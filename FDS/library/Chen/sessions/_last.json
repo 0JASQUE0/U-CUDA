@@ -1,0 +1,14 @@
+{
+  "step_h":"0.0025",
+  "sim_time":"50",
+  "skip_time":"10",
+  "scheme":"Euler",
+  "decimation":"1",
+  "auto_recompute":false,
+  "legend_show_ic":false,
+  "use_gpu":true,
+  "param_values":{"a":"40","b":"3","c":"28"},
+  "ic_sets":[{"label":"IC 1","visible":true,"values":{"x":"0.1","y":"0.1","z":"0.1"}},{"label":"IC 2","visible":true,"values":{"x":"2","y":"2","z":"2"}}],
+  "projections":[{"label":"Projection 1","type":0,"ax":0,"ay":1,"az":2,"show_var":[true,true,true]}],
+  "layout":""
+}

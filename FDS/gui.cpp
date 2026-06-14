@@ -1,0 +1,914 @@
+#include "gui.h"
+#include "imgui.h"
+#include "implot.h"
+#include "implot3d.h"
+#include "plot_renderer.h"
+#include "session_io.h"
+#include "plot_view_2d.h"
+#include "plot_view_3d.h"
+
+// Базовый цвет траектории по индексу НУ (единый для 2D/3D/time domain).
+static ImVec4 ic_base_color(int ic_index) {
+    return ImPlot::GetColormapColor(ic_index);
+}
+
+// Оттенок базового цвета по насыщенности: для переменной vi из nv внутри
+// одного НУ. vi=0 — самый насыщенный, дальше бледнее. Используется в time domain,
+// чтобы переменные одного НУ были видимо родственны (один тон), но различимы.
+static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
+    ImVec4 base = ic_base_color(ic_index);
+    float h, s, v;
+    ImGui::ColorConvertRGBtoHSV(base.x, base.y, base.z, h, s, v);
+    // распределяем насыщенность от 1.0 (vi=0) до ~0.35 (последняя переменная)
+    float frac = (nv <= 1) ? 0.0f : (float)vi / (float)(nv - 1);
+    float new_s = s * (1.0f - 0.45f * frac); // от s до 0.55*s (было 0.65 -> 0.35, тускло)
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(h, new_s, v, r, g, b);
+    return ImVec4(r, g, b, base.w);
+}
+#include <vector>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <cstring>
+#include <algorithm>
+
+// ---- helpers: std::string <-> ImGui ----
+static bool InputTextMultilineStr(const char* label, std::string& str, const ImVec2& size) {
+    std::vector<char> buf(str.begin(), str.end());
+    buf.resize(str.size() + 4096);
+    buf[str.size()] = '\0';
+    bool changed = ImGui::InputTextMultiline(label, buf.data(), buf.size(), size);
+    if (changed) str = buf.data();
+    return changed;
+}
+static bool InputTextStr(const char* label, std::string& str, float width = 0.0f) {
+    std::vector<char> buf(str.begin(), str.end());
+    buf.resize(str.size() + 1024);
+    buf[str.size()] = '\0';
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    bool changed = ImGui::InputText(label, buf.data(), buf.size());
+    if (changed) str = buf.data();
+    return changed;
+}
+
+// Числовое поле: как InputTextStr, но запятая заменяется на точку
+// (десятичный разделитель в коде — точка). Дроби 8/3 не трогаются здесь,
+// они нормализуются позже, при подстановке значений в код.
+static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
+    bool changed = InputTextStr(label, str, width);
+    if (changed) {
+        for (char& c : str) if (c == ',') c = '.';
+    }
+    return changed;
+}
+
+// ============================================================
+// Вкладка System: ввод системы, методы, генерация кода
+// ============================================================
+static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
+    model.poll(); // забрать результат OCR, если готов
+
+    // режим ввода
+    ImGui::Text("Input mode:");
+    ImGui::SameLine();
+    int mode = (int)model.mode;
+    ImGui::RadioButton("Image", &mode, (int)InputMode::Image); ImGui::SameLine();
+    ImGui::RadioButton("LaTeX", &mode, (int)InputMode::Latex); ImGui::SameLine();
+    ImGui::RadioButton("Plain", &mode, (int)InputMode::Plain);
+    model.mode = (InputMode)mode;
+    ImGui::Separator();
+
+    // источник картинки
+    if (model.mode == InputMode::Image) {
+        if (ImGui::Button("Choose image file...")) {
+            if (cb.pick_image_file) {
+                std::string path = cb.pick_image_file();
+                if (!path.empty()) model.start_ocr(std::make_unique<FileImageSource>(path));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Paste from clipboard"))
+            model.start_ocr(std::make_unique<ClipboardImageSource>());
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+            model.start_ocr(std::make_unique<ClipboardImageSource>());
+        ImGui::SameLine();
+        switch (model.ocr_state()) {
+        case OcrState::Running: ImGui::TextColored(ImVec4(1, 1, 0, 1), "Recognizing..."); break;
+        case OcrState::Done:    ImGui::TextColored(ImVec4(0, 1, 0, 1), "Recognized"); break;
+        case OcrState::Failed:  ImGui::TextColored(ImVec4(1, 0, 0, 1), "OCR failed: %s", model.ocr_error().c_str()); break;
+        default: ImGui::TextDisabled("(no image)"); break;
+        }
+        ImGui::TextDisabled("Tip: Win+Shift+S to snip, then Ctrl+V or 'Paste from clipboard'.");
+    }
+
+    // поле ввода
+    if (model.mode == InputMode::Image || model.mode == InputMode::Latex) {
+        ImGui::Text("LaTeX (editable - fix OCR errors here):");
+        InputTextMultilineStr("##latex", model.latex_text, ImVec2(-1, 90));
+        if (ImGui::CollapsingHeader("LaTeX format examples")) {
+            ImGui::TextDisabled(
+                "Each equation on its own line, LHS must have a derivative:\n"
+                "  \\dot{x} = \\sigma(y-x) \\\\\n  \\dot{y} = x(\\rho-z)-y\n"
+                "Supported: \\frac{a}{b}, x^{2}, \\sin x, \\sin^{2} x, \\cdot, |x|,\n"
+                "  subscripts x_{m}, greek \\sigma. Derivatives: \\dot{x}, x', dx/dt.");
+        }
+    }
+    else {
+        ImGui::Text("Equations (plain syntax):");
+        InputTextMultilineStr("##plain", model.plain_text, ImVec2(-1, 90));
+        if (ImGui::CollapsingHeader("Plain format examples")) {
+            ImGui::TextDisabled(
+                "  \\dot{x} = sigma*(y - x) \\\\\n  \\dot{y} = x*(rho - z) - y\n"
+                "Use * for multiplication, ^ for powers. LHS needs \\dot{x}= or x'=.");
+        }
+    }
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    // вспомогательные функции
+    ImGui::Checkbox("Use auxiliary functions", &model.use_aux_funcs);
+    if (model.use_aux_funcs) {
+        ImGui::Text("Function definitions (one per line, e.g. h(x) = m_1 x + ...):");
+        InputTextMultilineStr("##funcs", model.func_defs_text, ImVec2(-1, 60));
+        if (ImGui::CollapsingHeader("Auxiliary function examples")) {
+            ImGui::TextDisabled(
+                "h(x) = m_1 x + \\frac{1}{2}(m_0-m_1)(|x+1| - |x-1|)\n"
+                "Then call h(x) in equations. Body is inlined.\n"
+                "IMPORTANT: function params (m_0, m_1) must be in the alphabet too.");
+        }
+    }
+
+    // алфавит
+    ImGui::Text("Alphabet - all symbols incl. function params:");
+    ImGui::TextDisabled("e.g. x,y,z,alpha,beta,m_0,m_1");
+    InputTextStr("##alphabet", model.alphabet_text);
+
+    // порядок параметров
+    ImGui::Text("Parameter order in a[]:");
+    ImGui::SameLine();
+    int porder = (int)model.param_order;
+    ImGui::RadioButton("as in alphabet", &porder, (int)ParamOrder::AsInAlphabet); ImGui::SameLine();
+    ImGui::RadioButton("as in system", &porder, (int)ParamOrder::AsInSystem);
+    model.param_order = (ParamOrder)porder;
+
+    ImGui::Separator();
+
+    // методы
+    ImGui::Text("Schemes to generate:");
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = false;
+    ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
+    ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
+    ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
+    ImGui::Checkbox("RK4", &model.scheme_rk4);
+
+    if (ImGui::Button("Generate")) model.generate();
+    if (!model.error_message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Error: %s", model.error_message.c_str());
+    }
+
+    if (!model.generated_code.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Generated code:");
+        if (ImGui::Button("Copy")) {
+            if (cb.set_clipboard_text) cb.set_clipboard_text(model.generated_code);
+        }
+        ImGui::InputTextMultiline("##code",
+            (char*)model.generated_code.c_str(), model.generated_code.size() + 1,
+            ImVec2(-1, 220), ImGuiInputTextFlags_ReadOnly);
+    }
+}
+
+// ============================================================
+// Вкладка Parameters: НУ, значения/диапазоны параметров, шаг
+// ============================================================
+static void draw_parameters_tab(AppModel& model) {
+    ImGui::TextDisabled("Parameter fields appear after parsing the system.");
+    if (ImGui::Button("Refresh from system")) {
+        model.refresh_symbols();
+    }
+    if (!model.error_message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", model.error_message.c_str());
+    }
+    ImGui::Separator();
+
+    // шаг дискретизации
+    ImGui::Text("Discretization step h:");
+    ImGui::SameLine();
+    InputNumStr("##step_h", model.step_h, 120);
+    ImGui::TextDisabled("(leave empty to skip)");
+
+    ImGui::Spacing();
+
+    // начальные условия
+    if (!model.known_vars.empty()) {
+        ImGui::SeparatorText("Initial conditions");
+        for (const auto& v : model.known_vars) {
+            ImGui::Text("%s(0) =", v.c_str());
+            ImGui::SameLine();
+            std::string id = "##ic_" + v;
+            InputNumStr(id.c_str(), model.init_conditions[v], 140);
+        }
+    }
+
+    ImGui::Spacing();
+
+    // параметры: значение, min, max
+    if (!model.known_params.empty()) {
+        ImGui::SeparatorText("Parameters (value / min / max)");
+        // заголовки колонок
+        if (ImGui::BeginTable("params", 4, ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("name");
+            ImGui::TableSetupColumn("value");
+            ImGui::TableSetupColumn("min");
+            ImGui::TableSetupColumn("max");
+            ImGui::TableHeadersRow();
+            for (const auto& p : model.known_params) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
+                ImGui::TableSetColumnIndex(1);
+                { std::string id = "##val_" + p; InputNumStr(id.c_str(), model.param_values[p], 100); }
+                ImGui::TableSetColumnIndex(2);
+                { std::string id = "##min_" + p; InputNumStr(id.c_str(), model.param_min[p], 100); }
+                ImGui::TableSetColumnIndex(3);
+                { std::string id = "##max_" + p; InputNumStr(id.c_str(), model.param_max[p], 100); }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("Empty fields are left unset. Min/max are for bifurcation sweeps.");
+    }
+
+    if (model.known_vars.empty() && model.known_params.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("No symbols yet. Enter a system and press 'Refresh from system'.");
+    }
+}
+
+// ============================================================
+// Вкладка Library: имя, заметка, сохранение, список систем
+// ============================================================
+static void draw_library_tab(AppModel& model, SystemLibrary& lib) {
+    // кнопка начать новую систему с нуля (сбрасывает loaded_name)
+    if (ImGui::Button("New (clear all)")) {
+        model.clear();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("clears all fields to start a fresh system");
+    ImGui::Separator();
+
+    // имя и заметка
+    ImGui::Text("System name:");
+    InputTextStr("##name", model.name);
+    ImGui::Text("Note (reference, link, comments):");
+    InputTextMultilineStr("##note", model.note, ImVec2(-1, 50));
+
+    if (ImGui::Button("Save")) {
+        try {
+            bool renaming = (!model.loaded_name.empty() && model.loaded_name != model.name);
+            // проверка уникальности: имя занято другой системой?
+            // (занято, если есть система с таким именем, и это не та, что редактируем)
+            if (model.name != model.loaded_name
+                && lib.exists(model.name)) {
+                model.error_message = "Name '" + model.name + "' already exists";
+            }
+            else {
+                if (renaming && lib.exists(model.loaded_name)) {
+                    lib.rename(model.loaded_name, model.name);
+                }
+                model.name = lib.save(model.to_record());
+                model.loaded_name = model.name;
+                model.error_message.clear();
+            }
+        }
+        catch (const std::exception& e) { model.error_message = e.what(); }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save as copy")) {
+        // сохранить отдельную копию, не трогая текущую систему на диске
+        SystemRecord r = model.to_record();
+        r.name = (model.name.empty() ? std::string("Untitled") : model.name) + " (copy)";
+        try { lib.save(r); }
+        catch (const std::exception& e) { model.error_message = e.what(); }
+    }
+    if (!model.error_message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", model.error_message.c_str());
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Saved systems:");
+
+    // список с кнопками Load / Duplicate / Delete
+    std::vector<std::string> names = lib.list();
+    if (names.empty()) {
+        ImGui::TextDisabled("(library is empty)");
+    }
+    else {
+        if (ImGui::BeginTable("libtbl", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+            ImGui::TableSetupColumn("name");
+            ImGui::TableSetupColumn("");
+            ImGui::TableSetupColumn("");
+            ImGui::TableSetupColumn("");
+            for (const auto& n : names) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", n.c_str());
+                ImGui::TableSetColumnIndex(1);
+                {
+                    std::string id = "Load##" + n;
+                    if (ImGui::SmallButton(id.c_str())) {
+                        try { model.from_record(lib.load(n)); }
+                        catch (const std::exception& e) { model.error_message = e.what(); }
+                    }
+                }
+                ImGui::TableSetColumnIndex(2);
+                {
+                    std::string id = "Duplicate##" + n;
+                    if (ImGui::SmallButton(id.c_str())) {
+                        try { lib.duplicate(n); }
+                        catch (const std::exception& e) { model.error_message = e.what(); }
+                    }
+                }
+                ImGui::TableSetColumnIndex(3);
+                {
+                    std::string id = "Delete##" + n;
+                    if (ImGui::SmallButton(id.c_str())) lib.remove(n);
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+}
+
+
+// ============================================================
+// РЕЖИМ АНАЛИЗА: пространство фазовых портретов
+// ============================================================
+
+// Панель настроек сессии: параметры (общие), НУ (список), проекции (список),
+// время/шаг, метод (заглушка), кнопка пересчёта.
+static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
+    PhaseAnalysisSession& s = model.phase_session;
+
+    bool changed = false;
+
+    ImGui::Text("Phase portrait analysis");
+    ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
+
+    // выбор системы из библиотеки
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (ImGui::BeginCombo("##syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));   // загрузить систему (базовые значения)
+                    model.start_phase_analysis();      // подготовить сессию из эталона
+                    // поверх эталона — последняя рабочая сессия, если есть
+                    std::string j = lib.load_session(model.loaded_name, "_last");
+                    if (!j.empty()) {
+                        session_from_json(j, model.phase_session);
+                    }
+                }
+                catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    // --- именованные сессии (для текущей системы) ---
+    if (!model.loaded_name.empty()) {
+        ImGui::Spacing(); ImGui::Spacing();
+        ImGui::Text("Session:"); ImGui::SameLine();
+        static int sel_session = -1;            // индекс выбранной в комбобоксе
+        static char session_name[128] = "";     // имя для "Save as"
+        std::vector<std::string> sess = lib.list_sessions(model.loaded_name);
+
+        // загрузка состояния выбранной сессии (вызывается при выборе/при Save поверх)
+        auto load_session_into = [&](const std::string& name) {
+            std::string j = lib.load_session(model.loaded_name, name);
+            if (!j.empty()) {
+                session_from_json(j, model.phase_session);
+                model.phase_session.fit_request = true; // оси подстроятся при recompute
+            }
+            };
+
+        // комбобокс выбора сессии — загружается сразу при выборе (как система)
+        ImGui::SetNextItemWidth(160);
+        const char* preview = (sel_session >= 0 && sel_session < (int)sess.size())
+            ? sess[sel_session].c_str() : "(select)";
+        if (ImGui::BeginCombo("##sesssel", preview)) {
+            for (int k = 0; k < (int)sess.size(); ++k)
+                if (ImGui::Selectable(sess[k].c_str(), sel_session == k)) {
+                    sel_session = k;
+                    model.error_message.clear();      // действие -> чистим ошибку
+                    load_session_into(sess[k]);       // грузим сразу (recompute вручную)
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        // перезаписать ВЫБРАННУЮ сессию текущим состоянием (редактирование сессии)
+        if (ImGui::Button("Save##sess")) {
+            model.error_message.clear();
+            if (sel_session >= 0 && sel_session < (int)sess.size())
+                lib.save_session(model.loaded_name, sess[sel_session], session_to_json(s));
+            else
+                model.error_message = "No session selected";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete##sess")) {
+            model.error_message.clear();
+            if (sel_session >= 0 && sel_session < (int)sess.size()) {
+                lib.remove_session(model.loaded_name, sess[sel_session]);
+                sel_session = -1;
+            }
+        }
+
+        // сохранить текущее состояние под НОВЫМ именем
+        ImGui::SetNextItemWidth(160);
+        ImGui::InputText("##sessname", session_name, sizeof(session_name));
+        ImGui::SameLine();
+        if (ImGui::Button("Save as##sess")) {
+            model.error_message.clear();
+            std::string nm = session_name;
+            size_t a = nm.find_first_not_of(" \t");
+            size_t b = nm.find_last_not_of(" \t");
+            nm = (a == std::string::npos) ? "" : nm.substr(a, b - a + 1);
+            if (nm.empty())
+                model.error_message = "Session name is empty";
+            else if (nm == "_last")
+                model.error_message = "'_last' is reserved";
+            else if (lib.has_session(model.loaded_name, nm))
+                model.error_message = "Session '" + nm + "' already exists";
+            else {
+                lib.save_session(model.loaded_name, nm, session_to_json(s));
+                session_name[0] = '\0';
+            }
+        }
+        if (!model.error_message.empty())
+            ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", model.error_message.c_str());
+        ImGui::Spacing(); ImGui::Spacing();
+        ImGui::Separator();
+    }
+
+    // метод моделирования
+    ImGui::Text("Method:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    if (ImGui::BeginCombo("##method", s.scheme.c_str())) {
+        for (auto m : methods)
+            if (ImGui::Selectable(m, s.scheme == m)) { s.scheme = m; s.regenerate_krs(); changed = true; }
+        ImGui::EndCombo();
+    }
+
+    // время, шаг, децимация
+    ImGui::Text("Step h:"); ImGui::SameLine();
+    changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
+    ImGui::Text("Time(s):"); ImGui::SameLine();
+    changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
+    ImGui::Text("Skip(s):"); ImGui::SameLine();
+    changed |= InputNumStr("##ssk", s.skip_time, 70);
+    ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
+    changed |= InputNumStr("##dec", s.decimation, 70);
+    // шаг/время/децимация влияют на ось времени и сами данные: при их смене
+    // просим автоскейл, чтобы time domain не "скакал" со старыми пределами.
+    if (changed) s.fit_request = true;
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // переключатели
+    ImGui::Checkbox("Auto recompute", &s.auto_recompute); ImGui::SameLine();
+    ImGui::Checkbox("Legend shows initial conditions", &s.legend_show_ic); ImGui::SameLine();
+    ImGui::Checkbox("GPU", &s.use_gpu);
+
+    ImGui::Separator();
+
+    // параметры (общие на все проекции)
+    if (!s.params.empty()) {
+        ImGui::SeparatorText("Parameters");
+        if (ImGui::BeginTable("aparams", 2, ImGuiTableFlags_SizingFixedFit)) {
+            for (const auto& p : s.params) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
+                ImGui::TableSetColumnIndex(1);
+                std::string id = "##ap_" + p;
+                changed |= InputNumStr(id.c_str(), s.param_values[p], 110);
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    // начальные условия (несколько, мультистабильность)
+    ImGui::SeparatorText("Initial conditions");
+    int ic_to_remove = -1;
+    for (int i = 0; i < (int)s.ic_sets.size(); ++i) {
+        InitialConditionSet& ic = s.ic_sets[i];
+        ImGui::PushID(i);
+        ImGui::Checkbox("##vis", &ic.visible); ImGui::SameLine();
+        ImGui::SetNextItemWidth(70);
+        InputTextStr("##label", ic.label); ImGui::SameLine();
+        for (const auto& v : s.vars) {
+            ImGui::Text("%s:", v.c_str()); ImGui::SameLine();
+            std::string id = "##icv_" + v;
+            changed |= InputNumStr(id.c_str(), ic.values[v], 60); ImGui::SameLine();
+        }
+        if (ImGui::SmallButton("X")) ic_to_remove = i;
+        ImGui::PopID();
+    }
+    if (ic_to_remove >= 0) { s.remove_ic(ic_to_remove); changed = true; }
+    if (ImGui::Button("Add initial condition")) { s.add_ic(); }
+
+    // проекции
+    ImGui::SeparatorText("Projections");
+    int pr_to_remove = -1;
+    for (int i = 0; i < (int)s.projections.size(); ++i) {
+        Projection& pr = s.projections[i];
+        ImGui::PushID(1000 + i);
+        ImGui::SetNextItemWidth(90);
+        InputTextStr("##plabel", pr.label); ImGui::SameLine();
+        // тип проекции
+        ImGui::SetNextItemWidth(110);
+        const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D" };
+        int t = (int)pr.type;
+        if (ImGui::Combo("##ptype", &t, tnames, 3)) { pr.type = (ProjType)t; s.fit_request = true; }
+        ImGui::SameLine();
+
+        if (pr.type == ProjType::Phase2D) {
+            ImGui::Text("X:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(55);
+            if (ImGui::BeginCombo("##px", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
+                for (int k = 0; k < (int)s.vars.size(); ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(55);
+            if (ImGui::BeginCombo("##py", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
+                for (int k = 0; k < (int)s.vars.size(); ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
+                ImGui::EndCombo();
+            }
+        }
+        else if (pr.type == ProjType::Phase3D) {
+            ImGui::Text("X:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(50);
+            if (ImGui::BeginCombo("##p3x", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
+                for (int k = 0; k < (int)s.vars.size(); ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(50);
+            if (ImGui::BeginCombo("##p3y", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
+                for (int k = 0; k < (int)s.vars.size(); ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::Text("Z:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(50);
+            if (ImGui::BeginCombo("##p3z", s.vars.empty() ? "-" : s.vars[pr.axis_z < (int)s.vars.size() ? pr.axis_z : 0].c_str())) {
+                for (int k = 0; k < (int)s.vars.size(); ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_z == k)) { pr.axis_z = k; s.fit_request = true; }
+                ImGui::EndCombo();
+            }
+        }
+        else { // TimeDomain — галочки переменных
+            // синхронизируем размер show_var
+            if ((int)pr.show_var.size() != (int)s.vars.size())
+                pr.show_var.assign(s.vars.size(), true);
+            ImGui::Text("vars:"); ImGui::SameLine();
+            for (int k = 0; k < (int)s.vars.size(); ++k) {
+                bool v = pr.show_var[k];
+                if (ImGui::Checkbox(s.vars[k].c_str(), &v)) { pr.show_var[k] = v; }
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) pr_to_remove = i;
+        ImGui::PopID();
+    }
+    if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
+    if (ImGui::Button("Add projection")) { s.add_projection(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset windows layout")) { s.layout_generation++; }
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset to defaults")) {
+        try {
+            if (!model.loaded_name.empty()) {
+                model.from_record(lib.load(model.loaded_name)); // эталон с диска
+                model.start_phase_analysis();
+            }
+        }
+        catch (...) {}
+    }
+
+    ImGui::Separator();
+    // Recompute по кнопке или Ctrl+R
+    bool do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_recompute = true;
+    // авто-пересчёт при изменении
+    if (s.auto_recompute && changed) do_recompute = true;
+    if (do_recompute) {
+        s.recompute();
+        // авто-сохранение рабочего состояния сессии (если система сохранена в библиотеке)
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last", session_to_json(s));
+    }
+
+    if (!s.result.error.empty())
+        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
+}
+
+// Рисует окна проекций (каждая — отдельное docking-окно с графиком).
+static void draw_projection_windows(AppModel& model) {
+    PhaseAnalysisSession& s = model.phase_session;
+    const AnalysisResult& res = s.result;
+    // Свой offscreen-рендерер (FBO/текстура) на КАЖДУЮ проекцию: иначе все окна
+    // показывали бы одну общую текстуру (геометрию последней отрисованной).
+    // PlotRenderer некопируемый -> храним через unique_ptr, подгоняем под число проекций.
+    static std::vector<std::unique_ptr<PlotRenderer>> renderers;
+    if ((int)renderers.size() != (int)s.projections.size()) {
+        renderers.clear();
+        for (size_t k = 0; k < s.projections.size(); ++k)
+            renderers.push_back(std::make_unique<PlotRenderer>());
+    }
+    int pr_to_remove = -1;
+    for (int i = 0; i < (int)s.projections.size(); ++i) {
+        Projection& pr = s.projections[i];
+        PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
+        std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation);
+        bool open = true; // крестик закрытия
+        // Начальные позиция и размер (только при первом появлении).
+        // Каскад слева-сверху: каждое следующее окно чуть смещено.
+        // ИЗМЕНИТЬ РАЗМЕР МОЖНО ЗДЕСЬ: ImVec2(ширина, высота) в пикселях.
+        float ox = 60.0f + (i % 5) * 35.0f;
+        float oy = 80.0f + (i % 5) * 35.0f;
+        ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &open)) {
+            ImGui::PushID(i);   // разделить ID внутренних виджетов между окнами проекций
+            if (!res.ok || res.trajectories.empty()) {
+                ImGui::TextDisabled("No data. Press Recompute.");
+            }
+            ////////////////////////////////////////
+            else if (pr.type == ProjType::Phase2D) {
+                int ax = pr.axis_x, ay = pr.axis_y;
+                if (!res.ok || res.trajectories.empty()) {
+                    ImGui::TextDisabled("No data.");
+                }
+                else {
+                    // создать вьюер при первой отрисовке
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+
+                    // обновить имена осей
+                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
+                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+
+                    // подготовить серии: для каждой траектории выбираем координаты по (ax, ay)
+                    // храним float-массивы локально в статике, чтобы указатели жили до конца кадра
+                    static std::vector<std::vector<float>> series_data;
+                    series_data.clear();
+                    series_data.resize(res.trajectories.size());
+
+                    std::vector<PlotSeriesInput> series_in;
+                    series_in.reserve(res.trajectories.size());
+
+                    // видимость: глобальная — из живых галочек НУ (меняется без recompute)
+                    std::vector<bool> init_vis(res.trajectories.size(), true);
+                    std::vector<bool> glob_vis(res.trajectories.size(), true);
+
+                    for (size_t k = 0; k < res.trajectories.size(); ++k) {
+                        const auto& traj = res.trajectories[k];
+                        auto& buf = series_data[k];
+                        buf.reserve(traj.size() * 2);
+                        for (const auto& pt : traj) {
+                            buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
+                            buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                        }
+                        std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
+                        if (s.legend_show_ic && k < res.ic_text.size()) lab = res.ic_text[k];
+
+                        PlotSeriesInput si;
+                        si.points = buf.data();
+                        si.n_points = (int)(buf.size() / 2);
+                        si.color = ic_base_color((int)k);
+                        si.label = lab;
+                        series_in.push_back(si);
+
+                        bool vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        glob_vis[k] = vis;
+                        init_vis[k] = true;
+                    }
+
+                    int data_gen = s.data_generation * 100 + ax * 10 + ay;
+
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+                    pr.view2d->render(renderer, origin, avail, i, data_gen,
+                        series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
+            else if (pr.type == ProjType::TimeDomain) {
+                if (!res.ok || res.trajectories.empty()) {
+                    ImGui::TextDisabled("No data.");
+                }
+                else {
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+
+                    double h = atof(s.step_h.c_str()); if (h <= 0) h = 0.01;
+                    int dec = atoi(s.decimation.c_str()); if (dec < 1) dec = 1;
+                    double dt = h * dec;
+                    int nvars = (int)s.vars.size();
+
+                    // синхронизируем show_var с числом переменных
+                    if ((int)pr.show_var.size() != nvars)
+                        pr.show_var.assign(nvars, true);
+
+                    pr.view2d->x_axis.name = "t";
+                    pr.view2d->y_axis.name = "value";
+
+                    pr.view2d->pad_x = false;
+                    pr.view2d->show_zero_x = false;
+
+                    // серии: одна на (траектория k, видимая переменная vi)
+                    // храним буферы в статике, чтобы указатели жили до render
+                    static std::vector<std::vector<float>> series_data;
+                    series_data.clear();
+
+                    std::vector<PlotSeriesInput> series_in;
+                    std::vector<bool> init_vis;
+                    std::vector<bool> glob_vis;
+
+                    for (size_t k = 0; k < res.trajectories.size(); ++k) {
+                        const auto& traj = res.trajectories[k];
+                        if (traj.empty()) continue;
+                        int n = (int)traj.size();
+                        // видимость НУ — из живой галочки (без recompute)
+                        bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+
+                        for (int vi = 0; vi < nvars; ++vi) {
+                            if (vi < (int)pr.show_var.size() && !pr.show_var[vi]) continue;
+
+                            series_data.emplace_back();
+                            auto& buf = series_data.back();
+                            buf.reserve(n * 2);
+                            for (int t = 0; t < n; ++t) {
+                                buf.push_back((float)(t * dt));
+                                buf.push_back((float)traj[t][vi < (int)traj[t].size() ? vi : 0]);
+                            }
+
+                            std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
+                            std::string who = (s.legend_show_ic && k < res.ic_text.size()) ? res.ic_text[k] : base;
+                            std::string lab = s.vars[vi] + " [" + who + "]";
+
+                            PlotSeriesInput si;
+                            si.points = buf.data();
+                            si.n_points = n;
+                            si.color = ic_var_shade((int)k, vi, nvars);
+                            si.label = lab;
+                            series_in.push_back(si);
+                            init_vis.push_back(true);   // локальная (легенда) стартует с видимости НУ
+                            glob_vis.push_back(ic_vis);   // глобальная = живая галочка НУ
+                        }
+                    }
+
+                    int data_gen = s.data_generation * 1000 + (int)series_in.size();
+
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+                    pr.view2d->render(renderer, origin, avail, i, data_gen,
+                        series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
+            else if (pr.type == ProjType::Phase3D) {
+                int ax = pr.axis_x, ay = pr.axis_y, az = pr.axis_z;
+                if (!res.ok || res.trajectories.empty()) {
+                    ImGui::TextDisabled("No data.");
+                }
+                else {
+                    if (!pr.view3d) pr.view3d = std::make_unique<Plot3DView>();
+
+                    pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
+                    pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+                    pr.view3d->z_name = s.vars.empty() ? "z" : s.vars[az < (int)s.vars.size() ? az : 0];
+
+                    static std::vector<std::vector<float>> series_data;
+                    series_data.clear();
+                    series_data.resize(res.trajectories.size());
+
+                    std::vector<PlotSeriesInput3D> series_in;
+                    series_in.reserve(res.trajectories.size());
+
+                    std::vector<bool> init_vis(res.trajectories.size(), true);
+                    std::vector<bool> glob_vis(res.trajectories.size(), true);
+
+                    for (size_t k = 0; k < res.trajectories.size(); ++k) {
+                        const auto& traj = res.trajectories[k];
+                        auto& buf = series_data[k];
+                        buf.reserve(traj.size() * 3);
+                        for (const auto& pt : traj) {
+                            buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
+                            buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                            buf.push_back((float)pt[az < (int)pt.size() ? az : 0]);
+                        }
+                        std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
+                        if (s.legend_show_ic && k < res.ic_text.size()) lab = res.ic_text[k];
+
+                        PlotSeriesInput3D si;
+                        si.points = buf.data();
+                        si.n_points = (int)(buf.size() / 3);
+                        si.color = ic_base_color((int)k);
+                        si.label = lab;
+                        series_in.push_back(si);
+
+                        bool vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        glob_vis[k] = vis;
+                        init_vis[k] = true;
+                    }
+
+                    int data_gen = s.data_generation * 1000 + ax * 100 + ay * 10 + az;
+
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+                    pr.view3d->render(renderer, origin, avail, i, data_gen,
+                        series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::End();
+        if (!open) pr_to_remove = i; // окно закрыто крестиком
+    }
+    if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
+    // автоскейл применён ко всем окнам в этом кадре — сбрасываем запрос
+    s.fit_request = false;
+}
+
+// ============================================================
+// Главное окно: переключатель режимов Library / Analysis
+// ============================================================
+void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
+    // полноэкранный dockspace-хост
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGuiWindowFlags host_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("MainHost", nullptr, host_flags);
+    ImGui::PopStyleVar(2);
+
+    // переключатель режимов
+    int mode = (int)model.app_mode;
+    ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
+    ImGui::RadioButton("Analysis", &mode, (int)AppModel::AppMode::Analysis);
+    // при входе в Analysis — подготовить сессию из текущей системы
+    if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
+        model.app_mode != AppModel::AppMode::Analysis) {
+        model.start_phase_analysis();
+    }
+    model.app_mode = (AppModel::AppMode)mode;
+    ImGui::Separator();
+
+    // dockspace для содержимого
+    ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+
+    ImGui::End(); // MainHost
+
+    if (model.app_mode == AppModel::AppMode::Library) {
+        // режим библиотеки: окно с вкладками System/Parameters/Library
+        if (ImGui::Begin("Editor")) {
+            if (ImGui::BeginTabBar("tabs")) {
+                if (ImGui::BeginTabItem("System")) { draw_system_tab(model, cb); ImGui::EndTabItem(); }
+                if (ImGui::BeginTabItem("Parameters")) { draw_parameters_tab(model); ImGui::EndTabItem(); }
+                if (ImGui::BeginTabItem("Library")) { draw_library_tab(model, lib); ImGui::EndTabItem(); }
+                ImGui::EndTabBar();
+            }
+        }
+        ImGui::End();
+    }
+    else {
+        // режим анализа: панель настроек + окна проекций (докаются пользователем)
+        if (ImGui::Begin("Controls")) {
+            draw_phase_controls(model, lib);
+        }
+        ImGui::End();
+        draw_projection_windows(model);
+    }
+}

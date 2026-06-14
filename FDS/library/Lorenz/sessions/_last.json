@@ -1,0 +1,14 @@
+{
+  "step_h":"0.01",
+  "sim_time":"300",
+  "skip_time":"100",
+  "scheme":"RK4",
+  "decimation":"1",
+  "auto_recompute":true,
+  "legend_show_ic":true,
+  "use_gpu":false,
+  "param_values":{"beta":"8/3","rho":"28","sigma":"10"},
+  "ic_sets":[{"label":"IC 1","visible":true,"values":{"x":"0.2","y":"0.2","z":"0.2"}},{"label":"IC 2","visible":true,"values":{"x":"2","y":"2","z":"2"}},{"label":"IC 3","visible":true,"values":{"x":"5","y":"5","z":"5"}}],
+  "projections":[{"label":"Projection 1","type":2,"ax":0,"ay":1,"az":2,"show_var":[true,true,true]},{"label":"Projection 2","type":1,"ax":0,"ay":2,"az":2,"show_var":[true,true,true]},{"label":"Projection 3","type":0,"ax":1,"ay":2,"az":2,"show_var":[true,true,true]}],
+  "layout":""
+}

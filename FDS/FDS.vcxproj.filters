@@ -1,0 +1,200 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CudaCompile Include="kernel.cu" />
+    <CudaCompile Include="cudaLibrary.cu">
+      <Filter>NonLinAnal</Filter>
+    </CudaCompile>
+    <CudaCompile Include="cudaMacros.cu">
+      <Filter>NonLinAnal</Filter>
+    </CudaCompile>
+    <CudaCompile Include="hostLibrary.cu">
+      <Filter>NonLinAnal</Filter>
+    </CudaCompile>
+    <CudaCompile Include="main_NonLinAnal.cu">
+      <Filter>NonLinAnal</Filter>
+    </CudaCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="app_main.cpp" />
+    <ClCompile Include="sysparse.cpp">
+      <Filter>Parser</Filter>
+    </ClCompile>
+    <ClCompile Include="codegen.cpp">
+      <Filter>Parser</Filter>
+    </ClCompile>
+    <ClCompile Include="test_parser.cpp" />
+    <ClCompile Include="ocr_client_win.cpp">
+      <Filter>OCR</Filter>
+    </ClCompile>
+    <ClCompile Include="image_source.cpp">
+      <Filter>OCR</Filter>
+    </ClCompile>
+    <ClCompile Include="gui.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="app_model.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="system_library.cpp">
+      <Filter>Library</Filter>
+    </ClCompile>
+    <ClCompile Include="glad.c">
+      <Filter>External</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_renderer.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="session_io.cpp">
+      <Filter>Library</Filter>
+    </ClCompile>
+    <ClCompile Include="integrator.cpp">
+      <Filter>Compute</Filter>
+    </ClCompile>
+    <ClCompile Include="analysis_session.cpp">
+      <Filter>Compute</Filter>
+    </ClCompile>
+    <ClCompile Include="phase_portrait_nvrtc.cpp">
+      <Filter>NVRTC</Filter>
+    </ClCompile>
+    <ClCompile Include="nvrtc_engine.cpp">
+      <Filter>NVRTC</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_axis.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_legend.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="gpu_line_series.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_view_2d.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="gpu_line_series_3d.cpp">
+      <Filter>Visualization\3D</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_camera_3d.cpp">
+      <Filter>Visualization\3D</Filter>
+    </ClCompile>
+    <ClCompile Include="plot_view_3d.cpp">
+      <Filter>Visualization\3D</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="sysparse.hpp">
+      <Filter>Parser</Filter>
+    </ClInclude>
+    <ClInclude Include="codegen.hpp">
+      <Filter>Parser</Filter>
+    </ClInclude>
+    <ClInclude Include="configCUDA.h">
+      <Filter>NonLinAnal</Filter>
+    </ClInclude>
+    <ClInclude Include="cudaLibrary.cuh">
+      <Filter>NonLinAnal</Filter>
+    </ClInclude>
+    <ClInclude Include="cudaMacros.cuh">
+      <Filter>NonLinAnal</Filter>
+    </ClInclude>
+    <ClInclude Include="hostLibrary.cuh">
+      <Filter>NonLinAnal</Filter>
+    </ClInclude>
+    <ClInclude Include="ocr_client_win.h">
+      <Filter>OCR</Filter>
+    </ClInclude>
+    <ClInclude Include="image_source.h">
+      <Filter>OCR</Filter>
+    </ClInclude>
+    <ClInclude Include="gui.h">
+      <Filter>GUI</Filter>
+    </ClInclude>
+    <ClInclude Include="app_model.h">
+      <Filter>GUI</Filter>
+    </ClInclude>
+    <ClInclude Include="stb_image_write.h">
+      <Filter>External</Filter>
+    </ClInclude>
+    <ClInclude Include="system_library.h">
+      <Filter>Library</Filter>
+    </ClInclude>
+    <ClInclude Include="system_record.h">
+      <Filter>Library</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_renderer.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="session_io.h">
+      <Filter>Library</Filter>
+    </ClInclude>
+    <ClInclude Include="integrator.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis_session.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
+    <ClInclude Include="nvrtc_engine.h">
+      <Filter>NVRTC</Filter>
+    </ClInclude>
+    <ClInclude Include="phase_portrait_nvrtc.h">
+      <Filter>NVRTC</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_axis.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_legend.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="gpu_line_series.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_view_2d.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="gpu_line_series_3d.h">
+      <Filter>Visualization\3D</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_camera_3d.h">
+      <Filter>Visualization\3D</Filter>
+    </ClInclude>
+    <ClInclude Include="plot_view_3d.h">
+      <Filter>Visualization\3D</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="NonLinAnal">
+      <UniqueIdentifier>{05b9bc62-276b-4bf0-9359-3d9d775951ce}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="OCR">
+      <UniqueIdentifier>{272ac0ed-49fb-4dc3-9763-94b7de0001cd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Parser">
+      <UniqueIdentifier>{c97a1fc4-09bf-4bc8-a283-cff933683fd9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="GUI">
+      <UniqueIdentifier>{32362f33-3a32-42e4-8720-1784c4137bcd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="External">
+      <UniqueIdentifier>{3edcd083-ffd9-45b6-aa5e-e0f01effcfa1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Library">
+      <UniqueIdentifier>{a29a5c15-f1f8-46f7-b0a5-53d8a2681338}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Visualization">
+      <UniqueIdentifier>{710fc3e6-f726-4a0e-85a8-99e6d2b4e5c1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Temp">
+      <UniqueIdentifier>{772c305f-8dba-4214-8e67-625f0465cf64}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Compute">
+      <UniqueIdentifier>{b193475e-8acb-4a0e-9148-43e4242ebb08}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="NVRTC">
+      <UniqueIdentifier>{ea9812ed-ce54-4d9c-bb49-5942f266713a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Visualization\3D">
+      <UniqueIdentifier>{f90ee3ea-d4c4-417c-b548-5e8cbbf670f4}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

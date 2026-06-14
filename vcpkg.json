@@ -1,0 +1,17 @@
+{
+  "name": "cgc",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "glfw3",
+    "implot",
+    "implot3d",
+    {
+      "name": "imgui",
+      "features": [
+        "docking-experimental",
+        "glfw-binding",
+        "opengl3-binding"
+      ]
+    }
+  ]
+}

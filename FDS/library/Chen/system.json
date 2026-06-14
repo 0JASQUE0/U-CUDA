@@ -1,0 +1,20 @@
+{
+  "name": "Chen",
+  "note": "",
+  "mode": "LaTeX",
+  "latex_text": "\\begin{aligned}\n {\\frac{d x ( t )} {d t}} & {{}=a ( y ( t )-x ( t ) )} \\\\\n {\\frac{d y ( t )} {d t}} & {{}=( c-a ) x ( t )-x ( t ) z ( t )+c y ( t )} \\\\\n {\\frac{d z ( t )} {d t}} & {{}=x ( t ) y ( t )-b z ( t )} \\\\\n\\end{aligned}",
+  "plain_text": "",
+  "alphabet_text": "x,y,z,a,b,c",
+  "use_aux_funcs": false,
+  "func_defs_text": "",
+  "param_order": "AsInAlphabet",
+  "scheme_euler": true,
+  "scheme_cromer": true,
+  "scheme_midpoint": true,
+  "scheme_rk4": true,
+  "step_h": "0.0025",
+  "init_conditions": {"x": "0.1", "y": "0.1", "z": "0.1"},
+  "param_values": {"a": "40", "b": "3", "c": "28"},
+  "param_min": {"a": "", "b": "", "c": ""},
+  "param_max": {"a": "", "b": "", "c": ""}
+}

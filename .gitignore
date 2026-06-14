@@ -1,0 +1,32 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+
+# Build output
+x64/
+Debug/
+Release/
+*/x64/
+*.obj
+*.pdb
+*.exe
+*.lib
+*.exp
+*.ilk
+
+# vcpkg (устанавливается заново по манифесту)
+vcpkg_installed/
+
+# CUDA промежуточное
+*.ptx
+*.cubin
+*.fatbin
+
+# Python кэш (если есть рядом)
+__pycache__/
+*.pyc
+
+# Выходные файлы анализа (по желанию — если не хочешь коммитить результаты)
+# *.csv
