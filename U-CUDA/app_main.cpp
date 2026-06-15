@@ -79,11 +79,8 @@ static void set_clipboard_win(const std::string& text) {
 }
 
 int main() {
-#ifdef PROJECT_DIR
-    std::string dir = PROJECT_DIR;
-#else
+    // ocr_server.py и library\ копируются рядом с exe в Post-Build Event.
     std::string dir = exe_dir() + "\\";
-#endif
     printf("Wait 10s, podnimaetsya server");
     std::string ocr_script = dir + "ocr_server.py";
     std::string library_dir = dir + "library";
