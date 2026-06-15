@@ -36,9 +36,23 @@ std::string exe_dir() {
     return p.substr(0, p.find_last_of("\\/"));
 }
 
-static const char* PYTHON_EXE =
-"C:\\Users\\JASQUE\\AppData\\Local\\Programs\\Python\\Python310\\python.exe";
 static const char* OCR_SCRIPT_NAME = "ocr_server.py";
+
+// Ищем Python в таком порядке:
+//   1) переменная окружения U_CUDA_PYTHON (полный путь к python.exe)
+//   2) <project_dir>\.venv\Scripts\python.exe (локальное venv проекта)
+//   3) "python" — CreateProcess сам найдёт через PATH
+static std::string resolve_python_exe(const std::string& project_dir) {
+    char env_buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("U_CUDA_PYTHON", env_buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::string(env_buf, n);
+
+    std::string venv_py = project_dir + ".venv\\Scripts\\python.exe";
+    if (GetFileAttributesA(venv_py.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return venv_py;
+
+    return "python";
+}
 
 static std::string pick_image_file_win() {
     char filename[MAX_PATH] = "";
@@ -74,10 +88,12 @@ int main() {
     std::string ocr_script = dir + "ocr_server.py";
     std::string library_dir = dir + "library";
 
+    std::string python_exe = resolve_python_exe(dir);
+
     std::shared_ptr<OcrClient> ocr;
     std::string ocr_init_error;
     try {
-        ocr = std::make_shared<OcrClient>(PYTHON_EXE, ocr_script);
+        ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
     }
     catch (const std::exception& e) {
         ocr_init_error = e.what();
