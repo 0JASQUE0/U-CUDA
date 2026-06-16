@@ -13,9 +13,6 @@ git pull
 
 # почистить кэш VS и старые сборочные артефакты (gitignored, но мешают)
 Remove-Item -Recurse -Force .vs, x64 -ErrorAction SilentlyContinue
-
-# если в requirements.txt появились новые пакеты — обновить venv
-.\setup.ps1
 ```
 
 Открой `U-CUDA.sln` в Visual Studio → **Build → Rebuild Solution**.
