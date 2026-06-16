@@ -3,7 +3,12 @@
 
 typedef double numb;
 
+// AMOUNTOFX оборачивается в #ifndef, чтобы NVRTC-вызывающие проекты могли
+// переопределить размерность системы через #define AMOUNTOFX N перед include.
+// Обычная nvcc-сборка ничего не определяет — поведение прежнее.
+#ifndef AMOUNTOFX
 constexpr int AMOUNTOFX = 3;
+#endif
 constexpr int CHECK_INTERVAL = 100;
 
 // --- Calculate peaks ---
