@@ -18,6 +18,21 @@
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 
+// NVRTC не подтягивает <cstdint> автоматически, а cudaLibrary.cu использует
+// int64_t в getValueByIdx и др. Даём typedef'ы для базовых fixed-width int'ов
+// только под NVRTC; offline nvcc эти типы получает через <cstdint> в обычной
+// сборке.
+#ifdef __CUDACC_RTC__
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef short              int16_t;
+typedef unsigned short     uint16_t;
+typedef int                int32_t;
+typedef unsigned int       uint32_t;
+typedef long long          int64_t;
+typedef unsigned long long uint64_t;
+#endif
+
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__

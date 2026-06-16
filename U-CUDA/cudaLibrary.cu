@@ -2373,6 +2373,9 @@ __global__ void dbscanCUDA_optimized(
 // --------------------
 // --- Ядро для LLE ---
 // --------------------
+// Всё что ниже использует curand (init/uniform) и не нужно для bif1d.
+// Для NVRTC отрезаем — иначе валится на undefined curandState_t.
+#ifndef __CUDACC_RTC__
 __global__ void LLEKernelCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3536,3 +3539,4 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	if (error_estim == 3)
 		return (numb)amountOfIterations*h;
 }
+#endif // __CUDACC_RTC__ (с конца файла — закрытие гарда от LLE до EOF)
