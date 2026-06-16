@@ -211,3 +211,106 @@ void PhaseAnalysisSession::regenerate_krs() {
         krs_code.clear();
     }
 }
+
+// --- ParametricAnalysisSession ---
+
+void ParametricAnalysisSession::regenerate_krs() {
+    krs_code.clear();
+    if (sys.rhs.empty()) return;
+    try {
+        krs_code = codegen_scheme(sys, scheme_from_string(scheme));
+    }
+    catch (...) {
+        krs_code.clear();
+    }
+}
+
+void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+
+    param_values.clear();
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+
+    initial_conditions.clear();
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+
+    if (!params.empty()) {
+        if (param_index < 0 || param_index >= (int)params.size()) param_index = 0;
+        const std::string& pname = params[param_index];
+        auto lo = r.param_min.find(pname);
+        auto hi = r.param_max.find(pname);
+        if (lo != r.param_min.end() && !lo->second.empty()) param_lo_text = lo->second;
+        if (hi != r.param_max.end() && !hi->second.empty()) param_hi_text = hi->second;
+    }
+
+    result = Bifurcation1DResult{};
+    last_run_ok = false;
+    last_error.clear();
+    data_generation = 0;
+}
+
+static double parse_d(const std::string& s, double def) {
+    if (s.empty()) return def;
+    try { return std::stod(s); } catch (...) { return def; }
+}
+static int parse_i(const std::string& s, int def) {
+    if (s.empty()) return def;
+    try { return std::stoi(s); } catch (...) { return def; }
+}
+
+bool ParametricAnalysisSession::run(ParametricEngine& engine) {
+    last_run_ok = false;
+    last_error.clear();
+
+    if (krs_code.empty()) regenerate_krs();
+    if (krs_code.empty()) {
+        last_error = "krs_code пуст (нет валидной системы)";
+        return false;
+    }
+
+    Bifurcation1DRequest req;
+    req.krs_body = krs_code;
+    req.amountOfX = (int)vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = initial_conditions.find(vars[i]);
+        req.initial_conditions[i] = (it != initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
+    int nparams = (int)params.size();
+    req.base_values.assign((size_t)nparams + 1, 0.0);
+    for (int i = 0; i < nparams; ++i) {
+        auto it = param_values.find(params[i]);
+        req.base_values[i + 1] = (it != param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+    req.param_index = (param_index >= 0 && param_index < nparams) ? param_index + 1 : 1;
+
+    req.param_lo       = parse_d(param_lo_text, 0.0);
+    req.param_hi       = parse_d(param_hi_text, 1.0);
+    req.n_pts          = parse_i(n_pts_text, 500);
+    req.writable_var   = (writable_var >= 0 && writable_var < req.amountOfX) ? writable_var : 0;
+    req.h              = parse_d(h_text, 0.01);
+    req.t_max          = parse_d(t_max_text, 100.0);
+    req.transient_time = parse_d(transient_text, 100.0);
+    req.pre_scaller    = std::max(1, parse_i(pre_scaller_text, 1));
+    req.max_value      = parse_d(max_value_text, 1.0e6);
+
+    result = engine.run_bifurcation_1d(req);
+    last_run_ok = result.ok;
+    if (!result.ok) last_error = result.error;
+    data_generation++;
+    fit_request = true;
+    return result.ok;
+}

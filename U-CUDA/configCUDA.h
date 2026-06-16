@@ -31,9 +31,12 @@ constexpr bool continuation_bif1D = 0;
 
 // --- CHOOSE PARAMETER OR VARIABLE ANALYSIS ---
 // 2 -- variable and parameter analysis (first variable, second parameter)
-// 1 -- parameter analysis; 
+// 1 -- parameter analysis;
 // 0 -- variable analysis
-constexpr int par_or_var = 0; 
+// Обёрнуто в #ifndef, чтобы NVRTC-template мог переопределить через #define.
+#ifndef par_or_var
+constexpr int par_or_var = 0;
+#endif
 
 // --- CHOOSE LIN OR LOG variable/parameter distribution ---
 // 1 -- lin; [Xmin,Xmax] or [Xmin,Xmax,Ymin,Ymax]

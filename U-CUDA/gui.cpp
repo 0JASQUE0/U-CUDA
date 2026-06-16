@@ -857,7 +857,164 @@ static void draw_projection_windows(AppModel& model) {
 }
 
 // ============================================================
-// Главное окно: переключатель режимов Library / Analysis
+// Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
+// ============================================================
+static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
+    ParametricAnalysisSession& s = model.parametric_session;
+
+    ImGui::Text("Parametric analysis (1D bifurcation)");
+    ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
+
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (ImGui::BeginCombo("##par_syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));
+                    model.start_parametric_analysis();
+                }
+                catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    int sel_sch = 0;
+    for (int i = 0; i < 4; ++i) if (s.scheme == schemes[i]) sel_sch = i;
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::Combo("Scheme", &sel_sch, schemes, 4)) {
+        s.scheme = schemes[sel_sch];
+        s.regenerate_krs();
+    }
+
+    if (!s.params.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.params.size());
+        for (const auto& p : s.params) items.push_back(p.c_str());
+        if (s.param_index < 0 || s.param_index >= (int)s.params.size()) s.param_index = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Parameter", &s.param_index, items.data(), (int)items.size());
+    }
+    else {
+        ImGui::TextDisabled("No parameters (select a system first)");
+    }
+
+    InputNumStr("Param lo", s.param_lo_text, 120);
+    InputNumStr("Param hi", s.param_hi_text, 120);
+    InputNumStr("n points", s.n_pts_text,    120);
+
+    if (!s.vars.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+        if (s.writable_var < 0 || s.writable_var >= (int)s.vars.size()) s.writable_var = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Writable var", &s.writable_var, items.data(), (int)items.size());
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Integration:");
+    InputNumStr("h",           s.h_text,           120);
+    InputNumStr("t_max",       s.t_max_text,       120);
+    InputNumStr("transient",   s.transient_text,   120);
+    InputNumStr("pre_scaller", s.pre_scaller_text, 120);
+    InputNumStr("max_value",   s.max_value_text,   120);
+
+    ImGui::Separator();
+    ImGui::Text("Initial conditions:");
+    for (const auto& v : s.vars) {
+        InputNumStr(v.c_str(), s.initial_conditions[v], 120);
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Run", ImVec2(120, 0))) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run(*model.parametric_engine);
+    }
+
+    if (s.last_run_ok) {
+        int diverged = 0, total_peaks = 0, max_peaks = 0;
+        for (int f : s.result.flags) {
+            if (f < 0) ++diverged;
+            else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
+        }
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: n_pts=%d, peaks total=%d (max per param=%d)",
+            s.result.n_pts, total_peaks, max_peaks);
+        if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, s.result.n_pts);
+    }
+    else if (!s.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##par_err",
+            const_cast<char*>(s.last_error.c_str()),
+            s.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+}
+
+static void draw_parametric_plot(AppModel& model) {
+    ParametricAnalysisSession& s = model.parametric_session;
+    static std::unique_ptr<PlotRenderer> renderer;
+    static std::unique_ptr<Plot2DView> view;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    if (!view) {
+        view = std::make_unique<Plot2DView>();
+        view->points_mode = true;
+        view->show_legend = false;
+        view->point_size_px = 2.0f;
+        view->x_axis.name = "param";
+        view->y_axis.name = "X[writable_var]";
+    }
+
+    if (!s.last_run_ok || s.result.bifurcation_points.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    static std::vector<float> buf;
+    buf.clear();
+    int total_pts = 0;
+    double lo = std::stod(s.param_lo_text);
+    double hi = std::stod(s.param_hi_text);
+    int npts = s.result.n_pts;
+    for (int i = 0; i < npts; ++i) {
+        if (i < (int)s.result.flags.size() && s.result.flags[i] < 0) continue;
+        double x = (npts > 1) ? (lo + (hi - lo) * (double)i / (double)(npts - 1)) : lo;
+        for (double y : s.result.bifurcation_points[i]) {
+            buf.push_back((float)x);
+            buf.push_back((float)y);
+            ++total_pts;
+        }
+    }
+    if (total_pts == 0) {
+        ImGui::TextDisabled("All trajectories diverged or no peaks found.");
+        return;
+    }
+
+    PlotSeriesInput si;
+    si.points = buf.data();
+    si.n_points = total_pts;
+    si.color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+    si.label = "bifurcation";
+    std::vector<PlotSeriesInput> series_in{ si };
+    std::vector<bool> init_vis{ true }, glob_vis{ true };
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    view->render(*renderer, origin, avail, /*owner_id*/ 0xBE0F1D, s.data_generation,
+                 series_in, init_vis, glob_vis, s.fit_request);
+    s.fit_request = false;
+}
+
+// ============================================================
+// Главное окно: переключатель режимов Library / Analysis / Parametric
 // ============================================================
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // полноэкранный dockspace-хост
@@ -876,11 +1033,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // переключатель режимов
     int mode = (int)model.app_mode;
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
-    ImGui::RadioButton("Analysis", &mode, (int)AppModel::AppMode::Analysis);
+    ImGui::RadioButton("Analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
+    ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric);
     // при входе в Analysis — подготовить сессию из текущей системы
     if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
         model.app_mode != AppModel::AppMode::Analysis) {
         model.start_phase_analysis();
+    }
+    if ((AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
+        model.app_mode != AppModel::AppMode::Parametric) {
+        model.start_parametric_analysis();
     }
     model.app_mode = (AppModel::AppMode)mode;
     ImGui::Separator();
@@ -903,12 +1065,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
     }
-    else {
+    else if (model.app_mode == AppModel::AppMode::Analysis) {
         // режим анализа: панель настроек + окна проекций (докаются пользователем)
         if (ImGui::Begin("Controls")) {
             draw_phase_controls(model, lib);
         }
         ImGui::End();
         draw_projection_windows(model);
+    }
+    else { // AppMode::Parametric
+        if (ImGui::Begin("Parametric Controls")) {
+            draw_parametric_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Bifurcation 1D")) {
+            draw_parametric_plot(model);
+        }
+        ImGui::End();
     }
 }

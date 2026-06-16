@@ -162,3 +162,17 @@ bool AppModel::start_phase_analysis() {
     }
     return true;
 }
+
+bool AppModel::start_parametric_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    parametric_session.load_from_record(r, known_vars, known_params);
+    try {
+        parametric_session.sys = build_system();
+        parametric_session.regenerate_krs();
+    }
+    catch (...) {
+        // система неполна — Run покажет ошибку
+    }
+    return true;
+}

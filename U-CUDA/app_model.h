@@ -66,16 +66,23 @@ public:
     std::string loaded_name;
 
     // --- режим приложения и сессия анализа (слой 2) ---
-    // режим верхнего уровня: библиотека или анализ
-    enum class AppMode { Library, Analysis };
+    // режим верхнего уровня: библиотека, фазовый анализ или параметрический
+    enum class AppMode { Library, Analysis, Parametric };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
     PhaseAnalysisSession phase_session;
 
+    // сессия параметрического анализа (1D-бифуркация) — независимая песочница
+    ParametricAnalysisSession parametric_session;
+
+    // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
+    std::unique_ptr<ParametricEngine> parametric_engine;
+
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
     bool start_phase_analysis();
+    bool start_parametric_analysis();
 
     // ---- результат генерации ----
     std::string generated_code;    // итоговый код всех выбранных схем

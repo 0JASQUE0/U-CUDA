@@ -1,10 +1,12 @@
 ﻿#include "cudaLibrary.cuh"
 #include "configCUDA.h"
-#include <math.h>
-#include <cmath>
 
 // Host-only и runtime-API заголовки недоступны при NVRTC-компиляции.
+// <math.h> / <cmath> тоже прячем — device-код в NVRTC получает sin/cos/sqrt/isnan/...
+// как встроенные __device__ функции CUDA, заголовок не нужен.
 #ifndef __CUDACC_RTC__
+#include <math.h>
+#include <cmath>
 #include <curand_kernel.h>
 #include <iostream>
 #include <cuda_runtime.h>
@@ -2371,6 +2373,9 @@ __global__ void dbscanCUDA_optimized(
 // --------------------
 // --- Ядро для LLE ---
 // --------------------
+// Всё что ниже использует curand (init/uniform) и не нужно для bif1d.
+// Для NVRTC отрезаем — иначе валится на undefined curandState_t.
+#ifndef __CUDACC_RTC__
 __global__ void LLEKernelCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3534,3 +3539,4 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	if (error_estim == 3)
 		return (numb)amountOfIterations*h;
 }
+#endif // __CUDACC_RTC__ (с конца файла — закрытие гарда от LLE до EOF)

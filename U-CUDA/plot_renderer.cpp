@@ -5,8 +5,10 @@ static const char* VS_2D = R"(
 #version 330 core
 layout(location = 0) in vec2 a_pos;
 uniform mat4 u_mvp;
+uniform float u_point_size;
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
+    gl_PointSize = u_point_size;
 }
 )";
 
@@ -82,6 +84,7 @@ void PlotRenderer::compile_shaders() {
         if (program_2d_) {
             loc_mvp_2d_ = glGetUniformLocation(program_2d_, "u_mvp");
             loc_color_2d_ = glGetUniformLocation(program_2d_, "u_color");
+            loc_point_size_2d_ = glGetUniformLocation(program_2d_, "u_point_size");
         }
     }
     if (fs && vs3) {
@@ -173,6 +176,28 @@ void PlotRenderer::draw_line(GLuint vbo, int point_count, const float mvp[16],
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glLineWidth(line_width);
     glDrawArrays(GL_LINE_STRIP, 0, point_count);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
+void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
+    const float color[4], float point_size) {
+    if (!program_2d_ || point_count < 1 || !vbo) return;
+    glUseProgram(program_2d_);
+    glUniformMatrix4fv(loc_mvp_2d_, 1, GL_FALSE, mvp);
+    glUniform4fv(loc_color_2d_, 1, color);
+    if (loc_point_size_2d_ >= 0) glUniform1f(loc_point_size_2d_, point_size);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    // В core profile размер берётся из gl_PointSize в шейдере только при
+    // GL_PROGRAM_POINT_SIZE; иначе драйверы часто клампят до 1 px.
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glDrawArrays(GL_POINTS, 0, point_count);
+    glDisable(GL_PROGRAM_POINT_SIZE);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
