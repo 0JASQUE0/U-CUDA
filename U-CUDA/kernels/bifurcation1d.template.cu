@@ -18,6 +18,11 @@
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 
+// Для bif1d нам нужен PARAMETER analysis (par_or_var=1). По умолчанию в
+// configCUDA.h стоит 0 (variable/IC analysis) — этот #define перекрывает.
+// configCUDA.h обёрнут в #ifndef par_or_var, конфликта не будет.
+#define par_or_var 1
+
 // NVRTC не подтягивает <cstdint> автоматически, а cudaLibrary.cu использует
 // int64_t в getValueByIdx и др. Даём typedef'ы для базовых fixed-width int'ов
 // только под NVRTC; offline nvcc эти типы получает через <cstdint> в обычной
