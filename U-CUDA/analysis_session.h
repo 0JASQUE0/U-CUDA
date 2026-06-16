@@ -1,6 +1,7 @@
 #pragma once
 #include "system_record.h"
 #include "codegen.hpp"
+#include "parametric_engine.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -120,4 +121,43 @@ struct PhaseAnalysisSession {
     void recompute();
 
     int data_generation = 0;
+};
+
+// Сессия параметрического анализа (1D-бифуркация).
+// Изолирована от PhaseAnalysisSession — своя копия системы, своя интегрирующая схема.
+struct ParametricAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::string krs_code;
+
+    std::map<std::string, std::string> param_values;
+    std::map<std::string, std::string> initial_conditions;
+
+    // выбор изменяемого параметра и диапазон
+    int param_index = 0;              // 0-индекс в params (внутри run сдвигается на +1)
+    std::string param_lo_text = "0";
+    std::string param_hi_text = "1";
+    std::string n_pts_text    = "500";
+
+    int writable_var = 0;
+
+    std::string scheme         = "Euler";
+    std::string h_text         = "0.01";
+    std::string t_max_text     = "100";
+    std::string transient_text = "100";
+    std::string pre_scaller_text = "1";
+    std::string max_value_text = "1e6";
+
+    Bifurcation1DResult result;
+    bool last_run_ok = false;
+    std::string last_error;
+    int data_generation = 0;
+    bool fit_request = false;
+
+    void regenerate_krs();
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    bool run(ParametricEngine& engine);
 };
