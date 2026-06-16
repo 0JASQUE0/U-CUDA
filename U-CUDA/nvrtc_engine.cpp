@@ -39,7 +39,13 @@ bool NvrtcEngine::init() {
     CUdevice dev;
     CUOK(cuDeviceGet(&dev, 0), "cuDeviceGet");
     CUcontext ctx;
+    // В CUDA 13 у cuCtxCreate появился параметр CUctxCreateParams* перед flags.
+    // nullptr эквивалентен поведению старого 3-арг вызова.
+#if CUDA_VERSION >= 13000
+    CUOK(cuCtxCreate(&ctx, nullptr, 0, dev), "cuCtxCreate");
+#else
     CUOK(cuCtxCreate(&ctx, 0, dev), "cuCtxCreate");
+#endif
     context_ = ctx;
     CUOK(cuDeviceGetAttribute(&cc_major_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev), "ccMajor");
     CUOK(cuDeviceGetAttribute(&cc_minor_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "ccMinor");

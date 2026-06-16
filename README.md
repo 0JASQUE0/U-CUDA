@@ -65,7 +65,9 @@ C:\vcpkg\vcpkg integrate install
 
 ### 2. CUDA Toolkit
 
-Проект собран под **CUDA 12.8**, но должен работать на любой версии 12.x — используются только стандартные Runtime API + NVRTC.
+Проект собран под **CUDA 12.8**, но работает на любой версии **12.x и 13.x** — используются только стандартные Runtime API + NVRTC.
+
+> **CUDA 13:** в 13.0 у `cuCtxCreate` поменялась сигнатура (добавился параметр `CUctxCreateParams*`). В коде это разрулено через `#if CUDA_VERSION >= 13000` в [nvrtc_engine.cpp](U-CUDA/nvrtc_engine.cpp), так что собирается и на 12.x, и на 13.x без правок.
 
 Если у тебя другая версия CUDA, поменяй в `U-CUDA\U-CUDA.vcxproj` две строки (или через Visual Studio: **ПКМ на проекте → Build Dependencies → Build Customizations…** — снять `CUDA 12.8`, поставить установленную):
 
