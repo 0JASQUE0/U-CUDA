@@ -67,8 +67,9 @@
     </CudaCompile>
     <PostBuildEvent>
       <Command>xcopy /Y /I "$(ProjectDir)ocr_server.py" "$(OutDir)\"
-xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
-      <Message>Copying runtime data (ocr_server.py, library\) to $(OutDir)</Message>
+xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"
+xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"</Command>
+      <Message>Copying runtime data (ocr_server.py, library\, kernels\) to $(OutDir)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -95,8 +96,9 @@ xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
     </CudaCompile>
     <PostBuildEvent>
       <Command>xcopy /Y /I "$(ProjectDir)ocr_server.py" "$(OutDir)\"
-xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
-      <Message>Copying runtime data (ocr_server.py, library\) to $(OutDir)</Message>
+xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"
+xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"</Command>
+      <Message>Copying runtime data (ocr_server.py, library\, kernels\) to $(OutDir)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -129,6 +131,7 @@ xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
     <ClCompile Include="integrator.cpp" />
     <ClCompile Include="nvrtc_engine.cpp" />
     <ClCompile Include="ocr_client_win.cpp" />
+    <ClCompile Include="parametric_engine.cpp" />
     <ClCompile Include="phase_portrait_nvrtc.cpp" />
     <ClCompile Include="plot_axis.cpp" />
     <ClCompile Include="plot_camera_3d.cpp" />
@@ -160,6 +163,7 @@ xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
     <ClInclude Include="integrator.h" />
     <ClInclude Include="nvrtc_engine.h" />
     <ClInclude Include="ocr_client_win.h" />
+    <ClInclude Include="parametric_engine.h" />
     <ClInclude Include="phase_portrait_nvrtc.h" />
     <ClInclude Include="plot_axis.h" />
     <ClInclude Include="plot_camera_3d.h" />
@@ -172,6 +176,11 @@ xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"</Command>
     <ClInclude Include="sysparse.hpp" />
     <ClInclude Include="system_library.h" />
     <ClInclude Include="system_record.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- NVRTC-шаблоны ядер: не компилируются MSBuild'ом, копируются Post-Build
+         Event'ом в $(OutDir)kernels\ и читаются ParametricEngine'ом во время работы. -->
+    <None Include="kernels\bifurcation1d.template.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
