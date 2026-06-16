@@ -30,16 +30,38 @@ Remove-Item -Recurse -Force .vs, x64 -ErrorAction SilentlyContinue
 
 ## Установка
 
+### 0. Получить исходники
+
+```powershell
+# выбери папку, в которой будет лежать проект, например D:\
+cd D:\
+git clone https://github.com/0JASQUE0/U-CUDA.git
+cd U-CUDA
+```
+
+Команда `git clone <url> <папка>` — это **одна команда**: первый аргумент — что клонировать, второй (опциональный) — куда. Без второго аргумента создастся папка с именем репо в текущей директории.
+
 ### 1. Зависимости C++ через vcpkg
 
 ```powershell
-# если vcpkg ещё не установлен:
+# если vcpkg ещё не установлен — клонируем в C:\vcpkg (можно в любое место):
 git clone https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat
 C:\vcpkg\vcpkg integrate install
 ```
 
-После `integrate install` Visual Studio автоматически подхватит [vcpkg.json](vcpkg.json) при сборке и установит `glfw3`, `imgui`, `implot`, `implot3d`.
+> **Важно:** перед `vcpkg integrate install` закрой Visual Studio, после — перезапусти. Иначе VS не подхватит интеграцию.
+
+После `integrate install` Visual Studio автоматически подхватит [vcpkg.json](vcpkg.json) при сборке и установит `glfw3`, `imgui`, `implot`, `implot3d` (5-15 минут при первом ребилде).
+
+**Если при сборке ловишь `cannot open source file "imgui.h"` или подобное** — интеграция vcpkg не сработала. Проверь:
+
+```powershell
+C:\vcpkg\vcpkg integrate install
+# должно вывести: "Applied user-wide integration for this vcpkg root."
+```
+
+Закрой VS, открой `U-CUDA.sln` заново, **Build → Rebuild Solution**. В Output-окне сборки сначала должно появиться `vcpkg install ...` (скачивание/компиляция зависимостей), и только потом твой код. Если этого нет — `vcpkg integrate install` не отработал (запущен под другим пользователем, не от твоего имени, или vcpkg сломан).
 
 ### 2. CUDA Toolkit
 
