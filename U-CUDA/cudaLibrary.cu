@@ -1,11 +1,12 @@
 ﻿#include "cudaLibrary.cuh"
 #include "configCUDA.h"
-#include <cmath>
 
 // Host-only и runtime-API заголовки недоступны при NVRTC-компиляции.
-// <math.h> прячем туда же — NVRTC использует встроенный <cmath>.
+// <math.h> / <cmath> тоже прячем — device-код в NVRTC получает sin/cos/sqrt/isnan/...
+// как встроенные __device__ функции CUDA, заголовок не нужен.
 #ifndef __CUDACC_RTC__
 #include <math.h>
+#include <cmath>
 #include <curand_kernel.h>
 #include <iostream>
 #include <cuda_runtime.h>
