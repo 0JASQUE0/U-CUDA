@@ -181,6 +181,11 @@ struct ParametricEngine::Impl {
                                             n_headers, header_sources, header_names);
         if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram: ") + nvrtcGetErrorString(nr); return false; }
 
+        // Регистрируем kernel-имена ДО компиляции, чтобы потом через
+        // nvrtcGetLoweredName достать их mangled-варианты для cuModuleGetFunction.
+        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
+        nvrtcAddNameExpression(prog, "peakFinderCUDA");
+
         char arch[64];
         snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
 
@@ -219,6 +224,15 @@ struct ParametricEngine::Impl {
             return false;
         }
 
+        // Mangled-имена для обоих kernel-ов. Нужно скопировать в свои строки
+        // ДО nvrtcDestroyProgram — после destroy указатели становятся невалидны.
+        const char* mangled_traj_ptr = nullptr;
+        const char* mangled_peak_ptr = nullptr;
+        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA", &mangled_traj_ptr);
+        nvrtcGetLoweredName(prog, "peakFinderCUDA",             &mangled_peak_ptr);
+        std::string mangled_traj = mangled_traj_ptr ? mangled_traj_ptr : "calculateDiscreteModelCUDA";
+        std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
+
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
         nvrtcGetPTX(prog, &ptx[0]);
@@ -227,14 +241,14 @@ struct ParametricEngine::Impl {
         CUresult r = cuModuleLoadDataEx(&cached.module, ptx.c_str(), 0, nullptr, nullptr);
         if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx: " + cu_err(r); return false; }
 
-        r = cuModuleGetFunction(&cached.kernel_traj, cached.module, "calculateDiscreteModelCUDA");
+        r = cuModuleGetFunction(&cached.kernel_traj, cached.module, mangled_traj.c_str());
         if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(calculateDiscreteModelCUDA): " + cu_err(r);
+            err = "cuModuleGetFunction(" + mangled_traj + "): " + cu_err(r);
             release_module(); return false;
         }
-        r = cuModuleGetFunction(&cached.kernel_peak, cached.module, "peakFinderCUDA");
+        r = cuModuleGetFunction(&cached.kernel_peak, cached.module, mangled_peak.c_str());
         if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(peakFinderCUDA): " + cu_err(r);
+            err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
             release_module(); return false;
         }
 
