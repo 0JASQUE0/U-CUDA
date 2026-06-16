@@ -168,10 +168,33 @@ struct ParametricEngine::Impl {
 
         char arch[64];
         snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device" };
 
-        nr = nvrtcCompileProgram(prog, 3, opts);
+        // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h и т.п.).
+        // Берём CUDA_PATH из окружения (его проставляет CUDA Toolkit installer).
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH) {
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+            }
+        }
+        if (cuda_include_opt.empty()) {
+            err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
+                  "(установи CUDA Toolkit или задай CUDA_PATH=...)";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = {
+            arch,
+            std_opt.c_str(),
+            "-default-device",
+            cuda_include_opt.c_str()
+        };
+
+        nr = nvrtcCompileProgram(prog, 4, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
