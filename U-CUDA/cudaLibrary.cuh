@@ -2,11 +2,12 @@
 
 #include "cudaMacros.cuh"
 #include "configCUDA.h"
-#include <math.h>
 
 // Host-only и runtime-API заголовки недоступны при NVRTC-компиляции.
-// При обычной nvcc-сборке всё подключается как раньше.
+// <math.h> NVRTC обрабатывает иначе чем nvcc — лучше держать в #ifndef и
+// положиться на встроенный <cmath> (NVRTC сам выдаёт нужные device-функции).
 #ifndef __CUDACC_RTC__
+#include <math.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <fstream>
