@@ -35,7 +35,22 @@ std::string read_text_file(const std::string& path, std::string& err) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { err = "не удалось открыть " + path; return {}; }
     std::ostringstream ss; ss << f.rdbuf();
-    return ss.str();
+    std::string s = ss.str();
+    // UTF-8 BOM: 0xEF 0xBB 0xBF в начале — NVRTC от него спотыкается.
+    if (s.size() >= 3 &&
+        (unsigned char)s[0] == 0xEF &&
+        (unsigned char)s[1] == 0xBB &&
+        (unsigned char)s[2] == 0xBF) {
+        s.erase(0, 3);
+    }
+    // NVRTC не любит не-ASCII символы даже внутри комментариев (компилит как
+    // device code, не предполагает многобайтовых юникод-точек). Заменяем все
+    // байты со старшим битом на пробел — это безвредно для комментариев и
+    // не задевает строковые литералы из ASCII.
+    for (char& c : s) {
+        if ((unsigned char)c >= 0x80) c = ' ';
+    }
+    return s;
 }
 
 std::string replace_all(std::string s, const std::string& from, const std::string& to) {
