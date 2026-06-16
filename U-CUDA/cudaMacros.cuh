@@ -1,5 +1,10 @@
 #pragma once
 #include "configCUDA.h"
+
+// Под NVRTC (__CUDACC_RTC__ определён автоматически) host-only заголовки и
+// макросы недоступны и не нужны — kernel-ы их не используют. Под обычным
+// nvcc всё работает как раньше.
+#ifndef __CUDACC_RTC__
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <stdio.h>
@@ -17,3 +22,4 @@
 //__device__ __host__ inline numb max(numb a, numb b) { return (a > b) ? a : b; }
 
 void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true);
+#endif

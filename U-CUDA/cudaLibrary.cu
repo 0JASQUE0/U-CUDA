@@ -1,10 +1,14 @@
 ﻿#include "cudaLibrary.cuh"
+#include "configCUDA.h"
+#include <math.h>
+#include <cmath>
+
+// Host-only и runtime-API заголовки недоступны при NVRTC-компиляции.
+#ifndef __CUDACC_RTC__
 #include <curand_kernel.h>
 #include <iostream>
-#include <math.h>
 #include <cuda_runtime.h>
-#include "configCUDA.h"
-#include <cmath>
+#endif
 
 
 
@@ -12,6 +16,9 @@
 // --- Вычисляет следующее значение дискретной модели и записывает результат в x ---
 // ---------------------------------------------------------------------------------
 
+// calculateDiscreteModel_rand зависит от curand_kernel.h, которого нет в NVRTC.
+// Под NVRTC эта функция не нужна (kernel-ы для bif1d/LLE/basins её не зовут).
+#ifndef __CUDACC_RTC__
 __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a, const numb h)
 {
 	curandState_t state;
@@ -125,8 +132,9 @@ __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const n
 	X1[2] = X[2] + 0.5 * h * (X[0] * X[1] - a[3] * X[2]);
 	X[0] = X[0] + h * (a[1] * (X1[1] - X1[0]));
 	X[1] = X[1] + h * (X1[0] * (a[2] - X1[2]) - X1[1]);
-	X[2] = X[2] + h * (X1[0] * X1[1] - a[3] * X1[2]);	
+	X[2] = X[2] + h * (X1[0] * X1[1] - a[3] * X1[2]);
 }
+#endif // __CUDACC_RTC__
 
 __device__ __host__ numb sign(numb x) {
 	if (x > 0)
