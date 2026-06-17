@@ -78,81 +78,96 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     result = AnalysisResult{};
 }
 
-void PhaseAnalysisSession::recompute() {
+// Снапшот всех входов phase-расчёта. Создаётся на главном потоке, передаётся
+// worker'у при async-режиме. Все поля — by value, никакой ссылки на session.
+namespace {
+struct PhaseRunInputs {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    std::string step_h, sim_time, skip_time;
+    std::string scheme, decimation;
+    bool        use_gpu = true;
+    System      sys;
+    std::string krs_code;
+    std::map<std::string, std::string>  param_values;
+    std::vector<InitialConditionSet>    ic_sets;
+};
+} // namespace
+
+// Чистая функция: входы → AnalysisResult. Не трогает session, поэтому её
+// безопасно звать с любого потока.
+static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
+    AnalysisResult result;
     auto _t0 = std::chrono::high_resolution_clock::now();
-    result = AnalysisResult{};
-    int dim = (int)vars.size();
-    if (dim < 1) { result.error = "no variables"; return; }
-    double h = parse_val(step_h, 0.01);
-    if (h <= 0) { result.error = "step h must be > 0"; return; }
-    double tsim = parse_val(sim_time, 50.0);
-    double tskip = parse_val(skip_time, 0.0);
+
+    int dim = (int)in.vars.size();
+    if (dim < 1) { result.error = "no variables"; return result; }
+    double h = parse_val(in.step_h, 0.01);
+    if (h <= 0) { result.error = "step h must be > 0"; return result; }
+    double tsim = parse_val(in.sim_time, 50.0);
+    double tskip = parse_val(in.skip_time, 0.0);
     int total = (int)(tsim / h); if (total <= 0) total = 1;
     int skip = (int)(tskip / h); if (skip < 0) skip = 0;
 
     // параметры: a[0] зарезервирован, a[1..] = params
-    int nparams = (int)params.size();
+    int nparams = (int)in.params.size();
     std::vector<double> a(nparams + 1, 0.0);
-    for (int j = 0; j < nparams; ++j)
-        a[1 + j] = parse_val(param_values[params[j]], 0.0);
-
-    // децимация: выводить каждую dec-ю точку
-    int dec = std::atoi(decimation.c_str()); if (dec < 1) dec = 1;
-
-    int N = (int)ic_sets.size();
-    if (N < 1) { result.error = "no initial conditions"; return; }
-
-    // НУ всех наборов в плоский массив ic_flat[k*dim + i] + тексты для легенды
-    std::vector<double> ic_flat((size_t)N * dim, 0.0);
-    for (int k = 0; k < N; ++k) {
-        const auto& ic = ic_sets[k];
-        for (int i = 0; i < dim; ++i)
-            ic_flat[(size_t)k * dim + i] =
-            parse_val(ic.values.count(vars[i]) ? ic.values.at(vars[i]) : "", 0.0);
+    for (int j = 0; j < nparams; ++j) {
+        auto it = in.param_values.find(in.params[j]);
+        a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
     }
 
-    // сюда соберём сырые траектории (до децимации): [N][total][dim]
+    int dec = std::atoi(in.decimation.c_str()); if (dec < 1) dec = 1;
+
+    int N = (int)in.ic_sets.size();
+    if (N < 1) { result.error = "no initial conditions"; return result; }
+
+    std::vector<double> ic_flat((size_t)N * dim, 0.0);
+    for (int k = 0; k < N; ++k) {
+        const auto& ic = in.ic_sets[k];
+        for (int i = 0; i < dim; ++i) {
+            auto it = ic.values.find(in.vars[i]);
+            ic_flat[(size_t)k * dim + i] = parse_val(it != ic.values.end() ? it->second : "", 0.0);
+        }
+    }
+
     std::vector<std::vector<std::vector<double>>> raw;
     bool calc_ok = true;
     std::string calc_err;
 
-    if (use_gpu) {
-        // --- GPU: все N траекторий за один запуск (поток на НУ) ---
-        if (krs_code.empty()) regenerate_krs();
-        if (krs_code.empty()) {
+    if (in.use_gpu) {
+        if (in.krs_code.empty()) {
             result.error = "no KRS generated (check system)";
-            return;
+            return result;
         }
-        calc_ok = computePhasePortraitsNVRTC(krs_code, dim,
+        calc_ok = computePhasePortraitsNVRTC(in.krs_code, dim,
             ic_flat.data(), N, a.data(), (int)a.size(),
             h, total, skip, raw, &calc_err);
         if (!calc_ok) {
             result.error = "GPU: " + calc_err;
-            return;
+            return result;
         }
     }
     else {
-        // --- CPU: интерпретатор, по траектории на НУ ---
         std::unique_ptr<SystemEvaluator> evaluator;
         try {
-            evaluator.reset(new SystemEvaluator(sys));
+            evaluator.reset(new SystemEvaluator(in.sys));
         }
         catch (const std::exception& e) {
             result.error = std::string("parse error: ") + e.what();
-            return;
+            return result;
         }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
-            bool ok = computePhasePortraitCPU(*evaluator, int_scheme_from_string(scheme),
+            bool ok = computePhasePortraitCPU(*evaluator, int_scheme_from_string(in.scheme),
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
-            if (!ok) { calc_ok = false; calc_err = "trajectory '" + ic_sets[k].label + "' diverged (nan/inf)"; }
+            if (!ok) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[k].label + "' diverged (nan/inf)"; }
         }
     }
 
-    // --- общая часть: децимация + заполнение результата ---
     for (int k = 0; k < N; ++k) {
-        const auto& ic = ic_sets[k];
+        const auto& ic = in.ic_sets[k];
         std::vector<std::vector<double>>& traj = raw[k];
 
         std::vector<std::vector<double>> dtraj;
@@ -165,10 +180,10 @@ void PhaseAnalysisSession::recompute() {
         result.labels.push_back(ic.label);
         result.visible.push_back(ic.visible);
 
-        // текстовое НУ для легенды: "(x0,y0,z0)"
         std::string txt = "(";
         for (int i = 0; i < dim; ++i) {
-            std::string val = ic.values.count(vars[i]) ? ic.values.at(vars[i]) : "";
+            auto it = ic.values.find(in.vars[i]);
+            std::string val = it != ic.values.end() ? it->second : "";
             if (val.empty()) val = "0";
             txt += val; if (i + 1 < dim) txt += ",";
         }
@@ -177,19 +192,63 @@ void PhaseAnalysisSession::recompute() {
     }
 
     result.ok = result.trajectories.size() > 0;
-    if (!calc_ok && result.ok) {
-        // расчёт прошёл, но какая-то траектория разошлась — пометим
-        result.error = calc_err;
-    }
-    fit_request = true; // запросить автоскейл осей
+    if (!calc_ok && result.ok) result.error = calc_err;
 
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
-    // временный замер времени (можно убрать); не затираем реальную ошибку
     if (result.error.empty())
         result.error = "recompute: " + std::to_string(_ms) + " ms";
 
+    return result;
+}
+
+// Снапшот текущей session в PhaseRunInputs. Делается на главном потоке.
+static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
+    // krs_code должен быть свежим — если пустой, генерим перед снапшотом.
+    if (s.krs_code.empty()) s.regenerate_krs();
+    PhaseRunInputs in;
+    in.vars         = s.vars;
+    in.params       = s.params;
+    in.step_h       = s.step_h;
+    in.sim_time     = s.sim_time;
+    in.skip_time    = s.skip_time;
+    in.scheme       = s.scheme;
+    in.decimation   = s.decimation;
+    in.use_gpu      = s.use_gpu;
+    in.sys          = s.sys;
+    in.krs_code     = s.krs_code;
+    in.param_values = s.param_values;
+    in.ic_sets      = s.ic_sets;
+    return in;
+}
+
+void PhaseAnalysisSession::recompute() {
+    PhaseRunInputs in = snapshot_phase(*this);
+    result = compute_phase_portrait(in);
+    fit_request = true;
     data_generation++;
+}
+
+bool PhaseAnalysisSession::recompute_async() {
+    if (in_flight) return false;
+    PhaseRunInputs in = snapshot_phase(*this);
+    in_flight = true;
+    compute_start_time = std::chrono::steady_clock::now();
+    recompute_future = std::async(std::launch::async, [in = std::move(in)]() {
+        return compute_phase_portrait(in);
+    });
+    return true;
+}
+
+bool PhaseAnalysisSession::poll() {
+    if (!in_flight) return false;
+    if (!recompute_future.valid()) { in_flight = false; return false; }
+    if (recompute_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    result = recompute_future.get();
+    fit_request = true;
+    data_generation++;
+    in_flight = false;
+    return true;
 }
 
 
