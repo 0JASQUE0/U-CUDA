@@ -2,6 +2,8 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+#include <chrono>
+#include <future>
 #include <string>
 #include <vector>
 #include <map>
@@ -101,6 +103,18 @@ struct PhaseAnalysisSession {
     // сбрасывается в GUI после применения)
     bool fit_request = false;
 
+    // --- async-расчёт (как у ParametricAnalysisSession) ---
+    std::future<AnalysisResult> recompute_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    // session не копируется (содержит future) — только move.
+    PhaseAnalysisSession() = default;
+    PhaseAnalysisSession(PhaseAnalysisSession&&) = default;
+    PhaseAnalysisSession& operator=(PhaseAnalysisSession&&) = default;
+    PhaseAnalysisSession(const PhaseAnalysisSession&) = delete;
+    PhaseAnalysisSession& operator=(const PhaseAnalysisSession&) = delete;
+
     // поколение раскладки окон: увеличивается кнопкой "Reset layout",
     // входит в ID окон проекций -> docking забывает их позиции, окна
     // появляются заново (можно сделать новую раскладку).
@@ -117,8 +131,17 @@ struct PhaseAnalysisSession {
         const std::vector<std::string>& vars_,
         const std::vector<std::string>& params_);
 
-    // Пересчитать все траектории (по кнопке или авто).
+    // Пересчитать все траектории (по кнопке или авто). Sync — блокирует поток.
     void recompute();
+
+    // Async-аналог: снапшотит входы на главном потоке, спавнит worker.
+    // Результат применяется в poll() позже. Возвращает false если уже идёт расчёт.
+    bool recompute_async();
+
+    // Раз в кадр из GUI. Если worker готов — забирает result, выставляет
+    // fit_request и data_generation, сбрасывает in_flight. Возвращает true
+    // в кадр завершения (для авто-сохранения).
+    bool poll();
 
     int data_generation = 0;
 };
@@ -164,9 +187,36 @@ struct ParametricAnalysisSession {
     int data_generation = 0;
     bool fit_request = false;
 
+    // --- async-расчёт ---
+    // future, в которую std::async кладёт результат с worker-потока.
+    // Все мутации session происходят ТОЛЬКО на главном потоке (в run_async/poll),
+    // worker трогает только engine.
+    std::future<Bifurcation1DResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    // session не копируется (содержит future) — только move.
+    ParametricAnalysisSession() = default;
+    ParametricAnalysisSession(ParametricAnalysisSession&&) = default;
+    ParametricAnalysisSession& operator=(ParametricAnalysisSession&&) = default;
+    ParametricAnalysisSession(const ParametricAnalysisSession&) = delete;
+    ParametricAnalysisSession& operator=(const ParametricAnalysisSession&) = delete;
+
     void regenerate_krs();
     void load_from_record(const SystemRecord& r,
                           const std::vector<std::string>& vars_,
                           const std::vector<std::string>& params_);
+
+    // Старый синхронный Run. Заблокирует поток до конца расчёта.
     bool run(ParametricEngine& engine);
+
+    // Async: запускает расчёт в std::async-потоке. Возвращает false если
+    // уже что-то считается. Результат применяется в poll() позже.
+    bool run_async(ParametricEngine& engine);
+
+    // Вызывается каждый кадр из GUI-потока. Если future готова — забирает
+    // результат, применяет его к session (result, flags, data_generation,
+    // fit_request), сбрасывает in_flight. Возвращает true, если только что
+    // завершилось (GUI может среагировать, например авто-сохранить).
+    bool poll();
 };
