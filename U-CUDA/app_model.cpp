@@ -160,6 +160,7 @@ bool AppModel::start_phase_analysis() {
     catch (...) {
         // если система ещё неполна — КРС останется пустой, recompute покажет ошибку
     }
+    phase_session.loaded_system_name = name;
     return true;
 }
 
@@ -174,5 +175,6 @@ bool AppModel::start_parametric_analysis() {
     catch (...) {
         // система неполна — Run покажет ошибку
     }
+    parametric_session.loaded_system_name = name;
     return true;
 }

@@ -52,14 +52,24 @@ static bool InputTextStr(const char* label, std::string& str, float width = 0.0f
     return changed;
 }
 
-// Числовое поле: как InputTextStr, но запятая заменяется на точку
-// (десятичный разделитель в коде — точка). Дроби 8/3 не трогаются здесь,
-// они нормализуются позже, при подстановке значений в код.
+// Перехватываем символы ДО того, как ImGui положит их в буфер.
+// Так замена ',' → '.' происходит в момент ввода и НЕ модифицирует строку
+// между кадрами — иначе ImGui::InputText на каждом следующем кадре видит
+// внешнюю подмену буфера и возвращает changed=true, отчего auto_recompute
+// триггерится непрерывно при наличии запятой в поле.
+static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
+    if (data->EventChar == ',') data->EventChar = '.';
+    return 0;
+}
+
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
-    bool changed = InputTextStr(label, str, width);
-    if (changed) {
-        for (char& c : str) if (c == ',') c = '.';
-    }
+    std::vector<char> buf(str.begin(), str.end());
+    buf.resize(str.size() + 1024);
+    buf[str.size()] = '\0';
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    bool changed = ImGui::InputText(label, buf.data(), buf.size(),
+        ImGuiInputTextFlags_CallbackCharFilter, filter_comma_to_dot);
+    if (changed) str = buf.data();
     return changed;
 }
 
@@ -1041,8 +1051,13 @@ static void draw_parametric_plot(AppModel& model) {
     static std::vector<float> buf;
     buf.clear();
     int total_pts = 0;
-    double lo = std::stod(s.param_lo_text);
-    double hi = std::stod(s.param_hi_text);
+    // std::stod бросает invalid_argument на «--5» / пустую строку — иначе при
+    // редактировании поля одного кадра было бы достаточно чтобы убить GUI.
+    auto safe_stod = [](const std::string& v, double def) -> double {
+        try { return std::stod(v); } catch (...) { return def; }
+    };
+    double lo = safe_stod(s.param_lo_text, 0.0);
+    double hi = safe_stod(s.param_hi_text, 1.0);
     int npts = s.result.n_pts;
     for (int i = 0; i < npts; ++i) {
         if (i < (int)s.result.flags.size() && s.result.flags[i] < 0) continue;
@@ -1137,13 +1152,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "%s", text);
     }
-    // при входе в Analysis — подготовить сессию из текущей системы
+    // при входе в Analysis/Parametric — подготовить сессию ТОЛЬКО если она
+    // ещё не инициализирована под текущую систему. Иначе при каждом переходе
+    // между вкладками сбрасывались бы пользовательские правки (ИУ, диапазоны и т.д.)
     if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
-        model.app_mode != AppModel::AppMode::Analysis) {
+        model.app_mode != AppModel::AppMode::Analysis &&
+        model.phase_session.loaded_system_name != model.name) {
         model.start_phase_analysis();
     }
     if ((AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
-        model.app_mode != AppModel::AppMode::Parametric) {
+        model.app_mode != AppModel::AppMode::Parametric &&
+        model.parametric_session.loaded_system_name != model.name) {
         model.start_parametric_analysis();
     }
     model.app_mode = (AppModel::AppMode)mode;
