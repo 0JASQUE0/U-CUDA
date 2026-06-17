@@ -923,7 +923,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Writable var", &s.writable_var, items.data(), (int)items.size());
     }
     InputNumStr("Resolution", s.n_pts_text, 120);
-    ImGui::Checkbox("Plot inter-peaks (column 3) instead of peak values", &s.plot_inter_peaks);
+    ImGui::Checkbox("Plot inter-peaks instead of peak values", &s.plot_inter_peaks);
 
     ImGui::Separator();
     ImGui::Text("Integration:");
