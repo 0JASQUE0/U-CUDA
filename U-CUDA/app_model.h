@@ -38,6 +38,10 @@ public:
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
 
+    // Пользовательские именованные КРС (выбираются в scheme combo сессий
+    // вместе с built-in). Имя не должно совпадать с built-in.
+    std::vector<CustomScheme> custom_schemes;
+
     // порядок индексации параметров a[1..]
     ParamOrder param_order = ParamOrder::AsInAlphabet;
 
@@ -149,6 +153,16 @@ public:
                 out += it.name;
                 out += " =====\n";
                 out += codegen_scheme(sys, it.s);
+                out += "\n";
+            }
+            // custom-схемы — добавляем их код как есть для preview
+            for (const auto& cs : custom_schemes) {
+                if (cs.body.empty()) continue;
+                any = true;
+                out += "// ===== ";
+                out += cs.name;
+                out += " (custom) =====\n";
+                out += cs.body;
                 out += "\n";
             }
             if (!any) { error_message = "no scheme selected"; return false; }

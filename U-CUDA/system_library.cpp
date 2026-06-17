@@ -143,7 +143,16 @@ std::string record_to_json(const SystemRecord& r) {
     kvmap(o, "init_conditions", r.init_conditions);
     kvmap(o, "param_values", r.param_values);
     kvmap(o, "param_min", r.param_min);
-    kvmap(o, "param_max", r.param_max, /*last=*/true);
+    kvmap(o, "param_max", r.param_max);
+    // custom_schemes: [ {"name": "...", "body": "..."}, ... ]
+    o << "  \"custom_schemes\": [";
+    for (size_t k = 0; k < r.custom_schemes.size(); ++k) {
+        const auto& cs = r.custom_schemes[k];
+        if (k) o << ", ";
+        o << "{\"name\": \"" << esc(cs.name)
+          << "\", \"body\": \"" << esc(cs.body) << "\"}";
+    }
+    o << "]\n";
     o << "}\n";
     return o.str();
 }
@@ -169,6 +178,35 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "param_values") r.param_values = p.parse_map();
         else if (key == "param_min") r.param_min = p.parse_map();
         else if (key == "param_max") r.param_max = p.parse_map();
+        else if (key == "custom_schemes") {
+            p.ws();
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for custom_schemes");
+            ++p.i; p.ws();
+            if (p.peek() != ']') {
+                while (true) {
+                    p.ws();
+                    if (p.s[p.i] != '{') throw std::runtime_error("JSON: expected { in custom_schemes");
+                    ++p.i;
+                    CustomScheme cs;
+                    while (true) {
+                        std::string ck = p.parse_string();
+                        p.ws(); if (p.s[p.i] == ':') ++p.i;
+                        std::string cv = p.parse_string();
+                        if (ck == "name") cs.name = cv;
+                        else if (ck == "body") cs.body = cv;
+                        p.ws();
+                        if (p.peek() == ',') { ++p.i; continue; }
+                        if (p.peek() == '}') { ++p.i; break; }
+                        break;
+                    }
+                    r.custom_schemes.push_back(std::move(cs));
+                    p.ws();
+                    if (p.peek() == ',') { ++p.i; continue; }
+                    if (p.peek() == ']') { ++p.i; break; }
+                    break;
+                }
+            } else { ++p.i; }
+        }
         else {
             std::string val = p.parse_string();
             if (key == "name") r.name = val;

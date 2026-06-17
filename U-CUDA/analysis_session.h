@@ -71,6 +71,10 @@ struct PhaseAnalysisSession {
     std::vector<std::string> vars;     // имена переменных (порядок = индексы X[])
     std::vector<std::string> params;   // имена параметров (порядок = a[1..])
 
+    // Пользовательские КРС из текущей системы (копия из SystemRecord).
+    // Доступны в scheme combo вместе с built-in именами.
+    std::vector<CustomScheme> custom_schemes;
+
     // общие параметры системы (строки, "" = не задано/0)
     std::map<std::string, std::string> param_values; // param -> значение
     std::string step_h = "0.01";
@@ -158,6 +162,9 @@ struct ParametricAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::string krs_code;
+
+    // Пользовательские КРС из системы (см. PhaseAnalysisSession).
+    std::vector<CustomScheme> custom_schemes;
 
     std::map<std::string, std::string> param_values;
     std::map<std::string, std::string> initial_conditions;

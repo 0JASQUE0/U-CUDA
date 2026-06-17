@@ -52,6 +52,7 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& params_) {
     vars = vars_;
     params = params_;
+    custom_schemes = r.custom_schemes;
     step_h = r.step_h.empty() ? "0.01" : r.step_h;
     sim_time = "50";
     skip_time = "10";
@@ -262,6 +263,11 @@ static Scheme scheme_from_string(const std::string& s) {
 
 void PhaseAnalysisSession::regenerate_krs() {
     krs_code.clear();
+    // Сначала ищем среди custom — имя имеет приоритет над built-in (если бы
+    // совпали, что мы блокируем в System tab).
+    for (const auto& cs : custom_schemes) {
+        if (cs.name == scheme) { krs_code = cs.body; return; }
+    }
     if (sys.rhs.empty()) return; // нет уравнений — нечего генерировать
     try {
         krs_code = codegen_scheme(sys, scheme_from_string(scheme));
@@ -275,6 +281,9 @@ void PhaseAnalysisSession::regenerate_krs() {
 
 void ParametricAnalysisSession::regenerate_krs() {
     krs_code.clear();
+    for (const auto& cs : custom_schemes) {
+        if (cs.name == scheme) { krs_code = cs.body; return; }
+    }
     if (sys.rhs.empty()) return;
     try {
         krs_code = codegen_scheme(sys, scheme_from_string(scheme));
@@ -289,6 +298,7 @@ void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& params_) {
     vars = vars_;
     params = params_;
+    custom_schemes = r.custom_schemes;
     h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
 
     param_values.clear();

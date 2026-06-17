@@ -3,6 +3,15 @@
 #include <vector>
 #include <map>
 
+// Именованная пользовательская КРС. Это "ещё один scheme" — встаёт в scheme
+// combo рядом с Euler/Cromer/Midpoint/RK4. Имя не должно совпадать с built-in.
+// body — сырой C/CUDA-текст, подставляется напрямую в NVRTC-шаблон вместо
+// codegen-вывода. Доступны X[0..N-1], a[1..M], h, AMOUNTOFX, обычная математика.
+struct CustomScheme {
+    std::string name;
+    std::string body;
+};
+
 // Полная запись системы в библиотеке: весь ввод (для редактирования) +
 // значения по умолчанию (все опциональны: пустая строка = не задано).
 struct SystemRecord {
@@ -24,6 +33,9 @@ struct SystemRecord {
     bool scheme_cromer   = false;
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
+
+    // Пользовательские именованные КРС (см. CustomScheme выше).
+    std::vector<CustomScheme> custom_schemes;
 
     // --- значения по умолчанию (всё опционально, пустое = не задано) ---
     std::string step_h;          // шаг дискретизации (строка, пустая = не задано)
