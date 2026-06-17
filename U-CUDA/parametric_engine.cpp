@@ -7,6 +7,7 @@
 //
 
 #include <cuda.h>
+#include <cuda_runtime.h>
 #include <nvrtc.h>
 #include <windows.h>
 
@@ -14,7 +15,9 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace {
 
@@ -71,6 +74,14 @@ std::string cu_err(CUresult r) {
     const char* name = nullptr;
     cuGetErrorString(r, &name);
     return name ? std::string(name) : ("CUresult " + std::to_string((int)r));
+}
+
+// Локальная host-копия __device__ __host__ getValueByIdx из cudaLibrary.cu:1266.
+// Для 1D-бифуркации valueNumber всегда 0, поэтому просто линейная интерполяция.
+// Нужна для расчёта значения параметра в CSV (host-side).
+inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
+    if (nPts <= 1) return lo;
+    return lo + (hi - lo) * (double)idx / (double)(nPts - 1);
 }
 
 }  // namespace
@@ -256,6 +267,26 @@ struct ParametricEngine::Impl {
         return true;
     }
 
+    // =========================================================================
+    // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu:165-655.
+    // Идея: брать оригинальный код почти как есть, чтобы при обновлениях
+    // NonLinAnal перенос был механическим diff → patch. Изменения, которые
+    // ОБЯЗАТЕЛЬНЫ (помечены комментарием [ADAPT]):
+    //   - <<<grid, block, shared>>>(...) → cuLaunchKernel(CUfunction, ...) —
+    //     потому что наш kernel-модуль скомпилирован NVRTC'ом во время работы
+    //     и недоступен по compile-time символу
+    //   - gpuErrorCheck(...) — у NonLinAnal он зовёт exit() при ошибке; здесь
+    //     заменено локальным макросом BIF_CHECK, который пишет в res.error и
+    //     возвращает результат с cleanup'ом
+    //   - OUT_FILE_PATH приходит из req.csv_output_path (пусто = CSV не пишем)
+    //   - continuation_bif1D == 1 ветка отключена — она использует host-side
+    //     calculateDiscreteModel (default Lorenz из cudaLibrary.cu:120), а не
+    //     user's KRS; для нашего адаптера это не сработает
+    //   - calculate_mean_med_freq / calculate_mean_and_variance отключены —
+    //     соответствующие kernel-ы (MeanAndMedianFreqCUDA и т.д.) не входят
+    //     в NVRTC-bundle. Включим по мере необходимости
+    //   - Результат пишется в Bifurcation1DResult (память + CSV), не в файл
+    // =========================================================================
     Bifurcation1DResult run_bif1d(const Bifurcation1DRequest& req) {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
@@ -284,155 +315,293 @@ struct ParametricEngine::Impl {
         // ---- компиляция или cache hit ----
         if (!compile_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
 
-        // ---- производные величины (как в hostLibrary::bifurcation1D) ----
-        int    nPts                 = req.n_pts;
-        int    nPtsLimiter          = nPts;                  // без chunking
-        int    amountOfPointsInBlock= (int)(req.t_max / req.h / req.pre_scaller);
-        int    amountOfPointsForSkip= (int)(req.transient_time / req.h);
-        int    amountOfInitialConditions = req.amountOfX;
-        int    amountOfValues       = (int)req.base_values.size();
-        int    preScaller           = req.pre_scaller;
-        int    writableVar          = req.writable_var;
-        int    dimension            = 1;     // 1D-бифуркация
-        bool   par_or_var           = true;  // меняем параметр (не НУ)
+        // ====================================================================
+        // ПОРТ NonLinAnal::bifurcation1D (hostLibrary.cu:165-655).
+        // Локальные имена мапятся на аргументы функции NonLinAnal для удобства
+        // дифа — слева name из req, справа name как в hostLibrary.
+        // ====================================================================
+        const double tMax                       = req.t_max;
+        const int    nPts                       = req.n_pts;
+        const double h                          = req.h;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[2]                        = { req.param_lo, req.param_hi };
+        int    indicesOfMutVars[1]              = { req.param_index };          // уже 1-индексированный
+        const int    writableVar                = req.writable_var;
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const int    preScaller                 = req.pre_scaller;
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        // Константы из configCUDA.h — у NonLinAnal они constexpr,
+        // здесь литералы (значения те же).
+        constexpr int  blockSize_setup          = 32;
+        constexpr int  set_precision            = 15;
+        // [ADAPT] continuation_bif1D, calculate_mean_med_freq отключены —
+        // см. комментарий в шапке функции.
+
+        // --- amountOfPointsInBlock / amountOfPointsForSkip — порт строк 196-200 NL ---
+        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        int amountOfPointsForSkip = (int)(transientTime / h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
-        // ---- device alloc ----
-        CUdeviceptr d_data = 0, d_ranges = 0, d_indices = 0, d_ic = 0, d_values = 0;
-        CUdeviceptr d_outPeaks = 0, d_timeOfPeaks = 0, d_amountOfPeaks = 0;
-        size_t bytes_data    = (size_t)nPtsLimiter * amountOfPointsInBlock * sizeof(double);
-        size_t bytes_ranges  = 2 * sizeof(double);
-        size_t bytes_indices = sizeof(int);
-        size_t bytes_ic      = (size_t)amountOfInitialConditions * sizeof(double);
-        size_t bytes_values  = (size_t)amountOfValues * sizeof(double);
-        size_t bytes_peaks   = bytes_data;                    // up to same size as data
-        size_t bytes_amount  = (size_t)nPtsLimiter * sizeof(int);
+        // --- Memory budget (порт строк 202-244 NL) ---
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.92);
+
+        size_t memPerSystem =
+            3 * (size_t)amountOfPointsInBlock * sizeof(double) +  // d_data, d_outPeaks, d_timeOfPeaks
+            2 * sizeof(double) +                                  // d_meanFreq, d_medianFreq (зарезервировано)
+            sizeof(int);                                          // d_amountOfPeaks
+        size_t memConstants =
+            2 * sizeof(double) +
+            sizeof(int) +
+            (size_t)amountOfInitialConditions * sizeof(double) +
+            (size_t)amountOfValues * sizeof(double);
+        constexpr double SAFETY_FACTOR = 0.9;
+        size_t safeFree = (size_t)((double)freeMemory * SAFETY_FACTOR);
+        if (memConstants >= safeFree) return fail("not enough GPU memory for constants");
+        size_t availableMemory = safeFree - memConstants;
+
+        size_t nPtsLimiter = availableMemory / memPerSystem;
+        if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
+        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
+        if (nPtsLimiter == 0)
+            return fail("not enough GPU memory: per-system buffer too large");
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        // --- Host buffers (порт строк 257-264 NL) ---
+        // h_data/h_meanFreq/h_medianFreq/h_localX/h_localValues нужны только для
+        // continuation_bif1D и mean/median — мы их не используем.
+        std::vector<double> h_outPeaks   (nPtsLimiter * (size_t)amountOfPointsInBlock);
+        std::vector<double> h_timeOfPeaks(nPtsLimiter * (size_t)amountOfPointsInBlock);
+        std::vector<int>    h_amountOfPeaks(nPtsLimiter);
+
+        // --- Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq) ---
+        double* d_data              = nullptr;
+        double* d_ranges            = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        int*    d_amountOfPeaks     = nullptr;
+        double* d_outPeaks          = nullptr;
+        double* d_timeOfPeaks       = nullptr;
 
         auto cleanup = [&]() {
-            if (d_data)         cuMemFree(d_data);
-            if (d_ranges)       cuMemFree(d_ranges);
-            if (d_indices)      cuMemFree(d_indices);
-            if (d_ic)           cuMemFree(d_ic);
-            if (d_values)       cuMemFree(d_values);
-            if (d_outPeaks)     cuMemFree(d_outPeaks);
-            if (d_timeOfPeaks)  cuMemFree(d_timeOfPeaks);
-            if (d_amountOfPeaks)cuMemFree(d_amountOfPeaks);
+            if (d_data)              cudaFree(d_data);
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            if (d_outPeaks)          cudaFree(d_outPeaks);
+            if (d_timeOfPeaks)       cudaFree(d_timeOfPeaks);
         };
 
-        CUresult r;
-        if ((r = cuMemAlloc(&d_data,          bytes_data))    != CUDA_SUCCESS) { res.error = "cuMemAlloc data ("    + std::to_string(bytes_data) + "B): " + cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_ranges,        bytes_ranges))  != CUDA_SUCCESS) { res.error = "cuMemAlloc ranges: "  + cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_indices,       bytes_indices)) != CUDA_SUCCESS) { res.error = "cuMemAlloc indices: " + cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_ic,            bytes_ic))      != CUDA_SUCCESS) { res.error = "cuMemAlloc ic: "      + cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_values,        bytes_values))  != CUDA_SUCCESS) { res.error = "cuMemAlloc values: "  + cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_outPeaks,      bytes_peaks))   != CUDA_SUCCESS) { res.error = "cuMemAlloc outPeaks: "+ cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_timeOfPeaks,   bytes_peaks))   != CUDA_SUCCESS) { res.error = "cuMemAlloc timeOfPeaks: "+ cu_err(r); cleanup(); return res; }
-        if ((r = cuMemAlloc(&d_amountOfPeaks, bytes_amount))  != CUDA_SUCCESS) { res.error = "cuMemAlloc amountOfPeaks: "+ cu_err(r); cleanup(); return res; }
+        // [ADAPT] gpuErrorCheck → BIF_CHECK: пишем в res.error и выходим с cleanup
+        #define BIF_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define BIF_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
-        // ---- H2D ----
-        double h_ranges[2] = { req.param_lo, req.param_hi };
-        int    h_indices[1] = { req.param_index };   // уже 1-индексированный
-        cuMemcpyHtoD(d_ranges,  h_ranges,                    bytes_ranges);
-        cuMemcpyHtoD(d_indices, h_indices,                   bytes_indices);
-        cuMemcpyHtoD(d_ic,      req.initial_conditions.data(), bytes_ic);
-        cuMemcpyHtoD(d_values,  req.base_values.data(),      bytes_values);
+        BIF_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
+        BIF_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                          "cudaMalloc d_ranges");
+        BIF_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                             "cudaMalloc d_indicesOfMutVars");
+        BIF_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),          "cudaMalloc d_initialConditions");
+        BIF_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                     "cudaMalloc d_values");
+        BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_outPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_timeOfPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
 
-        // ---- launch calculateDiscreteModelCUDA ----
-        // Сигнатура (cudaLibrary.cu:906):
-        //   const int nPts, const int nPtsLimiter, const size_t sizeOfBlock,
-        //   const size_t amountOfCalculatedPoints, const size_t amountOfPointsForSkip,
-        //   const int dimension, numb* ranges, const numb h, int* indicesOfMutVars,
-        //   numb* initialConditions, const int amountOfInitialConditions,
-        //   const numb* values, const int amountOfValues,
-        //   const size_t amountOfIterations, const int preScaller,
-        //   const int writableVar, const numb maxValue,
-        //   numb* data, int* maxValueCheckerArray, const bool Par_or_Var
-        size_t sizeOfBlock          = (size_t)amountOfPointsInBlock;
-        size_t amountOfCalculated   = 0;
-        size_t amountOfPointsForSkip_s = (size_t)amountOfPointsForSkip;
-        size_t amountOfIterations   = (size_t)amountOfPointsInBlock;
-        double h_arg                = req.h;
-        double maxValue_arg         = req.max_value;
+        // --- H2D констант (порт строк 314-319 NL) ---
+        BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BIF_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,   1 * sizeof(int),                                   cudaMemcpyHostToDevice), "memcpy d_indices");
+        BIF_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
+        BIF_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        BIF_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        void* args_traj[] = {
-            &nPts,
-            &nPtsLimiter,
-            &sizeOfBlock,
-            &amountOfCalculated,
-            &amountOfPointsForSkip_s,
-            &dimension,
-            &d_ranges,
-            &h_arg,
-            &d_indices,
-            &d_ic,
-            &amountOfInitialConditions,
-            &d_values,
-            &amountOfValues,
-            &amountOfIterations,
-            &preScaller,
-            &writableVar,
-            &maxValue_arg,
-            &d_data,
-            &d_amountOfPeaks,
-            &par_or_var
-        };
+        size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
-        unsigned int grid = (unsigned int)((nPtsLimiter + kBlockSize - 1) / kBlockSize);
-        unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * kBlockSize);
+        // --- Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан) ---
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            if (cfg.is_open()) {
+                cfg << std::setprecision(set_precision);
+                cfg << "1D classical bifurcation\n";
+                cfg << "Parameter estimation\n";
+                cfg << "a[" << amountOfValues << "] = { ";
+                for (int kk = 0; kk < amountOfValues; ++kk) {
+                    cfg << values[kk];
+                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "X0[" << amountOfInitialConditions << "] = { ";
+                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
+                    cfg << initialConditions[kk];
+                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "CT = "       << tMax << "\n";
+                cfg << "TT = "       << transientTime << "\n";
+                cfg << "h = "        << h << "\n";
+                cfg << "decimator = " << preScaller << "\n";
+                cfg << "indexVar for peakfinder = " << writableVar << "\n";
+                cfg << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
+                cfg << "start value = " << ranges[0] << ", stop value = " << ranges[1] << "\n";
+            }
+            // обнуляем основной файл данных
+            std::ofstream trunc(OUT_FILE_PATH);
+            trunc.close();
+        }
 
-        r = cuLaunchKernel(cached.kernel_traj,
-                           grid, 1, 1, kBlockSize, 1, 1,
-                           shared, nullptr, args_traj, nullptr);
-        if (r != CUDA_SUCCESS) { res.error = "cuLaunchKernel(traj): " + cu_err(r); cleanup(); return res; }
-
-        r = cuCtxSynchronize();
-        if (r != CUDA_SUCCESS) { res.error = "cuCtxSynchronize after traj: " + cu_err(r); cleanup(); return res; }
-
-        // ---- launch peakFinderCUDA ----
-        // Сигнатура (cudaLibrary.cu:1553):
-        //   numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-        //   int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, const numb timeStep
-        double timeStep_arg = req.h * (double)preScaller;
-        void* args_peak[] = {
-            &d_data,
-            &sizeOfBlock,
-            &nPtsLimiter,
-            &d_amountOfPeaks,
-            &d_outPeaks,
-            &d_timeOfPeaks,
-            &timeStep_arg
-        };
-        r = cuLaunchKernel(cached.kernel_peak,
-                           grid, 1, 1, kBlockSize, 1, 1,
-                           0, nullptr, args_peak, nullptr);
-        if (r != CUDA_SUCCESS) { res.error = "cuLaunchKernel(peak): " + cu_err(r); cleanup(); return res; }
-
-        r = cuCtxSynchronize();
-        if (r != CUDA_SUCCESS) { res.error = "cuCtxSynchronize after peak: " + cu_err(r); cleanup(); return res; }
-
-        // ---- D2H ----
-        std::vector<double> h_outPeaks((size_t)nPtsLimiter * amountOfPointsInBlock);
-        std::vector<int>    h_amountOfPeaks(nPtsLimiter);
-        cuMemcpyDtoH(h_outPeaks.data(),      d_outPeaks,      bytes_peaks);
-        cuMemcpyDtoH(h_amountOfPeaks.data(), d_amountOfPeaks, bytes_amount);
-
-        cleanup();
-
-        // ---- упаковка ----
-        res.ok           = true;
+        // --- результат-аккумулятор (для GUI) ---
         res.n_pts        = nPts;
         res.record_steps = amountOfPointsInBlock;
-        res.flags        = std::move(h_amountOfPeaks);
-        res.bifurcation_points.resize(nPts);
-        for (int i = 0; i < nPts; ++i) {
-            int n = res.flags[i];
-            if (n <= 0) { res.bifurcation_points[i].clear(); continue; }
-            if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
-            const double* row = h_outPeaks.data() + (size_t)i * amountOfPointsInBlock;
-            res.bifurcation_points[i].assign(row, row + n);
+        res.flags.assign(nPts, 0);
+        res.bifurcation_points.assign(nPts, {});
+
+        // --- Главный цикл (порт строк 396-630 NL) ---
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            // последний чанк может быть меньше
+            if (iter == amountOfIteration - 1)
+                nPtsLimiter = nPts - (originalNPtsLimiter * iter);
+
+            int blockSize = 32;
+            int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
+
+            // [ADAPT] <<<>>> → cuLaunchKernel.
+            // continuation_bif1D == 0 ветка (classical). Continuation отключена.
+            int    nPts_int                  = nPts;
+            int    nPtsLimiter_int           = (int)nPtsLimiter;
+            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
+            size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
+            size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
+            int    dimension                 = 1;
+            double h_arg                     = h;
+            int    amountOfInitialConditions_int = amountOfInitialConditions;
+            int    amountOfValues_int        = amountOfValues;
+            size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
+            int    preScaller_int            = preScaller;
+            int    writableVar_int           = writableVar;
+            double maxValue_arg              = maxValue;
+            bool   par_or_var_arg            = true;   // parametric analysis
+
+            void* args_traj[] = {
+                &nPts_int,
+                &nPtsLimiter_int,
+                &sizeOfBlock_s,
+                &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s,
+                &dimension,
+                &d_ranges,
+                &h_arg,
+                &d_indicesOfMutVars,
+                &d_initialConditions,
+                &amountOfInitialConditions_int,
+                &d_values,
+                &amountOfValues_int,
+                &amountOfIterations_arg,
+                &preScaller_int,
+                &writableVar_int,
+                &maxValue_arg,
+                &d_data,
+                &d_amountOfPeaks,
+                &par_or_var_arg
+            };
+
+            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+
+            BIF_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared, nullptr, args_traj, nullptr),
+                         "cuLaunchKernel(traj)");
+            BIF_CHECK(cudaDeviceSynchronize(), "sync after traj");
+
+            // peakFinderCUDA
+            double timeStep_arg = h * (double)preScaller;
+            void* args_peak[] = {
+                &d_data,
+                &sizeOfBlock_s,
+                &nPtsLimiter_int,
+                &d_amountOfPeaks,
+                &d_outPeaks,
+                &d_timeOfPeaks,
+                &timeStep_arg
+            };
+            BIF_CHECK_CU(cuLaunchKernel(cached.kernel_peak,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        0, nullptr, args_peak, nullptr),
+                         "cuLaunchKernel(peak)");
+            BIF_CHECK(cudaDeviceSynchronize(), "sync after peak");
+
+            // D2H (порт строк 538-540 NL)
+            BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
+            BIF_CHECK(cudaMemcpy(h_amountOfPeaks.data(),  d_amountOfPeaks,  nPtsLimiter * sizeof(int),                                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
+            BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+            BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+            // --- CSV + аккумуляция результата (порт строк 574-608 NL) ---
+            std::ofstream out;
+            if (!OUT_FILE_PATH.empty()) {
+                out.open(OUT_FILE_PATH, std::ios::app);
+                if (out.is_open()) out << std::setprecision(set_precision);
+            }
+
+            for (size_t k = 0; k < nPtsLimiter; ++k) {
+                size_t global_idx = originalNPtsLimiter * iter + k;
+                double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
+                int    npeaks     = h_amountOfPeaks[k];
+
+                // CSV — формат NonLinAnal: param, peak, time
+                if (out.is_open()) {
+                    if (npeaks == 0) {
+                        out << param_val << ", " << 0 << ", " << 0 << '\n';
+                    } else if (npeaks == -1) {
+                        out << param_val << ", " << 0 << ", " << -1 << '\n';
+                    } else {
+                        for (size_t j = 0; j < (size_t)npeaks; ++j) {
+                            out << param_val << ", "
+                                << h_outPeaks   [k * (size_t)amountOfPointsInBlock + j] << ", "
+                                << h_timeOfPeaks[k * (size_t)amountOfPointsInBlock + j] << '\n';
+                        }
+                    }
+                }
+
+                // В память для GUI
+                res.flags[global_idx] = npeaks;
+                auto& dst = res.bifurcation_points[global_idx];
+                if (npeaks > 0) {
+                    int n = npeaks;
+                    if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
+                    const double* row = h_outPeaks.data() + k * (size_t)amountOfPointsInBlock;
+                    dst.assign(row, row + n);
+                } else {
+                    dst.clear();
+                }
+            }
+
+            if (out.is_open()) out.close();
         }
+
+        cleanup();
+        #undef BIF_CHECK
+        #undef BIF_CHECK_CU
+        res.ok = true;
         return res;
     }
 };

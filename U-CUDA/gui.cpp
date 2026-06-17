@@ -925,6 +925,11 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     InputNumStr("max_value",   s.max_value_text,   120);
 
     ImGui::Separator();
+    ImGui::Text("CSV output (empty = no file):");
+    InputTextStr("##csv_path", s.csv_output_path);
+    ImGui::TextDisabled("Will also write <path>_config.csv with run metadata.");
+
+    ImGui::Separator();
     ImGui::Text("Initial conditions:");
     for (const auto& v : s.vars) {
         InputNumStr(v.c_str(), s.initial_conditions[v], 120);

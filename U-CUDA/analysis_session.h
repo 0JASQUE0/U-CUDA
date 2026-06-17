@@ -149,6 +149,10 @@ struct ParametricAnalysisSession {
     std::string pre_scaller_text = "1";
     std::string max_value_text = "1e6";
 
+    // Если непусто — engine запишет CSV (формат NonLinAnal: param,peak,time).
+    // Конфиг сохраняется как <csv_output_path>_config.csv.
+    std::string csv_output_path;
+
     Bifurcation1DResult result;
     bool last_run_ok = false;
     std::string last_error;

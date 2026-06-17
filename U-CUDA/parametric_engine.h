@@ -47,6 +47,11 @@ struct Bifurcation1DRequest {
 
     // Защита от расхождения
     double max_value = 1.0e6;
+
+    // Если не пусто — engine запишет CSV с результатами по тому же формату,
+    // что и NonLinAnal::bifurcation1D (для publication-quality пост-процессинга).
+    // Пустая строка = ничего не пишем (только в памяти).
+    std::string csv_output_path;
 };
 
 struct Bifurcation1DResult {
