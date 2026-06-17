@@ -1231,6 +1231,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::Begin("MainHost", nullptr, host_flags);
     ImGui::PopStyleVar(2);
 
+    // custom_schemes — единственное поле, которое может отредактироваться
+    // в System tab БЕЗ переключения режима (т.е. без start_*_analysis).
+    // Чтобы scheme combo в Phase/Parametric увидел свежий список сразу
+    // после "+ Add custom scheme", синкаем копию live → сессии каждый кадр.
+    model.phase_session.custom_schemes = model.custom_schemes;
+    model.parametric_session.custom_schemes = model.custom_schemes;
+
     // poll'им async-расчёты независимо от текущего режима — чтобы при
     // возврате в этот режим пользователь сразу увидел готовый результат
     if (model.parametric_session.poll()) {
