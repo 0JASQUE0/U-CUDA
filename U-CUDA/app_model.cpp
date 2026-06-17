@@ -34,26 +34,60 @@ System AppModel::build_system() const {
 // Парсит систему, обновляет списки символов и синхронизирует словари значений.
 bool AppModel::refresh_symbols() {
     error_message.clear();
-    try {
-        System sys = build_system();
-        known_vars = sys.vars;
-        known_params = sys.params;
 
-        // синхронизация словаря: оставить значения для существующих символов,
-        // добавить пустые для новых, убрать исчезнувшие.
-        auto sync = [](std::map<std::string, std::string>& m,
-            const std::vector<std::string>& keys) {
-                std::map<std::string, std::string> next;
-                for (const auto& k : keys) {
-                    auto it = m.find(k);
-                    next[k] = (it != m.end()) ? it->second : std::string();
-                }
-                m.swap(next);
-            };
+    auto sync = [](std::map<std::string, std::string>& m,
+        const std::vector<std::string>& keys) {
+            std::map<std::string, std::string> next;
+            for (const auto& k : keys) {
+                auto it = m.find(k);
+                next[k] = (it != m.end()) ? it->second : std::string();
+            }
+            m.swap(next);
+        };
+
+    auto apply_sync = [&]() {
         sync(init_conditions, known_vars);
         sync(param_values, known_params);
         sync(param_min, known_params);
         sync(param_max, known_params);
+    };
+
+    // Helper: распарсить comma/space-separated список.
+    auto parse_csv = [](const std::string& s) {
+        std::vector<std::string> out;
+        std::string cur;
+        for (char c : s) {
+            if (c == ',' || c == ' ' || c == '\t' || c == '\n' || c == ';') {
+                if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+            }
+            else cur += c;
+        }
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    };
+
+    // Если задан явный vars_text — используем его. Это нужно для чистой
+    // Custom KRS (без уравнений), когда build_system не имеет данных.
+    if (!vars_text.empty()) {
+        known_vars = parse_csv(vars_text);
+        auto all = parse_csv(alphabet_text);
+        std::vector<std::string> params_only;
+        for (const auto& nm : all) {
+            bool is_var = false;
+            for (const auto& v : known_vars) if (v == nm) { is_var = true; break; }
+            if (!is_var) params_only.push_back(nm);
+        }
+        known_params = std::move(params_only);
+        apply_sync();
+        return true;
+    }
+
+    // Обычный путь: парсер уравнений.
+    try {
+        System sys = build_system();
+        known_vars = sys.vars;
+        known_params = sys.params;
+        apply_sync();
         return true;
     }
     catch (const std::exception& e) {
@@ -74,6 +108,7 @@ SystemRecord AppModel::to_record() const {
     r.latex_text = latex_text;
     r.plain_text = plain_text;
     r.alphabet_text = alphabet_text;
+    r.vars_text = vars_text;
     r.use_aux_funcs = use_aux_funcs;
     r.func_defs_text = func_defs_text;
     r.param_order = (param_order == ParamOrder::AsInSystem) ? "AsInSystem" : "AsInAlphabet";
@@ -99,6 +134,7 @@ void AppModel::from_record(const SystemRecord& r) {
     latex_text = r.latex_text;
     plain_text = r.plain_text;
     alphabet_text = r.alphabet_text;
+    vars_text = r.vars_text;
     use_aux_funcs = r.use_aux_funcs;
     func_defs_text = r.func_defs_text;
     param_order = (r.param_order == "AsInSystem") ? ParamOrder::AsInSystem : ParamOrder::AsInAlphabet;
@@ -133,6 +169,7 @@ void AppModel::clear() {
     use_aux_funcs = false;
     // алфавит и режим — оставляем дефолтными? обнулим алфавит тоже.
     alphabet_text.clear();
+    vars_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = false;

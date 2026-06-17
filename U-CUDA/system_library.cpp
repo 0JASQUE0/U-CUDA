@@ -132,6 +132,7 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "latex_text", r.latex_text);
     kv(o, "plain_text", r.plain_text);
     kv(o, "alphabet_text", r.alphabet_text);
+    kv(o, "vars_text", r.vars_text);
     kvbool(o, "use_aux_funcs", r.use_aux_funcs);
     kv(o, "func_defs_text", r.func_defs_text);
     kv(o, "param_order", r.param_order);
@@ -215,6 +216,7 @@ SystemRecord record_from_json(const std::string& json) {
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;
             else if (key == "alphabet_text") r.alphabet_text = val;
+            else if (key == "vars_text") r.vars_text = val;
             else if (key == "func_defs_text") r.func_defs_text = val;
             else if (key == "param_order") r.param_order = val;
             else if (key == "step_h") r.step_h = val;

@@ -33,6 +33,10 @@ public:
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
     std::string alphabet_text;     // алфавит через запятую: "x,y,z,sigma,rho,beta"
+    // Опциональный явный список переменных (для чистой Custom KRS без уравнений).
+    // Если пустой — vars/params определяются из равнений; иначе vars берутся
+    // отсюда, params = alphabet \ vars.
+    std::string vars_text;
     bool scheme_euler = false;
     bool scheme_cromer = false;
     bool scheme_midpoint = false;

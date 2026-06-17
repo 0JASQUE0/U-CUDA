@@ -170,6 +170,12 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::TextDisabled("e.g. x,y,z,alpha,beta,m_0,m_1");
     InputTextStr("##alphabet", model.alphabet_text);
 
+    // Override для переменных — нужен только когда нет уравнений (чистая Custom KRS).
+    ImGui::Text("Variables (optional override for Custom-only systems):");
+    ImGui::TextDisabled("Comma-sep var names, e.g. x,y,z. Params = alphabet \\ vars.\n"
+                       "Leave empty to derive vars/params from equations.");
+    InputTextStr("##vars_override", model.vars_text);
+
     // порядок параметров
     ImGui::Text("Parameter order in a[]:");
     ImGui::SameLine();
