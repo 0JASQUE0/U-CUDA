@@ -1008,8 +1008,11 @@ static void draw_parametric_plot(AppModel& model) {
     // По галке выбираем что рисовать: значения пиков или межпиковые интервалы.
     const auto& source = s.plot_inter_peaks ? s.result.peak_times
                                             : s.result.bifurcation_points;
-    view->y_axis.name = s.plot_inter_peaks ? "inter-peak interval"
-                                            : "X[writable_var]";
+    // Ось Y — всегда имя переменной, по которой строится диаграмма
+    // (фактический writable_var из системы), а не «X[writable_var]».
+    view->y_axis.name = (s.writable_var >= 0 && s.writable_var < (int)s.vars.size())
+                        ? s.vars[s.writable_var]
+                        : std::string("Y");
 
     static std::vector<float> buf;
     buf.clear();
