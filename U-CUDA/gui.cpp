@@ -933,7 +933,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     InputNumStr("computing time", s.t_max_text,       120);
     InputNumStr("transient time", s.transient_text,   120);
     InputNumStr("decimator",      s.pre_scaller_text, 120);
-    InputNumStr("max_value",      s.max_value_text,   120);
+    InputNumStr("max value",      s.max_value_text,   120);
 
     ImGui::Separator();
     ImGui::Text("CSV output:");
@@ -1013,6 +1013,10 @@ static void draw_parametric_plot(AppModel& model) {
     view->y_axis.name = (s.writable_var >= 0 && s.writable_var < (int)s.vars.size())
                         ? s.vars[s.writable_var]
                         : std::string("Y");
+    // Ось X — имя изменяемого параметра (param_index в сессии 0-индексирован).
+    view->x_axis.name = (s.param_index >= 0 && s.param_index < (int)s.params.size())
+                        ? s.params[s.param_index]
+                        : std::string("param");
 
     static std::vector<float> buf;
     buf.clear();
