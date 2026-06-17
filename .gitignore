@@ -29,4 +29,7 @@ __pycache__/
 *.pyc
 
 # Выходные файлы анализа (по желанию — если не хочешь коммитить результаты)
-# *.csvU-CUDA/imgui.ini
+# *.csv
+
+# Runtime UI state (ImGui layout)
+U-CUDA/imgui.ini
