@@ -474,6 +474,7 @@ struct ParametricEngine::Impl {
         res.record_steps = amountOfPointsInBlock;
         res.flags.assign(nPts, 0);
         res.bifurcation_points.assign(nPts, {});
+        res.peak_times.assign(nPts, {});
 
         // --- Главный цикл (порт строк 396-630 NL) ---
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
@@ -582,16 +583,20 @@ struct ParametricEngine::Impl {
                     }
                 }
 
-                // В память для GUI
+                // В память для GUI: значения пиков и межпиковые интервалы
                 res.flags[global_idx] = npeaks;
-                auto& dst = res.bifurcation_points[global_idx];
+                auto& dst_peaks = res.bifurcation_points[global_idx];
+                auto& dst_times = res.peak_times[global_idx];
                 if (npeaks > 0) {
                     int n = npeaks;
                     if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
-                    const double* row = h_outPeaks.data() + k * (size_t)amountOfPointsInBlock;
-                    dst.assign(row, row + n);
+                    const double* peakRow = h_outPeaks.data()    + k * (size_t)amountOfPointsInBlock;
+                    const double* timeRow = h_timeOfPeaks.data() + k * (size_t)amountOfPointsInBlock;
+                    dst_peaks.assign(peakRow, peakRow + n);
+                    dst_times.assign(timeRow, timeRow + n);
                 } else {
-                    dst.clear();
+                    dst_peaks.clear();
+                    dst_times.clear();
                 }
             }
 

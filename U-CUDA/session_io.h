@@ -19,3 +19,10 @@ std::string session_to_json(const PhaseAnalysisSession& s);
 // (vars/params/sys НЕ трогает — они приходят из системы). Возвращает false
 // при ошибке разбора (s остаётся как есть).
 bool session_from_json(const std::string& json, PhaseAnalysisSession& s);
+
+// То же самое для ParametricAnalysisSession.
+// Сохраняем: scheme, диапазон/n_pts, writable_var, integration-поля,
+// param_values, initial_conditions, csv_output_path + csv_save_enabled.
+// Не сохраняем результат и runtime-флаги.
+std::string session_to_json_parametric(const ParametricAnalysisSession& s);
+bool session_from_json_parametric(const std::string& json, ParametricAnalysisSession& s);

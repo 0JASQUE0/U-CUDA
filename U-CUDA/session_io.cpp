@@ -203,3 +203,66 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
         return false;
     }
 }
+// ============================================================================
+// ParametricAnalysisSession
+// ============================================================================
+
+std::string session_to_json_parametric(const ParametricAnalysisSession& s) {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"scheme\":";          jstr(o, s.scheme);          o << ",\n";
+    o << "  \"param_index\":"    << s.param_index            << ",\n";
+    o << "  \"param_lo_text\":";   jstr(o, s.param_lo_text);   o << ",\n";
+    o << "  \"param_hi_text\":";   jstr(o, s.param_hi_text);   o << ",\n";
+    o << "  \"n_pts_text\":";      jstr(o, s.n_pts_text);      o << ",\n";
+    o << "  \"writable_var\":"   << s.writable_var           << ",\n";
+    o << "  \"h_text\":";          jstr(o, s.h_text);          o << ",\n";
+    o << "  \"t_max_text\":";      jstr(o, s.t_max_text);      o << ",\n";
+    o << "  \"transient_text\":";  jstr(o, s.transient_text);  o << ",\n";
+    o << "  \"pre_scaller_text\":";jstr(o, s.pre_scaller_text);o << ",\n";
+    o << "  \"max_value_text\":";  jstr(o, s.max_value_text);  o << ",\n";
+    o << "  \"param_values\":";    jmap(o, s.param_values);    o << ",\n";
+    o << "  \"initial_conditions\":"; jmap(o, s.initial_conditions); o << ",\n";
+    o << "  \"csv_save_enabled\":" << (s.csv_save_enabled ? "true" : "false") << ",\n";
+    o << "  \"csv_output_path\":"; jstr(o, s.csv_output_path); o << ",\n";
+    o << "  \"plot_inter_peaks\":" << (s.plot_inter_peaks ? "true" : "false") << "\n";
+    o << "}\n";
+    return o.str();
+}
+
+bool session_from_json_parametric(const std::string& json, ParametricAnalysisSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if      (key == "scheme")             s.scheme           = p.str();
+            else if (key == "param_index")        s.param_index      = std::stoi(p.str_or_num());
+            else if (key == "param_lo_text")      s.param_lo_text    = p.str();
+            else if (key == "param_hi_text")      s.param_hi_text    = p.str();
+            else if (key == "n_pts_text")         s.n_pts_text       = p.str();
+            else if (key == "writable_var")       s.writable_var     = std::stoi(p.str_or_num());
+            else if (key == "h_text")             s.h_text           = p.str();
+            else if (key == "t_max_text")         s.t_max_text       = p.str();
+            else if (key == "transient_text")     s.transient_text   = p.str();
+            else if (key == "pre_scaller_text")   s.pre_scaller_text = p.str();
+            else if (key == "max_value_text")     s.max_value_text   = p.str();
+            else if (key == "param_values")       s.param_values        = p.map_ss();
+            else if (key == "initial_conditions") s.initial_conditions  = p.map_ss();
+            else if (key == "csv_save_enabled")   s.csv_save_enabled = p.boolean();
+            else if (key == "csv_output_path")    s.csv_output_path  = p.str();
+            else if (key == "plot_inter_peaks")   s.plot_inter_peaks = p.boolean();
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        // КРС перегенерируем под загруженный scheme
+        s.regenerate_krs();
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}

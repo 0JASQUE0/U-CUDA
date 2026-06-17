@@ -65,6 +65,11 @@ struct Bifurcation1DResult {
     // Длина каждого внутреннего вектора == record_steps.
     std::vector<std::vector<double>> bifurcation_points;
 
+    // peak_times[i] — межпиковые интервалы (timeOfPeaks в NonLinAnal).
+    // peak_times[i][j] = время от j-го пика до (j+1)-го для параметра i.
+    // Та же длина, что и bifurcation_points[i].
+    std::vector<std::vector<double>> peak_times;
+
     // flags[i]: 1 — расчёт прошёл, -1 — траектория разошлась за max_value.
     std::vector<int> flags;
 };
