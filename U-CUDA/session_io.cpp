@@ -224,7 +224,8 @@ std::string session_to_json_parametric(const ParametricAnalysisSession& s) {
     o << "  \"param_values\":";    jmap(o, s.param_values);    o << ",\n";
     o << "  \"initial_conditions\":"; jmap(o, s.initial_conditions); o << ",\n";
     o << "  \"csv_save_enabled\":" << (s.csv_save_enabled ? "true" : "false") << ",\n";
-    o << "  \"csv_output_path\":"; jstr(o, s.csv_output_path); o << "\n";
+    o << "  \"csv_output_path\":"; jstr(o, s.csv_output_path); o << ",\n";
+    o << "  \"plot_inter_peaks\":" << (s.plot_inter_peaks ? "true" : "false") << "\n";
     o << "}\n";
     return o.str();
 }
@@ -252,6 +253,7 @@ bool session_from_json_parametric(const std::string& json, ParametricAnalysisSes
             else if (key == "initial_conditions") s.initial_conditions  = p.map_ss();
             else if (key == "csv_save_enabled")   s.csv_save_enabled = p.boolean();
             else if (key == "csv_output_path")    s.csv_output_path  = p.str();
+            else if (key == "plot_inter_peaks")   s.plot_inter_peaks = p.boolean();
             else p.skip_value();
             if (p.opt(',')) continue;
             p.expect('}'); break;

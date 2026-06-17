@@ -886,6 +886,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
     ImGui::Separator();
 
+    // ----- Scheme -----
     const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
     int sel_sch = 0;
     for (int i = 0; i < 4; ++i) if (s.scheme == schemes[i]) sel_sch = i;
@@ -894,7 +895,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         s.scheme = schemes[sel_sch];
         s.regenerate_krs();
     }
+    ImGui::Separator();
 
+    // ----- Parameter sweep (выбор + диапазон) -----
     if (!s.params.empty()) {
         std::vector<const char*> items;
         items.reserve(s.params.size());
@@ -906,11 +909,11 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     else {
         ImGui::TextDisabled("No parameters (select a system first)");
     }
-
     InputNumStr("Param lo", s.param_lo_text, 120);
     InputNumStr("Param hi", s.param_hi_text, 120);
-    InputNumStr("n points", s.n_pts_text,    120);
+    ImGui::Separator();
 
+    // ----- Variable + resolution + inter-peaks -----
     if (!s.vars.empty()) {
         std::vector<const char*> items;
         items.reserve(s.vars.size());
@@ -919,6 +922,8 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::SetNextItemWidth(160);
         ImGui::Combo("Writable var", &s.writable_var, items.data(), (int)items.size());
     }
+    InputNumStr("Resolution", s.n_pts_text, 120);
+    ImGui::Checkbox("Plot inter-peaks (column 3) instead of peak values", &s.plot_inter_peaks);
 
     ImGui::Separator();
     ImGui::Text("Integration:");
@@ -947,7 +952,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Run", ImVec2(120, 0))) {
+    bool do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_run = true;
+    if (do_run) {
         if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
         s.run(*model.parametric_engine);
         // авто-сохранение последней сессии (если система загружена из библиотеки)
@@ -996,6 +1003,12 @@ static void draw_parametric_plot(AppModel& model) {
         return;
     }
 
+    // По галке выбираем что рисовать: значения пиков или межпиковые интервалы.
+    const auto& source = s.plot_inter_peaks ? s.result.peak_times
+                                            : s.result.bifurcation_points;
+    view->y_axis.name = s.plot_inter_peaks ? "inter-peak interval"
+                                            : "X[writable_var]";
+
     static std::vector<float> buf;
     buf.clear();
     int total_pts = 0;
@@ -1005,7 +1018,8 @@ static void draw_parametric_plot(AppModel& model) {
     for (int i = 0; i < npts; ++i) {
         if (i < (int)s.result.flags.size() && s.result.flags[i] < 0) continue;
         double x = (npts > 1) ? (lo + (hi - lo) * (double)i / (double)(npts - 1)) : lo;
-        for (double y : s.result.bifurcation_points[i]) {
+        if (i >= (int)source.size()) continue;
+        for (double y : source[i]) {
             buf.push_back((float)x);
             buf.push_back((float)y);
             ++total_pts;

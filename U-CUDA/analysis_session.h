@@ -154,6 +154,10 @@ struct ParametricAnalysisSession {
     bool csv_save_enabled = false;
     std::string csv_output_path;
 
+    // Если true — на графике рисуются межпиковые интервалы (peak_times),
+    // иначе значения пиков (bifurcation_points). Колонка 3 vs 2 в CSV.
+    bool plot_inter_peaks = false;
+
     Bifurcation1DResult result;
     bool last_run_ok = false;
     std::string last_error;
