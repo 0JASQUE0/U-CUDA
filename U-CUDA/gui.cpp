@@ -62,6 +62,15 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+// Проверка: парсится ли строка как число? std::stod кидает на "--5", "abc",
+// "1.2.3" и т.п.; пустую считаем валидной (дефолт подставится дальше),
+// "8/3" формально пройдёт как 8 (это не идеально, но соответствует
+// текущему поведению parse_d в parametric_engine).
+static bool is_numeric_string(const std::string& s) {
+    if (s.empty()) return true;
+    try { std::stod(s); return true; } catch (...) { return false; }
+}
+
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
     std::vector<char> buf(str.begin(), str.end());
     buf.resize(str.size() + 1024);
@@ -70,6 +79,13 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
     bool changed = ImGui::InputText(label, buf.data(), buf.size(),
         ImGuiInputTextFlags_CallbackCharFilter, filter_comma_to_dot);
     if (changed) str = buf.data();
+    // Inline-предупреждение, если содержимое не парсится как число.
+    // Default из engine'а (0) всё равно применится, но пользователю
+    // явно сигналим, что введённое значение игнорируется.
+    if (!is_numeric_string(str)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+            "  invalid number, using default");
+    }
     return changed;
 }
 
