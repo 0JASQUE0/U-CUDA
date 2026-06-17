@@ -1041,7 +1041,12 @@ static void draw_parametric_plot(AppModel& model) {
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    view->render(*renderer, origin, avail, /*owner_id*/ 0xBE0F1D, s.data_generation,
+    // data_gen зависит не только от того, что результат свежий, но и от того,
+    // КАКОЙ из двух датасетов мы сейчас рисуем (пики vs межпики). Иначе при
+    // тоггле чекбокса Plot2DView оставляет кэшированный VBO от предыдущего.
+    int data_gen = s.data_generation * 2 + (s.plot_inter_peaks ? 1 : 0);
+
+    view->render(*renderer, origin, avail, /*owner_id*/ 0xBE0F1D, data_gen,
                  series_in, init_vis, glob_vis, s.fit_request);
     s.fit_request = false;
 }
