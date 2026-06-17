@@ -96,6 +96,11 @@ struct PhaseAnalysisSession {
     // несколько проекций
     std::vector<Projection> projections;
 
+    // Имя системы, под которую сессия инициализирована (через load_from_record).
+    // Используется в GUI: при переключении радио-кнопок в один и тот же режим
+    // не сбрасывать пользовательские правки, если система не менялась.
+    std::string loaded_system_name;
+
     // последний результат расчёта
     AnalysisResult result;
 
@@ -186,6 +191,9 @@ struct ParametricAnalysisSession {
     std::string last_error;
     int data_generation = 0;
     bool fit_request = false;
+
+    // Имя системы, под которую сессия инициализирована (см. PhaseAnalysisSession).
+    std::string loaded_system_name;
 
     // --- async-расчёт ---
     // future, в которую std::async кладёт результат с worker-потока.

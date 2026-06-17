@@ -161,6 +161,10 @@ struct ParametricEngine::Impl {
     }
 
     bool compile_if_needed(const std::string& krs_body, int amountOfX, std::string& err) {
+        // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
+        // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
+        // выставляем наш перед NVRTC/CU-вызовами.
+        cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX);
         if (cached.module && cached.key == key) return true;  // cache hit
         release_module();
