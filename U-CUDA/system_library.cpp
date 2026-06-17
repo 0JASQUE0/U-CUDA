@@ -343,7 +343,8 @@ std::vector<std::string> SystemLibrary::list_sessions(const std::string& sysname
     for (auto& e : fs::directory_iterator(sd, ec)) {
         if (e.path().extension() != ".json") continue;
         std::string stem = e.path().stem().string();
-        if (stem == "_last") continue; // авто-сессию не показываем в списке именованных
+        // авто-сессии не показываем в списке именованных
+        if (stem == "_last" || stem == "_last_parametric") continue;
         names.push_back(stem);
     }
     return names;

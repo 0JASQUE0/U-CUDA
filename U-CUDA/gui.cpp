@@ -874,6 +874,10 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
                 try {
                     model.from_record(lib.load(nm));
                     model.start_parametric_analysis();
+                    // поверх эталона — последняя рабочая parametric-сессия для этой системы
+                    std::string j = lib.load_session(model.loaded_name, "_last_parametric");
+                    if (!j.empty())
+                        session_from_json_parametric(j, model.parametric_session);
                 }
                 catch (...) {}
             }
@@ -918,16 +922,17 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
 
     ImGui::Separator();
     ImGui::Text("Integration:");
-    InputNumStr("h",           s.h_text,           120);
-    InputNumStr("t_max",       s.t_max_text,       120);
-    InputNumStr("transient",   s.transient_text,   120);
-    InputNumStr("pre_scaller", s.pre_scaller_text, 120);
-    InputNumStr("max_value",   s.max_value_text,   120);
+    InputNumStr("h",              s.h_text,           120);
+    InputNumStr("computing time", s.t_max_text,       120);
+    InputNumStr("transient time", s.transient_text,   120);
+    InputNumStr("decimator",      s.pre_scaller_text, 120);
+    InputNumStr("max_value",      s.max_value_text,   120);
 
     ImGui::Separator();
-    ImGui::Text("CSV output (empty = no file):");
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file", &s.csv_save_enabled);
     InputTextStr("##csv_path", s.csv_output_path);
-    ImGui::TextDisabled("Will also write <path>_config.csv with run metadata.");
+    ImGui::TextDisabled("Path is kept even when save is off. Also writes <path>_config.csv.");
 
     ImGui::Separator();
     ImGui::Text("Initial conditions:");
@@ -936,9 +941,18 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     ImGui::Separator();
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        InputNumStr(p.c_str(), s.param_values[p], 120);
+    }
+
+    ImGui::Separator();
     if (ImGui::Button("Run", ImVec2(120, 0))) {
         if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
         s.run(*model.parametric_engine);
+        // авто-сохранение последней сессии (если система загружена из библиотеки)
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_parametric", session_to_json_parametric(s));
     }
 
     if (s.last_run_ok) {

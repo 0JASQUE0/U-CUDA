@@ -306,7 +306,7 @@ bool ParametricAnalysisSession::run(ParametricEngine& engine) {
     req.transient_time = parse_d(transient_text, 100.0);
     req.pre_scaller    = std::max(1, parse_i(pre_scaller_text, 1));
     req.max_value      = parse_d(max_value_text, 1.0e6);
-    req.csv_output_path = csv_output_path;
+    req.csv_output_path = csv_save_enabled ? csv_output_path : std::string{};
 
     result = engine.run_bifurcation_1d(req);
     last_run_ok = result.ok;
