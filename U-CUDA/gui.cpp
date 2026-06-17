@@ -923,7 +923,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Writable var", &s.writable_var, items.data(), (int)items.size());
     }
     InputNumStr("Resolution", s.n_pts_text, 120);
-    ImGui::Checkbox("Plot inter-peaks instead of peak values", &s.plot_inter_peaks);
+    // При тоггле просим автофит — диапазон Y у пиков и межпиков сильно разный.
+    if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &s.plot_inter_peaks))
+        s.fit_request = true;
 
     ImGui::Separator();
     ImGui::Text("Integration:");
