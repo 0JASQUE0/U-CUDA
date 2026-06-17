@@ -2,6 +2,8 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+#include <chrono>
+#include <future>
 #include <string>
 #include <vector>
 #include <map>
@@ -164,9 +166,36 @@ struct ParametricAnalysisSession {
     int data_generation = 0;
     bool fit_request = false;
 
+    // --- async-расчёт ---
+    // future, в которую std::async кладёт результат с worker-потока.
+    // Все мутации session происходят ТОЛЬКО на главном потоке (в run_async/poll),
+    // worker трогает только engine.
+    std::future<Bifurcation1DResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    // session не копируется (содержит future) — только move.
+    ParametricAnalysisSession() = default;
+    ParametricAnalysisSession(ParametricAnalysisSession&&) = default;
+    ParametricAnalysisSession& operator=(ParametricAnalysisSession&&) = default;
+    ParametricAnalysisSession(const ParametricAnalysisSession&) = delete;
+    ParametricAnalysisSession& operator=(const ParametricAnalysisSession&) = delete;
+
     void regenerate_krs();
     void load_from_record(const SystemRecord& r,
                           const std::vector<std::string>& vars_,
                           const std::vector<std::string>& params_);
+
+    // Старый синхронный Run. Заблокирует поток до конца расчёта.
     bool run(ParametricEngine& engine);
+
+    // Async: запускает расчёт в std::async-потоке. Возвращает false если
+    // уже что-то считается. Результат применяется в poll() позже.
+    bool run_async(ParametricEngine& engine);
+
+    // Вызывается каждый кадр из GUI-потока. Если future готова — забирает
+    // результат, применяет его к session (result, flags, data_generation,
+    // fit_request), сбрасывает in_flight. Возвращает true, если только что
+    // завершилось (GUI может среагировать, например авто-сохранить).
+    bool poll();
 };

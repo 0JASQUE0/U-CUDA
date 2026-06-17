@@ -868,6 +868,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("System:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(200);
     std::string current = model.name.empty() ? "(current)" : model.name;
+    // Во время async-расчёта смена системы запрещена — иначе результат
+    // worker'а применится к уже подменённой сессии.
+    if (s.in_flight) ImGui::BeginDisabled();
     if (ImGui::BeginCombo("##par_syssel", current.c_str())) {
         for (const auto& nm : lib.list()) {
             if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
@@ -884,6 +887,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         }
         ImGui::EndCombo();
     }
+    if (s.in_flight) ImGui::EndDisabled();
     ImGui::Separator();
 
     // ----- Scheme -----
@@ -954,14 +958,21 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     ImGui::Separator();
-    bool do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
-    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_run = true;
+    // Кнопка Run, дисейблится если уже идёт расчёт. Авто-сохранение
+    // _last_parametric делается в draw_gui::poll(), когда результат готов.
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    }
+    else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_run = true;
+    }
     if (do_run) {
         if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run(*model.parametric_engine);
-        // авто-сохранение последней сессии (если система загружена из библиотеки)
-        if (!model.loaded_name.empty())
-            lib.save_session(model.loaded_name, "_last_parametric", session_to_json_parametric(s));
+        s.run_async(*model.parametric_engine);
     }
 
     if (s.last_run_ok) {
@@ -1077,11 +1088,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::Begin("MainHost", nullptr, host_flags);
     ImGui::PopStyleVar(2);
 
+    // poll'им async-расчёты независимо от текущего режима — чтобы при
+    // возврате в Parametric пользователь сразу увидел готовый результат
+    if (model.parametric_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_parametric",
+                             session_to_json_parametric(model.parametric_session));
+    }
+
     // переключатель режимов
     int mode = (int)model.app_mode;
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
     ImGui::RadioButton("Analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
     ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric);
+
+    // Индикатор компьюта — справа от вкладок, чтобы было видно во всех режимах.
+    if (model.parametric_session.in_flight) {
+        ImGui::SameLine(0.0f, 24.0f);
+        double secs = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - model.parametric_session.compute_start_time).count();
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f),
+            "Computing parametric... %.1fs", secs);
+    }
     // при входе в Analysis — подготовить сессию из текущей системы
     if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
         model.app_mode != AppModel::AppMode::Analysis) {
