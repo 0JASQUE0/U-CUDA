@@ -55,6 +55,11 @@ bool NvrtcEngine::init() {
 
 bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     if (!inited_ && !init()) return false;
+    // Если этот worker-thread унаследовал чужой текущий контекст (например от
+    // ParametricEngine, который работал в той же thread-pool ячейке), модуль
+    // и kernel из нашего контекста дадут "invalid resource handle @ launch".
+    // Жёстко выставляем НАШ контекст текущим перед любыми CU/NVRTC-вызовами.
+    cuCtxSetCurrent((CUcontext)context_);
     release_module();
     amountOfX_ = amountOfX;
 
@@ -119,6 +124,8 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     double h, int total, int skip,
     std::vector<std::vector<std::vector<double>>>& out) {
     out.clear();
+    // см. комментарий в compile() — нужно выставить НАШ контекст текущим.
+    cuCtxSetCurrent((CUcontext)context_);
     if (!compiled_) NV_FAIL("not compiled");
     if (N <= 0) NV_FAIL("N<=0");
     if ((int)ic_flat.size() != N * amountOfX_) NV_FAIL("ic_flat size != N*amountOfX");

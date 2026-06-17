@@ -1155,15 +1155,25 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // при входе в Analysis/Parametric — подготовить сессию ТОЛЬКО если она
     // ещё не инициализирована под текущую систему. Иначе при каждом переходе
     // между вкладками сбрасывались бы пользовательские правки (ИУ, диапазоны и т.д.)
+    // Если переинициализируем — поверх эталона из библиотеки накладываем
+    // _last/_last_parametric, чтобы не терять последнее рабочее состояние.
     if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
         model.app_mode != AppModel::AppMode::Analysis &&
         model.phase_session.loaded_system_name != model.name) {
         model.start_phase_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string j = lib.load_session(model.loaded_name, "_last");
+            if (!j.empty()) session_from_json(j, model.phase_session);
+        }
     }
     if ((AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
         model.app_mode != AppModel::AppMode::Parametric &&
         model.parametric_session.loaded_system_name != model.name) {
         model.start_parametric_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string j = lib.load_session(model.loaded_name, "_last_parametric");
+            if (!j.empty()) session_from_json_parametric(j, model.parametric_session);
+        }
     }
     model.app_mode = (AppModel::AppMode)mode;
     ImGui::Separator();
