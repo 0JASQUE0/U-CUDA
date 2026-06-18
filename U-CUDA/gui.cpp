@@ -1284,25 +1284,40 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "%s", text);
     }
-    // при входе в Analysis/Parametric — подготовить сессию ТОЛЬКО если она
-    // ещё не инициализирована под текущую систему. Иначе при каждом переходе
-    // между вкладками сбрасывались бы пользовательские правки.
-    // Также инициализируем если session.vars пустой — для несохранённых
-    // систем (model.name="") иначе guard ошибочно пропускает первый вход.
+    // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать
+    // сессию. Init происходит когда:
+    //   1) система сменилась относительно той, для которой session была собрана;
+    //   2) session ещё ни разу не была инициализирована (vars пустой) — это
+    //      случай несохранённых систем, где model.name = loaded_system_name = "";
+    //   3) у model сменился алфавит / vars_text, и session.vars/params уже
+    //      не совпадают с актуальным model.known_vars/known_params.
+    // Случай 3 раньше требовал перезапуска приложения, чтобы подхватить новый
+    // алфавит — теперь подхватывается при следующем входе в режим.
+    bool entering_phase = (AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
+                          model.app_mode != AppModel::AppMode::Analysis;
+    bool entering_par   = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
+                          model.app_mode != AppModel::AppMode::Parametric;
+    if (entering_phase || entering_par) {
+        // обновим known_vars/known_params из живого алфавита, чтобы сравнение
+        // ниже было против актуального состояния
+        model.refresh_symbols();
+    }
     auto phase_need_init = model.phase_session.loaded_system_name != model.name
-                        || model.phase_session.vars.empty();
+                        || model.phase_session.vars.empty()
+                        || model.phase_session.vars   != model.known_vars
+                        || model.phase_session.params != model.known_params;
     auto par_need_init   = model.parametric_session.loaded_system_name != model.name
-                        || model.parametric_session.vars.empty();
-    if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
-        model.app_mode != AppModel::AppMode::Analysis && phase_need_init) {
+                        || model.parametric_session.vars.empty()
+                        || model.parametric_session.vars   != model.known_vars
+                        || model.parametric_session.params != model.known_params;
+    if (entering_phase && phase_need_init) {
         model.start_phase_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last");
             if (!j.empty()) session_from_json(j, model.phase_session);
         }
     }
-    if ((AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
-        model.app_mode != AppModel::AppMode::Parametric && par_need_init) {
+    if (entering_par && par_need_init) {
         model.start_parametric_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last_parametric");

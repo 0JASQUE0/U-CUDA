@@ -118,14 +118,6 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
     }
 
-    // DIAG: соберём строку "a[1]=eq=1.0, a[2]=m=1.5, ..." для отладки.
-    // Покажется в Phase под кнопкой Recompute как обычный error_text.
-    std::string diag = "a[]: ";
-    for (int j = 0; j < nparams; ++j) {
-        diag += "a[" + std::to_string(j + 1) + "]=" + in.params[j] + "=" + std::to_string(a[1 + j]);
-        if (j + 1 < nparams) diag += ", ";
-    }
-
     int dec = std::atoi(in.decimation.c_str()); if (dec < 1) dec = 1;
 
     int N = (int)in.ic_sets.size();
@@ -206,7 +198,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
     if (result.error.empty())
-        result.error = "recompute: " + std::to_string(_ms) + " ms | " + diag;
+        result.error = "recompute: " + std::to_string(_ms) + " ms";
 
     return result;
 }
