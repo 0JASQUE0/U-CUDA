@@ -63,23 +63,37 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 }
 
 // Проверка: парсится ли строка как число (или валидная дробь "a/b")?
-// std::stod кидает на "--5", "abc", "1.2.3" и т.п.; пустую считаем
-// валидной (дефолт подставится дальше). "8/3" — валидная дробь.
-// "2/x" / "8/0" / "8/" — невалидно, покажем подсказку.
+// Важно: std::stod НЕ кидает на "5asdfaxcv" — он парсит ведущее "5"
+// и тихо игнорирует остальное. Поэтому проверяем pos — что вся строка
+// (после возможных пробелов) реально была сконвертирована.
+// Пустая считается валидной (дефолт подставится дальше).
+// "8/3" — валидная дробь, "2/x" / "8/0" / "8/" / "5asdfaxcv" — нет.
 static bool is_numeric_string(const std::string& s) {
     if (s.empty()) return true;
+
+    // Полностью ли строка v сконвертирована в число (плюс trailing whitespace)?
+    auto parse_complete = [](const std::string& v) -> bool {
+        if (v.empty()) return false;
+        try {
+            size_t pos = 0;
+            std::stod(v, &pos);
+            for (size_t i = pos; i < v.size(); ++i)
+                if (!std::isspace(static_cast<unsigned char>(v[i]))) return false;
+            return true;
+        } catch (...) { return false; }
+    };
+
     size_t slash = s.find('/');
     if (slash != std::string::npos) {
         std::string num = s.substr(0, slash);
         std::string den = s.substr(slash + 1);
-        if (num.empty() || den.empty()) return false;
+        if (!parse_complete(num) || !parse_complete(den)) return false;
         try {
-            std::stod(num);
-            double d = std::stod(den);
-            return d != 0.0;
+            // знаменатель не должен быть нулём
+            return std::stod(den) != 0.0;
         } catch (...) { return false; }
     }
-    try { std::stod(s); return true; } catch (...) { return false; }
+    return parse_complete(s);
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
