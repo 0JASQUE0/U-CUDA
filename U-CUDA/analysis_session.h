@@ -155,57 +155,76 @@ struct PhaseAnalysisSession {
     int data_generation = 0;
 };
 
-// Сессия параметрического анализа (1D-бифуркация).
-// Изолирована от PhaseAnalysisSession — своя копия системы, своя интегрирующая схема.
+// Одна бифуркационная диаграмма (БД) на параметрическом графике:
+// независимый свип, свои IC/scheme/range/CSV/peaks-vs-inter-peaks.
+// Несколько БД оверлеятся на один график с легендой (см. ParametricAnalysisSession).
+struct BifurcationDiagramConfig {
+    std::string label   = "BD 1";   // подпись для легенды, редактируется
+    bool        visible = true;     // toggle в легенде (как visible у IC)
+
+    // Схема интегрирования: built-in имя или имя custom-схемы (resolve через
+    // session.custom_schemes на момент Run).
+    std::string scheme         = "Euler";
+
+    // Свип: какой параметр, его диапазон, число точек.
+    int         param_index    = 0;
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    // По какой переменной строим диаграмму.
+    int         writable_var   = 0;
+
+    // Интегрирование.
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string pre_scaller_text   = "1";
+    std::string max_value_text     = "1e6";
+
+    // CSV — путь хранится отдельно от флага, чтобы можно было выключить запись,
+    // не удаляя сам путь (для повторного включения).
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    // false → точки = значения пиков (bifurcation_points). true → межпиковые
+    // интервалы (peak_times). Колонка 3 vs 2 в CSV.
+    bool        plot_inter_peaks = false;
+
+    // Per-БД базовые значения параметров и НУ.
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    // Per-БД результат + GUI-флаги.
+    Bifurcation1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+};
+
+// Сессия параметрического анализа: одна система + список БД, каждая со своим
+// конфигом и результатом. Async-очередь одна на сессию (одна БД в полёте за раз).
 struct ParametricAnalysisSession {
+    // Идентичность системы — общая на все БД.
     std::vector<std::string> vars;
     std::vector<std::string> params;
     System sys;
-    std::string krs_code;
-
-    // Пользовательские КРС из системы (см. PhaseAnalysisSession).
     std::vector<CustomScheme> custom_schemes;
-
-    std::map<std::string, std::string> param_values;
-    std::map<std::string, std::string> initial_conditions;
-
-    // выбор изменяемого параметра и диапазон
-    int param_index = 0;              // 0-индекс в params (внутри run сдвигается на +1)
-    std::string param_lo_text = "0";
-    std::string param_hi_text = "1";
-    std::string n_pts_text    = "500";
-
-    int writable_var = 0;
-
-    std::string scheme         = "Euler";
-    std::string h_text         = "0.01";
-    std::string t_max_text     = "100";
-    std::string transient_text = "100";
-    std::string pre_scaller_text = "1";
-    std::string max_value_text = "1e6";
-
-    // CSV-вывод. Путь хранится отдельно от флага, чтобы можно было выключить
-    // запись, не удаляя сам путь из поля (для повторного включения).
-    bool csv_save_enabled = false;
-    std::string csv_output_path;
-
-    // Если true — на графике рисуются межпиковые интервалы (peak_times),
-    // иначе значения пиков (bifurcation_points). Колонка 3 vs 2 в CSV.
-    bool plot_inter_peaks = false;
-
-    Bifurcation1DResult result;
-    bool last_run_ok = false;
-    std::string last_error;
-    int data_generation = 0;
-    bool fit_request = false;
-
-    // Имя системы, под которую сессия инициализирована (см. PhaseAnalysisSession).
     std::string loaded_system_name;
 
+    // Список бифуркационных диаграмм. После load_from_record содержит как
+    // минимум один дефолтный элемент.
+    std::vector<BifurcationDiagramConfig> diagrams;
+
+    // Какая вкладка сейчас открыта — для Ctrl+R (последняя видимая).
+    int active_diagram_index = 0;
+    // Индекс БД, чей расчёт сейчас идёт в worker'е; -1 = ничего.
+    int running_diagram_index = -1;
+
     // --- async-расчёт ---
-    // future, в которую std::async кладёт результат с worker-потока.
-    // Все мутации session происходят ТОЛЬКО на главном потоке (в run_async/poll),
-    // worker трогает только engine.
+    // Все мутации session происходят на главном потоке (run_async/poll),
+    // worker трогает только engine + собственную копию Request.
     std::future<Bifurcation1DResult> run_future;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
@@ -217,21 +236,23 @@ struct ParametricAnalysisSession {
     ParametricAnalysisSession(const ParametricAnalysisSession&) = delete;
     ParametricAnalysisSession& operator=(const ParametricAnalysisSession&) = delete;
 
-    void regenerate_krs();
     void load_from_record(const SystemRecord& r,
                           const std::vector<std::string>& vars_,
                           const std::vector<std::string>& params_);
 
-    // Старый синхронный Run. Заблокирует поток до конца расчёта.
-    bool run(ParametricEngine& engine);
+    // Добавить БД: глубокая копия последней (если есть), иначе дефолт из vars/params.
+    // Label автоматически "BD <N+1>", результат и флаги обнуляются.
+    void add_diagram();
+    void remove_diagram(int i);
 
-    // Async: запускает расчёт в std::async-потоке. Возвращает false если
-    // уже что-то считается. Результат применяется в poll() позже.
-    bool run_async(ParametricEngine& engine);
+    // Старый синхронный Run для конкретной БД (по индексу).
+    bool run(ParametricEngine& engine, int diagram_idx);
 
-    // Вызывается каждый кадр из GUI-потока. Если future готова — забирает
-    // результат, применяет его к session (result, flags, data_generation,
-    // fit_request), сбрасывает in_flight. Возвращает true, если только что
-    // завершилось (GUI может среагировать, например авто-сохранить).
+    // Async-Run для конкретной БД. Возвращает false если очередь занята.
+    bool run_async(ParametricEngine& engine, int diagram_idx);
+
+    // Вызывается каждый кадр из GUI-потока. Если future готова — применяет
+    // результат к diagrams[running_diagram_index], сбрасывает in_flight.
+    // Возвращает true в кадр завершения.
     bool poll();
 };

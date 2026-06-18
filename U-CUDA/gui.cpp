@@ -1027,6 +1027,126 @@ static void draw_projection_windows(AppModel& model) {
 // ============================================================
 // Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
 // ============================================================
+// Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
+// нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
+static bool draw_diagram_controls(ParametricAnalysisSession& s, int idx) {
+    BifurcationDiagramConfig& bd = s.diagrams[idx];
+
+    ImGui::SetNextItemWidth(160);
+    InputTextStr("Label", bd.label);
+    ImGui::SameLine();
+    ImGui::Checkbox("visible", &bd.visible);
+    ImGui::Separator();
+
+    // ----- Scheme (built-in + custom) -----
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", bd.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, bd.scheme == m)) bd.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), bd.scheme == cs.name))
+                bd.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    // ----- Parameter sweep -----
+    if (!s.params.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.params.size());
+        for (const auto& p : s.params) items.push_back(p.c_str());
+        if (bd.param_index < 0 || bd.param_index >= (int)s.params.size()) bd.param_index = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Parameter", &bd.param_index, items.data(), (int)items.size());
+    }
+    else {
+        ImGui::TextDisabled("No parameters (select a system first)");
+    }
+    InputNumStr("Param lo", bd.param_lo_text, 120);
+    InputNumStr("Param hi", bd.param_hi_text, 120);
+    ImGui::Separator();
+
+    // ----- Variable + resolution + inter-peaks -----
+    if (!s.vars.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+        if (bd.writable_var < 0 || bd.writable_var >= (int)s.vars.size()) bd.writable_var = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Writable var", &bd.writable_var, items.data(), (int)items.size());
+    }
+    InputNumStr("Resolution", bd.n_pts_text, 120);
+    if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
+        bd.fit_request = true;
+
+    ImGui::Separator();
+    ImGui::Text("Integration:");
+    InputNumStr("h",              bd.h_text,           120);
+    InputNumStr("computing time", bd.t_max_text,       120);
+    InputNumStr("transient time", bd.transient_text,   120);
+    InputNumStr("decimator",      bd.pre_scaller_text, 120);
+    InputNumStr("max value",      bd.max_value_text,   120);
+
+    ImGui::Separator();
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file", &bd.csv_save_enabled);
+    InputTextStr("##csv_path", bd.csv_output_path);
+    ImGui::TextDisabled("Path is kept even when save is off. Also writes <path>_config.csv.");
+
+    ImGui::Separator();
+    ImGui::Text("Initial conditions:");
+    for (const auto& v : s.vars) {
+        std::string id = "##bd_ic_" + v;
+        ImGui::PushID(v.c_str());
+        InputNumStr(v.c_str(), bd.initial_conditions[v], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        ImGui::PushID(p.c_str());
+        InputNumStr(p.c_str(), bd.param_values[p], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    // Кнопка Run этой БД. Дисейблится во время async-расчёта (любой БД сессии).
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    }
+    else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    }
+
+    if (bd.last_run_ok) {
+        int diverged = 0, total_peaks = 0, max_peaks = 0;
+        for (int f : bd.result.flags) {
+            if (f < 0) ++diverged;
+            else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
+        }
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: n_pts=%d, peaks total=%d (max per param=%d)",
+            bd.result.n_pts, total_peaks, max_peaks);
+        if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, bd.result.n_pts);
+    }
+    else if (!bd.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##par_err",
+            const_cast<char*>(bd.last_error.c_str()),
+            bd.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+    return do_run;
+}
+
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ParametricAnalysisSession& s = model.parametric_session;
 
@@ -1058,116 +1178,56 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     if (s.in_flight) ImGui::EndDisabled();
     ImGui::Separator();
 
-    // ----- Scheme (built-in + custom) -----
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
-    ImGui::SetNextItemWidth(160);
-    if (ImGui::BeginCombo("Scheme", s.scheme.c_str())) {
-        for (auto m : schemes)
-            if (ImGui::Selectable(m, s.scheme == m)) {
-                s.scheme = m; s.regenerate_krs();
+    // Tab bar: одна вкладка на БД + кнопка "+" справа для добавления новой
+    // БД (копия последней). Активная вкладка хранится в s.active_diagram_index
+    // и используется Ctrl+R.
+    int active_now = -1;
+    int run_idx = -1;
+    int to_remove = -1;
+    if (ImGui::BeginTabBar("##bd_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.diagrams.size(); ++i) {
+            BifurcationDiagramConfig& bd = s.diagrams[i];
+            ImGui::PushID(i);
+            bool open = true;
+            // ID завязан на индекс, но label — на bd.label, чтобы пользователь
+            // видел свежее имя сразу после редактирования.
+            std::string tab_id = bd.label + "###bd_tab_" + std::to_string(i);
+            // Запрещаем закрывать таб, чей расчёт сейчас идёт.
+            bool can_close = !(s.in_flight && s.running_diagram_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                if (draw_diagram_controls(s, i)) run_idx = i;
+                ImGui::EndTabItem();
             }
-        if (!s.custom_schemes.empty()) ImGui::Separator();
-        for (const auto& cs : s.custom_schemes)
-            if (ImGui::Selectable((cs.name + " (custom)").c_str(), s.scheme == cs.name)) {
-                s.scheme = cs.name; s.regenerate_krs();
-            }
-        ImGui::EndCombo();
-    }
-    ImGui::Separator();
-
-    // ----- Parameter sweep (выбор + диапазон) -----
-    if (!s.params.empty()) {
-        std::vector<const char*> items;
-        items.reserve(s.params.size());
-        for (const auto& p : s.params) items.push_back(p.c_str());
-        if (s.param_index < 0 || s.param_index >= (int)s.params.size()) s.param_index = 0;
-        ImGui::SetNextItemWidth(160);
-        ImGui::Combo("Parameter", &s.param_index, items.data(), (int)items.size());
-    }
-    else {
-        ImGui::TextDisabled("No parameters (select a system first)");
-    }
-    InputNumStr("Param lo", s.param_lo_text, 120);
-    InputNumStr("Param hi", s.param_hi_text, 120);
-    ImGui::Separator();
-
-    // ----- Variable + resolution + inter-peaks -----
-    if (!s.vars.empty()) {
-        std::vector<const char*> items;
-        items.reserve(s.vars.size());
-        for (const auto& v : s.vars) items.push_back(v.c_str());
-        if (s.writable_var < 0 || s.writable_var >= (int)s.vars.size()) s.writable_var = 0;
-        ImGui::SetNextItemWidth(160);
-        ImGui::Combo("Writable var", &s.writable_var, items.data(), (int)items.size());
-    }
-    InputNumStr("Resolution", s.n_pts_text, 120);
-    // При тоггле просим автофит — диапазон Y у пиков и межпиков сильно разный.
-    if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &s.plot_inter_peaks))
-        s.fit_request = true;
-
-    ImGui::Separator();
-    ImGui::Text("Integration:");
-    InputNumStr("h",              s.h_text,           120);
-    InputNumStr("computing time", s.t_max_text,       120);
-    InputNumStr("transient time", s.transient_text,   120);
-    InputNumStr("decimator",      s.pre_scaller_text, 120);
-    InputNumStr("max value",      s.max_value_text,   120);
-
-    ImGui::Separator();
-    ImGui::Text("CSV output:");
-    ImGui::Checkbox("Save to file", &s.csv_save_enabled);
-    InputTextStr("##csv_path", s.csv_output_path);
-    ImGui::TextDisabled("Path is kept even when save is off. Also writes <path>_config.csv.");
-
-    ImGui::Separator();
-    ImGui::Text("Initial conditions:");
-    for (const auto& v : s.vars) {
-        InputNumStr(v.c_str(), s.initial_conditions[v], 120);
-    }
-
-    ImGui::Separator();
-    ImGui::Text("Parameters:");
-    for (const auto& p : s.params) {
-        InputNumStr(p.c_str(), s.param_values[p], 120);
-    }
-
-    ImGui::Separator();
-    // Кнопка Run, дисейблится если уже идёт расчёт. Авто-сохранение
-    // _last_parametric делается в draw_gui::poll(), когда результат готов.
-    bool do_run = false;
-    if (s.in_flight) {
-        ImGui::BeginDisabled();
-        ImGui::Button("Running...", ImVec2(160, 0));
-        ImGui::EndDisabled();
-    }
-    else {
-        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
-        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_run = true;
-    }
-    if (do_run) {
-        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run_async(*model.parametric_engine);
-    }
-
-    if (s.last_run_ok) {
-        int diverged = 0, total_peaks = 0, max_peaks = 0;
-        for (int f : s.result.flags) {
-            if (f < 0) ++diverged;
-            else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
+            if (!open) to_remove = i;
+            ImGui::PopID();
         }
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, peaks total=%d (max per param=%d)",
-            s.result.n_pts, total_peaks, max_peaks);
-        if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, s.result.n_pts);
+        // Кнопка "+ Add" справа. ImGuiTabItemFlags_Trailing удерживает её
+        // в конце; NoTooltip убирает дефолтную подсказку.
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_diagram();
+            }
+        }
+        ImGui::EndTabBar();
     }
-    else if (!s.last_error.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
-        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
-        ImGui::InputTextMultiline("##par_err",
-            const_cast<char*>(s.last_error.c_str()),
-            s.last_error.size() + 1,
-            sz,
-            ImGuiInputTextFlags_ReadOnly);
+    if (active_now >= 0) s.active_diagram_index = active_now;
+    if (to_remove >= 0) s.remove_diagram(to_remove);
+
+    // Ctrl+R на уровне всей панели — запускает Run для активной вкладки.
+    if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+        run_idx = s.active_diagram_index;
+    }
+
+    if (run_idx >= 0 && run_idx < (int)s.diagrams.size()) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine, run_idx);
     }
 }
 
@@ -1179,36 +1239,26 @@ static void draw_parametric_plot(AppModel& model) {
     if (!view) {
         view = std::make_unique<Plot2DView>();
         view->points_mode = true;
-        view->show_legend = false;
+        view->show_legend = true;    // мульти-БД → нужна легенда (как в Phase)
         view->point_size_px = 2.0f;
-        view->x_axis.name = "param";
-        view->y_axis.name = "X[writable_var]";
+        view->x_axis.name = "parameter";
+        view->y_axis.name = "X";
     }
 
-    if (!s.last_run_ok || s.result.bifurcation_points.empty()) {
+    if (s.diagrams.empty()) {
+        ImGui::TextDisabled("No diagrams yet.");
+        return;
+    }
+
+    // Имеется ли хотя бы одна БД с готовыми данными?
+    bool any_data = false;
+    for (const auto& bd : s.diagrams)
+        if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) { any_data = true; break; }
+    if (!any_data) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
 
-    // По галке выбираем что рисовать: значения пиков или межпиковые интервалы.
-    const auto& source = s.plot_inter_peaks ? s.result.peak_times
-                                            : s.result.bifurcation_points;
-    // Ось Y — всегда имя переменной, по которой строится диаграмма
-    // (фактический writable_var из системы), а не «X[writable_var]».
-    view->y_axis.name = (s.writable_var >= 0 && s.writable_var < (int)s.vars.size())
-                        ? s.vars[s.writable_var]
-                        : std::string("Y");
-    // Ось X — имя изменяемого параметра (param_index в сессии 0-индексирован).
-    view->x_axis.name = (s.param_index >= 0 && s.param_index < (int)s.params.size())
-                        ? s.params[s.param_index]
-                        : std::string("param");
-
-    static std::vector<float> buf;
-    buf.clear();
-    int total_pts = 0;
-    // std::stod бросает invalid_argument на «--5» / пустую строку — иначе при
-    // редактировании поля одного кадра было бы достаточно чтобы убить GUI.
-    // Симметрично с parse_d в analysis_session.cpp — понимаем "a/b".
     auto safe_stod = [](const std::string& v, double def) -> double {
         if (v.empty()) return def;
         size_t slash = v.find('/');
@@ -1219,43 +1269,82 @@ static void draw_parametric_plot(AppModel& model) {
         }
         return std::atof(v.c_str());
     };
-    double lo = safe_stod(s.param_lo_text, 0.0);
-    double hi = safe_stod(s.param_hi_text, 1.0);
-    int npts = s.result.n_pts;
-    for (int i = 0; i < npts; ++i) {
-        if (i < (int)s.result.flags.size() && s.result.flags[i] < 0) continue;
-        double x = (npts > 1) ? (lo + (hi - lo) * (double)i / (double)(npts - 1)) : lo;
-        if (i >= (int)source.size()) continue;
-        for (double y : source[i]) {
-            buf.push_back((float)x);
-            buf.push_back((float)y);
-            ++total_pts;
-        }
-    }
-    if (total_pts == 0) {
-        ImGui::TextDisabled("All trajectories diverged or no peaks found.");
-        return;
-    }
 
-    PlotSeriesInput si;
-    si.points = buf.data();
-    si.n_points = total_pts;
-    si.color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
-    si.label = "bifurcation";
-    std::vector<PlotSeriesInput> series_in{ si };
-    std::vector<bool> init_vis{ true }, glob_vis{ true };
+    // Подписи осей: если ВСЕ видимые БД с данными свипают тот же параметр /
+    // пишут ту же переменную — показываем имя; иначе generic "parameter"/"X".
+    int shared_param_idx = -2;  // -2 = ещё не инициализировано
+    int shared_var_idx   = -2;
+    for (const auto& bd : s.diagrams) {
+        if (!bd.visible || !bd.last_run_ok) continue;
+        if (shared_param_idx == -2) shared_param_idx = bd.param_index;
+        else if (shared_param_idx != bd.param_index) shared_param_idx = -1;
+        if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
+        else if (shared_var_idx != bd.writable_var) shared_var_idx = -1;
+    }
+    view->x_axis.name = (shared_param_idx >= 0 && shared_param_idx < (int)s.params.size())
+                          ? s.params[shared_param_idx] : std::string("parameter");
+    view->y_axis.name = (shared_var_idx >= 0 && shared_var_idx < (int)s.vars.size())
+                          ? s.vars[shared_var_idx] : std::string("X");
+
+    // Локальные буферы (по одному на серию). static, чтобы указатели жили
+    // до конца кадра (PlotSeriesInput хранит сырые указатели).
+    static std::vector<std::vector<float>> bufs;
+    if (bufs.size() != s.diagrams.size()) bufs.assign(s.diagrams.size(), {});
+
+    std::vector<PlotSeriesInput> series_in;
+    std::vector<bool> init_vis;
+    std::vector<bool> glob_vis;
+    series_in.reserve(s.diagrams.size());
+    init_vis.reserve(s.diagrams.size());
+    glob_vis.reserve(s.diagrams.size());
+
+    bool any_fit = false;
+    int  data_gen = 0;
+
+    for (int i = 0; i < (int)s.diagrams.size(); ++i) {
+        BifurcationDiagramConfig& bd = s.diagrams[i];
+        auto& buf = bufs[i];
+        buf.clear();
+        int total_pts = 0;
+
+        if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) {
+            const auto& source = bd.plot_inter_peaks ? bd.result.peak_times
+                                                     : bd.result.bifurcation_points;
+            double lo = safe_stod(bd.param_lo_text, 0.0);
+            double hi = safe_stod(bd.param_hi_text, 1.0);
+            int npts = bd.result.n_pts;
+            for (int k = 0; k < npts; ++k) {
+                if (k < (int)bd.result.flags.size() && bd.result.flags[k] < 0) continue;
+                double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                if (k >= (int)source.size()) continue;
+                for (double y : source[k]) {
+                    buf.push_back((float)x);
+                    buf.push_back((float)y);
+                    ++total_pts;
+                }
+            }
+        }
+
+        PlotSeriesInput si;
+        si.points   = buf.empty() ? nullptr : buf.data();
+        si.n_points = total_pts;
+        si.color    = ic_base_color(i);
+        si.label    = bd.label;
+        series_in.push_back(si);
+        init_vis.push_back(true);
+        glob_vis.push_back(bd.visible);
+
+        // data_gen накапливает per-BD generation + toggle inter_peaks
+        // (как было в одно-БД версии — чтобы тоггл триггерил перерисовку VBO).
+        data_gen = data_gen * 31 + bd.data_generation * 2 + (bd.plot_inter_peaks ? 1 : 0);
+        if (bd.fit_request) { any_fit = true; bd.fit_request = false; }
+    }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    // data_gen зависит не только от того, что результат свежий, но и от того,
-    // КАКОЙ из двух датасетов мы сейчас рисуем (пики vs межпики). Иначе при
-    // тоггле чекбокса Plot2DView оставляет кэшированный VBO от предыдущего.
-    int data_gen = s.data_generation * 2 + (s.plot_inter_peaks ? 1 : 0);
-
     view->render(*renderer, origin, avail, /*owner_id*/ 0xBE0F1D, data_gen,
-                 series_in, init_vis, glob_vis, s.fit_request);
-    s.fit_request = false;
+                 series_in, init_vis, glob_vis, any_fit);
 }
 
 // ============================================================
@@ -1302,21 +1391,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
-    const char* busy_what = nullptr;
+    std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
     if (model.parametric_session.in_flight) {
-        busy_what  = "parametric";
+        // Для параметрики показываем label считающейся БД, не просто "parametric"
+        // (у нас N штук на одном графике — без подписи неочевидно, чья очередь).
+        int ri = model.parametric_session.running_diagram_index;
+        if (ri >= 0 && ri < (int)model.parametric_session.diagrams.size())
+            busy_what = model.parametric_session.diagrams[ri].label;
+        else
+            busy_what = "parametric";
         busy_start = model.parametric_session.compute_start_time;
     }
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
         busy_start = model.phase_session.compute_start_time;
     }
-    if (busy_what) {
+    if (!busy_what.empty()) {
         double secs = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - busy_start).count();
-        char text[64];
-        std::snprintf(text, sizeof(text), "Computing %s... %.1fs", busy_what, secs);
+        char text[128];
+        std::snprintf(text, sizeof(text), "Computing %s... %.1fs", busy_what.c_str(), secs);
         float text_w = ImGui::CalcTextSize(text).x;
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);

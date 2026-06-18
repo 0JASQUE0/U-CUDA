@@ -279,17 +279,22 @@ void PhaseAnalysisSession::regenerate_krs() {
 
 // --- ParametricAnalysisSession ---
 
-void ParametricAnalysisSession::regenerate_krs() {
-    krs_code.clear();
-    for (const auto& cs : custom_schemes) {
-        if (cs.name == scheme) { krs_code = cs.body; return; }
+// Резолвит КРС для конкретной БД: сперва ищет среди custom_schemes сессии
+// (имя имеет приоритет над built-in, что блокируется в System tab), иначе
+// генерирует через codegen_scheme. Чистая функция — зовётся при сборке
+// Request в момент Run (не персистится). Раньше session хранил единый
+// krs_code, что не работает для разных БД с разными scheme.
+static std::string compute_krs_for_diagram(const ParametricAnalysisSession& s,
+                                           const BifurcationDiagramConfig& bd) {
+    for (const auto& cs : s.custom_schemes) {
+        if (cs.name == bd.scheme) return cs.body;
     }
-    if (sys.rhs.empty()) return;
+    if (s.sys.rhs.empty()) return {};
     try {
-        krs_code = codegen_scheme(sys, scheme_from_string(scheme));
+        return codegen_scheme(s.sys, scheme_from_string(bd.scheme));
     }
     catch (...) {
-        krs_code.clear();
+        return {};
     }
 }
 
@@ -299,33 +304,66 @@ void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
-    h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
 
-    param_values.clear();
+    // Сбрасываем список БД и создаём один дефолтный с настройками из record.
+    diagrams.clear();
+    BifurcationDiagramConfig bd;
+    bd.label = "BD 1";
+    bd.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
-        param_values[p] = (it != r.param_values.end()) ? it->second : "";
+        bd.param_values[p] = (it != r.param_values.end()) ? it->second : "";
     }
-
-    initial_conditions.clear();
     for (const auto& v : vars) {
         auto it = r.init_conditions.find(v);
-        initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+        bd.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
     }
-
     if (!params.empty()) {
-        if (param_index < 0 || param_index >= (int)params.size()) param_index = 0;
-        const std::string& pname = params[param_index];
+        bd.param_index = 0;
+        const std::string& pname = params[0];
         auto lo = r.param_min.find(pname);
         auto hi = r.param_max.find(pname);
-        if (lo != r.param_min.end() && !lo->second.empty()) param_lo_text = lo->second;
-        if (hi != r.param_max.end() && !hi->second.empty()) param_hi_text = hi->second;
+        if (lo != r.param_min.end() && !lo->second.empty()) bd.param_lo_text = lo->second;
+        if (hi != r.param_max.end() && !hi->second.empty()) bd.param_hi_text = hi->second;
     }
+    diagrams.push_back(std::move(bd));
 
-    result = Bifurcation1DResult{};
-    last_run_ok = false;
-    last_error.clear();
-    data_generation = 0;
+    active_diagram_index = 0;
+    running_diagram_index = -1;
+}
+
+void ParametricAnalysisSession::add_diagram() {
+    BifurcationDiagramConfig bd;
+    if (!diagrams.empty()) {
+        // Глубокая копия последней БД — пользователь обычно правит 1-2 поля.
+        bd = diagrams.back();
+        // Свежий результат: не наследуем data старой БД.
+        bd.result = Bifurcation1DResult{};
+        bd.last_run_ok = false;
+        bd.last_error.clear();
+        bd.data_generation = 0;
+        bd.fit_request = false;
+    } else {
+        // Пустая сессия (без vars/params) — оставляем дефолты конструктора.
+        for (const auto& v : vars) bd.initial_conditions[v] = "";
+        for (const auto& p : params) bd.param_values[p] = "";
+    }
+    bd.label = "BD " + std::to_string(diagrams.size() + 1);
+    diagrams.push_back(std::move(bd));
+    active_diagram_index = (int)diagrams.size() - 1;
+}
+
+void ParametricAnalysisSession::remove_diagram(int i) {
+    if (i < 0 || i >= (int)diagrams.size()) return;
+    // Запрещаем удалять БД, чей расчёт сейчас идёт — иначе worker положит
+    // результат в несуществующий слот при poll().
+    if (in_flight && running_diagram_index == i) return;
+    diagrams.erase(diagrams.begin() + i);
+    if (in_flight && running_diagram_index > i) running_diagram_index--;
+    if (active_diagram_index >= (int)diagrams.size())
+        active_diagram_index = (int)diagrams.size() - 1;
+    if (active_diagram_index < 0) active_diagram_index = 0;
 }
 
 // Парсит double, понимая дробь "a/b" — поведение симметрично с parse_val
@@ -346,84 +384,87 @@ static int parse_i(const std::string& s, int def) {
     try { return std::stoi(s); } catch (...) { return def; }
 }
 
-// Снапшот текущих GUI-полей сессии в Bifurcation1DRequest. Делается на главном
-// потоке перед стартом async-расчёта, чтобы worker работал со стабильной копией
-// и пользователь мог в это время менять поля без race condition.
-static Bifurcation1DRequest build_bif1d_request(const ParametricAnalysisSession& s) {
+// Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
+// главном потоке перед стартом async-расчёта, чтобы worker работал со
+// стабильной копией и пользователь мог в это время менять поля без race.
+// KRS резолвится здесь же, не персистится в session.
+static Bifurcation1DRequest build_bif1d_request(const ParametricAnalysisSession& s,
+                                                const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = s.krs_code;
+    req.krs_body  = compute_krs_for_diagram(s, bd);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
     for (int i = 0; i < req.amountOfX; ++i) {
-        auto it = s.initial_conditions.find(s.vars[i]);
-        req.initial_conditions[i] = (it != s.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+        auto it = bd.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != bd.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
     }
 
     // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
     for (int i = 0; i < nparams; ++i) {
-        auto it = s.param_values.find(s.params[i]);
-        req.base_values[i + 1] = (it != s.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+        auto it = bd.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
     }
-    req.param_index = (s.param_index >= 0 && s.param_index < nparams) ? s.param_index + 1 : 1;
+    req.param_index = (bd.param_index >= 0 && bd.param_index < nparams) ? bd.param_index + 1 : 1;
 
-    req.param_lo       = parse_d(s.param_lo_text, 0.0);
-    req.param_hi       = parse_d(s.param_hi_text, 1.0);
-    req.n_pts          = parse_i(s.n_pts_text, 500);
-    req.writable_var   = (s.writable_var >= 0 && s.writable_var < req.amountOfX) ? s.writable_var : 0;
-    req.h              = parse_d(s.h_text, 0.01);
-    req.t_max          = parse_d(s.t_max_text, 100.0);
-    req.transient_time = parse_d(s.transient_text, 100.0);
-    req.pre_scaller    = std::max(1, parse_i(s.pre_scaller_text, 1));
-    req.max_value      = parse_d(s.max_value_text, 1.0e6);
-    req.csv_output_path = s.csv_save_enabled ? s.csv_output_path : std::string{};
+    req.param_lo       = parse_d(bd.param_lo_text, 0.0);
+    req.param_hi       = parse_d(bd.param_hi_text, 1.0);
+    req.n_pts          = parse_i(bd.n_pts_text, 500);
+    req.writable_var   = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
+    req.h              = parse_d(bd.h_text, 0.01);
+    req.t_max          = parse_d(bd.t_max_text, 100.0);
+    req.transient_time = parse_d(bd.transient_text, 100.0);
+    req.pre_scaller    = std::max(1, parse_i(bd.pre_scaller_text, 1));
+    req.max_value      = parse_d(bd.max_value_text, 1.0e6);
+    req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     return req;
 }
 
-// Применить только что готовый Bifurcation1DResult к session (мутируем main-thread
-// поля: result, last_*, data_generation, fit_request). Общий код для sync и async.
-static void apply_bif1d_result(ParametricAnalysisSession& s, Bifurcation1DResult&& r) {
-    s.result = std::move(r);
-    s.last_run_ok = s.result.ok;
-    if (!s.result.ok) s.last_error = s.result.error;
-    s.data_generation++;
-    s.fit_request = true;
+// Применить только что готовый Bifurcation1DResult к конкретной БД.
+static void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult&& r) {
+    bd.result = std::move(r);
+    bd.last_run_ok = bd.result.ok;
+    if (!bd.result.ok) bd.last_error = bd.result.error;
+    bd.data_generation++;
+    bd.fit_request = true;
 }
 
-bool ParametricAnalysisSession::run(ParametricEngine& engine) {
-    last_run_ok = false;
-    last_error.clear();
+bool ParametricAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
+    if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
+    BifurcationDiagramConfig& bd = diagrams[diagram_idx];
+    bd.last_run_ok = false;
+    bd.last_error.clear();
 
-    if (krs_code.empty()) regenerate_krs();
-    if (krs_code.empty()) {
-        last_error = "krs_code пуст (нет валидной системы)";
+    Bifurcation1DRequest req = build_bif1d_request(*this, bd);
+    if (req.krs_body.empty()) {
+        bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
         return false;
     }
 
-    Bifurcation1DRequest req = build_bif1d_request(*this);
     Bifurcation1DResult r = engine.run_bifurcation_1d(req);
     bool ok = r.ok;
-    apply_bif1d_result(*this, std::move(r));
+    apply_bif1d_result(bd, std::move(r));
     return ok;
 }
 
-bool ParametricAnalysisSession::run_async(ParametricEngine& engine) {
+bool ParametricAnalysisSession::run_async(ParametricEngine& engine, int diagram_idx) {
     if (in_flight) return false;
+    if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
 
-    last_run_ok = false;
-    last_error.clear();
+    BifurcationDiagramConfig& bd = diagrams[diagram_idx];
+    bd.last_run_ok = false;
+    bd.last_error.clear();
 
-    if (krs_code.empty()) regenerate_krs();
-    if (krs_code.empty()) {
-        last_error = "krs_code пуст (нет валидной системы)";
+    Bifurcation1DRequest req = build_bif1d_request(*this, bd);
+    if (req.krs_body.empty()) {
+        bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
         return false;
     }
 
-    Bifurcation1DRequest req = build_bif1d_request(*this);
-
     in_flight = true;
+    running_diagram_index = diagram_idx;
     compute_start_time = std::chrono::steady_clock::now();
 
     // Worker НЕ трогает session напрямую — только engine и собственную копию req.
@@ -437,11 +478,15 @@ bool ParametricAnalysisSession::run_async(ParametricEngine& engine) {
 
 bool ParametricAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!run_future.valid()) { in_flight = false; return false; }
+    if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; return false; }
     if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
 
     Bifurcation1DResult r = run_future.get();
-    apply_bif1d_result(*this, std::move(r));
+    int idx = running_diagram_index;
+    if (idx >= 0 && idx < (int)diagrams.size()) {
+        apply_bif1d_result(diagrams[idx], std::move(r));
+    }
     in_flight = false;
+    running_diagram_index = -1;
     return true;
 }

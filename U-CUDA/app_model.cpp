@@ -221,7 +221,9 @@ bool AppModel::start_parametric_analysis() {
     parametric_session.load_from_record(r, known_vars, known_params);
     try {
         parametric_session.sys = build_system();
-        parametric_session.regenerate_krs();
+        // KRS теперь резолвится per-БД в момент Run (см. compute_krs_for_diagram
+        // в analysis_session.cpp), потому что разные БД могут использовать
+        // разные scheme. Здесь сохраняем только sys, на основе которой генерим.
     }
     catch (...) {
         // система неполна — Run покажет ошибку
