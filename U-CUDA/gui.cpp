@@ -62,13 +62,38 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
-// Проверка: парсится ли строка как число? std::stod кидает на "--5", "abc",
-// "1.2.3" и т.п.; пустую считаем валидной (дефолт подставится дальше),
-// "8/3" формально пройдёт как 8 (это не идеально, но соответствует
-// текущему поведению parse_d в parametric_engine).
+// Проверка: парсится ли строка как число (или валидная дробь "a/b")?
+// Важно: std::stod НЕ кидает на "5asdfaxcv" — он парсит ведущее "5"
+// и тихо игнорирует остальное. Поэтому проверяем pos — что вся строка
+// (после возможных пробелов) реально была сконвертирована.
+// Пустая считается валидной (дефолт подставится дальше).
+// "8/3" — валидная дробь, "2/x" / "8/0" / "8/" / "5asdfaxcv" — нет.
 static bool is_numeric_string(const std::string& s) {
     if (s.empty()) return true;
-    try { std::stod(s); return true; } catch (...) { return false; }
+
+    // Полностью ли строка v сконвертирована в число (плюс trailing whitespace)?
+    auto parse_complete = [](const std::string& v) -> bool {
+        if (v.empty()) return false;
+        try {
+            size_t pos = 0;
+            std::stod(v, &pos);
+            for (size_t i = pos; i < v.size(); ++i)
+                if (!std::isspace(static_cast<unsigned char>(v[i]))) return false;
+            return true;
+        } catch (...) { return false; }
+    };
+
+    size_t slash = s.find('/');
+    if (slash != std::string::npos) {
+        std::string num = s.substr(0, slash);
+        std::string den = s.substr(slash + 1);
+        if (!parse_complete(num) || !parse_complete(den)) return false;
+        try {
+            // знаменатель не должен быть нулём
+            return std::stod(den) != 0.0;
+        } catch (...) { return false; }
+    }
+    return parse_complete(s);
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
@@ -1183,8 +1208,16 @@ static void draw_parametric_plot(AppModel& model) {
     int total_pts = 0;
     // std::stod бросает invalid_argument на «--5» / пустую строку — иначе при
     // редактировании поля одного кадра было бы достаточно чтобы убить GUI.
+    // Симметрично с parse_d в analysis_session.cpp — понимаем "a/b".
     auto safe_stod = [](const std::string& v, double def) -> double {
-        try { return std::stod(v); } catch (...) { return def; }
+        if (v.empty()) return def;
+        size_t slash = v.find('/');
+        if (slash != std::string::npos) {
+            double num = std::atof(v.substr(0, slash).c_str());
+            double den = std::atof(v.substr(slash + 1).c_str());
+            if (den != 0) return num / den;
+        }
+        return std::atof(v.c_str());
     };
     double lo = safe_stod(s.param_lo_text, 0.0);
     double hi = safe_stod(s.param_hi_text, 1.0);
