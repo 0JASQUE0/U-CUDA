@@ -23,11 +23,13 @@ struct SystemRecord {
     std::string mode;            // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
-    std::string alphabet_text;
-    // Явный override для списка переменных. Если непустой — vars берутся отсюда,
-    // params = alphabet \ vars. Нужен в режиме чистой Custom KRS (без уравнений),
-    // когда парсеру неоткуда узнать, кто переменная, а кто параметр.
+    std::string alphabet_text;       // legacy: один список (vars + params вперемешку)
+    // Явные списки переменных и параметров. Приоритет над alphabet_text:
+    // если оба непустые — используются они напрямую; alphabet_text остаётся
+    // у старых записей как legacy fallback (либо когда equations должны
+    // сами вывести vars/params).
     std::string vars_text;
+    std::string params_text;
     bool        use_aux_funcs = false;
     std::string func_defs_text;
     std::string param_order;     // "AsInAlphabet" | "AsInSystem"

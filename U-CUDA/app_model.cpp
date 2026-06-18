@@ -66,8 +66,16 @@ bool AppModel::refresh_symbols() {
         return out;
     };
 
-    // Если задан явный vars_text — используем его. Это нужно для чистой
-    // Custom KRS (без уравнений), когда build_system не имеет данных.
+    // Если заданы явные vars_text И params_text — используем их напрямую.
+    // Это новый удобный формат: переменные и параметры разделены явно.
+    if (!vars_text.empty() && !params_text.empty()) {
+        known_vars = parse_csv(vars_text);
+        known_params = parse_csv(params_text);
+        apply_sync();
+        return true;
+    }
+
+    // Legacy fallback: только vars_text, params = alphabet \ vars.
     if (!vars_text.empty()) {
         known_vars = parse_csv(vars_text);
         auto all = parse_csv(alphabet_text);
@@ -109,6 +117,7 @@ SystemRecord AppModel::to_record() const {
     r.plain_text = plain_text;
     r.alphabet_text = alphabet_text;
     r.vars_text = vars_text;
+    r.params_text = params_text;
     r.use_aux_funcs = use_aux_funcs;
     r.func_defs_text = func_defs_text;
     r.param_order = (param_order == ParamOrder::AsInSystem) ? "AsInSystem" : "AsInAlphabet";
@@ -135,6 +144,7 @@ void AppModel::from_record(const SystemRecord& r) {
     plain_text = r.plain_text;
     alphabet_text = r.alphabet_text;
     vars_text = r.vars_text;
+    params_text = r.params_text;
     use_aux_funcs = r.use_aux_funcs;
     func_defs_text = r.func_defs_text;
     param_order = (r.param_order == "AsInSystem") ? ParamOrder::AsInSystem : ParamOrder::AsInAlphabet;
@@ -170,6 +180,7 @@ void AppModel::clear() {
     // алфавит и режим — оставляем дефолтными? обнулим алфавит тоже.
     alphabet_text.clear();
     vars_text.clear();
+    params_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = false;

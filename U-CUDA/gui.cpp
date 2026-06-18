@@ -165,16 +165,21 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         }
     }
 
-    // алфавит
-    ImGui::Text("Alphabet - all symbols incl. function params:");
-    ImGui::TextDisabled("e.g. x,y,z,alpha,beta,m_0,m_1");
-    InputTextStr("##alphabet", model.alphabet_text);
+    // ----- Variables / Parameters (новый раздельный формат) -----
+    ImGui::Text("Variables:");
+    ImGui::TextDisabled("Comma-sep, e.g. x,y,z. These are X[0..N-1] in KRS.");
+    InputTextStr("##vars_text", model.vars_text);
 
-    // Override для переменных — нужен только когда нет уравнений (чистая Custom KRS).
-    ImGui::Text("Variables (optional override for Custom-only systems):");
-    ImGui::TextDisabled("Comma-sep var names, e.g. x,y,z. Params = alphabet \\ vars.\n"
-                       "Leave empty to derive vars/params from equations.");
-    InputTextStr("##vars_override", model.vars_text);
+    ImGui::Text("Parameters:");
+    ImGui::TextDisabled("Comma-sep, e.g. sigma,rho,beta. These are a[1..M] in KRS.");
+    InputTextStr("##params_text", model.params_text);
+
+    // ----- Legacy: единый алфавит -----
+    if (ImGui::CollapsingHeader("Legacy: single alphabet field")) {
+        ImGui::TextDisabled("Used by older systems where vars/params live in one list.\n"
+                            "If Variables AND Parameters above are both filled, this is ignored.");
+        InputTextStr("##alphabet", model.alphabet_text);
+    }
 
     // порядок параметров
     ImGui::Text("Parameter order in a[]:");
