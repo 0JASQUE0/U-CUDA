@@ -32,11 +32,20 @@ public:
     InputMode mode = InputMode::Image;
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
-    std::string alphabet_text;     // алфавит через запятую: "x,y,z,sigma,rho,beta"
+    std::string alphabet_text;     // legacy: один список (vars+params вперемешку)
+    // Явные списки переменных и параметров. Если оба непустые — приоритет
+    // над alphabet_text. Удобнее визуально, явно отделяет переменные от
+    // параметров. alphabet_text остаётся для старых сохранённых систем.
+    std::string vars_text;
+    std::string params_text;
     bool scheme_euler = false;
     bool scheme_cromer = false;
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
+
+    // Пользовательские именованные КРС (выбираются в scheme combo сессий
+    // вместе с built-in). Имя не должно совпадать с built-in.
+    std::vector<CustomScheme> custom_schemes;
 
     // порядок индексации параметров a[1..]
     ParamOrder param_order = ParamOrder::AsInAlphabet;
@@ -151,6 +160,16 @@ public:
                 out += codegen_scheme(sys, it.s);
                 out += "\n";
             }
+            // custom-схемы — добавляем их код как есть для preview
+            for (const auto& cs : custom_schemes) {
+                if (cs.body.empty()) continue;
+                any = true;
+                out += "// ===== ";
+                out += cs.name;
+                out += " (custom) =====\n";
+                out += cs.body;
+                out += "\n";
+            }
             if (!any) { error_message = "no scheme selected"; return false; }
             generated_code = out;
             return true;
@@ -235,10 +254,18 @@ private:
 
     // парсит алфавит из строки "x, y, z" -> вектор
     std::vector<std::string> parse_alphabet() const {
+        // Если alphabet_text пуст, но есть явные vars+params, склеиваем их
+        // (нужно для build_system / parse_system_from_latex с новым форматом).
+        const std::string& src =
+            !alphabet_text.empty()
+                ? alphabet_text
+                : (!vars_text.empty() && !params_text.empty()
+                    ? (combined_alpha_ = vars_text + "," + params_text)
+                    : alphabet_text);
         std::vector<std::string> out;
         std::string cur;
-        for (char c : alphabet_text) {
-            if (c == ',' || c == ' ' || c == '\t' || c == '\n') {
+        for (char c : src) {
+            if (c == ',' || c == ' ' || c == '\t' || c == '\n' || c == ';') {
                 if (!cur.empty()) { out.push_back(cur); cur.clear(); }
             }
             else cur += c;
@@ -246,6 +273,8 @@ private:
         if (!cur.empty()) out.push_back(cur);
         return out;
     }
+    // буфер для склеенного алфавита (используется в parse_alphabet)
+    mutable std::string combined_alpha_;
 
     // строит System из текущего режима ввода
     System build_system() const; // реализовано в .cpp (зависит от sysparse)

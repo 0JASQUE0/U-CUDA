@@ -165,10 +165,21 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         }
     }
 
-    // алфавит
-    ImGui::Text("Alphabet - all symbols incl. function params:");
-    ImGui::TextDisabled("e.g. x,y,z,alpha,beta,m_0,m_1");
-    InputTextStr("##alphabet", model.alphabet_text);
+    // ----- Variables / Parameters (новый раздельный формат) -----
+    ImGui::Text("Variables:");
+    ImGui::TextDisabled("Comma-sep, e.g. x,y,z. These are X[0..N-1] in KRS.");
+    InputTextStr("##vars_text", model.vars_text);
+
+    ImGui::Text("Parameters:");
+    ImGui::TextDisabled("Comma-sep, e.g. sigma,rho,beta. These are a[1..M] in KRS.");
+    InputTextStr("##params_text", model.params_text);
+
+    // ----- Legacy: единый алфавит -----
+    if (ImGui::CollapsingHeader("Legacy: single alphabet field")) {
+        ImGui::TextDisabled("Used by older systems where vars/params live in one list.\n"
+                            "If Variables AND Parameters above are both filled, this is ignored.");
+        InputTextStr("##alphabet", model.alphabet_text);
+    }
 
     // порядок параметров
     ImGui::Text("Parameter order in a[]:");
@@ -189,6 +200,73 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
     ImGui::Checkbox("RK4", &model.scheme_rk4);
+
+    // ----- Custom KRS schemes (raw C/CUDA код вместо codegen) -----
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Custom KRS schemes",
+        model.custom_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled(
+            "Raw C/CUDA in calculateDiscreteModel body. Available: X[0..N-1] (vars),\n"
+            "a[1..M] (params), h (step), AMOUNTOFX. if/for/while + math functions OK.");
+
+        // существующие схемы
+        int to_delete = -1;
+        for (int i = 0; i < (int)model.custom_schemes.size(); ++i) {
+            auto& cs = model.custom_schemes[i];
+            ImGui::PushID(i);
+            ImGui::SetNextItemWidth(220);
+            std::string name_label = "name##cs_name_" + std::to_string(i);
+            InputTextStr(name_label.c_str(), cs.name);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) to_delete = i;
+            std::string body_label = "##cs_body_" + std::to_string(i);
+            InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, 100));
+            ImGui::Spacing();
+            ImGui::PopID();
+        }
+        if (to_delete >= 0) model.custom_schemes.erase(model.custom_schemes.begin() + to_delete);
+
+        // блокируем добавление с уже существующим/built-in именем
+        static const char* builtin_names[] = {
+            "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4"
+        };
+        if (ImGui::Button("+ Add custom scheme")) {
+            // подобрать уникальное имя "Custom N"
+            int n = (int)model.custom_schemes.size() + 1;
+            std::string candidate;
+            auto name_clash = [&](const std::string& nm) {
+                for (const char* b : builtin_names) if (nm == b) return true;
+                for (const auto& cs : model.custom_schemes) if (cs.name == nm) return true;
+                return false;
+            };
+            do { candidate = "Custom " + std::to_string(n++); } while (name_clash(candidate));
+            CustomScheme cs; cs.name = candidate;
+            model.custom_schemes.push_back(std::move(cs));
+        }
+
+        // подсветка конфликтов
+        for (const auto& cs : model.custom_schemes) {
+            for (const char* b : builtin_names) {
+                if (cs.name == b) {
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                        "  '%s' conflicts with a built-in scheme name; rename it.",
+                        cs.name.c_str());
+                    break;
+                }
+            }
+        }
+        // дубликаты между custom
+        for (size_t i = 0; i < model.custom_schemes.size(); ++i) {
+            for (size_t j = i + 1; j < model.custom_schemes.size(); ++j) {
+                if (!model.custom_schemes[i].name.empty() &&
+                    model.custom_schemes[i].name == model.custom_schemes[j].name) {
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                        "  duplicate custom name '%s'.",
+                        model.custom_schemes[i].name.c_str());
+                }
+            }
+        }
+    }
 
     if (ImGui::Button("Generate")) model.generate();
     if (!model.error_message.empty()) {
@@ -341,7 +419,16 @@ static void draw_library_tab(AppModel& model, SystemLibrary& lib) {
             ImGui::TableSetupColumn("");
             for (const auto& n : names) {
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", n.c_str());
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%s", n.c_str());
+                // Бэйдж "N custom schemes" если у системы они есть.
+                int cs_count = 0;
+                try { cs_count = (int)lib.load(n).custom_schemes.size(); } catch (...) {}
+                if (cs_count > 0) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f),
+                        " [%d custom]", cs_count);
+                }
                 ImGui::TableSetColumnIndex(1);
                 {
                     std::string id = "Load##" + n;
@@ -486,14 +573,35 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Separator();
     }
 
-    // метод моделирования
+    // метод моделирования + пользовательские схемы из системы
     ImGui::Text("Method:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(160);
-    const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    auto is_custom_scheme = [&](const std::string& nm) {
+        for (const auto& cs : s.custom_schemes) if (cs.name == nm) return true;
+        return false;
+    };
     if (ImGui::BeginCombo("##method", s.scheme.c_str())) {
         for (auto m : methods)
-            if (ImGui::Selectable(m, s.scheme == m)) { s.scheme = m; s.regenerate_krs(); changed = true; }
+            if (ImGui::Selectable(m, s.scheme == m)) {
+                s.scheme = m; s.regenerate_krs(); changed = true;
+            }
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), s.scheme == cs.name)) {
+                s.scheme = cs.name;
+                s.use_gpu = true;   // custom требует GPU — CPU-эвалуатор их не понимает
+                s.regenerate_krs();
+                changed = true;
+            }
         ImGui::EndCombo();
+    }
+    if (is_custom_scheme(s.scheme) && !s.use_gpu) {
+        // Если юзер вручную выключил GPU при custom — это не сработает.
+        // Подсвечиваем и не даём так стрелять себе в ногу.
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU)");
+        s.use_gpu = true;
     }
 
     // время, шаг, децимация
@@ -925,14 +1033,20 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     if (s.in_flight) ImGui::EndDisabled();
     ImGui::Separator();
 
-    // ----- Scheme -----
-    const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
-    int sel_sch = 0;
-    for (int i = 0; i < 4; ++i) if (s.scheme == schemes[i]) sel_sch = i;
+    // ----- Scheme (built-in + custom) -----
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
     ImGui::SetNextItemWidth(160);
-    if (ImGui::Combo("Scheme", &sel_sch, schemes, 4)) {
-        s.scheme = schemes[sel_sch];
-        s.regenerate_krs();
+    if (ImGui::BeginCombo("Scheme", s.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, s.scheme == m)) {
+                s.scheme = m; s.regenerate_krs();
+            }
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), s.scheme == cs.name)) {
+                s.scheme = cs.name; s.regenerate_krs();
+            }
+        ImGui::EndCombo();
     }
     ImGui::Separator();
 
@@ -1128,6 +1242,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::Begin("MainHost", nullptr, host_flags);
     ImGui::PopStyleVar(2);
 
+    // custom_schemes — единственное поле, которое может отредактироваться
+    // в System tab БЕЗ переключения режима (т.е. без start_*_analysis).
+    // Чтобы scheme combo в Phase/Parametric увидел свежий список сразу
+    // после "+ Add custom scheme", синкаем копию live → сессии каждый кадр.
+    model.phase_session.custom_schemes = model.custom_schemes;
+    model.parametric_session.custom_schemes = model.custom_schemes;
+
     // poll'им async-расчёты независимо от текущего режима — чтобы при
     // возврате в этот режим пользователь сразу увидел готовый результат
     if (model.parametric_session.poll()) {
@@ -1168,23 +1289,40 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "%s", text);
     }
-    // при входе в Analysis/Parametric — подготовить сессию ТОЛЬКО если она
-    // ещё не инициализирована под текущую систему. Иначе при каждом переходе
-    // между вкладками сбрасывались бы пользовательские правки (ИУ, диапазоны и т.д.)
-    // Если переинициализируем — поверх эталона из библиотеки накладываем
-    // _last/_last_parametric, чтобы не терять последнее рабочее состояние.
-    if ((AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
-        model.app_mode != AppModel::AppMode::Analysis &&
-        model.phase_session.loaded_system_name != model.name) {
+    // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать
+    // сессию. Init происходит когда:
+    //   1) система сменилась относительно той, для которой session была собрана;
+    //   2) session ещё ни разу не была инициализирована (vars пустой) — это
+    //      случай несохранённых систем, где model.name = loaded_system_name = "";
+    //   3) у model сменился алфавит / vars_text, и session.vars/params уже
+    //      не совпадают с актуальным model.known_vars/known_params.
+    // Случай 3 раньше требовал перезапуска приложения, чтобы подхватить новый
+    // алфавит — теперь подхватывается при следующем входе в режим.
+    bool entering_phase = (AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
+                          model.app_mode != AppModel::AppMode::Analysis;
+    bool entering_par   = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
+                          model.app_mode != AppModel::AppMode::Parametric;
+    if (entering_phase || entering_par) {
+        // обновим known_vars/known_params из живого алфавита, чтобы сравнение
+        // ниже было против актуального состояния
+        model.refresh_symbols();
+    }
+    auto phase_need_init = model.phase_session.loaded_system_name != model.name
+                        || model.phase_session.vars.empty()
+                        || model.phase_session.vars   != model.known_vars
+                        || model.phase_session.params != model.known_params;
+    auto par_need_init   = model.parametric_session.loaded_system_name != model.name
+                        || model.parametric_session.vars.empty()
+                        || model.parametric_session.vars   != model.known_vars
+                        || model.parametric_session.params != model.known_params;
+    if (entering_phase && phase_need_init) {
         model.start_phase_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last");
             if (!j.empty()) session_from_json(j, model.phase_session);
         }
     }
-    if ((AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
-        model.app_mode != AppModel::AppMode::Parametric &&
-        model.parametric_session.loaded_system_name != model.name) {
+    if (entering_par && par_need_init) {
         model.start_parametric_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last_parametric");
