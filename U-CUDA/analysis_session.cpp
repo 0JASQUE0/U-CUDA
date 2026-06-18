@@ -328,9 +328,18 @@ void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
     data_generation = 0;
 }
 
+// Парсит double, понимая дробь "a/b" — поведение симметрично с parse_val
+// (см. строки 10–18 этого же файла, которой пользуется Phase). Иначе
+// Parametric получал бы "8/3" как 8, а Phase как 2.667.
 static double parse_d(const std::string& s, double def) {
     if (s.empty()) return def;
-    try { return std::stod(s); } catch (...) { return def; }
+    size_t slash = s.find('/');
+    if (slash != std::string::npos) {
+        double num = std::atof(s.substr(0, slash).c_str());
+        double den = std::atof(s.substr(slash + 1).c_str());
+        if (den != 0) return num / den;
+    }
+    return std::atof(s.c_str());   // atof не кидает, "abc"→0
 }
 static int parse_i(const std::string& s, int def) {
     if (s.empty()) return def;
