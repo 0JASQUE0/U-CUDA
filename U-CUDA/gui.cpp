@@ -6,6 +6,16 @@
 #include "session_io.h"
 #include "plot_view_2d.h"
 #include "plot_view_3d.h"
+#include "app_config.h"
+
+// Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
+// (там же используется для resolve_python_exe / library_dir).
+extern std::string exe_dir();
+static std::string get_exe_dir_with_sep() {
+    std::string d = exe_dir();
+    if (!d.empty() && d.back() != '\\' && d.back() != '/') d += "\\";
+    return d;
+}
 
 // Базовый цвет траектории по индексу НУ (единый для 2D/3D/time domain).
 static ImVec4 ic_base_color(int ic_index) {
@@ -1980,7 +1990,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     int mode = (int)model.app_mode;
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
     ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
-    ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric);
+    ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
+    ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
     std::string busy_what;
@@ -2096,7 +2107,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
         draw_projection_windows(model);
     }
-    else { // AppMode::Parametric
+    else if (model.app_mode == AppModel::AppMode::Parametric) {
         if (ImGui::Begin("Parametric Controls")) {
             draw_parametric_controls(model, lib);
         }
@@ -2111,6 +2122,60 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
         if (ImGui::Begin("Lyapunov Spectrum")) {
             draw_ls_plot(model);
+        }
+        ImGui::End();
+    }
+    else { // AppMode::Settings
+        if (ImGui::Begin("Settings")) {
+            ImGui::Text("Interface scale");
+            ImGui::TextDisabled("Auto-detected at startup from glfwGetMonitorContentScale.");
+            ImGui::TextDisabled("Override persists in _app_config.json next to exe.");
+            ImGui::Separator();
+
+            ImGui::TextUnformatted("UI scale:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(220);
+            // Применяем НЕ во время drag'а, а на отпускание (IsItemDeactivatedAfterEdit) —
+            // иначе UI пересобирается на каждом кадре, виджет уходит из-под курсора.
+            static float ui_slider_value = -1.0f;
+            if (ui_slider_value < 0.0f) ui_slider_value = model.effective_ui_scale();
+            if (!ImGui::IsAnyItemActive())
+                ui_slider_value = model.effective_ui_scale();
+            ImGui::SliderFloat("##ui_scale", &ui_slider_value, 0.5f, 3.0f, "%.2fx");
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                model.ui_scale_override = ui_slider_value;
+                AppConfig cfg;
+                cfg.ui_scale_override = ui_slider_value;
+                cfg.use_builtin_font  = model.use_builtin_font;
+                save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Auto")) {
+                model.ui_scale_override = 0.0f;
+                ui_slider_value = model.ui_scale_auto;
+                AppConfig cfg;
+                cfg.ui_scale_override = 0.0f;
+                cfg.use_builtin_font  = model.use_builtin_font;
+                save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+            ImGui::TextDisabled("Auto detected: %.2fx   |   Override: %s",
+                model.ui_scale_auto,
+                model.ui_scale_override > 0 ?
+                    (std::to_string(model.ui_scale_override) + "x").c_str() :
+                    "(off)");
+
+            ImGui::Separator();
+            ImGui::Text("Font");
+            bool use_builtin = model.use_builtin_font;
+            if (ImGui::Checkbox("Use built-in font (ProggyClean)", &use_builtin)) {
+                model.use_builtin_font = use_builtin;
+                // Сохраняем ОБА поля чтобы не сбросить override.
+                AppConfig cfg;
+                cfg.ui_scale_override = model.ui_scale_override;
+                cfg.use_builtin_font  = use_builtin;
+                save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+            ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
+            ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
         }
         ImGui::End();
     }

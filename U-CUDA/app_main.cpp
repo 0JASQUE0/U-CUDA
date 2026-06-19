@@ -15,6 +15,7 @@
 #include <GLFW/glfw3.h>
 
 #include "app_model.h"
+#include "app_config.h"
 #include "gui.h"
 #include "system_library.h"
 #include "ocr_client_win.h"   // OcrClient + b64encode
@@ -90,7 +91,7 @@ int main() {
     std::shared_ptr<OcrClient> ocr;
     std::string ocr_init_error;
     try {
-        ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
+        //ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
     }
     catch (const std::exception& e) {
         ocr_init_error = e.what();
@@ -146,11 +147,77 @@ int main() {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     ImGui::StyleColorsDark();
+    // Базовый стиль сохраняем ДО первого ScaleAllSizes — на каждой смене масштаба
+    // сначала восстанавливаем его, потом скейлим. Иначе ScaleAllSizes накапливает.
+    ImGuiStyle base_style = ImGui::GetStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
+    // --- UI scale: auto-detect через GLFW + override из _app_config.json ---
+    {
+        float xs = 1.0f, ys = 1.0f;
+        if (GLFWmonitor* mon = glfwGetPrimaryMonitor())
+            glfwGetMonitorContentScale(mon, &xs, &ys);
+        model.ui_scale_auto = (xs > ys) ? xs : ys;
+        if (model.ui_scale_auto < 0.5f) model.ui_scale_auto = 1.0f;
+    }
+    AppConfig app_cfg;
+    if (load_app_config(dir, app_cfg)) {
+        if (app_cfg.ui_scale_override > 0.0f)
+            model.ui_scale_override = app_cfg.ui_scale_override;
+        model.use_builtin_font = app_cfg.use_builtin_font;
+    }
+
+    // applied = -1 / opposite → форсируем apply на первом кадре.
+    float applied_ui_scale     = -1.0f;
+    bool  applied_font_builtin = !model.use_builtin_font;  // !=, форсирует первый apply
+    auto apply_ui_scale = [&](float scale) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->Clear();
+
+        ImFont* loaded = nullptr;
+        if (!model.use_builtin_font) {
+            // Segoe UI: 15px baseline, scale-аппливается через SizePixels параметр.
+            // GetGlyphRangesCyrillic() — на случай если в UI появятся русские строки.
+            ImFontConfig cfg;
+            cfg.OversampleH = 2;   // TTF выглядит лучше с oversample 2 (типичный
+            cfg.OversampleV = 1;   // ImGui-дефолт для AddFontFromFileTTF).
+            cfg.PixelSnapH  = false;
+            loaded = io.Fonts->AddFontFromFileTTF(
+                "C:\\Windows\\Fonts\\segoeui.ttf", 15.0f * scale, &cfg,
+                io.Fonts->GetGlyphRangesCyrillic());
+        }
+        if (!loaded) {
+            // ProggyClean — либо явно выбран в Settings, либо segoeui.ttf не нашли.
+            // Values тут совпадают с внутренним default'ом ImGui::AddFontDefault(nullptr).
+            ImFontConfig cfg;
+            cfg.OversampleH  = 1;
+            cfg.OversampleV  = 1;
+            cfg.PixelSnapH   = true;
+            cfg.SizePixels   = 13.0f * scale;
+            cfg.GlyphOffset.y = 1.0f * (float)(int)(cfg.SizePixels / 13.0f);
+            io.Fonts->AddFontDefault(&cfg);
+        }
+        io.Fonts->Build();
+        // В ImGui 1.92+ backend сам обновит fonts texture при следующем NewFrame
+        // через ImTextureData::Status — ручных Destroy/Create не нужно.
+
+        ImGui::GetStyle() = base_style;
+        ImGui::GetStyle().ScaleAllSizes(scale);
+    };
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Применяем масштаб/шрифт ДО NewFrame — иначе пересоздание fonts texture
+        // в середине кадра валит RenderDrawData.
+        float wanted_scale = model.effective_ui_scale();
+        if (wanted_scale != applied_ui_scale || model.use_builtin_font != applied_font_builtin) {
+            apply_ui_scale(wanted_scale);
+            applied_ui_scale     = wanted_scale;
+            applied_font_builtin = model.use_builtin_font;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();

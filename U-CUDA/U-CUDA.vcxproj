@@ -147,6 +147,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="plot_renderer.cpp" />
     <ClCompile Include="plot_view_2d.cpp" />
     <ClCompile Include="plot_view_3d.cpp" />
+    <ClCompile Include="app_config.cpp" />
     <ClCompile Include="session_io.cpp" />
     <ClCompile Include="sysparse.cpp" />
     <ClCompile Include="system_library.cpp" />
@@ -158,6 +159,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="analysis_session.h" />
+    <ClInclude Include="app_config.h" />
     <ClInclude Include="app_model.h" />
     <ClInclude Include="codegen.hpp" />
     <ClInclude Include="configCUDA.h" />
