@@ -888,7 +888,9 @@ struct ParametricEngine::Impl {
         }
 
         // Результат-аккумулятор
-        res.n_pts = nPts;
+        res.n_pts    = nPts;
+        res.param_lo = ranges[0];
+        res.param_hi = ranges[1];
         res.lyapunov.assign(nPts, 0.0);
         res.flags.assign(nPts, 0);
 
@@ -1214,6 +1216,8 @@ struct ParametricEngine::Impl {
 
         res.n_pts       = nPts;
         res.n_exponents = amountOfInitialConditions;
+        res.param_lo    = ranges[0];
+        res.param_hi    = ranges[1];
         res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, 0.0));
         res.flags.assign(nPts, 0);
 

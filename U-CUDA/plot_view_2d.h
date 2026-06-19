@@ -34,6 +34,17 @@ public:
     // false (��-���������): GL_LINE_STRIP, ��� ��� ��� ��������� ����������.
     bool points_mode = false;
     float point_size_px = 2.0f;
+    // Толщина линий данных (когда points_mode=false). По умолчанию 1.5px —
+    // совпадает со старым хардкодом, регрессии нет.
+    float line_thickness_px = 1.5f;
+
+    // true: линии рисуются через ImDrawList::AddPolyline (umеет толщину >1px
+    // через триангуляцию + проходит ПОСЛЕ осей/сетки, поэтому данные оказываются
+    // ПОВЕРХ). Включаем для LLE/LS, где `glLineWidth` бесполезен — драйверы
+    // в core OpenGL клампят его до 1.0. false (default): GL_LINE_STRIP внутри
+    // FBO, как раньше (Bif/Phase). points_mode игнорируется этим флагом — оно
+    // для точечных режимов остаётся через GL.
+    bool imdraw_lines = false;
 
     // ��������� ����� � ���� � ������� ������ (������� ���������� ����� ����������).
     std::vector<bool> visible;
