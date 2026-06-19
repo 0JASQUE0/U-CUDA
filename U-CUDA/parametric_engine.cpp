@@ -100,7 +100,8 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
     std::string src_configCUDA_h;
-    std::string src_template;
+    std::string src_template;        // bifurcation1d.template.cu
+    std::string src_template_lle;    // lle1d.template.cu
     bool srcs_loaded = false;
 
     struct CachedModule {
@@ -109,12 +110,21 @@ struct ParametricEngine::Impl {
         CUfunction  kernel_traj = nullptr;  // calculateDiscreteModelCUDA
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
     };
-    CachedModule cached;
+    CachedModule cached;          // bif1d kernels (traj + peak)
+
+    // Отдельный модуль для LLE — другой шаблон, другой kernel.
+    struct CachedLleModule {
+        std::string key;
+        CUmodule    module      = nullptr;
+        CUfunction  kernel_lle  = nullptr;  // LLEKernelCUDA
+    };
+    CachedLleModule cached_lle;
 
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
             release_module();
+            release_lle_module();
             cuCtxDestroy(context);
         }
     }
@@ -126,6 +136,15 @@ struct ParametricEngine::Impl {
             cached.kernel_traj = nullptr;
             cached.kernel_peak = nullptr;
             cached.key.clear();
+        }
+    }
+
+    void release_lle_module() {
+        if (cached_lle.module) {
+            cuModuleUnload(cached_lle.module);
+            cached_lle.module = nullptr;
+            cached_lle.kernel_lle = nullptr;
+            cached_lle.key.clear();
         }
     }
 
@@ -152,6 +171,7 @@ struct ParametricEngine::Impl {
         std::string root = exe_dir() + "\\kernels\\";
         std::string e;
         src_template          = read_text_file(root + "bifurcation1d.template.cu", e); if (!e.empty()) { err = e; return false; }
+        src_template_lle      = read_text_file(root + "lle1d.template.cu",         e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -613,6 +633,338 @@ struct ParametricEngine::Impl {
         res.ok = true;
         return res;
     }
+
+    // =========================================================================
+    // compile_lle_if_needed — отдельная компиляция для LLE-шаблона.
+    // Ключ кэша = hash(krs_body + amountOfX + "lle"), чтобы PTX от bif1d
+    // не путался с LLE даже при одной и той же KRS.
+    // =========================================================================
+    bool compile_lle_if_needed(const std::string& krs_body, int amountOfX, std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":lle";
+        if (cached_lle.module && cached_lle.key == key) return true;
+        release_lle_module();
+
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template_lle;
+        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
+        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu",
+            "cudaLibrary.cuh",
+            "cudaMacros.cuh",
+            "configCUDA.h",
+        };
+        constexpr int n_headers = 4;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "lle1d.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(lle): ") + nvrtcGetErrorString(nr); return false; }
+
+        nvrtcAddNameExpression(prog, "LLEKernelCUDA");
+
+        char arch[64];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH) {
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+            }
+        }
+        if (cuda_include_opt.empty()) {
+            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = {
+            arch,
+            std_opt.c_str(),
+            "-default-device",
+            cuda_include_opt.c_str()
+        };
+
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile failed (lle):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        const char* mangled_lle_ptr = nullptr;
+        nvrtcGetLoweredName(prog, "LLEKernelCUDA", &mangled_lle_ptr);
+        std::string mangled_lle = mangled_lle_ptr ? mangled_lle_ptr : "LLEKernelCUDA";
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&cached_lle.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(lle): " + cu_err(r); return false; }
+
+        r = cuModuleGetFunction(&cached_lle.kernel_lle, cached_lle.module, mangled_lle.c_str());
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(" + mangled_lle + "): " + cu_err(r);
+            release_lle_module(); return false;
+        }
+
+        cached_lle.key = key;
+        return true;
+    }
+
+    // =========================================================================
+    // run_lle_1d — порт NonLinAnal::LLE1D из hostLibrary.cu:2261-2511. Та же
+    // diff-friendly стратегия, что у run_bif1d: оригинальное имена слева,
+    // req-имена справа. [ADAPT]-комментарии — отличия от NonLinAnal.
+    //   - <<<>>> → cuLaunchKernel (NVRTC-модуль).
+    //   - gpuErrorCheck → локальный LLE_CHECK с cleanup'ом, без exit().
+    //   - OUT_FILE_PATH — req.csv_output_path; пусто = без файла.
+    //   - Результат пишется в LLE1DResult (память + опц. CSV).
+    // =========================================================================
+    LLE1DResult run_lle_1d(const LLE1DRequest& req) {
+        LLE1DResult res;
+        auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
+
+        // ---- валидация ----
+        if (req.krs_body.empty())                                   return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                                                                    return fail("param_index вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
+        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_lle_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+
+        // ===== ПОРТ NonLinAnal::LLE1D (hostLibrary.cu:2261-2511) =====
+        const double tMax                       = req.t_max;
+        const double NT                         = req.NT;
+        const int    nPts                       = req.n_pts;
+        const double h                          = req.h;
+        const double eps                        = req.eps;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[2]                        = { req.param_lo, req.param_hi };
+        int    indicesOfMutVars[1]              = { req.param_index };
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        constexpr int blockSize_setup = 32;
+        constexpr int set_precision   = 15;
+
+        // amountOfPointsInBlock = tMax / NT — число NT-блоков интегрирования.
+        int amountOfPointsInBlock = (int)(tMax / NT);
+        int amountOfPointsForSkip = (int)(transientTime / h);
+
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+
+        // Memory budget — мирор NonLinAnal LLE1D:2291-2299 (консервативно).
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.5);
+
+        size_t nPtsLimiter = freeMemory / (sizeof(double) * (size_t)amountOfPointsInBlock);
+        if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > (size_t)nPts)  nPtsLimiter = (size_t)nPts;
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        std::vector<double> h_lleResult(nPtsLimiter);
+
+        double* d_ranges            = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        double* d_lleResult         = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_lleResult)         cudaFree(d_lleResult);
+        };
+
+        #define LLE_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define LLE_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        LLE_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                "cudaMalloc d_ranges");
+        LLE_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
+        LLE_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),"cudaMalloc d_initialConditions");
+        LLE_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),           "cudaMalloc d_values");
+        LLE_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(double)),                      "cudaMalloc d_lleResult");
+
+        LLE_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(double),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LLE_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  1 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
+        LLE_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
+        LLE_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        LLE_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
+
+        // Опциональный config CSV (порт NonLinAnal LLE1D:2355-2389)
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            if (cfg.is_open()) {
+                cfg << std::setprecision(set_precision);
+                cfg << "1D LLE\nParameter estimation\n";
+                cfg << "a[" << amountOfValues << "] = { ";
+                for (int kk = 0; kk < amountOfValues; ++kk) {
+                    cfg << values[kk];
+                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "X0[" << amountOfInitialConditions << "] = { ";
+                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
+                    cfg << initialConditions[kk];
+                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
+                cfg << "h = "  << h    << "\neps = " << eps << "\n";
+                cfg << "indexPar = " << indicesOfMutVars[0] << "\n";
+                cfg << "start value = " << ranges[0] << ", stop value = " << ranges[1] << "\n";
+            }
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
+        }
+
+        // Результат-аккумулятор
+        res.n_pts = nPts;
+        res.lyapunov.assign(nPts, 0.0);
+        res.flags.assign(nPts, 0);
+
+        // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter == amountOfIteration - 1)
+                nPtsLimiter = nPts - (originalNPtsLimiter * iter);
+
+            // blockSize по формуле NonLinAnal (hostLibrary.cu:2419), cap=32
+            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(double)));
+            if (blockSize < 1) blockSize = 1;
+            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            int gridSize = (int)((nPtsLimiter + blockSize - 1) / blockSize);
+
+            // Аргументы LLEKernelCUDA (cudaLibrary.cu:2379)
+            int    nPts_arg                  = nPts;
+            int    nPtsLimiter_arg           = (int)nPtsLimiter;
+            double NT_arg                    = NT;
+            double tMax_arg                  = tMax;
+            int    sizeOfBlock_arg           = amountOfPointsInBlock;
+            int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
+            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            int    dimension_arg             = 1;
+            double h_arg                     = h;
+            double eps_arg                   = eps;
+            int    amountOfIC_arg            = amountOfInitialConditions;
+            int    amountOfValues_arg        = amountOfValues;
+            int    amountOfIterations_arg    = (int)(tMax / NT);
+            int    preScaller_arg            = 1;
+            int    writableVar_arg           = 0;
+            double maxValue_arg              = maxValue;
+
+            void* args[] = {
+                &nPts_arg,
+                &nPtsLimiter_arg,
+                &NT_arg,
+                &tMax_arg,
+                &sizeOfBlock_arg,
+                &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_arg,
+                &dimension_arg,
+                &d_ranges,
+                &h_arg,
+                &eps_arg,
+                &d_indicesOfMutVars,
+                &d_initialConditions,
+                &amountOfIC_arg,
+                &d_values,
+                &amountOfValues_arg,
+                &amountOfIterations_arg,
+                &preScaller_arg,
+                &writableVar_arg,
+                &maxValue_arg,
+                &d_lleResult
+            };
+
+            // Shared = (3 * amountOfIC + amountOfValues) * sizeof(double) * blockSize
+            unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
+                                                 * sizeof(double) * blockSize);
+
+            LLE_CHECK_CU(cuLaunchKernel(cached_lle.kernel_lle,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared, nullptr, args, nullptr),
+                         "cuLaunchKernel(lle)");
+            LLE_CHECK(cudaDeviceSynchronize(), "sync after lle");
+
+            LLE_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, nPtsLimiter * sizeof(double), cudaMemcpyDeviceToHost),
+                      "memcpy h_lleResult");
+            LLE_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+            // Аккумулируем + опциональный CSV (порт NonLinAnal LLE1D:2478-2492)
+            std::ofstream out;
+            if (!OUT_FILE_PATH.empty()) {
+                out.open(OUT_FILE_PATH, std::ios::app);
+                if (out.is_open()) out << std::setprecision(set_precision);
+            }
+            for (size_t k = 0; k < nPtsLimiter; ++k) {
+                size_t global_idx = originalNPtsLimiter * iter + k;
+                double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
+                double v          = h_lleResult[k];
+
+                res.lyapunov[global_idx] = v;
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось)
+                res.flags[global_idx] = (v == 999.0 || v == -999.0) ? -1 : 1;
+
+                if (out.is_open()) out << param_val << ", " << v << '\n';
+            }
+            if (out.is_open()) out.close();
+        }
+
+        cleanup();
+        #undef LLE_CHECK
+        #undef LLE_CHECK_CU
+        res.ok = true;
+        return res;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -622,4 +974,8 @@ ParametricEngine::~ParametricEngine() = default;
 
 Bifurcation1DResult ParametricEngine::run_bifurcation_1d(const Bifurcation1DRequest& req) {
     return impl_->run_bif1d(req);
+}
+
+LLE1DResult ParametricEngine::run_lle_1d(const LLE1DRequest& req) {
+    return impl_->run_lle_1d(req);
 }

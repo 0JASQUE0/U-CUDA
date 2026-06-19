@@ -1029,7 +1029,7 @@ static void draw_projection_windows(AppModel& model) {
 // ============================================================
 // Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
 // нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
-static bool draw_diagram_controls(ParametricAnalysisSession& s, int idx) {
+static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     BifurcationDiagramConfig& bd = s.diagrams[idx];
 
     ImGui::SetNextItemWidth(160);
@@ -1147,36 +1147,8 @@ static bool draw_diagram_controls(ParametricAnalysisSession& s, int idx) {
     return do_run;
 }
 
-static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
-    ParametricAnalysisSession& s = model.parametric_session;
-
-    ImGui::Text("Parametric analysis (1D bifurcation)");
-    ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
-
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    // Во время async-расчёта смена системы запрещена — иначе результат
-    // worker'а применится к уже подменённой сессии.
-    if (s.in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##par_syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));
-                    model.start_parametric_analysis();
-                    // поверх эталона — последняя рабочая parametric-сессия для этой системы
-                    std::string j = lib.load_session(model.loaded_name, "_last_parametric");
-                    if (!j.empty())
-                        session_from_json_parametric(j, model.parametric_session);
-                }
-                catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (s.in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
+static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
+    BifurcationAnalysisSession& s = model.bifurcation_session;
 
     // Tab bar: одна вкладка на БД + кнопка "+" справа для добавления новой
     // БД (копия последней). Активная вкладка хранится в s.active_diagram_index
@@ -1231,8 +1203,8 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
 }
 
-static void draw_parametric_plot(AppModel& model) {
-    ParametricAnalysisSession& s = model.parametric_session;
+static void draw_bifurcation_plot(AppModel& model) {
+    BifurcationAnalysisSession& s = model.bifurcation_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
@@ -1348,6 +1320,324 @@ static void draw_parametric_plot(AppModel& model) {
 }
 
 // ============================================================
+// LLE: контролы (per-curve в табе) + line-plot λ(param)
+// ============================================================
+
+// Контролы одной LLE-кривой. Возвращает true, если пользователь нажал Run
+// для этой кривой.
+static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
+    LLECurveConfig& c = s.curves[idx];
+
+    ImGui::SetNextItemWidth(160);
+    InputTextStr("Label", c.label);
+    ImGui::SameLine();
+    ImGui::Checkbox("visible", &c.visible);
+    ImGui::Separator();
+
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    if (!s.params.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.params.size());
+        for (const auto& p : s.params) items.push_back(p.c_str());
+        if (c.param_index < 0 || c.param_index >= (int)s.params.size()) c.param_index = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Parameter", &c.param_index, items.data(), (int)items.size());
+    }
+    else {
+        ImGui::TextDisabled("No parameters (select a system first)");
+    }
+    InputNumStr("Param lo", c.param_lo_text, 120);
+    InputNumStr("Param hi", c.param_hi_text, 120);
+    InputNumStr("Resolution", c.n_pts_text, 120);
+
+    ImGui::Separator();
+    ImGui::Text("Integration:");
+    InputNumStr("h",              c.h_text,         120);
+    InputNumStr("computing time", c.t_max_text,     120);
+    InputNumStr("transient time", c.transient_text, 120);
+    InputNumStr("max value",      c.max_value_text, 120);
+
+    ImGui::Separator();
+    ImGui::Text("LLE (Wolf/Benettin):");
+    InputNumStr("eps", c.eps_text, 120);
+    InputNumStr("NT",  c.nt_text,  120);
+    ImGui::TextDisabled("eps = initial perturbation magnitude; NT = block length\n"
+                        "between renormalizations (in time units).");
+
+    ImGui::Separator();
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file", &c.csv_save_enabled);
+    InputTextStr("##lle_csv_path", c.csv_output_path);
+    ImGui::TextDisabled("Path is kept even when save is off. Also writes <path>_config.csv.");
+
+    ImGui::Separator();
+    ImGui::Text("Initial conditions:");
+    for (const auto& v : s.vars) {
+        ImGui::PushID(v.c_str());
+        InputNumStr(v.c_str(), c.initial_conditions[v], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        ImGui::PushID(p.c_str());
+        InputNumStr(p.c_str(), c.param_values[p], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    }
+    else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    }
+
+    if (c.last_run_ok) {
+        int diverged = 0;
+        for (int f : c.result.flags) if (f < 0) ++diverged;
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: n_pts=%d, λ-curve computed", c.result.n_pts);
+        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+    }
+    else if (!c.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##lle_err",
+            const_cast<char*>(c.last_error.c_str()),
+            c.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+    return do_run;
+}
+
+// Tab bar по LLE-кривым + кнопка «+» (копирует последнюю).
+static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
+    LLEAnalysisSession& s = model.lle_session;
+
+    int active_now = -1;
+    int run_idx = -1;
+    int to_remove = -1;
+    if (ImGui::BeginTabBar("##lle_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.curves.size(); ++i) {
+            LLECurveConfig& c = s.curves[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = c.label + "###lle_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_curve_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                if (draw_lle_curve_controls(s, i)) run_idx = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_curve();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_curve_index = active_now;
+    if (to_remove >= 0) s.remove_curve(to_remove);
+
+    if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+        run_idx = s.active_curve_index;
+    }
+
+    if (run_idx >= 0 && run_idx < (int)s.curves.size()) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine, run_idx);
+    }
+}
+
+// Plot LLE: линии (points_mode=false). Каждая кривая — λ(param).
+static void draw_lle_plot(AppModel& model) {
+    LLEAnalysisSession& s = model.lle_session;
+    static std::unique_ptr<PlotRenderer> renderer;
+    static std::unique_ptr<Plot2DView> view;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    if (!view) {
+        view = std::make_unique<Plot2DView>();
+        view->points_mode = false;   // LLE — непрерывная линия
+        view->show_legend = true;
+        view->x_axis.name = "parameter";
+        view->y_axis.name = "lambda";
+    }
+
+    if (s.curves.empty()) {
+        ImGui::TextDisabled("No curves yet.");
+        return;
+    }
+
+    bool any_data = false;
+    for (const auto& c : s.curves)
+        if (c.last_run_ok && !c.result.lyapunov.empty()) { any_data = true; break; }
+    if (!any_data) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    auto safe_stod = [](const std::string& v, double def) -> double {
+        if (v.empty()) return def;
+        size_t slash = v.find('/');
+        if (slash != std::string::npos) {
+            double num = std::atof(v.substr(0, slash).c_str());
+            double den = std::atof(v.substr(slash + 1).c_str());
+            if (den != 0) return num / den;
+        }
+        return std::atof(v.c_str());
+    };
+
+    // Подпись X: если все видимые кривые свипают тот же параметр — имя,
+    // иначе generic "parameter".
+    int shared_param_idx = -2;
+    for (const auto& c : s.curves) {
+        if (!c.visible || !c.last_run_ok) continue;
+        if (shared_param_idx == -2) shared_param_idx = c.param_index;
+        else if (shared_param_idx != c.param_index) shared_param_idx = -1;
+    }
+    view->x_axis.name = (shared_param_idx >= 0 && shared_param_idx < (int)s.params.size())
+                          ? s.params[shared_param_idx] : std::string("parameter");
+    view->y_axis.name = "lambda";
+
+    static std::vector<std::vector<float>> bufs;
+    if (bufs.size() != s.curves.size()) bufs.assign(s.curves.size(), {});
+
+    std::vector<PlotSeriesInput> series_in;
+    std::vector<bool> init_vis, glob_vis;
+    series_in.reserve(s.curves.size());
+    init_vis.reserve(s.curves.size());
+    glob_vis.reserve(s.curves.size());
+
+    bool any_fit = false;
+    int  data_gen = 0;
+
+    for (int i = 0; i < (int)s.curves.size(); ++i) {
+        LLECurveConfig& c = s.curves[i];
+        auto& buf = bufs[i];
+        buf.clear();
+        int total_pts = 0;
+
+        if (c.last_run_ok && !c.result.lyapunov.empty()) {
+            double lo = safe_stod(c.param_lo_text, 0.0);
+            double hi = safe_stod(c.param_hi_text, 1.0);
+            int npts = c.result.n_pts;
+            for (int k = 0; k < npts; ++k) {
+                if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
+                double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                double y = c.result.lyapunov[k];
+                if (!std::isfinite(y)) continue;
+                buf.push_back((float)x);
+                buf.push_back((float)y);
+                ++total_pts;
+            }
+        }
+
+        PlotSeriesInput si;
+        si.points   = buf.empty() ? nullptr : buf.data();
+        si.n_points = total_pts;
+        si.color    = ic_base_color(i);
+        si.label    = c.label;
+        series_in.push_back(si);
+        init_vis.push_back(true);
+        glob_vis.push_back(c.visible);
+
+        data_gen = data_gen * 31 + c.data_generation;
+        if (c.fit_request) { any_fit = true; c.fit_request = false; }
+    }
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    view->render(*renderer, origin, avail, /*owner_id*/ 0xBE11E5, data_gen,
+                 series_in, init_vis, glob_vis, any_fit);
+}
+
+// ============================================================
+// Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
+// ============================================================
+static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
+    ImGui::Text("Parametric analysis");
+    ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
+
+    // Общий селектор системы — одна система на все три sub-анализа (Bif/LLE/LS).
+    // Во время async-расчёта смена системы запрещена — иначе worker применит
+    // результат к уже подменённой сессии.
+    bool any_in_flight = model.bifurcation_session.in_flight || model.lle_session.in_flight;
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (any_in_flight) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("##par_syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));
+                    model.start_parametric_analysis();
+                    // Поверх эталона — последние рабочие сейвы для обеих сессий.
+                    std::string jb = lib.load_session(model.loaded_name, "_last_parametric");
+                    if (!jb.empty())
+                        session_from_json_parametric(jb, model.bifurcation_session);
+                    std::string jl = lib.load_session(model.loaded_name, "_last_lle");
+                    if (!jl.empty())
+                        session_from_json_lle(jl, model.lle_session);
+                }
+                catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (any_in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("##parm_top")) {
+        if (ImGui::BeginTabItem("Bifurcation")) {
+            model.parametric_active_analysis = 0;
+            draw_bifurcation_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("LLE")) {
+            model.parametric_active_analysis = 1;
+            draw_lle_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("LS")) {
+            model.parametric_active_analysis = 2;
+            ImGui::TextDisabled("Lyapunov spectrum: coming soon.");
+            ImGui::TextDisabled("(NonLinAnal already has LSKernelCUDA — will be enabled");
+            ImGui::TextDisabled(" in a follow-up PR: unguard + UI/engine wrapper.)");
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
+// ============================================================
 // Главное окно: переключатель режимов Library / Analysis / Parametric
 // ============================================================
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
@@ -1369,14 +1659,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Чтобы scheme combo в Phase/Parametric увидел свежий список сразу
     // после "+ Add custom scheme", синкаем копию live → сессии каждый кадр.
     model.phase_session.custom_schemes = model.custom_schemes;
-    model.parametric_session.custom_schemes = model.custom_schemes;
+    model.bifurcation_session.custom_schemes = model.custom_schemes;
+    model.lle_session.custom_schemes         = model.custom_schemes;
 
     // poll'им async-расчёты независимо от текущего режима — чтобы при
     // возврате в этот режим пользователь сразу увидел готовый результат
-    if (model.parametric_session.poll()) {
+    if (model.bifurcation_session.poll()) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_parametric",
-                             session_to_json_parametric(model.parametric_session));
+                             session_to_json_parametric(model.bifurcation_session));
+    }
+    if (model.lle_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_lle",
+                             session_to_json_lle(model.lle_session));
     }
     if (model.phase_session.poll()) {
         if (!model.loaded_name.empty())
@@ -1393,15 +1689,21 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
     std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
-    if (model.parametric_session.in_flight) {
-        // Для параметрики показываем label считающейся БД, не просто "parametric"
-        // (у нас N штук на одном графике — без подписи неочевидно, чья очередь).
-        int ri = model.parametric_session.running_diagram_index;
-        if (ri >= 0 && ri < (int)model.parametric_session.diagrams.size())
-            busy_what = model.parametric_session.diagrams[ri].label;
+    if (model.bifurcation_session.in_flight) {
+        int ri = model.bifurcation_session.running_diagram_index;
+        if (ri >= 0 && ri < (int)model.bifurcation_session.diagrams.size())
+            busy_what = model.bifurcation_session.diagrams[ri].label;
         else
-            busy_what = "parametric";
-        busy_start = model.parametric_session.compute_start_time;
+            busy_what = "bifurcation";
+        busy_start = model.bifurcation_session.compute_start_time;
+    }
+    else if (model.lle_session.in_flight) {
+        int ri = model.lle_session.running_curve_index;
+        if (ri >= 0 && ri < (int)model.lle_session.curves.size())
+            busy_what = model.lle_session.curves[ri].label;
+        else
+            busy_what = "LLE";
+        busy_start = model.lle_session.compute_start_time;
     }
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
@@ -1439,10 +1741,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                         || model.phase_session.vars.empty()
                         || model.phase_session.vars   != model.known_vars
                         || model.phase_session.params != model.known_params;
-    auto par_need_init   = model.parametric_session.loaded_system_name != model.name
-                        || model.parametric_session.vars.empty()
-                        || model.parametric_session.vars   != model.known_vars
-                        || model.parametric_session.params != model.known_params;
+    auto par_need_init   = model.bifurcation_session.loaded_system_name != model.name
+                        || model.bifurcation_session.vars.empty()
+                        || model.bifurcation_session.vars   != model.known_vars
+                        || model.bifurcation_session.params != model.known_params;
     if (entering_phase && phase_need_init) {
         model.start_phase_analysis();
         if (!model.loaded_name.empty()) {
@@ -1454,7 +1756,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_parametric_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last_parametric");
-            if (!j.empty()) session_from_json_parametric(j, model.parametric_session);
+            if (!j.empty()) session_from_json_parametric(j, model.bifurcation_session);
+            std::string jl = lib.load_session(model.loaded_name, "_last_lle");
+            if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
         }
     }
     model.app_mode = (AppModel::AppMode)mode;
@@ -1492,7 +1796,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Bifurcation 1D")) {
-            draw_parametric_plot(model);
+            draw_bifurcation_plot(model);
+        }
+        ImGui::End();
+        if (ImGui::Begin("LLE 1D")) {
+            draw_lle_plot(model);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Lyapunov Spectrum")) {
+            ImGui::TextDisabled("Coming soon.");
+            ImGui::TextDisabled("LSKernelCUDA already exists in NonLinAnal — will be");
+            ImGui::TextDisabled("enabled in a follow-up PR (unguard + UI/engine wrapper).");
         }
         ImGui::End();
     }

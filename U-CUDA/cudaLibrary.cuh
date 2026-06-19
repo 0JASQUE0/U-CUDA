@@ -12,8 +12,12 @@
 #include "device_launch_parameters.h"
 #include <fstream>
 #include <stdio.h>
-#include <curand_kernel.h>
 #endif
+
+// curand_kernel.h доступен и под NVRTC начиная с CUDA 11.0 (через
+// -I CUDA_PATH/include, который ParametricEngine уже подаёт NVRTC).
+// Нужен для LLE/LS-кернелов в cudaLibrary.cu (Wolf/Benettin perturbation init).
+#include <curand_kernel.h>
 
 __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1, numb* K, const numb* a, const numb h, const bool directionOfintegration = 1);
 

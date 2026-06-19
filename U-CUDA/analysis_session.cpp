@@ -277,28 +277,28 @@ void PhaseAnalysisSession::regenerate_krs() {
     }
 }
 
-// --- ParametricAnalysisSession ---
+// --- BifurcationAnalysisSession ---
 
-// Резолвит КРС для конкретной БД: сперва ищет среди custom_schemes сессии
-// (имя имеет приоритет над built-in, что блокируется в System tab), иначе
-// генерирует через codegen_scheme. Чистая функция — зовётся при сборке
-// Request в момент Run (не персистится). Раньше session хранил единый
-// krs_code, что не работает для разных БД с разными scheme.
-static std::string compute_krs_for_diagram(const ParametricAnalysisSession& s,
-                                           const BifurcationDiagramConfig& bd) {
-    for (const auto& cs : s.custom_schemes) {
-        if (cs.name == bd.scheme) return cs.body;
+// Резолвит КРС по имени scheme: сперва среди custom_schemes (имя имеет
+// приоритет над built-in, что блокируется в System tab), иначе генерирует
+// через codegen_scheme. Чистая функция — зовётся при сборке Request в
+// момент Run (не персистится). Переиспользуется bifurcation и LLE.
+static std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                          const System& sys,
+                                          const std::string& scheme) {
+    for (const auto& cs : custom_schemes) {
+        if (cs.name == scheme) return cs.body;
     }
-    if (s.sys.rhs.empty()) return {};
+    if (sys.rhs.empty()) return {};
     try {
-        return codegen_scheme(s.sys, scheme_from_string(bd.scheme));
+        return codegen_scheme(sys, scheme_from_string(scheme));
     }
     catch (...) {
         return {};
     }
 }
 
-void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
+void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
     const std::vector<std::string>& params_) {
     vars = vars_;
@@ -333,7 +333,7 @@ void ParametricAnalysisSession::load_from_record(const SystemRecord& r,
     running_diagram_index = -1;
 }
 
-void ParametricAnalysisSession::add_diagram() {
+void BifurcationAnalysisSession::add_diagram() {
     BifurcationDiagramConfig bd;
     if (!diagrams.empty()) {
         // Глубокая копия последней БД — пользователь обычно правит 1-2 поля.
@@ -354,7 +354,7 @@ void ParametricAnalysisSession::add_diagram() {
     active_diagram_index = (int)diagrams.size() - 1;
 }
 
-void ParametricAnalysisSession::remove_diagram(int i) {
+void BifurcationAnalysisSession::remove_diagram(int i) {
     if (i < 0 || i >= (int)diagrams.size()) return;
     // Запрещаем удалять БД, чей расчёт сейчас идёт — иначе worker положит
     // результат в несуществующий слот при poll().
@@ -388,10 +388,10 @@ static int parse_i(const std::string& s, int def) {
 // главном потоке перед стартом async-расчёта, чтобы worker работал со
 // стабильной копией и пользователь мог в это время менять поля без race.
 // KRS резолвится здесь же, не персистится в session.
-static Bifurcation1DRequest build_bif1d_request(const ParametricAnalysisSession& s,
+static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = compute_krs_for_diagram(s, bd);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -431,7 +431,7 @@ static void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult
     bd.fit_request = true;
 }
 
-bool ParametricAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
+bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
     bd.last_run_ok = false;
@@ -449,7 +449,7 @@ bool ParametricAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
     return ok;
 }
 
-bool ParametricAnalysisSession::run_async(ParametricEngine& engine, int diagram_idx) {
+bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram_idx) {
     if (in_flight) return false;
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
 
@@ -476,7 +476,7 @@ bool ParametricAnalysisSession::run_async(ParametricEngine& engine, int diagram_
     return true;
 }
 
-bool ParametricAnalysisSession::poll() {
+bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
     if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; return false; }
     if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
@@ -488,5 +488,169 @@ bool ParametricAnalysisSession::poll() {
     }
     in_flight = false;
     running_diagram_index = -1;
+    return true;
+}
+
+// ============================================================================
+// LLEAnalysisSession — структурно зеркалит BifurcationAnalysisSession.
+// Та же async-машинерия, та же per-curve конфигурация, тот же compute_krs_for_scheme.
+// ============================================================================
+
+void LLEAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+
+    curves.clear();
+    LLECurveConfig c;
+    c.label = "LLE 1";
+    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        c.param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        c.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+    if (!params.empty()) {
+        c.param_index = 0;
+        const std::string& pname = params[0];
+        auto lo = r.param_min.find(pname);
+        auto hi = r.param_max.find(pname);
+        if (lo != r.param_min.end() && !lo->second.empty()) c.param_lo_text = lo->second;
+        if (hi != r.param_max.end() && !hi->second.empty()) c.param_hi_text = hi->second;
+    }
+    curves.push_back(std::move(c));
+
+    active_curve_index = 0;
+    running_curve_index = -1;
+}
+
+void LLEAnalysisSession::add_curve() {
+    LLECurveConfig c;
+    if (!curves.empty()) {
+        c = curves.back();
+        c.result = LLE1DResult{};
+        c.last_run_ok = false;
+        c.last_error.clear();
+        c.data_generation = 0;
+        c.fit_request = false;
+    } else {
+        for (const auto& v : vars) c.initial_conditions[v] = "";
+        for (const auto& p : params) c.param_values[p] = "";
+    }
+    c.label = "LLE " + std::to_string(curves.size() + 1);
+    curves.push_back(std::move(c));
+    active_curve_index = (int)curves.size() - 1;
+}
+
+void LLEAnalysisSession::remove_curve(int i) {
+    if (i < 0 || i >= (int)curves.size()) return;
+    if (in_flight && running_curve_index == i) return;
+    curves.erase(curves.begin() + i);
+    if (in_flight && running_curve_index > i) running_curve_index--;
+    if (active_curve_index >= (int)curves.size())
+        active_curve_index = (int)curves.size() - 1;
+    if (active_curve_index < 0) active_curve_index = 0;
+}
+
+static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
+                                        const LLECurveConfig& c) {
+    LLE1DRequest req;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = c.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1, 0.0);
+    for (int i = 0; i < nparams; ++i) {
+        auto it = c.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+    req.param_index = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
+
+    req.param_lo       = parse_d(c.param_lo_text, 0.0);
+    req.param_hi       = parse_d(c.param_hi_text, 1.0);
+    req.n_pts          = parse_i(c.n_pts_text, 500);
+    req.h              = parse_d(c.h_text, 0.01);
+    req.t_max          = parse_d(c.t_max_text, 100.0);
+    req.transient_time = parse_d(c.transient_text, 100.0);
+    req.max_value      = parse_d(c.max_value_text, 1.0e6);
+    req.NT             = parse_d(c.nt_text,  1.0);
+    req.eps            = parse_d(c.eps_text, 1.0e-4);
+    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    return req;
+}
+
+static void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
+    c.result = std::move(r);
+    c.last_run_ok = c.result.ok;
+    if (!c.result.ok) c.last_error = c.result.error;
+    c.data_generation++;
+    c.fit_request = true;
+}
+
+bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
+    if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
+    LLECurveConfig& c = curves[curve_idx];
+    c.last_run_ok = false;
+    c.last_error.clear();
+
+    LLE1DRequest req = build_lle1d_request(*this, c);
+    if (req.krs_body.empty()) {
+        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        return false;
+    }
+    LLE1DResult r = engine.run_lle_1d(req);
+    bool ok = r.ok;
+    apply_lle1d_result(c, std::move(r));
+    return ok;
+}
+
+bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
+    if (in_flight) return false;
+    if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
+
+    LLECurveConfig& c = curves[curve_idx];
+    c.last_run_ok = false;
+    c.last_error.clear();
+
+    LLE1DRequest req = build_lle1d_request(*this, c);
+    if (req.krs_body.empty()) {
+        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        return false;
+    }
+
+    in_flight = true;
+    running_curve_index = curve_idx;
+    compute_start_time = std::chrono::steady_clock::now();
+
+    run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+        return engine.run_lle_1d(req);
+    });
+    return true;
+}
+
+bool LLEAnalysisSession::poll() {
+    if (!in_flight) return false;
+    if (!run_future.valid()) { in_flight = false; running_curve_index = -1; return false; }
+    if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+
+    LLE1DResult r = run_future.get();
+    int idx = running_curve_index;
+    if (idx >= 0 && idx < (int)curves.size()) {
+        apply_lle1d_result(curves[idx], std::move(r));
+    }
+    in_flight = false;
+    running_curve_index = -1;
     return true;
 }

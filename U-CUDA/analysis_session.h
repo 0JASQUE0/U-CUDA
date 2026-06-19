@@ -112,7 +112,7 @@ struct PhaseAnalysisSession {
     // сбрасывается в GUI после применения)
     bool fit_request = false;
 
-    // --- async-расчёт (как у ParametricAnalysisSession) ---
+    // --- async-расчёт (как у BifurcationAnalysisSession) ---
     std::future<AnalysisResult> recompute_future;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
@@ -157,7 +157,7 @@ struct PhaseAnalysisSession {
 
 // Одна бифуркационная диаграмма (БД) на параметрическом графике:
 // независимый свип, свои IC/scheme/range/CSV/peaks-vs-inter-peaks.
-// Несколько БД оверлеятся на один график с легендой (см. ParametricAnalysisSession).
+// Несколько БД оверлеятся на один график с легендой (см. BifurcationAnalysisSession).
 struct BifurcationDiagramConfig {
     std::string label   = "BD 1";   // подпись для легенды, редактируется
     bool        visible = true;     // toggle в легенде (как visible у IC)
@@ -205,7 +205,7 @@ struct BifurcationDiagramConfig {
 
 // Сессия параметрического анализа: одна система + список БД, каждая со своим
 // конфигом и результатом. Async-очередь одна на сессию (одна БД в полёте за раз).
-struct ParametricAnalysisSession {
+struct BifurcationAnalysisSession {
     // Идентичность системы — общая на все БД.
     std::vector<std::string> vars;
     std::vector<std::string> params;
@@ -230,11 +230,11 @@ struct ParametricAnalysisSession {
     std::chrono::steady_clock::time_point compute_start_time;
 
     // session не копируется (содержит future) — только move.
-    ParametricAnalysisSession() = default;
-    ParametricAnalysisSession(ParametricAnalysisSession&&) = default;
-    ParametricAnalysisSession& operator=(ParametricAnalysisSession&&) = default;
-    ParametricAnalysisSession(const ParametricAnalysisSession&) = delete;
-    ParametricAnalysisSession& operator=(const ParametricAnalysisSession&) = delete;
+    BifurcationAnalysisSession() = default;
+    BifurcationAnalysisSession(BifurcationAnalysisSession&&) = default;
+    BifurcationAnalysisSession& operator=(BifurcationAnalysisSession&&) = default;
+    BifurcationAnalysisSession(const BifurcationAnalysisSession&) = delete;
+    BifurcationAnalysisSession& operator=(const BifurcationAnalysisSession&) = delete;
 
     void load_from_record(const SystemRecord& r,
                           const std::vector<std::string>& vars_,
@@ -255,4 +255,84 @@ struct ParametricAnalysisSession {
     // результат к diagrams[running_diagram_index], сбрасывает in_flight.
     // Возвращает true в кадр завершения.
     bool poll();
+};
+
+// Одна кривая LLE(param) на параметрическом LLE-графике — структурно
+// зеркалит BifurcationDiagramConfig (тот же UX). Отличия:
+//   - нет writable_var (LLE — скаляр на точку параметра),
+//   - нет plot_inter_peaks,
+//   - + eps (возмущение Wolf/Benettin) и NT (длина блока интегрирования между
+//     ренормализациями, в единицах времени).
+struct LLECurveConfig {
+    std::string label   = "LLE 1";
+    bool        visible = true;
+
+    std::string scheme         = "Euler";
+
+    int         param_index    = 0;
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string max_value_text     = "1e6";
+
+    // LLE-специфика.
+    std::string eps_text       = "1e-4";
+    std::string nt_text        = "1";       // NT (в единицах времени)
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    LLE1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+};
+
+// Сессия LLE-анализа. Структура и API — копия BifurcationAnalysisSession
+// (другие request/result и другая терминология «curve» вместо «diagram»).
+struct LLEAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::string loaded_system_name;
+
+    std::vector<LLECurveConfig> curves;
+    int active_curve_index  = 0;
+    int running_curve_index = -1;
+
+    std::future<LLE1DResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    LLEAnalysisSession() = default;
+    LLEAnalysisSession(LLEAnalysisSession&&) = default;
+    LLEAnalysisSession& operator=(LLEAnalysisSession&&) = default;
+    LLEAnalysisSession(const LLEAnalysisSession&) = delete;
+    LLEAnalysisSession& operator=(const LLEAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    void add_curve();
+    void remove_curve(int i);
+    bool run(ParametricEngine& engine, int curve_idx);
+    bool run_async(ParametricEngine& engine, int curve_idx);
+    bool poll();
+};
+
+// Lyapunov-Spectrum-сессия — заглушка под будущий PR (Jacobian codegen +
+// Gram-Schmidt kernel). Пустые поля — чтобы GUI и AppModel могли упомянуть её
+// единообразно с другими сессиями.
+struct LyapunovSpectrumAnalysisSession {
+    std::string loaded_system_name;
+    bool in_flight = false;
 };

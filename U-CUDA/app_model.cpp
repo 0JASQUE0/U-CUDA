@@ -218,16 +218,20 @@ bool AppModel::start_phase_analysis() {
 bool AppModel::start_parametric_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
-    parametric_session.load_from_record(r, known_vars, known_params);
+    bifurcation_session.load_from_record(r, known_vars, known_params);
+    lle_session.load_from_record(r, known_vars, known_params);
     try {
-        parametric_session.sys = build_system();
-        // KRS теперь резолвится per-БД в момент Run (см. compute_krs_for_diagram
-        // в analysis_session.cpp), потому что разные БД могут использовать
-        // разные scheme. Здесь сохраняем только sys, на основе которой генерим.
+        // sys общий — обеим сессиям нужно для compute_krs_for_scheme.
+        // (KRS резолвится per-«прогон» в момент Run.)
+        System built = build_system();
+        bifurcation_session.sys = built;
+        lle_session.sys         = built;
     }
     catch (...) {
         // система неполна — Run покажет ошибку
     }
-    parametric_session.loaded_system_name = name;
+    bifurcation_session.loaded_system_name = name;
+    lle_session.loaded_system_name         = name;
+    ls_session.loaded_system_name          = name;
     return true;
 }
