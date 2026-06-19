@@ -5,7 +5,10 @@
 
 void Plot2DView::do_autofit() {
     float xmin, xmax, ymin, ymax;
-    if (series_cache_.bbox(xmin, xmax, ymin, ymax)) {
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
         double padx = pad_x ? (xmax - xmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
         double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
         x_axis.view_min = xmin - padx; x_axis.view_max = xmax + padx;
@@ -16,7 +19,10 @@ void Plot2DView::do_autofit() {
 
 void Plot2DView::fit_x() {
     float xmin, xmax, ymin, ymax;
-    if (series_cache_.bbox(xmin, xmax, ymin, ymax)) {
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
         double padx = pad_x ? (xmax - xmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
         x_axis.view_min = xmin - padx; x_axis.view_max = xmax + padx;
     }
@@ -24,7 +30,10 @@ void Plot2DView::fit_x() {
 
 void Plot2DView::fit_y() {
     float xmin, xmax, ymin, ymax;
-    if (series_cache_.bbox(xmin, xmax, ymin, ymax)) {
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
         double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
         y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
     }
@@ -67,14 +76,22 @@ void Plot2DView::render(PlotRenderer& renderer,
         return loc && glob;
         };
 
+    // Кэшируем маску видимости — её используют do_autofit/fit_x/fit_y, чтобы
+    // НЕ включать скрытые серии (через легенду) в авто-диапазон осей.
+    render_visible_mask_.resize(series_cache_.size());
+    for (int k = 0; k < series_cache_.size(); ++k)
+        render_visible_mask_[k] = eff_visible(k);
+
     // 2. ������� ��� ������ ������ ��� �� ������ ������� (fit_request)
     if (!view_valid || fit_request) do_autofit();
 
     // 3. ������� � �������
-    const float margin_left = 60.0f;
+    // margin_left/bottom увеличены, чтобы вместить тики + центрированное
+    // название оси (X — под тиками, Y — повернутое вертикально слева).
+    const float margin_left = 78.0f;
     const float margin_right = 20.0f;
     const float margin_top = 20.0f;
-    const float margin_bottom = 28.0f;
+    const float margin_bottom = 46.0f;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -187,13 +204,54 @@ void Plot2DView::render(PlotRenderer& renderer,
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         IM_COL32(120, 120, 130, 200), 0.0f, 0, 1.0f);
 
+    // Названия осей: X — горизонтально, под тиками по центру плота.
+    // Y — повёрнут на 90° против часовой, у левого края, по центру плота.
     {
         const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
-        ImVec2 xs_size = ImGui::CalcTextSize(xl);
-        dl->AddText(ImVec2(img_pos.x + plot_w - xs_size.x - 6, img_pos.y + plot_h - xs_size.y - 4),
-            col_text, xl);
-        dl->AddText(ImVec2(img_pos.x + 6, img_pos.y + 4), col_text, yl);
+        float font_h = ImGui::GetFontSize();
+
+        // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор)
+        ImVec2 xs = ImGui::CalcTextSize(xl);
+        float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
+        dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
+                    col_text, xl);
+
+        // Y label — вертикально-стопкой (как на корешке книги): буквы
+        // обычные (без поворота), по одной на строку. Делаем так потому
+        // что настоящий поворот вершин даёт шум антиалиаса.
+        //
+        // Х-позиция колонки считается ДИНАМИЧЕСКИ — за самыми широкими
+        // Y-тиками, иначе подпись наезжает на длинные числа (e.g. "0.09177").
+        size_t yl_len = std::strlen(yl);
+        if (yl_len > 0) {
+            // Максимальная ширина тиков по текущему диапазону Y.
+            float max_tick_w = 0.0f;
+            double vry = ey1 - ey0;
+            if (std::abs(vry) >= 1e-30) {
+                double lo = std::min(ey0, ey1);
+                double hi = std::max(ey0, ey1);
+                double sy = nice_step(std::abs(vry), 6);
+                double ystart = std::ceil(lo / sy) * sy;
+                int ny = (int)std::floor((hi - ystart) / sy + 1) + 1;
+                for (int iy = 0; iy < ny; ++iy) {
+                    std::string tl = fmt_tick(ystart + iy * sy);
+                    float w = ImGui::CalcTextSize(tl.c_str()).x;
+                    if (w > max_tick_w) max_tick_w = w;
+                }
+            }
+            float row_h   = font_h * 1.05f;
+            float stack_h = row_h * (float)yl_len;
+            float y_start = img_pos.y + (plot_h - stack_h) * 0.5f;
+            // Колонка букв слева от тиков с зазором 8px.
+            float center_x = img_pos.x - max_tick_w - 8.0f - font_h * 0.5f;
+            for (size_t i = 0; i < yl_len; ++i) {
+                char ch[2] = { yl[i], '\0' };
+                ImVec2 cs = ImGui::CalcTextSize(ch);
+                dl->AddText(ImVec2(center_x - cs.x * 0.5f, y_start + (float)i * row_h),
+                            col_text, ch);
+            }
+        }
     }
 
     // 9. ������� �����
