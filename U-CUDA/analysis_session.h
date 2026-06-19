@@ -329,10 +329,70 @@ struct LLEAnalysisSession {
     bool poll();
 };
 
-// Lyapunov-Spectrum-сессия — заглушка под будущий PR (Jacobian codegen +
-// Gram-Schmidt kernel). Пустые поля — чтобы GUI и AppModel могли упомянуть её
-// единообразно с другими сессиями.
+// Одна спектр-кривая на параметрическом LS-графике — конфиг идентичен
+// LLECurveConfig (тот же UX), но результат — матрица: N экспонент на
+// каждую точку параметра, где N == |vars|.
+struct LSCurveConfig {
+    std::string label   = "LS 1";
+    bool        visible = true;
+
+    std::string scheme         = "Euler";
+
+    int         param_index    = 0;
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string max_value_text     = "1e6";
+
+    std::string eps_text       = "1e-4";
+    std::string nt_text        = "1";
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    LS1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+};
+
+// LS-сессия — структура та же что у LLE-сессии, но другая Request/Result и
+// per-«прогон» — это «спектр» (curves).
 struct LyapunovSpectrumAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
     std::string loaded_system_name;
+
+    std::vector<LSCurveConfig> curves;
+    int active_curve_index  = 0;
+    int running_curve_index = -1;
+
+    std::future<LS1DResult> run_future;
     bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    LyapunovSpectrumAnalysisSession() = default;
+    LyapunovSpectrumAnalysisSession(LyapunovSpectrumAnalysisSession&&) = default;
+    LyapunovSpectrumAnalysisSession& operator=(LyapunovSpectrumAnalysisSession&&) = default;
+    LyapunovSpectrumAnalysisSession(const LyapunovSpectrumAnalysisSession&) = delete;
+    LyapunovSpectrumAnalysisSession& operator=(const LyapunovSpectrumAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    void add_curve();
+    void remove_curve(int i);
+    bool run(ParametricEngine& engine, int curve_idx);
+    bool run_async(ParametricEngine& engine, int curve_idx);
+    bool poll();
 };

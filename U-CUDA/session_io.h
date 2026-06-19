@@ -31,3 +31,8 @@ bool session_from_json_parametric(const std::string& json, BifurcationAnalysisSe
 // плюс eps/NT. Хранится отдельным файлом (`_last_lle.json`).
 std::string session_to_json_lle(const LLEAnalysisSession& s);
 bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);
+
+// LS-сессия — список спектров (полей exponents). Те же поля что у LLE — отличается
+// только Result, который JSON не хранит.
+std::string session_to_json_ls(const LyapunovSpectrumAnalysisSession& s);
+bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSession& s);

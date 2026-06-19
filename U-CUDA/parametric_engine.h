@@ -124,6 +124,45 @@ struct LLE1DResult {
     std::vector<int>    flags;
 };
 
+// ============================================================================
+// LS (Lyapunov Spectrum) 1D — на каждую точку параметра N экспонент (по числу
+// переменных). Алгоритм: Wolf/Benettin + Gram-Schmidt. Реализован в NonLinAnal
+// (cudaLibrary.cu:LSKernelCUDA). Поля Request — копия LLE1DRequest (тот же
+// набор управляющих параметров, eps и NT). Result — матрица nPts × amountOfX.
+// ============================================================================
+
+struct LS1DRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;
+    std::vector<double> base_values;
+    int param_index = 0;
+    double param_lo = 0.0;
+    double param_hi = 1.0;
+    int    n_pts = 500;
+    double h = 0.01;
+    double transient_time = 0.0;
+    double t_max = 100.0;
+    double NT  = 1.0;
+    double eps = 1.0e-4;
+    double max_value = 1.0e6;
+    std::string csv_output_path;
+};
+
+struct LS1DResult {
+    bool ok = false;
+    std::string error;
+
+    int n_pts = 0;
+    int n_exponents = 0;   // = amountOfX
+
+    // spectrum[i][k] — k-я экспонента для i-й точки параметра. Длина внутреннего
+    // вектора == n_exponents. Спец-значения 999 / -999 — kernel-флаги ошибки.
+    std::vector<std::vector<double>> spectrum;
+    // flags[i]: 1 (ok) / -1 (diverged) — все экспоненты разом.
+    std::vector<int> flags;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -138,7 +177,10 @@ public:
     // 1D-LLE. Отдельный PTX-кэш (другое шаблоное тело и другой kernel).
     LLE1DResult run_lle_1d(const LLE1DRequest& req);
 
-    // TODO (следующие шаги): run_bifurcation_2d, run_lyapunov_spectrum_1d, ...
+    // 1D-LS — спектр Ляпунова (N экспонент на точку параметра).
+    LS1DResult run_ls_1d(const LS1DRequest& req);
+
+    // TODO (следующие шаги): run_bifurcation_2d, ...
 
 private:
     struct Impl;

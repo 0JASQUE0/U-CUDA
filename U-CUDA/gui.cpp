@@ -1579,6 +1579,285 @@ static void draw_lle_plot(AppModel& model) {
 }
 
 // ============================================================
+// LS: контролы (per-curve в табе) + line-plot λ_k(param), N экспонент
+// на один спектр-«прогон». UX зеркало LLE.
+// ============================================================
+
+static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) {
+    LSCurveConfig& c = s.curves[idx];
+
+    ImGui::SetNextItemWidth(160);
+    InputTextStr("Label", c.label);
+    ImGui::SameLine();
+    ImGui::Checkbox("visible", &c.visible);
+    ImGui::Separator();
+
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    if (!s.params.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.params.size());
+        for (const auto& p : s.params) items.push_back(p.c_str());
+        if (c.param_index < 0 || c.param_index >= (int)s.params.size()) c.param_index = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Parameter", &c.param_index, items.data(), (int)items.size());
+    }
+    else {
+        ImGui::TextDisabled("No parameters (select a system first)");
+    }
+    InputNumStr("Param lo", c.param_lo_text, 120);
+    InputNumStr("Param hi", c.param_hi_text, 120);
+    InputNumStr("Resolution", c.n_pts_text, 120);
+
+    ImGui::Separator();
+    ImGui::Text("Integration:");
+    InputNumStr("h",              c.h_text,         120);
+    InputNumStr("computing time", c.t_max_text,     120);
+    InputNumStr("transient time", c.transient_text, 120);
+    InputNumStr("max value",      c.max_value_text, 120);
+
+    ImGui::Separator();
+    ImGui::Text("LS (Wolf/Benettin + Gram-Schmidt):");
+    InputNumStr("eps", c.eps_text, 120);
+    InputNumStr("NT",  c.nt_text,  120);
+    ImGui::TextDisabled("eps = initial perturbation magnitude; NT = block length\n"
+                        "between renormalizations (in time units).");
+
+    ImGui::Separator();
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file", &c.csv_save_enabled);
+    InputTextStr("##ls_csv_path", c.csv_output_path);
+    ImGui::TextDisabled("Path is kept even when save is off. Also writes <path>_config.csv.");
+
+    ImGui::Separator();
+    ImGui::Text("Initial conditions:");
+    for (const auto& v : s.vars) {
+        ImGui::PushID(v.c_str());
+        InputNumStr(v.c_str(), c.initial_conditions[v], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        ImGui::PushID(p.c_str());
+        InputNumStr(p.c_str(), c.param_values[p], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    }
+    else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    }
+
+    if (c.last_run_ok) {
+        int diverged = 0;
+        for (int f : c.result.flags) if (f < 0) ++diverged;
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
+        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+    }
+    else if (!c.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##ls_err",
+            const_cast<char*>(c.last_error.c_str()),
+            c.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+    return do_run;
+}
+
+static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
+    LyapunovSpectrumAnalysisSession& s = model.ls_session;
+
+    int active_now = -1;
+    int run_idx = -1;
+    int to_remove = -1;
+    if (ImGui::BeginTabBar("##ls_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.curves.size(); ++i) {
+            LSCurveConfig& c = s.curves[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = c.label + "###ls_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_curve_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                if (draw_ls_curve_controls(s, i)) run_idx = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_curve();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_curve_index = active_now;
+    if (to_remove >= 0) s.remove_curve(to_remove);
+
+    if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+        run_idx = s.active_curve_index;
+    }
+
+    if (run_idx >= 0 && run_idx < (int)s.curves.size()) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine, run_idx);
+    }
+}
+
+// Plot LS: каждая кривая раскладывается на N лiний (по числу экспонент).
+// Серия: spectrum_idx * N + exponent_idx. Цвета через ic_base_color(seq).
+static void draw_ls_plot(AppModel& model) {
+    LyapunovSpectrumAnalysisSession& s = model.ls_session;
+    static std::unique_ptr<PlotRenderer> renderer;
+    static std::unique_ptr<Plot2DView> view;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    if (!view) {
+        view = std::make_unique<Plot2DView>();
+        view->points_mode = false;
+        view->show_legend = true;
+        view->x_axis.name = "parameter";
+        view->y_axis.name = "lambda";
+    }
+
+    if (s.curves.empty()) {
+        ImGui::TextDisabled("No spectra yet.");
+        return;
+    }
+
+    bool any_data = false;
+    for (const auto& c : s.curves)
+        if (c.last_run_ok && !c.result.spectrum.empty()) { any_data = true; break; }
+    if (!any_data) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    auto safe_stod = [](const std::string& v, double def) -> double {
+        if (v.empty()) return def;
+        size_t slash = v.find('/');
+        if (slash != std::string::npos) {
+            double num = std::atof(v.substr(0, slash).c_str());
+            double den = std::atof(v.substr(slash + 1).c_str());
+            if (den != 0) return num / den;
+        }
+        return std::atof(v.c_str());
+    };
+
+    int shared_param_idx = -2;
+    for (const auto& c : s.curves) {
+        if (!c.visible || !c.last_run_ok) continue;
+        if (shared_param_idx == -2) shared_param_idx = c.param_index;
+        else if (shared_param_idx != c.param_index) shared_param_idx = -1;
+    }
+    view->x_axis.name = (shared_param_idx >= 0 && shared_param_idx < (int)s.params.size())
+                          ? s.params[shared_param_idx] : std::string("parameter");
+
+    // Подсчитываем общее число серий — sum(n_exponents per curve).
+    size_t total_series = 0;
+    for (const auto& c : s.curves) {
+        int N = c.result.n_exponents > 0 ? c.result.n_exponents : (int)s.vars.size();
+        total_series += (size_t)N;
+    }
+
+    static std::vector<std::vector<float>> bufs;
+    if (bufs.size() != total_series) bufs.assign(total_series, {});
+
+    std::vector<PlotSeriesInput> series_in;
+    std::vector<bool> init_vis, glob_vis;
+    series_in.reserve(total_series);
+    init_vis.reserve(total_series);
+    glob_vis.reserve(total_series);
+
+    bool any_fit = false;
+    int  data_gen = 0;
+    size_t buf_cursor = 0;
+    int    series_idx = 0;
+
+    for (int i = 0; i < (int)s.curves.size(); ++i) {
+        LSCurveConfig& c = s.curves[i];
+        int N = c.result.n_exponents > 0 ? c.result.n_exponents : (int)s.vars.size();
+
+        double lo = safe_stod(c.param_lo_text, 0.0);
+        double hi = safe_stod(c.param_hi_text, 1.0);
+        int npts = c.result.n_pts;
+        bool have = c.last_run_ok && !c.result.spectrum.empty();
+
+        for (int j = 0; j < N; ++j) {
+            auto& buf = bufs[buf_cursor++];
+            buf.clear();
+            int total_pts = 0;
+
+            if (have) {
+                for (int k = 0; k < npts; ++k) {
+                    if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
+                    if (k >= (int)c.result.spectrum.size()) continue;
+                    const auto& row = c.result.spectrum[k];
+                    if (j >= (int)row.size()) continue;
+                    double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                    double y = row[j];
+                    if (!std::isfinite(y)) continue;
+                    buf.push_back((float)x);
+                    buf.push_back((float)y);
+                    ++total_pts;
+                }
+            }
+
+            PlotSeriesInput si;
+            si.points   = buf.empty() ? nullptr : buf.data();
+            si.n_points = total_pts;
+            si.color    = ic_base_color(series_idx++);
+            // label: "<spectrum> λj" если N>1, иначе просто <spectrum>.
+            std::string lab = (N > 1)
+                ? (c.label + " " + std::string("\xCE\xBB") /* UTF-8 λ — но шрифт не покажет, fallback */)
+                : c.label;
+            // Для совместимости со шрифтом без glyph'а — английская подпись.
+            lab = (N > 1) ? (c.label + " L" + std::to_string(j + 1)) : c.label;
+            si.label    = lab;
+            series_in.push_back(si);
+            init_vis.push_back(true);
+            glob_vis.push_back(c.visible);
+        }
+
+        data_gen = data_gen * 31 + c.data_generation;
+        if (c.fit_request) { any_fit = true; c.fit_request = false; }
+    }
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    view->render(*renderer, origin, avail, /*owner_id*/ 0x15A1E0, data_gen,
+                 series_in, init_vis, glob_vis, any_fit);
+}
+
+// ============================================================
 // Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
 // ============================================================
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
@@ -1588,7 +1867,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     // Общий селектор системы — одна система на все три sub-анализа (Bif/LLE/LS).
     // Во время async-расчёта смена системы запрещена — иначе worker применит
     // результат к уже подменённой сессии.
-    bool any_in_flight = model.bifurcation_session.in_flight || model.lle_session.in_flight;
+    bool any_in_flight = model.bifurcation_session.in_flight
+                      || model.lle_session.in_flight
+                      || model.ls_session.in_flight;
     ImGui::Text("System:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(200);
     std::string current = model.name.empty() ? "(current)" : model.name;
@@ -1606,6 +1887,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
                     std::string jl = lib.load_session(model.loaded_name, "_last_lle");
                     if (!jl.empty())
                         session_from_json_lle(jl, model.lle_session);
+                    std::string js = lib.load_session(model.loaded_name, "_last_ls");
+                    if (!js.empty())
+                        session_from_json_ls(js, model.ls_session);
                 }
                 catch (...) {}
             }
@@ -1628,9 +1912,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         }
         if (ImGui::BeginTabItem("LS")) {
             model.parametric_active_analysis = 2;
-            ImGui::TextDisabled("Lyapunov spectrum: coming soon.");
-            ImGui::TextDisabled("(NonLinAnal already has LSKernelCUDA — will be enabled");
-            ImGui::TextDisabled(" in a follow-up PR: unguard + UI/engine wrapper.)");
+            draw_ls_controls(model, lib);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -1661,6 +1943,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.phase_session.custom_schemes = model.custom_schemes;
     model.bifurcation_session.custom_schemes = model.custom_schemes;
     model.lle_session.custom_schemes         = model.custom_schemes;
+    model.ls_session.custom_schemes          = model.custom_schemes;
 
     // poll'им async-расчёты независимо от текущего режима — чтобы при
     // возврате в этот режим пользователь сразу увидел готовый результат
@@ -1673,6 +1956,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_lle",
                              session_to_json_lle(model.lle_session));
+    }
+    if (model.ls_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_ls",
+                             session_to_json_ls(model.ls_session));
     }
     if (model.phase_session.poll()) {
         if (!model.loaded_name.empty())
@@ -1704,6 +1992,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         else
             busy_what = "LLE";
         busy_start = model.lle_session.compute_start_time;
+    }
+    else if (model.ls_session.in_flight) {
+        int ri = model.ls_session.running_curve_index;
+        if (ri >= 0 && ri < (int)model.ls_session.curves.size())
+            busy_what = model.ls_session.curves[ri].label;
+        else
+            busy_what = "LS";
+        busy_start = model.ls_session.compute_start_time;
     }
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
@@ -1759,6 +2055,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (!j.empty()) session_from_json_parametric(j, model.bifurcation_session);
             std::string jl = lib.load_session(model.loaded_name, "_last_lle");
             if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
+            std::string js = lib.load_session(model.loaded_name, "_last_ls");
+            if (!js.empty()) session_from_json_ls(js, model.ls_session);
         }
     }
     model.app_mode = (AppModel::AppMode)mode;
@@ -1804,9 +2102,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Lyapunov Spectrum")) {
-            ImGui::TextDisabled("Coming soon.");
-            ImGui::TextDisabled("LSKernelCUDA already exists in NonLinAnal — will be");
-            ImGui::TextDisabled("enabled in a follow-up PR (unguard + UI/engine wrapper).");
+            draw_ls_plot(model);
         }
         ImGui::End();
     }
