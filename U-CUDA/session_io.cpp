@@ -204,7 +204,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
     }
 }
 // ============================================================================
-// ParametricAnalysisSession
+// BifurcationAnalysisSession
 // ============================================================================
 
 // Сериализует одну БД в JSON-объект (без обёртки фигурными). Используется
@@ -258,7 +258,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     return true;
 }
 
-std::string session_to_json_parametric(const ParametricAnalysisSession& s) {
+std::string session_to_json_parametric(const BifurcationAnalysisSession& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_diagram_index\":" << s.active_diagram_index << ",\n";
@@ -274,7 +274,7 @@ std::string session_to_json_parametric(const ParametricAnalysisSession& s) {
     return o.str();
 }
 
-bool session_from_json_parametric(const std::string& json, ParametricAnalysisSession& s) {
+bool session_from_json_parametric(const std::string& json, BifurcationAnalysisSession& s) {
     try {
         JP p(json);
         p.expect('{');
@@ -340,6 +340,124 @@ bool session_from_json_parametric(const std::string& json, ParametricAnalysisSes
         if (s.active_diagram_index < 0 || s.active_diagram_index >= (int)s.diagrams.size())
             s.active_diagram_index = 0;
         s.running_diagram_index = -1;
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// ============================================================================
+// LLEAnalysisSession — отдельный JSON-файл `_last_lle.json`. Структура та же
+// что у parametric (массив объектов), отличаются только поля per-«прогон».
+// ============================================================================
+
+namespace {
+
+void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
+    o << "{";
+    o << "\"label\":";            jstr(o, c.label);
+    o << ",\"visible\":"          << (c.visible ? "true" : "false");
+    o << ",\"scheme\":";          jstr(o, c.scheme);
+    o << ",\"param_index\":"      << c.param_index;
+    o << ",\"param_lo_text\":";   jstr(o, c.param_lo_text);
+    o << ",\"param_hi_text\":";   jstr(o, c.param_hi_text);
+    o << ",\"n_pts_text\":";      jstr(o, c.n_pts_text);
+    o << ",\"h_text\":";          jstr(o, c.h_text);
+    o << ",\"t_max_text\":";      jstr(o, c.t_max_text);
+    o << ",\"transient_text\":";  jstr(o, c.transient_text);
+    o << ",\"max_value_text\":";  jstr(o, c.max_value_text);
+    o << ",\"eps_text\":";        jstr(o, c.eps_text);
+    o << ",\"nt_text\":";         jstr(o, c.nt_text);
+    o << ",\"param_values\":";    jmap(o, c.param_values);
+    o << ",\"initial_conditions\":"; jmap(o, c.initial_conditions);
+    o << ",\"csv_save_enabled\":" << (c.csv_save_enabled ? "true" : "false");
+    o << ",\"csv_output_path\":"; jstr(o, c.csv_output_path);
+    o << "}";
+}
+
+bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
+    if      (key == "label")              c.label             = p.str();
+    else if (key == "visible")            c.visible           = p.boolean();
+    else if (key == "scheme")             c.scheme            = p.str();
+    else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
+    else if (key == "param_lo_text")      c.param_lo_text     = p.str();
+    else if (key == "param_hi_text")      c.param_hi_text     = p.str();
+    else if (key == "n_pts_text")         c.n_pts_text        = p.str();
+    else if (key == "h_text")             c.h_text            = p.str();
+    else if (key == "t_max_text")         c.t_max_text        = p.str();
+    else if (key == "transient_text")     c.transient_text    = p.str();
+    else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "eps_text")           c.eps_text          = p.str();
+    else if (key == "nt_text")            c.nt_text           = p.str();
+    else if (key == "param_values")       c.param_values      = p.map_ss();
+    else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
+    else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
+    else if (key == "csv_output_path")    c.csv_output_path   = p.str();
+    else return false;
+    return true;
+}
+
+} // namespace
+
+std::string session_to_json_lle(const LLEAnalysisSession& s) {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"active_curve_index\":" << s.active_curve_index << ",\n";
+    o << "  \"curves\":[";
+    for (size_t i = 0; i < s.curves.size(); ++i) {
+        if (i) o << ",";
+        o << "\n    ";
+        write_lle_curve(o, s.curves[i]);
+    }
+    if (!s.curves.empty()) o << "\n  ";
+    o << "]\n";
+    o << "}\n";
+    return o.str();
+}
+
+bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "curves") {
+                s.curves.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        LLECurveConfig c;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k2 = p.str(); p.expect(':');
+                                if (!read_lle_curve_field(p, c, k2)) p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        s.curves.push_back(std::move(c));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else if (key == "active_curve_index") {
+                s.active_curve_index = std::stoi(p.str_or_num());
+            }
+            else {
+                p.skip_value();
+            }
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        if (s.curves.empty()) s.add_curve();
+        if (s.active_curve_index < 0 || s.active_curve_index >= (int)s.curves.size())
+            s.active_curve_index = 0;
+        s.running_curve_index = -1;
         return true;
     }
     catch (...) {

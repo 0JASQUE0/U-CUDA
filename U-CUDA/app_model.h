@@ -82,8 +82,17 @@ public:
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
     PhaseAnalysisSession phase_session;
 
-    // сессия параметрического анализа (1D-бифуркация) — независимая песочница
-    ParametricAnalysisSession parametric_session;
+    // Parametric mode держит три независимых анализа (1D bif / LLE / LS),
+    // переключаемых верхними табами в Parametric Controls. Каждый —
+    // песочница: своя копия системы, свои Run-кнопки, свой плот, свой
+    // _last_*.json. Результаты сессии не share'ят между собой.
+    BifurcationAnalysisSession bifurcation_session;
+    LLEAnalysisSession         lle_session;
+    LyapunovSpectrumAnalysisSession ls_session;
+
+    // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
+    // indicator. По умолчанию — Bifurcation.
+    int parametric_active_analysis = 0;
 
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
@@ -91,6 +100,8 @@ public:
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
     bool start_phase_analysis();
+    // Инициализирует ВСЕ parametric-сессии (bif/LLE/LS) из текущей системы —
+    // пользователь ждёт одинаковые vars/params в любом верхнем табе.
     bool start_parametric_analysis();
 
     // ---- результат генерации ----

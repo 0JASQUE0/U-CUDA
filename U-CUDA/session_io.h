@@ -20,9 +20,14 @@ std::string session_to_json(const PhaseAnalysisSession& s);
 // при ошибке разбора (s остаётся как есть).
 bool session_from_json(const std::string& json, PhaseAnalysisSession& s);
 
-// То же самое для ParametricAnalysisSession.
+// То же самое для BifurcationAnalysisSession (1D-бифуркация — список БД).
 // Сохраняем: scheme, диапазон/n_pts, writable_var, integration-поля,
 // param_values, initial_conditions, csv_output_path + csv_save_enabled.
 // Не сохраняем результат и runtime-флаги.
-std::string session_to_json_parametric(const ParametricAnalysisSession& s);
-bool session_from_json_parametric(const std::string& json, ParametricAnalysisSession& s);
+std::string session_to_json_parametric(const BifurcationAnalysisSession& s);
+bool session_from_json_parametric(const std::string& json, BifurcationAnalysisSession& s);
+
+// LLE-сессия — список кривых λ(param). Каждая со своим scheme/range/IC/params,
+// плюс eps/NT. Хранится отдельным файлом (`_last_lle.json`).
+std::string session_to_json_lle(const LLEAnalysisSession& s);
+bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);

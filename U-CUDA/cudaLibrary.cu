@@ -2373,9 +2373,10 @@ __global__ void dbscanCUDA_optimized(
 // --------------------
 // --- Ядро для LLE ---
 // --------------------
-// Всё что ниже использует curand (init/uniform) и не нужно для bif1d.
-// Для NVRTC отрезаем — иначе валится на undefined curandState_t.
-#ifndef __CUDACC_RTC__
+// LLEKernelCUDA (Wolf/Benettin) под NVRTC ВКЛЮЧЁН — curand_kernel.h теперь
+// доступен из cudaLibrary.cuh. Всё что после этого kernel'а (LLE_IC, LS,
+// dbscan, fastSynchro и пр.) остаётся под гардом, потому что не требуется
+// для текущих режимов engine'а и может нести host-only зависимости.
 __global__ void LLEKernelCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -2545,7 +2546,10 @@ __global__ void LLEKernelCUDA(
 	resultArray[idx] = result / tMax;
 }
 
-
+// Всё что ниже остаётся отрезано от NVRTC — engine эти kernel'ы не зовёт,
+// а часть из них содержит host-only зависимости или ещё не верифицирована
+// под NVRTC. По мере необходимости (LS, dbscan и др.) — снимать гард точечно.
+#ifndef __CUDACC_RTC__
 
 // -------------------------
 // --- Ядро для LLE (IC) ---
