@@ -2678,7 +2678,9 @@ __global__ void LLEKernelICCUDA(
 	resultArray[idx] = result / tMax;
 }
 
-
+// projectionOperator + gramSchmidtProcess + LSKernelCUDA — выведены из
+// NVRTC-гарда (нужны для LS). curand_kernel.h теперь доступен под NVRTC.
+#endif // __CUDACC_RTC__  (закрытие гарда, открытого выше для LLE_IC)
 
 //find projection operation (ab)
 __device__ __host__ void projectionOperator(numb* a, numb* b, numb* minuend, int amountOfValues)
@@ -2696,8 +2698,6 @@ __device__ __host__ void projectionOperator(numb* a, numb* b, numb* minuend, int
 	for (int i = 0; i < amountOfValues; ++i)
 		minuend[i] -= fraction * b[i];
 }
-
-
 
 __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVectorsAndValuesInVector, numb* denominators=nullptr/*They are is equale for our task*/)
 {
@@ -2892,6 +2892,9 @@ __global__ void LSKernelCUDA(
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
 }
+
+// Всё что ниже снова под гардом — engine не зовёт, потенциально хост-only.
+#ifndef __CUDACC_RTC__
 
 __global__ void LSKernelICCUDA(
 	const int nPts,

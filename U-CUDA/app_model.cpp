@@ -220,12 +220,14 @@ bool AppModel::start_parametric_analysis() {
     SystemRecord r = to_record();
     bifurcation_session.load_from_record(r, known_vars, known_params);
     lle_session.load_from_record(r, known_vars, known_params);
+    ls_session.load_from_record(r, known_vars, known_params);
     try {
-        // sys общий — обеим сессиям нужно для compute_krs_for_scheme.
+        // sys общий — всем трём сессиям нужен для compute_krs_for_scheme.
         // (KRS резолвится per-«прогон» в момент Run.)
         System built = build_system();
         bifurcation_session.sys = built;
         lle_session.sys         = built;
+        ls_session.sys          = built;
     }
     catch (...) {
         // система неполна — Run покажет ошибку
