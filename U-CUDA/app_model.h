@@ -75,8 +75,8 @@ public:
     std::string loaded_name;
 
     // --- режим приложения и сессия анализа (слой 2) ---
-    // режим верхнего уровня: библиотека, фазовый анализ или параметрический
-    enum class AppMode { Library, Analysis, Parametric };
+    // режим верхнего уровня: библиотека, фазовый анализ, параметрический или настройки.
+    enum class AppMode { Library, Analysis, Parametric, Settings };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -93,6 +93,22 @@ public:
     // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
     int parametric_active_analysis = 0;
+
+    // UI scale (DPI-aware). `ui_scale_auto` выставляется однократно при старте
+    // из glfwGetMonitorContentScale. `ui_scale_override` — слайдер в GUI;
+    // 0.0 означает «использовать auto». Эффективный scale (см. helper) идёт
+    // в apply_ui_scale в app_main каждый кадр — если изменился, шрифт и
+    // ImGui-style пересоздаются.
+    float ui_scale_auto     = 1.0f;
+    float ui_scale_override = 0.0f;
+    float effective_ui_scale() const {
+        return ui_scale_override > 0.0f ? ui_scale_override : ui_scale_auto;
+    }
+
+    // Выбор шрифта. false (дефолт) → TTF Segoe UI (антиалиаc, читаемо на 1080p
+    // и крупных DPI). true → bitmap ProggyClean (компактный, классический ImGui).
+    // Чекбокс — в Settings; персистится в _app_config.json.
+    bool use_builtin_font = false;
 
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
