@@ -65,3 +65,25 @@ bool GpuLineSeriesSet::bbox(float& xmin, float& xmax, float& ymin, float& ymax) 
     }
     return any;
 }
+
+bool GpuLineSeriesSet::bbox_filtered(float& xmin, float& xmax, float& ymin, float& ymax,
+                                     const std::vector<bool>& visible_mask) const {
+    if (series_.empty()) return false;
+    xmin = std::numeric_limits<float>::infinity();
+    xmax = -std::numeric_limits<float>::infinity();
+    ymin = std::numeric_limits<float>::infinity();
+    ymax = -std::numeric_limits<float>::infinity();
+    bool any = false;
+    for (size_t k = 0; k < series_.size(); ++k) {
+        if (!series_[k].valid()) continue;
+        // Если для серии нет записи в маске — считаем видимой (back-compat).
+        bool vis = (k < visible_mask.size()) ? visible_mask[k] : true;
+        if (!vis) continue;
+        any = true;
+        xmin = std::min(xmin, bbox_data_[k * 4 + 0]);
+        xmax = std::max(xmax, bbox_data_[k * 4 + 1]);
+        ymin = std::min(ymin, bbox_data_[k * 4 + 2]);
+        ymax = std::max(ymax, bbox_data_[k * 4 + 3]);
+    }
+    return any;
+}

@@ -66,6 +66,10 @@ public:
 
 private:
     GpuLineSeriesSet series_cache_;
+    // Эффективная видимость серий на текущий кадр (visible[k] && global_visible[k]).
+    // Обновляется в начале render(); do_autofit/fit_x/fit_y используют её,
+    // чтобы НЕ включать скрытые серии в авто-диапазон.
+    std::vector<bool> render_visible_mask_;
 
     bool   rect_zoom_pending_ = false;
     bool   rect_zoom_active_ = false;

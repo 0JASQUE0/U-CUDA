@@ -2034,6 +2034,26 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "%s", text);
     }
+
+    // Имя выбранной системы — по центру топ-бара. Рисуем после radio-кнопок
+    // и busy-индикатора, чтобы не сдвигать их разметку (SetCursorPosX выходит
+    // из cursor-flow). Если система не загружена — показываем плейсхолдер.
+    {
+        std::string sys_label = model.name.empty()
+            ? std::string("(no system loaded)")
+            : (std::string("System: ") + model.name);
+        ImVec2 ts = ImGui::CalcTextSize(sys_label.c_str());
+        float cx  = (ImGui::GetWindowSize().x - ts.x) * 0.5f;
+        // У radio-кнопок Y был установлен по первому SameLine'у; берём ту же Y,
+        // что у текущего курсора в начале строки (до индикатора).
+        // SetCursorPosX переносит только по X — Y остаётся в текущей строке.
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(cx);
+        ImColor col = model.name.empty()
+            ? ImColor(150, 150, 160, 200)
+            : ImColor(220, 220, 230, 255);
+        ImGui::TextColored(col, "%s", sys_label.c_str());
+    }
     // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать
     // сессию. Init происходит когда:
     //   1) система сменилась относительно той, для которой session была собрана;
