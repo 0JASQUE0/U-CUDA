@@ -98,8 +98,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         float color[4] = { c.x, c.y, c.z, c.w };
         if (points_mode)
             renderer.draw_points(g.vbo, g.point_count, mvp, color, point_size_px);
-        else
-            renderer.draw_line(g.vbo, g.point_count, mvp, color, 1.5f);
+        else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
+            renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
     }
     renderer.end_frame();
 
@@ -160,6 +160,29 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddLine(ImVec2(X(0), img_pos.y), ImVec2(X(0), img_pos.y + plot_h), col_axis, 1.5f);
     if (show_zero_y && std::min(ey0, ey1) <= 0 && std::max(ey0, ey1) >= 0)
         dl->AddLine(ImVec2(img_pos.x, Y(0)), ImVec2(img_pos.x + plot_w, Y(0)), col_axis, 1.5f);
+
+    // Линии данных поверх осей через ImDrawList (только если imdraw_lines).
+    // Рисуем посегментно (AddLine), а не AddPolyline — последняя на резких
+    // скачках LLE/LS визуально «рвётся» из-за miter-joins при острых углах.
+    // Толщина >1px надёжна (ImGui триангулирует), порядок: после осей.
+    if (imdraw_lines) {
+        ImVec2 cmin = img_pos;
+        ImVec2 cmax(img_pos.x + plot_w, img_pos.y + plot_h);
+        dl->PushClipRect(cmin, cmax, true);
+        for (int k = (int)series_in.size() - 1; k >= 0; --k) {
+            if (!eff_visible(k)) continue;
+            const PlotSeriesInput& s = series_in[k];
+            if (!s.points || s.n_points < 2) continue;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32(s.color);
+            ImVec2 prev(X(s.points[0]), Y(s.points[1]));
+            for (int i = 1; i < s.n_points; ++i) {
+                ImVec2 cur(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
+                dl->AddLine(prev, cur, col, line_thickness_px);
+                prev = cur;
+            }
+        }
+        dl->PopClipRect();
+    }
 
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         IM_COL32(120, 120, 130, 200), 0.0f, 0, 1.0f);

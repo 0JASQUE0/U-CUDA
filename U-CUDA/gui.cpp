@@ -1413,7 +1413,7 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         int diverged = 0;
         for (int f : c.result.flags) if (f < 0) ++diverged;
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, λ-curve computed", c.result.n_pts);
+            "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
         if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
     }
     else if (!c.last_error.empty()) {
@@ -1486,6 +1486,8 @@ static void draw_lle_plot(AppModel& model) {
         view = std::make_unique<Plot2DView>();
         view->points_mode = false;   // LLE — непрерывная линия
         view->show_legend = true;
+        view->line_thickness_px = 1.5f;
+        view->imdraw_lines = true;   // данные поверх осей + надёжная толщина
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
@@ -1545,8 +1547,11 @@ static void draw_lle_plot(AppModel& model) {
         int total_pts = 0;
 
         if (c.last_run_ok && !c.result.lyapunov.empty()) {
-            double lo = safe_stod(c.param_lo_text, 0.0);
-            double hi = safe_stod(c.param_hi_text, 1.0);
+            // X считаются по тому диапазону, с которым реально шёл Run, а не
+            // по текущим полям GUI — иначе кривая «прыгает» при редактировании
+            // param_lo/hi до следующего Run.
+            double lo = c.result.param_lo;
+            double hi = c.result.param_hi;
             int npts = c.result.n_pts;
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
@@ -1744,6 +1749,8 @@ static void draw_ls_plot(AppModel& model) {
         view = std::make_unique<Plot2DView>();
         view->points_mode = false;
         view->show_legend = true;
+        view->line_thickness_px = 1.5f;
+        view->imdraw_lines = true;
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
@@ -1806,8 +1813,9 @@ static void draw_ls_plot(AppModel& model) {
         LSCurveConfig& c = s.curves[i];
         int N = c.result.n_exponents > 0 ? c.result.n_exponents : (int)s.vars.size();
 
-        double lo = safe_stod(c.param_lo_text, 0.0);
-        double hi = safe_stod(c.param_hi_text, 1.0);
+        // X — по диапазону, с которым шёл Run (см. LLE-плот).
+        double lo = c.result.param_lo;
+        double hi = c.result.param_hi;
         int npts = c.result.n_pts;
         bool have = c.last_run_ok && !c.result.spectrum.empty();
 

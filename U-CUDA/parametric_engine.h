@@ -115,6 +115,11 @@ struct LLE1DResult {
     std::string error;
 
     int n_pts = 0;
+    // Снапшот свип-диапазона на момент Run — чтобы GUI рисовал точки именно по
+    // тем X, для которых считалось. Иначе при правке param_lo/hi в панели
+    // график «прыгает» до следующего Run.
+    double param_lo = 0.0;
+    double param_hi = 1.0;
     // lyapunov[i] — оценка λ для i-го значения параметра. Спец-значения:
     //   +999  — траектория x(t) сошла с аттрактора на transient'е (kernel-флаг),
     //   -999  — траектория разошлась за maxValue (kernel-флаг),
@@ -155,6 +160,9 @@ struct LS1DResult {
 
     int n_pts = 0;
     int n_exponents = 0;   // = amountOfX
+    // Снапшот диапазона свипа на момент Run (см. LLE1DResult).
+    double param_lo = 0.0;
+    double param_hi = 1.0;
 
     // spectrum[i][k] — k-я экспонента для i-й точки параметра. Длина внутреннего
     // вектора == n_exponents. Спец-значения 999 / -999 — kernel-флаги ошибки.
