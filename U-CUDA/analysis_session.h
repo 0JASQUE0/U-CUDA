@@ -168,6 +168,12 @@ struct BifurcationDiagramConfig {
 
     // Свип: какой параметр, его диапазон, число точек.
     int         param_index    = 0;
+    // Если sweep_over_var=true — БД строится по начальному условию переменной
+    // vars[var_sweep_index] вместо параметра. Дефолт false → param-свип (старое
+    // поведение). NonLinAnal-kernel принимает par_or_var runtime-аргументом,
+    // переключаем только индекс + флаг в engine — никакой пересборки PTX.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";

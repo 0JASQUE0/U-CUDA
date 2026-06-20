@@ -1062,17 +1062,48 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     }
     ImGui::Separator();
 
-    // ----- Parameter sweep -----
-    if (!s.params.empty()) {
-        std::vector<const char*> items;
-        items.reserve(s.params.size());
-        for (const auto& p : s.params) items.push_back(p.c_str());
-        if (bd.param_index < 0 || bd.param_index >= (int)s.params.size()) bd.param_index = 0;
+    // ----- Sweep target (parameter ИЛИ initial condition) -----
+    // Один combo с разделителем: сверху параметры, снизу переменные (IC).
+    // Выбор переменной → BD строится по начальному условию (par_or_var = 0
+    // в engine), runtime-флаг — никакой пересборки PTX.
+    if (!s.params.empty() || !s.vars.empty()) {
+        // Бочки валидации индексов на случай старых сохранений.
+        if (bd.param_index < 0 || bd.param_index >= (int)s.params.size())
+            bd.param_index = 0;
+        if (bd.var_sweep_index < 0 || bd.var_sweep_index >= (int)s.vars.size())
+            bd.var_sweep_index = 0;
+
+        std::string preview;
+        if (bd.sweep_over_var && !s.vars.empty())
+            preview = s.vars[bd.var_sweep_index] + " (IC)";
+        else if (!s.params.empty())
+            preview = s.params[bd.param_index];
+        else
+            preview = "?";
+
         ImGui::SetNextItemWidth(160);
-        ImGui::Combo("Parameter", &bd.param_index, items.data(), (int)items.size());
+        if (ImGui::BeginCombo("Sweep", preview.c_str())) {
+            for (int i = 0; i < (int)s.params.size(); ++i) {
+                bool sel = !bd.sweep_over_var && bd.param_index == i;
+                if (ImGui::Selectable(s.params[i].c_str(), sel)) {
+                    bd.sweep_over_var = false;
+                    bd.param_index = i;
+                }
+            }
+            if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
+            for (int i = 0; i < (int)s.vars.size(); ++i) {
+                std::string lbl = s.vars[i] + " (IC)";
+                bool sel = bd.sweep_over_var && bd.var_sweep_index == i;
+                if (ImGui::Selectable(lbl.c_str(), sel)) {
+                    bd.sweep_over_var = true;
+                    bd.var_sweep_index = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
     }
     else {
-        ImGui::TextDisabled("No parameters (select a system first)");
+        ImGui::TextDisabled("No parameters/variables (select a system first)");
     }
     InputNumStr("Param lo", bd.param_lo_text, 120);
     InputNumStr("Param hi", bd.param_hi_text, 120);
@@ -1253,19 +1284,30 @@ static void draw_bifurcation_plot(AppModel& model) {
         return std::atof(v.c_str());
     };
 
-    // Подписи осей: если ВСЕ видимые БД с данными свипают тот же параметр /
-    // пишут ту же переменную — показываем имя; иначе generic "parameter"/"X".
-    int shared_param_idx = -2;  // -2 = ещё не инициализировано
-    int shared_var_idx   = -2;
+    // Подписи осей: X = имя свип-таргета (параметр или переменная-IC) если все
+    // видимые БД свипают одно и то же; иначе generic "parameter". Y = имя
+    // writable_var, если все БД пишут одну и ту же переменную; иначе "X".
+    // Свип-таргет — пара (sweep_over_var, idx). Сравниваем как пару.
+    int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
+    int shared_idx  = -2;
+    int shared_var_idx = -2;
     for (const auto& bd : s.diagrams) {
         if (!bd.visible || !bd.last_run_ok) continue;
-        if (shared_param_idx == -2) shared_param_idx = bd.param_index;
-        else if (shared_param_idx != bd.param_index) shared_param_idx = -1;
+        int kind = bd.sweep_over_var ? 1 : 0;
+        int idx  = bd.sweep_over_var ? bd.var_sweep_index : bd.param_index;
+        if (shared_kind == -2) { shared_kind = kind; shared_idx = idx; }
+        else if (shared_kind != kind || shared_idx != idx) {
+            shared_kind = -1; shared_idx = -1;
+        }
         if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
         else if (shared_var_idx != bd.writable_var) shared_var_idx = -1;
     }
-    view->x_axis.name = (shared_param_idx >= 0 && shared_param_idx < (int)s.params.size())
-                          ? s.params[shared_param_idx] : std::string("parameter");
+    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
+        view->x_axis.name = s.params[shared_idx];
+    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
+        view->x_axis.name = s.vars[shared_idx] + " (IC)";
+    else
+        view->x_axis.name = "parameter";
     view->y_axis.name = (shared_var_idx >= 0 && shared_var_idx < (int)s.vars.size())
                           ? s.vars[shared_var_idx] : std::string("X");
 
