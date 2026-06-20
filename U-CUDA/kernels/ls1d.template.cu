@@ -7,7 +7,9 @@
 // curand_kernel.h и gramSchmidtProcess; теперь гард сужен, оба видны.
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
-#define par_or_var 1
+// par_or_var выбирает свип-режим compile-time (LSKernelCUDA читает макрос,
+// не runtime-аргумент). 1 = PARAMETER sweep, 0 = INITIAL CONDITION sweep.
+#define par_or_var {{PAR_OR_VAR}}
 
 #ifdef __CUDACC_RTC__
 typedef signed char        int8_t;

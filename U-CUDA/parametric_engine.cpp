@@ -676,9 +676,12 @@ struct ParametricEngine::Impl {
     // Ключ кэша = hash(krs_body + amountOfX + "lle"), чтобы PTX от bif1d
     // не путался с LLE даже при одной и той же KRS.
     // =========================================================================
-    bool compile_lle_if_needed(const std::string& krs_body, int amountOfX, std::string& err) {
+    bool compile_lle_if_needed(const std::string& krs_body, int amountOfX,
+                               int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
-        std::string key = hash_key(krs_body, amountOfX) + ":lle";
+        // par_or_var в kernel — compile-time макрос (см. bif1d). Два PTX-модуля
+        // кешируются отдельно: param-sweep и IC-sweep.
+        std::string key = hash_key(krs_body, amountOfX) + ":lle:pov" + std::to_string(par_or_var);
         if (cached_lle.module && cached_lle.key == key) return true;
         release_lle_module();
 
@@ -687,6 +690,7 @@ struct ParametricEngine::Impl {
         std::string src = src_template_lle;
         src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
         src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
 
         const char* header_sources[] = {
             src_cudaLibrary_cu.c_str(),
@@ -784,8 +788,13 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
-                                                                    return fail("param_index вне диапазона");
+        if (req.sweep_over_var) {
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index вне диапазона");
+        } else {
+            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                return fail("param_index вне диапазона");
+        }
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
@@ -796,7 +805,8 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_lle_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        if (!compile_lle_if_needed(req.krs_body, req.amountOfX,
+                                   req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         // ===== ПОРТ NonLinAnal::LLE1D (hostLibrary.cu:2261-2511) =====
         const double tMax                       = req.t_max;
@@ -807,7 +817,10 @@ struct ParametricEngine::Impl {
         const int    amountOfInitialConditions  = req.amountOfX;
         const double* initialConditions         = req.initial_conditions.data();
         double ranges[2]                        = { req.param_lo, req.param_hi };
-        int    indicesOfMutVars[1]              = { req.param_index };
+        // Sweep target: см. bif1d. При IC-свипе индекс — 0-based в localX.
+        int    indicesOfMutVars[1]              = { req.sweep_over_var
+                                                    ? req.var_sweep_index
+                                                    : req.param_index };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
         const double* values                    = req.base_values.data();
@@ -1008,9 +1021,10 @@ struct ParametricEngine::Impl {
     // =========================================================================
     // compile_ls_if_needed — третий шаблон. Ключ кэша помечен ":ls".
     // =========================================================================
-    bool compile_ls_if_needed(const std::string& krs_body, int amountOfX, std::string& err) {
+    bool compile_ls_if_needed(const std::string& krs_body, int amountOfX,
+                              int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
-        std::string key = hash_key(krs_body, amountOfX) + ":ls";
+        std::string key = hash_key(krs_body, amountOfX) + ":ls:pov" + std::to_string(par_or_var);
         if (cached_ls.module && cached_ls.key == key) return true;
         release_ls_module();
 
@@ -1019,6 +1033,7 @@ struct ParametricEngine::Impl {
         std::string src = src_template_ls;
         src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
         src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
 
         const char* header_sources[] = {
             src_cudaLibrary_cu.c_str(),
@@ -1110,8 +1125,13 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
-                                                                    return fail("param_index вне диапазона");
+        if (req.sweep_over_var) {
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index вне диапазона");
+        } else {
+            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                return fail("param_index вне диапазона");
+        }
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
@@ -1122,7 +1142,8 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_ls_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        if (!compile_ls_if_needed(req.krs_body, req.amountOfX,
+                                  req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         const double tMax                       = req.t_max;
         const double NT                         = req.NT;
@@ -1132,7 +1153,10 @@ struct ParametricEngine::Impl {
         const int    amountOfInitialConditions  = req.amountOfX;
         const double* initialConditions         = req.initial_conditions.data();
         double ranges[2]                        = { req.param_lo, req.param_hi };
-        int    indicesOfMutVars[1]              = { req.param_index };
+        // Sweep target: param-sweep → 1-based в localValues; IC-sweep → 0-based в localX.
+        int    indicesOfMutVars[1]              = { req.sweep_over_var
+                                                    ? req.var_sweep_index
+                                                    : req.param_index };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
         const double* values                    = req.base_values.data();

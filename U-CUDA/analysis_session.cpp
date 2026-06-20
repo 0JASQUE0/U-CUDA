@@ -580,6 +580,9 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
     }
     req.param_index = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
+    req.sweep_over_var = c.sweep_over_var;
+    req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
+                          ? c.var_sweep_index : 0;
 
     req.param_lo       = parse_d(c.param_lo_text, 0.0);
     req.param_hi       = parse_d(c.param_hi_text, 1.0);
@@ -743,6 +746,9 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
     }
     req.param_index = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
+    req.sweep_over_var = c.sweep_over_var;
+    req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
+                          ? c.var_sweep_index : 0;
 
     req.param_lo       = parse_d(c.param_lo_text, 0.0);
     req.param_hi       = parse_d(c.param_hi_text, 1.0);

@@ -14,8 +14,9 @@
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 
-// Параметрический свип — тот же режим, что и для bif1d.
-#define par_or_var 1
+// par_or_var выбирает свип-режим compile-time (LLEKernelCUDA читает макрос,
+// не runtime-аргумент). 1 = PARAMETER sweep, 0 = INITIAL CONDITION sweep.
+#define par_or_var {{PAR_OR_VAR}}
 
 // NVRTC не подтягивает <cstdint>, а cudaLibrary.cu использует int64_t.
 #ifdef __CUDACC_RTC__

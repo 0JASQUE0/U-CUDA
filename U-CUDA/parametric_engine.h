@@ -94,6 +94,12 @@ struct LLE1DRequest {
     std::vector<double> initial_conditions;  // длина == amountOfX
     std::vector<double> base_values;         // все параметры системы (с a[0]=0)
 
+    // Sweep target. По умолчанию param-свип (par_or_var=1):
+    //   param_index — 1-based индекс в base_values.
+    // При sweep_over_var=true (par_or_var=0) свип идёт по начальному условию:
+    //   var_sweep_index — 0-based индекс в initial_conditions.
+    bool sweep_over_var = false;
+    int  var_sweep_index = 0;
     int param_index = 0;                     // индекс в base_values (1-based)
     double param_lo = 0.0;
     double param_hi = 1.0;
@@ -147,6 +153,9 @@ struct LS1DRequest {
     int amountOfX = 0;
     std::vector<double> initial_conditions;
     std::vector<double> base_values;
+    // См. LLE1DRequest — те же поля sweep target'а.
+    bool sweep_over_var = false;
+    int  var_sweep_index = 0;
     int param_index = 0;
     double param_lo = 0.0;
     double param_hi = 1.0;
