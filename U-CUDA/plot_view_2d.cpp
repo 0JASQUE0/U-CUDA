@@ -254,6 +254,23 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
+    // Координаты под курсором — справа на уровне X-подписи, пока курсор внутри
+    // плота. Формат: "<x_name> = <val>,  <y_name> = <val>". Если имени оси нет
+    // (axis.name пуст) — используется 'x' / 'y'.
+    if (plot_h_ov) {
+        ImGuiIO& io = ImGui::GetIO();
+        double dx = ex0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (ex1 - ex0);
+        double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
+        const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "%s = %.6g,  %s = %.6g", xn, dx, yn, dy);
+        ImVec2 cs = ImGui::CalcTextSize(buf);
+        float cx = img_pos.x + plot_w - cs.x;
+        float cy = img_pos.y + plot_h + 2.0f + ImGui::GetFontSize() + 6.0f;
+        dl->AddText(ImVec2(cx, cy), col_text, buf);
+    }
+
     // 9. ������� �����
     if (xax_dbl)   fit_x();
     if (yax_dbl)   fit_y();

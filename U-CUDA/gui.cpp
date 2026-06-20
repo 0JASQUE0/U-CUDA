@@ -1223,6 +1223,7 @@ static void draw_bifurcation_plot(AppModel& model) {
         view->points_mode = true;
         view->show_legend = true;    // мульти-БД → нужна легенда (как в Phase)
         view->point_size_px = 2.0f;
+        view->pad_x = false;         // данные впритык к боковым границам плота
         view->x_axis.name = "parameter";
         view->y_axis.name = "X";
     }
@@ -1498,6 +1499,7 @@ static void draw_lle_plot(AppModel& model) {
         view->show_legend = true;
         view->line_thickness_px = 1.5f;
         view->imdraw_lines = true;   // данные поверх осей + надёжная толщина
+        view->pad_x = false;         // кривая впритык к боковым границам плота
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
@@ -1761,6 +1763,7 @@ static void draw_ls_plot(AppModel& model) {
         view->show_legend = true;
         view->line_thickness_px = 1.5f;
         view->imdraw_lines = true;
+        view->pad_x = false;
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
