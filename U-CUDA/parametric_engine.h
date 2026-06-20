@@ -30,8 +30,14 @@ struct Bifurcation1DRequest {
     std::vector<double> initial_conditions;  // длина == amountOfX
     std::vector<double> base_values;         // все параметры системы
 
-    // Изменяемый параметр
-    int param_index = 0;                     // индекс в base_values
+    // Изменяемый параметр (sweep target).
+    // По умолчанию свип идёт по параметру (par_or_var = 1):
+    //   param_index — 1-based индекс в base_values (a[0] зарезервирован).
+    // При sweep_over_var = true (par_or_var = 0) свип идёт по начальному
+    // условию: var_sweep_index — 0-based индекс в initial_conditions.
+    int  param_index    = 0;
+    bool sweep_over_var = false;
+    int  var_sweep_index = 0;
     double param_lo = 0.0;
     double param_hi = 1.0;
     int n_pts = 1000;                        // разрешение по параметру

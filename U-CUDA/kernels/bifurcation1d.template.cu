@@ -18,10 +18,12 @@
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 
-// Для bif1d нам нужен PARAMETER analysis (par_or_var=1). По умолчанию в
-// configCUDA.h стоит 0 (variable/IC analysis) — этот #define перекрывает.
-// configCUDA.h обёрнут в #ifndef par_or_var, конфликта не будет.
-#define par_or_var 1
+// par_or_var выбирает свип-режим compile-time (cudaLibrary.cu использует ЭТОТ
+// макрос, не runtime-аргумент Par_or_Var из сигнатуры kernel'а).
+//   1 = PARAMETER sweep (перебирается localValues[...]).
+//   0 = INITIAL CONDITION sweep (перебирается localX[...]).
+// configCUDA.h оборачивает дефолт в #ifndef par_or_var — конфликта нет.
+#define par_or_var {{PAR_OR_VAR}}
 
 // NVRTC не подтягивает <cstdint> автоматически, а cudaLibrary.cu использует
 // int64_t в getValueByIdx и др. Даём typedef'ы для базовых fixed-width int'ов

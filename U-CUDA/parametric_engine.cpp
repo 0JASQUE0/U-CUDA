@@ -200,12 +200,15 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    bool compile_if_needed(const std::string& krs_body, int amountOfX, std::string& err) {
+    bool compile_if_needed(const std::string& krs_body, int amountOfX,
+                           int par_or_var, std::string& err) {
         // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
         // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
         // выставляем наш перед NVRTC/CU-вызовами.
         cuCtxSetCurrent(context);
-        std::string key = hash_key(krs_body, amountOfX);
+        // par_or_var в kernel'е cudaLibrary.cu — compile-time макрос. Поэтому
+        // включаем его в hash-key: param-sweep и IC-sweep кешируются отдельно.
+        std::string key = hash_key(krs_body, amountOfX) + ":pov" + std::to_string(par_or_var);
         if (cached.module && cached.key == key) return true;  // cache hit
         release_module();
 
@@ -215,6 +218,7 @@ struct ParametricEngine::Impl {
         std::string src = src_template;
         src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
         src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
 
         // Виртуальные заголовки для NVRTC
         const char* header_sources[] = {
@@ -341,8 +345,13 @@ struct ParametricEngine::Impl {
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         // base_values уже идёт со сдвигом +1 (a[0] зарезервирован):
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
-                                                                    return fail("param_index вне диапазона");
+        if (req.sweep_over_var) {
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index вне диапазона");
+        } else {
+            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                return fail("param_index вне диапазона");
+        }
         if (req.writable_var < 0 || req.writable_var >= req.amountOfX)
                                                                     return fail("writable_var вне диапазона");
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
@@ -357,7 +366,8 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
 
         // ---- компиляция или cache hit ----
-        if (!compile_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        if (!compile_if_needed(req.krs_body, req.amountOfX,
+                               req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         // ====================================================================
         // ПОРТ NonLinAnal::bifurcation1D (hostLibrary.cu:165-655).
@@ -370,7 +380,14 @@ struct ParametricEngine::Impl {
         const int    amountOfInitialConditions  = req.amountOfX;
         const double* initialConditions         = req.initial_conditions.data();
         double ranges[2]                        = { req.param_lo, req.param_hi };
-        int    indicesOfMutVars[1]              = { req.param_index };          // уже 1-индексированный
+        // Sweep target:
+        //   param-sweep → indicesOfMutVars[0] = 1-based индекс параметра (a[]),
+        //                 par_or_var_arg = true  → kernel пишет в localValues.
+        //   var-sweep   → indicesOfMutVars[0] = 0-based индекс переменной (X[]),
+        //                 par_or_var_arg = false → kernel пишет в localX.
+        int    indicesOfMutVars[1]              = { req.sweep_over_var
+                                                    ? req.var_sweep_index
+                                                    : req.param_index };
         const int    writableVar                = req.writable_var;
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
@@ -544,7 +561,7 @@ struct ParametricEngine::Impl {
             int    preScaller_int            = preScaller;
             int    writableVar_int           = writableVar;
             double maxValue_arg              = maxValue;
-            bool   par_or_var_arg            = true;   // parametric analysis
+            bool   par_or_var_arg            = !req.sweep_over_var; // true=param, false=IC
 
             void* args_traj[] = {
                 &nPts_int,

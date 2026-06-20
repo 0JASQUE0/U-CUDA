@@ -408,6 +408,9 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
     }
     req.param_index = (bd.param_index >= 0 && bd.param_index < nparams) ? bd.param_index + 1 : 1;
+    req.sweep_over_var = bd.sweep_over_var;
+    req.var_sweep_index = (bd.var_sweep_index >= 0 && bd.var_sweep_index < req.amountOfX)
+                          ? bd.var_sweep_index : 0;
 
     req.param_lo       = parse_d(bd.param_lo_text, 0.0);
     req.param_hi       = parse_d(bd.param_hi_text, 1.0);
