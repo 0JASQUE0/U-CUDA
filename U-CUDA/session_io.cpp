@@ -364,6 +364,8 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"visible\":"          << (c.visible ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"param_index\":"      << c.param_index;
+    o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
+    o << ",\"var_sweep_index\":"  << c.var_sweep_index;
     o << ",\"param_lo_text\":";   jstr(o, c.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, c.param_hi_text);
     o << ",\"n_pts_text\":";      jstr(o, c.n_pts_text);
@@ -385,6 +387,8 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "visible")            c.visible           = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
+    else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "param_lo_text")      c.param_lo_text     = p.str();
     else if (key == "param_hi_text")      c.param_hi_text     = p.str();
     else if (key == "n_pts_text")         c.n_pts_text        = p.str();
@@ -482,6 +486,8 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"visible\":"          << (c.visible ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"param_index\":"      << c.param_index;
+    o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
+    o << ",\"var_sweep_index\":"  << c.var_sweep_index;
     o << ",\"param_lo_text\":";   jstr(o, c.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, c.param_hi_text);
     o << ",\"n_pts_text\":";      jstr(o, c.n_pts_text);
@@ -503,6 +509,8 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "visible")            c.visible           = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
+    else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "param_lo_text")      c.param_lo_text     = p.str();
     else if (key == "param_hi_text")      c.param_hi_text     = p.str();
     else if (key == "n_pts_text")         c.n_pts_text        = p.str();

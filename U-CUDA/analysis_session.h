@@ -276,6 +276,11 @@ struct LLECurveConfig {
     std::string scheme         = "Euler";
 
     int         param_index    = 0;
+    // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
+    // переменной vars[var_sweep_index] вместо параметра. Engine выберет
+    // соответствующий par_or_var compile-time через template substitution.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";
@@ -345,6 +350,11 @@ struct LSCurveConfig {
     std::string scheme         = "Euler";
 
     int         param_index    = 0;
+    // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
+    // переменной vars[var_sweep_index] вместо параметра. Engine выберет
+    // соответствующий par_or_var compile-time через template substitution.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";
