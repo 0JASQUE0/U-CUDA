@@ -30,6 +30,14 @@ public:
     bool show_zero_x = true;
     bool show_zero_y = true;
 
+    // Принудительный X-диапазон для autofit. Если x_fit_use_explicit=true,
+    // do_autofit/fit_x возьмут (x_fit_min, x_fit_max) вместо bbox данных.
+    // Нужно для BD/LLE/LS: X-ось должна охватывать ВЕСЬ sweep-диапазон,
+    // даже если часть параметров диверговала и точки отсутствуют.
+    bool   x_fit_use_explicit = false;
+    double x_fit_min = 0.0;
+    double x_fit_max = 1.0;
+
     // true: ������ ��� GL_POINTS (��� 1D-�����������).
     // false (��-���������): GL_LINE_STRIP, ��� ��� ��� ��������� ����������.
     bool points_mode = false;

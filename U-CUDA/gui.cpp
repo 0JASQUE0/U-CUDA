@@ -1107,6 +1107,22 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     }
     InputNumStr("Param lo", bd.param_lo_text, 120);
     InputNumStr("Param hi", bd.param_hi_text, 120);
+
+    // Continuation: каждая следующая точка стартует с конечного x[] предыдущей
+    // (single-thread GPU-kernel; см. parametric_engine::run_bif1d_continuation).
+    // При активации справа появляются radio forward/backward — для гистерезиса.
+    {
+        bool cont = bd.continuation;
+        if (ImGui::Checkbox("Continuation", &cont)) bd.continuation = cont;
+        if (bd.continuation) {
+            ImGui::SameLine();
+            int dir = bd.continuation_reverse ? 1 : 0;
+            ImGui::RadioButton("forward",  &dir, 0); ImGui::SameLine();
+            ImGui::RadioButton("backward", &dir, 1);
+            bd.continuation_reverse = (dir == 1);
+        }
+    }
+
     ImGui::Separator();
 
     // ----- Variable + resolution + inter-peaks -----
@@ -1284,13 +1300,14 @@ static void draw_bifurcation_plot(AppModel& model) {
         return std::atof(v.c_str());
     };
 
-    // Подписи осей: X = имя свип-таргета (параметр или переменная-IC) если все
-    // видимые БД свипают одно и то же; иначе generic "parameter". Y = имя
-    // writable_var, если все БД пишут одну и ту же переменную; иначе "X".
-    // Свип-таргет — пара (sweep_over_var, idx). Сравниваем как пару.
+    // Подписи осей + X-fit диапазон: пробегаем по видимым БД, собираем общий
+    // sweep-таргет и union (lo, hi) sweep-диапазонов. X-ось должна охватывать
+    // ВСЁ что свипалось — даже если часть параметров не дала точек.
     int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
     int shared_idx  = -2;
     int shared_var_idx = -2;
+    double x_fit_lo = 0.0, x_fit_hi = 0.0;
+    bool   x_fit_any = false;
     for (const auto& bd : s.diagrams) {
         if (!bd.visible || !bd.last_run_ok) continue;
         int kind = bd.sweep_over_var ? 1 : 0;
@@ -1301,7 +1318,18 @@ static void draw_bifurcation_plot(AppModel& model) {
         }
         if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
         else if (shared_var_idx != bd.writable_var) shared_var_idx = -1;
+        // X-range: continuation сохраняет lo/hi в result, иначе берём из текстов.
+        double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
+                    ? bd.result.param_lo : safe_stod(bd.param_lo_text, 0.0);
+        double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
+                    ? bd.result.param_hi : safe_stod(bd.param_hi_text, 1.0);
+        double a = std::min(lo, hi), b = std::max(lo, hi);
+        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
+        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
     }
+    view->x_fit_use_explicit = x_fit_any;
+    view->x_fit_min = x_fit_lo;
+    view->x_fit_max = x_fit_hi;
     if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
         view->x_axis.name = s.params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
@@ -1335,12 +1363,21 @@ static void draw_bifurcation_plot(AppModel& model) {
         if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) {
             const auto& source = bd.plot_inter_peaks ? bd.result.peak_times
                                                      : bd.result.bifurcation_points;
-            double lo = safe_stod(bd.param_lo_text, 0.0);
-            double hi = safe_stod(bd.param_hi_text, 1.0);
+            // Continuation result хранит param_lo/hi-снапшот. Classical путь
+            // его не заполняет — fallback на текущие текстовые поля.
+            double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
+                        ? bd.result.param_lo : safe_stod(bd.param_lo_text, 0.0);
+            double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
+                        ? bd.result.param_hi : safe_stod(bd.param_hi_text, 1.0);
+            bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() && bd.result.flags[k] < 0) continue;
-                double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                double x;
+                if (rev)
+                    x = (npts > 1) ? (hi - (hi - lo) * (double)k / (double)(npts - 1)) : hi;
+                else
+                    x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
                 if (k >= (int)source.size()) continue;
                 for (double y : source[k]) {
                     buf.push_back((float)x);
@@ -1596,10 +1633,12 @@ static void draw_lle_plot(AppModel& model) {
         return std::atof(v.c_str());
     };
 
-    // Подпись X: если все видимые кривые свипают одно и то же (param или IC) —
-    // показываем имя; иначе generic "parameter". См. BD.
+    // Подпись X + X-fit диапазон. См. BD: ось охватывает union(lo, hi)
+    // всех видимых кривых, не зависит от того, где есть/нет точек.
     int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
     int shared_idx  = -2;
+    double x_fit_lo = 0.0, x_fit_hi = 0.0;
+    bool   x_fit_any = false;
     for (const auto& c : s.curves) {
         if (!c.visible || !c.last_run_ok) continue;
         int kind = c.sweep_over_var ? 1 : 0;
@@ -1608,7 +1647,15 @@ static void draw_lle_plot(AppModel& model) {
         else if (shared_kind != kind || shared_idx != idx) {
             shared_kind = -1; shared_idx = -1;
         }
+        double lo = c.result.param_lo, hi = c.result.param_hi;
+        if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
+        double a = std::min(lo, hi), b = std::max(lo, hi);
+        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
+        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
     }
+    view->x_fit_use_explicit = x_fit_any;
+    view->x_fit_min = x_fit_lo;
+    view->x_fit_max = x_fit_hi;
     if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
         view->x_axis.name = s.params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
@@ -1895,14 +1942,35 @@ static void draw_ls_plot(AppModel& model) {
         return std::atof(v.c_str());
     };
 
-    int shared_param_idx = -2;
+    // Подпись X + X-fit диапазон. См. BD/LLE: ось охватывает union(lo, hi)
+    // всех видимых спектров, не зависит от наличия точек.
+    int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
+    int shared_idx  = -2;
+    double x_fit_lo = 0.0, x_fit_hi = 0.0;
+    bool   x_fit_any = false;
     for (const auto& c : s.curves) {
         if (!c.visible || !c.last_run_ok) continue;
-        if (shared_param_idx == -2) shared_param_idx = c.param_index;
-        else if (shared_param_idx != c.param_index) shared_param_idx = -1;
+        int kind = c.sweep_over_var ? 1 : 0;
+        int idx  = c.sweep_over_var ? c.var_sweep_index : c.param_index;
+        if (shared_kind == -2) { shared_kind = kind; shared_idx = idx; }
+        else if (shared_kind != kind || shared_idx != idx) {
+            shared_kind = -1; shared_idx = -1;
+        }
+        double lo = c.result.param_lo, hi = c.result.param_hi;
+        if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
+        double a = std::min(lo, hi), b = std::max(lo, hi);
+        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
+        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
     }
-    view->x_axis.name = (shared_param_idx >= 0 && shared_param_idx < (int)s.params.size())
-                          ? s.params[shared_param_idx] : std::string("parameter");
+    view->x_fit_use_explicit = x_fit_any;
+    view->x_fit_min = x_fit_lo;
+    view->x_fit_max = x_fit_hi;
+    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
+        view->x_axis.name = s.params[shared_idx];
+    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
+        view->x_axis.name = s.vars[shared_idx] + " (IC)";
+    else
+        view->x_axis.name = "parameter";
 
     // Подсчитываем общее число серий — sum(n_exponents per curve).
     size_t total_series = 0;

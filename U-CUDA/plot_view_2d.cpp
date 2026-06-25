@@ -11,13 +11,30 @@ void Plot2DView::do_autofit() {
     if (ok) {
         double padx = pad_x ? (xmax - xmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
         double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
-        x_axis.view_min = xmin - padx; x_axis.view_max = xmax + padx;
+        if (x_fit_use_explicit) {
+            x_axis.view_min = x_fit_min;
+            x_axis.view_max = x_fit_max;
+        } else {
+            x_axis.view_min = xmin - padx;
+            x_axis.view_max = xmax + padx;
+        }
         y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+        view_valid = true;
+    }
+    else if (x_fit_use_explicit) {
+        // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
+        x_axis.view_min = x_fit_min;
+        x_axis.view_max = x_fit_max;
         view_valid = true;
     }
 }
 
 void Plot2DView::fit_x() {
+    if (x_fit_use_explicit) {
+        x_axis.view_min = x_fit_min;
+        x_axis.view_max = x_fit_max;
+        return;
+    }
     float xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
