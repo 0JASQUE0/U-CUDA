@@ -11,6 +11,7 @@
 #include <future>
 #include <mutex>
 #include <atomic>
+#include <deque>
 
 // Функция-распознаватель: PNG-байты -> LaTeX. Внедряется снаружи,
 // чтобы модель не зависела от OcrClient напрямую (и была тестируема).
@@ -18,6 +19,15 @@ using OcrFn = std::function<std::string(const std::vector<unsigned char>&)>;
 
 // Способ ввода системы.
 enum class InputMode { Image, Latex, Plain };
+
+// Один элемент общей parametric-очереди: какой анализ + индекс в его сессии.
+// Очередь живёт в AppModel и драйнится в draw_gui после polls. См. план
+// «Cross-analysis batch Run all».
+struct ParametricQueueItem {
+    enum class Kind { Bifurcation, LLE, LS };
+    Kind kind = Kind::Bifurcation;
+    int  index = 0;
+};
 
 // Состояние распознавания (для UI-индикации).
 enum class OcrState { Idle, Running, Done, Failed };
@@ -112,6 +122,23 @@ public:
 
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
+
+    // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
+    // BD/LLE/LS. start_next_in_parametric_queue() драйнит её серийно (engine один).
+    std::deque<ParametricQueueItem> parametric_queue;
+
+    // Если ни одна из трёх сессий не in_flight и очередь не пуста — снимает
+    // элемент с фронта и запускает run_async соответствующей сессии.
+    // Возвращает true если что-то стартовало. Безопасно вызывать каждый кадр.
+    bool start_next_in_parametric_queue();
+
+    // Удаление конфига + чистка очереди (убрать item с этим индексом, у
+    // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
+    // вместо прямого session.remove_*, чтобы очередь не указывала на
+    // удалённые слоты.
+    void remove_bifurcation_diagram(int i);
+    void remove_lle_curve(int i);
+    void remove_ls_curve(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.

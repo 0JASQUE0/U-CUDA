@@ -1246,7 +1246,7 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::EndTabBar();
     }
     if (active_now >= 0) s.active_diagram_index = active_now;
-    if (to_remove >= 0) s.remove_diagram(to_remove);
+    if (to_remove >= 0) model.remove_bifurcation_diagram(to_remove);
 
     // Ctrl+R на уровне всей панели — запускает Run для активной вкладки.
     if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
@@ -1579,7 +1579,7 @@ static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::EndTabBar();
     }
     if (active_now >= 0) s.active_curve_index = active_now;
-    if (to_remove >= 0) s.remove_curve(to_remove);
+    if (to_remove >= 0) model.remove_lle_curve(to_remove);
 
     if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
         ImGui::IsKeyPressed(ImGuiKey_R, false)) {
@@ -1887,7 +1887,7 @@ static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::EndTabBar();
     }
     if (active_now >= 0) s.active_curve_index = active_now;
-    if (to_remove >= 0) s.remove_curve(to_remove);
+    if (to_remove >= 0) model.remove_ls_curve(to_remove);
 
     if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
         ImGui::IsKeyPressed(ImGuiKey_R, false)) {
@@ -2091,6 +2091,87 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     if (any_in_flight) ImGui::EndDisabled();
     ImGui::Separator();
 
+    // Batch Run all — global across BD/LLE/LS. Popup shows checkboxes for
+    // every configured diagram/curve/spectrum; Run pushes selected to
+    // model.parametric_queue and starts the first one. draw_gui ticks the
+    // queue after polls.
+    if (any_in_flight) ImGui::BeginDisabled();
+    if (ImGui::Button("Run all..."))
+        ImGui::OpenPopup("##run_all_parametric");
+    if (any_in_flight) ImGui::EndDisabled();
+    if (!model.parametric_queue.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu queued)", model.parametric_queue.size());
+    }
+    if (ImGui::BeginPopup("##run_all_parametric")) {
+        static std::vector<bool> picks_bd, picks_lle, picks_ls;
+        auto fit = [&](std::vector<bool>& v, size_t n) {
+            if (v.size() != n) v.assign(n, true);
+        };
+        fit(picks_bd,  model.bifurcation_session.diagrams.size());
+        fit(picks_lle, model.lle_session.curves.size());
+        fit(picks_ls,  model.ls_session.curves.size());
+
+        ImGui::TextDisabled("Sequential (one CUDA context).");
+
+        if (!picks_bd.empty()) {
+            ImGui::SeparatorText("Bifurcation");
+            for (size_t i = 0; i < picks_bd.size(); ++i) {
+                bool v = picks_bd[i];
+                std::string lbl = model.bifurcation_session.diagrams[i].label
+                                  + "###pbd_" + std::to_string(i);
+                if (ImGui::Checkbox(lbl.c_str(), &v)) picks_bd[i] = v;
+            }
+        }
+        if (!picks_lle.empty()) {
+            ImGui::SeparatorText("LLE");
+            for (size_t i = 0; i < picks_lle.size(); ++i) {
+                bool v = picks_lle[i];
+                std::string lbl = model.lle_session.curves[i].label
+                                  + "###plle_" + std::to_string(i);
+                if (ImGui::Checkbox(lbl.c_str(), &v)) picks_lle[i] = v;
+            }
+        }
+        if (!picks_ls.empty()) {
+            ImGui::SeparatorText("LS");
+            for (size_t i = 0; i < picks_ls.size(); ++i) {
+                bool v = picks_ls[i];
+                std::string lbl = model.ls_session.curves[i].label
+                                  + "###pls_" + std::to_string(i);
+                if (ImGui::Checkbox(lbl.c_str(), &v)) picks_ls[i] = v;
+            }
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("All")) {
+            for (auto&& b : picks_bd)  b = true;
+            for (auto&& b : picks_lle) b = true;
+            for (auto&& b : picks_ls)  b = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("None")) {
+            for (auto&& b : picks_bd)  b = false;
+            for (auto&& b : picks_lle) b = false;
+            for (auto&& b : picks_ls)  b = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Run")) {
+            for (size_t i = 0; i < picks_bd.size(); ++i)
+                if (picks_bd[i])
+                    model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, (int)i});
+            for (size_t i = 0; i < picks_lle.size(); ++i)
+                if (picks_lle[i])
+                    model.parametric_queue.push_back({ParametricQueueItem::Kind::LLE, (int)i});
+            for (size_t i = 0; i < picks_ls.size(); ++i)
+                if (picks_ls[i])
+                    model.parametric_queue.push_back({ParametricQueueItem::Kind::LS, (int)i});
+            model.start_next_in_parametric_queue();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::Separator();
+
     if (ImGui::BeginTabBar("##parm_top")) {
         if (ImGui::BeginTabItem("Bifurcation")) {
             model.parametric_active_analysis = 0;
@@ -2160,6 +2241,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                              session_to_json(model.phase_session));
     }
 
+    // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
+    // очереди есть элементы — берём следующий и стартуем. start_next сам
+    // проверяет условие и безопасен к вызову каждый кадр.
+    model.start_next_in_parametric_queue();
+
     // переключатель режимов
     int mode = (int)model.app_mode;
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
@@ -2201,8 +2287,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     if (!busy_what.empty()) {
         double secs = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - busy_start).count();
-        char text[128];
-        std::snprintf(text, sizeof(text), "Computing %s... %.1fs", busy_what.c_str(), secs);
+        char text[160];
+        // Если в очереди ещё что-то — дописываем "(+N)" для прогресса батча.
+        if (!model.parametric_queue.empty())
+            std::snprintf(text, sizeof(text), "Computing %s... %.1fs (+%zu)",
+                          busy_what.c_str(), secs, model.parametric_queue.size());
+        else
+            std::snprintf(text, sizeof(text), "Computing %s... %.1fs", busy_what.c_str(), secs);
         float text_w = ImGui::CalcTextSize(text).x;
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
