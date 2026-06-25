@@ -40,3 +40,17 @@ System parse_system_from_latex(const std::string& multiline_latex,
 //   g(s) = ...
 // Возвращает словарь определений. Бросает при синтаксической ошибке.
 FuncDefs parse_func_defs(const std::string& text);
+
+// Результат авто-распознавания алфавита по тексту LaTeX/Plain.
+struct DetectedAlphabet {
+    std::vector<std::string> vars;    // символы внутри производных
+    std::vector<std::string> params;  // остальные идентификаторы
+};
+
+// Сканирует текст и классифицирует все идентификаторы:
+//   - всё, что встречается внутри \dot{X} / \frac{dX}{dt} / X' / dX/dt → vars
+//   - все остальные идентификаторы (буквы + греки типа \alpha) → params
+// Из params исключаются: math-функции (sin/cos/exp/log/...) и LaTeX-команды
+// (\frac/\dot/\left/...). Порядок в выводе — по первому появлению в тексте.
+// Дубликаты не повторяются.
+DetectedAlphabet detect_alphabet(const std::string& text);

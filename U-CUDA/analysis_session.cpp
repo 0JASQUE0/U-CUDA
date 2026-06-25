@@ -258,6 +258,7 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return Scheme::EulerCromer;
     if (s == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
     if (s == "RK4")               return Scheme::RK4;
+    if (s == "DOPRI78")           return Scheme::DOPRI78;
     return Scheme::Euler;
 }
 

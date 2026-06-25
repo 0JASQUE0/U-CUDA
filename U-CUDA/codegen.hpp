@@ -15,7 +15,10 @@ struct System {
 };
 
 // Конечно-разностные схемы интегрирования.
-enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4 };
+// DOPRI78 — Dormand-Prince 8(7), 13-стадийный embedded метод (см. scheme_dopri78
+// в codegen.cpp). Сейчас используется только 8-й порядок (b[0]); 7-й порядок (z)
+// тоже считается — резерв под будущий адаптивный шаг по |y-z|.
+enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78 };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.

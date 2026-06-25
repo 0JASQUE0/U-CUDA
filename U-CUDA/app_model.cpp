@@ -125,6 +125,7 @@ SystemRecord AppModel::to_record() const {
     r.scheme_cromer = scheme_cromer;
     r.scheme_midpoint = scheme_midpoint;
     r.scheme_rk4 = scheme_rk4;
+    r.scheme_dopri78 = scheme_dopri78;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
     r.param_values = param_values;
@@ -152,6 +153,7 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_cromer = r.scheme_cromer;
     scheme_midpoint = r.scheme_midpoint;
     scheme_rk4 = r.scheme_rk4;
+    scheme_dopri78 = r.scheme_dopri78;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
     param_values = r.param_values;
@@ -164,7 +166,7 @@ void AppModel::from_record(const SystemRecord& r) {
     // сразу перегенерируем код загруженной системы (если выбраны методы),
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
-    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4)
+    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78)
         generate();
 }
 
@@ -183,7 +185,7 @@ void AppModel::clear() {
     params_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
-    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = false;
+    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = false;
     step_h.clear();
     init_conditions.clear();
     param_values.clear();

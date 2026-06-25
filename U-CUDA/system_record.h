@@ -39,6 +39,7 @@ struct SystemRecord {
     bool scheme_cromer   = false;
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
+    bool scheme_dopri78  = false;
 
     // Пользовательские именованные КРС (см. CustomScheme выше).
     std::vector<CustomScheme> custom_schemes;
