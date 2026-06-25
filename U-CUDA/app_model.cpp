@@ -237,3 +237,67 @@ bool AppModel::start_parametric_analysis() {
     ls_session.loaded_system_name          = name;
     return true;
 }
+
+// ============================================================================
+// Cross-analysis batch queue
+// ============================================================================
+
+bool AppModel::start_next_in_parametric_queue() {
+    if (bifurcation_session.in_flight ||
+        lle_session.in_flight ||
+        ls_session.in_flight) return false;
+    if (parametric_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!parametric_queue.empty()) {
+        ParametricQueueItem it = parametric_queue.front();
+        parametric_queue.pop_front();
+        bool ok = false;
+        switch (it.kind) {
+        case ParametricQueueItem::Kind::Bifurcation:
+            if (it.index >= 0 && it.index < (int)bifurcation_session.diagrams.size())
+                ok = bifurcation_session.run_async(*parametric_engine, it.index);
+            break;
+        case ParametricQueueItem::Kind::LLE:
+            if (it.index >= 0 && it.index < (int)lle_session.curves.size())
+                ok = lle_session.run_async(*parametric_engine, it.index);
+            break;
+        case ParametricQueueItem::Kind::LS:
+            if (it.index >= 0 && it.index < (int)ls_session.curves.size())
+                ok = ls_session.run_async(*parametric_engine, it.index);
+            break;
+        }
+        if (ok) return true;
+        // ok == false (например, krs пуст / индекс плохой) — last_error
+        // выставлен соответствующим run_async; идём дальше.
+    }
+    return false;
+}
+
+namespace {
+// Помощник: убрать из очереди элементы с (kind == k && index == removed),
+// для оставшихся того же kind: index > removed → --index.
+void cleanup_queue_after_removal(std::deque<ParametricQueueItem>& q,
+                                 ParametricQueueItem::Kind k, int removed) {
+    for (auto it = q.begin(); it != q.end(); ) {
+        if (it->kind == k && it->index == removed) it = q.erase(it);
+        else ++it;
+    }
+    for (auto& it : q)
+        if (it.kind == k && it.index > removed) --it.index;
+}
+} // namespace
+
+void AppModel::remove_bifurcation_diagram(int i) {
+    bifurcation_session.remove_diagram(i);
+    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::Bifurcation, i);
+}
+
+void AppModel::remove_lle_curve(int i) {
+    lle_session.remove_curve(i);
+    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LLE, i);
+}
+
+void AppModel::remove_ls_curve(int i) {
+    ls_session.remove_curve(i);
+    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LS, i);
+}
