@@ -38,6 +38,13 @@ struct Bifurcation1DRequest {
     int  param_index    = 0;
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
+    // Continuation: каждая новая точка параметра стартует с конечного x[]
+    // предыдущей (вместо сброса на initial_conditions). Игнорируется при
+    // sweep_over_var = true (валидатор отказывает).
+    //   continuation_reverse = false → forward (lo→hi)
+    //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
+    bool continuation = false;
+    bool continuation_reverse = false;
     double param_lo = 0.0;
     double param_hi = 1.0;
     int n_pts = 1000;                        // разрешение по параметру
@@ -64,6 +71,13 @@ struct Bifurcation1DResult {
     bool ok = false;
     std::string error;
 
+    // Снапшот режима continuation на момент Run — GUI использует флаг для
+    // корректного построения X точек (reverse → x = hi - (hi-lo)*i/(n-1)).
+    bool continuation_reverse = false;
+    // Снапшот диапазона — чтобы GUI считал X для continuation одинаково,
+    // не завися от правок текстовых полей после Run.
+    double param_lo = 0.0;
+    double param_hi = 1.0;
     int n_pts = 0;
     int record_steps = 0;
 

@@ -174,6 +174,12 @@ struct BifurcationDiagramConfig {
     // переключаем только индекс + флаг в engine — никакой пересборки PTX.
     bool        sweep_over_var = false;
     int         var_sweep_index = 0;
+    // Continuation: следующая точка параметра стартует с конечного x[]
+    // предыдущей. Требует sweep_over_var=false. Reverse — направление
+    // обхода (forward lo→hi vs backward hi→lo) для visualisation of
+    // hysteresis (forward и reverse BD на одном плоте).
+    bool        continuation = false;
+    bool        continuation_reverse = false;
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";

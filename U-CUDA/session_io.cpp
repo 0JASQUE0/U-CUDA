@@ -217,6 +217,8 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"param_index\":"      << bd.param_index;
     o << ",\"sweep_over_var\":"   << (bd.sweep_over_var ? "true" : "false");
     o << ",\"var_sweep_index\":"  << bd.var_sweep_index;
+    o << ",\"continuation\":"     << (bd.continuation ? "true" : "false");
+    o << ",\"continuation_reverse\":" << (bd.continuation_reverse ? "true" : "false");
     o << ",\"param_lo_text\":";   jstr(o, bd.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, bd.param_hi_text);
     o << ",\"n_pts_text\":";      jstr(o, bd.n_pts_text);
@@ -244,6 +246,8 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     bd.sweep_over_var    = p.boolean();
     else if (key == "var_sweep_index")    bd.var_sweep_index   = std::stoi(p.str_or_num());
+    else if (key == "continuation")       bd.continuation      = p.boolean();
+    else if (key == "continuation_reverse") bd.continuation_reverse = p.boolean();
     else if (key == "param_lo_text")      bd.param_lo_text     = p.str();
     else if (key == "param_hi_text")      bd.param_hi_text     = p.str();
     else if (key == "n_pts_text")         bd.n_pts_text        = p.str();

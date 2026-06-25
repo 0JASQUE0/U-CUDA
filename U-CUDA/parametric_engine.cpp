@@ -99,8 +99,34 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cu;
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
+    // Минимальный curand_kernel.h-stub, подаётся как virtual header в NVRTC.
+    // Нужен потому что в CUDA 13+ настоящий curand_kernel.h полагается на
+    // <cuda/std/type_traits> (libcudacxx), которого NVRTC не находит без
+    // дополнительных include-путей. Stub предоставляет ровно те символы,
+    // что использует NonLinAnal в LLE/LS-кернелах: curandState_t,
+    // curand_init, curand_uniform. Реализация — детерминированный LCG.
+    // Имя файла "curand_kernel.h", поэтому стандартный
+    // `#include <curand_kernel.h>` из cudaLibrary.cuh берёт ЕГО, а не
+    // системный (virtual headers ищутся NVRTC первыми).
+    static constexpr const char* src_curand_stub =
+        "#pragma once\n"
+        "#ifndef U_CUDA_CURAND_STUB_H\n"
+        "#define U_CUDA_CURAND_STUB_H\n"
+        "typedef struct { unsigned long long state; } curandState_t;\n"
+        "typedef curandState_t curandStateXORWOW_t;\n"
+        "__device__ __forceinline__ void curand_init(\n"
+        "    unsigned long long seed, unsigned long long /*subseq*/,\n"
+        "    unsigned long long /*offset*/, curandState_t* s) {\n"
+        "    s->state = seed * 6364136223846793005ULL + 1442695040888963407ULL;\n"
+        "}\n"
+        "__device__ __forceinline__ float curand_uniform(curandState_t* s) {\n"
+        "    s->state = s->state * 6364136223846793005ULL + 1442695040888963407ULL;\n"
+        "    return (float)(((s->state >> 40) & 0xFFFFFFULL) + 1ULL) / 16777216.0f;\n"
+        "}\n"
+        "#endif\n";
     std::string src_configCUDA_h;
     std::string src_template;        // bifurcation1d.template.cu
+    std::string src_template_cont;   // bifurcation1d_cont.template.cu
     std::string src_template_lle;    // lle1d.template.cu
     std::string src_template_ls;     // ls1d.template.cu
     bool srcs_loaded = false;
@@ -129,12 +155,23 @@ struct ParametricEngine::Impl {
     };
     CachedLsModule cached_ls;
 
+    // Continuation bif1d — четвёртый слот. Кернел single-thread, плюс
+    // peakFinderCUDA из того же модуля (он определён в cudaLibrary.cu).
+    struct CachedContModule {
+        std::string key;
+        CUmodule    module     = nullptr;
+        CUfunction  kernel_cont = nullptr;  // bifurcation1dContinuationKernel
+        CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
+    };
+    CachedContModule cached_cont;
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
             release_module();
             release_lle_module();
             release_ls_module();
+            release_cont_module();
             cuCtxDestroy(context);
         }
     }
@@ -167,6 +204,16 @@ struct ParametricEngine::Impl {
         }
     }
 
+    void release_cont_module() {
+        if (cached_cont.module) {
+            cuModuleUnload(cached_cont.module);
+            cached_cont.module = nullptr;
+            cached_cont.kernel_cont = nullptr;
+            cached_cont.kernel_peak = nullptr;
+            cached_cont.key.clear();
+        }
+    }
+
     bool ensure_init(std::string& err) {
         if (inited) return true;
         CUresult r = cuInit(0);
@@ -189,9 +236,10 @@ struct ParametricEngine::Impl {
         if (srcs_loaded) return true;
         std::string root = exe_dir() + "\\kernels\\";
         std::string e;
-        src_template          = read_text_file(root + "bifurcation1d.template.cu", e); if (!e.empty()) { err = e; return false; }
-        src_template_lle      = read_text_file(root + "lle1d.template.cu",         e); if (!e.empty()) { err = e; return false; }
-        src_template_ls       = read_text_file(root + "ls1d.template.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_template          = read_text_file(root + "bifurcation1d.template.cu",      e); if (!e.empty()) { err = e; return false; }
+        src_template_cont     = read_text_file(root + "bifurcation1d_cont.template.cu", e); if (!e.empty()) { err = e; return false; }
+        src_template_lle      = read_text_file(root + "lle1d.template.cu",              e); if (!e.empty()) { err = e; return false; }
+        src_template_ls       = read_text_file(root + "ls1d.template.cu",               e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -226,14 +274,16 @@ struct ParametricEngine::Impl {
             src_cudaLibrary_cuh.c_str(),
             src_cudaMacros_cuh.c_str(),
             src_configCUDA_h.c_str(),
+            src_curand_stub,
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
             "cudaLibrary.cuh",
             "cudaMacros.cuh",
             "configCUDA.h",
+            "curand_kernel.h",
         };
-        constexpr int n_headers = 4;
+        constexpr int n_headers = 5;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d.cu",
@@ -336,6 +386,18 @@ struct ParametricEngine::Impl {
     //   - Результат пишется в Bifurcation1DResult (память + CSV), не в файл
     // =========================================================================
     Bifurcation1DResult run_bif1d(const Bifurcation1DRequest& req) {
+        // Continuation требует sequential x-carry — это совсем другой путь
+        // (single-thread kernel). Отказываем при IC-sweep (не имеет смысла:
+        // continuation подразумевает param как непрерывный параметр).
+        if (req.continuation) {
+            if (req.sweep_over_var) {
+                Bifurcation1DResult r;
+                r.error = "continuation требует param-sweep, не IC-sweep";
+                return r;
+            }
+            return run_bif1d_continuation(req);
+        }
+
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
@@ -1350,6 +1412,251 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef LS_CHECK
         #undef LS_CHECK_CU
+        res.ok = true;
+        return res;
+    }
+
+    // =========================================================================
+    // compile_bif1d_cont_if_needed — отдельный модуль (single-thread sequential
+    // continuation kernel + peakFinderCUDA). Cache key с суффиксом :cont.
+    // =========================================================================
+    bool compile_bif1d_cont_if_needed(const std::string& krs_body, int amountOfX,
+                                      std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":cont";
+        if (cached_cont.module && cached_cont.key == key) return true;
+        release_cont_module();
+
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template_cont;
+        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
+        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+            src_curand_stub,
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu", "cudaLibrary.cuh", "cudaMacros.cuh", "configCUDA.h",
+            "curand_kernel.h",
+        };
+        constexpr int n_headers = 5;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d_cont.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(cont): ") + nvrtcGetErrorString(nr); return false; }
+
+        // bifurcation1dContinuationKernel — extern "C" (имя не мангается).
+        // peakFinderCUDA — обычный C++ символ, регистрируем для mangled-имени.
+        nvrtcAddNameExpression(prog, "peakFinderCUDA");
+
+        char arch[64];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
+        if (cuda_include_opt.empty()) {
+            err = "CUDA_PATH не задан";
+            nvrtcDestroyProgram(&prog); return false;
+        }
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile failed (cont):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        const char* mangled_peak_ptr = nullptr;
+        nvrtcGetLoweredName(prog, "peakFinderCUDA", &mangled_peak_ptr);
+        std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&cached_cont.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(cont): " + cu_err(r); return false; }
+
+        r = cuModuleGetFunction(&cached_cont.kernel_cont, cached_cont.module,
+                                "bifurcation1dContinuationKernel");
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(bifurcation1dContinuationKernel): " + cu_err(r);
+            release_cont_module(); return false;
+        }
+        r = cuModuleGetFunction(&cached_cont.kernel_peak, cached_cont.module, mangled_peak.c_str());
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
+            release_cont_module(); return false;
+        }
+
+        cached_cont.key = key;
+        return true;
+    }
+
+    // =========================================================================
+    // run_bif1d_continuation — single-thread sequential. Каждый параметр
+    // стартует с конечного x[] предыдущего. Direction (forward/reverse)
+    // обрабатывается в kernel'е. PeakFinderCUDA вызывается из того же модуля.
+    // =========================================================================
+    Bifurcation1DResult run_bif1d_continuation(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                    return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                                                                     return fail("param_index вне диапазона");
+        if (req.writable_var < 0 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err))
+            return fail(err);
+
+        const int amountOfPointsInBlock = (int)(req.t_max / req.h / req.pre_scaller);
+        const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+        if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+        const int nPts = req.n_pts;
+        double* d_data       = nullptr;
+        double* d_baseValues = nullptr;
+        double* d_baseX      = nullptr;
+        int*    d_amountOfPeaks = nullptr;
+        double* d_outPeaks   = nullptr;
+        double* d_timeOfPeaks= nullptr;
+
+        auto cleanup = [&]() {
+            if (d_data)       cudaFree(d_data);
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_amountOfPeaks) cudaFree(d_amountOfPeaks);
+            if (d_outPeaks)   cudaFree(d_outPeaks);
+            if (d_timeOfPeaks)cudaFree(d_timeOfPeaks);
+        };
+        #define C_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define C_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        const size_t dataBytes  = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(double);
+        C_CHECK(cudaMalloc((void**)&d_data,         dataBytes),                                       "cudaMalloc d_data");
+        C_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(double)), "cudaMalloc d_baseValues");
+        C_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(double)),          "cudaMalloc d_baseX");
+        C_CHECK(cudaMalloc((void**)&d_amountOfPeaks,(size_t)nPts * sizeof(int)),                      "cudaMalloc d_amountOfPeaks");
+        C_CHECK(cudaMalloc((void**)&d_outPeaks,     dataBytes),                                       "cudaMalloc d_outPeaks");
+        C_CHECK(cudaMalloc((void**)&d_timeOfPeaks,  dataBytes),                                       "cudaMalloc d_timeOfPeaks");
+
+        C_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
+                           req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        C_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
+                           (size_t)req.amountOfX * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseX");
+        C_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        // --- Launch continuation kernel ---
+        int    nPts_arg              = nPts;
+        double lo_arg                = req.param_lo;
+        double hi_arg                = req.param_hi;
+        bool   reverse_arg           = req.continuation_reverse;
+        int    mutParamIdx_arg       = req.param_index;
+        int    amountOfValues_arg    = (int)req.base_values.size();
+        int    amountOfX_arg         = req.amountOfX;
+        double h_arg                 = req.h;
+        int    transient_steps_arg   = amountOfPointsForSkip;
+        int    sizeOfBlock_arg       = amountOfPointsInBlock;
+        int    preScaller_arg        = req.pre_scaller;
+        int    writableVar_arg       = req.writable_var;
+        double maxValue_arg          = req.max_value;
+
+        void* cont_args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg,
+            &mutParamIdx_arg,
+            &d_baseValues, &amountOfValues_arg,
+            &d_baseX,      &amountOfX_arg,
+            &h_arg, &transient_steps_arg, &sizeOfBlock_arg, &preScaller_arg,
+            &writableVar_arg, &maxValue_arg,
+            &d_data, &d_amountOfPeaks
+        };
+        C_CHECK_CU(cuLaunchKernel(cached_cont.kernel_cont,
+                                  1, 1, 1, 1, 1, 1, 0, nullptr, cont_args, nullptr),
+                   "cuLaunchKernel(cont)");
+        C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
+
+        // --- Launch peakFinderCUDA на полученные данные ---
+        // Сигнатура: (numb* data, size_t sizeOfBlock, int amountOfBlocks,
+        //             int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
+        size_t sizeOfBlock_s = (size_t)amountOfPointsInBlock;
+        int    nBlocks       = nPts;
+        double timeStep      = req.h * (double)req.pre_scaller;
+        void* peak_args[] = {
+            &d_data, &sizeOfBlock_s, &nBlocks,
+            &d_amountOfPeaks, &d_outPeaks, &d_timeOfPeaks, &timeStep
+        };
+        int    peakBlock = 32;
+        int    peakGrid  = (nPts + peakBlock - 1) / peakBlock;
+        C_CHECK_CU(cuLaunchKernel(cached_cont.kernel_peak,
+                                  peakGrid, 1, 1, peakBlock, 1, 1,
+                                  0, nullptr, peak_args, nullptr),
+                   "cuLaunchKernel(peak)");
+        C_CHECK(cudaDeviceSynchronize(), "sync after peak");
+
+        // --- D2H ---
+        std::vector<double> h_outPeaks   ((size_t)nPts * (size_t)amountOfPointsInBlock);
+        std::vector<double> h_timeOfPeaks((size_t)nPts * (size_t)amountOfPointsInBlock);
+        std::vector<int>    h_amountOfPeaks((size_t)nPts);
+        C_CHECK(cudaMemcpy(h_outPeaks.data(),    d_outPeaks,    dataBytes,             cudaMemcpyDeviceToHost), "memcpy out h_outPeaks");
+        C_CHECK(cudaMemcpy(h_timeOfPeaks.data(), d_timeOfPeaks, dataBytes,             cudaMemcpyDeviceToHost), "memcpy out h_timeOfPeaks");
+        C_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks, nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy out h_amountOfPeaks");
+        C_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+        // --- Заполнение Result ---
+        res.n_pts        = nPts;
+        res.record_steps = amountOfPointsInBlock;
+        res.param_lo     = req.param_lo;
+        res.param_hi     = req.param_hi;
+        res.continuation_reverse = req.continuation_reverse;
+        res.flags.assign(nPts, 0);
+        res.bifurcation_points.assign(nPts, {});
+        res.peak_times.assign(nPts, {});
+        for (int j = 0; j < nPts; ++j) {
+            int n = h_amountOfPeaks[j];
+            res.flags[j] = n;
+            if (n > 0) {
+                if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
+                const double* pr = h_outPeaks.data()    + (size_t)j * amountOfPointsInBlock;
+                const double* tr = h_timeOfPeaks.data() + (size_t)j * amountOfPointsInBlock;
+                res.bifurcation_points[j].assign(pr, pr + n);
+                res.peak_times[j].assign(tr, tr + n);
+            }
+        }
+
+        cleanup();
+        #undef C_CHECK
+        #undef C_CHECK_CU
         res.ok = true;
         return res;
     }
