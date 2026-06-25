@@ -144,6 +144,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="plot_axis.cpp" />
     <ClCompile Include="plot_camera_3d.cpp" />
     <ClCompile Include="plot_legend.cpp" />
+    <ClCompile Include="heatmap_view.cpp" />
     <ClCompile Include="plot_renderer.cpp" />
     <ClCompile Include="plot_view_2d.cpp" />
     <ClCompile Include="plot_view_3d.cpp" />
@@ -168,6 +169,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="gpu_line_series.h" />
     <ClInclude Include="gpu_line_series_3d.h" />
     <ClInclude Include="gui.h" />
+    <ClInclude Include="heatmap_view.h" />
     <ClInclude Include="hostLibrary.cuh" />
     <ClInclude Include="image_source.h" />
     <ClInclude Include="integrator.h" />

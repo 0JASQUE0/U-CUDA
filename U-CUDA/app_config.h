@@ -12,6 +12,10 @@ struct AppConfig {
     // true → bitmap ProggyClean (как было до Segoe UI). false (дефолт) → TTF
     // Segoe UI с `C:\Windows\Fonts\segoeui.ttf`. Чекбокс в Settings.
     bool use_builtin_font = false;
+
+    // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
+    // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
+    int heatmap_colormap = 0;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл

@@ -53,11 +53,22 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     double hi = std::max(emin, emax);
     double sx = nice_step(std::abs(vrx), 8);
     double xstart = std::ceil(lo / sx) * sx;
-    int nx = (int)std::floor((hi - xstart) / sx + 1) + 1;
+    // hi-xstart нормируется на sx → floor(...) + 1 даёт ровно столько тиков,
+    // сколько помещается в [xstart, hi]. Эпсилон ловит floating-point случаи
+    // когда xstart + k*sx должно совпадать с hi, но из-за accumulation lo чуть
+    // меньше. Дополнительно: tick рисуем только если он в пределах view (с
+    // запасом в полстепа в обе стороны) — это исключает overshoot на правом
+    // краю при zoom, когда последний tick визуально выпадает за границу плота.
+    int nx = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
+    if (nx < 0) nx = 0;
 
     for (int ix = 0; ix < nx; ++ix) {
         double xv = xstart + ix * sx;
+        if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
         float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
+        // Подпись центрирована по px — её половина уезжает в margin_left/right
+        // (они для этого и оставлены в layout'е плота). Не клампим текст в
+        // ширину плота, иначе крайние tick'и без подписей.
         dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
         std::string lbl = fmt_tick(xv);
         ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
@@ -78,11 +89,18 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     double hi = std::max(emin, emax);
     double sy = nice_step(std::abs(vry), 6);
     double ystart = std::ceil(lo / sy) * sy;
-    int ny = (int)std::floor((hi - ystart) / sy + 1) + 1;
+    // См. комментарий в draw_axis_x_grid про формулу и +1e-9 эпсилон.
+    int ny = (int)std::floor((hi - ystart) / sy + 1e-9) + 1;
+    if (ny < 0) ny = 0;
 
     for (int iy = 0; iy < ny; ++iy) {
         double yv = ystart + iy * sy;
+        if (yv > hi + sy * 1e-6 || yv < lo - sy * 1e-6) continue;
         float py = pos.y + (float)((emax - yv) / vry) * plot_h;
+        // Подпись центрирована по py — её половина уезжает в margin_top/bottom
+        // (они для этого и оставлены в layout'е плота). Не клампим текст по
+        // высоте плота, иначе крайние tick'и (на самой границе view) без
+        // подписей.
         dl->AddLine(ImVec2(pos.x, py), ImVec2(pos.x + plot_w, py), col_grid, 1.0f);
         std::string lbl = fmt_tick(yv);
         ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());

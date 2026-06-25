@@ -6,6 +6,7 @@
 #include "session_io.h"
 #include "plot_view_2d.h"
 #include "plot_view_3d.h"
+#include "heatmap_view.h"
 #include "app_config.h"
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
@@ -1498,6 +1499,52 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     InputNumStr("Resolution", c.n_pts_text, 120);
 
     ImGui::Separator();
+    // 2D-режим. Сетка квадратная (см. analysis_session.h:LLECurveConfig коммент)
+    // — Resolution выше применяется и к X, и к Y.
+    ImGui::Checkbox("2D mode (heatmap)", &c.mode_2d);
+    if (c.mode_2d) {
+        ImGui::Indent();
+        // Sweep target для второй оси — комбо, симметрично первой.
+        if (!s.params.empty() || !s.vars.empty()) {
+            if (c.param_index_2 < 0 || c.param_index_2 >= (int)s.params.size())
+                c.param_index_2 = 0;
+            if (c.var_sweep_index_2 < 0 || c.var_sweep_index_2 >= (int)s.vars.size())
+                c.var_sweep_index_2 = 0;
+            std::string preview2;
+            if (c.sweep_over_var_2 && !s.vars.empty())
+                preview2 = s.vars[c.var_sweep_index_2] + " (IC)";
+            else if (!s.params.empty())
+                preview2 = s.params[c.param_index_2];
+            else
+                preview2 = "?";
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
+                for (int i = 0; i < (int)s.params.size(); ++i) {
+                    bool sel = !c.sweep_over_var_2 && c.param_index_2 == i;
+                    if (ImGui::Selectable(s.params[i].c_str(), sel)) {
+                        c.sweep_over_var_2 = false;
+                        c.param_index_2 = i;
+                    }
+                }
+                if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
+                for (int i = 0; i < (int)s.vars.size(); ++i) {
+                    std::string lbl = s.vars[i] + " (IC)";
+                    bool sel = c.sweep_over_var_2 && c.var_sweep_index_2 == i;
+                    if (ImGui::Selectable(lbl.c_str(), sel)) {
+                        c.sweep_over_var_2 = true;
+                        c.var_sweep_index_2 = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        InputNumStr("Param2 lo", c.param_lo_2_text, 120);
+        InputNumStr("Param2 hi", c.param_hi_2_text, 120);
+        ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
+        ImGui::Unindent();
+    }
+
+    ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,         120);
     InputNumStr("computing time", c.t_max_text,     120);
@@ -1544,21 +1591,43 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
     }
 
-    if (c.last_run_ok) {
-        int diverged = 0;
-        for (int f : c.result.flags) if (f < 0) ++diverged;
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
-        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
-    }
-    else if (!c.last_error.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
-        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
-        ImGui::InputTextMultiline("##lle_err",
-            const_cast<char*>(c.last_error.c_str()),
-            c.last_error.size() + 1,
-            sz,
-            ImGuiInputTextFlags_ReadOnly);
+    if (c.mode_2d) {
+        if (c.last_run_2d_ok) {
+            int total = (int)c.result_2d.flags.size();
+            int diverged = 0;
+            for (int f : c.result_2d.flags) if (f < 0) ++diverged;
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: %dx%d heatmap, lambda(min..max) = %.4g..%.4g",
+                c.result_2d.n_pts, c.result_2d.n_pts,
+                c.result_2d.min_val, c.result_2d.max_val);
+            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
+        }
+        else if (!c.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##lle_err",
+                const_cast<char*>(c.last_error.c_str()),
+                c.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
+    } else {
+        if (c.last_run_ok) {
+            int diverged = 0;
+            for (int f : c.result.flags) if (f < 0) ++diverged;
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
+            if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+        }
+        else if (!c.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##lle_err",
+                const_cast<char*>(c.last_error.c_str()),
+                c.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
     }
     return do_run;
 }
@@ -1612,10 +1681,13 @@ static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
 }
 
 // Plot LLE: линии (points_mode=false). Каждая кривая — λ(param).
+// При mode_2d=true у активной кривой вместо линий рисуется HeatmapView
+// (квадратная сетка λ(p1, p2) с colormap'ом).
 static void draw_lle_plot(AppModel& model) {
     LLEAnalysisSession& s = model.lle_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
+    static std::unique_ptr<HeatmapView> heatmap;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -1627,9 +1699,78 @@ static void draw_lle_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
+    if (!heatmap) {
+        heatmap = std::make_unique<HeatmapView>();
+        // Восстанавливаем последний выбранный colormap из persisted config.
+        // Делаем один раз — пользовательский выбор combo ниже перезаписывает.
+        int cm = model.heatmap_colormap;
+        if (cm >= 0 && cm <= 3) heatmap->colormap = (HeatmapColormap)cm;
+    }
 
     if (s.curves.empty()) {
         ImGui::TextDisabled("No curves yet.");
+        return;
+    }
+
+    // Активная кривая решает, что рисовать. Если её mode_2d=true — heatmap;
+    // иначе старый line-plot со всеми кривыми.
+    int act = s.active_curve_index;
+    if (act < 0 || act >= (int)s.curves.size()) act = 0;
+    LLECurveConfig& cact = s.curves[act];
+
+    if (cact.mode_2d) {
+        // ------- HEATMAP -------
+        // Combo для выбора colormap'а — над плотом.
+        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+        int cmap_idx = (int)heatmap->colormap;
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::Combo("Colormap", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            heatmap->colormap = (HeatmapColormap)cmap_idx;
+            model.heatmap_colormap = cmap_idx;
+            // Персистим в _app_config.json — выбор сохранится между запусками.
+            AppConfig cfg;
+            cfg.ui_scale_override = model.ui_scale_override;
+            cfg.use_builtin_font  = model.use_builtin_font;
+            cfg.heatmap_colormap  = cmap_idx;
+            save_app_config(get_exe_dir_with_sep(), cfg);
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Autoscale color", &heatmap->autoscale);
+        if (!heatmap->autoscale) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            ImGui::InputFloat("vmin", &heatmap->manual_vmin, 0.0f, 0.0f, "%.4g");
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            ImGui::InputFloat("vmax", &heatmap->manual_vmax, 0.0f, 0.0f, "%.4g");
+        }
+
+        if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
+            ImGui::TextDisabled("No 2D data yet. Press Run.");
+            return;
+        }
+
+        // Подписи осей по реальным selected-полям свипа.
+        auto axis_name_for = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+            if (sweep_var) {
+                return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
+            }
+            return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
+        };
+        heatmap->x_axis.name = axis_name_for(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+        heatmap->y_axis.name = axis_name_for(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+
+        bool fit = cact.fit_request_2d;
+        if (fit) cact.fit_request_2d = false;
+
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        heatmap->render(*renderer, origin, avail,
+                        /*owner_id*/ 0xBE11E6, cact.data_generation_2d,
+                        cact.result_2d.n_pts, cact.result_2d.n_pts,
+                        cact.result_2d.values.data(),
+                        cact.result_2d.param_lo,   cact.result_2d.param_hi,
+                        cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
+                        cact.result_2d.min_val, cact.result_2d.max_val,
+                        fit);
         return;
     }
 
@@ -2450,6 +2591,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 AppConfig cfg;
                 cfg.ui_scale_override = ui_slider_value;
                 cfg.use_builtin_font  = model.use_builtin_font;
+                cfg.heatmap_colormap  = model.heatmap_colormap;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::SameLine();
@@ -2459,6 +2601,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 AppConfig cfg;
                 cfg.ui_scale_override = 0.0f;
                 cfg.use_builtin_font  = model.use_builtin_font;
+                cfg.heatmap_colormap  = model.heatmap_colormap;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Auto detected: %.2fx   |   Override: %s",
@@ -2476,6 +2619,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 AppConfig cfg;
                 cfg.ui_scale_override = model.ui_scale_override;
                 cfg.use_builtin_font  = use_builtin;
+                cfg.heatmap_colormap  = model.heatmap_colormap;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");

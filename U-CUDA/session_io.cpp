@@ -383,6 +383,15 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"initial_conditions\":"; jmap(o, c.initial_conditions);
     o << ",\"csv_save_enabled\":" << (c.csv_save_enabled ? "true" : "false");
     o << ",\"csv_output_path\":"; jstr(o, c.csv_output_path);
+    // 2D-режим (heatmap): persistим только конфиг, result_2d не храним
+    // (на 200x200 это ~40k чисел в JSON — слишком тяжело). После load
+    // пользователь нажмёт Run заново.
+    o << ",\"mode_2d\":"           << (c.mode_2d ? "true" : "false");
+    o << ",\"param_index_2\":"     << c.param_index_2;
+    o << ",\"sweep_over_var_2\":"  << (c.sweep_over_var_2 ? "true" : "false");
+    o << ",\"var_sweep_index_2\":" << c.var_sweep_index_2;
+    o << ",\"param_lo_2_text\":";  jstr(o, c.param_lo_2_text);
+    o << ",\"param_hi_2_text\":";  jstr(o, c.param_hi_2_text);
     o << "}";
 }
 
@@ -406,6 +415,14 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
     else if (key == "csv_output_path")    c.csv_output_path   = p.str();
+    // 2D-режим: backwards-compatible — старые JSON без этих ключей оставят
+    // дефолты конструктора (mode_2d=false, ...).
+    else if (key == "mode_2d")            c.mode_2d           = p.boolean();
+    else if (key == "param_index_2")      c.param_index_2     = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var_2")   c.sweep_over_var_2  = p.boolean();
+    else if (key == "var_sweep_index_2")  c.var_sweep_index_2 = std::stoi(p.str_or_num());
+    else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
+    else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();
     else return false;
     return true;
 }

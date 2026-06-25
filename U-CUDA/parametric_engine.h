@@ -200,6 +200,84 @@ struct LS1DResult {
     std::vector<int> flags;
 };
 
+// ============================================================================
+// LLE 2D — λ(p1, p2) на квадратной сетке n_pts × n_pts. Алгоритм тот же
+// (LLEKernelCUDA, см. cudaLibrary.cu:2380) — kernel принимает runtime-аргумент
+// dimension=2, ranges[4] и indicesOfMutVars[2]. par_or_var (compile-time)
+// принимает три значения:
+//   1 — оба свипа по параметрам;
+//   0 — оба свипа по начальным условиям;
+//   2 — смешанный: ось 1 (X в kernel'е) по IC, ось 2 (Y в kernel'е) по param.
+// Сетка квадратная — таково ограничение getValueByIdx (cu:1276): idx∈[0,n²),
+// pointIdx_x = idx%n, pointIdx_y = idx/n. Разная разрешалка по осям без
+// правок NonLinAnal невозможна — поэтому здесь один n_pts на обе оси.
+//
+// Engine принимает любую комбинацию sweep_over_var/_2 без отдельного флага
+// "mixed". Маппинг (user X/Y → kernel-ось 1/2):
+//   - sweep_over_var == sweep_over_var_2 → par_or_var=0|1, оси один в один;
+//   - sweep_over_var=true, sweep_over_var_2=false → par_or_var=2, оси один в один;
+//   - sweep_over_var=false, sweep_over_var_2=true → par_or_var=2 + внутренний
+//     своп: indicesOfMutVars/ranges подаются в kernel "перевёрнуто" (X↔Y), а
+//     полученный flat-массив транспонируется на хосте, так что наружу result
+//     по-прежнему row-major idx=iy*n+ix в системе пользователя.
+// ============================================================================
+
+struct LLE2DRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;
+    std::vector<double> base_values;
+
+    // Sweep target по обеим осям. По умолчанию оба по параметру (par_or_var=1).
+    bool sweep_over_var  = false;  // ось X
+    bool sweep_over_var_2 = false; // ось Y
+    // Индексы целей свипа. При sweep_over_var_*=true берётся var_sweep_index_*
+    // (0-based в initial_conditions); иначе param_index_* (1-based в base_values).
+    int  param_index      = 0;
+    int  var_sweep_index  = 0;
+    int  param_index_2    = 0;
+    int  var_sweep_index_2 = 0;
+
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    int    n_pts      = 200;     // одно значение — сетка квадратная
+
+    // Интегрирование (как в LLE1D).
+    double h              = 0.01;
+    double transient_time = 0.0;
+    double t_max          = 100.0;
+    double NT             = 1.0;
+    double eps            = 1.0e-4;
+    double max_value      = 1.0e6;
+
+    std::string csv_output_path;
+};
+
+struct LLE2DResult {
+    bool ok = false;
+    std::string error;
+
+    int n_pts = 0;                 // сторона сетки (всего n_pts² ячеек)
+    // Снапшот диапазонов на момент Run (как у LLE1DResult).
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+
+    // values[iy*n_pts + ix] = λ для (p1(ix), p2(iy)). Размер n_pts² целиком,
+    // включая ячейки, где kernel вернул спец-значение (999 — нет аттрактора,
+    // -999 — разошлось, NaN/inf — численная проблема). Render отфильтрует.
+    std::vector<double> values;
+    std::vector<int>    flags;     // 1=ok, -1=diverged
+
+    // Авто-нормализация для colormap'а: min/max по валидным значениям
+    // (без 999/-999/nan/inf). Если валидных нет — обе 0.
+    double min_val = 0.0;
+    double max_val = 0.0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -217,7 +295,11 @@ public:
     // 1D-LS — спектр Ляпунова (N экспонент на точку параметра).
     LS1DResult run_ls_1d(const LS1DRequest& req);
 
-    // TODO (следующие шаги): run_bifurcation_2d, ...
+    // 2D-LLE — λ(p1, p2) на квадратной сетке. Отдельный PTX-кэш (другая
+    // ветка par_or_var, тот же kernel LLEKernelCUDA).
+    LLE2DResult run_lle_2d(const LLE2DRequest& req);
+
+    // TODO (следующие шаги): run_ls_2d, run_bifurcation_2d, ...
 
 private:
     struct Impl;

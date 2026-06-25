@@ -122,6 +122,12 @@ public:
     // Чекбокс — в Settings; персистится в _app_config.json.
     bool use_builtin_font = false;
 
+    // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
+    // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
+    // Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет
+    // сюда; static HeatmapView в draw_lle_plot читает при первом создании.
+    int heatmap_colormap = 0;
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 

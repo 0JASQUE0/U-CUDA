@@ -23,6 +23,20 @@ public:
     void draw_points(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float point_size);
 
+    // Хитмапа: рендерит fullscreen-quad внутри текущего FBO (begin_frame),
+    // сэмплит R32F-текстуру tex и применяет colormap.
+    //   colormap_id: 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray.
+    //   uv_off/uv_scale: маппинг fullscreen-quad UV [0,1] в UV данных:
+    //     uv_data = v_uv * uv_scale + uv_off
+    //   используется для zoom/pan — view ⊂ data ставит scale<1 + offset>0;
+    //   view ⊃ data → UV вылезет за [0,1], CLAMP_TO_BORDER (см. ensure_tex
+    //   в HeatmapView) даст тёмный фон, чтобы пользователь видел границы.
+    // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер
+    // отображает тёмно-серым (используется engine'ом для diverged/spec).
+    void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
+                      float uv_off_x, float uv_off_y,
+                      float uv_scale_x, float uv_scale_y);
+
     // ������ 3D-����� (vbo � float[3] �� �������).
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
@@ -47,8 +61,13 @@ private:
 
     GLuint program_2d_ = 0;
     GLuint program_3d_ = 0;
+    GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;
+    GLint  loc_heatmap_tex_ = -1, loc_heatmap_vmin_ = -1,
+           loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
+           loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1;
+    GLuint heatmap_vbo_ = 0;     // ленивая инициализация fullscreen quad
 
     GLuint vao_ = 0;
 
