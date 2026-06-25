@@ -38,6 +38,16 @@ bool parse_bool_field(const std::string& s, const std::string& key, bool& out) {
     return false;
 }
 
+bool parse_int_field(const std::string& s, const std::string& key, int& out) {
+    size_t pos = find_value_pos(s, key);
+    if (pos == std::string::npos) return false;
+    char* end = nullptr;
+    long v = std::strtol(s.c_str() + pos, &end, 10);
+    if (end == s.c_str() + pos) return false;
+    out = (int)v;
+    return true;
+}
+
 } // namespace
 
 bool load_app_config(const std::string& dir, AppConfig& out) {
@@ -51,6 +61,9 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     bool bv = false;
     if (parse_bool_field(body, "use_builtin_font", bv))
         out.use_builtin_font = bv;
+    int iv = 0;
+    if (parse_int_field(body, "heatmap_colormap", iv))
+        out.heatmap_colormap = iv;
     return true;
 }
 
@@ -62,7 +75,8 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         if (!f) return false;
         f << "{\n";
         f << "  \"ui_scale_override\": " << cfg.ui_scale_override << ",\n";
-        f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << "\n";
+        f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << ",\n";
+        f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << "\n";
         f << "}\n";
         if (!f) return false;
     }

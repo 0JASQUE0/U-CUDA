@@ -311,6 +311,27 @@ struct LLECurveConfig {
     std::string last_error;
     int         data_generation = 0;
     bool        fit_request = false;
+
+    // ---- 2D-режим (LLE по двум параметрам/IC, рисуется хитмапой) ----
+    // mode_2d=true → Run собирает LLE2DRequest вместо LLE1DRequest, результат
+    // ложится в result_2d (не затирает result, чтобы переключение туда-обратно
+    // не теряло последний 1D-расчёт). См. analysis_session.cpp:run_async.
+    // Смешанный свип (одна ось param, другая IC) разруливается engine'ом
+    // автоматически по sweep_over_var/_2 — отдельного флага не требуется.
+    bool        mode_2d = false;
+    // Sweep target для второй оси (структурно зеркалит param_index/sweep_over_var).
+    int         param_index_2 = 0;
+    bool        sweep_over_var_2 = false;
+    int         var_sweep_index_2 = 0;
+    std::string param_lo_2_text = "0";
+    std::string param_hi_2_text = "1";
+    // n_pts_2_text не нужен: kernel-getValueByIdx работает только на квадратной
+    // сетке (cudaLibrary.cu:1276), используется n_pts_text для обеих осей.
+
+    LLE2DResult result_2d;
+    bool        last_run_2d_ok = false;
+    int         data_generation_2d = 0;
+    bool        fit_request_2d = false;
 };
 
 // Сессия LLE-анализа. Структура и API — копия BifurcationAnalysisSession
@@ -327,6 +348,11 @@ struct LLEAnalysisSession {
     int running_curve_index = -1;
 
     std::future<LLE1DResult> run_future;
+    // Параллельный future для 2D-режима. in_flight (общий) гарантирует, что
+    // в полёте одновременно только одна задача — 1D или 2D, не обе. Какая
+    // именно — определяет is_2d_run (выставляется в run_async, читается poll).
+    std::future<LLE2DResult> run_future_2d;
+    bool is_2d_run = false;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
