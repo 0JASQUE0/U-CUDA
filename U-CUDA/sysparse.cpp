@@ -530,3 +530,207 @@ System parse_system_from_latex(const std::string& multiline_latex,
 
     return sys;
 }
+
+// ============================================================================
+// detect_alphabet — авто-классификация идентификаторов из LaTeX/Plain текста.
+// Идентификаторы внутри производных → vars; остальные → params.
+// ============================================================================
+
+DetectedAlphabet detect_alphabet(const std::string& text) {
+    DetectedAlphabet out;
+    // Множества для дедупликации; vectors хранят порядок появления.
+    std::set<std::string> var_set, param_set;
+
+    auto push_unique = [](std::vector<std::string>& v,
+                          std::set<std::string>& seen, const std::string& tok) {
+        if (seen.count(tok)) return;
+        seen.insert(tok);
+        v.push_back(tok);
+    };
+
+    // Black-list для params (math functions + LaTeX commands + constants).
+    static const std::set<std::string> EXCLUDED = {
+        "sin","cos","tan","sec","csc","cot",
+        "arcsin","arccos","arctan",
+        "sinh","cosh","tanh","asinh","acosh","atanh",
+        "exp","log","ln","sqrt","abs","max","min",
+        "pi","infty","cdot","times","div","pm","mp","cdots","ldots",
+        "frac","dfrac","dot","ddot","left","right","begin","end",
+        "tau","theta",   // часто переменная времени — не параметр
+        "operatorname","mathrm","text"
+    };
+
+    // ---- preprocess: убираем OCR-мусор и `\mathrm{d}` ----
+    // Делаем это до сканирования, чтобы дальше можно было искать только `d`/`t`.
+    std::string s = text;
+    auto str_replace_all = [&](const std::string& from, const std::string& to) {
+        if (from.empty()) return;
+        size_t p = 0;
+        while ((p = s.find(from, p)) != std::string::npos) {
+            s.replace(p, from.size(), to);
+            p += to.size();
+        }
+    };
+    str_replace_all("\\mathrm{d}", "d");
+    str_replace_all("\\mathrm{t}", "t");
+    str_replace_all("\\mathrm d",  "d");
+    str_replace_all("\\mathrm t",  "t");
+    str_replace_all("\\operatorname{d}", "d");
+
+    // Хелпер: считает один токен-идентификатор начиная с позиции i.
+    // Возвращает {длина_в_символах, имя_токена_без_изменений}. Если нет — длина 0.
+    auto read_token = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
+        if (i >= src.size()) return { 0, "" };
+        char c = src[i];
+        if (c == '\\') {
+            size_t j = i + 1;
+            while (j < src.size() && std::isalpha((unsigned char)src[j])) ++j;
+            if (j > i + 1) return { j - i, src.substr(i, j - i) };
+            return { 1, "" };   // \{ \\ и т.п. — пропускаем 1 символ
+        }
+        if (std::isalpha((unsigned char)c)) {
+            return { 1, std::string(1, c) };
+        }
+        return { 0, "" };
+    };
+
+    // Хелпер: позиция первого не-пробельного символа начиная с i, либо npos.
+    auto skip_ws = [&](const std::string& src, size_t i) -> size_t {
+        while (i < src.size() && std::isspace((unsigned char)src[i])) ++i;
+        return i;
+    };
+
+    // ---- 1) производные: \dot{X}, \dot X ----
+    for (size_t i = 0; i + 4 <= s.size(); ) {
+        if (s.compare(i, 4, "\\dot") == 0) {
+            size_t j = skip_ws(s, i + 4);
+            if (j < s.size() && s[j] == '{') {
+                size_t end = s.find('}', j + 1);
+                if (end != std::string::npos) {
+                    std::string inner = s.substr(j + 1, end - j - 1);
+                    size_t a = inner.find_first_not_of(" \t");
+                    size_t b = inner.find_last_not_of(" \t");
+                    if (a != std::string::npos)
+                        push_unique(out.vars, var_set, inner.substr(a, b - a + 1));
+                }
+                i = (end == std::string::npos) ? i + 4 : end + 1;
+                continue;
+            }
+            auto [len, tok] = read_token(s, j);
+            if (len > 0 && !tok.empty())
+                push_unique(out.vars, var_set, tok);
+            i = j + (len > 0 ? len : 1);
+            continue;
+        }
+        ++i;
+    }
+
+    // ---- 2) производные: \frac{d X}{d t}, \dfrac{...}{...} ----
+    auto try_frac_at = [&](size_t i) -> size_t {
+        // Возвращает индекс после frac-группы (если успешно), иначе 0.
+        const std::string& src = s;
+        size_t p = i;
+        if (p + 5 < src.size() && src.compare(p, 5, "\\frac") == 0) p += 5;
+        else if (p + 6 < src.size() && src.compare(p, 6, "\\dfrac") == 0) p += 6;
+        else return 0;
+        p = skip_ws(src, p);
+        if (p >= src.size() || src[p] != '{') return 0;
+        size_t num_end = src.find('}', p + 1);
+        if (num_end == std::string::npos) return 0;
+        std::string num = src.substr(p + 1, num_end - p - 1);
+        size_t q = skip_ws(src, num_end + 1);
+        if (q >= src.size() || src[q] != '{') return 0;
+        size_t den_end = src.find('}', q + 1);
+        if (den_end == std::string::npos) return 0;
+        std::string den = src.substr(q + 1, den_end - q - 1);
+        // numerator: `d X` — после ведущего `d` идёт переменная.
+        auto trim = [](std::string x) {
+            size_t a = x.find_first_not_of(" \t");
+            size_t b = x.find_last_not_of(" \t");
+            return (a == std::string::npos) ? std::string{} : x.substr(a, b - a + 1);
+        };
+        num = trim(num); den = trim(den);
+        if (num.empty() || den.empty()) return 0;
+        if (num[0] != 'd') return 0;
+        size_t k = 1;
+        while (k < num.size() && std::isspace((unsigned char)num[k])) ++k;
+        if (k >= num.size()) return 0;
+        std::string var;
+        if (num[k] == '\\') {
+            size_t e = k + 1;
+            while (e < num.size() && std::isalpha((unsigned char)num[e])) ++e;
+            var = num.substr(k, e - k);
+        } else if (std::isalpha((unsigned char)num[k])) {
+            var = std::string(1, num[k]);
+        } else {
+            return 0;
+        }
+        // denominator: должен начинаться с `d` и заканчиваться `t`/`\tau`/`\theta`.
+        if (den[0] != 'd') return 0;
+        // (не делаем strict-check на `t` — обычно OK; держим как valid)
+        if (!var.empty()) push_unique(out.vars, var_set, var);
+        return den_end + 1;
+    };
+
+    for (size_t i = 0; i < s.size(); ) {
+        if (s[i] == '\\') {
+            size_t nxt = try_frac_at(i);
+            if (nxt > 0) { i = nxt; continue; }
+        }
+        ++i;
+    }
+
+    // ---- 3) производные: dX/dt, X' ----
+    for (size_t i = 0; i + 1 < s.size(); ) {
+        // dX/dt: literal 'd', then var, optional ws, '/', 'd', then 't'/\tau...
+        if (s[i] == 'd' && i + 2 < s.size()) {
+            size_t j = i + 1;
+            std::string var;
+            if (j < s.size() && s[j] == '\\') {
+                size_t e = j + 1;
+                while (e < s.size() && std::isalpha((unsigned char)s[e])) ++e;
+                if (e > j + 1) { var = s.substr(j, e - j); j = e; }
+            } else if (j < s.size() && std::isalpha((unsigned char)s[j])
+                       && (j + 1 >= s.size() || !std::isalpha((unsigned char)s[j + 1]))) {
+                var = std::string(1, s[j]); j = j + 1;
+            }
+            if (!var.empty()) {
+                size_t k = skip_ws(s, j);
+                if (k < s.size() && s[k] == '/' && k + 1 < s.size() && s[k + 1] == 'd') {
+                    size_t m = k + 2;
+                    if (m < s.size() && (s[m] == 't' || s[m] == '\\')) {
+                        push_unique(out.vars, var_set, var);
+                        i = m + 1; continue;
+                    }
+                }
+            }
+        }
+        // X' — одна буква + ' (prime). Чтобы не цеплять кавычку посреди слова, требуем,
+        // что слева — не буква.
+        if (s[i + 1] == '\'') {
+            char c = s[i];
+            bool left_ok = (i == 0) || !std::isalpha((unsigned char)s[i - 1]);
+            if (std::isalpha((unsigned char)c) && left_ok) {
+                push_unique(out.vars, var_set, std::string(1, c));
+                i += 2; continue;
+            }
+        }
+        ++i;
+    }
+
+    // ---- 4) params: всё остальное ----
+    for (size_t i = 0; i < s.size(); ) {
+        auto [len, tok] = read_token(s, i);
+        if (len == 0) { ++i; continue; }
+        i += len;
+        if (tok.empty()) continue;
+        std::string canon = tok;
+        if (canon[0] == '\\') canon.erase(0, 1);
+        if (EXCLUDED.count(canon)) continue;
+        if (canon == "d" || canon == "t") continue;
+        if (var_set.count(tok)) continue;
+        push_unique(out.params, param_set, tok);
+    }
+
+    return out;
+}

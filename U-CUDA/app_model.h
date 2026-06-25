@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <regex>
 
 // Функция-распознаватель: PNG-байты -> LaTeX. Внедряется снаружи,
 // чтобы модель не зависела от OcrClient напрямую (и была тестируема).
@@ -52,6 +53,7 @@ public:
     bool scheme_cromer = false;
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
+    bool scheme_dopri78 = false;
 
     // Пользовательские именованные КРС (выбираются в scheme combo сессий
     // вместе с built-in). Имя не должно совпадать с built-in.
@@ -203,6 +205,7 @@ public:
                 { scheme_cromer,   "Euler-Cromer",      Scheme::EulerCromer },
                 { scheme_midpoint, "Explicit Midpoint", Scheme::ExplicitMidpoint },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
+                { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
             };
             bool any = false;
             for (const auto& it : items) {
@@ -249,57 +252,113 @@ public:
 private:
     OcrFn ocr_;
 
-    // Форматирует сырой LaTeX в читаемый вид:
-    //   \begin{aligned}
-    //    eq1 \\
-    //    eq2 \\
-    //   \end{aligned}
-    // Если окружения нет — просто разбивает по \\ с отступом.
+    // Форматирует сырой LaTeX в единообразный вид: каждое уравнение на своей
+    // строке, без \begin{aligned}/\end{aligned} и без \\, все формы
+    // производных нормализуются к \dot{X}.
+    // Поддерживаемые исходные формы производных:
+    //   \frac{dX}{dt}, \dfrac{dX}{dt} (+ варианты с \tau, \theta, пробелами)
+    //   X'                   (prime)
+    //   dX/dt                (slash-form)
     static std::string format_latex(const std::string& raw) {
         std::string s = raw;
-        // вырезаем существующие окружения-обёртки, оставив только уравнения
+        // 1) Снимаем обёртки окружений.
         auto remove_all = [&](const std::string& token) {
             size_t p;
             while ((p = s.find(token)) != std::string::npos) s.erase(p, token.size());
             };
-        // снять \begin{...}/\end{...} aligned|array|cases и \left\{ \right.
-        for (const char* env : { "aligned","array","cases" }) {
+        for (const char* env : { "aligned","array","cases","equation","gather","split","matrix" }) {
             remove_all(std::string("\\begin{") + env + "}");
             remove_all(std::string("\\end{") + env + "}");
         }
         remove_all("\\left\\{");
         remove_all("\\right.");
-        // спецификатор столбцов array, напр. {c} или {r l}
-        // (грубо: убираем одиночную {...} из коротких буквенных групп в начале)
+        // align-табы и `{}=`-обёртки правой части — типичный OCR-мусор.
+        remove_all("&");
+        // \mathrm{d}, \mathrm{t} → d, t (чтобы \frac-нормализация ниже поймала).
+        auto replace_all = [&](const std::string& from, const std::string& to) {
+            size_t p = 0;
+            while ((p = s.find(from, p)) != std::string::npos) {
+                s.replace(p, from.size(), to);
+                p += to.size();
+            }
+            };
+        replace_all("\\mathrm{d}", "d");
+        replace_all("\\mathrm{t}", "t");
+        replace_all("\\mathrm d",  "d");
+        replace_all("\\mathrm t",  "t");
+        replace_all("{{}=", "=");   // OCR-артефакт "{{}=..."
+        replace_all("{}=",  "=");
 
-        // разбить по "\\"
+        // 2) Нормализация производных к \dot{X}. X = одна буква, \greek или {group}.
+        //    std::regex с raw-strings ECMAScript-flavor по умолчанию.
+        try {
+            static const std::regex re_frac(
+                R"(\\d?frac\s*\{\s*d\s*([A-Za-z]|\\[A-Za-z]+|\{[^{}]*\})\s*\}\s*\{\s*d\s*(t|\\tau|\\theta)\s*\})");
+            static const std::regex re_slash(
+                R"(d\s*([A-Za-z]|\\[A-Za-z]+)\s*/\s*d\s*(t|\\tau|\\theta))");
+            static const std::regex re_prime(
+                R"(([A-Za-z]|\\[A-Za-z]+)\s*\')");
+            s = std::regex_replace(s, re_frac,  R"(\dot{$1})");
+            s = std::regex_replace(s, re_slash, R"(\dot{$1})");
+            s = std::regex_replace(s, re_prime, R"(\dot{$1})");
+        } catch (const std::regex_error&) {
+            // если regex недоступен по какой-то причине — оставляем как было
+        }
+
+        // 3) Разбить по "\\" и по переводам строк.
         std::vector<std::string> eqs;
         size_t start = 0;
-        for (size_t i = 0; i + 1 < s.size(); ++i) {
-            if (s[i] == '\\' && s[i + 1] == '\\') {
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i + 1 < s.size() && s[i] == '\\' && s[i + 1] == '\\') {
                 eqs.push_back(s.substr(start, i - start));
                 i += 1; start = i + 1;
+            } else if (s[i] == '\n' || s[i] == '\r') {
+                eqs.push_back(s.substr(start, i - start));
+                start = i + 1;
             }
         }
         eqs.push_back(s.substr(start));
 
-        // собрать в желаемом формате
-        std::string out = "\\begin{aligned}\n";
-        bool any = false;
+        // 4) Trim, снять обёртки `{...}` вокруг всего уравнения, собрать со `\\` в конце.
+        std::vector<std::string> clean;
         for (auto& e : eqs) {
-            // trim
             size_t a = e.find_first_not_of(" \t\n\r");
             size_t b = e.find_last_not_of(" \t\n\r");
             if (a == std::string::npos) continue;
             std::string eq = e.substr(a, b - a + 1);
-            // пропустить остаток вроде одиночного спецификатора столбцов "{c}"
+            // снять внешние `{ ... }` (артефакт OCR-вывода).
+            while (eq.size() >= 2 && eq.front() == '{' && eq.back() == '}') {
+                // только если фигурные сбалансированы строго на концах.
+                int depth = 0; bool ok = true;
+                for (size_t k = 0; k < eq.size(); ++k) {
+                    if (eq[k] == '{') ++depth;
+                    else if (eq[k] == '}') {
+                        --depth;
+                        if (depth == 0 && k + 1 < eq.size()) { ok = false; break; }
+                    }
+                }
+                if (!ok) break;
+                eq = eq.substr(1, eq.size() - 2);
+                size_t a2 = eq.find_first_not_of(" \t");
+                size_t b2 = eq.find_last_not_of(" \t");
+                if (a2 == std::string::npos) { eq.clear(); break; }
+                eq = eq.substr(a2, b2 - a2 + 1);
+            }
             bool only_braces = eq.find_first_not_of("{}clr| \t") == std::string::npos;
             if (only_braces) continue;
-            out += " " + eq + " \\\\\n";
-            any = true;
+            // снять trailing punctuation типа " ,"/" ." (артефакты OCR).
+            while (!eq.empty() && (eq.back() == ',' || eq.back() == '.' || eq.back() == ';' || eq.back() == ' ' || eq.back() == '\t'))
+                eq.pop_back();
+            if (eq.empty()) continue;
+            clean.push_back(eq);
         }
-        out += "\\end{aligned}";
-        if (!any) return raw; // не смогли разобрать — вернём как есть
+        if (clean.empty()) return raw;
+        std::string out;
+        for (size_t i = 0; i < clean.size(); ++i) {
+            if (i) out += "\n";
+            out += clean[i];
+            if (i + 1 < clean.size()) out += " \\\\";
+        }
         return out;
     }
     std::future<std::string> ocr_future_;

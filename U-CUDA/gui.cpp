@@ -202,6 +202,24 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // ----- Variables / Parameters (новый раздельный формат) -----
     ImGui::Text("Variables:");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Auto-detect")) {
+        // Scan latex_text (or plain_text если режим Plain) и заполнить vars/params.
+        const std::string& src = (model.mode == InputMode::Plain)
+                                 ? model.plain_text
+                                 : model.latex_text;
+        DetectedAlphabet det = detect_alphabet(src);
+        auto join = [](const std::vector<std::string>& v) {
+            std::string out;
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (i) out += ", ";
+                out += v[i];
+            }
+            return out;
+        };
+        model.vars_text   = join(det.vars);
+        model.params_text = join(det.params);
+    }
     ImGui::TextDisabled("Comma-sep, e.g. x,y,z. These are X[0..N-1] in KRS.");
     InputTextStr("##vars_text", model.vars_text);
 
@@ -228,13 +246,14 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // методы
     ImGui::Text("Schemes to generate:");
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = true;
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = false;
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = false;
     ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
-    ImGui::Checkbox("RK4", &model.scheme_rk4);
+    ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
+    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78);
 
     // ----- Custom KRS schemes (raw C/CUDA код вместо codegen) -----
     ImGui::Spacing();
@@ -263,7 +282,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // блокируем добавление с уже существующим/built-in именем
         static const char* builtin_names[] = {
-            "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4"
+            "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78"
         };
         if (ImGui::Button("+ Add custom scheme")) {
             // подобрать уникальное имя "Custom N"
@@ -611,7 +630,7 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     // метод моделирования + пользовательские схемы из системы
     ImGui::Text("Method:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(160);
-    static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
     auto is_custom_scheme = [&](const std::string& nm) {
         for (const auto& cs : s.custom_schemes) if (cs.name == nm) return true;
         return false;
@@ -1049,7 +1068,7 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // ----- Scheme (built-in + custom) -----
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", bd.scheme.c_str())) {
         for (auto m : schemes)
@@ -1424,7 +1443,7 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     ImGui::Checkbox("visible", &c.visible);
     ImGui::Separator();
 
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
         for (auto m : schemes)
@@ -1733,7 +1752,7 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     ImGui::Checkbox("visible", &c.visible);
     ImGui::Separator();
 
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
         for (auto m : schemes)
