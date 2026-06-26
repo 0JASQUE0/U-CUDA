@@ -349,6 +349,69 @@ struct Bifurcation2DResult {
     double max_val = 0.0;
 };
 
+// ============================================================================
+// LS 2D — полный спектр N экспонент в каждой ячейке сетки n_pts × n_pts.
+// Алгоритм тот же (LSKernelCUDA, cudaLibrary.cu:2732), kernel принимает
+// runtime-аргумент dimension=2, ranges[4] и indicesOfMutVars[2]. par_or_var
+// (compile-time) три значения — как у LLE-2D (см. комментарий к LLE2DRequest).
+// Отличие от LLE-2D: на ячейку kernel возвращает N экспонент, не одну. D2H
+// копирует cur_limiter * N значений и распаковывает по плоскостям-экспонентам.
+// ============================================================================
+
+struct LS2DRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;
+    std::vector<double> base_values;
+
+    bool sweep_over_var  = false;  // ось X
+    bool sweep_over_var_2 = false; // ось Y
+    int  param_index      = 0;
+    int  var_sweep_index  = 0;
+    int  param_index_2    = 0;
+    int  var_sweep_index_2 = 0;
+
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    int    n_pts      = 200;
+
+    double h              = 0.01;
+    double transient_time = 0.0;
+    double t_max          = 100.0;
+    double NT             = 1.0;
+    double eps            = 1.0e-4;
+    double max_value      = 1.0e6;
+
+    std::string csv_output_path;
+};
+
+struct LS2DResult {
+    bool ok = false;
+    std::string error;
+
+    int n_pts       = 0;            // сторона сетки (всего n_pts² ячеек)
+    int n_exponents = 0;            // == amountOfX
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+
+    // Layout: values[k * n_pts * n_pts + iy * n_pts + ix] = k-я экспонента в
+    // ячейке (ix, iy). Группировка по экспонентам (не по ячейкам) — даёт
+    // contiguous-плоскость на отрисовку HeatmapView: &values[k*n*n] передаётся
+    // без копирования. Спец-значения 999/-999/NaN — как в LS1DResult.
+    std::vector<double> values;
+    // flags[iy*n + ix] — общий per-cell (1=ok, -1=diverged для всех экспонент).
+    std::vector<int>    flags;
+
+    // Авто-нормализация per-plane (по валидным значениям, без 999/-999/nan).
+    // Размер == n_exponents; если валидных нет — обе 0.
+    std::vector<double> min_val;
+    std::vector<double> max_val;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -373,7 +436,8 @@ public:
     // ветка par_or_var, тот же kernel LLEKernelCUDA).
     LLE2DResult run_lle_2d(const LLE2DRequest& req);
 
-    // TODO (следующие шаги): run_ls_2d, ...
+    // 2D-LS — полный спектр N экспонент в каждой ячейке n_pts × n_pts.
+    LS2DResult run_ls_2d(const LS2DRequest& req);
 
 private:
     struct Impl;

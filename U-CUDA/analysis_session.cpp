@@ -950,21 +950,91 @@ static void apply_ls1d_result(LSCurveConfig& c, LS1DResult&& r) {
     c.fit_request = true;
 }
 
+// 2D-Request: те же общие поля + поля второй оси (param_index_2 / var_sweep_index_2).
+static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
+                                      const LSCurveConfig& c) {
+    LS2DRequest req;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = c.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1, 0.0);
+    for (int i = 0; i < nparams; ++i) {
+        auto it = c.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    req.sweep_over_var     = c.sweep_over_var;
+    req.sweep_over_var_2   = c.sweep_over_var_2;
+    req.param_index        = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
+    req.param_index_2      = (c.param_index_2 >= 0 && c.param_index_2 < nparams) ? c.param_index_2 + 1 : 1;
+    req.var_sweep_index    = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
+                             ? c.var_sweep_index : 0;
+    req.var_sweep_index_2  = (c.var_sweep_index_2 >= 0 && c.var_sweep_index_2 < req.amountOfX)
+                             ? c.var_sweep_index_2 : 0;
+
+    req.param_lo           = parse_d(c.param_lo_text,   0.0);
+    req.param_hi           = parse_d(c.param_hi_text,   1.0);
+    req.param_lo_2         = parse_d(c.param_lo_2_text, 0.0);
+    req.param_hi_2         = parse_d(c.param_hi_2_text, 1.0);
+    req.n_pts              = parse_i(c.n_pts_text, 200);
+    req.h                  = parse_d(c.h_text, 0.01);
+    req.t_max              = parse_d(c.t_max_text, 100.0);
+    req.transient_time     = parse_d(c.transient_text, 100.0);
+    req.max_value          = parse_d(c.max_value_text, 1.0e6);
+    req.NT                 = parse_d(c.nt_text,  1.0);
+    req.eps                = parse_d(c.eps_text, 1.0e-4);
+    req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    return req;
+}
+
+static void apply_ls2d_result(LSCurveConfig& c, LS2DResult&& r) {
+    c.result_2d = std::move(r);
+    c.last_run_2d_ok = c.result_2d.ok;
+    if (!c.result_2d.ok) c.last_error = c.result_2d.error;
+    // Clamp выбранной экспоненты под новый n_exponents (если N изменился).
+    if (c.result_2d.n_exponents > 0 &&
+        c.display_exponent_idx >= c.result_2d.n_exponents) {
+        c.display_exponent_idx = 0;
+    }
+    c.data_generation_2d++;
+    c.fit_request_2d = true;
+}
+
 bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
     LSCurveConfig& c = curves[curve_idx];
     c.last_run_ok = false;
+    c.last_run_2d_ok = false;
     c.last_error.clear();
 
-    LS1DRequest req = build_ls1d_request(*this, c);
-    if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
-        return false;
+    if (c.mode_2d) {
+        LS2DRequest req = build_ls2d_request(*this, c);
+        if (req.krs_body.empty()) {
+            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        LS2DResult r = engine.run_ls_2d(req);
+        bool ok = r.ok;
+        apply_ls2d_result(c, std::move(r));
+        return ok;
+    } else {
+        LS1DRequest req = build_ls1d_request(*this, c);
+        if (req.krs_body.empty()) {
+            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        LS1DResult r = engine.run_ls_1d(req);
+        bool ok = r.ok;
+        apply_ls1d_result(c, std::move(r));
+        return ok;
     }
-    LS1DResult r = engine.run_ls_1d(req);
-    bool ok = r.ok;
-    apply_ls1d_result(c, std::move(r));
-    return ok;
 }
 
 bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
@@ -973,33 +1043,57 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
 
     LSCurveConfig& c = curves[curve_idx];
     c.last_run_ok = false;
+    c.last_run_2d_ok = false;
     c.last_error.clear();
 
-    LS1DRequest req = build_ls1d_request(*this, c);
-    if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
-        return false;
+    if (c.mode_2d) {
+        LS2DRequest req = build_ls2d_request(*this, c);
+        if (req.krs_body.empty()) {
+            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        in_flight = true;
+        is_2d_run = true;
+        running_curve_index = curve_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        run_future_2d = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+            return engine.run_ls_2d(req);
+        });
+    } else {
+        LS1DRequest req = build_ls1d_request(*this, c);
+        if (req.krs_body.empty()) {
+            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        in_flight = true;
+        is_2d_run = false;
+        running_curve_index = curve_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+            return engine.run_ls_1d(req);
+        });
     }
-
-    in_flight = true;
-    running_curve_index = curve_idx;
-    compute_start_time = std::chrono::steady_clock::now();
-
-    run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
-        return engine.run_ls_1d(req);
-    });
     return true;
 }
 
 bool LyapunovSpectrumAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!run_future.valid()) { in_flight = false; running_curve_index = -1; return false; }
-    if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-
-    LS1DResult r = run_future.get();
-    int idx = running_curve_index;
-    if (idx >= 0 && idx < (int)curves.size()) {
-        apply_ls1d_result(curves[idx], std::move(r));
+    if (is_2d_run) {
+        if (!run_future_2d.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        LS2DResult r = run_future_2d.get();
+        int idx = running_curve_index;
+        if (idx >= 0 && idx < (int)curves.size()) {
+            apply_ls2d_result(curves[idx], std::move(r));
+        }
+    } else {
+        if (!run_future.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        LS1DResult r = run_future.get();
+        int idx = running_curve_index;
+        if (idx >= 0 && idx < (int)curves.size()) {
+            apply_ls1d_result(curves[idx], std::move(r));
+        }
     }
     in_flight = false;
     running_curve_index = -1;

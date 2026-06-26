@@ -2093,6 +2093,50 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     InputNumStr("Resolution", c.n_pts_text, 120);
 
     ImGui::Separator();
+    // 2D-режим. Сетка квадратная (см. LLE 2D — то же ограничение getValueByIdx).
+    ImGui::Checkbox("2D mode (heatmap of one exponent)", &c.mode_2d);
+    if (c.mode_2d) {
+        ImGui::Indent();
+        if (!s.params.empty() || !s.vars.empty()) {
+            if (c.param_index_2 < 0 || c.param_index_2 >= (int)s.params.size())
+                c.param_index_2 = 0;
+            if (c.var_sweep_index_2 < 0 || c.var_sweep_index_2 >= (int)s.vars.size())
+                c.var_sweep_index_2 = 0;
+            std::string preview2;
+            if (c.sweep_over_var_2 && !s.vars.empty())
+                preview2 = s.vars[c.var_sweep_index_2] + " (IC)";
+            else if (!s.params.empty())
+                preview2 = s.params[c.param_index_2];
+            else
+                preview2 = "?";
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
+                for (int i = 0; i < (int)s.params.size(); ++i) {
+                    bool sel = !c.sweep_over_var_2 && c.param_index_2 == i;
+                    if (ImGui::Selectable(s.params[i].c_str(), sel)) {
+                        c.sweep_over_var_2 = false;
+                        c.param_index_2 = i;
+                    }
+                }
+                if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
+                for (int i = 0; i < (int)s.vars.size(); ++i) {
+                    std::string lbl = s.vars[i] + " (IC)";
+                    bool sel = c.sweep_over_var_2 && c.var_sweep_index_2 == i;
+                    if (ImGui::Selectable(lbl.c_str(), sel)) {
+                        c.sweep_over_var_2 = true;
+                        c.var_sweep_index_2 = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        InputNumStr("Param2 lo", c.param_lo_2_text, 120);
+        InputNumStr("Param2 hi", c.param_hi_2_text, 120);
+        ImGui::TextDisabled("Grid is square (Resolution applies to both axes).\nAll N exponents computed; switch in plot window.");
+        ImGui::Unindent();
+    }
+
+    ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,         120);
     InputNumStr("computing time", c.t_max_text,     120);
@@ -2139,21 +2183,42 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
     }
 
-    if (c.last_run_ok) {
-        int diverged = 0;
-        for (int f : c.result.flags) if (f < 0) ++diverged;
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
-        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
-    }
-    else if (!c.last_error.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
-        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
-        ImGui::InputTextMultiline("##ls_err",
-            const_cast<char*>(c.last_error.c_str()),
-            c.last_error.size() + 1,
-            sz,
-            ImGuiInputTextFlags_ReadOnly);
+    if (c.mode_2d) {
+        if (c.last_run_2d_ok) {
+            int total = (int)c.result_2d.flags.size();
+            int diverged = 0;
+            for (int f : c.result_2d.flags) if (f < 0) ++diverged;
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: %dx%d heatmap, %d exponents",
+                c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
+            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
+        }
+        else if (!c.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##ls_err_2d",
+                const_cast<char*>(c.last_error.c_str()),
+                c.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
+    } else {
+        if (c.last_run_ok) {
+            int diverged = 0;
+            for (int f : c.result.flags) if (f < 0) ++diverged;
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
+            if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+        }
+        else if (!c.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##ls_err",
+                const_cast<char*>(c.last_error.c_str()),
+                c.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
     }
     return do_run;
 }
@@ -2207,10 +2272,14 @@ static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
 // Plot LS: каждая кривая раскладывается на N лiний (по числу экспонент).
 // Серия: spectrum_idx * N + exponent_idx. Цвета через ic_base_color(seq).
+// При mode_2d=true у активной кривой вместо линий рисуется HeatmapView с
+// одной выбранной экспонентой; combo "Exponent" над хитмапой переключает
+// плоскость без повторного Run.
 static void draw_ls_plot(AppModel& model) {
     LyapunovSpectrumAnalysisSession& s = model.ls_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
+    static std::unique_ptr<HeatmapView> heatmap_ls;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -2222,9 +2291,101 @@ static void draw_ls_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
+    if (!heatmap_ls) {
+        heatmap_ls = std::make_unique<HeatmapView>();
+        int cm = model.heatmap_colormap;
+        if (cm >= 0 && cm <= 3) heatmap_ls->colormap = (HeatmapColormap)cm;
+    }
 
     if (s.curves.empty()) {
         ImGui::TextDisabled("No spectra yet.");
+        return;
+    }
+
+    // Активная кривая решает, что рисовать. mode_2d → heatmap одной экспоненты.
+    int act = s.active_curve_index;
+    if (act < 0 || act >= (int)s.curves.size()) act = 0;
+    LSCurveConfig& cact = s.curves[act];
+
+    if (cact.mode_2d) {
+        // Combo colormap (persisted в _app_config.json, как у LLE/BD).
+        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+        int cmap_idx = (int)heatmap_ls->colormap;
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::Combo("Colormap##lshm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            heatmap_ls->colormap = (HeatmapColormap)cmap_idx;
+            model.heatmap_colormap = cmap_idx;
+            AppConfig cfg;
+            cfg.ui_scale_override = model.ui_scale_override;
+            cfg.use_builtin_font  = model.use_builtin_font;
+            cfg.heatmap_colormap  = cmap_idx;
+            cfg.tick_precision    = model.tick_precision;
+            save_app_config(get_exe_dir_with_sep(), cfg);
+        }
+
+        // Combo exponent: λ₁..λ_N. Active при наличии данных; clamp idx под N.
+        if (cact.last_run_2d_ok && cact.result_2d.n_exponents > 0) {
+            int N = cact.result_2d.n_exponents;
+            if (cact.display_exponent_idx < 0 || cact.display_exponent_idx >= N)
+                cact.display_exponent_idx = 0;
+            std::vector<std::string> names;
+            names.reserve(N);
+            for (int j = 0; j < N; ++j) names.push_back("L" + std::to_string(j + 1));
+            std::vector<const char*> cnames;
+            cnames.reserve(N);
+            for (auto& s2 : names) cnames.push_back(s2.c_str());
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            ImGui::Combo("Exponent##lshm", &cact.display_exponent_idx, cnames.data(), N);
+        }
+
+        ImGui::SameLine();
+        ImGui::Checkbox("Autoscale color##lshm", &heatmap_ls->autoscale);
+        if (!heatmap_ls->autoscale) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            ImGui::InputFloat("vmin##lshm", &heatmap_ls->manual_vmin, 0.0f, 0.0f, "%.4g");
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            ImGui::InputFloat("vmax##lshm", &heatmap_ls->manual_vmax, 0.0f, 0.0f, "%.4g");
+        }
+
+        if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
+            ImGui::TextDisabled("No 2D data yet. Press Run.");
+            return;
+        }
+
+        // Подписи осей по реальным selected-полям свипа.
+        auto ax_name = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+            if (sweep_var)
+                return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
+            return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
+        };
+        heatmap_ls->x_axis.name = ax_name(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+        heatmap_ls->y_axis.name = ax_name(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+
+        bool fit = cact.fit_request_2d;
+        if (fit) cact.fit_request_2d = false;
+
+        // Указатель на нужную плоскость + её per-plane min/max.
+        int k = cact.display_exponent_idx;
+        size_t plane_size = (size_t)cact.result_2d.n_pts * (size_t)cact.result_2d.n_pts;
+        const double* plane_ptr = cact.result_2d.values.data() + (size_t)k * plane_size;
+        double vmin = (k >= 0 && k < (int)cact.result_2d.min_val.size()) ? cact.result_2d.min_val[k] : 0.0;
+        double vmax = (k >= 0 && k < (int)cact.result_2d.max_val.size()) ? cact.result_2d.max_val[k] : 0.0;
+
+        // data_generation для VBO-кэша: смешиваем поколение чанка + индекс
+        // экспоненты, чтобы переключение перезалило текстуру.
+        int gen = cact.data_generation_2d * 64 + k;
+
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        heatmap_ls->render(*renderer, origin, avail,
+                           /*owner_id*/ 0x15A2D1DEu, gen,
+                           cact.result_2d.n_pts, cact.result_2d.n_pts,
+                           plane_ptr,
+                           cact.result_2d.param_lo,   cact.result_2d.param_hi,
+                           cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
+                           vmin, vmax,
+                           fit);
         return;
     }
 
