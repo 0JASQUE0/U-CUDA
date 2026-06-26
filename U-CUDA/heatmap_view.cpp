@@ -161,11 +161,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     const float colorbar_w    = 18.0f;
     const float colorbar_gap  = 12.0f;
 
-    char vbuf[64];
-    std::snprintf(vbuf, sizeof(vbuf), "%.4g", vmax);
-    float w_vmax = ImGui::CalcTextSize(vbuf).x;
-    std::snprintf(vbuf, sizeof(vbuf), "%.4g", vmin);
-    float w_vmin = ImGui::CalcTextSize(vbuf).x;
+    std::string s_vmax = fmt_tick(vmax);
+    std::string s_vmin = fmt_tick(vmin);
+    float w_vmax = ImGui::CalcTextSize(s_vmax.c_str()).x;
+    float w_vmin = ImGui::CalcTextSize(s_vmin.c_str()).x;
     float cb_label_w = std::max(w_vmin, w_vmax);
     const float margin_right = colorbar_w + colorbar_gap + cb_label_w + 10.0f;
 
@@ -503,12 +502,11 @@ void HeatmapView::render(PlotRenderer& renderer,
                     ImVec2(cb_x + colorbar_w, cb_y + cb_h),
                     IM_COL32(120, 120, 130, 200));
         // Подписи min/max справа от colorbar'а.
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.4g", vmax);
-        dl->AddText(ImVec2(cb_x + colorbar_w + 4.0f, cb_y - 2.0f), col_text, buf);
-        std::snprintf(buf, sizeof(buf), "%.4g", vmin);
+        std::string s_max = fmt_tick(vmax);
+        std::string s_min = fmt_tick(vmin);
+        dl->AddText(ImVec2(cb_x + colorbar_w + 4.0f, cb_y - 2.0f), col_text, s_max.c_str());
         dl->AddText(ImVec2(cb_x + colorbar_w + 4.0f, cb_y + cb_h - font_h + 2.0f),
-                    col_text, buf);
+                    col_text, s_min.c_str());
     }
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.

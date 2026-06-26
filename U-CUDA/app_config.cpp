@@ -64,6 +64,9 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     int iv = 0;
     if (parse_int_field(body, "heatmap_colormap", iv))
         out.heatmap_colormap = iv;
+    int tp = 0;
+    if (parse_int_field(body, "tick_precision", tp))
+        out.tick_precision = tp;
     return true;
 }
 
@@ -76,7 +79,8 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "{\n";
         f << "  \"ui_scale_override\": " << cfg.ui_scale_override << ",\n";
         f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << ",\n";
-        f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << "\n";
+        f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << ",\n";
+        f << "  \"tick_precision\": "    << cfg.tick_precision << "\n";
         f << "}\n";
         if (!f) return false;
     }

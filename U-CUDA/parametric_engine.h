@@ -278,6 +278,77 @@ struct LLE2DResult {
     double max_val = 0.0;
 };
 
+// ============================================================================
+// Bifurcation 2D — «период»(p1, p2) на квадратной сетке n_pts × n_pts.
+// Алгоритм — порт bifurcation2D из hostLibrary.cu: три ядра на каждый чанк:
+//   calculateDiscreteModelCUDA (dimension=2, par_or_var compile-time)
+//   → peakFinderCUDA   → пики амплитуд + межпиковые интервалы
+//   → dbscanCUDA       → число кластеров = период системы в ячейке
+//
+// par_or_var (compile-time) — три значения (cudaLibrary.cu:973-990):
+//   1 — обе оси по параметрам;
+//   0 — обе оси по начальным условиям;
+//   2 — смешанный: ось 1 (X kernel) по IC, ось 2 (Y kernel) по param.
+// Маппинг sweep_over_var/_2 → par_or_var и логика своп/транспонирования — та
+// же что у LLE-2D (см. комментарий к LLE2DRequest выше).
+// ============================================================================
+
+struct Bifurcation2DRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;
+    std::vector<double> base_values;
+
+    // Ось X (первая).
+    bool sweep_over_var  = false;
+    int  var_sweep_index = 0;
+    int  param_index     = 0;       // 1-based в base_values
+
+    // Ось Y (вторая).
+    bool sweep_over_var_2  = false;
+    int  var_sweep_index_2 = 0;
+    int  param_index_2     = 0;
+
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    int    n_pts      = 200;        // квадратная сетка n_pts²
+
+    int    writable_var   = 0;      // индекс переменной для peak-finding
+    double h              = 0.01;
+    double transient_time = 0.0;
+    double t_max          = 100.0;
+    int    pre_scaller    = 1;
+    double max_value      = 1.0e6;
+
+    // DBSCAN-порог: радиус эпсилон для кластеризации пиков.
+    // Тот же смысл, что eps в bifurcation2D NonLinAnal (hostLibrary.cu:912).
+    double eps_dbscan = 0.1;
+
+    std::string csv_output_path;
+};
+
+struct Bifurcation2DResult {
+    bool ok = false;
+    std::string error;
+
+    int n_pts = 0;                   // сторона сетки (всего n_pts² ячеек)
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+
+    // values[iy*n_pts + ix] = (double)dbscan_result — период (число кластеров пиков).
+    // Спец-значения: -1.0 = расхождение (flag=-1), 0.0 = нет пиков (фикс. точка).
+    std::vector<double> values;
+    std::vector<int>    flags;       // 1=ok, -1=diverged
+
+    // Авто-нормализация для colormap (без -1/nan).
+    double min_val = 0.0;
+    double max_val = 0.0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -289,6 +360,9 @@ public:
     // скомпилированный PTX (кэш по хэшу krs_body + amountOfX).
     Bifurcation1DResult run_bifurcation_1d(const Bifurcation1DRequest& req);
 
+    // 2D-бифуркация — период(p1, p2) через DBSCAN на квадратной сетке.
+    Bifurcation2DResult run_bifurcation_2d(const Bifurcation2DRequest& req);
+
     // 1D-LLE. Отдельный PTX-кэш (другое шаблоное тело и другой kernel).
     LLE1DResult run_lle_1d(const LLE1DRequest& req);
 
@@ -299,7 +373,7 @@ public:
     // ветка par_or_var, тот же kernel LLEKernelCUDA).
     LLE2DResult run_lle_2d(const LLE2DRequest& req);
 
-    // TODO (следующие шаги): run_ls_2d, run_bifurcation_2d, ...
+    // TODO (следующие шаги): run_ls_2d, ...
 
 private:
     struct Impl;

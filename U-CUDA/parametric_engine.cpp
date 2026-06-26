@@ -100,37 +100,16 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cu;
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
-    // Минимальный curand_kernel.h-stub, подаётся как virtual header в NVRTC.
-    // Нужен потому что в CUDA 13+ настоящий curand_kernel.h полагается на
-    // <cuda/std/type_traits> (libcudacxx), которого NVRTC не находит без
-    // дополнительных include-путей. Stub предоставляет ровно те символы,
-    // что использует NonLinAnal в LLE/LS-кернелах: curandState_t,
-    // curand_init, curand_uniform. Реализация — детерминированный LCG.
-    // Имя файла "curand_kernel.h", поэтому стандартный
-    // `#include <curand_kernel.h>` из cudaLibrary.cuh берёт ЕГО, а не
-    // системный (virtual headers ищутся NVRTC первыми).
-    static constexpr const char* src_curand_stub =
-        "#pragma once\n"
-        "#ifndef U_CUDA_CURAND_STUB_H\n"
-        "#define U_CUDA_CURAND_STUB_H\n"
-        "typedef struct { unsigned long long state; } curandState_t;\n"
-        "typedef curandState_t curandStateXORWOW_t;\n"
-        "__device__ __forceinline__ void curand_init(\n"
-        "    unsigned long long seed, unsigned long long /*subseq*/,\n"
-        "    unsigned long long /*offset*/, curandState_t* s) {\n"
-        "    s->state = seed * 6364136223846793005ULL + 1442695040888963407ULL;\n"
-        "}\n"
-        "__device__ __forceinline__ float curand_uniform(curandState_t* s) {\n"
-        "    s->state = s->state * 6364136223846793005ULL + 1442695040888963407ULL;\n"
-        "    return (float)(((s->state >> 40) & 0xFFFFFFULL) + 1ULL) / 16777216.0f;\n"
-        "}\n"
-        "#endif\n";
+    // curand_kernel.h перехвачен inline-stub'ом в каждом template'е (kernels/*.cu)
+    // + `#define CURAND_KERNEL_H_` блокирует реальный header. Virtual header'а
+    // здесь больше нет — иначе он повторно объявлял бы curandState_t.
     std::string src_configCUDA_h;
     std::string src_template;        // bifurcation1d.template.cu
     std::string src_template_cont;   // bifurcation1d_cont.template.cu
     std::string src_template_lle;    // lle1d.template.cu
     std::string src_template_lle_2d; // lle2d.template.cu
     std::string src_template_ls;     // ls1d.template.cu
+    std::string src_template_bif2d;  // bifurcation2d.template.cu
     bool srcs_loaded = false;
 
     struct CachedModule {
@@ -170,6 +149,17 @@ struct ParametricEngine::Impl {
     };
     CachedContModule cached_cont;
 
+    // Bif-2D — отдельный шаблон (bifurcation2d.template.cu), три kernel'а:
+    // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
+    struct CachedBif2dModule {
+        std::string  key;
+        CUmodule     module        = nullptr;
+        CUfunction   kernel_traj   = nullptr;   // calculateDiscreteModelCUDA
+        CUfunction   kernel_peak   = nullptr;   // peakFinderCUDA
+        CUfunction   kernel_dbscan = nullptr;   // dbscanCUDA
+    };
+    CachedBif2dModule cached_bif2d;
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
@@ -178,6 +168,7 @@ struct ParametricEngine::Impl {
             release_lle_2d_module();
             release_ls_module();
             release_cont_module();
+            release_bif2d_module();
             cuCtxDestroy(context);
         }
     }
@@ -229,6 +220,17 @@ struct ParametricEngine::Impl {
         }
     }
 
+    void release_bif2d_module() {
+        if (cached_bif2d.module) {
+            cuModuleUnload(cached_bif2d.module);
+            cached_bif2d.module        = nullptr;
+            cached_bif2d.kernel_traj   = nullptr;
+            cached_bif2d.kernel_peak   = nullptr;
+            cached_bif2d.kernel_dbscan = nullptr;
+            cached_bif2d.key.clear();
+        }
+    }
+
     bool ensure_init(std::string& err) {
         if (inited) return true;
         CUresult r = cuInit(0);
@@ -256,6 +258,7 @@ struct ParametricEngine::Impl {
         src_template_lle      = read_text_file(root + "lle1d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_lle_2d   = read_text_file(root + "lle2d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_ls       = read_text_file(root + "ls1d.template.cu",               e); if (!e.empty()) { err = e; return false; }
+        src_template_bif2d    = read_text_file(root + "bifurcation2d.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -284,22 +287,22 @@ struct ParametricEngine::Impl {
         src = replace_all(src, "{{KRS_BODY}}",    krs_body);
         src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
 
-        // Виртуальные заголовки для NVRTC
+        // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен здесь:
+        // inline-stub в template'е + `#define CURAND_KERNEL_H_` блокируют как
+        // реальный header (по -I path), так и любой повторный inject.
         const char* header_sources[] = {
             src_cudaLibrary_cu.c_str(),
             src_cudaLibrary_cuh.c_str(),
             src_cudaMacros_cuh.c_str(),
             src_configCUDA_h.c_str(),
-            src_curand_stub,
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
             "cudaLibrary.cuh",
             "cudaMacros.cuh",
             "configCUDA.h",
-            "curand_kernel.h",
         };
-        constexpr int n_headers = 5;
+        constexpr int n_headers = 4;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d.cu",
@@ -1879,13 +1882,11 @@ struct ParametricEngine::Impl {
             src_cudaLibrary_cuh.c_str(),
             src_cudaMacros_cuh.c_str(),
             src_configCUDA_h.c_str(),
-            src_curand_stub,
         };
         const char* header_names[] = {
             "cudaLibrary.cu", "cudaLibrary.cuh", "cudaMacros.cuh", "configCUDA.h",
-            "curand_kernel.h",
         };
-        constexpr int n_headers = 5;
+        constexpr int n_headers = 4;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d_cont.cu",
@@ -2101,6 +2102,452 @@ struct ParametricEngine::Impl {
         res.ok = true;
         return res;
     }
+
+    // =========================================================================
+    // compile_bif2d_if_needed — шаблон bifurcation2d.template.cu, три kernel'а:
+    // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
+    // Cache key: ":bif2d:" + par_or_var.
+    // =========================================================================
+    bool compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
+                                 int par_or_var, std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":bif2d:" + std::to_string(par_or_var);
+        if (cached_bif2d.module && cached_bif2d.key == key) return true;
+        release_bif2d_module();
+
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template_bif2d;
+        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
+        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu",
+            "cudaLibrary.cuh",
+            "cudaMacros.cuh",
+            "configCUDA.h",
+        };
+        constexpr int n_headers = 4;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation2d.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(bif2d): ") + nvrtcGetErrorString(nr); return false; }
+
+        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
+        nvrtcAddNameExpression(prog, "peakFinderCUDA");
+        nvrtcAddNameExpression(prog, "dbscanCUDA");
+
+        char arch[64];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
+        if (cuda_include_opt.empty()) {
+            err = "переменная окружения CUDA_PATH не задана";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile(bif2d) failed:\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        const char* mp_traj = nullptr, *mp_peak = nullptr, *mp_dbscan = nullptr;
+        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA", &mp_traj);
+        nvrtcGetLoweredName(prog, "peakFinderCUDA",             &mp_peak);
+        nvrtcGetLoweredName(prog, "dbscanCUDA",                 &mp_dbscan);
+        std::string mangled_traj   = mp_traj   ? mp_traj   : "calculateDiscreteModelCUDA";
+        std::string mangled_peak   = mp_peak   ? mp_peak   : "peakFinderCUDA";
+        std::string mangled_dbscan = mp_dbscan ? mp_dbscan : "dbscanCUDA";
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&cached_bif2d.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(bif2d): " + cu_err(r); return false; }
+
+        r = cuModuleGetFunction(&cached_bif2d.kernel_traj,   cached_bif2d.module, mangled_traj.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_traj + "): " + cu_err(r); release_bif2d_module(); return false; }
+        r = cuModuleGetFunction(&cached_bif2d.kernel_peak,   cached_bif2d.module, mangled_peak.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r); release_bif2d_module(); return false; }
+        r = cuModuleGetFunction(&cached_bif2d.kernel_dbscan, cached_bif2d.module, mangled_dbscan.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_dbscan + "): " + cu_err(r); release_bif2d_module(); return false; }
+
+        cached_bif2d.key = key;
+        return true;
+    }
+
+    // =========================================================================
+    // run_bif2d — порт NonLinAnal::bifurcation2D (hostLibrary.cu:898-1724).
+    // Три kernel'а: calculateDiscreteModelCUDA → peakFinderCUDA → dbscanCUDA.
+    // Результат: число DBSCAN-кластеров на ячейку = период системы.
+    // [ADAPT]: те же адаптации, что у run_bif1d + run_lle_2d (см. их комментарии).
+    // =========================================================================
+    Bifurcation2DResult run_bif2d(const Bifurcation2DRequest& req) {
+        Bifurcation2DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
+
+        // ---- валидация ----
+        if (req.krs_body.empty())                                    return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if (req.n_pts <= 0)          return fail("n_pts должно быть > 0");
+        if (req.h <= 0.0)            return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)        return fail("t_max должно быть > 0");
+        if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)    return fail("pre_scaller должно быть > 0");
+        if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan должно быть > 0");
+        if (req.writable_var < 0 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+
+        // ---- par_or_var + swap_xy (та же логика что у run_lle_2d) ----
+        auto check_param = [&](int p1based) -> bool {
+            return p1based > 0 && p1based < (int)req.base_values.size();
+        };
+        auto check_var = [&](int v0based) -> bool {
+            return v0based >= 0 && v0based < req.amountOfX;
+        };
+
+        int par_or_var;
+        int    idx_axis_x, idx_axis_y;
+        double ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y;
+        bool   swap_xy = false;
+
+        if (req.sweep_over_var == req.sweep_over_var_2) {
+            par_or_var = req.sweep_over_var ? 0 : 1;
+            if (par_or_var == 1) {
+                if (!check_param(req.param_index))   return fail("param_index (ось X) вне диапазона");
+                if (!check_param(req.param_index_2)) return fail("param_index_2 (ось Y) вне диапазона");
+                idx_axis_x = req.param_index;
+                idx_axis_y = req.param_index_2;
+            } else {
+                if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                idx_axis_x = req.var_sweep_index;
+                idx_axis_y = req.var_sweep_index_2;
+            }
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var && !req.sweep_over_var_2) {
+            par_or_var = 2;
+            if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (ось X) вне диапазона");
+            if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+            idx_axis_x = req.var_sweep_index;
+            idx_axis_y = req.param_index_2;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else {
+            par_or_var = 2;
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            idx_axis_x = req.var_sweep_index_2;
+            idx_axis_y = req.param_index;
+            ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
+            ranges_lo_y = req.param_lo;   ranges_hi_y = req.param_hi;
+            swap_xy = true;
+        }
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+
+        // ---- локальные переменные (порт hostLibrary.cu:bifurcation2D) ----
+        const int    nPts                       = req.n_pts;
+        const double tMax                       = req.t_max;
+        const double h                          = req.h;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[4]                        = { ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y };
+        int    indicesOfMutVars[2]              = { idx_axis_x, idx_axis_y };
+        const int    writableVar                = req.writable_var;
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const int    preScaller                 = req.pre_scaller;
+        const double eps_dbscan                 = req.eps_dbscan;
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        constexpr int  blockSize_setup          = 32;
+        constexpr int  set_precision            = 15;
+
+        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        int amountOfPointsForSkip = (int)(transientTime / h);
+
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+
+        size_t total_cells = (size_t)nPts * (size_t)nPts;
+
+        // Memory budget — порт hostLibrary.cu:930-950.
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.92);
+
+        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * 3 * sizeof(double) + 2 * sizeof(int);
+        size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(double) + 2 * sizeof(int);
+        if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
+
+        size_t nPtsLimiter = (freeMemory - memConstants) / baseMemPerSystem;
+        if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > total_cells)             nPtsLimiter = total_cells;
+        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
+        if (nPtsLimiter == 0) return fail("not enough GPU memory: per-system buffer too large");
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        // ---- host buffers ----
+        std::vector<int> h_dbscanResult(nPtsLimiter);
+
+        // ---- device buffers ----
+        double* d_data              = nullptr;
+        double* d_ranges            = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        int*    d_amountOfPeaks     = nullptr;
+        double* d_intervals         = nullptr;
+        double* d_helpfulArray      = nullptr;
+        int*    d_dbscanResult      = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_data)              cudaFree(d_data);
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            if (d_intervals)         cudaFree(d_intervals);
+            if (d_helpfulArray)      cudaFree(d_helpfulArray);
+            if (d_dbscanResult)      cudaFree(d_dbscanResult);
+        };
+
+        #define BIF2D_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define BIF2D_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        BIF2D_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
+        BIF2D_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
+        BIF2D_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
+        BIF2D_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),           "cudaMalloc d_initialConditions");
+        BIF2D_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                      "cudaMalloc d_values");
+        BIF2D_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
+        BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_intervals");
+        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_helpfulArray");
+        BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+
+        BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
+        BIF2D_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_ic");
+        BIF2D_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),             cudaMemcpyHostToDevice), "memcpy d_values");
+        BIF2D_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
+
+        // Config CSV (опционально).
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            if (cfg.is_open()) {
+                cfg << std::setprecision(set_precision);
+                cfg << "2D bifurcation (DBSCAN)\n";
+                if (par_or_var == 1) cfg << "Parameter estimation\n";
+                if (par_or_var == 0) cfg << "Initial conditions estimation\n";
+                if (par_or_var == 2) cfg << "Mixed: x=IC, y=parameter\n";
+                cfg << "a[" << amountOfValues << "] = { ";
+                for (int kk = 0; kk < amountOfValues; ++kk) { cfg << values[kk]; if (kk != amountOfValues-1) cfg << ", "; else cfg << " }\n"; }
+                cfg << "X0[" << amountOfInitialConditions << "] = { ";
+                for (int kk = 0; kk < amountOfInitialConditions; ++kk) { cfg << initialConditions[kk]; if (kk != amountOfInitialConditions-1) cfg << ", "; else cfg << " }\n"; }
+                cfg << "CT = " << tMax << "\nTT = " << transientTime << "\nh = " << h << "\ndecimator = " << preScaller << "\n";
+                cfg << "eps_DBSCAN = " << eps_dbscan << "\n";
+                cfg << "indexVar for peakfinder = " << writableVar << "\n";
+                cfg << "indices = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
+                cfg << "axis1: " << ranges[0] << " .. " << ranges[1] << "\n";
+                cfg << "axis2: " << ranges[2] << " .. " << ranges[3] << "\n";
+                cfg << "n_pts = " << nPts << "x" << nPts << "\n";
+            }
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
+        }
+
+        res.n_pts      = nPts;
+        res.param_lo   = req.param_lo;
+        res.param_hi   = req.param_hi;
+        res.param_lo_2 = req.param_lo_2;
+        res.param_hi_2 = req.param_hi_2;
+        res.values.assign(total_cells, 0.0);
+        res.flags.assign(total_cells,  0);
+
+        std::ofstream out;
+        if (!OUT_FILE_PATH.empty()) {
+            out.open(OUT_FILE_PATH);
+            if (out.is_open()) out << std::setprecision(set_precision);
+        }
+
+        // ---- Главный цикл по чанкам (порт hostLibrary.cu:1212-1692) ----
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            size_t cur_limiter = originalNPtsLimiter;
+            if (iter == amountOfIteration - 1)
+                cur_limiter = total_cells - (originalNPtsLimiter * iter);
+
+            int blockSize = blockSize_setup;
+            int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
+
+            // 1. calculateDiscreteModelCUDA (dimension=2)
+            int    nPts_int                  = nPts;
+            int    nPtsLimiter_int           = (int)cur_limiter;
+            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
+            size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
+            size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
+            int    dimension_arg             = 2;
+            double h_arg                     = h;
+            int    amountOfIC_int            = amountOfInitialConditions;
+            int    amountOfValues_int        = amountOfValues;
+            size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
+            int    preScaller_int            = preScaller;
+            int    writableVar_int           = writableVar;
+            double maxValue_arg              = maxValue;
+            bool   par_or_var_arg            = (par_or_var != 0);  // true=param, false=IC (runtime hint, kernel использует compile-time макрос)
+
+            void* args_traj[] = {
+                &nPts_int,
+                &nPtsLimiter_int,
+                &sizeOfBlock_s,
+                &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s,
+                &dimension_arg,
+                &d_ranges,
+                &h_arg,
+                &d_indicesOfMutVars,
+                &d_initialConditions,
+                &amountOfIC_int,
+                &d_values,
+                &amountOfValues_int,
+                &amountOfIterations_arg,
+                &preScaller_int,
+                &writableVar_int,
+                &maxValue_arg,
+                &d_data,
+                &d_amountOfPeaks,
+                &par_or_var_arg
+            };
+            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
+                                          gridSize, 1, 1, blockSize, 1, 1,
+                                          shared_traj, nullptr, args_traj, nullptr),
+                           "cuLaunchKernel(bif2d traj)");
+            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after traj");
+
+            // 2. peakFinderCUDA — d_data передаётся и как data, и как outPeaks (in-place)
+            double timeStep_arg = h * (double)preScaller;
+            void* args_peak[] = {
+                &d_data,
+                &sizeOfBlock_s,
+                &nPtsLimiter_int,
+                &d_amountOfPeaks,
+                &d_data,        // outPeaks — in-place поверх траектории
+                &d_intervals,
+                &timeStep_arg
+            };
+            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_peak,
+                                          gridSize, 1, 1, blockSize, 1, 1,
+                                          0, nullptr, args_peak, nullptr),
+                           "cuLaunchKernel(bif2d peak)");
+            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after peak");
+
+            // 3. dbscanCUDA
+            double eps_arg = eps_dbscan;
+            void* args_dbscan[] = {
+                &d_data,
+                &sizeOfBlock_s,
+                &nPtsLimiter_int,
+                &d_amountOfPeaks,
+                &d_intervals,
+                &d_helpfulArray,
+                &eps_arg,
+                &d_dbscanResult
+            };
+            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
+                                          gridSize, 1, 1, blockSize, 1, 1,
+                                          0, nullptr, args_dbscan, nullptr),
+                           "cuLaunchKernel(bif2d dbscan)");
+            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after dbscan");
+
+            // D2H: только d_dbscanResult (число кластеров = период).
+            BIF2D_CHECK(cudaMemcpy(h_dbscanResult.data(), d_dbscanResult,
+                                   cur_limiter * sizeof(int), cudaMemcpyDeviceToHost),
+                        "memcpy h_dbscanResult");
+
+            for (size_t k = 0; k < cur_limiter; ++k) {
+                size_t kernel_idx = originalNPtsLimiter * iter + k;
+                int    period     = h_dbscanResult[k];
+                size_t out_idx;
+                if (swap_xy) {
+                    size_t kix = kernel_idx % (size_t)nPts;
+                    size_t kiy = kernel_idx / (size_t)nPts;
+                    out_idx = kix * (size_t)nPts + kiy;
+                } else {
+                    out_idx = kernel_idx;
+                }
+                double v = (period < 0) ? -1.0 : (double)period;
+                res.values[out_idx] = v;
+                res.flags[out_idx]  = (period < 0) ? -1 : 1;
+                if (out.is_open()) out << period << ((k + 1 < cur_limiter) ? ", " : "\n");
+            }
+        }
+        if (out.is_open()) out.close();
+
+        // Авто-нормализация colormap.
+        double vmin =  std::numeric_limits<double>::infinity();
+        double vmax = -std::numeric_limits<double>::infinity();
+        for (size_t k = 0; k < total_cells; ++k) {
+            if (res.flags[k] < 0) continue;
+            double v = res.values[k];
+            if (!std::isfinite(v) || v < 0.0) continue;
+            if (v < vmin) vmin = v;
+            if (v > vmax) vmax = v;
+        }
+        res.min_val = std::isfinite(vmin) ? vmin : 0.0;
+        res.max_val = std::isfinite(vmax) ? vmax : 0.0;
+
+        cleanup();
+        #undef BIF2D_CHECK
+        #undef BIF2D_CHECK_CU
+        res.ok = true;
+        return res;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -2110,6 +2557,10 @@ ParametricEngine::~ParametricEngine() = default;
 
 Bifurcation1DResult ParametricEngine::run_bifurcation_1d(const Bifurcation1DRequest& req) {
     return impl_->run_bif1d(req);
+}
+
+Bifurcation2DResult ParametricEngine::run_bifurcation_2d(const Bifurcation2DRequest& req) {
+    return impl_->run_bif2d(req);
 }
 
 LLE1DResult ParametricEngine::run_lle_1d(const LLE1DRequest& req) {

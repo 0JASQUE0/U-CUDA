@@ -128,6 +128,11 @@ public:
     // сюда; static HeatmapView в draw_lle_plot читает при первом создании.
     int heatmap_colormap = 0;
 
+    // Кол-во значащих цифр в подписях тиков осей и colorbar'а (2-10).
+    // Зеркалит AppConfig::tick_precision; при изменении в Settings вызывается
+    // set_tick_precision() из plot_axis.h, чтобы fmt_tick() сразу подхватил.
+    int tick_precision = 4;
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 

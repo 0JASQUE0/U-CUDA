@@ -1131,7 +1131,15 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     // Continuation: каждая следующая точка стартует с конечного x[] предыдущей
     // (single-thread GPU-kernel; см. parametric_engine::run_bif1d_continuation).
     // При активации справа появляются radio forward/backward — для гистерезиса.
+    // В 2D-режиме отключён: run_bif2d использует свой 3-kernel pipeline, флаг
+    // continuation им игнорируется — лочим UI и принудительно сбрасываем флаги,
+    // чтобы скрытое состояние не утекло в следующий 1D-Run.
+    if (bd.mode_2d) {
+        bd.continuation = false;
+        bd.continuation_reverse = false;
+    }
     {
+        ImGui::BeginDisabled(bd.mode_2d);
         bool cont = bd.continuation;
         if (ImGui::Checkbox("Continuation", &cont)) bd.continuation = cont;
         if (bd.continuation) {
@@ -1141,6 +1149,55 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
             ImGui::RadioButton("backward", &dir, 1);
             bd.continuation_reverse = (dir == 1);
         }
+        ImGui::EndDisabled();
+        if (bd.mode_2d)
+            ImGui::TextDisabled("(unavailable in 2D mode)");
+    }
+
+    ImGui::Separator();
+
+    // ----- 2D mode: хитмап «период»(p1, p2) через DBSCAN -----
+    ImGui::Checkbox("2D mode (period heatmap)", &bd.mode_2d);
+    if (bd.mode_2d) {
+        ImGui::Indent();
+        if (!s.params.empty() || !s.vars.empty()) {
+            if (bd.param_index_2 < 0 || bd.param_index_2 >= (int)s.params.size())
+                bd.param_index_2 = 0;
+            if (bd.var_sweep_index_2 < 0 || bd.var_sweep_index_2 >= (int)s.vars.size())
+                bd.var_sweep_index_2 = 0;
+            std::string preview2;
+            if (bd.sweep_over_var_2 && !s.vars.empty())
+                preview2 = s.vars[bd.var_sweep_index_2] + " (IC)";
+            else if (!s.params.empty())
+                preview2 = s.params[bd.param_index_2];
+            else
+                preview2 = "?";
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
+                for (int i = 0; i < (int)s.params.size(); ++i) {
+                    bool sel = !bd.sweep_over_var_2 && bd.param_index_2 == i;
+                    if (ImGui::Selectable(s.params[i].c_str(), sel)) {
+                        bd.sweep_over_var_2 = false;
+                        bd.param_index_2 = i;
+                    }
+                }
+                if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
+                for (int i = 0; i < (int)s.vars.size(); ++i) {
+                    std::string lbl = s.vars[i] + " (IC)";
+                    bool sel = bd.sweep_over_var_2 && bd.var_sweep_index_2 == i;
+                    if (ImGui::Selectable(lbl.c_str(), sel)) {
+                        bd.sweep_over_var_2 = true;
+                        bd.var_sweep_index_2 = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        InputNumStr("Param2 lo",  bd.param_lo_2_text, 120);
+        InputNumStr("Param2 hi",  bd.param_hi_2_text, 120);
+        InputNumStr("DBSCAN eps", bd.eps_dbscan_text, 120);
+        ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
+        ImGui::Unindent();
     }
 
     ImGui::Separator();
@@ -1155,8 +1212,9 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         ImGui::Combo("Writable var", &bd.writable_var, items.data(), (int)items.size());
     }
     InputNumStr("Resolution", bd.n_pts_text, 120);
-    if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
-        bd.fit_request = true;
+    if (!bd.mode_2d)
+        if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
+            bd.fit_request = true;
 
     ImGui::Separator();
     ImGui::Text("Integration:");
@@ -1201,25 +1259,47 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
     }
 
-    if (bd.last_run_ok) {
-        int diverged = 0, total_peaks = 0, max_peaks = 0;
-        for (int f : bd.result.flags) {
-            if (f < 0) ++diverged;
-            else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
+    if (bd.mode_2d) {
+        if (bd.last_run_2d_ok) {
+            int total = (int)bd.result_2d.flags.size();
+            int diverged = 0;
+            for (int f : bd.result_2d.flags) if (f < 0) ++diverged;
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: %dx%d heatmap, period(min..max) = %.0f..%.0f",
+                bd.result_2d.n_pts, bd.result_2d.n_pts,
+                bd.result_2d.min_val, bd.result_2d.max_val);
+            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
         }
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, peaks total=%d (max per param=%d)",
-            bd.result.n_pts, total_peaks, max_peaks);
-        if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, bd.result.n_pts);
-    }
-    else if (!bd.last_error.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
-        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
-        ImGui::InputTextMultiline("##par_err",
-            const_cast<char*>(bd.last_error.c_str()),
-            bd.last_error.size() + 1,
-            sz,
-            ImGuiInputTextFlags_ReadOnly);
+        else if (!bd.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##par_err_2d",
+                const_cast<char*>(bd.last_error.c_str()),
+                bd.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
+    } else {
+        if (bd.last_run_ok) {
+            int diverged = 0, total_peaks = 0, max_peaks = 0;
+            for (int f : bd.result.flags) {
+                if (f < 0) ++diverged;
+                else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
+            }
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: n_pts=%d, peaks total=%d (max per param=%d)",
+                bd.result.n_pts, total_peaks, max_peaks);
+            if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, bd.result.n_pts);
+        }
+        else if (!bd.last_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+            ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+            ImGui::InputTextMultiline("##par_err",
+                const_cast<char*>(bd.last_error.c_str()),
+                bd.last_error.size() + 1,
+                sz,
+                ImGuiInputTextFlags_ReadOnly);
+        }
     }
     return do_run;
 }
@@ -1284,6 +1364,7 @@ static void draw_bifurcation_plot(AppModel& model) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
+    static std::unique_ptr<HeatmapView> heatmap_bd;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -1294,10 +1375,74 @@ static void draw_bifurcation_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "X";
     }
+    if (!heatmap_bd) {
+        heatmap_bd = std::make_unique<HeatmapView>();
+        int cm = model.heatmap_colormap;
+        if (cm >= 0 && cm <= 3) heatmap_bd->colormap = (HeatmapColormap)cm;
+    }
 
     if (s.diagrams.empty()) {
         ImGui::TextDisabled("No diagrams yet.");
         return;
+    }
+
+    // Активная БД решает, что рисовать. Если mode_2d=true — heatmap_bd.
+    {
+        int act = s.active_diagram_index;
+        if (act >= 0 && act < (int)s.diagrams.size()) {
+            BifurcationDiagramConfig& bdact = s.diagrams[act];
+            if (bdact.mode_2d) {
+                // Colormap combo + autoscale над плотом.
+                static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+                int cmap_idx = (int)heatmap_bd->colormap;
+                ImGui::SetNextItemWidth(140);
+                if (ImGui::Combo("Colormap##bdhm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+                    heatmap_bd->colormap = (HeatmapColormap)cmap_idx;
+                    model.heatmap_colormap = cmap_idx;
+                    AppConfig cfg;
+                    cfg.ui_scale_override = model.ui_scale_override;
+                    cfg.use_builtin_font  = model.use_builtin_font;
+                    cfg.heatmap_colormap  = cmap_idx;
+                    save_app_config(get_exe_dir_with_sep(), cfg);
+                }
+                ImGui::SameLine();
+                ImGui::Checkbox("Autoscale color##bdhm", &heatmap_bd->autoscale);
+                if (!heatmap_bd->autoscale) {
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+                    ImGui::InputFloat("vmin##bdhm", &heatmap_bd->manual_vmin, 0.0f, 0.0f, "%.4g");
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+                    ImGui::InputFloat("vmax##bdhm", &heatmap_bd->manual_vmax, 0.0f, 0.0f, "%.4g");
+                }
+
+                if (!bdact.last_run_2d_ok || bdact.result_2d.values.empty()) {
+                    ImGui::TextDisabled("No 2D data yet. Press Run.");
+                    return;
+                }
+
+                auto ax_name = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+                    if (sweep_var)
+                        return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
+                    return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
+                };
+                heatmap_bd->x_axis.name = ax_name(bdact.sweep_over_var,   bdact.param_index,   bdact.var_sweep_index);
+                heatmap_bd->y_axis.name = ax_name(bdact.sweep_over_var_2, bdact.param_index_2, bdact.var_sweep_index_2);
+
+                bool fit = bdact.fit_request_2d;
+                if (fit) bdact.fit_request_2d = false;
+
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                ImVec2 origin = ImGui::GetCursorScreenPos();
+                heatmap_bd->render(*renderer, origin, avail,
+                                   /*owner_id*/ 0xBD2D1DE1u, bdact.data_generation_2d,
+                                   bdact.result_2d.n_pts, bdact.result_2d.n_pts,
+                                   bdact.result_2d.values.data(),
+                                   bdact.result_2d.param_lo,   bdact.result_2d.param_hi,
+                                   bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
+                                   bdact.result_2d.min_val, bdact.result_2d.max_val,
+                                   fit);
+                return;
+            }
+        }
     }
 
     // Имеется ли хотя бы одна БД с готовыми данными?
@@ -2592,6 +2737,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = ui_slider_value;
                 cfg.use_builtin_font  = model.use_builtin_font;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
+                cfg.tick_precision    = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::SameLine();
@@ -2602,6 +2748,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = 0.0f;
                 cfg.use_builtin_font  = model.use_builtin_font;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
+                cfg.tick_precision    = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Auto detected: %.2fx   |   Override: %s",
@@ -2620,10 +2767,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = model.ui_scale_override;
                 cfg.use_builtin_font  = use_builtin;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
+                cfg.tick_precision    = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
+
+            ImGui::Separator();
+            ImGui::Text("Axes");
+            int tp = model.tick_precision;
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderInt("Tick precision (digits)", &tp, 2, 10)) {
+                model.tick_precision = tp;
+                set_tick_precision(tp);
+                AppConfig cfg;
+                cfg.ui_scale_override = model.ui_scale_override;
+                cfg.use_builtin_font  = model.use_builtin_font;
+                cfg.heatmap_colormap  = model.heatmap_colormap;
+                cfg.tick_precision    = tp;
+                save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+            ImGui::TextDisabled("Significant digits in axis tick and colorbar labels.");
         }
         ImGui::End();
     }

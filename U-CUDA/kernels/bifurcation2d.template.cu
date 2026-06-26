@@ -1,14 +1,21 @@
-// ls1d.template.cu
+// bifurcation2d.template.cu
 //
-// NVRTC-шаблон для 1D спектра Ляпунова (LS). Подставляется ParametricEngine'ом
-// тем же способом, что bifurcation1d/lle1d. Алгоритм — NonLinAnal::LSKernelCUDA
-// (cudaLibrary.cu:2732), Wolf/Benettin с Gram-Schmidt'ом для N ортогональных
-// перенормализаций. Раньше был отрезан под #ifndef __CUDACC_RTC__ вместе с
-// curand_kernel.h и gramSchmidtProcess; теперь гард сужен, оба видны.
+// NVRTC-шаблон для 2D-бифуркации (хитмап «период(p1, p2)» через DBSCAN).
+// Структура идентична bifurcation1d.template.cu; отличие — в runtime-аргументах
+// kernel'а (см. parametric_engine.cpp::run_bif2d): dimension=2, ranges[4],
+// indicesOfMutVars[2], общее число ячеек nPts*nPts (чанкируется как LLE-2D).
+//
+// Цепочка ядер на каждый чанк:
+//   calculateDiscreteModelCUDA (dimension=2) -> peakFinderCUDA -> dbscanCUDA
+// Результат dbscanCUDA[cell] = число кластеров пиков = период системы.
+//
+// Плейсхолдеры:
+//   AMOUNT_OF_X — размерность системы (число переменных, int)
+//   KRS_BODY    — тело calculateDiscreteModel из codegen
+//   PAR_OR_VAR  — 1 (обе оси по param), 0 (обе по IC), 2 (X=IC, Y=param)
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
-// par_or_var выбирает свип-режим compile-time (LSKernelCUDA читает макрос,
-// не runtime-аргумент). 1 = PARAMETER sweep, 0 = INITIAL CONDITION sweep.
+
 #define par_or_var {{PAR_OR_VAR}}
 
 #ifdef __CUDACC_RTC__
