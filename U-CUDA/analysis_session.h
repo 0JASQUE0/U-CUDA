@@ -426,6 +426,25 @@ struct LSCurveConfig {
     std::string last_error;
     int         data_generation = 0;
     bool        fit_request = false;
+
+    // ---- 2D-режим (LS по двум параметрам/IC, хитмап одной экспоненты) ----
+    // mode_2d=true → Run собирает LS2DRequest вместо LS1DRequest, результат
+    // (полный спектр N экспонент на каждую ячейку) ложится в result_2d.
+    // Combo над хитмапой переключает display_exponent_idx без повторного Run.
+    bool        mode_2d = false;
+    int         param_index_2 = 0;
+    bool        sweep_over_var_2 = false;
+    int         var_sweep_index_2 = 0;
+    std::string param_lo_2_text = "0";
+    std::string param_hi_2_text = "1";
+
+    LS2DResult result_2d;
+    bool        last_run_2d_ok = false;
+    int         data_generation_2d = 0;
+    bool        fit_request_2d = false;
+
+    // Какую экспоненту показывать в heatmap (0-based, default λ₁).
+    int         display_exponent_idx = 0;
 };
 
 // LS-сессия — структура та же что у LLE-сессии, но другая Request/Result и
@@ -442,6 +461,10 @@ struct LyapunovSpectrumAnalysisSession {
     int running_curve_index = -1;
 
     std::future<LS1DResult> run_future;
+    // Параллельный future для 2D-режима — гарантия: одновременно в полёте только
+    // одна задача (1D или 2D); какая именно — is_2d_run.
+    std::future<LS2DResult> run_future_2d;
+    bool is_2d_run = false;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 

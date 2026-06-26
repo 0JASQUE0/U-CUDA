@@ -3,8 +3,6 @@
 #include <cmath>
 #include "gpu_line_series_3d.h"
 #include "plot_camera_3d.h"
-// app_main.cpp - точка входа GUI-приложения: окно GLFW+OpenGL3, цикл ImGui.
-// Связывает AppModel, OCR и платформенные колбэки.
 #include "imgui.h"
 #include "implot.h"
 #include "implot3d.h"

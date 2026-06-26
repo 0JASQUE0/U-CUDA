@@ -109,6 +109,7 @@ struct ParametricEngine::Impl {
     std::string src_template_lle;    // lle1d.template.cu
     std::string src_template_lle_2d; // lle2d.template.cu
     std::string src_template_ls;     // ls1d.template.cu
+    std::string src_template_ls_2d;  // ls2d.template.cu
     std::string src_template_bif2d;  // bifurcation2d.template.cu
     bool srcs_loaded = false;
 
@@ -139,6 +140,9 @@ struct ParametricEngine::Impl {
     };
     CachedLsModule cached_ls;
 
+    // LS-2D — отдельный шаблон/par_or_var-ветка, тот же kernel.
+    CachedLsModule cached_ls_2d;
+
     // Continuation bif1d — четвёртый слот. Кернел single-thread, плюс
     // peakFinderCUDA из того же модуля (он определён в cudaLibrary.cu).
     struct CachedContModule {
@@ -167,6 +171,7 @@ struct ParametricEngine::Impl {
             release_lle_module();
             release_lle_2d_module();
             release_ls_module();
+            release_ls_2d_module();
             release_cont_module();
             release_bif2d_module();
             cuCtxDestroy(context);
@@ -207,6 +212,15 @@ struct ParametricEngine::Impl {
             cached_ls.module = nullptr;
             cached_ls.kernel_ls = nullptr;
             cached_ls.key.clear();
+        }
+    }
+
+    void release_ls_2d_module() {
+        if (cached_ls_2d.module) {
+            cuModuleUnload(cached_ls_2d.module);
+            cached_ls_2d.module = nullptr;
+            cached_ls_2d.kernel_ls = nullptr;
+            cached_ls_2d.key.clear();
         }
     }
 
@@ -258,6 +272,7 @@ struct ParametricEngine::Impl {
         src_template_lle      = read_text_file(root + "lle1d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_lle_2d   = read_text_file(root + "lle2d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_ls       = read_text_file(root + "ls1d.template.cu",               e); if (!e.empty()) { err = e; return false; }
+        src_template_ls_2d    = read_text_file(root + "ls2d.template.cu",               e); if (!e.empty()) { err = e; return false; }
         src_template_bif2d    = read_text_file(root + "bifurcation2d.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
@@ -1861,6 +1876,418 @@ struct ParametricEngine::Impl {
     }
 
     // =========================================================================
+    // compile_ls_2d_if_needed — отдельный шаблон ls2d.template.cu, тот же kernel
+    // LSKernelCUDA. Ключ кэша помечен ":ls2d:" — изолирован от ":ls:" slot'а.
+    // =========================================================================
+    bool compile_ls_2d_if_needed(const std::string& krs_body, int amountOfX,
+                                 int par_or_var, std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":ls2d:pov" + std::to_string(par_or_var);
+        if (cached_ls_2d.module && cached_ls_2d.key == key) return true;
+        release_ls_2d_module();
+
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template_ls_2d;
+        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
+        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu",
+            "cudaLibrary.cuh",
+            "cudaMacros.cuh",
+            "configCUDA.h",
+        };
+        constexpr int n_headers = 4;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "ls2d.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(ls2d): ") + nvrtcGetErrorString(nr); return false; }
+
+        nvrtcAddNameExpression(prog, "LSKernelCUDA");
+
+        char arch[64];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH) {
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+            }
+        }
+        if (cuda_include_opt.empty()) {
+            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile failed (ls2d):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        const char* mangled_ptr = nullptr;
+        nvrtcGetLoweredName(prog, "LSKernelCUDA", &mangled_ptr);
+        std::string mangled = mangled_ptr ? mangled_ptr : "LSKernelCUDA";
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&cached_ls_2d.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(ls2d): " + cu_err(r); return false; }
+
+        r = cuModuleGetFunction(&cached_ls_2d.kernel_ls, cached_ls_2d.module, mangled.c_str());
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(" + mangled + "): " + cu_err(r);
+            release_ls_2d_module(); return false;
+        }
+
+        cached_ls_2d.key = key;
+        return true;
+    }
+
+    // =========================================================================
+    // run_ls_2d — спектр Ляпунова на сетке n_pts × n_pts. Гибрид run_ls_1d
+    // (per-system буфер размером N экспонент) и run_lle_2d (swap_xy логика,
+    // chunking по cell'ам). На каждую ячейку kernel возвращает N значений; D2H
+    // копирует cur_limiter * N doubles, host распаковывает по плоскостям —
+    // values[k*n*n + iy*n + ix] = k-я экспонента в ячейке (ix, iy).
+    // =========================================================================
+    LS2DResult run_ls_2d(const LS2DRequest& req) {
+        LS2DResult res;
+        auto fail = [&](const std::string& msg) -> LS2DResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                    return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне допустимого диапазона");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
+        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+
+        // par_or_var + swap_xy: точная копия логики из run_lle_2d.
+        auto check_param = [&](int p1based) -> bool {
+            return p1based > 0 && p1based < (int)req.base_values.size();
+        };
+        auto check_var = [&](int v0based) -> bool {
+            return v0based >= 0 && v0based < req.amountOfX;
+        };
+
+        int par_or_var;
+        int  idx_axis_x, idx_axis_y;
+        double ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y;
+        bool swap_xy = false;
+
+        if (req.sweep_over_var == req.sweep_over_var_2) {
+            par_or_var = req.sweep_over_var ? 0 : 1;
+            if (par_or_var == 1) {
+                if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
+                if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+                idx_axis_x = req.param_index;
+                idx_axis_y = req.param_index_2;
+            } else {
+                if (!check_var(req.var_sweep_index))    return fail("var_sweep_index (ось X) вне диапазона");
+                if (!check_var(req.var_sweep_index_2))  return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                idx_axis_x = req.var_sweep_index;
+                idx_axis_y = req.var_sweep_index_2;
+            }
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var && !req.sweep_over_var_2) {
+            par_or_var = 2;
+            if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+            if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+            idx_axis_x = req.var_sweep_index;
+            idx_axis_y = req.param_index_2;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else {
+            par_or_var = 2;
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            idx_axis_x = req.var_sweep_index_2;
+            idx_axis_y = req.param_index;
+            ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
+            ranges_lo_y = req.param_lo;   ranges_hi_y = req.param_hi;
+            swap_xy = true;
+        }
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_ls_2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+
+        const double tMax                       = req.t_max;
+        const double NT                         = req.NT;
+        const int    nPts                       = req.n_pts;
+        const double h                          = req.h;
+        const double eps                        = req.eps;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[4]                        = { ranges_lo_x, ranges_hi_x,
+                                                    ranges_lo_y, ranges_hi_y };
+        int    indicesOfMutVars[2]              = { idx_axis_x, idx_axis_y };
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        constexpr int blockSize_setup = 32;
+        constexpr int set_precision   = 15;
+
+        int amountOfPointsInBlock = (int)(tMax / NT);
+        int amountOfPointsForSkip = (int)(transientTime / h);
+
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+
+        size_t total_cells = (size_t)nPts * (size_t)nPts;
+        const int N = amountOfInitialConditions;
+
+        // Memory budget — мирор run_ls_1d (агрессивно делит /16, т.к. per-system
+        // память ~N). total_cells заменяет nPts.
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory /= 16;
+
+        size_t perSystemBytes = sizeof(double) * (size_t)amountOfPointsInBlock * (size_t)N;
+        if (perSystemBytes == 0) perSystemBytes = sizeof(double);
+        size_t nPtsLimiter = freeMemory / perSystemBytes;
+        if (nPtsLimiter == 0)             nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > total_cells)    nPtsLimiter = total_cells;
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        // h_lsResult — nPtsLimiter × N row-major (как в run_ls_1d).
+        std::vector<double> h_lsResult(nPtsLimiter * (size_t)N);
+
+        double* d_ranges            = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        double* d_lsResult          = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_lsResult)          cudaFree(d_lsResult);
+        };
+
+        #define LS2_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define LS2_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        LS2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                "cudaMalloc d_ranges");
+        LS2_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
+        LS2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)N * sizeof(double)),                        "cudaMalloc d_initialConditions");
+        LS2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),           "cudaMalloc d_values");
+        LS2_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)N * sizeof(double)),          "cudaMalloc d_lsResult");
+
+        LS2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                       cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LS2_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                          cudaMemcpyHostToDevice), "memcpy d_indices");
+        LS2_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)N * sizeof(double),               cudaMemcpyHostToDevice), "memcpy d_ic");
+        LS2_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_values");
+        LS2_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
+
+        // Опциональный config CSV.
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            if (cfg.is_open()) {
+                cfg << std::setprecision(set_precision);
+                cfg << "2D LS\n";
+                if (par_or_var == 1) cfg << "Parameter estimation\n";
+                if (par_or_var == 0) cfg << "Initial conditions estimation\n";
+                if (par_or_var == 2) cfg << "Mixed: x=IC, y=parameter\n";
+                cfg << "a[" << amountOfValues << "] = { ";
+                for (int kk = 0; kk < amountOfValues; ++kk) {
+                    cfg << values[kk];
+                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "X0[" << N << "] = { ";
+                for (int kk = 0; kk < N; ++kk) {
+                    cfg << initialConditions[kk];
+                    if (kk != N - 1) cfg << ", "; else cfg << " }\n";
+                }
+                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
+                cfg << "h = " << h << "\neps = " << eps << "\n";
+                cfg << "indices = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
+                cfg << "axis1: " << ranges[0] << " .. " << ranges[1] << "\n";
+                cfg << "axis2: " << ranges[2] << " .. " << ranges[3] << "\n";
+                cfg << "n_pts = " << nPts << "x" << nPts << "\n";
+                cfg << "exponents = " << N << "\n";
+            }
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
+        }
+
+        res.n_pts       = nPts;
+        res.n_exponents = N;
+        res.param_lo    = req.param_lo;
+        res.param_hi    = req.param_hi;
+        res.param_lo_2  = req.param_lo_2;
+        res.param_hi_2  = req.param_hi_2;
+        res.values.assign((size_t)N * total_cells, 0.0);
+        res.flags.assign(total_cells, 0);
+
+        std::ofstream out;
+        if (!OUT_FILE_PATH.empty()) {
+            out.open(OUT_FILE_PATH);
+            if (out.is_open()) out << std::setprecision(set_precision);
+        }
+
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            size_t cur_limiter = originalNPtsLimiter;
+            if (iter == amountOfIteration - 1)
+                cur_limiter = total_cells - (originalNPtsLimiter * iter);
+
+            // blockSize: тот же расчёт что в run_ls_1d (32K shared / per-thread).
+            int blockSizeMax = (int)(32000 / ((double)(3 * N + 2 * N * N + amountOfValues)
+                                              * (double)sizeof(double)));
+            int blockSize = blockSizeMax;
+            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            if (blockSize < 1)               blockSize = 1;
+            int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
+
+            int    nPts_arg                  = nPts;
+            int    nPtsLimiter_arg           = (int)cur_limiter;
+            double NT_arg                    = NT;
+            double tMax_arg                  = tMax;
+            int    sizeOfBlock_arg           = amountOfPointsInBlock;
+            int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
+            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            int    dimension_arg             = 2;
+            double h_arg                     = h;
+            double eps_arg                   = eps;
+            int    amountOfIC_arg            = N;
+            int    amountOfValues_arg        = amountOfValues;
+            int    amountOfIterations_arg    = (int)(tMax / NT);
+            int    preScaller_arg            = 1;
+            int    writableVar_arg           = 0;
+            double maxValue_arg              = maxValue;
+
+            void* args[] = {
+                &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
+                &amountOfCalculatedPoints, &amountOfPointsForSkip_arg, &dimension_arg,
+                &d_ranges, &h_arg, &eps_arg, &d_indicesOfMutVars, &d_initialConditions,
+                &amountOfIC_arg, &d_values, &amountOfValues_arg,
+                &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
+                &d_lsResult
+            };
+
+            unsigned int shared = (unsigned int)((3 * N + 2 * N * N + amountOfValues)
+                                                 * sizeof(double) * blockSize);
+
+            LS2_CHECK_CU(cuLaunchKernel(cached_ls_2d.kernel_ls,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared, nullptr, args, nullptr),
+                         "cuLaunchKernel(ls2d)");
+            LS2_CHECK(cudaDeviceSynchronize(), "sync after ls2d");
+
+            LS2_CHECK(cudaMemcpy(h_lsResult.data(), d_lsResult,
+                                 cur_limiter * (size_t)N * sizeof(double),
+                                 cudaMemcpyDeviceToHost),
+                      "memcpy h_lsResult");
+            LS2_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+            // Распаковка: для каждой ячейки чанка — N экспонент. Layout
+            // values[k * total_cells + out_idx] — k-я плоскость contiguous.
+            for (size_t k = 0; k < cur_limiter; ++k) {
+                size_t kernel_idx = originalNPtsLimiter * iter + k;
+                size_t out_idx;
+                if (swap_xy) {
+                    size_t kix = kernel_idx % (size_t)nPts;
+                    size_t kiy = kernel_idx / (size_t)nPts;
+                    out_idx = kix * (size_t)nPts + kiy;
+                } else {
+                    out_idx = kernel_idx;
+                }
+                // Первая экспонента — ground-truth для флага (как в run_ls_1d).
+                double first = h_lsResult[k * (size_t)N + 0];
+                int flag = (first == 999.0 || first == -999.0) ? -1 : 1;
+                res.flags[out_idx] = flag;
+                for (int j = 0; j < N; ++j) {
+                    double v = h_lsResult[k * (size_t)N + j];
+                    res.values[(size_t)j * total_cells + out_idx] = v;
+                }
+                if (out.is_open()) {
+                    for (int j = 0; j < N; ++j) {
+                        out << h_lsResult[k * (size_t)N + j];
+                        if (j + 1 < N) out << ", ";
+                    }
+                    out << '\n';
+                }
+            }
+        }
+        if (out.is_open()) out.close();
+
+        // Per-plane min/max — autoscale colormap'а в GUI выбирает их по
+        // активной экспоненте. Diverged-ячейки (flag<0) и 999/-999/NaN
+        // исключаются.
+        res.min_val.assign((size_t)N, 0.0);
+        res.max_val.assign((size_t)N, 0.0);
+        for (int j = 0; j < N; ++j) {
+            double vmin =  std::numeric_limits<double>::infinity();
+            double vmax = -std::numeric_limits<double>::infinity();
+            for (size_t c = 0; c < total_cells; ++c) {
+                if (res.flags[c] < 0) continue;
+                double v = res.values[(size_t)j * total_cells + c];
+                if (!std::isfinite(v))         continue;
+                if (v == 999.0 || v == -999.0) continue;
+                if (v < vmin) vmin = v;
+                if (v > vmax) vmax = v;
+            }
+            if (std::isfinite(vmin) && std::isfinite(vmax)) {
+                res.min_val[j] = vmin;
+                res.max_val[j] = vmax;
+            }
+        }
+
+        cleanup();
+        #undef LS2_CHECK
+        #undef LS2_CHECK_CU
+        res.ok = true;
+        return res;
+    }
+
+    // =========================================================================
     // compile_bif1d_cont_if_needed — отдельный модуль (single-thread sequential
     // continuation kernel + peakFinderCUDA). Cache key с суффиксом :cont.
     // =========================================================================
@@ -2573,4 +3000,8 @@ LS1DResult ParametricEngine::run_ls_1d(const LS1DRequest& req) {
 
 LLE2DResult ParametricEngine::run_lle_2d(const LLE2DRequest& req) {
     return impl_->run_lle_2d(req);
+}
+
+LS2DResult ParametricEngine::run_ls_2d(const LS2DRequest& req) {
+    return impl_->run_ls_2d(req);
 }
