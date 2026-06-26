@@ -437,22 +437,86 @@ static void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult
     bd.fit_request = true;
 }
 
+static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
+                                                const BifurcationDiagramConfig& bd) {
+    Bifurcation2DRequest req;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = bd.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != bd.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1, 0.0);
+    for (int i = 0; i < nparams; ++i) {
+        auto it = bd.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    req.sweep_over_var     = bd.sweep_over_var;
+    req.sweep_over_var_2   = bd.sweep_over_var_2;
+    req.param_index        = (bd.param_index >= 0 && bd.param_index < nparams) ? bd.param_index + 1 : 1;
+    req.param_index_2      = (bd.param_index_2 >= 0 && bd.param_index_2 < nparams) ? bd.param_index_2 + 1 : 1;
+    req.var_sweep_index    = (bd.var_sweep_index >= 0 && bd.var_sweep_index < req.amountOfX)
+                             ? bd.var_sweep_index : 0;
+    req.var_sweep_index_2  = (bd.var_sweep_index_2 >= 0 && bd.var_sweep_index_2 < req.amountOfX)
+                             ? bd.var_sweep_index_2 : 0;
+
+    req.param_lo           = parse_d(bd.param_lo_text,   0.0);
+    req.param_hi           = parse_d(bd.param_hi_text,   1.0);
+    req.param_lo_2         = parse_d(bd.param_lo_2_text, 0.0);
+    req.param_hi_2         = parse_d(bd.param_hi_2_text, 1.0);
+    req.n_pts              = parse_i(bd.n_pts_text, 200);
+    req.writable_var       = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
+    req.h                  = parse_d(bd.h_text, 0.01);
+    req.t_max              = parse_d(bd.t_max_text, 100.0);
+    req.transient_time     = parse_d(bd.transient_text, 100.0);
+    req.pre_scaller        = std::max(1, parse_i(bd.pre_scaller_text, 1));
+    req.max_value          = parse_d(bd.max_value_text, 1.0e6);
+    req.eps_dbscan         = parse_d(bd.eps_dbscan_text, 0.1);
+    req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
+    return req;
+}
+
+static void apply_bif2d_result(BifurcationDiagramConfig& bd, Bifurcation2DResult&& r) {
+    bd.result_2d = std::move(r);
+    bd.last_run_2d_ok = bd.result_2d.ok;
+    if (!bd.result_2d.ok) bd.last_error = bd.result_2d.error;
+    bd.data_generation_2d++;
+    bd.fit_request_2d = true;
+}
+
 bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
     bd.last_run_ok = false;
+    bd.last_run_2d_ok = false;
     bd.last_error.clear();
 
-    Bifurcation1DRequest req = build_bif1d_request(*this, bd);
-    if (req.krs_body.empty()) {
-        bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
-        return false;
+    if (bd.mode_2d) {
+        Bifurcation2DRequest req = build_bif2d_request(*this, bd);
+        if (req.krs_body.empty()) {
+            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        Bifurcation2DResult r = engine.run_bifurcation_2d(req);
+        bool ok = r.ok;
+        apply_bif2d_result(bd, std::move(r));
+        return ok;
+    } else {
+        Bifurcation1DRequest req = build_bif1d_request(*this, bd);
+        if (req.krs_body.empty()) {
+            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        Bifurcation1DResult r = engine.run_bifurcation_1d(req);
+        bool ok = r.ok;
+        apply_bif1d_result(bd, std::move(r));
+        return ok;
     }
-
-    Bifurcation1DResult r = engine.run_bifurcation_1d(req);
-    bool ok = r.ok;
-    apply_bif1d_result(bd, std::move(r));
-    return ok;
 }
 
 bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram_idx) {
@@ -461,36 +525,57 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
 
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
     bd.last_run_ok = false;
+    bd.last_run_2d_ok = false;
     bd.last_error.clear();
 
-    Bifurcation1DRequest req = build_bif1d_request(*this, bd);
-    if (req.krs_body.empty()) {
-        bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
-        return false;
+    if (bd.mode_2d) {
+        Bifurcation2DRequest req = build_bif2d_request(*this, bd);
+        if (req.krs_body.empty()) {
+            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        in_flight = true;
+        is_2d_run = true;
+        running_diagram_index = diagram_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        run_future_2d = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+            return engine.run_bifurcation_2d(req);
+        });
+    } else {
+        Bifurcation1DRequest req = build_bif1d_request(*this, bd);
+        if (req.krs_body.empty()) {
+            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            return false;
+        }
+        in_flight = true;
+        is_2d_run = false;
+        running_diagram_index = diagram_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+            return engine.run_bifurcation_1d(req);
+        });
     }
-
-    in_flight = true;
-    running_diagram_index = diagram_idx;
-    compute_start_time = std::chrono::steady_clock::now();
-
-    // Worker НЕ трогает session напрямую — только engine и собственную копию req.
-    // Результат вернётся через future и будет применён в poll() на главном потоке.
-    run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
-        return engine.run_bifurcation_1d(req);
-    });
-
     return true;
 }
 
 bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; return false; }
-    if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-
-    Bifurcation1DResult r = run_future.get();
-    int idx = running_diagram_index;
-    if (idx >= 0 && idx < (int)diagrams.size()) {
-        apply_bif1d_result(diagrams[idx], std::move(r));
+    if (is_2d_run) {
+        if (!run_future_2d.valid()) { in_flight = false; running_diagram_index = -1; return false; }
+        if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        Bifurcation2DResult r = run_future_2d.get();
+        int idx = running_diagram_index;
+        if (idx >= 0 && idx < (int)diagrams.size()) {
+            apply_bif2d_result(diagrams[idx], std::move(r));
+        }
+    } else {
+        if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; return false; }
+        if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        Bifurcation1DResult r = run_future.get();
+        int idx = running_diagram_index;
+        if (idx >= 0 && idx < (int)diagrams.size()) {
+            apply_bif1d_result(diagrams[idx], std::move(r));
+        }
     }
     in_flight = false;
     running_diagram_index = -1;

@@ -16,14 +16,24 @@ double nice_step(double range, int target_count) {
     return step * mag;
 }
 
+// Глобальное значение для fmt_tick. Менеджится set_tick_precision() (зовётся
+// из app_main при загрузке config и из Settings UI при изменении слайдера).
+static int g_tick_precision = 4;
+
+void set_tick_precision(int n) {
+    g_tick_precision = std::clamp(n, 2, 10);
+}
+
 std::string fmt_tick(double v) {
     char buf[32];
     double a = std::abs(v);
     if (a < 1e-12) return "0";
+    // %.Ne даёт N+1 значащих цифр (1 до точки + N после); чтобы согласовать
+    // с %.Ng (N значащих), для научной нотации передаём prec-1.
     if (a != 0 && (a < 1e-3 || a >= 1e5))
-        std::snprintf(buf, sizeof(buf), "%.2e", v);
+        std::snprintf(buf, sizeof(buf), "%.*e", std::max(1, g_tick_precision - 1), v);
     else
-        std::snprintf(buf, sizeof(buf), "%.4g", v);
+        std::snprintf(buf, sizeof(buf), "%.*g", g_tick_precision, v);
     return buf;
 }
 

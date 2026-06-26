@@ -16,6 +16,11 @@ struct AppConfig {
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
     // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
     int heatmap_colormap = 0;
+
+    // Кол-во значащих цифр в подписях тиков осей и colorbar'а. Минимум 2
+    // (исключает пустые подписи), максимум 10 (предел double-precision в `%g`).
+    // По умолчанию 4 (сохраняет старое поведение).
+    int tick_precision = 4;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл

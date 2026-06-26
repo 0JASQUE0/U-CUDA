@@ -213,6 +213,20 @@ struct BifurcationDiagramConfig {
     std::string last_error;
     int         data_generation = 0;
     bool        fit_request = false;
+
+    // ---- 2D-режим (хитмап «период»(p1, p2) через DBSCAN) ----
+    bool        mode_2d           = false;
+    int         param_index_2     = 0;
+    bool        sweep_over_var_2  = false;
+    int         var_sweep_index_2 = 0;
+    std::string param_lo_2_text   = "0";
+    std::string param_hi_2_text   = "1";
+    std::string eps_dbscan_text   = "0.1";
+
+    Bifurcation2DResult result_2d;
+    bool        last_run_2d_ok    = false;
+    int         data_generation_2d = 0;
+    bool        fit_request_2d    = false;
 };
 
 // Сессия параметрического анализа: одна система + список БД, каждая со своим
@@ -238,6 +252,8 @@ struct BifurcationAnalysisSession {
     // Все мутации session происходят на главном потоке (run_async/poll),
     // worker трогает только engine + собственную копию Request.
     std::future<Bifurcation1DResult> run_future;
+    std::future<Bifurcation2DResult> run_future_2d;
+    bool is_2d_run = false;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 

@@ -16,6 +16,7 @@
 
 #include "app_model.h"
 #include "app_config.h"
+#include "plot_axis.h"
 #include "gui.h"
 #include "system_library.h"
 #include "ocr_client_win.h"   // OcrClient + b64encode
@@ -166,7 +167,12 @@ int main() {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
+        if (app_cfg.heatmap_colormap >= 0 && app_cfg.heatmap_colormap <= 3)
+            model.heatmap_colormap = app_cfg.heatmap_colormap;
+        if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
+            model.tick_precision = app_cfg.tick_precision;
     }
+    set_tick_precision(model.tick_precision);
 
     // applied = -1 / opposite → форсируем apply на первом кадре.
     float applied_ui_scale     = -1.0f;
