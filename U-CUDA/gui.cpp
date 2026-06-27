@@ -3167,55 +3167,186 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
+    // Layout: [text] [progress bar] [Stop] for in-flight cancellable sessions;
+    // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
+    // drains parametric_queue so remaining batch items don't auto-start.
+    enum class BusyKind { None, Bif, LLE, LS, Basins, Phase };
+    BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
+    bool busy_cancelling = false;     // user already pressed Stop, waiting for engine
+    bool show_done = false;           // not in flight — show persistent last-run info
+    bool last_ok = true;              // for show_done: true = green "Done", false = red "Cancelled"
+    double done_seconds = 0.0;
+    float  progress_fraction = 0.0f;  // 0..1 from session.progress_token
+    int    basins_phase = 0;          // 1 = sim, 2 = cluster; 0 = not basins or not started
+
     if (model.bifurcation_session.in_flight) {
         int ri = model.bifurcation_session.running_diagram_index;
-        if (ri >= 0 && ri < (int)model.bifurcation_session.diagrams.size())
-            busy_what = model.bifurcation_session.diagrams[ri].label;
-        else
-            busy_what = "bifurcation";
+        busy_what = (ri >= 0 && ri < (int)model.bifurcation_session.diagrams.size())
+                        ? model.bifurcation_session.diagrams[ri].label : "bifurcation";
         busy_start = model.bifurcation_session.compute_start_time;
+        busy_kind = BusyKind::Bif;
+        busy_cancelling = model.bifurcation_session.cancel_token &&
+                          model.bifurcation_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.bifurcation_session.progress_token)
+            progress_fraction = model.bifurcation_session.progress_token->load(std::memory_order_relaxed);
     }
     else if (model.lle_session.in_flight) {
         int ri = model.lle_session.running_curve_index;
-        if (ri >= 0 && ri < (int)model.lle_session.curves.size())
-            busy_what = model.lle_session.curves[ri].label;
-        else
-            busy_what = "LLE";
+        busy_what = (ri >= 0 && ri < (int)model.lle_session.curves.size())
+                        ? model.lle_session.curves[ri].label : "LLE";
         busy_start = model.lle_session.compute_start_time;
+        busy_kind = BusyKind::LLE;
+        busy_cancelling = model.lle_session.cancel_token &&
+                          model.lle_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.lle_session.progress_token)
+            progress_fraction = model.lle_session.progress_token->load(std::memory_order_relaxed);
     }
     else if (model.ls_session.in_flight) {
         int ri = model.ls_session.running_curve_index;
-        if (ri >= 0 && ri < (int)model.ls_session.curves.size())
-            busy_what = model.ls_session.curves[ri].label;
-        else
-            busy_what = "LS";
+        busy_what = (ri >= 0 && ri < (int)model.ls_session.curves.size())
+                        ? model.ls_session.curves[ri].label : "LS";
         busy_start = model.ls_session.compute_start_time;
+        busy_kind = BusyKind::LS;
+        busy_cancelling = model.ls_session.cancel_token &&
+                          model.ls_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.ls_session.progress_token)
+            progress_fraction = model.ls_session.progress_token->load(std::memory_order_relaxed);
     }
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
         busy_start = model.phase_session.compute_start_time;
+        busy_kind  = BusyKind::Phase;
     }
     else if (model.basins_session.in_flight) {
         busy_what  = model.basins_session.config.label.empty()
                         ? "basins" : model.basins_session.config.label;
         busy_start = model.basins_session.compute_start_time;
+        busy_kind  = BusyKind::Basins;
+        busy_cancelling = model.basins_session.cancel_token &&
+                          model.basins_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.basins_session.progress_token)
+            progress_fraction = model.basins_session.progress_token->load(std::memory_order_relaxed);
+        if (model.basins_session.progress_phase_token)
+            basins_phase = model.basins_session.progress_phase_token->load(std::memory_order_relaxed);
     }
-    if (!busy_what.empty()) {
-        double secs = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - busy_start).count();
-        char text[160];
-        // Если в очереди ещё что-то — дописываем "(+N)" для прогресса батча.
-        if (!model.parametric_queue.empty())
-            std::snprintf(text, sizeof(text), "Computing %s... %.1fs (+%zu)",
-                          busy_what.c_str(), secs, model.parametric_queue.size());
-        else
-            std::snprintf(text, sizeof(text), "Computing %s... %.1fs", busy_what.c_str(), secs);
-        float text_w = ImGui::CalcTextSize(text).x;
+    else {
+        // Nothing in flight — pick the session whose last run finished most
+        // recently (across the 4 cancellable ones) and show persistent info.
+        struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
+        DoneCand candidates[4] = {
+            { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
+              &model.bifurcation_session.last_run_label,
+              model.bifurcation_session.last_run_succeeded,
+              model.bifurcation_session.last_run_seconds },
+            { BusyKind::LLE,    model.lle_session.last_run_completed_at,
+              &model.lle_session.last_run_label,
+              model.lle_session.last_run_succeeded,
+              model.lle_session.last_run_seconds },
+            { BusyKind::LS,     model.ls_session.last_run_completed_at,
+              &model.ls_session.last_run_label,
+              model.ls_session.last_run_succeeded,
+              model.ls_session.last_run_seconds },
+            { BusyKind::Basins, model.basins_session.last_run_completed_at,
+              &model.basins_session.last_run_label,
+              model.basins_session.last_run_succeeded,
+              model.basins_session.last_run_seconds },
+        };
+        const DoneCand* best = nullptr;
+        for (const auto& c : candidates) {
+            if (c.label->empty()) continue;
+            if (!best || c.ts > best->ts) best = &c;
+        }
+        if (best) {
+            busy_what    = *best->label;
+            busy_kind    = best->kind;
+            show_done    = true;
+            last_ok      = best->ok;
+            done_seconds = best->secs;
+        }
+    }
+
+    if (busy_kind != BusyKind::None) {
+        char text[200];
+        // Phase suffix appears only for basins while running (not on "Cancelling"
+        // or "Done" — those reflect overall state, not the current sub-phase).
+        const char* phase_suffix = "";
+        if (busy_kind == BusyKind::Basins && !show_done && !busy_cancelling) {
+            if      (basins_phase == 1) phase_suffix = " (1/2 sim)";
+            else if (basins_phase == 2) phase_suffix = " (2/2 cluster)";
+        }
+        if (show_done) {
+            std::snprintf(text, sizeof(text), "%s %s in %.1fs",
+                          last_ok ? "Done" : "Cancelled",
+                          busy_what.c_str(), done_seconds);
+        } else if (busy_cancelling) {
+            double secs = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - busy_start).count();
+            std::snprintf(text, sizeof(text), "Cancelling %s... %.1fs", busy_what.c_str(), secs);
+        } else {
+            double secs = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - busy_start).count();
+            if (!model.parametric_queue.empty())
+                std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
+                              busy_what.c_str(), phase_suffix, secs, model.parametric_queue.size());
+            else
+                std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs",
+                              busy_what.c_str(), phase_suffix, secs);
+        }
+
+        const bool show_stop = (busy_kind != BusyKind::Phase) &&
+                               !show_done && !busy_cancelling;
+        const bool show_bar  = show_stop;  // bar only when running & not cancelling
+
+        const float pad      = ImGui::GetStyle().ItemSpacing.x;
+        const float bar_w    = 120.0f;
+        const float bar_h    = ImGui::GetTextLineHeight();
+        const float text_w   = ImGui::CalcTextSize(text).x;
+        const float stop_w   = show_stop
+                               ? (ImGui::CalcTextSize("Stop").x +
+                                  ImGui::GetStyle().FramePadding.x * 2.0f)
+                               : 0.0f;
+        float total_w = text_w + 12.0f;
+        if (show_bar)  total_w += bar_w + pad;
+        if (show_stop) total_w += stop_w + pad;
+
         ImGui::SameLine();
-        ImGui::SetCursorPosX(ImGui::GetWindowSize().x - text_w - 12.0f);
-        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "%s", text);
+        ImGui::SetCursorPosX(ImGui::GetWindowSize().x - total_w);
+
+        ImVec4 col;
+        if (show_done) {
+            col = last_ok ? ImVec4(0.55f, 0.95f, 0.55f, 1.0f)   // green
+                          : ImVec4(0.95f, 0.45f, 0.45f, 1.0f);  // red
+        } else {
+            col = ImVec4(1.0f, 0.85f, 0.25f, 1.0f);              // yellow (running/cancelling)
+        }
+        ImGui::TextColored(col, "%s", text);
+
+        if (show_bar) {
+            ImGui::SameLine();
+            float f = progress_fraction;
+            if (f < 0.0f) f = 0.0f;
+            if (f > 1.0f) f = 1.0f;
+            ImGui::ProgressBar(f, ImVec2(bar_w, bar_h), "");
+        }
+        if (show_stop) {
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.15f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.20f, 0.20f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.90f, 0.25f, 0.25f, 1.0f));
+            if (ImGui::SmallButton("Stop")) {
+                switch (busy_kind) {
+                    case BusyKind::Bif:    model.bifurcation_session.request_cancel(); break;
+                    case BusyKind::LLE:    model.lle_session.request_cancel();         break;
+                    case BusyKind::LS:     model.ls_session.request_cancel();          break;
+                    case BusyKind::Basins: model.basins_session.request_cancel();      break;
+                    default: break;
+                }
+                model.parametric_queue.clear();
+            }
+            ImGui::PopStyleColor(3);
+        }
     }
 
     // Имя выбранной системы — по центру топ-бара. Рисуем после radio-кнопок

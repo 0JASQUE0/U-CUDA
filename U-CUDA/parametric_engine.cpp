@@ -609,6 +609,14 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        // Cooperative cancellation between kernel launches.
+        #define BIF_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         BIF_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
         BIF_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                          "cudaMalloc d_ranges");
@@ -667,6 +675,8 @@ struct ParametricEngine::Impl {
 
         // --- Главный цикл (порт строк 396-630 NL) ---
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            BIF_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             // последний чанк может быть меньше
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
@@ -1010,6 +1020,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define LLE_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         LLE_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                "cudaMalloc d_ranges");
         LLE_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
@@ -1058,6 +1075,8 @@ struct ParametricEngine::Impl {
 
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            LLE_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
@@ -1406,6 +1425,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define LLE2_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         LLE2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                "cudaMalloc d_ranges");
         LLE2_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
@@ -1468,6 +1494,8 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            LLE2_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
@@ -1777,6 +1805,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define LS_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         LS_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                                          "cudaMalloc d_ranges");
         LS_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                                             "cudaMalloc d_indicesOfMutVars");
@@ -1824,6 +1859,8 @@ struct ParametricEngine::Impl {
         res.flags.assign(nPts, 0);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            LS_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
@@ -2153,6 +2190,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define LS2_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         LS2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                "cudaMalloc d_ranges");
         LS2_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
@@ -2214,6 +2258,8 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            LS2_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
@@ -2471,6 +2517,16 @@ struct ParametricEngine::Impl {
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
         #define C_CHECK_CU(call, where) do { CUresult _r = (call); \
             if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+        // Continuation kernel is monolithic (single launch sweeping all nPts),
+        // so this can only catch cancellation BEFORE launch. After launch the
+        // kernel runs to completion regardless.
+        #define C_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         const size_t dataBytes  = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(double);
         C_CHECK(cudaMalloc((void**)&d_data,         dataBytes),                                       "cudaMalloc d_data");
@@ -2510,10 +2566,15 @@ struct ParametricEngine::Impl {
             &writableVar_arg, &maxValue_arg,
             &d_data, &d_amountOfPeaks
         };
+        C_CANCEL_CHECK();
+        // Continuation is monolithic: progress jumps 0 -> 0.5 around the sweep
+        // kernel, then -> 1.0 after the peak-finder below. Mid-kernel reporting
+        // isn't possible without restructuring the kernel itself.
         C_CHECK_CU(cuLaunchKernel(cached_cont.kernel_cont,
                                   1, 1, 1, 1, 1, 1, 0, nullptr, cont_args, nullptr),
                    "cuLaunchKernel(cont)");
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
+        if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // --- Launch peakFinderCUDA на полученные данные ---
         // Сигнатура: (numb* data, size_t sizeOfBlock, int amountOfBlocks,
@@ -2826,6 +2887,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define BIF2D_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         BIF2D_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
         BIF2D_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
@@ -2885,6 +2953,8 @@ struct ParametricEngine::Impl {
 
         // ---- Главный цикл по чанкам (порт hostLibrary.cu:1212-1692) ----
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            BIF2D_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
@@ -3245,6 +3315,13 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
+        #define BAS_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
 
         BAS_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
         BAS_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
@@ -3305,7 +3382,13 @@ struct ParametricEngine::Impl {
         }
 
         // ---- 1. Цикл по chunk'ам: traj-kernel + avg-peak-kernel ----
+        // Two-phase progress: phase 1 here (sim), phase 2 (DBSCAN) below. Each
+        // phase reports its own 0..1 fraction; GUI shows the phase label.
+        if (req.progress_phase) req.progress_phase->store(1, std::memory_order_relaxed);
+        if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            BAS_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
@@ -3382,7 +3465,12 @@ struct ParametricEngine::Impl {
         std::vector<int> h_neighbors(total_cells, 0);
         int h_amountOfNeighbors      = 0;
 
+        // Phase 2: DBSCAN expansion. Reset bar to 0..1, bump phase to 2.
+        if (req.progress_phase) req.progress_phase->store(2, std::memory_order_relaxed);
+        if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
+            BAS_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(main_iter) / float(total_cells), std::memory_order_relaxed);
             int clearIdx_init = -1;
             BAS_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
 

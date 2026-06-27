@@ -535,13 +535,20 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     bd.last_run_ok = false;
     bd.last_run_2d_ok = false;
     bd.last_error.clear();
+    last_run_label.clear();
+    cancel_token   = std::make_shared<std::atomic<bool>>(false);
+    progress_token = std::make_shared<std::atomic<float>>(0.0f);
 
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
             bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = true;
         running_diagram_index = diagram_idx;
@@ -553,8 +560,12 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
             bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = false;
         running_diagram_index = diagram_idx;
@@ -566,27 +577,41 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     return true;
 }
 
+void BifurcationAnalysisSession::request_cancel() {
+    if (cancel_token) cancel_token->store(true, std::memory_order_relaxed);
+}
+
 bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
+    bool cancelled = false;
+    std::string label;
+    int idx = running_diagram_index;
+    if (idx >= 0 && idx < (int)diagrams.size()) label = diagrams[idx].label;
     if (is_2d_run) {
-        if (!run_future_2d.valid()) { in_flight = false; running_diagram_index = -1; return false; }
+        if (!run_future_2d.valid()) { in_flight = false; running_diagram_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation2DResult r = run_future_2d.get();
-        int idx = running_diagram_index;
-        if (idx >= 0 && idx < (int)diagrams.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif2d_result(diagrams[idx], std::move(r));
         }
     } else {
-        if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; return false; }
+        if (!run_future.valid()) { in_flight = false; running_diagram_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation1DResult r = run_future.get();
-        int idx = running_diagram_index;
-        if (idx >= 0 && idx < (int)diagrams.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif1d_result(diagrams[idx], std::move(r));
         }
     }
+    last_run_completed_at = std::chrono::steady_clock::now();
+    last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
+    last_run_label = label.empty() ? std::string("bifurcation") : label;
+    last_run_succeeded = !cancelled;
     in_flight = false;
     running_diagram_index = -1;
+    cancel_token.reset();
+    progress_token.reset();
     return true;
 }
 
@@ -796,13 +821,20 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     c.last_run_ok = false;
     c.last_run_2d_ok = false;
     c.last_error.clear();
+    last_run_label.clear();
+    cancel_token   = std::make_shared<std::atomic<bool>>(false);
+    progress_token = std::make_shared<std::atomic<float>>(0.0f);
 
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
             c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = true;
         running_curve_index = curve_idx;
@@ -814,8 +846,12 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
             c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = false;
         running_curve_index = curve_idx;
@@ -827,27 +863,41 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     return true;
 }
 
+void LLEAnalysisSession::request_cancel() {
+    if (cancel_token) cancel_token->store(true, std::memory_order_relaxed);
+}
+
 bool LLEAnalysisSession::poll() {
     if (!in_flight) return false;
+    bool cancelled = false;
+    std::string label;
+    int idx = running_curve_index;
+    if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
     if (is_2d_run) {
-        if (!run_future_2d.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (!run_future_2d.valid()) { in_flight = false; running_curve_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE2DResult r = run_future_2d.get();
-        int idx = running_curve_index;
-        if (idx >= 0 && idx < (int)curves.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
             apply_lle2d_result(curves[idx], std::move(r));
         }
     } else {
-        if (!run_future.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (!run_future.valid()) { in_flight = false; running_curve_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE1DResult r = run_future.get();
-        int idx = running_curve_index;
-        if (idx >= 0 && idx < (int)curves.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
             apply_lle1d_result(curves[idx], std::move(r));
         }
     }
+    last_run_completed_at = std::chrono::steady_clock::now();
+    last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
+    last_run_label = label.empty() ? std::string("LLE") : label;
+    last_run_succeeded = !cancelled;
     in_flight = false;
     running_curve_index = -1;
+    cancel_token.reset();
+    progress_token.reset();
     return true;
 }
 
@@ -947,12 +997,22 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
     BasinsConfig& c = config;
     c.last_run_ok = false;
     c.last_error.clear();
+    last_run_label.clear();
+    cancel_token         = std::make_shared<std::atomic<bool>>(false);
+    progress_token       = std::make_shared<std::atomic<float>>(0.0f);
+    progress_phase_token = std::make_shared<std::atomic<int>>(0);
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
         c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        cancel_token.reset();
+        progress_token.reset();
+        progress_phase_token.reset();
         return false;
     }
+    req.cancel         = cancel_token;
+    req.progress       = progress_token;
+    req.progress_phase = progress_phase_token;
 
     in_flight = true;
     compute_start_time = std::chrono::steady_clock::now();
@@ -962,14 +1022,33 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
     return true;
 }
 
+void BasinsAnalysisSession::request_cancel() {
+    if (cancel_token) cancel_token->store(true, std::memory_order_relaxed);
+}
+
 bool BasinsAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!run_future.valid()) { in_flight = false; return false; }
+    if (!run_future.valid()) {
+        in_flight = false;
+        cancel_token.reset(); progress_token.reset(); progress_phase_token.reset();
+        return false;
+    }
     if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
 
     BasinsResult r = run_future.get();
-    apply_basins_result(config, std::move(r));
+    bool cancelled = r.cancelled;
+    std::string label = config.label.empty() ? std::string("basins") : config.label;
+    if (!cancelled) {
+        apply_basins_result(config, std::move(r));
+    }
+    last_run_completed_at = std::chrono::steady_clock::now();
+    last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
+    last_run_label = label;
+    last_run_succeeded = !cancelled;
     in_flight = false;
+    cancel_token.reset();
+    progress_token.reset();
+    progress_phase_token.reset();
     return true;
 }
 
@@ -1181,13 +1260,20 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     c.last_run_ok = false;
     c.last_run_2d_ok = false;
     c.last_error.clear();
+    last_run_label.clear();
+    cancel_token   = std::make_shared<std::atomic<bool>>(false);
+    progress_token = std::make_shared<std::atomic<float>>(0.0f);
 
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
             c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = true;
         running_curve_index = curve_idx;
@@ -1199,8 +1285,12 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
             c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            cancel_token.reset();
+            progress_token.reset();
             return false;
         }
+        req.cancel = cancel_token;
+        req.progress = progress_token;
         in_flight = true;
         is_2d_run = false;
         running_curve_index = curve_idx;
@@ -1212,26 +1302,40 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     return true;
 }
 
+void LyapunovSpectrumAnalysisSession::request_cancel() {
+    if (cancel_token) cancel_token->store(true, std::memory_order_relaxed);
+}
+
 bool LyapunovSpectrumAnalysisSession::poll() {
     if (!in_flight) return false;
+    bool cancelled = false;
+    std::string label;
+    int idx = running_curve_index;
+    if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
     if (is_2d_run) {
-        if (!run_future_2d.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (!run_future_2d.valid()) { in_flight = false; running_curve_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS2DResult r = run_future_2d.get();
-        int idx = running_curve_index;
-        if (idx >= 0 && idx < (int)curves.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
             apply_ls2d_result(curves[idx], std::move(r));
         }
     } else {
-        if (!run_future.valid()) { in_flight = false; running_curve_index = -1; return false; }
+        if (!run_future.valid()) { in_flight = false; running_curve_index = -1; cancel_token.reset(); progress_token.reset(); return false; }
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS1DResult r = run_future.get();
-        int idx = running_curve_index;
-        if (idx >= 0 && idx < (int)curves.size()) {
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
             apply_ls1d_result(curves[idx], std::move(r));
         }
     }
+    last_run_completed_at = std::chrono::steady_clock::now();
+    last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
+    last_run_label = label.empty() ? std::string("LS") : label;
+    last_run_succeeded = !cancelled;
     in_flight = false;
     running_curve_index = -1;
+    cancel_token.reset();
+    progress_token.reset();
     return true;
 }
