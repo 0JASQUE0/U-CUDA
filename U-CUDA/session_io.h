@@ -36,3 +36,8 @@ bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);
 // только Result, который JSON не хранит.
 std::string session_to_json_ls(const LyapunovSpectrumAnalysisSession& s);
 bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSession& s);
+
+// Basins-сессия — один config (без curves-vector). Сохраняем axes/ranges,
+// integration, DBSCAN eps, IC, params, CSV-настройки. Result в JSON не пишется.
+std::string session_to_json_basins(const BasinsAnalysisSession& s);
+bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s);

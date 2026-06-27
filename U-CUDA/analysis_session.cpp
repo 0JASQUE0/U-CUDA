@@ -841,6 +841,126 @@ bool LLEAnalysisSession::poll() {
 }
 
 // ============================================================================
+// BasinsAnalysisSession — один config на сессию, без inner tab-bar.
+// ============================================================================
+
+void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+
+    BasinsConfig c;
+    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        c.param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        c.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+    c.axis_x_var = 0;
+    c.axis_y_var = (vars.size() > 1) ? 1 : 0;
+    c.writable_var = 0;
+    config = std::move(c);
+}
+
+static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
+                                          const BasinsConfig& c) {
+    BasinsRequest req;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = c.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1, 0.0);
+    for (int i = 0; i < nparams; ++i) {
+        auto it = c.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    req.axis_x_var      = (c.axis_x_var >= 0 && c.axis_x_var < req.amountOfX) ? c.axis_x_var : 0;
+    req.axis_y_var      = (c.axis_y_var >= 0 && c.axis_y_var < req.amountOfX) ? c.axis_y_var : (req.amountOfX > 1 ? 1 : 0);
+    req.axis_x_lo       = parse_d(c.axis_x_lo_text, -10.0);
+    req.axis_x_hi       = parse_d(c.axis_x_hi_text,  10.0);
+    req.axis_y_lo       = parse_d(c.axis_y_lo_text, -10.0);
+    req.axis_y_hi       = parse_d(c.axis_y_hi_text,  10.0);
+    req.n_pts           = parse_i(c.n_pts_text, 200);
+    req.writable_var    = (c.writable_var >= 0 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
+    req.h               = parse_d(c.h_text, 0.01);
+    req.t_max           = parse_d(c.t_max_text, 1000.0);
+    req.transient_time  = parse_d(c.transient_text, 10000.0);
+    req.pre_scaller     = std::max(1, parse_i(c.pre_scaller_text, 1));
+    req.max_value       = parse_d(c.max_value_text, 1.0e6);
+    req.eps_dbscan      = parse_d(c.eps_dbscan_text, 0.5);
+    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    return req;
+}
+
+static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
+    c.result = std::move(r);
+    c.last_run_ok = c.result.ok;
+    if (!c.result.ok) c.last_error = c.result.error;
+    c.data_generation++;
+    c.fit_request = true;
+}
+
+bool BasinsAnalysisSession::run(ParametricEngine& engine) {
+    BasinsConfig& c = config;
+    c.last_run_ok = false;
+    c.last_error.clear();
+
+    BasinsRequest req = build_basins_request(*this, c);
+    if (req.krs_body.empty()) {
+        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        return false;
+    }
+    BasinsResult r = engine.run_basins(req);
+    bool ok = r.ok;
+    apply_basins_result(c, std::move(r));
+    return ok;
+}
+
+bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
+    if (in_flight) return false;
+    BasinsConfig& c = config;
+    c.last_run_ok = false;
+    c.last_error.clear();
+
+    BasinsRequest req = build_basins_request(*this, c);
+    if (req.krs_body.empty()) {
+        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        return false;
+    }
+
+    in_flight = true;
+    compute_start_time = std::chrono::steady_clock::now();
+    run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
+        return engine.run_basins(req);
+    });
+    return true;
+}
+
+bool BasinsAnalysisSession::poll() {
+    if (!in_flight) return false;
+    if (!run_future.valid()) { in_flight = false; return false; }
+    if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+
+    BasinsResult r = run_future.get();
+    apply_basins_result(config, std::move(r));
+    in_flight = false;
+    return true;
+}
+
+// ============================================================================
 // LyapunovSpectrumAnalysisSession — копия LLE-паттерна для LS.
 // ============================================================================
 

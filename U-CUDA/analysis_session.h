@@ -388,6 +388,76 @@ struct LLEAnalysisSession {
     bool poll();
 };
 
+// ============================================================================
+// Basins of Attraction — карта классификации траекторий на сетке IC.
+// Одна конфигурация на сессию (без inner tab-bar — basin расчёт тяжёлый).
+// 5 плотов в окне результата переключаются внутренним tab-bar'ом.
+// ============================================================================
+
+struct BasinsConfig {
+    std::string label = "Basins";
+    std::string scheme = "Euler";
+
+    int axis_x_var = 0;
+    int axis_y_var = 1;
+    std::string axis_x_lo_text = "-10";
+    std::string axis_x_hi_text = "10";
+    std::string axis_y_lo_text = "-10";
+    std::string axis_y_hi_text = "10";
+    std::string n_pts_text = "100";
+
+    int writable_var = 0;
+
+    std::string h_text           = "0.01";
+    std::string t_max_text       = "200";
+    std::string transient_text   = "50";
+    std::string pre_scaller_text = "1";
+    std::string max_value_text   = "1e6";
+    std::string eps_dbscan_text  = "0.5";
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    BasinsResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
+    int         active_plot_tab = 0;
+};
+
+struct BasinsAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::string loaded_system_name;
+
+    BasinsConfig config;
+
+    std::future<BasinsResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    BasinsAnalysisSession() = default;
+    BasinsAnalysisSession(BasinsAnalysisSession&&) = default;
+    BasinsAnalysisSession& operator=(BasinsAnalysisSession&&) = default;
+    BasinsAnalysisSession(const BasinsAnalysisSession&) = delete;
+    BasinsAnalysisSession& operator=(const BasinsAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    bool run(ParametricEngine& engine);
+    bool run_async(ParametricEngine& engine);
+    bool poll();
+};
+
 // Одна спектр-кривая на параметрическом LS-графике — конфиг идентичен
 // LLECurveConfig (тот же UX), но результат — матрица: N экспонент на
 // каждую точку параметра, где N == |vars|.

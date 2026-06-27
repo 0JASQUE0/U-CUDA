@@ -1,7 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <CudaCompile Include="kernel.cu" />
     <CudaCompile Include="cudaLibrary.cu">
       <Filter>NonLinAnal</Filter>
     </CudaCompile>
@@ -23,7 +22,6 @@
     <ClCompile Include="codegen.cpp">
       <Filter>Parser</Filter>
     </ClCompile>
-    <ClCompile Include="test_parser.cpp" />
     <ClCompile Include="ocr_client_win.cpp">
       <Filter>OCR</Filter>
     </ClCompile>
@@ -80,6 +78,15 @@
     </ClCompile>
     <ClCompile Include="plot_view_3d.cpp">
       <Filter>Visualization\3D</Filter>
+    </ClCompile>
+    <ClCompile Include="parametric_engine.cpp">
+      <Filter>NVRTC</Filter>
+    </ClCompile>
+    <ClCompile Include="heatmap_view.cpp">
+      <Filter>Visualization</Filter>
+    </ClCompile>
+    <ClCompile Include="app_config.cpp">
+      <Filter>Library</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -160,6 +167,15 @@
     </ClInclude>
     <ClInclude Include="plot_view_3d.h">
       <Filter>Visualization\3D</Filter>
+    </ClInclude>
+    <ClInclude Include="app_config.h">
+      <Filter>Library</Filter>
+    </ClInclude>
+    <ClInclude Include="heatmap_view.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
+    <ClInclude Include="parametric_engine.h">
+      <Filter>NVRTC</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

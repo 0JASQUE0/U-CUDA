@@ -3119,6 +3119,15 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 	return;
 }
 
+// ===== Открываем доступ под NVRTC для basins-pipeline (U-CUDA) =====
+// Группа kernel'ов до CUDA_dbscan_search_unbound_points_kernel включительно
+// нужна U-CUDA::run_basins. До правки весь блок был внутри
+// `#ifndef __CUDACC_RTC__` (LLE/LS-зависимости), и NVRTC не находил символы
+// в PTX (cuModuleGetFunction → "named symbol not found"). Здесь временно
+// закрываем guard, оставляя последующие FastSynchro-kernels по-прежнему
+// hidden под NVRTC (они тянут зависимости, NonLinAnal оставил их host-only).
+#endif // __CUDACC_RTC__ — re-opened below after basins kernels
+
 __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h)
 {
@@ -3330,6 +3339,8 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 	}
 }
 
+// ===== Закрываем NVRTC-окно — FastSynchro дальше под guard'ом =====
+#ifndef __CUDACC_RTC__
 
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,

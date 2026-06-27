@@ -111,6 +111,7 @@ struct ParametricEngine::Impl {
     std::string src_template_ls;     // ls1d.template.cu
     std::string src_template_ls_2d;  // ls2d.template.cu
     std::string src_template_bif2d;  // bifurcation2d.template.cu
+    std::string src_template_basins; // basins.template.cu
     bool srcs_loaded = false;
 
     struct CachedModule {
@@ -164,6 +165,18 @@ struct ParametricEngine::Impl {
     };
     CachedBif2dModule cached_bif2d;
 
+    // Basins — отдельный шаблон, пять kernel'ов (трое для DBSCAN host-цикла).
+    struct CachedBasinsModule {
+        std::string  key;
+        CUmodule     module                  = nullptr;
+        CUfunction   kernel_traj             = nullptr;  // calculateDiscreteModelCUDA
+        CUfunction   kernel_avg_peak         = nullptr;  // avgPeakFinderCUDA
+        CUfunction   kernel_dbscan           = nullptr;  // CUDA_dbscan_kernel
+        CUfunction   kernel_search_fixed     = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
+        CUfunction   kernel_search_clear     = nullptr;  // CUDA_dbscan_search_clear_points_kernel
+    };
+    CachedBasinsModule cached_basins;
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
@@ -174,6 +187,7 @@ struct ParametricEngine::Impl {
             release_ls_2d_module();
             release_cont_module();
             release_bif2d_module();
+            release_basins_module();
             cuCtxDestroy(context);
         }
     }
@@ -245,6 +259,19 @@ struct ParametricEngine::Impl {
         }
     }
 
+    void release_basins_module() {
+        if (cached_basins.module) {
+            cuModuleUnload(cached_basins.module);
+            cached_basins.module              = nullptr;
+            cached_basins.kernel_traj         = nullptr;
+            cached_basins.kernel_avg_peak     = nullptr;
+            cached_basins.kernel_dbscan       = nullptr;
+            cached_basins.kernel_search_fixed = nullptr;
+            cached_basins.kernel_search_clear = nullptr;
+            cached_basins.key.clear();
+        }
+    }
+
     bool ensure_init(std::string& err) {
         if (inited) return true;
         CUresult r = cuInit(0);
@@ -274,6 +301,7 @@ struct ParametricEngine::Impl {
         src_template_ls       = read_text_file(root + "ls1d.template.cu",               e); if (!e.empty()) { err = e; return false; }
         src_template_ls_2d    = read_text_file(root + "ls2d.template.cu",               e); if (!e.empty()) { err = e; return false; }
         src_template_bif2d    = read_text_file(root + "bifurcation2d.template.cu",     e); if (!e.empty()) { err = e; return false; }
+        src_template_basins   = read_text_file(root + "basins.template.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -2975,6 +3003,526 @@ struct ParametricEngine::Impl {
         res.ok = true;
         return res;
     }
+
+    // =========================================================================
+    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует
+    // 5 kernel'ов: calculateDiscreteModelCUDA, avgPeakFinderCUDA, и три DBSCAN-
+    // kernel'а (cluster, search_fixed_points, search_clear_points). Cache-ключ
+    // помечен `:basins`. par_or_var=0 захардкоден в шаблоне, поэтому ключа не
+    // требует — только хэш krs_body/amountOfX.
+    // =========================================================================
+    bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
+                                  std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":basins";
+        if (cached_basins.module && cached_basins.key == key) return true;
+        release_basins_module();
+
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template_basins;
+        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
+        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu",
+            "cudaLibrary.cuh",
+            "cudaMacros.cuh",
+            "configCUDA.h",
+        };
+        constexpr int n_headers = 4;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "basins.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(basins): ") + nvrtcGetErrorString(nr); return false; }
+
+        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
+        nvrtcAddNameExpression(prog, "avgPeakFinderCUDA");
+        nvrtcAddNameExpression(prog, "CUDA_dbscan_kernel");
+        nvrtcAddNameExpression(prog, "CUDA_dbscan_search_fixed_points_kernel");
+        nvrtcAddNameExpression(prog, "CUDA_dbscan_search_clear_points_kernel");
+
+        char arch[64];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
+        if (cuda_include_opt.empty()) {
+            err = "CUDA_PATH не задан";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile failed (basins):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        const char* m_traj = nullptr, *m_avg = nullptr, *m_db = nullptr, *m_fix = nullptr, *m_clr = nullptr;
+        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA",               &m_traj);
+        nvrtcGetLoweredName(prog, "avgPeakFinderCUDA",                        &m_avg);
+        nvrtcGetLoweredName(prog, "CUDA_dbscan_kernel",                       &m_db);
+        nvrtcGetLoweredName(prog, "CUDA_dbscan_search_fixed_points_kernel",   &m_fix);
+        nvrtcGetLoweredName(prog, "CUDA_dbscan_search_clear_points_kernel",   &m_clr);
+        std::string mt = m_traj ? m_traj : "calculateDiscreteModelCUDA";
+        std::string ma = m_avg  ? m_avg  : "avgPeakFinderCUDA";
+        std::string md = m_db   ? m_db   : "CUDA_dbscan_kernel";
+        std::string mf = m_fix  ? m_fix  : "CUDA_dbscan_search_fixed_points_kernel";
+        std::string mc = m_clr  ? m_clr  : "CUDA_dbscan_search_clear_points_kernel";
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&cached_basins.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(basins): " + cu_err(r); return false; }
+
+        r = cuModuleGetFunction(&cached_basins.kernel_traj,         cached_basins.module, mt.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mt + "): " + cu_err(r); release_basins_module(); return false; }
+        r = cuModuleGetFunction(&cached_basins.kernel_avg_peak,     cached_basins.module, ma.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + ma + "): " + cu_err(r); release_basins_module(); return false; }
+        r = cuModuleGetFunction(&cached_basins.kernel_dbscan,       cached_basins.module, md.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + md + "): " + cu_err(r); release_basins_module(); return false; }
+        r = cuModuleGetFunction(&cached_basins.kernel_search_fixed, cached_basins.module, mf.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mf + "): " + cu_err(r); release_basins_module(); return false; }
+        r = cuModuleGetFunction(&cached_basins.kernel_search_clear, cached_basins.module, mc.c_str());
+        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mc + "): " + cu_err(r); release_basins_module(); return false; }
+
+        cached_basins.key = key;
+        return true;
+    }
+
+    // =========================================================================
+    // run_basins — порт NonLinAnal::basinsOfAttraction (hostLibrary.cu:3235) +
+    // CUDA_dbscan host-loop (hostLibrary.cu:3066). Структура:
+    //   1. traj+avg_peak chunked loop по cell'ам;
+    //   2. host-DBSCAN: цикл по точкам, на каждой итерации запускаются
+    //      search_fixed/search_clear + cluster_kernel с расширением через
+    //      neighbors-список.
+    // Возвращает: basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
+    // =========================================================================
+    BasinsResult run_basins(const BasinsRequest& req) {
+        BasinsResult res;
+        auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                  return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне допустимого диапазона");
+        if ((int)req.initial_conditions.size() != req.amountOfX)   return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)      return fail("base_values слишком много");
+        if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
+        if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
+        if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (выбери разные переменные)");
+        if (req.writable_var < 0 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+        if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+
+        const int    nPts                       = req.n_pts;
+        const double h                          = req.h;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[4]                        = { req.axis_x_lo, req.axis_x_hi,
+                                                    req.axis_y_lo, req.axis_y_hi };
+        int    indicesOfMutVars[2]              = { req.axis_x_var, req.axis_y_var };
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double tMax                       = req.t_max;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const int    preScaller                 = req.pre_scaller;
+        const double eps_dbscan                 = req.eps_dbscan;
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        constexpr int blockSize_setup = 32;
+        constexpr int set_precision   = 15;
+
+        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        int amountOfPointsForSkip = (int)(transientTime / h);
+
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0");
+
+        size_t total_cells = (size_t)nPts * (size_t)nPts;
+
+        // Memory budget — мирор hostLibrary.cu:3269. Per-cell траектория-buffer:
+        // 2 * amountOfPointsInBlock * sizeof(double) (d_data + d_intervals).
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.9);
+
+        size_t perCellBytes = 2 * sizeof(double) * (size_t)amountOfPointsInBlock;
+        if (perCellBytes == 0) perCellBytes = sizeof(double);
+        size_t nPtsLimiter = freeMemory / perCellBytes;
+        if (nPtsLimiter == 0)              nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > total_cells)     nPtsLimiter = total_cells;
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        double* d_data              = nullptr;
+        double* d_ranges            = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        int*    d_amountOfPeaks     = nullptr;
+        double* d_intervals         = nullptr;
+        int*    d_helpfulArray      = nullptr;
+        int*    d_dbscanResult      = nullptr;
+        double* d_avgPeaks          = nullptr;
+        double* d_avgIntervals      = nullptr;
+        int*    d_amountOfNeighbors = nullptr;
+        int*    d_neighbors         = nullptr;
+        int*    d_clearIdx          = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_data)              cudaFree(d_data);
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            if (d_intervals)         cudaFree(d_intervals);
+            if (d_helpfulArray)      cudaFree(d_helpfulArray);
+            if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_avgPeaks)          cudaFree(d_avgPeaks);
+            if (d_avgIntervals)      cudaFree(d_avgIntervals);
+            if (d_amountOfNeighbors) cudaFree(d_amountOfNeighbors);
+            if (d_neighbors)         cudaFree(d_neighbors);
+            if (d_clearIdx)          cudaFree(d_clearIdx);
+        };
+
+        #define BAS_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define BAS_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        BAS_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
+        BAS_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
+        BAS_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
+        BAS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),           "cudaMalloc d_initialConditions");
+        BAS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                      "cudaMalloc d_values");
+        BAS_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
+        BAS_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_intervals");
+        BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
+        BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(double)),                                 "cudaMalloc d_avgPeaks");
+        BAS_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(double)),                                 "cudaMalloc d_avgIntervals");
+        BAS_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                                                  "cudaMalloc d_amountOfNeighbors");
+        BAS_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),                                    "cudaMalloc d_neighbors");
+        BAS_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                                                  "cudaMalloc d_clearIdx");
+
+        BAS_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BAS_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
+        BAS_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_ic");
+        BAS_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),             cudaMemcpyHostToDevice), "memcpy d_values");
+        BAS_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)),  "memset d_dbscanResult");
+        BAS_CHECK(cudaMemset(d_helpfulArray, 0, total_cells * sizeof(int)),  "memset d_helpfulArray");
+        BAS_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
+
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            if (cfg.is_open()) {
+                cfg << std::setprecision(set_precision);
+                cfg << "Basins of attraction\n";
+                cfg << "a[" << amountOfValues << "] = { ";
+                for (int kk = 0; kk < amountOfValues; ++kk) { cfg << values[kk]; if (kk != amountOfValues-1) cfg << ", "; else cfg << " }\n"; }
+                cfg << "X0[" << amountOfInitialConditions << "] = { ";
+                for (int kk = 0; kk < amountOfInitialConditions; ++kk) { cfg << initialConditions[kk]; if (kk != amountOfInitialConditions-1) cfg << ", "; else cfg << " }\n"; }
+                cfg << "CT = " << tMax << "\nTT = " << transientTime << "\nh = " << h << "\n";
+                cfg << "decimator = " << preScaller << "\neps_DBSCAN = " << eps_dbscan << "\n";
+                cfg << "indexVar for peakfinder = " << req.writable_var << "\n";
+                cfg << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
+                cfg << "start value_1 = " << ranges[0] << ", stop value_1 = " << ranges[1] << "\n";
+                cfg << "start value_2 = " << ranges[2] << ", stop value_2 = " << ranges[3] << "\n";
+            }
+        }
+
+        // CSV-заготовки 4 файлов (с ranges-заголовком). Сами данные дописываем после.
+        if (!OUT_FILE_PATH.empty()) {
+            auto write_ranges = [&](const std::string& path) {
+                std::ofstream o(path);
+                if (!o.is_open()) return;
+                o << std::setprecision(set_precision);
+                o << ranges[0] << " " << ranges[1] << "\n";
+                o << ranges[2] << " " << ranges[3] << "\n";
+            };
+            write_ranges(OUT_FILE_PATH);
+            write_ranges(OUT_FILE_PATH + "_1.csv");
+            write_ranges(OUT_FILE_PATH + "_2.csv");
+            write_ranges(OUT_FILE_PATH + "_3.csv");
+        }
+
+        // ---- 1. Цикл по chunk'ам: traj-kernel + avg-peak-kernel ----
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            size_t cur_limiter = originalNPtsLimiter;
+            if (iter == amountOfIteration - 1)
+                cur_limiter = total_cells - (originalNPtsLimiter * iter);
+
+            // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), clamp blockSize_setup
+            int blockSize = (int)std::ceil((1024.0 * 48.0) / ((double)(amountOfInitialConditions + amountOfValues) * (double)sizeof(double)));
+            if (blockSize < 1)                blockSize = 1;
+            if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
+            int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
+
+            // calculateDiscreteModelCUDA — те же 20 args, что и у LLE-2D/BD-2D.
+            int    nPts_arg                  = nPts;
+            int    nPtsLimiter_int           = (int)cur_limiter;
+            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
+            size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
+            size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
+            int    dimension_arg             = 2;
+            double h_arg                     = h;
+            int    amountOfIC_int            = amountOfInitialConditions;
+            int    amountOfValues_int        = amountOfValues;
+            size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
+            int    preScaller_int            = preScaller;
+            int    writableVar_int           = req.writable_var;
+            double maxValue_arg              = maxValue;
+            bool   par_or_var_arg            = false;   // compile-time par_or_var=0 в шаблоне
+
+            // Offset-указатель для helpfulArray (chunk пишет в свою часть глобального массива).
+            int* d_helpful_chunk = d_helpfulArray + iter * originalNPtsLimiter;
+
+            void* args_traj[] = {
+                &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_s, &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s, &dimension_arg, &d_ranges, &h_arg,
+                &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                &d_values, &amountOfValues_int, &amountOfIterations_arg,
+                &preScaller_int, &writableVar_int, &maxValue_arg,
+                &d_data, &d_helpful_chunk, &par_or_var_arg
+            };
+            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_traj,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared_traj, nullptr, args_traj, nullptr),
+                         "cuLaunchKernel(basins traj)");
+            BAS_CHECK(cudaDeviceSynchronize(), "sync after traj");
+
+            // avgPeakFinderCUDA. d_data → outPeaks (in-place); d_intervals → timeOfPeaks.
+            int sizeOfBlock_int = amountOfPointsInBlock;
+            int amountOfBlocks  = (int)cur_limiter;
+            double h_peak       = h * (double)preScaller;
+            double* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
+            double* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
+
+            void* args_avg[] = {
+                &d_data, &sizeOfBlock_int, &amountOfBlocks,
+                &d_avg_peak_chunk, &d_avg_interv_chunk,
+                &d_data, &d_intervals,
+                &d_helpful_chunk, &h_peak
+            };
+            int avg_blockSize = blockSize_setup;
+            int avg_gridSize  = (int)((cur_limiter + avg_blockSize - 1) / avg_blockSize);
+            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_avg_peak,
+                                        avg_gridSize, 1, 1, avg_blockSize, 1, 1,
+                                        0, nullptr, args_avg, nullptr),
+                         "cuLaunchKernel(basins avg_peak)");
+            BAS_CHECK(cudaDeviceSynchronize(), "sync after avg_peak");
+        }
+
+        // ---- 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan) ----
+        int blockSize_db = blockSize_setup;
+        int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
+        int amountOfData_int = (int)total_cells;
+
+        int amountOfClusters         = 0;
+        int amountOfNegativeClusters = 0;
+        std::vector<int> h_neighbors(total_cells, 0);
+        int h_amountOfNeighbors      = 0;
+
+        for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
+            int clearIdx_init = -1;
+            BAS_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
+
+            // search_fixed_points: проверяет, остались ли -1-точки без cluster'а.
+            void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
+                                    &amountOfData_int, &d_clearIdx };
+            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_fixed,
+                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                        0, nullptr, args_search, nullptr),
+                         "cuLaunchKernel(search_fixed)");
+            BAS_CHECK(cudaDeviceSynchronize(), "sync search_fixed");
+
+            int clearIdx = -1;
+            BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H");
+
+            int resultClusters = 0;
+            if (clearIdx == -1) {
+                // FP-точек не осталось — search_clear_points (Osc).
+                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_clear,
+                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                            0, nullptr, args_search, nullptr),
+                             "cuLaunchKernel(search_clear)");
+                ++amountOfClusters;
+                resultClusters = amountOfClusters;
+                BAS_CHECK(cudaDeviceSynchronize(), "sync search_clear");
+                BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
+                if (clearIdx == -1) break;  // всё кластеризовано
+            } else {
+                --amountOfNegativeClusters;
+                resultClusters = amountOfNegativeClusters;
+            }
+
+            // Reset amountOfNeighbors на каждой итерации.
+            h_amountOfNeighbors = 0;
+            BAS_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
+
+            // CUDA_dbscan_kernel — расширение cluster'а от clearIdx.
+            double eps_arg = eps_dbscan;
+            void* args_db[] = {
+                &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
+                &amountOfData_int, &eps_arg, &resultClusters,
+                &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
+            };
+            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                        0, nullptr, args_db, nullptr),
+                         "cuLaunchKernel(dbscan expand init)");
+            BAS_CHECK(cudaDeviceSynchronize(), "sync dbscan init");
+
+            BAS_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors D2H");
+            if (h_amountOfNeighbors > 0)
+                BAS_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
+                          "memcpy neighbors D2H");
+
+            // Цикл расширения cluster'а по всем найденным соседям.
+            for (size_t ni = 0; ni < (size_t)h_amountOfNeighbors; ++ni) {
+                int neighbor_idx = h_neighbors[ni];
+                void* args_db2[] = {
+                    &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
+                    &amountOfData_int, &eps_arg, &resultClusters,
+                    &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
+                };
+                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                            0, nullptr, args_db2, nullptr),
+                             "cuLaunchKernel(dbscan expand neighbor)");
+                BAS_CHECK(cudaDeviceSynchronize(), "sync dbscan neighbor");
+
+                BAS_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors loop");
+                if (h_amountOfNeighbors > 0)
+                    BAS_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
+                              "memcpy neighbors loop");
+            }
+        }
+
+        // ---- 3. D2H результаты ----
+        res.n_pts       = nPts;
+        res.axis_x_lo   = req.axis_x_lo;
+        res.axis_x_hi   = req.axis_x_hi;
+        res.axis_y_lo   = req.axis_y_lo;
+        res.axis_y_hi   = req.axis_y_hi;
+        res.axis_x_var  = req.axis_x_var;
+        res.axis_y_var  = req.axis_y_var;
+        res.basin_idx.assign(total_cells, 0);
+        res.avg_peaks.assign(total_cells, 0.0);
+        res.avg_intervals.assign(total_cells, 0.0);
+        res.helpful_array.assign(total_cells, 0);
+
+        BAS_CHECK(cudaMemcpy(res.basin_idx.data(),     d_dbscanResult, total_cells * sizeof(int),    cudaMemcpyDeviceToHost), "memcpy basin_idx");
+        BAS_CHECK(cudaMemcpy(res.avg_peaks.data(),     d_avgPeaks,     total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy avg_peaks");
+        BAS_CHECK(cudaMemcpy(res.avg_intervals.data(), d_avgIntervals, total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy avg_intervals");
+        BAS_CHECK(cudaMemcpy(res.helpful_array.data(), d_helpfulArray, total_cells * sizeof(int),    cudaMemcpyDeviceToHost), "memcpy helpful_array");
+
+        // ---- 4. Сводки + CSV ----
+        res.n_clusters       = amountOfClusters;
+        res.min_cluster_idx  = amountOfNegativeClusters;
+
+        // Per-field min/max (исключая 999/-999/NaN).
+        auto compute_minmax = [&](const std::vector<double>& v, double& mn, double& mx) {
+            mn = std::numeric_limits<double>::infinity();
+            mx = -std::numeric_limits<double>::infinity();
+            for (double x : v) {
+                if (!std::isfinite(x)) continue;
+                if (x == 999.0 || x == -999.0) continue;
+                if (x < mn) mn = x;
+                if (x > mx) mx = x;
+            }
+            if (!std::isfinite(mn) || !std::isfinite(mx)) { mn = 0.0; mx = 0.0; }
+        };
+        compute_minmax(res.avg_peaks,     res.avg_peaks_min,     res.avg_peaks_max);
+        compute_minmax(res.avg_intervals, res.avg_intervals_min, res.avg_intervals_max);
+
+        // CSV: добавляем матрицы (формат — N значений через ", " на строку, n_pts строк).
+        if (!OUT_FILE_PATH.empty()) {
+            auto append_matrix_int = [&](const std::string& path, const std::vector<int>& v) {
+                std::ofstream o(path, std::ios::app);
+                if (!o.is_open()) return;
+                o << std::setprecision(set_precision);
+                int counter = 0;
+                for (size_t i = 0; i < v.size(); ++i) {
+                    if (counter != 0) o << ", ";
+                    if (counter == nPts) { o << "\n"; counter = 0; }
+                    o << v[i];
+                    ++counter;
+                }
+            };
+            auto append_matrix_double = [&](const std::string& path, const std::vector<double>& v) {
+                std::ofstream o(path, std::ios::app);
+                if (!o.is_open()) return;
+                o << std::setprecision(set_precision);
+                int counter = 0;
+                for (size_t i = 0; i < v.size(); ++i) {
+                    if (counter != 0) o << ", ";
+                    if (counter == nPts) { o << "\n"; counter = 0; }
+                    double x = v[i];
+                    if (!std::isfinite(x)) x = 999.0;
+                    o << x;
+                    ++counter;
+                }
+            };
+            append_matrix_int(OUT_FILE_PATH,            res.basin_idx);
+            append_matrix_double(OUT_FILE_PATH + "_1.csv", res.avg_peaks);
+            append_matrix_double(OUT_FILE_PATH + "_2.csv", res.avg_intervals);
+            append_matrix_int(OUT_FILE_PATH + "_3.csv", res.helpful_array);
+        }
+
+        cleanup();
+        #undef BAS_CHECK
+        #undef BAS_CHECK_CU
+        res.ok = true;
+        return res;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -3004,4 +3552,8 @@ LLE2DResult ParametricEngine::run_lle_2d(const LLE2DRequest& req) {
 
 LS2DResult ParametricEngine::run_ls_2d(const LS2DRequest& req) {
     return impl_->run_ls_2d(req);
+}
+
+BasinsResult ParametricEngine::run_basins(const BasinsRequest& req) {
+    return impl_->run_basins(req);
 }
