@@ -53,6 +53,7 @@ uniform sampler2D u_tex;
 uniform float u_vmin;
 uniform float u_vmax;
 uniform int   u_colormap;
+uniform int   u_discrete_n;  // 0 = continuous, N>0 = quantize t into N bands
 uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
 out vec4 frag_color;
@@ -78,14 +79,17 @@ vec3 inferno(float t) {
     return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
 }
 vec3 turbo(float t) {
-    const vec3 c0 = vec3(0.1140890109, 0.06288340699, 0.2248337215);
-    const vec3 c1 = vec3(6.716419496, 3.182758453, 7.571589941);
-    const vec3 c2 = vec3(-66.09402084, -4.128636633, -10.34302667);
-    const vec3 c3 = vec3(228.7660791, 25.04986699, -91.54105500);
-    const vec3 c4 = vec3(-334.8351125, -69.31749345, 288.5858273);
-    const vec3 c5 = vec3(218.7637214, 67.52150243, -305.2045764);
-    const vec3 c6 = vec3(-52.88903478, -21.54527364, 110.5174634);
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
+    // Canonical Google Research / MATLAB Turbo, 5th-degree polynomial fit
+    // (matplotlib turbo). Previous 6th-degree approximation gave P(1) ~=
+    // (0.54, 0.83, -0.19) -> yellow-green after clamp; this one ends at
+    // ~ (0.74, 0.21, 0.18) which is the proper Turbo bright red.
+    const vec3 c0 = vec3(0.13572138, 0.09140261, 0.10667330);
+    const vec3 c1 = vec3(4.61539260, 2.19418839, 12.64194608);
+    const vec3 c2 = vec3(-42.66032258, 4.84296658, -60.58204836);
+    const vec3 c3 = vec3(132.13108234, -14.18503333, 110.36276771);
+    const vec3 c4 = vec3(-152.94239396, 4.27729857, -89.90310912);
+    const vec3 c5 = vec3(59.28637943, 2.82956604, 27.34824973);
+    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
 }
 void main() {
     vec2 uv = v_uv * u_uv_scale + u_uv_off;
@@ -102,6 +106,17 @@ void main() {
     }
     float range = u_vmax - u_vmin;
     float t = (range > 1e-30) ? clamp((v - u_vmin) / range, 0.0, 1.0) : 0.5;
+    // Discrete mode: quantize t into u_discrete_n bands. Sample the colormap
+    // at the band's edge-aligned position k/(N-1) so the first band picks
+    // t=0 (e.g. blue end of Turbo) and the last band picks t=1 (red end).
+    // Band-center sampling (k+0.5)/N would shrink the endpoints inward and
+    // make discrete and continuous modes show different extreme colors.
+    if (u_discrete_n > 0) {
+        float n = float(u_discrete_n);
+        float k = floor(t * n);
+        if (k >= n) k = n - 1.0;
+        t = (n > 1.0) ? (k / (n - 1.0)) : 0.5;
+    }
     vec3 col;
     if      (u_colormap == 0) col = viridis(t);
     else if (u_colormap == 1) col = inferno(t);
@@ -188,6 +203,7 @@ void PlotRenderer::compile_shaders() {
             loc_heatmap_cmap_     = glGetUniformLocation(program_heatmap_, "u_colormap");
             loc_heatmap_uv_off_   = glGetUniformLocation(program_heatmap_, "u_uv_off");
             loc_heatmap_uv_scale_ = glGetUniformLocation(program_heatmap_, "u_uv_scale");
+            loc_heatmap_discrete_n_ = glGetUniformLocation(program_heatmap_, "u_discrete_n");
         }
     }
     if (vs2)  glDeleteShader(vs2);
@@ -304,7 +320,8 @@ void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
 
 void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                                 float uv_off_x, float uv_off_y,
-                                float uv_scale_x, float uv_scale_y) {
+                                float uv_scale_x, float uv_scale_y,
+                                int n_discrete) {
     if (!program_heatmap_ || !tex) return;
     if (!heatmap_vbo_) {
         // Fullscreen triangle-strip: 4 точки × (pos.xy, uv.xy). Текстурные
@@ -329,6 +346,7 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     if (loc_heatmap_cmap_     >= 0) glUniform1i(loc_heatmap_cmap_, colormap_id);
     if (loc_heatmap_uv_off_   >= 0) glUniform2f(loc_heatmap_uv_off_, uv_off_x, uv_off_y);
     if (loc_heatmap_uv_scale_ >= 0) glUniform2f(loc_heatmap_uv_scale_, uv_scale_x, uv_scale_y);
+    if (loc_heatmap_discrete_n_ >= 0) glUniform1i(loc_heatmap_discrete_n_, n_discrete);
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, heatmap_vbo_);

@@ -83,14 +83,16 @@ vec3f cmap_inferno(float t) {
     return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
 }
 vec3f cmap_turbo(float t) {
-    const vec3f c0 = {0.1140890109f, 0.06288340699f, 0.2248337215f};
-    const vec3f c1 = {6.716419496f, 3.182758453f, 7.571589941f};
-    const vec3f c2 = {-66.09402084f, -4.128636633f, -10.34302667f};
-    const vec3f c3 = {228.7660791f, 25.04986699f, -91.54105500f};
-    const vec3f c4 = {-334.8351125f, -69.31749345f, 288.5858273f};
-    const vec3f c5 = {218.7637214f, 67.52150243f, -305.2045764f};
-    const vec3f c6 = {-52.88903478f, -21.54527364f, 110.5174634f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
+    // Canonical Turbo (matplotlib polynomial fit). See plot_renderer.cpp for
+    // the matching GLSL version. Mirrors the shader bit-for-bit so colorbar
+    // strips agree with on-screen heatmap colors.
+    const vec3f c0 = {0.13572138f, 0.09140261f, 0.10667330f};
+    const vec3f c1 = {4.61539260f, 2.19418839f, 12.64194608f};
+    const vec3f c2 = {-42.66032258f, 4.84296658f, -60.58204836f};
+    const vec3f c3 = {132.13108234f, -14.18503333f, 110.36276771f};
+    const vec3f c4 = {-152.94239396f, 4.27729857f, -89.90310912f};
+    const vec3f c5 = {59.28637943f, 2.82956604f, 27.34824973f};
+    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
 }
 vec3f cmap_gray(float t) { return {t, t, t}; }
 
@@ -160,13 +162,57 @@ void HeatmapView::render(PlotRenderer& renderer,
     const float margin_bottom = 46.0f;
     const float colorbar_w    = 18.0f;
     const float colorbar_gap  = 12.0f;
+    const float tick_len      = 4.0f;
+    const float tick_text_gap = 2.0f;
 
-    std::string s_vmax = fmt_tick(vmax);
-    std::string s_vmin = fmt_tick(vmin);
-    float w_vmax = ImGui::CalcTextSize(s_vmax.c_str()).x;
-    float w_vmin = ImGui::CalcTextSize(s_vmin.c_str()).x;
-    float cb_label_w = std::max(w_vmin, w_vmax);
-    const float margin_right = colorbar_w + colorbar_gap + cb_label_w + 10.0f;
+    // Resolve the active number of discrete bands. discrete_levels overrides
+    // auto-detection; otherwise span vmin..vmax inclusive at integer steps.
+    int n_disc = 0;
+    if (discrete) {
+        if (discrete_levels > 0) n_disc = discrete_levels;
+        else {
+            int span = (int)std::lround((double)((double)vmax - (double)vmin)) + 1;
+            n_disc = std::max(1, span);
+        }
+    }
+
+    // Compute colorbar ticks up-front so margin_right can reserve exactly the
+    // width needed for the widest label. Two modes:
+    //   - Discrete auto (discrete_levels == 0): one tick per integer level,
+    //     placed at the data value itself (vmin..vmax inclusive).
+    //   - Discrete manual (discrete_levels > 0): tick at each band center
+    //     (vmin + (k + 0.5) * bandsize).
+    //   - Continuous: ~5 nice_step values across [vmin, vmax].
+    auto compute_ticks = [&]() {
+        std::vector<double> out;
+        double range = (double)vmax - (double)vmin;
+        if (n_disc > 0) {
+            if (discrete_levels == 0) {
+                for (int k = 0; k < n_disc; ++k)
+                    out.push_back((double)vmin + (double)k);
+            } else if (range > 0.0) {
+                double bs = range / (double)n_disc;
+                for (int k = 0; k < n_disc; ++k)
+                    out.push_back((double)vmin + ((double)k + 0.5) * bs);
+            }
+        } else if (range > 0.0) {
+            double step = nice_step(range, 5);
+            if (step > 0.0) {
+                double start = std::ceil((double)vmin / step) * step;
+                for (double v = start; v <= (double)vmax + step * 0.5; v += step)
+                    out.push_back(v);
+            }
+        }
+        if (out.empty()) out.push_back((double)vmin);
+        return out;
+    };
+    std::vector<double> tick_vals = compute_ticks();
+    float max_tick_w = 0.0f;
+    for (double v : tick_vals) {
+        float w = ImGui::CalcTextSize(fmt_tick(v).c_str()).x;
+        max_tick_w = std::max(max_tick_w, w);
+    }
+    const float margin_right = colorbar_w + colorbar_gap + tick_len + tick_text_gap + max_tick_w + 6.0f;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -187,10 +233,11 @@ void HeatmapView::render(PlotRenderer& renderer,
     float uv_off_y   = (float)((view_min_y - param_lo_y) / data_ry);
     float uv_scale_y = (float)((view_max_y - view_min_y) / data_ry);
 
-    // 5. FBO render.
+    // 5. FBO render. (n_disc was resolved up-front in section 3.)
     renderer.begin_frame(plot_w, plot_h, 0.08f, 0.08f, 0.10f, 1.0f);
     renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
-                          uv_off_x, uv_off_y, uv_scale_x, uv_scale_y);
+                          uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
+                          n_disc);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
@@ -213,6 +260,28 @@ void HeatmapView::render(PlotRenderer& renderer,
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     bool plot_hov = ImGui::IsItemHovered();
     bool plot_dbl = plot_hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+
+    // Right-click context menu on the heatmap area: discrete-mode toggle.
+    // Open manually (instead of BeginPopupContextItem) so a RMB drag — used
+    // for rect-zoom — does NOT trigger the menu. Threshold is the same as
+    // ImGui's mouse-drag threshold so the gesture matches the rest of the UI.
+    char ctx_id[64];
+    std::snprintf(ctx_id, sizeof(ctx_id), "##hm_ctx_%d", owner_id);
+    if (plot_hov && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 0.0f);
+        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
+            ImGui::OpenPopup(ctx_id);
+        }
+    }
+    if (ImGui::BeginPopup(ctx_id)) {
+        ImGui::Checkbox("Discrete colorbar", &discrete);
+        if (discrete) {
+            ImGui::SetNextItemWidth(80.0f);
+            ImGui::InputInt("Levels (0=auto)", &discrete_levels, 0, 0);
+            if (discrete_levels < 0) discrete_levels = 0;
+        }
+        ImGui::EndPopup();
+    }
 
     ImGui::SetCursorScreenPos(ImVec2(img_pos.x, img_pos.y + plot_h));
     std::snprintf(id_buf, sizeof(id_buf), "##hm_xax_%d", owner_id);
@@ -481,32 +550,63 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // 9. Colorbar справа: серия горизонтальных стрипов, ImDrawList::AddRectFilled.
-    //   ~64 стрипа достаточно для гладкости viridis/turbo (нелинейность есть, но
-    //   на 64 шагов уже неотличимо от непрерывного).
+    // 9. Colorbar on the right: horizontal strips via ImDrawList::AddRectFilled.
+    //    Continuous mode uses 64 strips (visually indistinguishable from LUT).
+    //    Discrete mode uses one strip per band, sampled at the band center —
+    //    matches the on-screen heatmap quantization exactly.
     {
         float cb_x = img_pos.x + plot_w + colorbar_gap;
         float cb_y = img_pos.y;
         float cb_h = (float)plot_h;
-        const int N_STRIPS = 64;
-        for (int i = 0; i < N_STRIPS; ++i) {
-            float t0 = (float)i       / (float)N_STRIPS;
-            float t1 = (float)(i + 1) / (float)N_STRIPS;
-            // colorbar: верхний край = vmax (t=1), нижний = vmin (t=0)
+        int n_strips = (n_disc > 0) ? n_disc : 64;
+        for (int i = 0; i < n_strips; ++i) {
+            float t0 = (float)i       / (float)n_strips;
+            float t1 = (float)(i + 1) / (float)n_strips;
+            // Colorbar: top edge = vmax (t=1), bottom = vmin (t=0).
             float y0 = cb_y + cb_h * (1.0f - t1);
             float y1 = cb_y + cb_h * (1.0f - t0);
-            ImU32 col = cmap_sample((t0 + t1) * 0.5f, colormap);
+            // Sample position: in discrete mode mirror the shader (edge-
+            // aligned k/(N-1)) so the first/last bands match continuous
+            // endpoints exactly. Continuous mode samples the strip center.
+            float t_samp;
+            if (n_disc > 0) {
+                t_samp = (n_disc > 1) ? (float)i / (float)(n_disc - 1) : 0.5f;
+            } else {
+                t_samp = (t0 + t1) * 0.5f;
+            }
+            ImU32 col = cmap_sample(t_samp, colormap);
             dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + colorbar_w, y1), col);
         }
         dl->AddRect(ImVec2(cb_x, cb_y),
                     ImVec2(cb_x + colorbar_w, cb_y + cb_h),
                     IM_COL32(120, 120, 130, 200));
-        // Подписи min/max справа от colorbar'а.
-        std::string s_max = fmt_tick(vmax);
-        std::string s_min = fmt_tick(vmin);
-        dl->AddText(ImVec2(cb_x + colorbar_w + 4.0f, cb_y - 2.0f), col_text, s_max.c_str());
-        dl->AddText(ImVec2(cb_x + colorbar_w + 4.0f, cb_y + cb_h - font_h + 2.0f),
-                    col_text, s_min.c_str());
+
+        // Tick marks + labels: use the pre-computed tick_vals so the labels
+        // line up with the bands they describe and margin_right reserved the
+        // correct width for them.
+        double range = (double)vmax - (double)vmin;
+        for (double value : tick_vals) {
+            if (range <= 0.0) {
+                // Degenerate vmin == vmax: still draw the single label centered.
+                float y = cb_y + cb_h * 0.5f;
+                std::string s = fmt_tick(value);
+                dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
+                                   y - font_h * 0.5f),
+                            col_text, s.c_str());
+                continue;
+            }
+            float frac = (float)((value - (double)vmin) / range);
+            if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
+            frac = std::min(std::max(frac, 0.0f), 1.0f);
+            float y = cb_y + cb_h * (1.0f - frac);
+            dl->AddLine(ImVec2(cb_x + colorbar_w, y),
+                        ImVec2(cb_x + colorbar_w + tick_len, y),
+                        col_text);
+            std::string s = fmt_tick(value);
+            dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
+                               y - font_h * 0.5f),
+                        col_text, s.c_str());
+        }
     }
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.

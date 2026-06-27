@@ -33,9 +33,11 @@ public:
     //   в HeatmapView) даст тёмный фон, чтобы пользователь видел границы.
     // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер
     // отображает тёмно-серым (используется engine'ом для diverged/spec).
+    // n_discrete: 0 = continuous shading, N>0 = quantize into N color bands.
     void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                       float uv_off_x, float uv_off_y,
-                      float uv_scale_x, float uv_scale_y);
+                      float uv_scale_x, float uv_scale_y,
+                      int n_discrete = 0);
 
     // ������ 3D-����� (vbo � float[3] �� �������).
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
@@ -66,7 +68,8 @@ private:
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;
     GLint  loc_heatmap_tex_ = -1, loc_heatmap_vmin_ = -1,
            loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
-           loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1;
+           loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1,
+           loc_heatmap_discrete_n_ = -1;
     GLuint heatmap_vbo_ = 0;     // ленивая инициализация fullscreen quad
 
     GLuint vao_ = 0;

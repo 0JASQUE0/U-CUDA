@@ -3405,11 +3405,17 @@ struct ParametricEngine::Impl {
                                             gridSize_db, 1, 1, blockSize_db, 1, 1,
                                             0, nullptr, args_search, nullptr),
                              "cuLaunchKernel(search_clear)");
-                ++amountOfClusters;
-                resultClusters = amountOfClusters;
                 BAS_CHECK(cudaDeviceSynchronize(), "sync search_clear");
                 BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
-                if (clearIdx == -1) break;  // всё кластеризовано
+                // All cells are classified — no new seed found, stop.
+                // NB: increment goes AFTER the clearIdx check. NonLinAnal's
+                // reference (hostLibrary.cu:3151) increments before the check
+                // and so reports one extra cluster, but it returns void and the
+                // count is never read; we expose n_clusters to the UI, so the
+                // off-by-one was visible as "4 clusters" with only 3 real ones.
+                if (clearIdx == -1) break;
+                ++amountOfClusters;
+                resultClusters = amountOfClusters;
             } else {
                 --amountOfNegativeClusters;
                 resultClusters = amountOfNegativeClusters;

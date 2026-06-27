@@ -2765,7 +2765,12 @@ static void draw_basins_plot(AppModel& model) {
     static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
     static std::unique_ptr<Plot2DView>   scatter_view;
     if (!renderer)     renderer     = std::make_unique<PlotRenderer>();
-    if (!hm_basins)    hm_basins    = std::make_unique<HeatmapView>();
+    if (!hm_basins) {
+        hm_basins = std::make_unique<HeatmapView>();
+        // Cluster IDs are integers — discrete colorbar by default. User can
+        // toggle off via right-click context menu on the heatmap.
+        hm_basins->discrete = true;
+    }
     if (!hm_avgpk)     hm_avgpk     = std::make_unique<HeatmapView>();
     if (!hm_avgint)    hm_avgint    = std::make_unique<HeatmapView>();
     if (!hm_states)    hm_states    = std::make_unique<HeatmapView>();
@@ -2818,8 +2823,23 @@ static void draw_basins_plot(AppModel& model) {
         static std::vector<double> buf;
         buf.resize(total);
         for (size_t k = 0; k < total; ++k) buf[k] = (double)c.result.basin_idx[k];
-        double vmin = (double)c.result.min_cluster_idx;
+        // Cluster IDs in basin_idx:
+        //   min_cluster_idx..-1 — FP-clusters (always present when negative)
+        //   0                   — diverged/unbound cells (helpful_array[i] == 0)
+        //   1..n_clusters       — oscillatory clusters
+        // When no FP-clusters exist (min_cluster_idx == 0) and no cell
+        // diverged, "cluster 0" isn't a real ID; shift vmin to 1 so the
+        // colorbar doesn't show a phantom band. If diverged cells exist,
+        // keep vmin = 0 so they get their own color band.
+        bool has_diverged = false;
+        for (int f : c.result.helpful_array)
+            if (f == 0) { has_diverged = true; break; }
+        double vmin;
+        if (c.result.min_cluster_idx < 0)        vmin = (double)c.result.min_cluster_idx;
+        else if (has_diverged)                   vmin = 0.0;
+        else                                     vmin = 1.0;
         double vmax = (double)c.result.n_clusters;
+        if (vmax < vmin) vmax = vmin;
         hm_basins->colormap = HeatmapColormap::Turbo;
         hm_basins->x_axis.name = ax_x;
         hm_basins->y_axis.name = ax_y;
