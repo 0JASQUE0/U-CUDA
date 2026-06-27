@@ -126,6 +126,8 @@ SystemRecord AppModel::to_record() const {
     r.scheme_midpoint = scheme_midpoint;
     r.scheme_rk4 = scheme_rk4;
     r.scheme_dopri78 = scheme_dopri78;
+    r.scheme_cd = scheme_cd;
+    r.symmetry_s = symmetry_s;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
     r.param_values = param_values;
@@ -154,6 +156,8 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_midpoint = r.scheme_midpoint;
     scheme_rk4 = r.scheme_rk4;
     scheme_dopri78 = r.scheme_dopri78;
+    scheme_cd = r.scheme_cd;
+    symmetry_s = r.symmetry_s;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
     param_values = r.param_values;
@@ -166,7 +170,7 @@ void AppModel::from_record(const SystemRecord& r) {
     // сразу перегенерируем код загруженной системы (если выбраны методы),
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
-    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78)
+    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_cd)
         generate();
 }
 
@@ -185,7 +189,8 @@ void AppModel::clear() {
     params_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
-    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = false;
+    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_cd = false;
+    symmetry_s = "0.5";
     step_h.clear();
     init_conditions.clear();
     param_values.clear();

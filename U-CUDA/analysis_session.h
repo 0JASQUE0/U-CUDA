@@ -81,6 +81,7 @@ struct PhaseAnalysisSession {
     std::string sim_time = "250";       // время моделирования (с)
     std::string skip_time = "100";      // transient (с)
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
+    std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
     std::string decimation = "1";      // выводить каждую N-ю точку
     bool auto_recompute = false;       // пересчитывать сразу при изменении
     bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
@@ -165,6 +166,7 @@ struct BifurcationDiagramConfig {
     // Схема интегрирования: built-in имя или имя custom-схемы (resolve через
     // session.custom_schemes на момент Run).
     std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
 
     // Свип: какой параметр, его диапазон, число точек.
     int         param_index    = 0;
@@ -296,6 +298,7 @@ struct LLECurveConfig {
     bool        visible = true;
 
     std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -397,6 +400,7 @@ struct LLEAnalysisSession {
 struct BasinsConfig {
     std::string label = "Basins";
     std::string scheme = "Euler";
+    std::string symmetry_s = "0.5";    // a[0] для CD
 
     int axis_x_var = 0;
     int axis_y_var = 1;
@@ -466,6 +470,7 @@ struct LSCurveConfig {
     bool        visible = true;
 
     std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию

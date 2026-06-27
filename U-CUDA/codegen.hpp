@@ -18,11 +18,23 @@ struct System {
 // DOPRI78 — Dormand-Prince 8(7), 13-стадийный embedded метод (см. scheme_dopri78
 // в codegen.cpp). Сейчас используется только 8-й порядок (b[0]); 7-й порядок (z)
 // тоже считается — резерв под будущий адаптивный шаг по |y-z|.
-enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78 };
+enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
 std::string codegen_scheme(const System& s, Scheme sch);
+
+// Emits a human-readable C-code mirror of what the CPU integrator
+// (integrator.cpp::step_*) actually computes. For Euler/RK4/etc this matches
+// codegen_scheme bit-for-bit (same AST is evaluated either way). For CD it
+// differs: GPU uses analytic solving for linear-in-var components, CPU uses
+// 4 simple iterations for every variable — this function returns the CPU form
+// so users can compare the two side by side in the debug panel.
+std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
+
+// Maps UI scheme name ("Euler" / "RK4" / "CD" / ...) to the Scheme enum.
+// Unknown names fall back to Scheme::Euler.
+Scheme scheme_from_name(const std::string& name);
 
 // Нормализует числовое значение/выражение параметра для подстановки в C-код:
 //   "8/3"   -> "8.0/3.0"   (вещественное деление, без потери точности)

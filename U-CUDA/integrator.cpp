@@ -6,6 +6,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Explicit Midpoint") return IntScheme::ExplicitMidpoint;
     if (s == "RK4")               return IntScheme::RK4;
     if (s == "DOPRI78")           return IntScheme::DOPRI78;
+    if (s == "CD")                return IntScheme::CD;
     return IntScheme::Euler;
 }
 
@@ -100,6 +101,33 @@ void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double 
     for (int l = 0; l < n; ++l) X[l] += h * X2[l];
 }
 
+// CD (Composition D-method): h1 = h*a[0], h2 = h*(1-a[0]).
+// Полу-шаг 1 (явный, прямой порядок): для каждой i обновляем X[i] += h1*f_i(X).
+// Полу-шаг 2 (неявный, обратный порядок): для каждой i (от n-1 к 0)
+// 4 простые итерации: X[i] = saved + h2 * f_i(X). Это упрощение GPU-кодгена,
+// где для линейной по var компоненты есть аналитическое решение; на CPU мы
+// единообразно используем итерации (упрощает код, точность достаточная).
+void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
+             int n, double* k1) {
+    const double s = a[0];
+    const double h1 = h * s;
+    const double h2 = h * (1.0 - s);
+
+    // Φ_h1: явный полушаг, прямой порядок (как Euler-Cromer).
+    for (int i = 0; i < n; ++i) {
+        ev.eval(X, a, k1);
+        X[i] += h1 * k1[i];
+    }
+    // Φ*_h2: неявный полушаг, обратный порядок, 4 итерации.
+    for (int i = n - 1; i >= 0; --i) {
+        double saved = X[i];
+        for (int it = 0; it < 4; ++it) {
+            ev.eval(X, a, k1);
+            X[i] = saved + h2 * k1[i];
+        }
+    }
+}
+
 } // namespace
 
 bool computePhasePortraitCPU(
@@ -126,6 +154,7 @@ bool computePhasePortraitCPU(
         case IntScheme::ExplicitMidpoint: step_midpoint(ev, X.data(), a, h, n, k1.data(), tmp.data()); break;
         case IntScheme::RK4:              step_rk4(ev, X.data(), a, h, n, k1.data(), k2.data(), k3.data(), k4.data(), tmp.data()); break;
         case IntScheme::DOPRI78:          step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data()); break;
+        case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         }
     };
 

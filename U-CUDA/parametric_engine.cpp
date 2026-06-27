@@ -382,10 +382,14 @@ struct ParametricEngine::Impl {
             arch,
             std_opt.c_str(),
             "-default-device",
-            cuda_include_opt.c_str()
+            cuda_include_opt.c_str(),
+            // FMA даёт чуть другое округление (одно округление вместо двух) — это
+            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
+            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
+            "--fmad=false"
         };
 
-        nr = nvrtcCompileProgram(prog, 4, opts);
+        nr = nvrtcCompileProgram(prog, 5, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -859,10 +863,14 @@ struct ParametricEngine::Impl {
             arch,
             std_opt.c_str(),
             "-default-device",
-            cuda_include_opt.c_str()
+            cuda_include_opt.c_str(),
+            // FMA даёт чуть другое округление (одно округление вместо двух) — это
+            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
+            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
+            "--fmad=false"
         };
 
-        nr = nvrtcCompileProgram(prog, 4, opts);
+        nr = nvrtcCompileProgram(prog, 5, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -1205,10 +1213,14 @@ struct ParametricEngine::Impl {
             arch,
             std_opt.c_str(),
             "-default-device",
-            cuda_include_opt.c_str()
+            cuda_include_opt.c_str(),
+            // FMA даёт чуть другое округление (одно округление вместо двух) — это
+            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
+            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
+            "--fmad=false"
         };
 
-        nr = nvrtcCompileProgram(prog, 4, opts);
+        nr = nvrtcCompileProgram(prog, 5, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;

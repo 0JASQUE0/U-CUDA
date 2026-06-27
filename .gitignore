@@ -33,3 +33,6 @@ __pycache__/
 
 # Runtime UI state (ImGui layout)
 U-CUDA/imgui.ini
+
+# Local-only project docs (not shared via git)
+docs/

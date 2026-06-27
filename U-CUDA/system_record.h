@@ -40,6 +40,11 @@ struct SystemRecord {
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
     bool scheme_dopri78  = false;
+    bool scheme_cd       = false;
+
+    // Коэффициент симметрии s для CD-метода (передаётся в kernel как a[0]).
+    // 0.5 = классический симметричный CD. Используется только когда scheme == "CD".
+    std::string symmetry_s = "0.5";
 
     // Пользовательские именованные КРС (см. CustomScheme выше).
     std::vector<CustomScheme> custom_schemes;

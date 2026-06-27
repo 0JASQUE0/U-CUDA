@@ -54,6 +54,7 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     params = params_;
     custom_schemes = r.custom_schemes;
     step_h = r.step_h.empty() ? "0.01" : r.step_h;
+    symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
     sim_time = "50";
     skip_time = "10";
 
@@ -87,6 +88,7 @@ struct PhaseRunInputs {
     std::vector<std::string> params;
     std::string step_h, sim_time, skip_time;
     std::string scheme, decimation;
+    std::string symmetry_s = "0.5"; // a[0] для CD
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
@@ -110,9 +112,10 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     int total = (int)(tsim / h); if (total <= 0) total = 1;
     int skip = (int)(tskip / h); if (skip < 0) skip = 0;
 
-    // параметры: a[0] зарезервирован, a[1..] = params
+    // параметры: a[0] зарезервирован под CD-коэф. симметрии, a[1..] = params
     int nparams = (int)in.params.size();
     std::vector<double> a(nparams + 1, 0.0);
+    a[0] = parse_val(in.symmetry_s, 0.5);
     for (int j = 0; j < nparams; ++j) {
         auto it = in.param_values.find(in.params[j]);
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
@@ -214,6 +217,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.sim_time     = s.sim_time;
     in.skip_time    = s.skip_time;
     in.scheme       = s.scheme;
+    in.symmetry_s   = s.symmetry_s;
     in.decimation   = s.decimation;
     in.use_gpu      = s.use_gpu;
     in.sys          = s.sys;
@@ -259,6 +263,7 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
     if (s == "RK4")               return Scheme::RK4;
     if (s == "DOPRI78")           return Scheme::DOPRI78;
+    if (s == "CD")                return Scheme::CD;
     return Scheme::Euler;
 }
 
@@ -311,6 +316,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     BifurcationDiagramConfig bd;
     bd.label = "BD 1";
     bd.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -404,6 +410,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -451,6 +458,7 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -598,6 +606,7 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     LLECurveConfig c;
     c.label = "LLE 1";
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -663,6 +672,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -710,6 +720,7 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -853,6 +864,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
 
     BasinsConfig c;
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -882,6 +894,7 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -975,6 +988,7 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     LSCurveConfig c;
     c.label = "LS 1";
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -1040,6 +1054,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1085,6 +1100,7 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
 
     int nparams = (int)s.params.size();
     req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
