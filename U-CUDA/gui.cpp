@@ -2516,6 +2516,339 @@ static void draw_ls_plot(AppModel& model) {
 }
 
 // ============================================================
+// Basins of attraction: controls + 5-plot window (inner tab-bar).
+// ============================================================
+
+static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
+    BasinsAnalysisSession& s = model.basins_session;
+    BasinsConfig& c = s.config;
+
+    ImGui::Text("Basins of attraction");
+    ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
+
+    // ----- System picker (как у Parametric) -----
+    // Смена системы во время async-расчёта запрещена.
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (s.in_flight) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("##basins_syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));
+                    model.start_basins_analysis();
+                    std::string jb = lib.load_session(model.loaded_name, "_last_basins");
+                    if (!jb.empty())
+                        session_from_json_basins(jb, model.basins_session);
+                }
+                catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (s.in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // ----- Scheme -----
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    // ----- Axes (X, Y по двум IC-переменным) -----
+    if (!s.vars.empty()) {
+        if (c.axis_x_var < 0 || c.axis_x_var >= (int)s.vars.size()) c.axis_x_var = 0;
+        if (c.axis_y_var < 0 || c.axis_y_var >= (int)s.vars.size())
+            c.axis_y_var = (s.vars.size() > 1) ? 1 : 0;
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Axis X (IC)", &c.axis_x_var, items.data(), (int)items.size());
+        InputNumStr("X lo", c.axis_x_lo_text, 120);
+        InputNumStr("X hi", c.axis_x_hi_text, 120);
+
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Axis Y (IC)", &c.axis_y_var, items.data(), (int)items.size());
+        InputNumStr("Y lo", c.axis_y_lo_text, 120);
+        InputNumStr("Y hi", c.axis_y_hi_text, 120);
+    } else {
+        ImGui::TextDisabled("No variables (load a system first)");
+    }
+    InputNumStr("Resolution", c.n_pts_text, 120);
+
+    // ----- Writable var (для peak finder) -----
+    if (!s.vars.empty()) {
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+        if (c.writable_var < 0 || c.writable_var >= (int)s.vars.size()) c.writable_var = 0;
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Writable var", &c.writable_var, items.data(), (int)items.size());
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Integration:");
+    InputNumStr("h",              c.h_text,           120);
+    InputNumStr("computing time", c.t_max_text,       120);
+    InputNumStr("transient time", c.transient_text,   120);
+    InputNumStr("decimator",      c.pre_scaller_text, 120);
+    InputNumStr("max value",      c.max_value_text,   120);
+
+    ImGui::Separator();
+    InputNumStr("DBSCAN eps", c.eps_dbscan_text, 120);
+    ImGui::TextDisabled("Clustering radius in (avgPeak, avgInterval) space.");
+
+    ImGui::Separator();
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file", &c.csv_save_enabled);
+    InputTextStr("##basins_csv_path", c.csv_output_path);
+    ImGui::TextDisabled("Writes 4 files: <path>, _1.csv (avgPk), _2.csv (avgInt), _3.csv (states).");
+
+    ImGui::Separator();
+    ImGui::Text("Initial conditions (for non-axis variables):");
+    for (const auto& v : s.vars) {
+        ImGui::PushID(v.c_str());
+        InputNumStr(v.c_str(), c.initial_conditions[v], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        ImGui::PushID(p.c_str());
+        InputNumStr(p.c_str(), c.param_values[p], 120);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    }
+    else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    }
+    if (!s.in_flight && ImGui::GetIO().KeyCtrl &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+        do_run = true;
+    }
+    if (do_run) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine);
+    }
+
+    if (c.last_run_ok) {
+        int total = (int)c.result.basin_idx.size();
+        int diverged = 0;
+        for (int f : c.result.helpful_array) if (f == 0) ++diverged;
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: %dx%d, %d clusters (+ %d FP clusters); %d cells unbound",
+            c.result.n_pts, c.result.n_pts,
+            c.result.n_clusters, -c.result.min_cluster_idx, diverged);
+    } else if (!c.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##basins_err",
+            const_cast<char*>(c.last_error.c_str()),
+            c.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+}
+
+// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views statics —
+// один на представление, чтобы view-state (zoom, pan) сохранялся между
+// переключениями.
+static void draw_basins_plot(AppModel& model) {
+    BasinsAnalysisSession& s = model.basins_session;
+    BasinsConfig& c = s.config;
+    static std::unique_ptr<PlotRenderer> renderer;
+    static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
+    static std::unique_ptr<Plot2DView>   scatter_view;
+    if (!renderer)     renderer     = std::make_unique<PlotRenderer>();
+    if (!hm_basins)    hm_basins    = std::make_unique<HeatmapView>();
+    if (!hm_avgpk)     hm_avgpk     = std::make_unique<HeatmapView>();
+    if (!hm_avgint)    hm_avgint    = std::make_unique<HeatmapView>();
+    if (!hm_states)    hm_states    = std::make_unique<HeatmapView>();
+    if (!scatter_view) {
+        scatter_view = std::make_unique<Plot2DView>();
+        scatter_view->points_mode = true;
+        scatter_view->show_legend = false;
+        scatter_view->point_size_px = 3.0f;
+        scatter_view->pad_x = false;
+    }
+
+    if (!c.last_run_ok || c.result.basin_idx.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    // Inner tab-bar — переключение по 5 видам.
+    const char* tab_names[5] = { "Basins", "Avg peaks", "Avg interval", "States", "Scatter" };
+    if (ImGui::BeginTabBar("##basins_inner")) {
+        for (int t = 0; t < 5; ++t) {
+            if (ImGui::BeginTabItem(tab_names[t])) {
+                c.active_plot_tab = t;
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+
+    int n = c.result.n_pts;
+    size_t total = (size_t)n * (size_t)n;
+    double xlo = c.result.axis_x_lo, xhi = c.result.axis_x_hi;
+    double ylo = c.result.axis_y_lo, yhi = c.result.axis_y_hi;
+
+    auto axis_name = [&](int var_idx) -> std::string {
+        if (var_idx >= 0 && var_idx < (int)s.vars.size())
+            return s.vars[var_idx] + "(0)";
+        return std::string("x");
+    };
+    std::string ax_x = axis_name(c.result.axis_x_var);
+    std::string ax_y = axis_name(c.result.axis_y_var);
+
+    bool fit = c.fit_request;
+    if (fit) c.fit_request = false;
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    if (c.active_plot_tab == 0) {
+        // Basins idx — turbo-discrete через GL_NEAREST. Spectrum [min..max].
+        static std::vector<double> buf;
+        buf.resize(total);
+        for (size_t k = 0; k < total; ++k) buf[k] = (double)c.result.basin_idx[k];
+        double vmin = (double)c.result.min_cluster_idx;
+        double vmax = (double)c.result.n_clusters;
+        hm_basins->colormap = HeatmapColormap::Turbo;
+        hm_basins->x_axis.name = ax_x;
+        hm_basins->y_axis.name = ax_y;
+        hm_basins->render(*renderer, origin, avail,
+                          /*owner_id*/ 0x1BA51D01u, c.data_generation,
+                          n, n, buf.data(),
+                          xlo, xhi, ylo, yhi,
+                          vmin, vmax, fit);
+    }
+    else if (c.active_plot_tab == 1) {
+        hm_avgpk->colormap = HeatmapColormap::Viridis;
+        hm_avgpk->x_axis.name = ax_x;
+        hm_avgpk->y_axis.name = ax_y;
+        hm_avgpk->render(*renderer, origin, avail,
+                         /*owner_id*/ 0x1BA51D02u, c.data_generation,
+                         n, n, c.result.avg_peaks.data(),
+                         xlo, xhi, ylo, yhi,
+                         c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
+    }
+    else if (c.active_plot_tab == 2) {
+        hm_avgint->colormap = HeatmapColormap::Viridis;
+        hm_avgint->x_axis.name = ax_x;
+        hm_avgint->y_axis.name = ax_y;
+        hm_avgint->render(*renderer, origin, avail,
+                          /*owner_id*/ 0x1BA51D03u, c.data_generation,
+                          n, n, c.result.avg_intervals.data(),
+                          xlo, xhi, ylo, yhi,
+                          c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
+    }
+    else if (c.active_plot_tab == 3) {
+        // States: helpful_array → 3 категории. Маппим в дискретные значения
+        // и рендерим через HeatmapView в Turbo (3 равноотстоящие точки):
+        //   1 (Osc)     → 0   (синий конец turbo)
+        //   -1 (FP)     → 1   (зелёный середина)
+        //   0 (Unbound) → 2   (красный конец)
+        // Это не точные MATLAB-цвета, но 3 различимые категории.
+        static std::vector<double> buf;
+        buf.resize(total);
+        for (size_t k = 0; k < total; ++k) {
+            int v = c.result.helpful_array[k];
+            buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
+        }
+        hm_states->colormap = HeatmapColormap::Turbo;
+        hm_states->x_axis.name = ax_x;
+        hm_states->y_axis.name = ax_y;
+        hm_states->render(*renderer, origin, avail,
+                          /*owner_id*/ 0x1BA51D04u, c.data_generation,
+                          n, n, buf.data(),
+                          xlo, xhi, ylo, yhi,
+                          0.0, 2.0, fit);
+        // Подсказка под плотом — где какой цвет.
+        ImGui::TextDisabled("Turbo: 0=Osc, 1=FixedPoint, 2=Unbound");
+    }
+    else if (c.active_plot_tab == 4) {
+        // Scatter (avgPeak, avgInterval), точки сгруппированы по basin_idx.
+        // Каждый кластер — своя серия (PlotSeriesInput с собственным цветом).
+        int min_id = c.result.min_cluster_idx;
+        int max_id = c.result.n_clusters;
+        int n_total_clusters = max_id - min_id + 1;
+        if (n_total_clusters < 1) n_total_clusters = 1;
+
+        // Сгруппируем точки по basin_idx.
+        std::map<int, std::vector<float>> bufs;
+        int valid_pts = 0;
+        for (size_t k = 0; k < total; ++k) {
+            int id = c.result.basin_idx[k];
+            double xp = c.result.avg_peaks[k];
+            double yp = c.result.avg_intervals[k];
+            if (!std::isfinite(xp) || !std::isfinite(yp)) continue;
+            if (xp == 999.0 || xp == -999.0 || yp == 999.0 || yp == -999.0) continue;
+            bufs[id].push_back((float)xp);
+            bufs[id].push_back((float)yp);
+            ++valid_pts;
+        }
+        if (valid_pts == 0) {
+            ImGui::TextDisabled("No valid (avgPeak, avgInterval) points.");
+            return;
+        }
+
+        // Static-буферы должны жить весь кадр (Plot2DView хранит сырые указатели).
+        static std::vector<std::vector<float>> series_buffers;
+        static std::vector<std::string>        series_labels;
+        series_buffers.clear();
+        series_labels.clear();
+        series_buffers.reserve(bufs.size());
+        series_labels.reserve(bufs.size());
+
+        std::vector<PlotSeriesInput> series_in;
+        std::vector<bool> init_vis, glob_vis;
+        for (auto& kv : bufs) {
+            int id = kv.first;
+            series_buffers.push_back(std::move(kv.second));
+            series_labels.push_back("c" + std::to_string(id));
+            // Цвет per-cluster через ic_base_color (golden-ratio hash). Сдвиг
+            // на (id - min_id) — чтобы FP-кластеры (отрицательные) и Osc
+            // (положительные) тоже разделялись.
+            PlotSeriesInput si;
+            si.points   = series_buffers.back().empty() ? nullptr : series_buffers.back().data();
+            si.n_points = (int)(series_buffers.back().size() / 2);
+            si.color    = ic_base_color(id - min_id);
+            si.label    = series_labels.back();
+            series_in.push_back(si);
+            init_vis.push_back(true);
+            glob_vis.push_back(true);
+        }
+        (void)n_total_clusters;
+        scatter_view->x_axis.name = "avg peak";
+        scatter_view->y_axis.name = "avg interval";
+        scatter_view->render(*renderer, origin, avail,
+                             /*owner_id*/ 0x1BA51D05u, c.data_generation,
+                             series_in, init_vis, glob_vis, fit);
+    }
+}
+
+// ============================================================
 // Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
 // ============================================================
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
@@ -2706,6 +3039,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last",
                              session_to_json(model.phase_session));
     }
+    // Basins: один config на сессию. Сохраняем JSON каждый кадр (после poll
+    // - но также при изменении полей в controls). Здесь только after-poll save.
+    if (model.basins_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_basins",
+                             session_to_json_basins(model.basins_session));
+    }
 
     // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
     // очереди есть элементы — берём следующий и стартуем. start_next сам
@@ -2717,6 +3057,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
     ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
     ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
+    ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
@@ -2749,6 +3090,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
         busy_start = model.phase_session.compute_start_time;
+    }
+    else if (model.basins_session.in_flight) {
+        busy_what  = model.basins_session.config.label.empty()
+                        ? "basins" : model.basins_session.config.label;
+        busy_start = model.basins_session.compute_start_time;
     }
     if (!busy_what.empty()) {
         double secs = std::chrono::duration<double>(
@@ -2794,11 +3140,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     //      не совпадают с актуальным model.known_vars/known_params.
     // Случай 3 раньше требовал перезапуска приложения, чтобы подхватить новый
     // алфавит — теперь подхватывается при следующем входе в режим.
-    bool entering_phase = (AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
-                          model.app_mode != AppModel::AppMode::Analysis;
-    bool entering_par   = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
-                          model.app_mode != AppModel::AppMode::Parametric;
-    if (entering_phase || entering_par) {
+    bool entering_phase  = (AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
+                           model.app_mode != AppModel::AppMode::Analysis;
+    bool entering_par    = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
+                           model.app_mode != AppModel::AppMode::Parametric;
+    bool entering_basins = (AppModel::AppMode)mode == AppModel::AppMode::Basins &&
+                           model.app_mode != AppModel::AppMode::Basins;
+    if (entering_phase || entering_par || entering_basins) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -2827,6 +3175,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
             if (!js.empty()) session_from_json_ls(js, model.ls_session);
+        }
+    }
+    auto basins_need_init = model.basins_session.loaded_system_name != model.name
+                         || model.basins_session.vars.empty()
+                         || model.basins_session.vars   != model.known_vars
+                         || model.basins_session.params != model.known_params;
+    if (entering_basins && basins_need_init) {
+        model.start_basins_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jb = lib.load_session(model.loaded_name, "_last_basins");
+            if (!jb.empty()) session_from_json_basins(jb, model.basins_session);
         }
     }
     model.app_mode = (AppModel::AppMode)mode;
@@ -2873,6 +3232,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
         if (ImGui::Begin("Lyapunov Spectrum")) {
             draw_ls_plot(model);
+        }
+        ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::Basins) {
+        if (ImGui::Begin("Basins Controls")) {
+            draw_basins_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Basins of Attraction")) {
+            draw_basins_plot(model);
         }
         ImGui::End();
     }

@@ -240,6 +240,19 @@ bool AppModel::start_parametric_analysis() {
     return true;
 }
 
+bool AppModel::start_basins_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    basins_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        basins_session.sys = built;
+    }
+    catch (...) {}
+    basins_session.loaded_system_name = name;
+    return true;
+}
+
 // ============================================================================
 // Cross-analysis batch queue
 // ============================================================================

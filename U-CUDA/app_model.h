@@ -87,8 +87,9 @@ public:
     std::string loaded_name;
 
     // --- режим приложения и сессия анализа (слой 2) ---
-    // режим верхнего уровня: библиотека, фазовый анализ, параметрический или настройки.
-    enum class AppMode { Library, Analysis, Parametric, Settings };
+    // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
+    // бассейны притяжения или настройки.
+    enum class AppMode { Library, Analysis, Parametric, Basins, Settings };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -101,6 +102,9 @@ public:
     BifurcationAnalysisSession bifurcation_session;
     LLEAnalysisSession         lle_session;
     LyapunovSpectrumAnalysisSession ls_session;
+
+    // Basins of attraction — отдельный AppMode со своим Run и 5-плотным окном.
+    BasinsAnalysisSession      basins_session;
 
     // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
@@ -159,6 +163,8 @@ public:
     // Инициализирует ВСЕ parametric-сессии (bif/LLE/LS) из текущей системы —
     // пользователь ждёт одинаковые vars/params в любом верхнем табе.
     bool start_parametric_analysis();
+    // Инициализирует basins-сессию из текущей системы.
+    bool start_basins_analysis();
 
     // ---- результат генерации ----
     std::string generated_code;    // итоговый код всех выбранных схем

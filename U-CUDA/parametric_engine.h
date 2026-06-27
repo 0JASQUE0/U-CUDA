@@ -412,6 +412,60 @@ struct LS2DResult {
     std::vector<double> max_val;
 };
 
+// ============================================================================
+// Basins of Attraction — карта классификации траекторий на сетке n_pts × n_pts
+// начальных условий (axis_x_var, axis_y_var). На каждую ячейку считается:
+//   - flag классификации (-1=FP / 0=Unbound / 1=Osc) через calculateDiscreteModelCUDA
+//   - avgPeak и avgInterval через avgPeakFinderCUDA (с множителями mult_avg_*)
+//   - cluster id через CUDA_dbscan (host-цикл из 3 kernel'ов)
+// Свип ВСЕГДА по двум IC — par_or_var=0 в шаблоне жёстко.
+// ============================================================================
+
+struct BasinsRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;   // default IC для не-axis переменных
+    std::vector<double> base_values;
+
+    int axis_x_var = 0;       // 0-based индекс переменной по X
+    int axis_y_var = 1;       // 0-based индекс по Y
+    double axis_x_lo = -10.0, axis_x_hi = 10.0;
+    double axis_y_lo = -10.0, axis_y_hi = 10.0;
+    int    n_pts = 200;
+
+    int    writable_var   = 0;
+    double h              = 0.01;
+    double t_max          = 1000.0;
+    double transient_time = 10000.0;
+    int    pre_scaller    = 1;
+    double max_value      = 1.0e6;
+    double eps_dbscan     = 0.5;
+
+    std::string csv_output_path;
+};
+
+struct BasinsResult {
+    bool ok = false;
+    std::string error;
+
+    int n_pts = 0;
+    double axis_x_lo = 0.0, axis_x_hi = 0.0;
+    double axis_y_lo = 0.0, axis_y_hi = 0.0;
+    int axis_x_var = 0, axis_y_var = 1;
+
+    // Все four-поля размер n_pts² row-major (iy*n + ix):
+    std::vector<int>    basin_idx;       // ≥1 = Osc cluster; ≤-1 = FP cluster; 0 = Unbound
+    std::vector<double> avg_peaks;       // 999 = no peaks / unbound, NaN→999
+    std::vector<double> avg_intervals;
+    std::vector<int>    helpful_array;   // -1=FP, 0=Unbound, 1=Osc
+
+    // Сводки для отрисовки.
+    int    n_clusters = 0;               // max(basin_idx); min подсчитывается отдельно
+    int    min_cluster_idx = 0;          // самый отрицательный (для FP cluster id)
+    double avg_peaks_min     = 0.0, avg_peaks_max     = 0.0;
+    double avg_intervals_min = 0.0, avg_intervals_max = 0.0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -438,6 +492,9 @@ public:
 
     // 2D-LS — полный спектр N экспонент в каждой ячейке n_pts × n_pts.
     LS2DResult run_ls_2d(const LS2DRequest& req);
+
+    // Basins of attraction — карта на сетке IC. 4 output-поля + cluster ids.
+    BasinsResult run_basins(const BasinsRequest& req);
 
 private:
     struct Impl;

@@ -615,3 +615,78 @@ bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSessi
         return false;
     }
 }
+
+// ============================================================================
+// BasinsAnalysisSession — `_last_basins.json`. Один config на сессию
+// (без curves-vector). Result не сохраняется.
+// ============================================================================
+
+std::string session_to_json_basins(const BasinsAnalysisSession& s) {
+    std::ostringstream o;
+    const BasinsConfig& c = s.config;
+    o << "{\n";
+    o << "  \"label\":";            jstr(o, c.label);          o << ",\n";
+    o << "  \"scheme\":";           jstr(o, c.scheme);         o << ",\n";
+    o << "  \"axis_x_var\":"        << c.axis_x_var          << ",\n";
+    o << "  \"axis_y_var\":"        << c.axis_y_var          << ",\n";
+    o << "  \"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text); o << ",\n";
+    o << "  \"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text); o << ",\n";
+    o << "  \"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text); o << ",\n";
+    o << "  \"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text); o << ",\n";
+    o << "  \"n_pts_text\":";       jstr(o, c.n_pts_text);     o << ",\n";
+    o << "  \"writable_var\":"      << c.writable_var        << ",\n";
+    o << "  \"h_text\":";           jstr(o, c.h_text);         o << ",\n";
+    o << "  \"t_max_text\":";       jstr(o, c.t_max_text);     o << ",\n";
+    o << "  \"transient_text\":";   jstr(o, c.transient_text); o << ",\n";
+    o << "  \"pre_scaller_text\":"; jstr(o, c.pre_scaller_text); o << ",\n";
+    o << "  \"max_value_text\":";   jstr(o, c.max_value_text); o << ",\n";
+    o << "  \"eps_dbscan_text\":";  jstr(o, c.eps_dbscan_text);o << ",\n";
+    o << "  \"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",\n";
+    o << "  \"csv_output_path\":";  jstr(o, c.csv_output_path);o << ",\n";
+    o << "  \"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",\n";
+    o << "  \"param_values\":";     jmap(o, c.param_values);   o << ",\n";
+    o << "  \"active_plot_tab\":"   << c.active_plot_tab     << "\n";
+    o << "}\n";
+    return o.str();
+}
+
+bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        BasinsConfig& c = s.config;
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if      (key == "label")              c.label             = p.str();
+            else if (key == "scheme")             c.scheme            = p.str();
+            else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
+            else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
+            else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();
+            else if (key == "axis_x_hi_text")     c.axis_x_hi_text    = p.str();
+            else if (key == "axis_y_lo_text")     c.axis_y_lo_text    = p.str();
+            else if (key == "axis_y_hi_text")     c.axis_y_hi_text    = p.str();
+            else if (key == "n_pts_text")         c.n_pts_text        = p.str();
+            else if (key == "writable_var")       c.writable_var      = std::stoi(p.str_or_num());
+            else if (key == "h_text")             c.h_text            = p.str();
+            else if (key == "t_max_text")         c.t_max_text        = p.str();
+            else if (key == "transient_text")     c.transient_text    = p.str();
+            else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
+            else if (key == "max_value_text")     c.max_value_text    = p.str();
+            else if (key == "eps_dbscan_text")    c.eps_dbscan_text   = p.str();
+            else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
+            else if (key == "csv_output_path")    c.csv_output_path   = p.str();
+            else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
+            else if (key == "param_values")       c.param_values      = p.map_ss();
+            else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
