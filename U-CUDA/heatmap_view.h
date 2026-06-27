@@ -43,6 +43,13 @@ public:
     float  shown_vmin = 0.0f;
     float  shown_vmax = 1.0f;
 
+    // Discrete colormap mode: quantize values into N bands. Used for integer-
+    // valued heatmaps (basin cluster IDs, BD-2D periods). When discrete_levels
+    // is 0, N is auto-derived from the data range (round(vmax-vmin+1)).
+    // Right-click context menu on the plot toggles `discrete`.
+    bool   discrete = false;
+    int    discrete_levels = 0;
+
     HeatmapView() = default;
     ~HeatmapView();
     HeatmapView(const HeatmapView&) = delete;

@@ -2765,7 +2765,12 @@ static void draw_basins_plot(AppModel& model) {
     static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
     static std::unique_ptr<Plot2DView>   scatter_view;
     if (!renderer)     renderer     = std::make_unique<PlotRenderer>();
-    if (!hm_basins)    hm_basins    = std::make_unique<HeatmapView>();
+    if (!hm_basins) {
+        hm_basins = std::make_unique<HeatmapView>();
+        // Cluster IDs are integers — discrete colorbar by default. User can
+        // toggle off via right-click context menu on the heatmap.
+        hm_basins->discrete = true;
+    }
     if (!hm_avgpk)     hm_avgpk     = std::make_unique<HeatmapView>();
     if (!hm_avgint)    hm_avgint    = std::make_unique<HeatmapView>();
     if (!hm_states)    hm_states    = std::make_unique<HeatmapView>();
