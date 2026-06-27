@@ -11,6 +11,7 @@
 #include <nvrtc.h>
 #include <windows.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -3465,12 +3466,21 @@ struct ParametricEngine::Impl {
         std::vector<int> h_neighbors(total_cells, 0);
         int h_amountOfNeighbors      = 0;
 
+        // Progress for DBSCAN phase: the outer loop runs once PER CLUSTER (early
+        // exits when all cells classified), so main_iter is a poor metric — only
+        // reaches ~10 vs total_cells in millions. Instead, after each cluster's
+        // expansion we count classified cells in d_dbscanResult and report
+        // that fraction. Throttled to >200 ms between scans so the overhead
+        // stays bounded on large grids (each scan ~4 MB D2H + linear scan per 1M
+        // cells, ~3-5 ms; with throttle the cost is at most ~5 scans/sec).
+        std::vector<int> h_dbscan_check(total_cells, 0);
+        auto last_progress_scan = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+
         // Phase 2: DBSCAN expansion. Reset bar to 0..1, bump phase to 2.
         if (req.progress_phase) req.progress_phase->store(2, std::memory_order_relaxed);
         if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
             BAS_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(main_iter) / float(total_cells), std::memory_order_relaxed);
             int clearIdx_init = -1;
             BAS_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
 
@@ -3549,6 +3559,23 @@ struct ParametricEngine::Impl {
                 if (h_amountOfNeighbors > 0)
                     BAS_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
                               "memcpy neighbors loop");
+            }
+
+            // Report progress by counting classified cells. Throttled so the
+            // D2H+scan happens at most ~5x/sec regardless of cluster count.
+            if (req.progress) {
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_progress_scan >= std::chrono::milliseconds(200)) {
+                    last_progress_scan = now;
+                    BAS_CHECK(cudaMemcpy(h_dbscan_check.data(), d_dbscanResult,
+                                         total_cells * sizeof(int), cudaMemcpyDeviceToHost),
+                              "memcpy dbscanResult D2H (progress)");
+                    size_t classified = 0;
+                    for (size_t k = 0; k < total_cells; ++k)
+                        if (h_dbscan_check[k] != 0) ++classified;
+                    req.progress->store(float(classified) / float(total_cells),
+                                        std::memory_order_relaxed);
+                }
             }
         }
 
