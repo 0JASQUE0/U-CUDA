@@ -162,13 +162,57 @@ void HeatmapView::render(PlotRenderer& renderer,
     const float margin_bottom = 46.0f;
     const float colorbar_w    = 18.0f;
     const float colorbar_gap  = 12.0f;
+    const float tick_len      = 4.0f;
+    const float tick_text_gap = 2.0f;
 
-    std::string s_vmax = fmt_tick(vmax);
-    std::string s_vmin = fmt_tick(vmin);
-    float w_vmax = ImGui::CalcTextSize(s_vmax.c_str()).x;
-    float w_vmin = ImGui::CalcTextSize(s_vmin.c_str()).x;
-    float cb_label_w = std::max(w_vmin, w_vmax);
-    const float margin_right = colorbar_w + colorbar_gap + cb_label_w + 10.0f;
+    // Resolve the active number of discrete bands. discrete_levels overrides
+    // auto-detection; otherwise span vmin..vmax inclusive at integer steps.
+    int n_disc = 0;
+    if (discrete) {
+        if (discrete_levels > 0) n_disc = discrete_levels;
+        else {
+            int span = (int)std::lround((double)((double)vmax - (double)vmin)) + 1;
+            n_disc = std::max(1, span);
+        }
+    }
+
+    // Compute colorbar ticks up-front so margin_right can reserve exactly the
+    // width needed for the widest label. Two modes:
+    //   - Discrete auto (discrete_levels == 0): one tick per integer level,
+    //     placed at the data value itself (vmin..vmax inclusive).
+    //   - Discrete manual (discrete_levels > 0): tick at each band center
+    //     (vmin + (k + 0.5) * bandsize).
+    //   - Continuous: ~5 nice_step values across [vmin, vmax].
+    auto compute_ticks = [&]() {
+        std::vector<double> out;
+        double range = (double)vmax - (double)vmin;
+        if (n_disc > 0) {
+            if (discrete_levels == 0) {
+                for (int k = 0; k < n_disc; ++k)
+                    out.push_back((double)vmin + (double)k);
+            } else if (range > 0.0) {
+                double bs = range / (double)n_disc;
+                for (int k = 0; k < n_disc; ++k)
+                    out.push_back((double)vmin + ((double)k + 0.5) * bs);
+            }
+        } else if (range > 0.0) {
+            double step = nice_step(range, 5);
+            if (step > 0.0) {
+                double start = std::ceil((double)vmin / step) * step;
+                for (double v = start; v <= (double)vmax + step * 0.5; v += step)
+                    out.push_back(v);
+            }
+        }
+        if (out.empty()) out.push_back((double)vmin);
+        return out;
+    };
+    std::vector<double> tick_vals = compute_ticks();
+    float max_tick_w = 0.0f;
+    for (double v : tick_vals) {
+        float w = ImGui::CalcTextSize(fmt_tick(v).c_str()).x;
+        max_tick_w = std::max(max_tick_w, w);
+    }
+    const float margin_right = colorbar_w + colorbar_gap + tick_len + tick_text_gap + max_tick_w + 6.0f;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -189,18 +233,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     float uv_off_y   = (float)((view_min_y - param_lo_y) / data_ry);
     float uv_scale_y = (float)((view_max_y - view_min_y) / data_ry);
 
-    // Resolve the active number of discrete bands. discrete_levels overrides
-    // auto-detection; otherwise span vmin..vmax inclusive at integer steps.
-    int n_disc = 0;
-    if (discrete) {
-        if (discrete_levels > 0) n_disc = discrete_levels;
-        else {
-            int span = (int)std::lround((double)(vmax - vmin)) + 1;
-            n_disc = std::max(1, span);
-        }
-    }
-
-    // 5. FBO render.
+    // 5. FBO render. (n_disc was resolved up-front in section 3.)
     renderer.begin_frame(plot_w, plot_h, 0.08f, 0.08f, 0.10f, 1.0f);
     renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
@@ -229,11 +262,18 @@ void HeatmapView::render(PlotRenderer& renderer,
     bool plot_dbl = plot_hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
     // Right-click context menu on the heatmap area: discrete-mode toggle.
-    // BeginPopupContextItem only opens on a clean click, not on RMB drag, so
-    // it does not collide with the rect-zoom drag handler below.
+    // Open manually (instead of BeginPopupContextItem) so a RMB drag — used
+    // for rect-zoom — does NOT trigger the menu. Threshold is the same as
+    // ImGui's mouse-drag threshold so the gesture matches the rest of the UI.
     char ctx_id[64];
     std::snprintf(ctx_id, sizeof(ctx_id), "##hm_ctx_%d", owner_id);
-    if (ImGui::BeginPopupContextItem(ctx_id)) {
+    if (plot_hov && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 0.0f);
+        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
+            ImGui::OpenPopup(ctx_id);
+        }
+    }
+    if (ImGui::BeginPopup(ctx_id)) {
         ImGui::Checkbox("Discrete colorbar", &discrete);
         if (discrete) {
             ImGui::SetNextItemWidth(80.0f);
@@ -532,43 +572,31 @@ void HeatmapView::render(PlotRenderer& renderer,
                     ImVec2(cb_x + colorbar_w, cb_y + cb_h),
                     IM_COL32(120, 120, 130, 200));
 
-        // Tick marks + labels. In discrete mode one tick per integer level
-        // (placed at the band center); otherwise use nice_step from plot_axis
-        // to pick ~5 round values across [vmin, vmax].
+        // Tick marks + labels: use the pre-computed tick_vals so the labels
+        // line up with the bands they describe and margin_right reserved the
+        // correct width for them.
         double range = (double)vmax - (double)vmin;
-        const float tick_len = 4.0f;
-        auto draw_tick = [&](double value) {
-            if (range <= 0.0) return;
+        for (double value : tick_vals) {
+            if (range <= 0.0) {
+                // Degenerate vmin == vmax: still draw the single label centered.
+                float y = cb_y + cb_h * 0.5f;
+                std::string s = fmt_tick(value);
+                dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
+                                   y - font_h * 0.5f),
+                            col_text, s.c_str());
+                continue;
+            }
             float frac = (float)((value - (double)vmin) / range);
-            if (frac < -1e-4f || frac > 1.0f + 1e-4f) return;
+            if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
             frac = std::min(std::max(frac, 0.0f), 1.0f);
             float y = cb_y + cb_h * (1.0f - frac);
             dl->AddLine(ImVec2(cb_x + colorbar_w, y),
                         ImVec2(cb_x + colorbar_w + tick_len, y),
                         col_text);
             std::string s = fmt_tick(value);
-            dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + 2.0f,
+            dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
                                y - font_h * 0.5f),
                         col_text, s.c_str());
-        };
-        if (n_disc > 0) {
-            // One tick per band center. vmin/vmax are the inclusive integer
-            // range; band k covers [vmin + k - 0.5, vmin + k + 0.5).
-            for (int k = 0; k < n_disc; ++k) {
-                double v = (double)vmin + (double)k;
-                draw_tick(v);
-            }
-        } else if (range > 0.0) {
-            double step = nice_step(range, 5);
-            if (step > 0.0) {
-                double start = std::ceil((double)vmin / step) * step;
-                for (double v = start; v <= (double)vmax + step * 0.5; v += step) {
-                    draw_tick(v);
-                }
-            }
-        } else {
-            // Degenerate vmin == vmax: just label the single value.
-            draw_tick((double)vmin);
         }
     }
 

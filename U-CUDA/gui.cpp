@@ -2823,8 +2823,16 @@ static void draw_basins_plot(AppModel& model) {
         static std::vector<double> buf;
         buf.resize(total);
         for (size_t k = 0; k < total; ++k) buf[k] = (double)c.result.basin_idx[k];
-        double vmin = (double)c.result.min_cluster_idx;
+        // Cluster IDs: 1..n_clusters for oscillatory, min_cluster_idx..-1 for
+        // FP. Diverged cells are marked via helpful_array (basin_idx = 0 is
+        // not a real cluster). When there are no FP-clusters, min_cluster_idx
+        // is 0 — shift vmin up to 1 so the colorbar does not show a phantom
+        // "cluster 0" band that no cell actually belongs to.
+        double vmin = (c.result.min_cluster_idx == 0)
+                      ? 1.0
+                      : (double)c.result.min_cluster_idx;
         double vmax = (double)c.result.n_clusters;
+        if (vmax < vmin) vmax = vmin;
         hm_basins->colormap = HeatmapColormap::Turbo;
         hm_basins->x_axis.name = ax_x;
         hm_basins->y_axis.name = ax_y;
