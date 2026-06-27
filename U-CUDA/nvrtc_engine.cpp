@@ -94,8 +94,9 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu", 0, nullptr, nullptr), "createProgram");
     char arch[32];
     snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
-    const char* opts[] = { arch };
-    nvrtcResult comp = nvrtcCompileProgram(prog, 1, opts);
+    // --fmad=false: см. parametric_engine.cpp — выравниваем округление под CPU.
+    const char* opts[] = { arch, "--fmad=false" };
+    nvrtcResult comp = nvrtcCompileProgram(prog, 2, opts);
     // лог (при ошибке — в error_)
     size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
     std::string log;
