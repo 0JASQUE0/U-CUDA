@@ -17,6 +17,7 @@
 //      при смене только параметров анализа.
 //
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,10 +66,20 @@ struct Bifurcation1DRequest {
     // что и NonLinAnal::bifurcation1D (для publication-quality пост-процессинга).
     // Пустая строка = ничего не пишем (только в памяти).
     std::string csv_output_path;
+
+    // Cooperative cancellation token. Shared between caller (session) and
+    // worker thread; engine checks it between kernel launches and aborts
+    // with cancelled=true if set. nullptr = no cancellation.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // Progress reporting (0.0 .. 1.0). Engine writes after each chunk;
+    // GUI reads each frame to drive a progress bar. nullptr = no reporting.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct Bifurcation1DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     // Снапшот режима continuation на момент Run — GUI использует флаг для
@@ -134,10 +145,17 @@ struct LLE1DRequest {
 
     // Опциональный CSV.
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct LLE1DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts = 0;
@@ -181,10 +199,17 @@ struct LS1DRequest {
     double eps = 1.0e-4;
     double max_value = 1.0e6;
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct LS1DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts = 0;
@@ -253,10 +278,17 @@ struct LLE2DRequest {
     double max_value      = 1.0e6;
 
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct LLE2DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts = 0;                 // сторона сетки (всего n_pts² ячеек)
@@ -327,10 +359,17 @@ struct Bifurcation2DRequest {
     double eps_dbscan = 0.1;
 
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct Bifurcation2DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts = 0;                   // сторона сетки (всего n_pts² ячеек)
@@ -385,10 +424,17 @@ struct LS2DRequest {
     double max_value      = 1.0e6;
 
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
 };
 
 struct LS2DResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts       = 0;            // сторона сетки (всего n_pts² ячеек)
@@ -442,10 +488,20 @@ struct BasinsRequest {
     double eps_dbscan     = 0.5;
 
     std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress. For basins the engine RESETS
+    // `progress` to 0 between phases and bumps `progress_phase` (1 = sim,
+    // 2 = cluster), so the GUI shows a per-phase 0..1 bar with a phase label.
+    std::shared_ptr<std::atomic<float>> progress;
+    std::shared_ptr<std::atomic<int>>   progress_phase;
 };
 
 struct BasinsResult {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
 
     int n_pts = 0;

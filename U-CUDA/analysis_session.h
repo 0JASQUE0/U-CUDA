@@ -2,6 +2,7 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <string>
@@ -259,6 +260,21 @@ struct BifurcationAnalysisSession {
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
+    // Cooperative cancellation. Token is created in run_async() and shared
+    // with the worker via Request::cancel; request_cancel() sets it to true,
+    // engine bails out at the next cuDeviceSynchronize and returns
+    // cancelled=true. Token is reset after poll() consumes the result.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    // Progress (0..1) written by engine on each chunk, read by GUI each frame.
+    std::shared_ptr<std::atomic<float>> progress_token;
+    // Persistent info about the last finished run — shown in the busy bar
+    // after completion until the next run_async clears it. last_run_label
+    // empty == no completion to display.
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
     // session не копируется (содержит future) — только move.
     BifurcationAnalysisSession() = default;
     BifurcationAnalysisSession(BifurcationAnalysisSession&&) = default;
@@ -280,6 +296,9 @@ struct BifurcationAnalysisSession {
 
     // Async-Run для конкретной БД. Возвращает false если очередь занята.
     bool run_async(ParametricEngine& engine, int diagram_idx);
+
+    // Cooperative cancel of the in-flight run. No-op if nothing is in flight.
+    void request_cancel();
 
     // Вызывается каждый кадр из GUI-потока. Если future готова — применяет
     // результат к diagrams[running_diagram_index], сбрасывает in_flight.
@@ -375,6 +394,14 @@ struct LLEAnalysisSession {
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
+    // Cooperative cancellation — see BifurcationAnalysisSession::cancel_token.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
     LLEAnalysisSession() = default;
     LLEAnalysisSession(LLEAnalysisSession&&) = default;
     LLEAnalysisSession& operator=(LLEAnalysisSession&&) = default;
@@ -388,6 +415,7 @@ struct LLEAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    void request_cancel();
     bool poll();
 };
 
@@ -448,6 +476,17 @@ struct BasinsAnalysisSession {
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
+    // Cooperative cancellation — see BifurcationAnalysisSession::cancel_token.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    // Two-phase progress: 1 = sim, 2 = cluster. GUI uses this to render
+    // "(1/2 sim)" or "(2/2 cluster)" suffix and reset the bar between phases.
+    std::shared_ptr<std::atomic<int>>   progress_phase_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
     BasinsAnalysisSession() = default;
     BasinsAnalysisSession(BasinsAnalysisSession&&) = default;
     BasinsAnalysisSession& operator=(BasinsAnalysisSession&&) = default;
@@ -459,6 +498,7 @@ struct BasinsAnalysisSession {
                           const std::vector<std::string>& params_);
     bool run(ParametricEngine& engine);
     bool run_async(ParametricEngine& engine);
+    void request_cancel();
     bool poll();
 };
 
@@ -543,6 +583,14 @@ struct LyapunovSpectrumAnalysisSession {
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
+    // Cooperative cancellation — see BifurcationAnalysisSession::cancel_token.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
     LyapunovSpectrumAnalysisSession() = default;
     LyapunovSpectrumAnalysisSession(LyapunovSpectrumAnalysisSession&&) = default;
     LyapunovSpectrumAnalysisSession& operator=(LyapunovSpectrumAnalysisSession&&) = default;
@@ -556,5 +604,6 @@ struct LyapunovSpectrumAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    void request_cancel();
     bool poll();
 };
