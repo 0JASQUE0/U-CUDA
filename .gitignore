@@ -36,3 +36,7 @@ U-CUDA/imgui.ini
 
 # Local-only project docs (not shared via git)
 docs/
+
+# Local-only Claude session notes / tooling state
+CLAUDE.md
+.understand-anything/
