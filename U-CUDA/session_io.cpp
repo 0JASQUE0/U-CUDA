@@ -90,6 +90,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"sim_time\":"; jstr(o, s.sim_time); o << ",\n";
     o << "  \"skip_time\":"; jstr(o, s.skip_time); o << ",\n";
     o << "  \"scheme\":"; jstr(o, s.scheme); o << ",\n";
+    o << "  \"symmetry_s\":"; jstr(o, s.symmetry_s); o << ",\n";
     o << "  \"decimation\":"; jstr(o, s.decimation); o << ",\n";
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
     o << "  \"legend_show_ic\":" << (s.legend_show_ic ? "true" : "false") << ",\n";
@@ -133,6 +134,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "sim_time")   s.sim_time = p.str();
             else if (key == "skip_time")  s.skip_time = p.str();
             else if (key == "scheme")     s.scheme = p.str();
+            else if (key == "symmetry_s") s.symmetry_s = p.str();
             else if (key == "decimation") s.decimation = p.str();
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();
             else if (key == "legend_show_ic") s.legend_show_ic = p.boolean();
@@ -214,6 +216,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << "\"label\":";            jstr(o, bd.label);
     o << ",\"visible\":"          << (bd.visible ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, bd.scheme);
+    o << ",\"symmetry_s\":";      jstr(o, bd.symmetry_s);
     o << ",\"param_index\":"      << bd.param_index;
     o << ",\"sweep_over_var\":"   << (bd.sweep_over_var ? "true" : "false");
     o << ",\"var_sweep_index\":"  << bd.var_sweep_index;
@@ -243,6 +246,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     if      (key == "label")              bd.label             = p.str();
     else if (key == "visible")            bd.visible           = p.boolean();
     else if (key == "scheme")             bd.scheme            = p.str();
+    else if (key == "symmetry_s")         bd.symmetry_s        = p.str();
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     bd.sweep_over_var    = p.boolean();
     else if (key == "var_sweep_index")    bd.var_sweep_index   = std::stoi(p.str_or_num());
@@ -367,6 +371,7 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << "\"label\":";            jstr(o, c.label);
     o << ",\"visible\":"          << (c.visible ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
+    o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"var_sweep_index\":"  << c.var_sweep_index;
@@ -399,6 +404,7 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
     else if (key == "visible")            c.visible           = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
+    else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
@@ -506,6 +512,7 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << "\"label\":";            jstr(o, c.label);
     o << ",\"visible\":"          << (c.visible ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
+    o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"var_sweep_index\":"  << c.var_sweep_index;
@@ -529,6 +536,7 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
     else if (key == "visible")            c.visible           = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
+    else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
@@ -627,6 +635,7 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     o << "{\n";
     o << "  \"label\":";            jstr(o, c.label);          o << ",\n";
     o << "  \"scheme\":";           jstr(o, c.scheme);         o << ",\n";
+    o << "  \"symmetry_s\":";       jstr(o, c.symmetry_s);     o << ",\n";
     o << "  \"axis_x_var\":"        << c.axis_x_var          << ",\n";
     o << "  \"axis_y_var\":"        << c.axis_y_var          << ",\n";
     o << "  \"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text); o << ",\n";
@@ -661,6 +670,7 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
             p.expect(':');
             if      (key == "label")              c.label             = p.str();
             else if (key == "scheme")             c.scheme            = p.str();
+            else if (key == "symmetry_s")         c.symmetry_s        = p.str();
             else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
             else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
             else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();

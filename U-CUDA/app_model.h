@@ -54,6 +54,10 @@ public:
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
     bool scheme_dopri78 = false;
+    bool scheme_cd = false;
+
+    // Коэффициент симметрии s для CD-метода (передаётся в kernel как a[0]).
+    std::string symmetry_s = "0.5";
 
     // Пользовательские именованные КРС (выбираются в scheme combo сессий
     // вместе с built-in). Имя не должно совпадать с built-in.
@@ -223,6 +227,7 @@ public:
                 { scheme_midpoint, "Explicit Midpoint", Scheme::ExplicitMidpoint },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
+                { scheme_cd,       "CD",                Scheme::CD },
             };
             bool any = false;
             for (const auto& it : items) {

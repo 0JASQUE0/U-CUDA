@@ -247,14 +247,15 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // методы
     ImGui::Text("Schemes to generate:");
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = true;
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = false;
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = false;
     ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
     ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
-    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78);
+    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78); ImGui::SameLine();
+    ImGui::Checkbox("CD", &model.scheme_cd);
 
     // ----- Custom KRS schemes (raw C/CUDA код вместо codegen) -----
     ImGui::Spacing();
@@ -283,7 +284,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // блокируем добавление с уже существующим/built-in именем
         static const char* builtin_names[] = {
-            "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78"
+            "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD"
         };
         if (ImGui::Button("+ Add custom scheme")) {
             // подобрать уникальное имя "Custom N"
@@ -631,7 +632,7 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     // метод моделирования + пользовательские схемы из системы
     ImGui::Text("Method:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(160);
-    static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     auto is_custom_scheme = [&](const std::string& nm) {
         for (const auto& cs : s.custom_schemes) if (cs.name == nm) return true;
         return false;
@@ -666,6 +667,10 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
     ImGui::Text("Skip(s):"); ImGui::SameLine();
     changed |= InputNumStr("##ssk", s.skip_time, 70);
+    if (s.scheme == "CD") {
+        ImGui::Text("Symmetry s:"); ImGui::SameLine();
+        changed |= InputNumStr("##sym", s.symmetry_s, 70);
+    }
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
     // шаг/время/децимация влияют на ось времени и сами данные: при их смене
@@ -792,6 +797,79 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     if (ImGui::Button("Add projection")) { s.add_projection(); }
     ImGui::SameLine();
     if (ImGui::Button("Reset windows layout")) { s.layout_generation++; }
+
+    ImGui::Separator();
+    // Debug panel: show what kernel/integrator actually computes. Useful for
+    // comparing CPU vs GPU runs and catching parsing surprises.
+    if (ImGui::CollapsingHeader("Debug: KRS body & parsed values")) {
+        ImGui::TextDisabled("KRS body — what NVRTC compiles for GPU. On CPU the same RHS\n"
+                            "is parsed into an AST and interpreted. For CD the CPU and GPU\n"
+                            "algorithms differ (see the second panel). Values below are\n"
+                            "the exact doubles both paths parse.");
+
+        if (ImGui::Button("Regenerate")) s.regenerate_krs();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(rebuilds KRS from the current system/scheme)");
+
+        // GPU KRS body (what NVRTC compiles).
+        ImGui::SeparatorText("KRS (GPU, NVRTC)");
+        std::string body_gpu = s.krs_code.empty()
+            ? std::string("(empty — press Regenerate or change Method)")
+            : s.krs_code;
+        std::vector<char> buf_gpu(body_gpu.begin(), body_gpu.end());
+        buf_gpu.resize(body_gpu.size() + 1);
+        buf_gpu[body_gpu.size()] = '\0';
+        ImGui::InputTextMultiline("##krs_gpu", buf_gpu.data(), buf_gpu.size(),
+            ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
+
+        // CPU equivalent: identical to GPU for Euler/RK4/etc; for CD it's the
+        // 4-simple-iterations form that integrator.cpp::step_cd actually runs.
+        ImGui::SeparatorText("KRS (CPU equivalent)");
+        std::string body_cpu;
+        try {
+            body_cpu = codegen_scheme_cpu_equivalent(s.sys, scheme_from_name(s.scheme));
+        } catch (...) {
+            body_cpu = "(generation failed)";
+        }
+        if (body_cpu.empty()) body_cpu = "(empty — same as GPU for non-CD schemes)";
+        std::vector<char> buf_cpu(body_cpu.begin(), body_cpu.end());
+        buf_cpu.resize(body_cpu.size() + 1);
+        buf_cpu[body_cpu.size()] = '\0';
+        ImGui::InputTextMultiline("##krs_cpu", buf_cpu.data(), buf_cpu.size(),
+            ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
+        if (s.scheme != "CD")
+            ImGui::TextDisabled("(for %s CPU and GPU evaluate the same AST — texts match)", s.scheme.c_str());
+        else
+            ImGui::TextDisabled("(for CD: GPU uses analytic solve for linear vars; CPU always uses 4 iterations)");
+
+        ImGui::SeparatorText("Parsed inputs (double, %.17g)");
+        auto parse = [](const std::string& v, double def) -> double {
+            if (v.empty()) return def;
+            size_t sl = v.find('/');
+            if (sl != std::string::npos) {
+                double n = std::atof(v.substr(0, sl).c_str());
+                double d = std::atof(v.substr(sl + 1).c_str());
+                if (d != 0) return n / d;
+            }
+            return std::atof(v.c_str());
+        };
+
+        ImGui::Text("h        = %.17g", parse(s.step_h, 0.01));
+        ImGui::Text("a[0] (s) = %.17g", parse(s.symmetry_s, 0.5));
+        for (size_t j = 0; j < s.params.size(); ++j) {
+            auto it = s.param_values.find(s.params[j]);
+            double v = (it != s.param_values.end()) ? parse(it->second, 0.0) : 0.0;
+            ImGui::Text("a[%zu] (%s) = %.17g", j + 1, s.params[j].c_str(), v);
+        }
+        for (size_t k = 0; k < s.ic_sets.size(); ++k) {
+            ImGui::Text("%s:", s.ic_sets[k].label.c_str());
+            for (size_t i = 0; i < s.vars.size(); ++i) {
+                auto it = s.ic_sets[k].values.find(s.vars[i]);
+                double v = (it != s.ic_sets[k].values.end()) ? parse(it->second, 0.0) : 0.0;
+                ImGui::Text("  X[%zu] (%s) = %.17g", i, s.vars[i].c_str(), v);
+            }
+        }
+    }
 
     ImGui::Separator();
     if (ImGui::Button("Reset to defaults")) {
@@ -1069,7 +1147,7 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // ----- Scheme (built-in + custom) -----
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", bd.scheme.c_str())) {
         for (auto m : schemes)
@@ -1219,6 +1297,8 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              bd.h_text,           120);
+    if (bd.scheme == "CD")
+        InputNumStr("symmetry s", bd.symmetry_s,       120);
     InputNumStr("computing time", bd.t_max_text,       120);
     InputNumStr("transient time", bd.transient_text,   120);
     InputNumStr("decimator",      bd.pre_scaller_text, 120);
@@ -1589,7 +1669,7 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     ImGui::Checkbox("visible", &c.visible);
     ImGui::Separator();
 
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
         for (auto m : schemes)
@@ -1692,6 +1772,8 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,         120);
+    if (c.scheme == "CD")
+        InputNumStr("symmetry s", c.symmetry_s,     120);
     InputNumStr("computing time", c.t_max_text,     120);
     InputNumStr("transient time", c.transient_text, 120);
     InputNumStr("max value",      c.max_value_text, 120);
@@ -2038,7 +2120,7 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     ImGui::Checkbox("visible", &c.visible);
     ImGui::Separator();
 
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
         for (auto m : schemes)
@@ -2139,6 +2221,8 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,         120);
+    if (c.scheme == "CD")
+        InputNumStr("symmetry s", c.symmetry_s,     120);
     InputNumStr("computing time", c.t_max_text,     120);
     InputNumStr("transient time", c.transient_text, 120);
     InputNumStr("max value",      c.max_value_text, 120);
@@ -2551,7 +2635,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // ----- Scheme -----
-    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78" };
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
         for (auto m : schemes)
@@ -2600,6 +2684,8 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,           120);
+    if (c.scheme == "CD")
+        InputNumStr("symmetry s", c.symmetry_s,       120);
     InputNumStr("computing time", c.t_max_text,       120);
     InputNumStr("transient time", c.transient_text,   120);
     InputNumStr("decimator",      c.pre_scaller_text, 120);
