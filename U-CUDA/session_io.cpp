@@ -236,6 +236,14 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"csv_save_enabled\":" << (bd.csv_save_enabled ? "true" : "false");
     o << ",\"csv_output_path\":"; jstr(o, bd.csv_output_path);
     o << ",\"plot_inter_peaks\":" << (bd.plot_inter_peaks ? "true" : "false");
+    // 2D-mode config: result_2d not persisted (too heavy), user runs again.
+    o << ",\"mode_2d\":"           << (bd.mode_2d ? "true" : "false");
+    o << ",\"param_index_2\":"     << bd.param_index_2;
+    o << ",\"sweep_over_var_2\":"  << (bd.sweep_over_var_2 ? "true" : "false");
+    o << ",\"var_sweep_index_2\":" << bd.var_sweep_index_2;
+    o << ",\"param_lo_2_text\":";  jstr(o, bd.param_lo_2_text);
+    o << ",\"param_hi_2_text\":";  jstr(o, bd.param_hi_2_text);
+    o << ",\"eps_dbscan_text\":";  jstr(o, bd.eps_dbscan_text);
     o << "}";
 }
 
@@ -266,6 +274,15 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "csv_save_enabled")   bd.csv_save_enabled  = p.boolean();
     else if (key == "csv_output_path")    bd.csv_output_path   = p.str();
     else if (key == "plot_inter_peaks")   bd.plot_inter_peaks  = p.boolean();
+    // 2D-mode: backwards-compatible — старые JSON без этих ключей оставят
+    // дефолты конструктора.
+    else if (key == "mode_2d")            bd.mode_2d           = p.boolean();
+    else if (key == "param_index_2")      bd.param_index_2     = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var_2")   bd.sweep_over_var_2  = p.boolean();
+    else if (key == "var_sweep_index_2")  bd.var_sweep_index_2 = std::stoi(p.str_or_num());
+    else if (key == "param_lo_2_text")    bd.param_lo_2_text   = p.str();
+    else if (key == "param_hi_2_text")    bd.param_hi_2_text   = p.str();
+    else if (key == "eps_dbscan_text")    bd.eps_dbscan_text   = p.str();
     else return false;
     return true;
 }
@@ -529,6 +546,14 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"initial_conditions\":"; jmap(o, c.initial_conditions);
     o << ",\"csv_save_enabled\":" << (c.csv_save_enabled ? "true" : "false");
     o << ",\"csv_output_path\":"; jstr(o, c.csv_output_path);
+    // 2D-mode config: result_2d not persisted (too heavy), user runs again.
+    o << ",\"mode_2d\":"             << (c.mode_2d ? "true" : "false");
+    o << ",\"param_index_2\":"       << c.param_index_2;
+    o << ",\"sweep_over_var_2\":"    << (c.sweep_over_var_2 ? "true" : "false");
+    o << ",\"var_sweep_index_2\":"   << c.var_sweep_index_2;
+    o << ",\"param_lo_2_text\":";    jstr(o, c.param_lo_2_text);
+    o << ",\"param_hi_2_text\":";    jstr(o, c.param_hi_2_text);
+    o << ",\"display_exponent_idx\":" << c.display_exponent_idx;
     o << "}";
 }
 
@@ -553,6 +578,15 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
     else if (key == "csv_output_path")    c.csv_output_path   = p.str();
+    // 2D-mode: backwards-compatible — старые JSON без этих ключей оставят
+    // дефолты конструктора.
+    else if (key == "mode_2d")            c.mode_2d           = p.boolean();
+    else if (key == "param_index_2")      c.param_index_2     = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var_2")   c.sweep_over_var_2  = p.boolean();
+    else if (key == "var_sweep_index_2")  c.var_sweep_index_2 = std::stoi(p.str_or_num());
+    else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
+    else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();
+    else if (key == "display_exponent_idx") c.display_exponent_idx = std::stoi(p.str_or_num());
     else return false;
     return true;
 }
