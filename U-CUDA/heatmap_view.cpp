@@ -565,7 +565,16 @@ void HeatmapView::render(PlotRenderer& renderer,
             // Colorbar: top edge = vmax (t=1), bottom = vmin (t=0).
             float y0 = cb_y + cb_h * (1.0f - t1);
             float y1 = cb_y + cb_h * (1.0f - t0);
-            ImU32 col = cmap_sample((t0 + t1) * 0.5f, colormap);
+            // Sample position: in discrete mode mirror the shader (edge-
+            // aligned k/(N-1)) so the first/last bands match continuous
+            // endpoints exactly. Continuous mode samples the strip center.
+            float t_samp;
+            if (n_disc > 0) {
+                t_samp = (n_disc > 1) ? (float)i / (float)(n_disc - 1) : 0.5f;
+            } else {
+                t_samp = (t0 + t1) * 0.5f;
+            }
+            ImU32 col = cmap_sample(t_samp, colormap);
             dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + colorbar_w, y1), col);
         }
         dl->AddRect(ImVec2(cb_x, cb_y),

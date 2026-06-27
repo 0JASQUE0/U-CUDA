@@ -106,14 +106,16 @@ void main() {
     }
     float range = u_vmax - u_vmin;
     float t = (range > 1e-30) ? clamp((v - u_vmin) / range, 0.0, 1.0) : 0.5;
-    // Discrete mode: quantize t into u_discrete_n bands so every cell in a
-    // band picks the same color (band center). vmin/vmax are expected to be
-    // the inclusive integer range, so step = 1/N -> N distinct values.
+    // Discrete mode: quantize t into u_discrete_n bands. Sample the colormap
+    // at the band's edge-aligned position k/(N-1) so the first band picks
+    // t=0 (e.g. blue end of Turbo) and the last band picks t=1 (red end).
+    // Band-center sampling (k+0.5)/N would shrink the endpoints inward and
+    // make discrete and continuous modes show different extreme colors.
     if (u_discrete_n > 0) {
         float n = float(u_discrete_n);
         float k = floor(t * n);
         if (k >= n) k = n - 1.0;
-        t = (k + 0.5) / n;
+        t = (n > 1.0) ? (k / (n - 1.0)) : 0.5;
     }
     vec3 col;
     if      (u_colormap == 0) col = viridis(t);
