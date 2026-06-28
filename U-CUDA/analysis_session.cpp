@@ -511,8 +511,9 @@ static void apply_bif2d_result(BifurcationDiagramConfig& bd, Bifurcation2DResult
 bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
-    bd.last_run_ok = false;
-    bd.last_run_2d_ok = false;
+    // Keep last_run_ok / last_run_2d_ok set from the previous successful
+    // run so the GUI keeps drawing the old plot until apply_*_result swaps
+    // in the new data.
     bd.last_error.clear();
 
     if (bd.mode_2d) {
@@ -543,8 +544,9 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
 
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
-    bd.last_run_ok = false;
-    bd.last_run_2d_ok = false;
+    // Keep last_run_ok / last_run_2d_ok set from the previous successful
+    // run so the GUI keeps drawing the old plot until apply_*_result swaps
+    // in the new data.
     bd.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
@@ -798,8 +800,8 @@ static void apply_lle2d_result(LLECurveConfig& c, LLE2DResult&& r) {
 bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
     LLECurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
 
     if (c.mode_2d) {
@@ -830,8 +832,8 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
 
     LLECurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
@@ -991,7 +993,8 @@ static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
 
 bool BasinsAnalysisSession::run(ParametricEngine& engine) {
     BasinsConfig& c = config;
-    c.last_run_ok = false;
+    // Keep previous last_run_ok so the old heatmap stays visible until
+    // apply_basins_result swaps in fresh data.
     c.last_error.clear();
 
     BasinsRequest req = build_basins_request(*this, c);
@@ -1008,7 +1011,8 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine) {
 bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
     if (in_flight) return false;
     BasinsConfig& c = config;
-    c.last_run_ok = false;
+    // Keep previous last_run_ok so the old heatmap stays visible until
+    // apply_basins_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token         = std::make_shared<std::atomic<bool>>(false);
@@ -1239,8 +1243,8 @@ static void apply_ls2d_result(LSCurveConfig& c, LS2DResult&& r) {
 bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
     LSCurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
 
     if (c.mode_2d) {
@@ -1271,8 +1275,8 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
 
     LSCurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
