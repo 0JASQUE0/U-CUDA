@@ -917,7 +917,9 @@ bool LLEAnalysisSession::poll() {
 }
 
 // ============================================================================
-// BasinsAnalysisSession — один config на сессию, без inner tab-bar.
+// BasinsAnalysisSession — N configs на сессию (по образцу
+// BifurcationAnalysisSession::diagrams). 5 inner tabs (Basins/AvgPk/AvgInt/
+// States/Scatter) живут per-config через BasinsConfig::active_plot_tab.
 // ============================================================================
 
 void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
@@ -928,6 +930,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     custom_schemes = r.custom_schemes;
 
     BasinsConfig c;
+    c.label = "Basins 1";
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
@@ -942,7 +945,42 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     c.axis_x_var = 0;
     c.axis_y_var = (vars.size() > 1) ? 1 : 0;
     c.writable_var = 0;
-    config = std::move(c);
+
+    configs.clear();
+    configs.push_back(std::move(c));
+    active_config_index = 0;
+    running_config_index = -1;
+}
+
+void BasinsAnalysisSession::add_config() {
+    BasinsConfig c;
+    if (!configs.empty()) {
+        // Глубокая копия последнего config — пользователь обычно правит 1-2 поля.
+        c = configs.back();
+        c.result = BasinsResult{};
+        c.last_run_ok = false;
+        c.last_error.clear();
+        c.data_generation = 0;
+        c.fit_request = false;
+    } else {
+        for (const auto& v : vars) c.initial_conditions[v] = "";
+        for (const auto& p : params) c.param_values[p] = "";
+    }
+    c.label = "Basins " + std::to_string(configs.size() + 1);
+    configs.push_back(std::move(c));
+    active_config_index = (int)configs.size() - 1;
+}
+
+void BasinsAnalysisSession::remove_config(int i) {
+    if (i < 0 || i >= (int)configs.size()) return;
+    // Запрещаем удалять config, чей расчёт сейчас идёт — иначе worker положит
+    // результат в несуществующий слот при poll().
+    if (in_flight && running_config_index == i) return;
+    configs.erase(configs.begin() + i);
+    if (in_flight && running_config_index > i) running_config_index--;
+    if (active_config_index >= (int)configs.size())
+        active_config_index = (int)configs.size() - 1;
+    if (active_config_index < 0) active_config_index = 0;
 }
 
 static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
@@ -991,8 +1029,9 @@ static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
     c.fit_request = true;
 }
 
-bool BasinsAnalysisSession::run(ParametricEngine& engine) {
-    BasinsConfig& c = config;
+bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+    BasinsConfig& c = configs[config_idx];
     // Keep previous last_run_ok so the old heatmap stays visible until
     // apply_basins_result swaps in fresh data.
     c.last_error.clear();
@@ -1008,9 +1047,11 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine) {
     return ok;
 }
 
-bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
+bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     if (in_flight) return false;
-    BasinsConfig& c = config;
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+
+    BasinsConfig& c = configs[config_idx];
     // Keep previous last_run_ok so the old heatmap stays visible until
     // apply_basins_result swaps in fresh data.
     c.last_error.clear();
@@ -1032,6 +1073,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
     req.progress_phase = progress_phase_token;
 
     in_flight = true;
+    running_config_index = config_idx;
     compute_start_time = std::chrono::steady_clock::now();
     run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
         return engine.run_basins(req);
@@ -1047,6 +1089,7 @@ bool BasinsAnalysisSession::poll() {
     if (!in_flight) return false;
     if (!run_future.valid()) {
         in_flight = false;
+        running_config_index = -1;
         cancel_token.reset(); progress_token.reset(); progress_phase_token.reset();
         return false;
     }
@@ -1054,9 +1097,11 @@ bool BasinsAnalysisSession::poll() {
 
     BasinsResult r = run_future.get();
     bool cancelled = r.cancelled;
-    std::string label = config.label.empty() ? std::string("basins") : config.label;
-    if (!cancelled) {
-        apply_basins_result(config, std::move(r));
+    int idx = running_config_index;
+    std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[idx].label.empty())
+                            ? configs[idx].label : std::string("basins");
+    if (!cancelled && idx >= 0 && idx < (int)configs.size()) {
+        apply_basins_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
@@ -1064,6 +1109,7 @@ bool BasinsAnalysisSession::poll() {
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
+    running_config_index = -1;
     cancel_token.reset();
     progress_token.reset();
     progress_phase_token.reset();

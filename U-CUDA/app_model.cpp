@@ -321,3 +321,8 @@ void AppModel::remove_ls_curve(int i) {
     ls_session.remove_curve(i);
     cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LS, i);
 }
+
+void AppModel::remove_basins_config(int i) {
+    // Basins isn't part of parametric_queue, so no queue cleanup needed.
+    basins_session.remove_config(i);
+}

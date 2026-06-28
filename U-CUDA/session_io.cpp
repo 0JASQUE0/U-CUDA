@@ -663,32 +663,78 @@ bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSessi
 // (без curves-vector). Result не сохраняется.
 // ============================================================================
 
+// Запись одного BasinsConfig в JSON (без внешних { } — пишет голый объект).
+// Используется внутри массива "configs".
+static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
+    o << "{";
+    o << "\"label\":";            jstr(o, c.label);            o << ",";
+    o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
+    o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"axis_x_var\":"        << c.axis_x_var            << ",";
+    o << "\"axis_y_var\":"        << c.axis_y_var            << ",";
+    o << "\"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text);   o << ",";
+    o << "\"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text);   o << ",";
+    o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
+    o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
+    o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
+    o << "\"writable_var\":"      << c.writable_var          << ",";
+    o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
+    o << "\"t_max_text\":";       jstr(o, c.t_max_text);       o << ",";
+    o << "\"transient_text\":";   jstr(o, c.transient_text);   o << ",";
+    o << "\"pre_scaller_text\":"; jstr(o, c.pre_scaller_text); o << ",";
+    o << "\"max_value_text\":";   jstr(o, c.max_value_text);   o << ",";
+    o << "\"eps_dbscan_text\":";  jstr(o, c.eps_dbscan_text);  o << ",";
+    o << "\"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",";
+    o << "\"csv_output_path\":";  jstr(o, c.csv_output_path);  o << ",";
+    o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
+    o << "\"param_values\":";     jmap(o, c.param_values);     o << ",";
+    o << "\"active_plot_tab\":"   << c.active_plot_tab;
+    o << "}";
+}
+
+// Чтение одного поля BasinsConfig. Возвращает true если ключ распознан и
+// значение прочитано из p. Иначе false — caller должен сам сделать skip_value.
+// Используется и при разборе нового формата (внутри "configs"), и при
+// разборе legacy плоского формата.
+static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
+    if      (key == "label")              c.label             = p.str();
+    else if (key == "scheme")             c.scheme            = p.str();
+    else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
+    else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
+    else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();
+    else if (key == "axis_x_hi_text")     c.axis_x_hi_text    = p.str();
+    else if (key == "axis_y_lo_text")     c.axis_y_lo_text    = p.str();
+    else if (key == "axis_y_hi_text")     c.axis_y_hi_text    = p.str();
+    else if (key == "n_pts_text")         c.n_pts_text        = p.str();
+    else if (key == "writable_var")       c.writable_var      = std::stoi(p.str_or_num());
+    else if (key == "h_text")             c.h_text            = p.str();
+    else if (key == "t_max_text")         c.t_max_text        = p.str();
+    else if (key == "transient_text")     c.transient_text    = p.str();
+    else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
+    else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "eps_dbscan_text")    c.eps_dbscan_text   = p.str();
+    else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
+    else if (key == "csv_output_path")    c.csv_output_path   = p.str();
+    else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
+    else if (key == "param_values")       c.param_values      = p.map_ss();
+    else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
+    else return false;
+    return true;
+}
+
 std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     std::ostringstream o;
-    const BasinsConfig& c = s.config;
     o << "{\n";
-    o << "  \"label\":";            jstr(o, c.label);          o << ",\n";
-    o << "  \"scheme\":";           jstr(o, c.scheme);         o << ",\n";
-    o << "  \"symmetry_s\":";       jstr(o, c.symmetry_s);     o << ",\n";
-    o << "  \"axis_x_var\":"        << c.axis_x_var          << ",\n";
-    o << "  \"axis_y_var\":"        << c.axis_y_var          << ",\n";
-    o << "  \"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text); o << ",\n";
-    o << "  \"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text); o << ",\n";
-    o << "  \"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text); o << ",\n";
-    o << "  \"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text); o << ",\n";
-    o << "  \"n_pts_text\":";       jstr(o, c.n_pts_text);     o << ",\n";
-    o << "  \"writable_var\":"      << c.writable_var        << ",\n";
-    o << "  \"h_text\":";           jstr(o, c.h_text);         o << ",\n";
-    o << "  \"t_max_text\":";       jstr(o, c.t_max_text);     o << ",\n";
-    o << "  \"transient_text\":";   jstr(o, c.transient_text); o << ",\n";
-    o << "  \"pre_scaller_text\":"; jstr(o, c.pre_scaller_text); o << ",\n";
-    o << "  \"max_value_text\":";   jstr(o, c.max_value_text); o << ",\n";
-    o << "  \"eps_dbscan_text\":";  jstr(o, c.eps_dbscan_text);o << ",\n";
-    o << "  \"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",\n";
-    o << "  \"csv_output_path\":";  jstr(o, c.csv_output_path);o << ",\n";
-    o << "  \"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",\n";
-    o << "  \"param_values\":";     jmap(o, c.param_values);   o << ",\n";
-    o << "  \"active_plot_tab\":"   << c.active_plot_tab     << "\n";
+    o << "  \"active_config_index\":" << s.active_config_index << ",\n";
+    o << "  \"configs\":[";
+    for (size_t i = 0; i < s.configs.size(); ++i) {
+        if (i) o << ",";
+        o << "\n    ";
+        write_basins_config(o, s.configs[i]);
+    }
+    if (!s.configs.empty()) o << "\n  ";
+    o << "]\n";
     o << "}\n";
     return o.str();
 }
@@ -697,37 +743,71 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
     try {
         JP p(json);
         p.expect('{');
-        BasinsConfig& c = s.config;
         if (p.opt('}')) return true;
+
+        // Legacy (старые _last_basins.json без ключа "configs") — собираем
+        // плоские поля в один config. Если встречается ключ "configs" —
+        // переключаемся на новый формат и legacy-buffer отбрасываем.
+        BasinsConfig legacy;
+        bool legacy_has_fields = false;
+        bool new_format = false;
+
         while (true) {
             std::string key = p.str();
             p.expect(':');
-            if      (key == "label")              c.label             = p.str();
-            else if (key == "scheme")             c.scheme            = p.str();
-            else if (key == "symmetry_s")         c.symmetry_s        = p.str();
-            else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
-            else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
-            else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();
-            else if (key == "axis_x_hi_text")     c.axis_x_hi_text    = p.str();
-            else if (key == "axis_y_lo_text")     c.axis_y_lo_text    = p.str();
-            else if (key == "axis_y_hi_text")     c.axis_y_hi_text    = p.str();
-            else if (key == "n_pts_text")         c.n_pts_text        = p.str();
-            else if (key == "writable_var")       c.writable_var      = std::stoi(p.str_or_num());
-            else if (key == "h_text")             c.h_text            = p.str();
-            else if (key == "t_max_text")         c.t_max_text        = p.str();
-            else if (key == "transient_text")     c.transient_text    = p.str();
-            else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
-            else if (key == "max_value_text")     c.max_value_text    = p.str();
-            else if (key == "eps_dbscan_text")    c.eps_dbscan_text   = p.str();
-            else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
-            else if (key == "csv_output_path")    c.csv_output_path   = p.str();
-            else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
-            else if (key == "param_values")       c.param_values      = p.map_ss();
-            else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
-            else p.skip_value();
+            if (key == "configs") {
+                new_format = true;
+                s.configs.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        BasinsConfig bc;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k2 = p.str(); p.expect(':');
+                                if (!read_basins_field(p, bc, k2)) p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        s.configs.push_back(std::move(bc));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else if (key == "active_config_index") {
+                s.active_config_index = std::stoi(p.str_or_num());
+            }
+            else if (read_basins_field(p, legacy, key)) {
+                legacy_has_fields = true;
+            }
+            else {
+                p.skip_value();
+            }
             if (p.opt(',')) continue;
             p.expect('}'); break;
         }
+
+        if (!new_format && legacy_has_fields) {
+            // Старое сохранение: оборачиваем в один config (заменяет
+            // дефолт, который положил load_from_record).
+            if (legacy.label.empty()) legacy.label = "Basins 1";
+            s.configs.clear();
+            s.configs.push_back(std::move(legacy));
+        }
+
+        if (s.configs.empty()) {
+            // JSON был пустой или только non-config поля — оставим хотя бы
+            // один config (load_from_record уже положил дефолт).
+            return true;
+        }
+        if (s.active_config_index < 0 ||
+            s.active_config_index >= (int)s.configs.size()) {
+            s.active_config_index = 0;
+        }
+        s.running_config_index = -1;
         return true;
     }
     catch (...) {

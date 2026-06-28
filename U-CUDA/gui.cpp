@@ -2605,7 +2605,6 @@ static void draw_ls_plot(AppModel& model) {
 
 static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
-    BasinsConfig& c = s.config;
 
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
@@ -2632,6 +2631,60 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::EndCombo();
     }
     if (s.in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // Tab bar: одна вкладка на Basins-config + "+" для add. Зеркалит
+    // draw_bifurcation_controls. Активная вкладка хранится в
+    // s.active_config_index и используется Ctrl+R + плотами.
+    int active_now = -1;
+    int to_remove = -1;
+    bool run_pressed_in_tab = false;
+    if (ImGui::BeginTabBar("##basins_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.configs.size(); ++i) {
+            BasinsConfig& bc = s.configs[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = bc.label + "###basins_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_config_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_config();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_config_index = active_now;
+    if (to_remove >= 0) model.remove_basins_config(to_remove);
+    (void)run_pressed_in_tab;
+
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No basins configs. Press '+' to add one.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    BasinsConfig& c = s.configs[s.active_config_index];
+
+    // Inline rename для активной вкладки.
+    {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s", c.label.c_str());
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::InputText("Label##basins_label", buf, sizeof(buf)))
+            c.label = buf;
+    }
     ImGui::Separator();
 
     // ----- Scheme -----
@@ -2733,7 +2786,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
     if (do_run) {
         if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run_async(*model.parametric_engine);
+        s.run_async(*model.parametric_engine, s.active_config_index);
     }
 
     if (c.last_run_ok) {
@@ -2760,7 +2813,16 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 // переключениями.
 static void draw_basins_plot(AppModel& model) {
     BasinsAnalysisSession& s = model.basins_session;
-    BasinsConfig& c = s.config;
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    BasinsConfig& c = s.configs[s.active_config_index];
+    // Owner IDs зависят от индекса config — каждый basin имеет независимый
+    // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
+    const unsigned base_oid = 0x1BA50000u + (unsigned)s.active_config_index * 5u;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
     static std::unique_ptr<Plot2DView>   scatter_view;
@@ -2844,7 +2906,7 @@ static void draw_basins_plot(AppModel& model) {
         hm_basins->x_axis.name = ax_x;
         hm_basins->y_axis.name = ax_y;
         hm_basins->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D01u, c.data_generation,
+                          /*owner_id*/ base_oid + 0u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
@@ -2854,7 +2916,7 @@ static void draw_basins_plot(AppModel& model) {
         hm_avgpk->x_axis.name = ax_x;
         hm_avgpk->y_axis.name = ax_y;
         hm_avgpk->render(*renderer, origin, avail,
-                         /*owner_id*/ 0x1BA51D02u, c.data_generation,
+                         /*owner_id*/ base_oid + 1u, c.data_generation,
                          n, n, c.result.avg_peaks.data(),
                          xlo, xhi, ylo, yhi,
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
@@ -2864,7 +2926,7 @@ static void draw_basins_plot(AppModel& model) {
         hm_avgint->x_axis.name = ax_x;
         hm_avgint->y_axis.name = ax_y;
         hm_avgint->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D03u, c.data_generation,
+                          /*owner_id*/ base_oid + 2u, c.data_generation,
                           n, n, c.result.avg_intervals.data(),
                           xlo, xhi, ylo, yhi,
                           c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
@@ -2886,7 +2948,7 @@ static void draw_basins_plot(AppModel& model) {
         hm_states->x_axis.name = ax_x;
         hm_states->y_axis.name = ax_y;
         hm_states->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D04u, c.data_generation,
+                          /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           0.0, 2.0, fit);
@@ -2949,7 +3011,7 @@ static void draw_basins_plot(AppModel& model) {
         scatter_view->x_axis.name = "avg peak";
         scatter_view->y_axis.name = "avg interval";
         scatter_view->render(*renderer, origin, avail,
-                             /*owner_id*/ 0x1BA51D05u, c.data_generation,
+                             /*owner_id*/ base_oid + 4u, c.data_generation,
                              series_in, init_vis, glob_vis, fit);
     }
 }
@@ -3220,8 +3282,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         busy_kind  = BusyKind::Phase;
     }
     else if (model.basins_session.in_flight) {
-        busy_what  = model.basins_session.config.label.empty()
-                        ? "basins" : model.basins_session.config.label;
+        int ri = model.basins_session.running_config_index;
+        busy_what = (ri >= 0 && ri < (int)model.basins_session.configs.size() &&
+                     !model.basins_session.configs[ri].label.empty())
+                        ? model.basins_session.configs[ri].label
+                        : std::string("basins");
         busy_start = model.basins_session.compute_start_time;
         busy_kind  = BusyKind::Basins;
         busy_cancelling = model.basins_session.cancel_token &&

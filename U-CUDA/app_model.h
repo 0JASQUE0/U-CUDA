@@ -160,6 +160,7 @@ public:
     void remove_bifurcation_diagram(int i);
     void remove_lle_curve(int i);
     void remove_ls_curve(int i);
+    void remove_basins_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
