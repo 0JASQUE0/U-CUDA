@@ -35,7 +35,7 @@ constexpr bool continuation_bif1D = 0;
 // 0 -- variable analysis
 // Обёрнуто в #ifndef, чтобы NVRTC-template мог переопределить через #define.
 #ifndef par_or_var
-constexpr int par_or_var = 0;
+constexpr int par_or_var = 1;
 #endif
 
 // --- CHOOSE LIN OR LOG variable/parameter distribution ---

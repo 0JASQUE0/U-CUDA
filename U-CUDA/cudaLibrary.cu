@@ -128,13 +128,34 @@ __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a,
 
 __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, const numb h)
 {
-	double X1[3];
-	X1[0] = X[0] + 0.5 * h * (a[1] * (X[1] - X[0]));
-	X1[1] = X[1] + 0.5 * h * (X[0] * (a[2] - X[2]) - X[1]);
-	X1[2] = X[2] + 0.5 * h * (X[0] * X[1] - a[3] * X[2]);
-	X[0] = X[0] + h * (a[1] * (X1[1] - X1[0]));
-	X[1] = X[1] + h * (X1[0] * (a[2] - X1[2]) - X1[1]);
-	X[2] = X[2] + h * (X1[0] * X1[1] - a[3] * X1[2]);
+	numb X1[3];
+	numb k[3][4];
+	int N = 3;
+	int i, j;
+	for (i = 0; i < N; i++) {
+		X1[i] = X[i];
+	}
+	for (j = 0; j < 4; j++) {
+		k[0][j] = (-X1[1] - X1[2]);
+		k[1][j] = (X1[0] + a[1] * X1[1]);
+		k[2][j] = (a[2] + X1[2] * (X1[0] - a[3]));
+
+		if (j == 3) {
+			for (i = 0; i < N; i++) {
+				X[i] = X[i] + h * (k[i][0] + 2 * k[i][1] + 2 * k[i][2] + k[i][3]) / 6;
+			}
+		}
+		else if (j == 2) {
+			for (i = 0; i < N; i++) {
+				X1[i] = X[i] + h * k[i][j];
+			}
+		}
+		else {
+			for (i = 0; i < N; i++) {
+				X1[i] = X[i] + 0.5 * h * k[i][j];
+			}
+		}
+	}
 }
 #endif // __CUDACC_RTC__
 

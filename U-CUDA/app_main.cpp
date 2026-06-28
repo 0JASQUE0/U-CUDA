@@ -211,7 +211,20 @@ int main() {
     };
 
     while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+        bool compute_in_flight =
+            model.bifurcation_session.in_flight ||
+            model.lle_session.in_flight ||
+            model.ls_session.in_flight ||
+            model.basins_session.in_flight;
+        // During heavy compute throttle the main loop: glfwWaitEventsTimeout
+        // blocks the thread up to 100 ms unless an input event arrives. Drops
+        // render rate from ~60 FPS to ~10 FPS, freeing GPU and CPU for CUDA
+        // work. Empirically captures most of the win; lower rates (500 ms /
+        // 2 FPS) save only ~1 s extra on a 90 s job and make the progress bar
+        // visibly jerky. Cancel button reacts immediately (input events wake
+        // the thread).
+        if (compute_in_flight) glfwWaitEventsTimeout(0.1);
+        else                   glfwPollEvents();
 
         // Применяем масштаб/шрифт ДО NewFrame — иначе пересоздание fonts texture
         // в середине кадра валит RenderDrawData.

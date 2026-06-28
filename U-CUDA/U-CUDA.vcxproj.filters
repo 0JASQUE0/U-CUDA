@@ -13,6 +13,7 @@
     <CudaCompile Include="main_NonLinAnal.cu">
       <Filter>NonLinAnal</Filter>
     </CudaCompile>
+    <CudaCompile Include="kernel.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="app_main.cpp" />
@@ -88,6 +89,7 @@
     <ClCompile Include="app_config.cpp">
       <Filter>Library</Filter>
     </ClCompile>
+    <ClCompile Include="test_parser.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sysparse.hpp">
