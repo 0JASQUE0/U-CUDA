@@ -8,6 +8,8 @@
 #include "plot_view_3d.h"
 #include "heatmap_view.h"
 #include "app_config.h"
+#include <map>
+#include <memory>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -2845,9 +2847,13 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
 }
 
-// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views statics —
-// один на представление, чтобы view-state (zoom, pan) сохранялся между
-// переключениями.
+// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views — per
+// (config × tab) в std::map по owner_id. HeatmapView/Plot2DView хранят
+// data_gen_cached внутри без учёта owner_id, поэтому переиспользовать один
+// view между разными configs нельзя (после Run All у двух configs одинаковый
+// data_generation=1 → cache не invalidate'тся и на чужой вкладке показывается
+// предыдущий buffer). Map с lazy-init решает это и сохраняет независимый
+// zoom/pan per (config, tab).
 static void draw_basins_plot(AppModel& model) {
     BasinsAnalysisSession& s = model.basins_session;
     if (s.configs.empty()) {
@@ -2861,25 +2867,34 @@ static void draw_basins_plot(AppModel& model) {
     // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
     const unsigned base_oid = 0x1BA50000u + (unsigned)s.active_config_index * 5u;
     static std::unique_ptr<PlotRenderer> renderer;
-    static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
-    static std::unique_ptr<Plot2DView>   scatter_view;
-    if (!renderer)     renderer     = std::make_unique<PlotRenderer>();
-    if (!hm_basins) {
-        hm_basins = std::make_unique<HeatmapView>();
-        // Cluster IDs are integers — discrete colorbar by default. User can
-        // toggle off via right-click context menu on the heatmap.
-        hm_basins->discrete = true;
-    }
-    if (!hm_avgpk)     hm_avgpk     = std::make_unique<HeatmapView>();
-    if (!hm_avgint)    hm_avgint    = std::make_unique<HeatmapView>();
-    if (!hm_states)    hm_states    = std::make_unique<HeatmapView>();
-    if (!scatter_view) {
-        scatter_view = std::make_unique<Plot2DView>();
-        scatter_view->points_mode = true;
-        scatter_view->show_legend = false;
-        scatter_view->point_size_px = 3.0f;
-        scatter_view->pad_x = false;
-    }
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_basins, hm_avgpk, hm_avgint, hm_states;
+    static std::map<unsigned, std::unique_ptr<Plot2DView>>  scatter_views;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
+                     bool discrete_default) -> HeatmapView& {
+        auto& slot = m[oid];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            if (discrete_default) slot->discrete = true;
+        }
+        return *slot;
+    };
+    auto get_scatter = [](unsigned oid) -> Plot2DView& {
+        auto& slot = scatter_views[oid];
+        if (!slot) {
+            slot = std::make_unique<Plot2DView>();
+            slot->points_mode = true;
+            slot->show_legend = false;
+            slot->point_size_px = 3.0f;
+            slot->pad_x = false;
+        }
+        return *slot;
+    };
+    HeatmapView& hm_basins_v = get_hm(hm_basins, base_oid + 0u, /*discrete*/ true);
+    HeatmapView& hm_avgpk_v  = get_hm(hm_avgpk,  base_oid + 1u, false);
+    HeatmapView& hm_avgint_v = get_hm(hm_avgint, base_oid + 2u, false);
+    HeatmapView& hm_states_v = get_hm(hm_states, base_oid + 3u, false);
+    Plot2DView&  scatter_v   = get_scatter(base_oid + 4u);
 
     if (!c.last_run_ok || c.result.basin_idx.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -2939,30 +2954,30 @@ static void draw_basins_plot(AppModel& model) {
         else                                     vmin = 1.0;
         double vmax = (double)c.result.n_clusters;
         if (vmax < vmin) vmax = vmin;
-        hm_basins->colormap = HeatmapColormap::Turbo;
-        hm_basins->x_axis.name = ax_x;
-        hm_basins->y_axis.name = ax_y;
-        hm_basins->render(*renderer, origin, avail,
+        hm_basins_v.colormap = HeatmapColormap::Turbo;
+        hm_basins_v.x_axis.name = ax_x;
+        hm_basins_v.y_axis.name = ax_y;
+        hm_basins_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 0u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
     }
     else if (c.active_plot_tab == 1) {
-        hm_avgpk->colormap = HeatmapColormap::Viridis;
-        hm_avgpk->x_axis.name = ax_x;
-        hm_avgpk->y_axis.name = ax_y;
-        hm_avgpk->render(*renderer, origin, avail,
+        hm_avgpk_v.colormap = HeatmapColormap::Viridis;
+        hm_avgpk_v.x_axis.name = ax_x;
+        hm_avgpk_v.y_axis.name = ax_y;
+        hm_avgpk_v.render(*renderer, origin, avail,
                          /*owner_id*/ base_oid + 1u, c.data_generation,
                          n, n, c.result.avg_peaks.data(),
                          xlo, xhi, ylo, yhi,
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
     }
     else if (c.active_plot_tab == 2) {
-        hm_avgint->colormap = HeatmapColormap::Viridis;
-        hm_avgint->x_axis.name = ax_x;
-        hm_avgint->y_axis.name = ax_y;
-        hm_avgint->render(*renderer, origin, avail,
+        hm_avgint_v.colormap = HeatmapColormap::Viridis;
+        hm_avgint_v.x_axis.name = ax_x;
+        hm_avgint_v.y_axis.name = ax_y;
+        hm_avgint_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 2u, c.data_generation,
                           n, n, c.result.avg_intervals.data(),
                           xlo, xhi, ylo, yhi,
@@ -2981,10 +2996,10 @@ static void draw_basins_plot(AppModel& model) {
             int v = c.result.helpful_array[k];
             buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
         }
-        hm_states->colormap = HeatmapColormap::Turbo;
-        hm_states->x_axis.name = ax_x;
-        hm_states->y_axis.name = ax_y;
-        hm_states->render(*renderer, origin, avail,
+        hm_states_v.colormap = HeatmapColormap::Turbo;
+        hm_states_v.x_axis.name = ax_x;
+        hm_states_v.y_axis.name = ax_y;
+        hm_states_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
@@ -3045,9 +3060,9 @@ static void draw_basins_plot(AppModel& model) {
             glob_vis.push_back(true);
         }
         (void)n_total_clusters;
-        scatter_view->x_axis.name = "avg peak";
-        scatter_view->y_axis.name = "avg interval";
-        scatter_view->render(*renderer, origin, avail,
+        scatter_v.x_axis.name = "avg peak";
+        scatter_v.y_axis.name = "avg interval";
+        scatter_v.render(*renderer, origin, avail,
                              /*owner_id*/ base_oid + 4u, c.data_generation,
                              series_in, init_vis, glob_vis, fit);
     }
