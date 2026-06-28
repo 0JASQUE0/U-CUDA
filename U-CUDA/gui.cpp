@@ -8,6 +8,8 @@
 #include "plot_view_3d.h"
 #include "heatmap_view.h"
 #include "app_config.h"
+#include <map>
+#include <memory>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -1444,7 +1446,12 @@ static void draw_bifurcation_plot(AppModel& model) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
-    static std::unique_ptr<HeatmapView> heatmap_bd;
+    // Per-diagram HeatmapView. HeatmapView::data_gen_cached is keyed only by
+    // data_generation, not owner_id, so a single shared instance would bleed
+    // textures between diagrams that happen to share data_generation_2d
+    // (e.g. both at =1 after one Run each). Map by owner_id with lazy-init —
+    // each diagram keeps its own upload, zoom/pan and colormap state.
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> heatmap_bd_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -1455,11 +1462,15 @@ static void draw_bifurcation_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "X";
     }
-    if (!heatmap_bd) {
-        heatmap_bd = std::make_unique<HeatmapView>();
-        int cm = model.heatmap_colormap;
-        if (cm >= 0 && cm <= 3) heatmap_bd->colormap = (HeatmapColormap)cm;
-    }
+    auto get_bd_heatmap = [&](unsigned oid) -> HeatmapView& {
+        auto& slot = heatmap_bd_map[oid];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            int cm = model.heatmap_colormap;
+            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+        }
+        return *slot;
+    };
 
     if (s.diagrams.empty()) {
         ImGui::TextDisabled("No diagrams yet.");
@@ -1472,12 +1483,16 @@ static void draw_bifurcation_plot(AppModel& model) {
         if (act >= 0 && act < (int)s.diagrams.size()) {
             BifurcationDiagramConfig& bdact = s.diagrams[act];
             if (bdact.mode_2d) {
+                // Per-diagram heatmap by owner_id. Base + active index = unique.
+                const unsigned bd_oid = 0xBD2D0000u + (unsigned)act;
+                HeatmapView& hb = get_bd_heatmap(bd_oid);
+
                 // Colormap combo + autoscale над плотом.
                 static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
-                int cmap_idx = (int)heatmap_bd->colormap;
+                int cmap_idx = (int)hb.colormap;
                 ImGui::SetNextItemWidth(140);
                 if (ImGui::Combo("Colormap##bdhm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
-                    heatmap_bd->colormap = (HeatmapColormap)cmap_idx;
+                    hb.colormap = (HeatmapColormap)cmap_idx;
                     model.heatmap_colormap = cmap_idx;
                     AppConfig cfg;
                     cfg.ui_scale_override = model.ui_scale_override;
@@ -1486,12 +1501,12 @@ static void draw_bifurcation_plot(AppModel& model) {
                     save_app_config(get_exe_dir_with_sep(), cfg);
                 }
                 ImGui::SameLine();
-                ImGui::Checkbox("Autoscale color##bdhm", &heatmap_bd->autoscale);
-                if (!heatmap_bd->autoscale) {
+                ImGui::Checkbox("Autoscale color##bdhm", &hb.autoscale);
+                if (!hb.autoscale) {
                     ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                    ImGui::InputFloat("vmin##bdhm", &heatmap_bd->manual_vmin, 0.0f, 0.0f, "%.4g");
+                    ImGui::InputFloat("vmin##bdhm", &hb.manual_vmin, 0.0f, 0.0f, "%.4g");
                     ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                    ImGui::InputFloat("vmax##bdhm", &heatmap_bd->manual_vmax, 0.0f, 0.0f, "%.4g");
+                    ImGui::InputFloat("vmax##bdhm", &hb.manual_vmax, 0.0f, 0.0f, "%.4g");
                 }
 
                 if (!bdact.last_run_2d_ok || bdact.result_2d.values.empty()) {
@@ -1504,22 +1519,22 @@ static void draw_bifurcation_plot(AppModel& model) {
                         return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
                     return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
                 };
-                heatmap_bd->x_axis.name = ax_name(bdact.sweep_over_var,   bdact.param_index,   bdact.var_sweep_index);
-                heatmap_bd->y_axis.name = ax_name(bdact.sweep_over_var_2, bdact.param_index_2, bdact.var_sweep_index_2);
+                hb.x_axis.name = ax_name(bdact.sweep_over_var,   bdact.param_index,   bdact.var_sweep_index);
+                hb.y_axis.name = ax_name(bdact.sweep_over_var_2, bdact.param_index_2, bdact.var_sweep_index_2);
 
                 bool fit = bdact.fit_request_2d;
                 if (fit) bdact.fit_request_2d = false;
 
                 ImVec2 avail = ImGui::GetContentRegionAvail();
                 ImVec2 origin = ImGui::GetCursorScreenPos();
-                heatmap_bd->render(*renderer, origin, avail,
-                                   /*owner_id*/ 0xBD2D1DE1u, bdact.data_generation_2d,
-                                   bdact.result_2d.n_pts, bdact.result_2d.n_pts,
-                                   bdact.result_2d.values.data(),
-                                   bdact.result_2d.param_lo,   bdact.result_2d.param_hi,
-                                   bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
-                                   bdact.result_2d.min_val, bdact.result_2d.max_val,
-                                   fit);
+                hb.render(*renderer, origin, avail,
+                          /*owner_id*/ bd_oid, bdact.data_generation_2d,
+                          bdact.result_2d.n_pts, bdact.result_2d.n_pts,
+                          bdact.result_2d.values.data(),
+                          bdact.result_2d.param_lo,   bdact.result_2d.param_hi,
+                          bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
+                          bdact.result_2d.min_val, bdact.result_2d.max_val,
+                          fit);
                 return;
             }
         }
@@ -1914,7 +1929,9 @@ static void draw_lle_plot(AppModel& model) {
     LLEAnalysisSession& s = model.lle_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
-    static std::unique_ptr<HeatmapView> heatmap;
+    // Per-curve HeatmapView (see draw_bifurcation_plot for the rationale —
+    // shared cache bleeds textures between curves with equal data_generation_2d).
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> heatmap_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -1926,13 +1943,15 @@ static void draw_lle_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
-    if (!heatmap) {
-        heatmap = std::make_unique<HeatmapView>();
-        // Восстанавливаем последний выбранный colormap из persisted config.
-        // Делаем один раз — пользовательский выбор combo ниже перезаписывает.
-        int cm = model.heatmap_colormap;
-        if (cm >= 0 && cm <= 3) heatmap->colormap = (HeatmapColormap)cm;
-    }
+    auto get_lle_heatmap = [&](unsigned oid) -> HeatmapView& {
+        auto& slot = heatmap_map[oid];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            int cm = model.heatmap_colormap;
+            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+        }
+        return *slot;
+    };
 
     if (s.curves.empty()) {
         ImGui::TextDisabled("No curves yet.");
@@ -1947,12 +1966,16 @@ static void draw_lle_plot(AppModel& model) {
 
     if (cact.mode_2d) {
         // ------- HEATMAP -------
+        // Per-curve heatmap by owner_id.
+        const unsigned lle_oid = 0xBE110000u + (unsigned)act;
+        HeatmapView& heatmap = get_lle_heatmap(lle_oid);
+
         // Combo для выбора colormap'а — над плотом.
         static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
-        int cmap_idx = (int)heatmap->colormap;
+        int cmap_idx = (int)heatmap.colormap;
         ImGui::SetNextItemWidth(140);
         if (ImGui::Combo("Colormap", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
-            heatmap->colormap = (HeatmapColormap)cmap_idx;
+            heatmap.colormap = (HeatmapColormap)cmap_idx;
             model.heatmap_colormap = cmap_idx;
             // Персистим в _app_config.json — выбор сохранится между запусками.
             AppConfig cfg;
@@ -1962,12 +1985,12 @@ static void draw_lle_plot(AppModel& model) {
             save_app_config(get_exe_dir_with_sep(), cfg);
         }
         ImGui::SameLine();
-        ImGui::Checkbox("Autoscale color", &heatmap->autoscale);
-        if (!heatmap->autoscale) {
+        ImGui::Checkbox("Autoscale color", &heatmap.autoscale);
+        if (!heatmap.autoscale) {
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            ImGui::InputFloat("vmin", &heatmap->manual_vmin, 0.0f, 0.0f, "%.4g");
+            ImGui::InputFloat("vmin", &heatmap.manual_vmin, 0.0f, 0.0f, "%.4g");
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            ImGui::InputFloat("vmax", &heatmap->manual_vmax, 0.0f, 0.0f, "%.4g");
+            ImGui::InputFloat("vmax", &heatmap.manual_vmax, 0.0f, 0.0f, "%.4g");
         }
 
         if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
@@ -1982,22 +2005,22 @@ static void draw_lle_plot(AppModel& model) {
             }
             return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
         };
-        heatmap->x_axis.name = axis_name_for(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
-        heatmap->y_axis.name = axis_name_for(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+        heatmap.x_axis.name = axis_name_for(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+        heatmap.y_axis.name = axis_name_for(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
 
         bool fit = cact.fit_request_2d;
         if (fit) cact.fit_request_2d = false;
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
-        heatmap->render(*renderer, origin, avail,
-                        /*owner_id*/ 0xBE11E6, cact.data_generation_2d,
-                        cact.result_2d.n_pts, cact.result_2d.n_pts,
-                        cact.result_2d.values.data(),
-                        cact.result_2d.param_lo,   cact.result_2d.param_hi,
-                        cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
-                        cact.result_2d.min_val, cact.result_2d.max_val,
-                        fit);
+        heatmap.render(*renderer, origin, avail,
+                       /*owner_id*/ lle_oid, cact.data_generation_2d,
+                       cact.result_2d.n_pts, cact.result_2d.n_pts,
+                       cact.result_2d.values.data(),
+                       cact.result_2d.param_lo,   cact.result_2d.param_hi,
+                       cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
+                       cact.result_2d.min_val, cact.result_2d.max_val,
+                       fit);
         return;
     }
 
@@ -2363,7 +2386,8 @@ static void draw_ls_plot(AppModel& model) {
     LyapunovSpectrumAnalysisSession& s = model.ls_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
-    static std::unique_ptr<HeatmapView> heatmap_ls;
+    // Per-curve HeatmapView (see draw_bifurcation_plot rationale).
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> heatmap_ls_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     if (!view) {
         view = std::make_unique<Plot2DView>();
@@ -2375,11 +2399,15 @@ static void draw_ls_plot(AppModel& model) {
         view->x_axis.name = "parameter";
         view->y_axis.name = "lambda";
     }
-    if (!heatmap_ls) {
-        heatmap_ls = std::make_unique<HeatmapView>();
-        int cm = model.heatmap_colormap;
-        if (cm >= 0 && cm <= 3) heatmap_ls->colormap = (HeatmapColormap)cm;
-    }
+    auto get_ls_heatmap = [&](unsigned oid) -> HeatmapView& {
+        auto& slot = heatmap_ls_map[oid];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            int cm = model.heatmap_colormap;
+            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+        }
+        return *slot;
+    };
 
     if (s.curves.empty()) {
         ImGui::TextDisabled("No spectra yet.");
@@ -2392,12 +2420,16 @@ static void draw_ls_plot(AppModel& model) {
     LSCurveConfig& cact = s.curves[act];
 
     if (cact.mode_2d) {
+        // Per-curve heatmap by owner_id.
+        const unsigned ls_oid = 0x15A20000u + (unsigned)act;
+        HeatmapView& heatmap_ls = get_ls_heatmap(ls_oid);
+
         // Combo colormap (persisted в _app_config.json, как у LLE/BD).
         static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
-        int cmap_idx = (int)heatmap_ls->colormap;
+        int cmap_idx = (int)heatmap_ls.colormap;
         ImGui::SetNextItemWidth(140);
         if (ImGui::Combo("Colormap##lshm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
-            heatmap_ls->colormap = (HeatmapColormap)cmap_idx;
+            heatmap_ls.colormap = (HeatmapColormap)cmap_idx;
             model.heatmap_colormap = cmap_idx;
             AppConfig cfg;
             cfg.ui_scale_override = model.ui_scale_override;
@@ -2424,12 +2456,12 @@ static void draw_ls_plot(AppModel& model) {
         }
 
         ImGui::SameLine();
-        ImGui::Checkbox("Autoscale color##lshm", &heatmap_ls->autoscale);
-        if (!heatmap_ls->autoscale) {
+        ImGui::Checkbox("Autoscale color##lshm", &heatmap_ls.autoscale);
+        if (!heatmap_ls.autoscale) {
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            ImGui::InputFloat("vmin##lshm", &heatmap_ls->manual_vmin, 0.0f, 0.0f, "%.4g");
+            ImGui::InputFloat("vmin##lshm", &heatmap_ls.manual_vmin, 0.0f, 0.0f, "%.4g");
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            ImGui::InputFloat("vmax##lshm", &heatmap_ls->manual_vmax, 0.0f, 0.0f, "%.4g");
+            ImGui::InputFloat("vmax##lshm", &heatmap_ls.manual_vmax, 0.0f, 0.0f, "%.4g");
         }
 
         if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
@@ -2443,8 +2475,8 @@ static void draw_ls_plot(AppModel& model) {
                 return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
             return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
         };
-        heatmap_ls->x_axis.name = ax_name(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
-        heatmap_ls->y_axis.name = ax_name(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+        heatmap_ls.x_axis.name = ax_name(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+        heatmap_ls.y_axis.name = ax_name(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
 
         bool fit = cact.fit_request_2d;
         if (fit) cact.fit_request_2d = false;
@@ -2462,14 +2494,14 @@ static void draw_ls_plot(AppModel& model) {
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
-        heatmap_ls->render(*renderer, origin, avail,
-                           /*owner_id*/ 0x15A2D1DEu, gen,
-                           cact.result_2d.n_pts, cact.result_2d.n_pts,
-                           plane_ptr,
-                           cact.result_2d.param_lo,   cact.result_2d.param_hi,
-                           cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
-                           vmin, vmax,
-                           fit);
+        heatmap_ls.render(*renderer, origin, avail,
+                          /*owner_id*/ ls_oid, gen,
+                          cact.result_2d.n_pts, cact.result_2d.n_pts,
+                          plane_ptr,
+                          cact.result_2d.param_lo,   cact.result_2d.param_hi,
+                          cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
+                          vmin, vmax,
+                          fit);
         return;
     }
 
@@ -2605,7 +2637,6 @@ static void draw_ls_plot(AppModel& model) {
 
 static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
-    BasinsConfig& c = s.config;
 
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
@@ -2632,6 +2663,60 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::EndCombo();
     }
     if (s.in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // Tab bar: одна вкладка на Basins-config + "+" для add. Зеркалит
+    // draw_bifurcation_controls. Активная вкладка хранится в
+    // s.active_config_index и используется Ctrl+R + плотами.
+    int active_now = -1;
+    int to_remove = -1;
+    bool run_pressed_in_tab = false;
+    if (ImGui::BeginTabBar("##basins_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.configs.size(); ++i) {
+            BasinsConfig& bc = s.configs[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = bc.label + "###basins_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_config_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_config();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_config_index = active_now;
+    if (to_remove >= 0) model.remove_basins_config(to_remove);
+    (void)run_pressed_in_tab;
+
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No basins configs. Press '+' to add one.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    BasinsConfig& c = s.configs[s.active_config_index];
+
+    // Inline rename для активной вкладки.
+    {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s", c.label.c_str());
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::InputText("Label##basins_label", buf, sizeof(buf)))
+            c.label = buf;
+    }
     ImGui::Separator();
 
     // ----- Scheme -----
@@ -2733,7 +2818,44 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
     if (do_run) {
         if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run_async(*model.parametric_engine);
+        s.run_async(*model.parametric_engine, s.active_config_index);
+    }
+
+    // Batch "Run all..." across basin configs. Pushes selected indices into
+    // model.basins_queue; draw_gui ticks the queue after polls.
+    ImGui::SameLine();
+    if (s.in_flight) ImGui::BeginDisabled();
+    if (ImGui::Button("Run all..."))
+        ImGui::OpenPopup("##run_all_basins");
+    if (s.in_flight) ImGui::EndDisabled();
+    if (!model.basins_queue.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu queued)", model.basins_queue.size());
+    }
+    if (ImGui::BeginPopup("##run_all_basins")) {
+        static std::vector<bool> picks;
+        if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
+
+        ImGui::TextDisabled("Sequential (one CUDA context).");
+        for (size_t i = 0; i < picks.size(); ++i) {
+            bool v = picks[i];
+            std::string lbl = s.configs[i].label + "###pbasins_" + std::to_string(i);
+            if (ImGui::Checkbox(lbl.c_str(), &v)) picks[i] = v;
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("All"))  { for (auto&& b : picks) b = true;  }
+        ImGui::SameLine();
+        if (ImGui::Button("None")) { for (auto&& b : picks) b = false; }
+        ImGui::SameLine();
+        if (ImGui::Button("Run")) {
+            for (size_t i = 0; i < picks.size(); ++i)
+                if (picks[i])
+                    model.basins_queue.push_back({(int)i});
+            model.start_next_in_basins_queue();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     if (c.last_run_ok) {
@@ -2755,32 +2877,54 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
 }
 
-// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views statics —
-// один на представление, чтобы view-state (zoom, pan) сохранялся между
-// переключениями.
+// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views — per
+// (config × tab) в std::map по owner_id. HeatmapView/Plot2DView хранят
+// data_gen_cached внутри без учёта owner_id, поэтому переиспользовать один
+// view между разными configs нельзя (после Run All у двух configs одинаковый
+// data_generation=1 → cache не invalidate'тся и на чужой вкладке показывается
+// предыдущий buffer). Map с lazy-init решает это и сохраняет независимый
+// zoom/pan per (config, tab).
 static void draw_basins_plot(AppModel& model) {
     BasinsAnalysisSession& s = model.basins_session;
-    BasinsConfig& c = s.config;
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    BasinsConfig& c = s.configs[s.active_config_index];
+    // Owner IDs зависят от индекса config — каждый basin имеет независимый
+    // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
+    const unsigned base_oid = 0x1BA50000u + (unsigned)s.active_config_index * 5u;
     static std::unique_ptr<PlotRenderer> renderer;
-    static std::unique_ptr<HeatmapView>  hm_basins, hm_avgpk, hm_avgint, hm_states;
-    static std::unique_ptr<Plot2DView>   scatter_view;
-    if (!renderer)     renderer     = std::make_unique<PlotRenderer>();
-    if (!hm_basins) {
-        hm_basins = std::make_unique<HeatmapView>();
-        // Cluster IDs are integers — discrete colorbar by default. User can
-        // toggle off via right-click context menu on the heatmap.
-        hm_basins->discrete = true;
-    }
-    if (!hm_avgpk)     hm_avgpk     = std::make_unique<HeatmapView>();
-    if (!hm_avgint)    hm_avgint    = std::make_unique<HeatmapView>();
-    if (!hm_states)    hm_states    = std::make_unique<HeatmapView>();
-    if (!scatter_view) {
-        scatter_view = std::make_unique<Plot2DView>();
-        scatter_view->points_mode = true;
-        scatter_view->show_legend = false;
-        scatter_view->point_size_px = 3.0f;
-        scatter_view->pad_x = false;
-    }
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_basins, hm_avgpk, hm_avgint, hm_states;
+    static std::map<unsigned, std::unique_ptr<Plot2DView>>  scatter_views;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
+                     bool discrete_default) -> HeatmapView& {
+        auto& slot = m[oid];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            if (discrete_default) slot->discrete = true;
+        }
+        return *slot;
+    };
+    auto get_scatter = [](unsigned oid) -> Plot2DView& {
+        auto& slot = scatter_views[oid];
+        if (!slot) {
+            slot = std::make_unique<Plot2DView>();
+            slot->points_mode = true;
+            slot->show_legend = false;
+            slot->point_size_px = 3.0f;
+            slot->pad_x = false;
+        }
+        return *slot;
+    };
+    HeatmapView& hm_basins_v = get_hm(hm_basins, base_oid + 0u, /*discrete*/ true);
+    HeatmapView& hm_avgpk_v  = get_hm(hm_avgpk,  base_oid + 1u, false);
+    HeatmapView& hm_avgint_v = get_hm(hm_avgint, base_oid + 2u, false);
+    HeatmapView& hm_states_v = get_hm(hm_states, base_oid + 3u, false);
+    Plot2DView&  scatter_v   = get_scatter(base_oid + 4u);
 
     if (!c.last_run_ok || c.result.basin_idx.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -2840,31 +2984,31 @@ static void draw_basins_plot(AppModel& model) {
         else                                     vmin = 1.0;
         double vmax = (double)c.result.n_clusters;
         if (vmax < vmin) vmax = vmin;
-        hm_basins->colormap = HeatmapColormap::Turbo;
-        hm_basins->x_axis.name = ax_x;
-        hm_basins->y_axis.name = ax_y;
-        hm_basins->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D01u, c.data_generation,
+        hm_basins_v.colormap = HeatmapColormap::Turbo;
+        hm_basins_v.x_axis.name = ax_x;
+        hm_basins_v.y_axis.name = ax_y;
+        hm_basins_v.render(*renderer, origin, avail,
+                          /*owner_id*/ base_oid + 0u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
     }
     else if (c.active_plot_tab == 1) {
-        hm_avgpk->colormap = HeatmapColormap::Viridis;
-        hm_avgpk->x_axis.name = ax_x;
-        hm_avgpk->y_axis.name = ax_y;
-        hm_avgpk->render(*renderer, origin, avail,
-                         /*owner_id*/ 0x1BA51D02u, c.data_generation,
+        hm_avgpk_v.colormap = HeatmapColormap::Viridis;
+        hm_avgpk_v.x_axis.name = ax_x;
+        hm_avgpk_v.y_axis.name = ax_y;
+        hm_avgpk_v.render(*renderer, origin, avail,
+                         /*owner_id*/ base_oid + 1u, c.data_generation,
                          n, n, c.result.avg_peaks.data(),
                          xlo, xhi, ylo, yhi,
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
     }
     else if (c.active_plot_tab == 2) {
-        hm_avgint->colormap = HeatmapColormap::Viridis;
-        hm_avgint->x_axis.name = ax_x;
-        hm_avgint->y_axis.name = ax_y;
-        hm_avgint->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D03u, c.data_generation,
+        hm_avgint_v.colormap = HeatmapColormap::Viridis;
+        hm_avgint_v.x_axis.name = ax_x;
+        hm_avgint_v.y_axis.name = ax_y;
+        hm_avgint_v.render(*renderer, origin, avail,
+                          /*owner_id*/ base_oid + 2u, c.data_generation,
                           n, n, c.result.avg_intervals.data(),
                           xlo, xhi, ylo, yhi,
                           c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
@@ -2882,11 +3026,11 @@ static void draw_basins_plot(AppModel& model) {
             int v = c.result.helpful_array[k];
             buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
         }
-        hm_states->colormap = HeatmapColormap::Turbo;
-        hm_states->x_axis.name = ax_x;
-        hm_states->y_axis.name = ax_y;
-        hm_states->render(*renderer, origin, avail,
-                          /*owner_id*/ 0x1BA51D04u, c.data_generation,
+        hm_states_v.colormap = HeatmapColormap::Turbo;
+        hm_states_v.x_axis.name = ax_x;
+        hm_states_v.y_axis.name = ax_y;
+        hm_states_v.render(*renderer, origin, avail,
+                          /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           0.0, 2.0, fit);
@@ -2946,10 +3090,10 @@ static void draw_basins_plot(AppModel& model) {
             glob_vis.push_back(true);
         }
         (void)n_total_clusters;
-        scatter_view->x_axis.name = "avg peak";
-        scatter_view->y_axis.name = "avg interval";
-        scatter_view->render(*renderer, origin, avail,
-                             /*owner_id*/ 0x1BA51D05u, c.data_generation,
+        scatter_v.x_axis.name = "avg peak";
+        scatter_v.y_axis.name = "avg interval";
+        scatter_v.render(*renderer, origin, avail,
+                             /*owner_id*/ base_oid + 4u, c.data_generation,
                              series_in, init_vis, glob_vis, fit);
     }
 }
@@ -3157,6 +3301,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // очереди есть элементы — берём следующий и стартуем. start_next сам
     // проверяет условие и безопасен к вызову каждый кадр.
     model.start_next_in_parametric_queue();
+    // То же для basins-очереди (независимая).
+    model.start_next_in_basins_queue();
 
     // переключатель режимов
     int mode = (int)model.app_mode;
@@ -3169,7 +3315,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
     // Layout: [text] [progress bar] [Stop] for in-flight cancellable sessions;
     // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
-    // drains parametric_queue so remaining batch items don't auto-start.
+    // drains parametric_queue and basins_queue so remaining batch items
+    // don't auto-start.
     enum class BusyKind { None, Bif, LLE, LS, Basins, Phase };
     BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
@@ -3220,8 +3367,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         busy_kind  = BusyKind::Phase;
     }
     else if (model.basins_session.in_flight) {
-        busy_what  = model.basins_session.config.label.empty()
-                        ? "basins" : model.basins_session.config.label;
+        int ri = model.basins_session.running_config_index;
+        busy_what = (ri >= 0 && ri < (int)model.basins_session.configs.size() &&
+                     !model.basins_session.configs[ri].label.empty())
+                        ? model.basins_session.configs[ri].label
+                        : std::string("basins");
         busy_start = model.basins_session.compute_start_time;
         busy_kind  = BusyKind::Basins;
         busy_cancelling = model.basins_session.cancel_token &&
@@ -3287,9 +3437,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         } else {
             double secs = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - busy_start).count();
-            if (!model.parametric_queue.empty())
+            // Queue suffix: prefer the queue that matches the running session
+            // (parametric for Bif/LLE/LS, basins for Basins).
+            size_t queue_n = 0;
+            if (busy_kind == BusyKind::Basins) queue_n = model.basins_queue.size();
+            else                               queue_n = model.parametric_queue.size();
+            if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
-                              busy_what.c_str(), phase_suffix, secs, model.parametric_queue.size());
+                              busy_what.c_str(), phase_suffix, secs, queue_n);
             else
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs",
                               busy_what.c_str(), phase_suffix, secs);
@@ -3343,7 +3498,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Basins: model.basins_session.request_cancel();      break;
                     default: break;
                 }
+                // Drain both queues so remaining batch items don't auto-start.
                 model.parametric_queue.clear();
+                model.basins_queue.clear();
             }
             ImGui::PopStyleColor(3);
         }

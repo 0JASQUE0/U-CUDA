@@ -2,9 +2,20 @@
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include <cstdlib>
+#include <cstdio>
 #include <cmath>
 #include <memory>
 #include <chrono>
+
+// Mirrors the top-bar indicator text to the console on completion so users
+// who keep stdout visible can see timings without watching the title bar.
+static void log_run_completed(const char* label, bool ok, double secs) {
+    std::printf("[run] %s %s in %.2fs\n",
+                ok ? "Done" : "Cancelled",
+                (label && *label) ? label : "(unnamed)",
+                secs);
+    std::fflush(stdout);
+}
 
 // Парсит значение (число или дробь a/b) в double; пусто -> fallback.
 static double parse_val(const std::string& s, double fallback) {
@@ -500,8 +511,9 @@ static void apply_bif2d_result(BifurcationDiagramConfig& bd, Bifurcation2DResult
 bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) {
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
-    bd.last_run_ok = false;
-    bd.last_run_2d_ok = false;
+    // Keep last_run_ok / last_run_2d_ok set from the previous successful
+    // run so the GUI keeps drawing the old plot until apply_*_result swaps
+    // in the new data.
     bd.last_error.clear();
 
     if (bd.mode_2d) {
@@ -532,8 +544,9 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
 
     BifurcationDiagramConfig& bd = diagrams[diagram_idx];
-    bd.last_run_ok = false;
-    bd.last_run_2d_ok = false;
+    // Keep last_run_ok / last_run_2d_ok set from the previous successful
+    // run so the GUI keeps drawing the old plot until apply_*_result swaps
+    // in the new data.
     bd.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
@@ -608,6 +621,7 @@ bool BifurcationAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("bifurcation") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_diagram_index = -1;
     cancel_token.reset();
@@ -786,8 +800,8 @@ static void apply_lle2d_result(LLECurveConfig& c, LLE2DResult&& r) {
 bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
     LLECurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
 
     if (c.mode_2d) {
@@ -818,8 +832,8 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
 
     LLECurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
@@ -894,6 +908,7 @@ bool LLEAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LLE") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_curve_index = -1;
     cancel_token.reset();
@@ -902,7 +917,9 @@ bool LLEAnalysisSession::poll() {
 }
 
 // ============================================================================
-// BasinsAnalysisSession — один config на сессию, без inner tab-bar.
+// BasinsAnalysisSession — N configs на сессию (по образцу
+// BifurcationAnalysisSession::diagrams). 5 inner tabs (Basins/AvgPk/AvgInt/
+// States/Scatter) живут per-config через BasinsConfig::active_plot_tab.
 // ============================================================================
 
 void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
@@ -913,6 +930,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     custom_schemes = r.custom_schemes;
 
     BasinsConfig c;
+    c.label = "Basins 1";
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
@@ -927,7 +945,42 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     c.axis_x_var = 0;
     c.axis_y_var = (vars.size() > 1) ? 1 : 0;
     c.writable_var = 0;
-    config = std::move(c);
+
+    configs.clear();
+    configs.push_back(std::move(c));
+    active_config_index = 0;
+    running_config_index = -1;
+}
+
+void BasinsAnalysisSession::add_config() {
+    BasinsConfig c;
+    if (!configs.empty()) {
+        // Глубокая копия последнего config — пользователь обычно правит 1-2 поля.
+        c = configs.back();
+        c.result = BasinsResult{};
+        c.last_run_ok = false;
+        c.last_error.clear();
+        c.data_generation = 0;
+        c.fit_request = false;
+    } else {
+        for (const auto& v : vars) c.initial_conditions[v] = "";
+        for (const auto& p : params) c.param_values[p] = "";
+    }
+    c.label = "Basins " + std::to_string(configs.size() + 1);
+    configs.push_back(std::move(c));
+    active_config_index = (int)configs.size() - 1;
+}
+
+void BasinsAnalysisSession::remove_config(int i) {
+    if (i < 0 || i >= (int)configs.size()) return;
+    // Запрещаем удалять config, чей расчёт сейчас идёт — иначе worker положит
+    // результат в несуществующий слот при poll().
+    if (in_flight && running_config_index == i) return;
+    configs.erase(configs.begin() + i);
+    if (in_flight && running_config_index > i) running_config_index--;
+    if (active_config_index >= (int)configs.size())
+        active_config_index = (int)configs.size() - 1;
+    if (active_config_index < 0) active_config_index = 0;
 }
 
 static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
@@ -976,9 +1029,11 @@ static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
     c.fit_request = true;
 }
 
-bool BasinsAnalysisSession::run(ParametricEngine& engine) {
-    BasinsConfig& c = config;
-    c.last_run_ok = false;
+bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+    BasinsConfig& c = configs[config_idx];
+    // Keep previous last_run_ok so the old heatmap stays visible until
+    // apply_basins_result swaps in fresh data.
     c.last_error.clear();
 
     BasinsRequest req = build_basins_request(*this, c);
@@ -992,10 +1047,13 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine) {
     return ok;
 }
 
-bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
+bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     if (in_flight) return false;
-    BasinsConfig& c = config;
-    c.last_run_ok = false;
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+
+    BasinsConfig& c = configs[config_idx];
+    // Keep previous last_run_ok so the old heatmap stays visible until
+    // apply_basins_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token         = std::make_shared<std::atomic<bool>>(false);
@@ -1015,6 +1073,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine) {
     req.progress_phase = progress_phase_token;
 
     in_flight = true;
+    running_config_index = config_idx;
     compute_start_time = std::chrono::steady_clock::now();
     run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
         return engine.run_basins(req);
@@ -1030,6 +1089,7 @@ bool BasinsAnalysisSession::poll() {
     if (!in_flight) return false;
     if (!run_future.valid()) {
         in_flight = false;
+        running_config_index = -1;
         cancel_token.reset(); progress_token.reset(); progress_phase_token.reset();
         return false;
     }
@@ -1037,15 +1097,19 @@ bool BasinsAnalysisSession::poll() {
 
     BasinsResult r = run_future.get();
     bool cancelled = r.cancelled;
-    std::string label = config.label.empty() ? std::string("basins") : config.label;
-    if (!cancelled) {
-        apply_basins_result(config, std::move(r));
+    int idx = running_config_index;
+    std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[idx].label.empty())
+                            ? configs[idx].label : std::string("basins");
+    if (!cancelled && idx >= 0 && idx < (int)configs.size()) {
+        apply_basins_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
+    running_config_index = -1;
     cancel_token.reset();
     progress_token.reset();
     progress_phase_token.reset();
@@ -1225,8 +1289,8 @@ static void apply_ls2d_result(LSCurveConfig& c, LS2DResult&& r) {
 bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
     LSCurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
 
     if (c.mode_2d) {
@@ -1257,8 +1321,8 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (curve_idx < 0 || curve_idx >= (int)curves.size()) return false;
 
     LSCurveConfig& c = curves[curve_idx];
-    c.last_run_ok = false;
-    c.last_run_2d_ok = false;
+    // Keep previous last_run_ok flags so the old plot stays visible until
+    // apply_*_result swaps in fresh data.
     c.last_error.clear();
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
@@ -1333,6 +1397,7 @@ bool LyapunovSpectrumAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LS") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_curve_index = -1;
     cancel_token.reset();

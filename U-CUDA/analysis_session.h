@@ -470,7 +470,14 @@ struct BasinsAnalysisSession {
     std::vector<CustomScheme> custom_schemes;
     std::string loaded_system_name;
 
-    BasinsConfig config;
+    // Список Basins-конфигов. После load_from_record содержит как минимум
+    // один дефолтный элемент. Структура зеркалит BifurcationAnalysisSession::diagrams.
+    std::vector<BasinsConfig> configs;
+
+    // Какая вкладка сейчас открыта — для Ctrl+R (последняя видимая).
+    int active_config_index = 0;
+    // Индекс config'а, чей расчёт сейчас идёт в worker'е; -1 = ничего.
+    int running_config_index = -1;
 
     std::future<BasinsResult> run_future;
     bool in_flight = false;
@@ -496,8 +503,14 @@ struct BasinsAnalysisSession {
     void load_from_record(const SystemRecord& r,
                           const std::vector<std::string>& vars_,
                           const std::vector<std::string>& params_);
-    bool run(ParametricEngine& engine);
-    bool run_async(ParametricEngine& engine);
+
+    // Добавить config: глубокая копия последнего (если есть), иначе дефолт.
+    // Label автоматически "Basins <N+1>", результат и флаги обнуляются.
+    void add_config();
+    void remove_config(int i);
+
+    bool run(ParametricEngine& engine, int config_idx);
+    bool run_async(ParametricEngine& engine, int config_idx);
     void request_cancel();
     bool poll();
 };
