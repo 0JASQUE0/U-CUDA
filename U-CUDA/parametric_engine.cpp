@@ -379,18 +379,9 @@ struct ParametricEngine::Impl {
         }
 
         std::string std_opt = "--std=c++17";
-        const char* opts[] = {
-            arch,
-            std_opt.c_str(),
-            "-default-device",
-            cuda_include_opt.c_str(),
-            // FMA даёт чуть другое округление (одно округление вместо двух) — это
-            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
-            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
-            "--fmad=false"
-        };
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
 
-        nr = nvrtcCompileProgram(prog, 5, opts);
+        nr = nvrtcCompileProgram(prog, 4, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -870,18 +861,9 @@ struct ParametricEngine::Impl {
         }
 
         std::string std_opt = "--std=c++17";
-        const char* opts[] = {
-            arch,
-            std_opt.c_str(),
-            "-default-device",
-            cuda_include_opt.c_str(),
-            // FMA даёт чуть другое округление (одно округление вместо двух) — это
-            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
-            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
-            "--fmad=false"
-        };
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
 
-        nr = nvrtcCompileProgram(prog, 5, opts);
+        nr = nvrtcCompileProgram(prog, 4, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -1229,18 +1211,9 @@ struct ParametricEngine::Impl {
         }
 
         std::string std_opt = "--std=c++17";
-        const char* opts[] = {
-            arch,
-            std_opt.c_str(),
-            "-default-device",
-            cuda_include_opt.c_str(),
-            // FMA даёт чуть другое округление (одно округление вместо двух) — это
-            // делает результат GPU неидентичным host'у. Отключаем, чтобы CPU и
-            // GPU совпадали bit-to-bit (Эйлер) или максимально близко (хаос).
-            "--fmad=false"
-        };
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
 
-        nr = nvrtcCompileProgram(prog, 5, opts);
+        nr = nvrtcCompileProgram(prog, 4, opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -2862,6 +2835,12 @@ struct ParametricEngine::Impl {
         double* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
 
+        // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
+        // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
+        // downclock between launches; on the same stream kernels are ordered
+        // implicitly and the GPU stays under continuous load.
+        CUstream stream = nullptr;
+
         auto cleanup = [&]() {
             if (d_data)              cudaFree(d_data);
             if (d_ranges)            cudaFree(d_ranges);
@@ -2872,6 +2851,7 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (stream)              cuStreamDestroy(stream);
         };
 
         #define BIF2D_CHECK(call, where) do { \
@@ -2911,6 +2891,8 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_ic");
         BIF2D_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),             cudaMemcpyHostToDevice), "memcpy d_values");
         BIF2D_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        BIF2D_CHECK_CU(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
@@ -3004,11 +2986,11 @@ struct ParametricEngine::Impl {
             unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
                                           gridSize, 1, 1, blockSize, 1, 1,
-                                          shared_traj, nullptr, args_traj, nullptr),
+                                          shared_traj, stream, args_traj, nullptr),
                            "cuLaunchKernel(bif2d traj)");
-            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after traj");
 
-            // 2. peakFinderCUDA — d_data передаётся и как data, и как outPeaks (in-place)
+            // 2. peakFinderCUDA — d_data передаётся и как data, и как outPeaks (in-place).
+            // Same stream as traj → automatic ordering, no explicit sync needed.
             double timeStep_arg = h * (double)preScaller;
             void* args_peak[] = {
                 &d_data,
@@ -3021,11 +3003,10 @@ struct ParametricEngine::Impl {
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_peak,
                                           gridSize, 1, 1, blockSize, 1, 1,
-                                          0, nullptr, args_peak, nullptr),
+                                          0, stream, args_peak, nullptr),
                            "cuLaunchKernel(bif2d peak)");
-            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after peak");
 
-            // 3. dbscanCUDA
+            // 3. dbscanCUDA — same stream, ordered after peak.
             double eps_arg = eps_dbscan;
             void* args_dbscan[] = {
                 &d_data,
@@ -3039,14 +3020,17 @@ struct ParametricEngine::Impl {
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
                                           gridSize, 1, 1, blockSize, 1, 1,
-                                          0, nullptr, args_dbscan, nullptr),
+                                          0, stream, args_dbscan, nullptr),
                            "cuLaunchKernel(bif2d dbscan)");
-            BIF2D_CHECK(cudaDeviceSynchronize(), "sync after dbscan");
 
             // D2H: только d_dbscanResult (число кластеров = период).
-            BIF2D_CHECK(cudaMemcpy(h_dbscanResult.data(), d_dbscanResult,
-                                   cur_limiter * sizeof(int), cudaMemcpyDeviceToHost),
+            // Async on the same stream + single sync — keeps the GPU continuously
+            // loaded across the whole chunk instead of inserting 3 sync gaps.
+            BIF2D_CHECK(cudaMemcpyAsync(h_dbscanResult.data(), d_dbscanResult,
+                                        cur_limiter * sizeof(int),
+                                        cudaMemcpyDeviceToHost, stream),
                         "memcpy h_dbscanResult");
+            BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
 
             for (size_t k = 0; k < cur_limiter; ++k) {
                 size_t kernel_idx = originalNPtsLimiter * iter + k;

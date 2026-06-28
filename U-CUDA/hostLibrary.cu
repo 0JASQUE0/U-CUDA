@@ -924,7 +924,7 @@ __host__ void bifurcation2D(
 
 	gpuErrorCheck(cudaMemGetInfo(&freeMemory, &totalMemory));	// Получаем свободный и общий объемы памяти GPU
 
-	freeMemory *= 1.0;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
+	freeMemory *= 0.92;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
 
 	// Базовая оценка: 3 массива по amountOfPointsInBlock + 2 int + резерв 20%

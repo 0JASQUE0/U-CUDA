@@ -8,6 +8,8 @@
 #include "hostLibrary.cuh"
 #include "windows.h"
 #include <cstring>
+//#include <string>
+std::string exe_dir() { return "."; }
 //
 //
 //
@@ -75,25 +77,25 @@ int main()
 //	0.01	//9	k_syn;
 //	};*/
 //
-	params[6] = -0.5;
-	//params[1] = 0.04475;
-	
-	bifurcation1D(
-		5000,		//const numb	tMax,							// Время моделирования системы
-		1001,		//const int		nPts,						// Разрешение диаграммы
-		0.05,		//const numb	h,								// Шаг интегрирования
-		sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-		init,//const numb * initialConditions,				// Массив с начальными условиями
-		new numb[2]{ 0.04, 0.06 },//const numb * ranges,							// Диаппазон изменения переменной
-		new int[1] { 1 },//const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
-		4,//const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-		10000000,//const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-		20000,//const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-		params,//const numb * values,							// Параметры
-		sizeof(params) / sizeof(numb),//const int		amountOfValues,					// Количество параметров
-		1,//const int		preScaller,
-		"D:\\CUDAresults\\bif1D_KopetsMischenko_02.csv"//std::string		OUT_FILE_PATH
-	);
+	//params[6] = -0.5;
+	////params[1] = 0.04475;
+	//
+	//bifurcation1D(
+	//	5000,		//const numb	tMax,							// Время моделирования системы
+	//	1001,		//const int		nPts,						// Разрешение диаграммы
+	//	0.05,		//const numb	h,								// Шаг интегрирования
+	//	sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
+	//	init,//const numb * initialConditions,				// Массив с начальными условиями
+	//	new numb[2]{ 0.04, 0.06 },//const numb * ranges,							// Диаппазон изменения переменной
+	//	new int[1] { 1 },//const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
+	//	4,//const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
+	//	10000000,//const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+	//	20000,//const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
+	//	params,//const numb * values,							// Параметры
+	//	sizeof(params) / sizeof(numb),//const int		amountOfValues,					// Количество параметров
+	//	1,//const int		preScaller,
+	//	"D:\\CUDAresults\\bif1D_KopetsMischenko_02.csv"//std::string		OUT_FILE_PATH
+	//);
 //
 //	//params[6] = 0.27;
 //	//params[1] = 0.04475;
@@ -152,23 +154,23 @@ int main()
 //	//	"D:\\CUDAresults\\LS2D_KopetsMischenko_41_1.csv"//std::string		OUT_FILE_PATH
 //	//);
 //
-	LS2D(
-		CT,	//const numb tMax,
-		5.0,	//const numb NT,
-		501,	//const int nPts,
-		0.05,	//const numb h,
-		1e-5,	//const numb eps,
-		init,	//const numb * initialConditions,
-		sizeof(init) / sizeof(numb),//const int amountOfInitialConditions,
-		new numb[4]{ -0.75, 0.75, 0.034, 0.068 },//const numb * ranges,
-		new int[2] { 6, 1},//const int* indicesOfMutVars,
-		1,		//const int writableVar,
-		100000000,	//const numb maxValue,
-		TT,	//const numb transientTime,
-		params,	//const numb * values,
-		sizeof(params) / sizeof(numb),//const int amountOfValues,
-		"D:\\CUDAresults\\LS2D_KopetsMischenko_41_1.csv"//std::string		OUT_FILE_PATH
-	);
+	//LS2D(
+	//	CT,	//const numb tMax,
+	//	5.0,	//const numb NT,
+	//	501,	//const int nPts,
+	//	0.05,	//const numb h,
+	//	1e-5,	//const numb eps,
+	//	init,	//const numb * initialConditions,
+	//	sizeof(init) / sizeof(numb),//const int amountOfInitialConditions,
+	//	new numb[4]{ -0.75, 0.75, 0.034, 0.068 },//const numb * ranges,
+	//	new int[2] { 6, 1},//const int* indicesOfMutVars,
+	//	1,		//const int writableVar,
+	//	100000000,	//const numb maxValue,
+	//	TT,	//const numb transientTime,
+	//	params,	//const numb * values,
+	//	sizeof(params) / sizeof(numb),//const int amountOfValues,
+	//	"D:\\CUDAresults\\LS2D_KopetsMischenko_41_1.csv"//std::string		OUT_FILE_PATH
+	//);
 //	
 //	////////bifurcation2D(
 //	////////	CT, //const numb	tMax,								// Время моделирования системы
@@ -407,23 +409,23 @@ int main()
 //	//for (int j = 0; j < 11; j++) {
 //	//	path = "D:\\CUDAresults\\bif1D_KopetsMischenko_par_d2_decimator=" + std::to_string(decimator[j]) + ".csv";
 //
-		bifurcation1D(
-			3000,		//const numb	tMax,							// Время моделирования системы
-			1001,		//const int		nPts,						// Разрешение диаграммы
-			0.05,		//const numb	h,								// Шаг интегрирования
-			sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-			init,//const numb * initialConditions,				// Массив с начальными условиями
-			new numb[2]{ -0.75, 0.75 },//const numb * ranges,							// Диаппазон изменения переменной
-			new int[1] { 6 },//const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
-			4,//const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-			10000000,//const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-			4000,//const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-			params,//const numb * values,							// Параметры
-			sizeof(params) / sizeof(numb),//const int		amountOfValues,					// Количество параметров
-			1,//const int		preScaller,
-			path//std::string		OUT_FILE_PATH
-		);
-	}
+	//	bifurcation1D(
+	//		3000,		//const numb	tMax,							// Время моделирования системы
+	//		1001,		//const int		nPts,						// Разрешение диаграммы
+	//		0.05,		//const numb	h,								// Шаг интегрирования
+	//		sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
+	//		init,//const numb * initialConditions,				// Массив с начальными условиями
+	//		new numb[2]{ -0.75, 0.75 },//const numb * ranges,							// Диаппазон изменения переменной
+	//		new int[1] { 6 },//const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
+	//		4,//const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
+	//		10000000,//const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+	//		4000,//const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
+	//		params,//const numb * values,							// Параметры
+	//		sizeof(params) / sizeof(numb),//const int		amountOfValues,					// Количество параметров
+	//		1,//const int		preScaller,
+	//		path//std::string		OUT_FILE_PATH
+	//	);
+	//}
 //
 //	//TimeDomainCalculation(
 //	//	3000,	//const numb	tMax,							// Время моделирования системы
@@ -748,27 +750,27 @@ int main()
 //	//params[1] = 1.9408;
 //	//init[0] = 0.2;
 //	//
-//	//bifurcation2D(
-//	//	CT, //const numb	tMax,								// Время моделирования системы
-//	//	801, //const int		nPts,								// Разрешение диаграммы
-//	//	h, //const numb	h,									// Шаг интегрирования
-//	//	sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-//	//	init,//const numb* initialConditions,					// Массив с начальными условиями
-//	//	new numb[4]{ 0, 15, -1, 1 },//const numb* ranges,								// Диапазоны изменения параметров
-//	//	new int[2] { 1, 2 },//const int* indicesOfMutVars,					// Индексы изменяемых параметров
-//	//	//new numb[4]{ 0.001, 0.01, 0, 2 },//const numb* ranges,								// Диапазоны изменения параметров
-//	//	//new int[2] { 9, 1 },//const int* indicesOfMutVars,					// Индексы изменяемых параметров
-//	//	//new numb[4]{ 3, 10, 0, 0.5 },//const numb* ranges,								// Диапазоны изменения параметров
-//	//	//new int[2] { 2, 1 },//const int* indicesOfMutVars,					// Индексы изменяемых параметро
-//	//	1, //const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-//	//	100000000, //const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-//	//	TT, //const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-//	//	params,//const numb* values,								// Параметры
-//	//	sizeof(params) / sizeof(numb),//const int		amountOfValues,						// Количество параметров
-//	//	2, //const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-//	//	0.2,//const numb	eps,
-//	//	"D:\\CUDAresults\\bif2D_Faiza_23022026_par_a_vs_b_2.csv" //std::string		OUT_FILE_PATH
-//	//);
+	numb init[3]{ 0.2, 0.2, 0.2 };
+	numb params[4]{ 0.5, 0.2, 0.2, 5.7 };
+	std::string path = "D:\\testNLA.csv";
+
+		bifurcation2D(
+		2000, //const numb	tMax,								// Время моделирования системы
+		600, //const int		nPts,								// Разрешение диаграммы
+		0.01, //const numb	h,									// Шаг интегрирования
+		sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
+		init,//const numb* initialConditions,					// Массив с начальными условиями
+		new numb[4]{ 0.1, 0.35, 0.0, 0.35 },//const numb* ranges,								// Диапазоны изменения параметров
+		new int[2] { 1, 2 },//const int* indicesOfMutVars,					// Индексы изменяемых параметров
+		0, //const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
+		1e6, //const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+		1000, //const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
+		params,//const numb* values,								// Параметры
+		sizeof(params) / sizeof(numb),//const int		amountOfValues,						// Количество параметров
+		1, //const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+		0.1,//const numb	eps,
+		path //std::string		OUT_FILE_PATH
+	);
 //	//
 //	//LS2D(
 //	//	5*CT,	//const numb tMax,
@@ -1226,23 +1228,23 @@ int main()
 //	//	"D:\\CUDAresults\\bif1D_HR_neron.csv"//std::string		OUT_FILE_PATH
 //	//);
 //	//
-//	//LLE1D(
-//	//	15000, //const numb	tMax,								// Время моделирования системы
-//	//	0.1,	//const numb	NT,									// Время нормализации
-//	//	1001,	//const int		nPts,								// Разрешение диаграммы
-//	//	0.01,	//const numb	h,									// Шаг интегрирования
-//	//	1e-4,	//const numb	eps,								// Эпсилон для LLE
-//	//	init,//const numb * initialConditions,					// Массив с начальными условиями
-//	//	sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-//	//	new numb[2]{ 2.6, 3.6 },//const numb * ranges,								// Диапазоны изменения параметров
-//	//	new int[1] { 8 },//const int* indicesOfMutVars,					// Индексы изменяемых параметров
-//	//	0,		//const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-//	//	100000,//const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-//	//	10000,//const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-//	//	params,//const numb * values,								// Параметры
-//	//	sizeof(params) / sizeof(numb),//const int		amountOfValues,
-//	//	"D:\\CUDAresults\\LLE1D_HR_neron.csv"//std::string		OUT_FILE_PATH
-//	//);
+	//LLE1D(
+	//	15000, //const numb	tMax,								// Время моделирования системы
+	//	0.1,	//const numb	NT,									// Время нормализации
+	//	1001,	//const int		nPts,								// Разрешение диаграммы
+	//	0.01,	//const numb	h,									// Шаг интегрирования
+	//	1e-4,	//const numb	eps,								// Эпсилон для LLE
+	//	init,//const numb * initialConditions,					// Массив с начальными условиями
+	//	sizeof(init) / sizeof(numb),//const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
+	//	new numb[2]{ 2.6, 3.6 },//const numb * ranges,								// Диапазоны изменения параметров
+	//	new int[1] { 8 },//const int* indicesOfMutVars,					// Индексы изменяемых параметров
+	//	0,		//const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
+	//	100000,//const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+	//	10000,//const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
+	//	params,//const numb * values,								// Параметры
+	//	sizeof(params) / sizeof(numb),//const int		amountOfValues,
+	//	"D:\\CUDAresults\\LLE1D_HR_neron.csv"//std::string		OUT_FILE_PATH
+	//);
 //	//
 //	//bifurcation_DFT_1D(
 //	//	25000,	//const numb	tMax,								// Время моделирования системы
