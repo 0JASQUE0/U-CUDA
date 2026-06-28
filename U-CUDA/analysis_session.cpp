@@ -2,9 +2,20 @@
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include <cstdlib>
+#include <cstdio>
 #include <cmath>
 #include <memory>
 #include <chrono>
+
+// Mirrors the top-bar indicator text to the console on completion so users
+// who keep stdout visible can see timings without watching the title bar.
+static void log_run_completed(const char* label, bool ok, double secs) {
+    std::printf("[run] %s %s in %.2fs\n",
+                ok ? "Done" : "Cancelled",
+                (label && *label) ? label : "(unnamed)",
+                secs);
+    std::fflush(stdout);
+}
 
 // Парсит значение (число или дробь a/b) в double; пусто -> fallback.
 static double parse_val(const std::string& s, double fallback) {
@@ -608,6 +619,7 @@ bool BifurcationAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("bifurcation") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_diagram_index = -1;
     cancel_token.reset();
@@ -894,6 +906,7 @@ bool LLEAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LLE") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_curve_index = -1;
     cancel_token.reset();
@@ -1045,6 +1058,7 @@ bool BasinsAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     cancel_token.reset();
     progress_token.reset();
@@ -1333,6 +1347,7 @@ bool LyapunovSpectrumAnalysisSession::poll() {
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LS") : label;
     last_run_succeeded = !cancelled;
+    log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
     running_curve_index = -1;
     cancel_token.reset();
