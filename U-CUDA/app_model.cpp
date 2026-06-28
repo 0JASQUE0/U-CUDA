@@ -323,6 +323,29 @@ void AppModel::remove_ls_curve(int i) {
 }
 
 void AppModel::remove_basins_config(int i) {
-    // Basins isn't part of parametric_queue, so no queue cleanup needed.
     basins_session.remove_config(i);
+    // Cleanup basins_queue: drop items pointing at the removed index, shift
+    // index > i down by one.
+    for (auto it = basins_queue.begin(); it != basins_queue.end(); ) {
+        if (it->index == i) it = basins_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : basins_queue)
+        if (it.index > i) --it.index;
+}
+
+bool AppModel::start_next_in_basins_queue() {
+    if (basins_session.in_flight) return false;
+    if (basins_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!basins_queue.empty()) {
+        BasinsQueueItem it = basins_queue.front();
+        basins_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)basins_session.configs.size()) {
+            if (basins_session.run_async(*parametric_engine, it.index)) return true;
+        }
+        // ok == false (krs пуст / индекс плохой) — last_error выставлен;
+        // идём дальше.
+    }
+    return false;
 }

@@ -2789,6 +2789,43 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         s.run_async(*model.parametric_engine, s.active_config_index);
     }
 
+    // Batch "Run all..." across basin configs. Pushes selected indices into
+    // model.basins_queue; draw_gui ticks the queue after polls.
+    ImGui::SameLine();
+    if (s.in_flight) ImGui::BeginDisabled();
+    if (ImGui::Button("Run all..."))
+        ImGui::OpenPopup("##run_all_basins");
+    if (s.in_flight) ImGui::EndDisabled();
+    if (!model.basins_queue.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu queued)", model.basins_queue.size());
+    }
+    if (ImGui::BeginPopup("##run_all_basins")) {
+        static std::vector<bool> picks;
+        if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
+
+        ImGui::TextDisabled("Sequential (one CUDA context).");
+        for (size_t i = 0; i < picks.size(); ++i) {
+            bool v = picks[i];
+            std::string lbl = s.configs[i].label + "###pbasins_" + std::to_string(i);
+            if (ImGui::Checkbox(lbl.c_str(), &v)) picks[i] = v;
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("All"))  { for (auto&& b : picks) b = true;  }
+        ImGui::SameLine();
+        if (ImGui::Button("None")) { for (auto&& b : picks) b = false; }
+        ImGui::SameLine();
+        if (ImGui::Button("Run")) {
+            for (size_t i = 0; i < picks.size(); ++i)
+                if (picks[i])
+                    model.basins_queue.push_back({(int)i});
+            model.start_next_in_basins_queue();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     if (c.last_run_ok) {
         int total = (int)c.result.basin_idx.size();
         int diverged = 0;
@@ -3219,6 +3256,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // очереди есть элементы — берём следующий и стартуем. start_next сам
     // проверяет условие и безопасен к вызову каждый кадр.
     model.start_next_in_parametric_queue();
+    // То же для basins-очереди (независимая).
+    model.start_next_in_basins_queue();
 
     // переключатель режимов
     int mode = (int)model.app_mode;
@@ -3231,7 +3270,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
     // Layout: [text] [progress bar] [Stop] for in-flight cancellable sessions;
     // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
-    // drains parametric_queue so remaining batch items don't auto-start.
+    // drains parametric_queue and basins_queue so remaining batch items
+    // don't auto-start.
     enum class BusyKind { None, Bif, LLE, LS, Basins, Phase };
     BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
@@ -3352,9 +3392,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         } else {
             double secs = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - busy_start).count();
-            if (!model.parametric_queue.empty())
+            // Queue suffix: prefer the queue that matches the running session
+            // (parametric for Bif/LLE/LS, basins for Basins).
+            size_t queue_n = 0;
+            if (busy_kind == BusyKind::Basins) queue_n = model.basins_queue.size();
+            else                               queue_n = model.parametric_queue.size();
+            if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
-                              busy_what.c_str(), phase_suffix, secs, model.parametric_queue.size());
+                              busy_what.c_str(), phase_suffix, secs, queue_n);
             else
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs",
                               busy_what.c_str(), phase_suffix, secs);
@@ -3408,7 +3453,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Basins: model.basins_session.request_cancel();      break;
                     default: break;
                 }
+                // Drain both queues so remaining batch items don't auto-start.
                 model.parametric_queue.clear();
+                model.basins_queue.clear();
             }
             ImGui::PopStyleColor(3);
         }

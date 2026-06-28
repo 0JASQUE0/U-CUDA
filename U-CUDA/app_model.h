@@ -30,6 +30,15 @@ struct ParametricQueueItem {
     int  index = 0;
 };
 
+// Один элемент basins-очереди — индекс config'а в basins_session.configs.
+// Basins живёт в отдельной очереди (а не в parametric_queue), потому что
+// сейчас параметрика и basins не пересекаются по UI: parametric "Run all"
+// пушит BD/LLE/LS, а basins "Run all" — свои configs. Драйнится тем же
+// движком, но независимым тиком в draw_gui.
+struct BasinsQueueItem {
+    int index = 0;
+};
+
 // Состояние распознавания (для UI-индикации).
 enum class OcrState { Idle, Running, Done, Failed };
 
@@ -152,6 +161,10 @@ public:
     // элемент с фронта и запускает run_async соответствующей сессии.
     // Возвращает true если что-то стартовало. Безопасно вызывать каждый кадр.
     bool start_next_in_parametric_queue();
+
+    // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
+    std::deque<BasinsQueueItem> basins_queue;
+    bool start_next_in_basins_queue();
 
     // Удаление конфига + чистка очереди (убрать item с этим индексом, у
     // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
