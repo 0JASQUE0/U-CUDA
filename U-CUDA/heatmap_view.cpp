@@ -530,11 +530,15 @@ void HeatmapView::render(PlotRenderer& renderer,
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
     dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
 
-    // Y-метка — стопкой букв. Сдвигаем X-позицию столбца ДИНАМИЧЕСКИ за самые
-    // широкие Y-тики (как в Plot2DView), иначе подпись наезжает на цифры,
-    // когда сетка nice-step выдала длинные числа типа "0.09177".
-    size_t yl_len = std::strlen(yl);
-    if (yl_len > 0) {
+    // Y-метка — повёрнута на -90° (читается снизу вверх, mathematical
+    // convention). Рендерим горизонтально через AddText, затем поворачиваем
+    // все добавленные вершины вокруг pivot. На ТОЧНО -90° матрица имеет
+    // целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
+    // сохраняется → шрифт остаётся чётким (AA-шум бывает только на
+    // произвольных углах). X-позиция считается ДИНАМИЧЕСКИ за самыми
+    // широкими тиками, иначе подпись наезжает на длинные числа.
+    ImVec2 ts_yl = ImGui::CalcTextSize(yl);
+    if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
         double ey0 = y_axis.view_min, ey1 = y_axis.view_max;
         double vry = ey1 - ey0;
@@ -550,16 +554,24 @@ void HeatmapView::render(PlotRenderer& renderer,
                 if (w > max_tick_w) max_tick_w = w;
             }
         }
-        float row_h   = font_h * 1.05f;
-        float stack_h = row_h * (float)yl_len;
-        float y_start = img_pos.y + (plot_h - stack_h) * 0.5f;
-        // Колонка букв слева от тиков с зазором 8px.
-        float center_x = img_pos.x - max_tick_w - 8.0f - font_h * 0.5f;
-        for (size_t i = 0; i < yl_len; ++i) {
-            char ch[2] = { yl[i], '\0' };
-            ImVec2 cs = ImGui::CalcTextSize(ch);
-            dl->AddText(ImVec2(center_x - cs.x * 0.5f, y_start + (float)i * row_h),
-                        col_text, ch);
+        // Pivot — позиция левого-верхнего угла ДО поворота, она же центр
+        // вращения. После -90° (dx, dy) ↦ (dy, -dx):
+        //   • по X текст займёт [pivot.x, pivot.x + ts_yl.y]
+        //   • по Y — [pivot.y - ts_yl.x, pivot.y]
+        // Снапим к целым пикселям для чёткости глифов.
+        float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts_yl.y);
+        float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
+        ImVec2 pivot(pivot_x, pivot_y);
+
+        int idx_start = dl->VtxBuffer.Size;
+        dl->AddText(pivot, col_text, yl);
+        int idx_end = dl->VtxBuffer.Size;
+        for (int i = idx_start; i < idx_end; ++i) {
+            ImDrawVert& v = dl->VtxBuffer[i];
+            float dx = v.pos.x - pivot.x;
+            float dy = v.pos.y - pivot.y;
+            v.pos.x = pivot.x + dy;
+            v.pos.y = pivot.y - dx;
         }
     }
 
