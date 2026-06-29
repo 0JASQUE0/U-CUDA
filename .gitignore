@@ -40,3 +40,22 @@ docs/
 # Local-only Claude session notes / tooling state
 CLAUDE.md
 .understand-anything/
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Build artifacts
+x64/
+.vs/
+*.exe
+*.dll
+*.pdb
+
+# vcpkg
+vcpkg_installed/
+
+ucuda-dashboard/
+
+.claudeignore

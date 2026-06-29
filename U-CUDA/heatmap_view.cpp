@@ -185,16 +185,22 @@ void HeatmapView::render(PlotRenderer& renderer,
     //   - Discrete auto   (discrete_levels == 0): one tick per integer level,
     //     label = vmin + k, position = band center.
     //   - Discrete manual (discrete_levels > 0):  tick at each band center,
-    //     label coincides with position (vmin + (k+0.5)*bandsize).
     //   - Continuous: ~5 nice_step values across [vmin, vmax].
     struct ColorbarTick { double label; float frac; };
     auto compute_ticks = [&]() {
         std::vector<ColorbarTick> out;
         double range = (double)vmax - (double)vmin;
         if (n_disc > 0) {
-            if (discrete_levels == 0) {
+            double rvmin = std::round((double)vmin);
+            double rvmax = std::round((double)vmax);
+            bool integer_like = std::abs(rvmin - (double)vmin) < 1e-6
+                             && std::abs(rvmax - (double)vmax) < 1e-6
+                             && (int)std::lround(rvmax - rvmin) == n_disc - 1;
+            if (integer_like) {
                 for (int k = 0; k < n_disc; ++k)
+
                     out.push_back({ (double)vmin + (double)k,
+
                                     ((float)k + 0.5f) / (float)n_disc });
             } else if (range > 0.0) {
                 double bs = range / (double)n_disc;
