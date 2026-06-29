@@ -90,7 +90,7 @@ int main() {
     std::shared_ptr<OcrClient> ocr;
     std::string ocr_init_error;
     try {
-        ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
+        //ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
     }
     catch (const std::exception& e) {
         ocr_init_error = e.what();
