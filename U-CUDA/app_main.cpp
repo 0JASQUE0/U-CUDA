@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <cstdio>
+#include <future>
 
 
 
@@ -81,25 +82,33 @@ static void set_clipboard_win(const std::string& text) {
 int main() {
     // ocr_server.py и library\ копируются рядом с exe в Post-Build Event.
     std::string dir = exe_dir() + "\\";
-    printf("Wait 10s, podnimaetsya server");
+    //printf("Wait 10s, podnimaetsya server");
     std::string ocr_script = dir + "ocr_server.py";
     std::string library_dir = dir + "library";
 
     std::string python_exe = resolve_python_exe(dir);
 
-    std::shared_ptr<OcrClient> ocr;
-    std::string ocr_init_error;
-    try {
-        //ocr = std::make_shared<OcrClient>(python_exe, ocr_script);
-    }
-    catch (const std::exception& e) {
-        ocr_init_error = e.what();
-    }
+    // Spawn the Python OCR server on a worker thread. Its ctor blocks ~10s
+    // waiting for READY from the model; doing it inline would delay window
+    // creation by the same amount. Exception (e.g. python missing) is stored
+    // in the future and re-thrown by .get() on first OCR call.
+    std::shared_future<std::shared_ptr<OcrClient>> ocr_future =
+        std::async(std::launch::async,
+            [python_exe, ocr_script]() -> std::shared_ptr<OcrClient> {
+                return std::make_shared<OcrClient>(python_exe, ocr_script);
+            }).share();
 
-    OcrFn ocr_fn = [ocr](const std::vector<unsigned char>& png) -> std::string {
-        if (!ocr) throw std::runtime_error("OCR not available");
-        return ocr->recognize_base64(b64encode(png));
+    OcrFn ocr_fn = [ocr_future](const std::vector<unsigned char>& png) -> std::string {
+        // First call blocks until READY (or rethrows the ctor's exception).
+        // start_ocr runs us on its own worker thread, so the UI stays alive.
+        auto client = ocr_future.get();
+        if (!client) throw std::runtime_error("OCR not available");
+        return client->recognize_base64(b64encode(png));
         };
+
+    // Populated lazily from ocr_future once it resolves; surfaced as a banner.
+    std::string ocr_init_error;
+    bool ocr_init_checked = false;
 
     AppModel model(ocr_fn);
     model.app_mode = AppModel::AppMode::Analysis;
@@ -238,6 +247,17 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        // Once the async OCR ctor finishes, peek at the result so we can show
+        // a warning banner if it failed. .get() is safe to call repeatedly on
+        // a shared_future; subsequent OCR-invocations from ocr_fn will hit the
+        // cached value.
+        if (!ocr_init_checked &&
+            ocr_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try { ocr_future.get(); }
+            catch (const std::exception& e) { ocr_init_error = e.what(); }
+            ocr_init_checked = true;
+        }
 
         if (!ocr_init_error.empty()) {
             ImGui::Begin("OCR warning");
