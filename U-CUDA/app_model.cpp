@@ -48,8 +48,6 @@ bool AppModel::refresh_symbols() {
     auto apply_sync = [&]() {
         sync(init_conditions, known_vars);
         sync(param_values, known_params);
-        sync(param_min, known_params);
-        sync(param_max, known_params);
     };
 
     // Helper: распарсить comma/space-separated список.
@@ -131,8 +129,6 @@ SystemRecord AppModel::to_record() const {
     r.step_h = step_h;
     r.init_conditions = init_conditions;
     r.param_values = param_values;
-    r.param_min = param_min;
-    r.param_max = param_max;
     r.custom_schemes = custom_schemes;
     return r;
 }
@@ -161,8 +157,6 @@ void AppModel::from_record(const SystemRecord& r) {
     step_h = r.step_h;
     init_conditions = r.init_conditions;
     param_values = r.param_values;
-    param_min = r.param_min;
-    param_max = r.param_max;
     custom_schemes = r.custom_schemes;
     loaded_name = r.name;          // запоминаем имя на диске
     // обновим списки символов (без падения, если система ещё неполна)
@@ -194,8 +188,6 @@ void AppModel::clear() {
     step_h.clear();
     init_conditions.clear();
     param_values.clear();
-    param_min.clear();
-    param_max.clear();
     custom_schemes.clear();
     known_vars.clear();
     known_params.clear();

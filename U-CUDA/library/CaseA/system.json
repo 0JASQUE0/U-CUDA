@@ -14,7 +14,5 @@
   "scheme_rk4": true,
   "step_h": "0.01",
   "init_conditions": {"x": "0.2", "y": "0.20", "z": "0.2"},
-  "param_values": {},
-  "param_min": {},
-  "param_max": {}
+  "param_values": {}
 }

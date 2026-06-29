@@ -88,8 +88,6 @@ public:
     std::string step_h;
     std::map<std::string, std::string> init_conditions; // var -> value
     std::map<std::string, std::string> param_values;    // param -> value
-    std::map<std::string, std::string> param_min;       // param -> min
-    std::map<std::string, std::string> param_max;       // param -> max
 
     // имена переменных/параметров, полученные при последнем refresh_symbols()
     std::vector<std::string> known_vars;

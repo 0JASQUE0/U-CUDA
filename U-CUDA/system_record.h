@@ -57,8 +57,4 @@ struct SystemRecord {
 
     // значения параметров по имени: "sigma" -> "10" (пустое = не задано)
     std::map<std::string, std::string> param_values;
-
-    // диапазоны параметров для бифуркаций: имя -> (min, max), строки
-    std::map<std::string, std::string> param_min;
-    std::map<std::string, std::string> param_max;
 };
