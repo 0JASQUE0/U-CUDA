@@ -176,40 +176,47 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // Compute colorbar ticks up-front so margin_right can reserve exactly the
-    // width needed for the widest label. Two modes:
-    //   - Discrete auto (discrete_levels == 0): one tick per integer level,
-    //     placed at the data value itself (vmin..vmax inclusive).
-    //   - Discrete manual (discrete_levels > 0): tick at each band center
-    //     (vmin + (k + 0.5) * bandsize).
+    // Colorbar tick: `label` is what's printed, `frac` is the 0..1 position
+    // along the bar (0 = vmin / bottom, 1 = vmax / top). They're decoupled
+    // because in discrete-auto mode the label is the integer level (vmin + k)
+    // but the position must be the band CENTER (k + 0.5)/n_disc — otherwise
+    // labels sit on segment boundaries instead of in the middle of each
+    // colored rectangle (mirrors MATLAB `cb.Ticks = idx + 0.5; cb.TickLabels = idx`).
+    //   - Discrete auto   (discrete_levels == 0): one tick per integer level,
+    //     label = vmin + k, position = band center.
+    //   - Discrete manual (discrete_levels > 0):  tick at each band center,
+    //     label coincides with position (vmin + (k+0.5)*bandsize).
     //   - Continuous: ~5 nice_step values across [vmin, vmax].
+    struct ColorbarTick { double label; float frac; };
     auto compute_ticks = [&]() {
-        std::vector<double> out;
+        std::vector<ColorbarTick> out;
         double range = (double)vmax - (double)vmin;
         if (n_disc > 0) {
             if (discrete_levels == 0) {
                 for (int k = 0; k < n_disc; ++k)
-                    out.push_back((double)vmin + (double)k);
+                    out.push_back({ (double)vmin + (double)k,
+                                    ((float)k + 0.5f) / (float)n_disc });
             } else if (range > 0.0) {
                 double bs = range / (double)n_disc;
                 for (int k = 0; k < n_disc; ++k)
-                    out.push_back((double)vmin + ((double)k + 0.5) * bs);
+                    out.push_back({ (double)vmin + ((double)k + 0.5) * bs,
+                                    ((float)k + 0.5f) / (float)n_disc });
             }
         } else if (range > 0.0) {
             double step = nice_step(range, 5);
             if (step > 0.0) {
                 double start = std::ceil((double)vmin / step) * step;
                 for (double v = start; v <= (double)vmax + step * 0.5; v += step)
-                    out.push_back(v);
+                    out.push_back({ v, (float)((v - (double)vmin) / range) });
             }
         }
-        if (out.empty()) out.push_back((double)vmin);
+        if (out.empty()) out.push_back({ (double)vmin, 0.5f });
         return out;
     };
-    std::vector<double> tick_vals = compute_ticks();
+    std::vector<ColorbarTick> tick_vals = compute_ticks();
     float max_tick_w = 0.0f;
-    for (double v : tick_vals) {
-        float w = ImGui::CalcTextSize(fmt_tick(v).c_str()).x;
+    for (const auto& t : tick_vals) {
+        float w = ImGui::CalcTextSize(fmt_tick(t.label).c_str()).x;
         max_tick_w = std::max(max_tick_w, w);
     }
     const float margin_right = colorbar_w + colorbar_gap + tick_len + tick_text_gap + max_tick_w + 6.0f;
@@ -585,24 +592,24 @@ void HeatmapView::render(PlotRenderer& renderer,
         // line up with the bands they describe and margin_right reserved the
         // correct width for them.
         double range = (double)vmax - (double)vmin;
-        for (double value : tick_vals) {
+        for (const auto& t : tick_vals) {
             if (range <= 0.0) {
                 // Degenerate vmin == vmax: still draw the single label centered.
                 float y = cb_y + cb_h * 0.5f;
-                std::string s = fmt_tick(value);
+                std::string s = fmt_tick(t.label);
                 dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
                                    y - font_h * 0.5f),
                             col_text, s.c_str());
                 continue;
             }
-            float frac = (float)((value - (double)vmin) / range);
+            float frac = t.frac;
             if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
             frac = std::min(std::max(frac, 0.0f), 1.0f);
             float y = cb_y + cb_h * (1.0f - frac);
             dl->AddLine(ImVec2(cb_x + colorbar_w, y),
                         ImVec2(cb_x + colorbar_w + tick_len, y),
                         col_text);
-            std::string s = fmt_tick(value);
+            std::string s = fmt_tick(t.label);
             dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
                                y - font_h * 0.5f),
                         col_text, s.c_str());
