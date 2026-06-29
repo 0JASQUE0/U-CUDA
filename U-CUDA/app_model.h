@@ -143,6 +143,16 @@ public:
     // сюда; static HeatmapView в draw_lle_plot читает при первом создании.
     int heatmap_colormap = 0;
 
+    // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/
+    // States) хранит свой независимый выбор, чтобы переключение в одном не
+    // влияло на остальные. Отдельно от heatmap_colormap, который шарится
+    // Bif/LLE/LS. 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолты = Turbo
+    // (хорошо разделяет дискретные / категориальные значения).
+    int basins_colormap        = 2;
+    int basins_avgpk_colormap  = 2;
+    int basins_avgint_colormap = 2;
+    int basins_states_colormap = 2;
+
     // Кол-во значащих цифр в подписях тиков осей и colorbar'а (2-10).
     // Зеркалит AppConfig::tick_precision; при изменении в Settings вызывается
     // set_tick_precision() из plot_axis.h, чтобы fmt_tick() сразу подхватил.

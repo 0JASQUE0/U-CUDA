@@ -1491,6 +1491,10 @@ static void draw_bifurcation_plot(AppModel& model) {
                     cfg.ui_scale_override = model.ui_scale_override;
                     cfg.use_builtin_font  = model.use_builtin_font;
                     cfg.heatmap_colormap  = cmap_idx;
+                    cfg.basins_colormap        = model.basins_colormap;
+                    cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                    cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                    cfg.basins_states_colormap = model.basins_states_colormap;
                     save_app_config(get_exe_dir_with_sep(), cfg);
                 }
                 ImGui::SameLine();
@@ -1975,6 +1979,10 @@ static void draw_lle_plot(AppModel& model) {
             cfg.ui_scale_override = model.ui_scale_override;
             cfg.use_builtin_font  = model.use_builtin_font;
             cfg.heatmap_colormap  = cmap_idx;
+            cfg.basins_colormap        = model.basins_colormap;
+            cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+            cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+            cfg.basins_states_colormap = model.basins_states_colormap;
             save_app_config(get_exe_dir_with_sep(), cfg);
         }
         ImGui::SameLine();
@@ -2428,7 +2436,11 @@ static void draw_ls_plot(AppModel& model) {
             cfg.ui_scale_override = model.ui_scale_override;
             cfg.use_builtin_font  = model.use_builtin_font;
             cfg.heatmap_colormap  = cmap_idx;
-            cfg.tick_precision    = model.tick_precision;
+            cfg.basins_colormap        = model.basins_colormap;
+            cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+            cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+            cfg.basins_states_colormap = model.basins_states_colormap;
+            cfg.tick_precision         = model.tick_precision;
             save_app_config(get_exe_dir_with_sep(), cfg);
         }
 
@@ -2936,6 +2948,43 @@ static void draw_basins_plot(AppModel& model) {
         ImGui::EndTabBar();
     }
 
+    // Combo выбора colormap — свой для каждого heatmap-таба (Basins/AvgPk/
+    // AvgInt/States). Каждый выбор пишется в свой field в AppModel и
+    // персистится в _app_config.json. Все эти поля независимы от
+    // model.heatmap_colormap (тот шарится Bif/LLE/LS) — смена здесь их не
+    // затрагивает, и наоборот. Scatter-таб использует Plot2DView, без
+    // colormap.
+    {
+        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+        int* field = nullptr;
+        const char* combo_id = nullptr;
+        switch (c.active_plot_tab) {
+            case 0: field = &model.basins_colormap;        combo_id = "Colormap##bas";     break;
+            case 1: field = &model.basins_avgpk_colormap;  combo_id = "Colormap##bas_pk";  break;
+            case 2: field = &model.basins_avgint_colormap; combo_id = "Colormap##bas_int"; break;
+            case 3: field = &model.basins_states_colormap; combo_id = "Colormap##bas_st";  break;
+            default: break;  // Scatter (4) — без combo
+        }
+        if (field) {
+            int cmap_idx = *field;
+            if (cmap_idx < 0 || cmap_idx > 3) cmap_idx = 2;
+            ImGui::SetNextItemWidth(140);
+            if (ImGui::Combo(combo_id, &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+                *field = cmap_idx;
+                AppConfig cfg;
+                cfg.ui_scale_override      = model.ui_scale_override;
+                cfg.use_builtin_font       = model.use_builtin_font;
+                cfg.heatmap_colormap       = model.heatmap_colormap;
+                cfg.basins_colormap        = model.basins_colormap;
+                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                cfg.basins_states_colormap = model.basins_states_colormap;
+                cfg.tick_precision         = model.tick_precision;
+                save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+        }
+    }
+
     int n = c.result.n_pts;
     size_t total = (size_t)n * (size_t)n;
     double xlo = c.result.axis_x_lo, xhi = c.result.axis_x_hi;
@@ -2977,7 +3026,10 @@ static void draw_basins_plot(AppModel& model) {
         else                                     vmin = 1.0;
         double vmax = (double)c.result.n_clusters;
         if (vmax < vmin) vmax = vmin;
-        hm_basins_v.colormap = HeatmapColormap::Turbo;
+        {
+            int cm = model.basins_colormap;
+            hm_basins_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+        }
         hm_basins_v.x_axis.name = ax_x;
         hm_basins_v.y_axis.name = ax_y;
         hm_basins_v.render(*renderer, origin, avail,
@@ -2987,7 +3039,10 @@ static void draw_basins_plot(AppModel& model) {
                           vmin, vmax, fit);
     }
     else if (c.active_plot_tab == 1) {
-        hm_avgpk_v.colormap = HeatmapColormap::Viridis;
+        {
+            int cm = model.basins_avgpk_colormap;
+            hm_avgpk_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+        }
         hm_avgpk_v.x_axis.name = ax_x;
         hm_avgpk_v.y_axis.name = ax_y;
         hm_avgpk_v.render(*renderer, origin, avail,
@@ -2997,7 +3052,10 @@ static void draw_basins_plot(AppModel& model) {
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
     }
     else if (c.active_plot_tab == 2) {
-        hm_avgint_v.colormap = HeatmapColormap::Viridis;
+        {
+            int cm = model.basins_avgint_colormap;
+            hm_avgint_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+        }
         hm_avgint_v.x_axis.name = ax_x;
         hm_avgint_v.y_axis.name = ax_y;
         hm_avgint_v.render(*renderer, origin, avail,
@@ -3019,7 +3077,10 @@ static void draw_basins_plot(AppModel& model) {
             int v = c.result.helpful_array[k];
             buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
         }
-        hm_states_v.colormap = HeatmapColormap::Turbo;
+        {
+            int cm = model.basins_states_colormap;
+            hm_states_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+        }
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
         hm_states_v.render(*renderer, origin, avail,
@@ -3027,8 +3088,8 @@ static void draw_basins_plot(AppModel& model) {
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           0.0, 2.0, fit);
-        // Подсказка под плотом — где какой цвет.
-        ImGui::TextDisabled("Turbo: 0=Osc, 1=FixedPoint, 2=Unbound");
+        // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
+        ImGui::TextDisabled("Levels: 0=Osc, 1=FixedPoint, 2=Unbound");
     }
     else if (c.active_plot_tab == 4) {
         // Scatter (avgPeak, avgInterval), точки сгруппированы по basin_idx.
@@ -3654,7 +3715,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = ui_slider_value;
                 cfg.use_builtin_font  = model.use_builtin_font;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.tick_precision    = model.tick_precision;
+                cfg.basins_colormap        = model.basins_colormap;
+                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                cfg.basins_states_colormap = model.basins_states_colormap;
+                cfg.tick_precision         = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::SameLine();
@@ -3665,7 +3730,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = 0.0f;
                 cfg.use_builtin_font  = model.use_builtin_font;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.tick_precision    = model.tick_precision;
+                cfg.basins_colormap        = model.basins_colormap;
+                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                cfg.basins_states_colormap = model.basins_states_colormap;
+                cfg.tick_precision         = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Auto detected: %.2fx   |   Override: %s",
@@ -3684,7 +3753,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = model.ui_scale_override;
                 cfg.use_builtin_font  = use_builtin;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.tick_precision    = model.tick_precision;
+                cfg.basins_colormap        = model.basins_colormap;
+                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                cfg.basins_states_colormap = model.basins_states_colormap;
+                cfg.tick_precision         = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
@@ -3701,7 +3774,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 cfg.ui_scale_override = model.ui_scale_override;
                 cfg.use_builtin_font  = model.use_builtin_font;
                 cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.tick_precision    = tp;
+                cfg.basins_colormap        = model.basins_colormap;
+                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
+                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
+                cfg.basins_states_colormap = model.basins_states_colormap;
+                cfg.tick_precision         = tp;
                 save_app_config(get_exe_dir_with_sep(), cfg);
             }
             ImGui::TextDisabled("Significant digits in axis tick and colorbar labels.");
