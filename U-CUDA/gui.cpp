@@ -2780,6 +2780,32 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Writable var", &c.writable_var, items.data(), (int)items.size());
     }
 
+    // ----- Feature selection -----
+    // 12 фич (см. BF_* в configCUDA.h / enum BasinFeature в analysis_session.h).
+    // Feature 1 пишется в outAvgPeaks-буфер (X-координата DBSCAN), Feature 2 —
+    // в AvgTimeOfPeaks-буфер (Y-координата). Множители применяются ПОСЛЕ
+    // вычисления фичи и нужны для масштабирования кластеризации.
+    ImGui::Separator();
+    ImGui::Text("Features (DBSCAN axes + plot data):");
+    static const char* feat_names[] = {
+        "Avg peaks",             "Avg intervals",
+        "RMS peaks",             "RMS intervals",
+        "StDev peaks",           "StDev intervals",
+        "sign\xc2\xb7log10|avg peaks|", "sign\xc2\xb7log10|avg intervals|",
+        "log10 RMS peaks",       "log10 RMS intervals",
+        "log10 StDev peaks",     "log10 StDev intervals",
+    };
+    if (c.feature1 < 0 || c.feature1 >= BF_FEATURE_COUNT) c.feature1 = BF_FEATURE1_DEFAULT;
+    if (c.feature2 < 0 || c.feature2 >= BF_FEATURE_COUNT) c.feature2 = BF_FEATURE2_DEFAULT;
+    ImGui::SetNextItemWidth(220);
+    ImGui::Combo("Feature 1##bas", &c.feature1, feat_names, IM_ARRAYSIZE(feat_names));
+    ImGui::SameLine();
+    InputNumStr("mult##bas_f1", c.mult_feature1_text, 80);
+    ImGui::SetNextItemWidth(220);
+    ImGui::Combo("Feature 2##bas", &c.feature2, feat_names, IM_ARRAYSIZE(feat_names));
+    ImGui::SameLine();
+    InputNumStr("mult##bas_f2", c.mult_feature2_text, 80);
+
     ImGui::Separator();
     ImGui::Text("Integration:");
     InputNumStr("h",              c.h_text,           120);
@@ -2792,13 +2818,13 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     ImGui::Separator();
     InputNumStr("DBSCAN eps", c.eps_dbscan_text, 120);
-    ImGui::TextDisabled("Clustering radius in (avgPeak, avgInterval) space.");
+    ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
 
     ImGui::Separator();
     ImGui::Text("CSV output:");
     ImGui::Checkbox("Save to file", &c.csv_save_enabled);
     InputTextStr("##basins_csv_path", c.csv_output_path);
-    ImGui::TextDisabled("Writes 4 files: <path>, _1.csv (avgPk), _2.csv (avgInt), _3.csv (states).");
+    ImGui::TextDisabled("Writes 4 files: <path>, _1.csv (Feature 1), _2.csv (Feature 2), _3.csv (states).");
 
     ImGui::Separator();
     ImGui::Text("Initial conditions (for non-axis variables):");
@@ -2946,7 +2972,9 @@ static void draw_basins_plot(AppModel& model) {
     }
 
     // Inner tab-bar — переключение по 5 видам.
-    const char* tab_names[5] = { "Basins", "Avg peaks", "Avg interval", "States", "Scatter" };
+    // Имена 2-го и 3-го табов нейтральные — они показывают выбранную фичу
+    // (Feature 1/2 из BasinsConfig), которая может быть не "avg peaks/interval".
+    const char* tab_names[5] = { "Basins", "Feature 1", "Feature 2", "States", "Scatter" };
     if (ImGui::BeginTabBar("##basins_inner")) {
         for (int t = 0; t < 5; ++t) {
             if (ImGui::BeginTabItem(tab_names[t])) {
@@ -3161,8 +3189,20 @@ static void draw_basins_plot(AppModel& model) {
             glob_vis.push_back(true);
         }
         (void)n_total_clusters;
-        scatter_v.x_axis.name = "avg peak";
-        scatter_v.y_axis.name = "avg interval";
+        // Имена осей scatter'а — выбранные фичи. Должны быть синхронизированы
+        // с feat_names в draw_basins_controls (тот же порядок BF_*).
+        static const char* feat_names_plot[] = {
+            "Avg peaks",             "Avg intervals",
+            "RMS peaks",             "RMS intervals",
+            "StDev peaks",           "StDev intervals",
+            "sign\xc2\xb7log10|avg peaks|", "sign\xc2\xb7log10|avg intervals|",
+            "log10 RMS peaks",       "log10 RMS intervals",
+            "log10 StDev peaks",     "log10 StDev intervals",
+        };
+        int f1 = (c.feature1 >= 0 && c.feature1 < BF_FEATURE_COUNT) ? c.feature1 : BF_FEATURE1_DEFAULT;
+        int f2 = (c.feature2 >= 0 && c.feature2 < BF_FEATURE_COUNT) ? c.feature2 : BF_FEATURE2_DEFAULT;
+        scatter_v.x_axis.name = feat_names_plot[f1];
+        scatter_v.y_axis.name = feat_names_plot[f2];
         scatter_v.render(*renderer, origin, avail,
                              /*owner_id*/ base_oid + 4u, c.data_generation,
                              series_in, init_vis, glob_vis, fit);

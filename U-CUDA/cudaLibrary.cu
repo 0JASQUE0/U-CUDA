@@ -168,6 +168,114 @@ __device__ __host__ numb sign(numb x) {
 		return 0;
 }
 
+// Внутренняя функция: обрабатывает рекурсию по m (бинарное дерево)
+// Аналог chua_multistep_extended из твоего примера
+__device__ __host__ numb chua_inner(numb x, numb m, numb d, numb kslope, numb mu_val, numb M_val) {
+	numb sg_prod = 1.0;    // Накопленное произведение знаков
+	numb offset = 0.0;     // Накопленное смещение
+
+	const int MAX_ITER = 100; // Ограничивает уровни внутренней матрешки
+	int iter = 0;
+
+	while (iter < MAX_ITER) {
+		// Базовый случай: масштаб стал слишком маленьким
+		if (d < 1e-14) {
+			return sg_prod * (-x) - offset;
+		}
+
+		numb sg_current = (x < 0) ? -1.0 : 1.0;
+		numb x_abs = (x < 0) ? -x : x;
+		sg_prod *= sg_current;
+
+		// Пороги из MATLAB-кода
+		numb b_val = 2.0 * d * (kslope * m - m - kslope + 1.0) / M_val / (m - 1.0);
+		numb thr_lin = (d * (m - 2.0) / (m - 1.0) + b_val) / kslope;
+		numb thr_hor_left = (m - 2.0) / (m - 1.0) * d;
+		numb thr_hor_right = m / (m - 1.0) * d;
+
+		// Проверка зон
+		if (x_abs < thr_lin) {
+			// Линейный участок
+			numb y = -kslope * x_abs + b_val;
+			return sg_prod * y - offset;
+		}
+		else if (x_abs < thr_hor_left) {
+			// Горизонтальный участок слева
+			numb y = -(m - 2.0) / (m - 1.0) * d;
+			return sg_prod * y - offset;
+		}
+		else if (x_abs > thr_hor_right) {
+			// Горизонтальный участок справа 
+			// (x_abs <= mu*d гарантированно, так как мы внутри базового интервала)
+			numb y = -m / (m - 1.0) * d;
+			return sg_prod * y - offset;
+		}
+		else {
+			// Фрактальная часть с масштабированием по m: f(x) = f(x-d, d/m) - d
+			offset += sg_prod * d;
+			x = x_abs - d;
+			d = d / m;
+			++iter;
+		}
+	}
+	// Защита от зацикливания
+	return sg_prod * (-x) - offset;
+}
+
+// Внешняя функция: обрабатывает рекурсию по M и собирает итоговое выражение
+// Аналог psi_m из твоего примера
+__device__ __host__ numb psi_two_scale(numb x, numb m, numb M, numb d, numb kslope) {
+	// Вычисляем mu и границу базового интервала [x0, x0 * M]
+	numb mu_val = (m * (2.0 - 1.0 / kslope) - 2.0 * (1.0 - 1.0 / kslope)) / (m - 1.0);
+	numb x0 = mu_val * d / M;
+
+	if (x == 0) x = 1e-15;
+
+	numb sg = (x < 0) ? -1.0 : 1.0;
+	numb x_abs = (x < 0) ? -x : x;
+
+	numb current_x0 = x0;
+	numb current_A = 1.0; // Множитель масштаба
+	bool flag = true;
+
+	const int MAX_OUTER_ITER = 100; // Ограничивает уровни внешней матрешки
+	int outer_iter = 0;
+
+	// Находим нужную октаву (интервал, масштабированный по M)
+	while (flag && outer_iter < MAX_OUTER_ITER) {
+		numb x1 = M * current_x0;
+		if (x_abs > x1) {
+			// x слишком большой, увеличиваем интервал
+			current_x0 = M * current_x0;
+			current_A = current_A * M;
+		}
+		else if (x_abs > current_x0 && x_abs <= x1) {
+			// Попали в нужный интервал
+			flag = false;
+		}
+		else {
+			// x слишком маленький, уменьшаем интервал
+			current_x0 = current_x0 / M;
+			current_A = current_A / M;
+		}
+		outer_iter++;
+	}
+
+	// Отображаем x_abs в базовый интервал [x0, x0 * M]
+	numb x_arg = (x_abs - current_x0) / current_A + x0;
+
+	// Вычисляем значение внутренней функции для базового интервала
+	numb y_inner = chua_inner(x_arg, m, d, kslope, mu_val, M);
+
+	// Масштабируем результат обратно (учитываем внешнее масштабирование по M)
+	numb y_scaled = current_A * y_inner;
+
+	// Возвращаем готовый член уравнения: 0.19 * (chua_twoscale(x) + x)
+	numb res = 0.19 * (sg * y_scaled + x);
+
+	return res;
+}
+
 //__device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb kslope, numb dmargin) {
 //	
 //	
@@ -807,8 +915,8 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 
 
 		if (data != nullptr) {
-			//data[startDataIndex + i] = x[0] + pi* x[1] + euler*x[2];
-			data[startDataIndex + i] = (x[writableVar]);
+			data[startDataIndex + i] = x[0] + pi* x[1] + euler*x[2];
+			//data[startDataIndex + i] = (x[writableVar]);
 
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {
@@ -3149,75 +3257,121 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 // hidden под NVRTC (они тянут зависимости, NonLinAnal оставил их host-only).
 #endif // __CUDACC_RTC__ — re-opened below after basins kernels
 
-__global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
-	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h)
+// Возвращает 4 флага: нужны ли (sum_p, sum_p², sum_i, sum_i²) для feat. Логика
+// зеркалит compute_basin_feature: AVG→sum, RMS→sum², STDEV→оба. feature1/2 в
+// kernel'е — uniform по warp'у, поэтому ветви компилируются в константы и
+// dead code выпиливается.
+__device__ __host__ __forceinline__
+void feature_needs(int feat, bool& sp, bool& sp2, bool& si, bool& si2)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
-	int idx = threadIdx.x + blockIdx.x * blockDim.x;
-	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
-		return;
+	sp = sp2 = si = si2 = false;
+	switch (feat) {
+		case BF_AVG_PEAKS:           case BF_LOG_AVG_PEAKS:        sp  = true;             break;
+		case BF_AVG_INTERVALS:       case BF_LOG_AVG_INTERVALS:    si  = true;             break;
+		case BF_RMS_PEAKS:           case BF_LOG_RMS_PEAKS:        sp2 = true;             break;
+		case BF_RMS_INTERVALS:       case BF_LOG_RMS_INTERVALS:    si2 = true;             break;
+		case BF_STDEV_PEAKS:         case BF_LOG_STDEV_PEAKS:      sp  = true; sp2 = true; break;
+		case BF_STDEV_INTERVALS:     case BF_LOG_STDEV_INTERVALS:  si  = true; si2 = true; break;
+		default: break;
+	}
+}
 
-	// 1 - stability, -1 - fixed point, 0 - unbound solution
-	if (systemCheker[idx] == 0) // unbound solution
-	{
-		outAvgPeaks[idx] = 999;
+// Финальный feature dispatch. mean_*/rms_*/std_* должны быть посчитаны, если
+// feature_needs пометил соответствующий sum (иначе по контракту приходит 0,
+// что для не-выбранной фичи всё равно никогда не используется).
+__device__ __host__ __forceinline__
+numb compute_basin_feature(int feat,
+	numb mean_p, numb mean_i, numb rms_p, numb rms_i, numb std_p, numb std_i)
+{
+	switch (feat) {
+		case BF_AVG_PEAKS:            return mean_p;
+		case BF_AVG_INTERVALS:        return mean_i;
+		case BF_RMS_PEAKS:            return rms_p;
+		case BF_RMS_INTERVALS:        return rms_i;
+		case BF_STDEV_PEAKS:          return std_p;
+		case BF_STDEV_INTERVALS:      return std_i;
+		case BF_LOG_AVG_PEAKS:        return mean_p == (numb)0 ? (numb)0 : (mean_p > 0 ?  log10(mean_p) : -log10(-mean_p));
+		case BF_LOG_AVG_INTERVALS:    return mean_i == (numb)0 ? (numb)0 : (mean_i > 0 ?  log10(mean_i) : -log10(-mean_i));
+		case BF_LOG_RMS_PEAKS:        return rms_p > 0 ? log10(rms_p) : (numb)-999;
+		case BF_LOG_RMS_INTERVALS:    return rms_i > 0 ? log10(rms_i) : (numb)-999;
+		case BF_LOG_STDEV_PEAKS:      return std_p > 0 ? log10(std_p) : (numb)-999;
+		case BF_LOG_STDEV_INTERVALS:  return std_i > 0 ? log10(std_i) : (numb)-999;
+		default:                      return (numb)-999;
+	}
+}
+
+__global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
+	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h,
+	int feature1, int feature2, numb mult1, numb mult2)
+{
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	if (idx >= amountOfBlocks) return;
+
+	// systemCheker: 1=Osc, -1=FP, 0=Unbound. FP/Unbound — sentinel values, чтобы
+	// downstream DBSCAN их распознал; не считаем фичи для них.
+	if (systemCheker[idx] == 0) {                           // unbound
+		outAvgPeaks[idx]    = 999;
 		AvgTimeOfPeaks[idx] = 999;
 		return;
 	}
-
-	if (systemCheker[idx] == -1) //fixed point
-	{
-		outAvgPeaks[idx] = data[idx * sizeOfBlock + sizeOfBlock - 1];
+	if (systemCheker[idx] == -1) {                          // fixed point
+		outAvgPeaks[idx]    = data[idx * sizeOfBlock + sizeOfBlock - 1];
 		AvgTimeOfPeaks[idx] = -1.0;
 		return;
 	}
-
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
-	//if (outAvgPeaks[idx] == -1)
-	//{
-	//	outAvgPeaks[idx] = NAN;
-	//	AvgTimeOfPeaks[idx] = NAN;
-	//	return;
-	//}
-
-	outAvgPeaks[idx] = 0;
-	AvgTimeOfPeaks[idx] = 0;
-
-	//__device__ __host__ int peakFinder(numb* data, const int startDataIndex,
-	//	const int amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h)
 
 	int amountOfPeaks = peakFinder(data, idx * sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
-
-
-	for (int i = 0; i < amountOfPeaks; ++i)
-	{
-		outAvgPeaks[idx] += outPeaks[idx * sizeOfBlock + i];
-		AvgTimeOfPeaks[idx] += timeOfPeaks[idx * sizeOfBlock + i];
-	}
-
-	if (amountOfPeaks <= 0) //No peaks
-	{
-		outAvgPeaks[idx] = -999;
+	if (amountOfPeaks <= 0) {
+		outAvgPeaks[idx]    = -999;
 		AvgTimeOfPeaks[idx] = -1.0;
 		return;
 	}
 
-	AvgTimeOfPeaks[idx] = AvgTimeOfPeaks[idx] * mult_avg_interval;
-	outAvgPeaks[idx] = outAvgPeaks[idx] * mult_avg_peak;
-	AvgTimeOfPeaks[idx] /= amountOfPeaks;
+	// Какие первичные суммы реально нужны для (feature1, feature2). feature1/2
+	// одинаковы для всех threads в launch'е → branches uniform, компилятор
+	// выкидывает мёртвые ветки. RAW значения (без mult) — масштаб применяем
+	// только к финальной фиче в конце.
+	bool a_sp, a_sp2, a_si, a_si2, b_sp, b_sp2, b_si, b_si2;
+	feature_needs(feature1, a_sp, a_sp2, a_si, a_si2);
+	feature_needs(feature2, b_sp, b_sp2, b_si, b_si2);
+	const bool need_sp  = a_sp  || b_sp;
+	const bool need_sp2 = a_sp2 || b_sp2;
+	const bool need_si  = a_si  || b_si;
+	const bool need_si2 = a_si2 || b_si2;
 
-	if (lin_or_log == 1)
-		outAvgPeaks[idx] /= amountOfPeaks;
-	else {
-		if (outAvgPeaks[idx] > 0)
-			outAvgPeaks[idx] = log10(outAvgPeaks[idx] / amountOfPeaks);
-		else if (outAvgPeaks[idx] < 0)
-			outAvgPeaks[idx] = -log10(abs(outAvgPeaks[idx]) / amountOfPeaks);
-		else
-			outAvgPeaks[idx] = 0;
+	numb sum_p = 0, sum_p2 = 0, sum_i = 0, sum_i2 = 0;
+	for (int i = 0; i < amountOfPeaks; ++i) {
+		if (need_sp || need_sp2) {
+			numb p = outPeaks[idx * sizeOfBlock + i];
+			if (need_sp)  sum_p  += p;
+			if (need_sp2) sum_p2 += p * p;
+		}
+		if (need_si || need_si2) {
+			numb it = timeOfPeaks[idx * sizeOfBlock + i];
+			if (need_si)  sum_i  += it;
+			if (need_si2) sum_i2 += it * it;
+		}
 	}
 
-	return;
+	numb inv_n = (numb)1.0 / (numb)amountOfPeaks;
+	numb mean_p = need_sp  ? sum_p  * inv_n         : (numb)0;
+	numb mean_i = need_si  ? sum_i  * inv_n         : (numb)0;
+	numb rms_p  = need_sp2 ? sqrt(sum_p2 * inv_n)   : (numb)0;
+	numb rms_i  = need_si2 ? sqrt(sum_i2 * inv_n)   : (numb)0;
+	// var = E[x²] - E[x]²; floor at 0 чтобы sqrt не упал от округлений.
+	numb std_p = 0;
+	if (need_sp && need_sp2) {
+		numb v = sum_p2 * inv_n - mean_p * mean_p;
+		std_p = sqrt(v < 0 ? (numb)0 : v);
+	}
+	numb std_i = 0;
+	if (need_si && need_si2) {
+		numb v = sum_i2 * inv_n - mean_i * mean_i;
+		std_i = sqrt(v < 0 ? (numb)0 : v);
+	}
+
+	outAvgPeaks[idx]    = mult1 * compute_basin_feature(feature1, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
+	AvgTimeOfPeaks[idx] = mult2 * compute_basin_feature(feature2, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
 }
 
 __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, const int amountOfBlocks,

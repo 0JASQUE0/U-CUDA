@@ -47,7 +47,7 @@ constexpr bool LINEAR_OR_LOG_DISTRIB = 1;
 // --- CHOOSE AVG OR LOG10(AVG) ANALYSIS ---
 // 1 -- avg peak analysis; 
 // 0 -- log10(avg peak) analysis
-constexpr bool lin_or_log = 1; 
+constexpr bool lin_or_log = 0; 
 
 // --- CALCULATE ADDITIONALLY MEAN AND MEDIAN FREQUENCY? ---
 // 1 -- yes; 
@@ -76,8 +76,46 @@ constexpr numb mult_peak  = 1.0; // multiplier for peak values for DBSCAN //1000
 constexpr numb mult_interval = 0.0; // multiplier for interval values for DBSCAN //4
 
 // --- MULTIPLIERS FOR DBSCAN (Basins of attraction) ---
+// Дефолты для mult1/mult2 в avgPeakFinderCUDA. Используются как default args
+// kernel'а, в headless call site (hostLibrary.cu) и как initial value для
+// UI-полей mult_feature1_text / mult_feature2_text в BasinsConfig.
 constexpr numb mult_avg_peak = 1.0; // multiplier for average peak values for DBSCAN (basins of attraction)
 constexpr numb mult_avg_interval = 1.0; // multiplier for average interval values for DBSCAN (basins of attraction)
+
+// ---------------------------------------------------------------------------
+// avgPeakFinderCUDA — feature codes. Источник истины для switch'а внутри
+// kernel'а И для headless callers (без UI), которые должны явно указать,
+// какие фичи писать в outAvgPeaks / AvgTimeOfPeaks. Host-side mirror —
+// enum class BasinFeature в analysis_session.h (значения совпадают;
+// static_assert'ы в analysis_session.cpp ловят drift).
+//
+// Значения features:
+//   AVG     — mean(peaks/intervals)
+//   RMS     — sqrt(mean(x²))
+//   STDEV   — sqrt(mean(x²) - mean(x)²)
+//   LOG_AVG — sign(mean) * log10(|mean|), 0 при mean==0
+//   LOG_RMS — log10(RMS), -999 при RMS==0
+//   LOG_STDEV — log10(StDev), -999 при StDev==0
+// ---------------------------------------------------------------------------
+constexpr int BF_AVG_PEAKS            = 0;
+constexpr int BF_AVG_INTERVALS        = 1;
+constexpr int BF_RMS_PEAKS            = 2;
+constexpr int BF_RMS_INTERVALS        = 3;
+constexpr int BF_STDEV_PEAKS          = 4;
+constexpr int BF_STDEV_INTERVALS      = 5;
+constexpr int BF_LOG_AVG_PEAKS        = 6;
+constexpr int BF_LOG_AVG_INTERVALS    = 7;
+constexpr int BF_LOG_RMS_PEAKS        = 8;
+constexpr int BF_LOG_RMS_INTERVALS    = 9;
+constexpr int BF_LOG_STDEV_PEAKS      = 10;
+constexpr int BF_LOG_STDEV_INTERVALS  = 11;
+constexpr int BF_FEATURE_COUNT        = 12;
+
+// Дефолты — семантически равны pre-feature-selection поведению (mean пиков,
+// mean интервалов). Подставляются как default args kernel'а, в UI и в
+// initial value BasinsConfig::feature1 / feature2.
+constexpr int BF_FEATURE1_DEFAULT = BF_AVG_PEAKS;
+constexpr int BF_FEATURE2_DEFAULT = BF_AVG_INTERVALS;
 
 constexpr int blockSize_setup = 32; // default blockSize value
 constexpr int set_precision  = 15; // precision of numbers in writng final csv files

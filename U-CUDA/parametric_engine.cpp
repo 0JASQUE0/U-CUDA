@@ -3425,11 +3425,20 @@ struct ParametricEngine::Impl {
             double* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
             double* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
 
+            // feature1/feature2 + mult1/mult2 — выбор пользователя (см.
+            // BasinsConfig). Копируем req-поля в local non-const, чтобы
+            // взять адреса для void*[] (req — const ref).
+            int  feature1_int = req.feature1;
+            int  feature2_int = req.feature2;
+            numb mult1_v      = req.mult1;
+            numb mult2_v      = req.mult2;
             void* args_avg[] = {
                 &d_data, &sizeOfBlock_int, &amountOfBlocks,
                 &d_avg_peak_chunk, &d_avg_interv_chunk,
                 &d_data, &d_intervals,
-                &d_helpful_chunk, &h_peak
+                &d_helpful_chunk, &h_peak,
+                &feature1_int, &feature2_int,
+                &mult1_v, &mult2_v
             };
             int avg_blockSize = blockSize_setup;
             int avg_gridSize  = (int)((cur_limiter + avg_blockSize - 1) / avg_blockSize);

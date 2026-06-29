@@ -425,6 +425,24 @@ struct LLEAnalysisSession {
 // 5 плотов в окне результата переключаются внутренним tab-bar'ом.
 // ============================================================================
 
+// Mirror BF_* кодов из configCUDA.h — для type-safe использования в GUI/host
+// коде. Значения должны совпадать с BF_* (static_assert'ы в analysis_session.cpp
+// ловят drift). Передаётся в kernel как plain int.
+enum class BasinFeature : int {
+    AvgPeaks            = 0,
+    AvgIntervals        = 1,
+    RMSPeaks            = 2,
+    RMSIntervals        = 3,
+    StDevPeaks          = 4,
+    StDevIntervals      = 5,
+    LogAvgPeaks         = 6,
+    LogAvgIntervals     = 7,
+    LogRMSPeaks         = 8,
+    LogRMSIntervals     = 9,
+    LogStDevPeaks       = 10,
+    LogStDevIntervals   = 11,
+};
+
 struct BasinsConfig {
     std::string label = "Basins";
     std::string scheme = "Euler";
@@ -452,6 +470,16 @@ struct BasinsConfig {
 
     std::map<std::string, std::string> initial_conditions;
     std::map<std::string, std::string> param_values;
+
+    // Какие фичи пишутся в outAvgPeaks / AvgTimeOfPeaks из avgPeakFinderCUDA.
+    // Значения 0..11 (см. enum BasinFeature / BF_* в configCUDA.h). Множители
+    // mult_feature*_text применяются к финальному значению фичи (для подстройки
+    // масштаба DBSCAN-кластеризации). Хранятся как text для единообразия с
+    // остальными числовыми полями BasinsConfig.
+    int         feature1 = BF_FEATURE1_DEFAULT;
+    int         feature2 = BF_FEATURE2_DEFAULT;
+    std::string mult_feature1_text = "1.0";
+    std::string mult_feature2_text = "1.0";
 
     BasinsResult result;
     bool        last_run_ok = false;

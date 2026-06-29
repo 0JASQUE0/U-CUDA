@@ -440,6 +440,8 @@ __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlo
 __device__ __host__ numb sign(numb x);
 __device__ __host__ numb psi_m(numb x, numb m, numb d, numb k, numb dmargin);
 __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb kslope, numb dmargin);
+__device__ __host__ numb chua_inner(numb x, numb m, numb d, numb kslope, numb mu_val, numb M_val);
+__device__ __host__ numb psi_two_scale(numb x, numb m, numb M, numb d, numb kslope);
 
 /**
  * ���������� ����� � "data" ������� � ������������� ������
@@ -698,8 +700,16 @@ __global__ void LSKernelICCUDA(
 __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h = 0);
 
+// feature1/feature2 — BF_* коды из configCUDA.h: какую статистику записать
+// в outAvgPeaks (feature1) и в AvgTimeOfPeaks (feature2). Дефолты дают
+// pre-feature-selection поведение (mean peaks, mean intervals).
+// mult1/mult2 — множители, применяемые ПОСЛЕ вычисления соответствующей
+// фичи (для подстройки масштаба кластеризации в DBSCAN).
 __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
-	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h = 0);
+	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker,
+	numb h = 0,
+	int feature1 = BF_FEATURE1_DEFAULT, int feature2 = BF_FEATURE2_DEFAULT,
+	numb mult1   = mult_avg_peak,       numb mult2   = mult_avg_interval);
 
 __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* PeaksAmount, int* systemCheker, numb h = 0);
