@@ -129,10 +129,38 @@ void HeatmapView::render(PlotRenderer& renderer,
         return;
     }
 
+    // 0. Swap-axes. Транспонируем values + меняем nx/ny и param-ranges; всё
+    // дальнейшее работает с этой "пост-swap" раскладкой как с исходной. При
+    // переключении флага форсируем re-upload (другая раскладка пикселей) и
+    // autofit (визуальный X теперь соответствует исходному data Y).
+    if (swap_axes != swap_axes_cached_) {
+        data_gen_cached = -1;
+        view_valid = false;
+        swap_axes_cached_ = swap_axes;
+    }
+    std::vector<double> swap_buf;
+    const double* eff_values = values;
+    if (swap_axes) {
+        swap_buf.resize((size_t)nx * (size_t)ny);
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i)
+                swap_buf[(size_t)i * (size_t)ny + (size_t)j]
+                    = values[(size_t)j * (size_t)nx + (size_t)i];
+        eff_values = swap_buf.data();
+        std::swap(nx, ny);
+        std::swap(param_lo_x, param_lo_y);
+        std::swap(param_hi_x, param_hi_y);
+    }
+    // Визуальные имена осей — каллер пишет в x_axis.name то, что относится
+    // к "data X". При swap_axes визуальный горизонтальный (= "post-swap X")
+    // = data Y → берём y_axis.name. И симметрично для визуального Y.
+    const std::string& vis_x_name = swap_axes ? y_axis.name : x_axis.name;
+    const std::string& vis_y_name = swap_axes ? x_axis.name : y_axis.name;
+
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
         ensure_tex(nx, ny);
-        upload_data(nx, ny, values);
+        upload_data(nx, ny, eff_values);
         data_gen_cached = data_generation;
     }
 
@@ -522,9 +550,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // 8. Названия осей (как в Plot2DView).
-    const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
-    const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+    // 8. Названия осей (как в Plot2DView). Используем vis_x_name/vis_y_name —
+    // они учитывают swap_axes без мутации x_axis.name / y_axis.name.
+    const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
+    const char* yl = vis_y_name.empty() ? "y" : vis_y_name.c_str();
     float font_h = ImGui::GetFontSize();
     ImVec2 xs = ImGui::CalcTextSize(xl);
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
@@ -645,9 +674,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         int ix = (int)std::floor((dx - param_lo_x) / (param_hi_x - param_lo_x) * (double)nx);
         int iy = (int)std::floor((dy - param_lo_y) / (param_hi_y - param_lo_y) * (double)ny);
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-            double v = values[(size_t)iy * (size_t)nx + (size_t)ix];
-            const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
-            const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+            double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
+            const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
+            const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
             ImGui::BeginTooltip();
             if (!std::isfinite(v) || v == 999.0 || v == -999.0) {
                 ImGui::Text("%s = %.6g\n%s = %.6g\nlambda: diverged", xn, dx, yn, dy);

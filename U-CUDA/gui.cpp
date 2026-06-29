@@ -1505,6 +1505,9 @@ static void draw_bifurcation_plot(AppModel& model) {
                     ImGui::SameLine(); ImGui::SetNextItemWidth(80);
                     ImGui::InputFloat("vmax##bdhm", &hb.manual_vmax, 0.0f, 0.0f, "%.4g");
                 }
+                ImGui::SameLine();
+                if (ImGui::Button(hb.swap_axes ? "Swap axes (on)##bdhm" : "Swap axes##bdhm"))
+                    hb.swap_axes = !hb.swap_axes;
 
                 if (!bdact.last_run_2d_ok || bdact.result_2d.values.empty()) {
                     ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -1993,6 +1996,9 @@ static void draw_lle_plot(AppModel& model) {
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
             ImGui::InputFloat("vmax", &heatmap.manual_vmax, 0.0f, 0.0f, "%.4g");
         }
+        ImGui::SameLine();
+        if (ImGui::Button(heatmap.swap_axes ? "Swap axes (on)##llehm" : "Swap axes##llehm"))
+            heatmap.swap_axes = !heatmap.swap_axes;
 
         if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
             ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -2468,6 +2474,9 @@ static void draw_ls_plot(AppModel& model) {
             ImGui::SameLine(); ImGui::SetNextItemWidth(80);
             ImGui::InputFloat("vmax##lshm", &heatmap_ls.manual_vmax, 0.0f, 0.0f, "%.4g");
         }
+        ImGui::SameLine();
+        if (ImGui::Button(heatmap_ls.swap_axes ? "Swap axes (on)##lshm" : "Swap axes##lshm"))
+            heatmap_ls.swap_axes = !heatmap_ls.swap_axes;
 
         if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
             ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -2958,11 +2967,12 @@ static void draw_basins_plot(AppModel& model) {
         static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
         int* field = nullptr;
         const char* combo_id = nullptr;
+        HeatmapView* active_hm = nullptr;
         switch (c.active_plot_tab) {
-            case 0: field = &model.basins_colormap;        combo_id = "Colormap##bas";     break;
-            case 1: field = &model.basins_avgpk_colormap;  combo_id = "Colormap##bas_pk";  break;
-            case 2: field = &model.basins_avgint_colormap; combo_id = "Colormap##bas_int"; break;
-            case 3: field = &model.basins_states_colormap; combo_id = "Colormap##bas_st";  break;
+            case 0: field = &model.basins_colormap;        combo_id = "Colormap##bas";     active_hm = &hm_basins_v; break;
+            case 1: field = &model.basins_avgpk_colormap;  combo_id = "Colormap##bas_pk";  active_hm = &hm_avgpk_v;  break;
+            case 2: field = &model.basins_avgint_colormap; combo_id = "Colormap##bas_int"; active_hm = &hm_avgint_v; break;
+            case 3: field = &model.basins_states_colormap; combo_id = "Colormap##bas_st";  active_hm = &hm_states_v; break;
             default: break;  // Scatter (4) — без combo
         }
         if (field) {
@@ -2981,6 +2991,13 @@ static void draw_basins_plot(AppModel& model) {
                 cfg.basins_states_colormap = model.basins_states_colormap;
                 cfg.tick_precision         = model.tick_precision;
                 save_app_config(get_exe_dir_with_sep(), cfg);
+            }
+            // Swap axes — per-tab. Сессионный toggle (не персистится),
+            // повторный клик возвращает исходную ориентацию.
+            if (active_hm) {
+                ImGui::SameLine();
+                if (ImGui::Button(active_hm->swap_axes ? "Swap axes (on)##bas_sw" : "Swap axes##bas_sw"))
+                    active_hm->swap_axes = !active_hm->swap_axes;
             }
         }
     }

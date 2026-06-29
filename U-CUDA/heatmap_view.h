@@ -50,6 +50,13 @@ public:
     bool   discrete = false;
     int    discrete_levels = 0;
 
+    // Swap-axes toggle: транспонирует картинку и меняет местами визуальный X<->Y
+    // (диапазоны, тики, подписи и tooltip). Действует только на отрисовку —
+    // исходные значения `values`, `param_lo/hi_*` и AxisInfo.name остаются
+    // нетронутыми. Переключается кнопкой "Swap axes" в toolbar'е каждого
+    // heatmap-плота; повторное переключение возвращает исходную ориентацию.
+    bool   swap_axes = false;
+
     HeatmapView() = default;
     ~HeatmapView();
     HeatmapView(const HeatmapView&) = delete;
@@ -81,6 +88,11 @@ private:
     int    rect_zoom_mode_ = 0;
     double rect_zoom_x0_ = 0.0;
     double rect_zoom_y0_ = 0.0;
+
+    // Для детекции изменения swap_axes: если флаг отличается от прошлого
+    // кадра — форсируем re-upload текстуры (с транспонированной раскладкой)
+    // и autofit (т.к. новые ranges).
+    bool   swap_axes_cached_ = false;
 
     void ensure_tex(int w, int h);
     void upload_data(int nx, int ny, const double* values);
