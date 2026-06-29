@@ -339,11 +339,6 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     }
     if (!params.empty()) {
         bd.param_index = 0;
-        const std::string& pname = params[0];
-        auto lo = r.param_min.find(pname);
-        auto hi = r.param_max.find(pname);
-        if (lo != r.param_min.end() && !lo->second.empty()) bd.param_lo_text = lo->second;
-        if (hi != r.param_max.end() && !hi->second.empty()) bd.param_hi_text = hi->second;
     }
     diagrams.push_back(std::move(bd));
 
@@ -435,6 +430,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
 
     req.param_lo       = parse_d(bd.param_lo_text, 0.0);
     req.param_hi       = parse_d(bd.param_hi_text, 1.0);
+    if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
     req.n_pts          = parse_i(bd.n_pts_text, 500);
     req.writable_var   = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
     req.h              = parse_d(bd.h_text, 0.01);
@@ -488,6 +484,8 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.param_hi           = parse_d(bd.param_hi_text,   1.0);
     req.param_lo_2         = parse_d(bd.param_lo_2_text, 0.0);
     req.param_hi_2         = parse_d(bd.param_hi_2_text, 1.0);
+    if (req.param_hi   < req.param_lo)   std::swap(req.param_lo,   req.param_hi);
+    if (req.param_hi_2 < req.param_lo_2) std::swap(req.param_lo_2, req.param_hi_2);
     req.n_pts              = parse_i(bd.n_pts_text, 200);
     req.writable_var       = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
     req.h                  = parse_d(bd.h_text, 0.01);
@@ -657,11 +655,6 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     }
     if (!params.empty()) {
         c.param_index = 0;
-        const std::string& pname = params[0];
-        auto lo = r.param_min.find(pname);
-        auto hi = r.param_max.find(pname);
-        if (lo != r.param_min.end() && !lo->second.empty()) c.param_lo_text = lo->second;
-        if (hi != r.param_max.end() && !hi->second.empty()) c.param_hi_text = hi->second;
     }
     curves.push_back(std::move(c));
 
@@ -723,6 +716,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
 
     req.param_lo       = parse_d(c.param_lo_text, 0.0);
     req.param_hi       = parse_d(c.param_hi_text, 1.0);
+    if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
     req.n_pts          = parse_i(c.n_pts_text, 500);
     req.h              = parse_d(c.h_text, 0.01);
     req.t_max          = parse_d(c.t_max_text, 100.0);
@@ -778,6 +772,8 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.param_hi           = parse_d(c.param_hi_text,   1.0);
     req.param_lo_2         = parse_d(c.param_lo_2_text, 0.0);
     req.param_hi_2         = parse_d(c.param_hi_2_text, 1.0);
+    if (req.param_hi   < req.param_lo)   std::swap(req.param_lo,   req.param_hi);
+    if (req.param_hi_2 < req.param_lo_2) std::swap(req.param_lo_2, req.param_hi_2);
     req.n_pts              = parse_i(c.n_pts_text, 200);
     req.h                  = parse_d(c.h_text, 0.01);
     req.t_max              = parse_d(c.t_max_text, 100.0);
@@ -1009,6 +1005,8 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.axis_x_hi       = parse_d(c.axis_x_hi_text,  10.0);
     req.axis_y_lo       = parse_d(c.axis_y_lo_text, -10.0);
     req.axis_y_hi       = parse_d(c.axis_y_hi_text,  10.0);
+    if (req.axis_x_hi < req.axis_x_lo) std::swap(req.axis_x_lo, req.axis_x_hi);
+    if (req.axis_y_hi < req.axis_y_lo) std::swap(req.axis_y_lo, req.axis_y_hi);
     req.n_pts           = parse_i(c.n_pts_text, 200);
     req.writable_var    = (c.writable_var >= 0 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
     req.h               = parse_d(c.h_text, 0.01);
@@ -1143,11 +1141,6 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     }
     if (!params.empty()) {
         c.param_index = 0;
-        const std::string& pname = params[0];
-        auto lo = r.param_min.find(pname);
-        auto hi = r.param_max.find(pname);
-        if (lo != r.param_min.end() && !lo->second.empty()) c.param_lo_text = lo->second;
-        if (hi != r.param_max.end() && !hi->second.empty()) c.param_hi_text = hi->second;
     }
     curves.push_back(std::move(c));
 
@@ -1209,6 +1202,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
 
     req.param_lo       = parse_d(c.param_lo_text, 0.0);
     req.param_hi       = parse_d(c.param_hi_text, 1.0);
+    if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
     req.n_pts          = parse_i(c.n_pts_text, 500);
     req.h              = parse_d(c.h_text, 0.01);
     req.t_max          = parse_d(c.t_max_text, 100.0);
@@ -1262,6 +1256,8 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.param_hi           = parse_d(c.param_hi_text,   1.0);
     req.param_lo_2         = parse_d(c.param_lo_2_text, 0.0);
     req.param_hi_2         = parse_d(c.param_hi_2_text, 1.0);
+    if (req.param_hi   < req.param_lo)   std::swap(req.param_lo,   req.param_hi);
+    if (req.param_hi_2 < req.param_lo_2) std::swap(req.param_lo_2, req.param_hi_2);
     req.n_pts              = parse_i(c.n_pts_text, 200);
     req.h                  = parse_d(c.h_text, 0.01);
     req.t_max              = parse_d(c.t_max_text, 100.0);

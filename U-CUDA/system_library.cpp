@@ -147,8 +147,6 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
     kvmap(o, "param_values", r.param_values);
-    kvmap(o, "param_min", r.param_min);
-    kvmap(o, "param_max", r.param_max);
     // custom_schemes: [ {"name": "...", "body": "..."}, ... ]
     o << "  \"custom_schemes\": [";
     for (size_t k = 0; k < r.custom_schemes.size(); ++k) {
@@ -183,8 +181,6 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();
-        else if (key == "param_min") r.param_min = p.parse_map();
-        else if (key == "param_max") r.param_max = p.parse_map();
         else if (key == "custom_schemes") {
             p.ws();
             if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for custom_schemes");

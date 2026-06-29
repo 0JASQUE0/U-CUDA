@@ -379,29 +379,22 @@ static void draw_parameters_tab(AppModel& model) {
 
     ImGui::Spacing();
 
-    // параметры: значение, min, max
+    // параметры: значение
     if (!model.known_params.empty()) {
-        ImGui::SeparatorText("Parameters (value / min / max)");
-        // заголовки колонок
-        if (ImGui::BeginTable("params", 4, ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::SeparatorText("Parameters (value)");
+        if (ImGui::BeginTable("params", 2, ImGuiTableFlags_SizingFixedFit)) {
             ImGui::TableSetupColumn("name");
             ImGui::TableSetupColumn("value");
-            ImGui::TableSetupColumn("min");
-            ImGui::TableSetupColumn("max");
             ImGui::TableHeadersRow();
             for (const auto& p : model.known_params) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
                 ImGui::TableSetColumnIndex(1);
                 { std::string id = "##val_" + p; InputNumStr(id.c_str(), model.param_values[p], 100); }
-                ImGui::TableSetColumnIndex(2);
-                { std::string id = "##min_" + p; InputNumStr(id.c_str(), model.param_min[p], 100); }
-                ImGui::TableSetColumnIndex(3);
-                { std::string id = "##max_" + p; InputNumStr(id.c_str(), model.param_max[p], 100); }
             }
             ImGui::EndTable();
         }
-        ImGui::TextDisabled("Empty fields are left unset. Min/max are for bifurcation sweeps.");
+        ImGui::TextDisabled("Empty fields are left unset.");
     }
 
     if (model.known_vars.empty() && model.known_params.empty()) {
