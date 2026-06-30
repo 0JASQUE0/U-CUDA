@@ -671,31 +671,26 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
+        // Snapshot of CSV-relevant request fields, captured BEFORE any disk
+        // write so it can be reused by the GUI right-click export (which runs
+        // after `req` is gone). Engine and GUI share the same writers in
+        // data_export, so the on-disk format is identical byte-for-byte.
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.tMax          = tMax;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.preScaller    = preScaller;
+        res.snapshot.writableVar   = writableVar;
+        res.snapshot.indexOfMutVar = indicesOfMutVars[0];
+        res.snapshot.range_lo      = ranges[0];
+        res.snapshot.range_hi      = ranges[1];
+
         // --- Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан) ---
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "1D classical bifurcation\n";
-                cfg << "Parameter estimation\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) {
-                    cfg << values[kk];
-                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
-                    cfg << initialConditions[kk];
-                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "CT = "       << tMax << "\n";
-                cfg << "TT = "       << transientTime << "\n";
-                cfg << "h = "        << h << "\n";
-                cfg << "decimator = " << preScaller << "\n";
-                cfg << "indexVar for peakfinder = " << writableVar << "\n";
-                cfg << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
-                cfg << "start value = " << ranges[0] << ", stop value = " << ranges[1] << "\n";
-            }
+            data_export::write_bif1d_config(cfg, res.snapshot);
             // обнуляем основной файл данных
             std::ofstream trunc(OUT_FILE_PATH);
             trunc.close();
@@ -802,19 +797,10 @@ struct ParametricEngine::Impl {
                 double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 int    npeaks     = h_amountOfPeaks[k];
 
-                // CSV — формат NonLinAnal: param, peak, time
                 if (out.is_open()) {
-                    if (npeaks == 0) {
-                        out << param_val << ", " << 0 << ", " << 0 << '\n';
-                    } else if (npeaks == -1) {
-                        out << param_val << ", " << 0 << ", " << -1 << '\n';
-                    } else {
-                        for (size_t j = 0; j < (size_t)npeaks; ++j) {
-                            out << param_val << ", "
-                                << h_outPeaks   [k * (size_t)amountOfPointsInBlock + j] << ", "
-                                << h_timeOfPeaks[k * (size_t)amountOfPointsInBlock + j] << '\n';
-                        }
-                    }
+                    const double* peakRow = h_outPeaks.data()    + k * (size_t)amountOfPointsInBlock;
+                    const double* timeRow = h_timeOfPeaks.data() + k * (size_t)amountOfPointsInBlock;
+                    data_export::write_bif1d_rows(out, param_val, npeaks, peakRow, timeRow);
                 }
 
                 // В память для GUI: значения пиков и межпиковые интервалы
@@ -1068,27 +1054,22 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
-        // Опциональный config CSV (порт NonLinAnal LLE1D:2355-2389)
+        // Snapshot CSV-relevant request fields for GUI right-click export.
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.tMax          = tMax;
+        res.snapshot.NT            = NT;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.eps           = eps;
+        res.snapshot.indexOfMutVar = indicesOfMutVars[0];
+        res.snapshot.range_lo      = ranges[0];
+        res.snapshot.range_hi      = ranges[1];
+
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "1D LLE\nParameter estimation\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) {
-                    cfg << values[kk];
-                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
-                    cfg << initialConditions[kk];
-                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
-                cfg << "h = "  << h    << "\neps = " << eps << "\n";
-                cfg << "indexPar = " << indicesOfMutVars[0] << "\n";
-                cfg << "start value = " << ranges[0] << ", stop value = " << ranges[1] << "\n";
-            }
+            data_export::write_lle1d_config(cfg, res.snapshot);
             std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
@@ -1183,7 +1164,7 @@ struct ParametricEngine::Impl {
                 // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось)
                 res.flags[global_idx] = (v == 999.0 || v == -999.0) ? -1 : 1;
 
-                if (out.is_open()) out << param_val << ", " << v << '\n';
+                if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
             }
             if (out.is_open()) out.close();
         }
@@ -1464,35 +1445,6 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
-        // Опциональный config CSV (порт LLE2D:2575-2611).
-        if (!OUT_FILE_PATH.empty()) {
-            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "2D LLE\n";
-                if (par_or_var == 1) cfg << "Parameter estimation\n";
-                if (par_or_var == 0) cfg << "Initial conditions estimation\n";
-                if (par_or_var == 2) cfg << "Mixed: x=IC, y=parameter\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) {
-                    cfg << values[kk];
-                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
-                    cfg << initialConditions[kk];
-                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
-                cfg << "h = " << h << "\neps = " << eps << "\n";
-                cfg << "indices = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-                cfg << "axis1: " << ranges[0] << " .. " << ranges[1] << "\n";
-                cfg << "axis2: " << ranges[2] << " .. " << ranges[3] << "\n";
-                cfg << "n_pts = " << nPts << "x" << nPts << "\n";
-            }
-            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
-        }
-
         // В result диапазоны храним всегда «пользовательские» (X = первая ось
         // запроса), не свопнутые ranges[] — чтобы GUI рисовал оси правильно
         // независимо от того, делал ли engine внутренний свап.
@@ -1504,10 +1456,30 @@ struct ParametricEngine::Impl {
         res.values.assign(total_cells, 0.0);
         res.flags.assign(total_cells, 0);
 
-        std::ofstream out;
+        // Snapshot of CSV-relevant fields in USER ordering — engine + GUI
+        // share the writer, so both files agree on axis ordering even when
+        // the engine has internally swapped X/Y for kernel dispatch.
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.par_or_var    = par_or_var;
+        res.snapshot.tMax          = tMax;
+        res.snapshot.NT            = NT;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.eps           = eps;
+        res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
+                                                           : req.param_index;
+        res.snapshot.indexOfMutVar2 = req.sweep_over_var_2 ? req.var_sweep_index_2
+                                                           : req.param_index_2;
+        res.snapshot.range1_lo = req.param_lo;   res.snapshot.range1_hi = req.param_hi;
+        res.snapshot.range2_lo = req.param_lo_2; res.snapshot.range2_hi = req.param_hi_2;
+        res.snapshot.n_pts     = nPts;
+
         if (!OUT_FILE_PATH.empty()) {
-            out.open(OUT_FILE_PATH);
-            if (out.is_open()) out << std::setprecision(set_precision);
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            data_export::write_lle2d_config(cfg, res.snapshot);
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
@@ -1593,10 +1565,18 @@ struct ParametricEngine::Impl {
                 }
                 res.values[out_idx] = v;
                 res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? -1 : 1;
-                if (out.is_open()) out << v << ((k + 1 < cur_limiter) ? ", " : "\n");
             }
         }
-        if (out.is_open()) out.close();
+
+        // Write the data file once, AFTER the chunked loop — see data_export
+        // header for why the grid layout is centralized there.
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream out(OUT_FILE_PATH);
+            if (out.is_open()) {
+                out << std::setprecision(set_precision);
+                data_export::write_lle2d_grid(out, nPts, res.values.data());
+            }
+        }
 
         // Авто-нормализация для colormap'а: min/max по валидным значениям.
         double vmin =  std::numeric_limits<double>::infinity();
@@ -1844,27 +1824,22 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
-        // Опциональный config CSV
+        // Snapshot CSV-relevant request fields for GUI right-click export.
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.tMax          = tMax;
+        res.snapshot.NT            = NT;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.eps           = eps;
+        res.snapshot.indexOfMutVar = indicesOfMutVars[0];
+        res.snapshot.range_lo      = ranges[0];
+        res.snapshot.range_hi      = ranges[1];
+
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "1D LS\nParameter estimation\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) {
-                    cfg << values[kk];
-                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) {
-                    cfg << initialConditions[kk];
-                    if (kk != amountOfInitialConditions - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
-                cfg << "h = "  << h    << "\neps = " << eps << "\n";
-                cfg << "indexPar = " << indicesOfMutVars[0] << "\n";
-                cfg << "start value = " << ranges[0] << ", stop value = " << ranges[1] << "\n";
-            }
+            data_export::write_ls1d_config(cfg, res.snapshot);
             std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
@@ -1952,12 +1927,9 @@ struct ParametricEngine::Impl {
                     row[j] = h_lsResult[k * (size_t)amountOfInitialConditions + j];
                 }
 
-                if (out.is_open()) {
-                    out << param_val;
-                    for (int j = 0; j < amountOfInitialConditions; ++j)
-                        out << ", " << row[j];
-                    out << '\n';
-                }
+                if (out.is_open())
+                    data_export::write_ls1d_row(out, param_val, row.data(),
+                                                amountOfInitialConditions);
             }
             if (out.is_open()) out.close();
         }
@@ -2229,36 +2201,6 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
-        // Опциональный config CSV.
-        if (!OUT_FILE_PATH.empty()) {
-            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "2D LS\n";
-                if (par_or_var == 1) cfg << "Parameter estimation\n";
-                if (par_or_var == 0) cfg << "Initial conditions estimation\n";
-                if (par_or_var == 2) cfg << "Mixed: x=IC, y=parameter\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) {
-                    cfg << values[kk];
-                    if (kk != amountOfValues - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "X0[" << N << "] = { ";
-                for (int kk = 0; kk < N; ++kk) {
-                    cfg << initialConditions[kk];
-                    if (kk != N - 1) cfg << ", "; else cfg << " }\n";
-                }
-                cfg << "CT = " << tMax << "\nNT = " << NT << "\nTT = " << transientTime << "\n";
-                cfg << "h = " << h << "\neps = " << eps << "\n";
-                cfg << "indices = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-                cfg << "axis1: " << ranges[0] << " .. " << ranges[1] << "\n";
-                cfg << "axis2: " << ranges[2] << " .. " << ranges[3] << "\n";
-                cfg << "n_pts = " << nPts << "x" << nPts << "\n";
-                cfg << "exponents = " << N << "\n";
-            }
-            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
-        }
-
         res.n_pts       = nPts;
         res.n_exponents = N;
         res.param_lo    = req.param_lo;
@@ -2268,10 +2210,28 @@ struct ParametricEngine::Impl {
         res.values.assign((size_t)N * total_cells, 0.0);
         res.flags.assign(total_cells, 0);
 
-        std::ofstream out;
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + N);
+        res.snapshot.par_or_var    = par_or_var;
+        res.snapshot.tMax          = tMax;
+        res.snapshot.NT            = NT;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.eps           = eps;
+        res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
+                                                           : req.param_index;
+        res.snapshot.indexOfMutVar2 = req.sweep_over_var_2 ? req.var_sweep_index_2
+                                                           : req.param_index_2;
+        res.snapshot.range1_lo = req.param_lo;   res.snapshot.range1_hi = req.param_hi;
+        res.snapshot.range2_lo = req.param_lo_2; res.snapshot.range2_hi = req.param_hi_2;
+        res.snapshot.n_pts       = nPts;
+        res.snapshot.n_exponents = N;
+
         if (!OUT_FILE_PATH.empty()) {
-            out.open(OUT_FILE_PATH);
-            if (out.is_open()) out << std::setprecision(set_precision);
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            data_export::write_ls2d_config(cfg, res.snapshot);
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
@@ -2350,16 +2310,18 @@ struct ParametricEngine::Impl {
                     double v = h_lsResult[k * (size_t)N + j];
                     res.values[(size_t)j * total_cells + out_idx] = v;
                 }
-                if (out.is_open()) {
-                    for (int j = 0; j < N; ++j) {
-                        out << h_lsResult[k * (size_t)N + j];
-                        if (j + 1 < N) out << ", ";
-                    }
-                    out << '\n';
-                }
             }
         }
-        if (out.is_open()) out.close();
+
+        // Write the data file once, AFTER the chunked loop — see data_export
+        // header for why the grid layout is centralized there.
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream out(OUT_FILE_PATH);
+            if (out.is_open()) {
+                out << std::setprecision(set_precision);
+                data_export::write_ls2d_cells(out, nPts, N, res.values.data());
+            }
+        }
 
         // Per-plane min/max — autoscale colormap'а в GUI выбирает их по
         // активной экспоненте. Diverged-ячейки (flag<0) и 999/-999/NaN
@@ -2939,30 +2901,6 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
-        // Config CSV (опционально).
-        if (!OUT_FILE_PATH.empty()) {
-            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "2D bifurcation (DBSCAN)\n";
-                if (par_or_var == 1) cfg << "Parameter estimation\n";
-                if (par_or_var == 0) cfg << "Initial conditions estimation\n";
-                if (par_or_var == 2) cfg << "Mixed: x=IC, y=parameter\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) { cfg << values[kk]; if (kk != amountOfValues-1) cfg << ", "; else cfg << " }\n"; }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) { cfg << initialConditions[kk]; if (kk != amountOfInitialConditions-1) cfg << ", "; else cfg << " }\n"; }
-                cfg << "CT = " << tMax << "\nTT = " << transientTime << "\nh = " << h << "\ndecimator = " << preScaller << "\n";
-                cfg << "eps_DBSCAN = " << eps_dbscan << "\n";
-                cfg << "indexVar for peakfinder = " << writableVar << "\n";
-                cfg << "indices = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-                cfg << "axis1: " << ranges[0] << " .. " << ranges[1] << "\n";
-                cfg << "axis2: " << ranges[2] << " .. " << ranges[3] << "\n";
-                cfg << "n_pts = " << nPts << "x" << nPts << "\n";
-            }
-            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
-        }
-
         res.n_pts      = nPts;
         res.param_lo   = req.param_lo;
         res.param_hi   = req.param_hi;
@@ -2971,10 +2909,28 @@ struct ParametricEngine::Impl {
         res.values.assign(total_cells, 0.0);
         res.flags.assign(total_cells,  0);
 
-        std::ofstream out;
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.par_or_var    = par_or_var;
+        res.snapshot.tMax          = tMax;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.preScaller    = preScaller;
+        res.snapshot.eps_dbscan    = eps_dbscan;
+        res.snapshot.writableVar   = writableVar;
+        res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
+                                                           : req.param_index;
+        res.snapshot.indexOfMutVar2 = req.sweep_over_var_2 ? req.var_sweep_index_2
+                                                           : req.param_index_2;
+        res.snapshot.range1_lo = req.param_lo;   res.snapshot.range1_hi = req.param_hi;
+        res.snapshot.range2_lo = req.param_lo_2; res.snapshot.range2_hi = req.param_hi_2;
+        res.snapshot.n_pts     = nPts;
+
         if (!OUT_FILE_PATH.empty()) {
-            out.open(OUT_FILE_PATH);
-            if (out.is_open()) out << std::setprecision(set_precision);
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            data_export::write_bif2d_config(cfg, res.snapshot);
+            std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
         // ---- Главный цикл по чанкам (порт hostLibrary.cu:1212-1692) ----
@@ -3089,10 +3045,18 @@ struct ParametricEngine::Impl {
                 double v = (period < 0) ? -1.0 : (double)period;
                 res.values[out_idx] = v;
                 res.flags[out_idx]  = (period < 0) ? -1 : 1;
-                if (out.is_open()) out << period << ((k + 1 < cur_limiter) ? ", " : "\n");
             }
         }
-        if (out.is_open()) out.close();
+
+        // Write the data file once, AFTER the chunked loop — see data_export
+        // header for why the grid layout is centralized there.
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream out(OUT_FILE_PATH);
+            if (out.is_open()) {
+                out << std::setprecision(set_precision);
+                data_export::write_bif2d_grid(out, nPts, res.values.data());
+            }
+        }
 
         // Авто-нормализация colormap.
         double vmin =  std::numeric_limits<double>::infinity();
@@ -3376,32 +3340,39 @@ struct ParametricEngine::Impl {
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
+        // Snapshot CSV-relevant fields for GUI right-click export.
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.tMax          = tMax;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.preScaller    = preScaller;
+        res.snapshot.eps_dbscan    = eps_dbscan;
+        res.snapshot.writableVar   = req.writable_var;
+        res.snapshot.axis_x_var    = req.axis_x_var;
+        res.snapshot.axis_y_var    = req.axis_y_var;
+        res.snapshot.axis_x_lo     = req.axis_x_lo;
+        res.snapshot.axis_x_hi     = req.axis_x_hi;
+        res.snapshot.axis_y_lo     = req.axis_y_lo;
+        res.snapshot.axis_y_hi     = req.axis_y_hi;
+        res.snapshot.n_pts         = nPts;
+        res.snapshot.feature1      = req.feature1;
+        res.snapshot.feature2      = req.feature2;
+        res.snapshot.mult1         = (double)req.mult1;
+        res.snapshot.mult2         = (double)req.mult2;
+
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
-            if (cfg.is_open()) {
-                cfg << std::setprecision(set_precision);
-                cfg << "Basins of attraction\n";
-                cfg << "a[" << amountOfValues << "] = { ";
-                for (int kk = 0; kk < amountOfValues; ++kk) { cfg << values[kk]; if (kk != amountOfValues-1) cfg << ", "; else cfg << " }\n"; }
-                cfg << "X0[" << amountOfInitialConditions << "] = { ";
-                for (int kk = 0; kk < amountOfInitialConditions; ++kk) { cfg << initialConditions[kk]; if (kk != amountOfInitialConditions-1) cfg << ", "; else cfg << " }\n"; }
-                cfg << "CT = " << tMax << "\nTT = " << transientTime << "\nh = " << h << "\n";
-                cfg << "decimator = " << preScaller << "\neps_DBSCAN = " << eps_dbscan << "\n";
-                cfg << "indexVar for peakfinder = " << req.writable_var << "\n";
-                cfg << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-                cfg << "start value_1 = " << ranges[0] << ", stop value_1 = " << ranges[1] << "\n";
-                cfg << "start value_2 = " << ranges[2] << ", stop value_2 = " << ranges[3] << "\n";
-            }
+            data_export::write_basins_config(cfg, res.snapshot);
         }
 
-        // CSV-заготовки 4 файлов (с ranges-заголовком). Сами данные дописываем после.
+        // Pre-write the 2-line ranges header into each of the 4 data files.
+        // Body is appended after compute (see the post-loop block below).
         if (!OUT_FILE_PATH.empty()) {
             auto write_ranges = [&](const std::string& path) {
                 std::ofstream o(path);
-                if (!o.is_open()) return;
-                o << std::setprecision(set_precision);
-                o << ranges[0] << " " << ranges[1] << "\n";
-                o << ranges[2] << " " << ranges[3] << "\n";
+                data_export::write_basins_ranges(o, res.snapshot);
             };
             write_ranges(OUT_FILE_PATH);
             write_ranges(OUT_FILE_PATH + "_1.csv");
@@ -3652,38 +3623,26 @@ struct ParametricEngine::Impl {
         compute_minmax(res.avg_peaks,     res.avg_peaks_min,     res.avg_peaks_max);
         compute_minmax(res.avg_intervals, res.avg_intervals_min, res.avg_intervals_max);
 
-        // CSV: добавляем матрицы (формат — N значений через ", " на строку, n_pts строк).
+        // Append the n_pts × n_pts grid for each of the 4 fields, after the
+        // 2-line ranges header already written above. Layout matches the
+        // shared writers data_export uses for the GUI right-click export.
         if (!OUT_FILE_PATH.empty()) {
-            auto append_matrix_int = [&](const std::string& path, const std::vector<int>& v) {
+            auto append_int = [&](const std::string& path, const int* data) {
                 std::ofstream o(path, std::ios::app);
                 if (!o.is_open()) return;
                 o << std::setprecision(set_precision);
-                int counter = 0;
-                for (size_t i = 0; i < v.size(); ++i) {
-                    if (counter != 0) o << ", ";
-                    if (counter == nPts) { o << "\n"; counter = 0; }
-                    o << v[i];
-                    ++counter;
-                }
+                data_export::write_basins_grid_int(o, nPts, data);
             };
-            auto append_matrix_double = [&](const std::string& path, const std::vector<double>& v) {
+            auto append_double = [&](const std::string& path, const double* data) {
                 std::ofstream o(path, std::ios::app);
                 if (!o.is_open()) return;
                 o << std::setprecision(set_precision);
-                int counter = 0;
-                for (size_t i = 0; i < v.size(); ++i) {
-                    if (counter != 0) o << ", ";
-                    if (counter == nPts) { o << "\n"; counter = 0; }
-                    double x = v[i];
-                    if (!std::isfinite(x)) x = 999.0;
-                    o << x;
-                    ++counter;
-                }
+                data_export::write_basins_grid_double(o, nPts, data);
             };
-            append_matrix_int(OUT_FILE_PATH,            res.basin_idx);
-            append_matrix_double(OUT_FILE_PATH + "_1.csv", res.avg_peaks);
-            append_matrix_double(OUT_FILE_PATH + "_2.csv", res.avg_intervals);
-            append_matrix_int(OUT_FILE_PATH + "_3.csv", res.helpful_array);
+            append_int   (OUT_FILE_PATH,             res.basin_idx.data());
+            append_double(OUT_FILE_PATH + "_1.csv",  res.avg_peaks.data());
+            append_double(OUT_FILE_PATH + "_2.csv",  res.avg_intervals.data());
+            append_int   (OUT_FILE_PATH + "_3.csv",  res.helpful_array.data());
         }
 
         cleanup();
@@ -3826,6 +3785,34 @@ struct ParametricEngine::Impl {
         if (req.h <= 0.0)             return fail("h должно быть > 0");
         if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr должно быть > 0");
         if (req.pre_scaller <= 0)     return fail("pre_scaller должно быть > 0");
+
+        // Snapshot CSV-relevant request fields for GUI right-click export.
+        // FastSync has no engine-side CSV writer, so this is consumed only by
+        // data_export::export_fastsync; engine writes nothing to disk.
+        res.snapshot.mode           = req.mode;
+        res.snapshot.values         = req.values;
+        res.snapshot.ic_master      = req.ic_master;
+        res.snapshot.ic_slave       = req.ic_slave;
+        res.snapshot.k_forward      = req.k_forward;
+        res.snapshot.k_backward     = req.k_backward;
+        res.snapshot.h              = req.h;
+        res.snapshot.iter_of_synchr = req.iter_of_synchr;
+        res.snapshot.preScaller     = req.pre_scaller;
+        res.snapshot.window         = (double)req.window;
+        res.snapshot.type_of_synch  = req.type_of_synch;
+        res.snapshot.error_estim    = req.error_estim;
+        res.snapshot.fs_error_trs   = req.fs_error_trs;
+        res.snapshot.tMax           = req.t_max;
+        res.snapshot.transientTime  = req.transient_time;
+        res.snapshot.axis_x_var     = req.axis_x_var;
+        res.snapshot.axis_y_var     = req.axis_y_var;
+        res.snapshot.axis_x_lo      = req.axis_x_lo;
+        res.snapshot.axis_x_hi      = req.axis_x_hi;
+        res.snapshot.axis_y_lo      = req.axis_y_lo;
+        res.snapshot.axis_y_hi      = req.axis_y_hi;
+        res.snapshot.n_pts          = req.n_pts;
+        res.snapshot.grid_swap_master_slave = req.grid_swap_master_slave;
+        res.snapshot.var_names      = req.var_names;
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -3983,23 +3970,13 @@ struct ParametricEngine::Impl {
             cudaFree(d_values); cudaFree(d_kF); cudaFree(d_kB);
             #undef FS_CHECK
 
-            // ---- CSV (On Attractor): trajectory + sync_error per row ----
+            // CSV (On Attractor): delegate to data_export so engine and the
+            // GUI right-click export produce byte-identical files.
             if (!req.csv_output_path.empty()) {
                 std::ofstream csv(req.csv_output_path);
                 if (csv.is_open()) {
-                    csv << std::setprecision(15);
-                    // Header: var-names + "sync_error".
-                    for (int j = 0; j < amountOfIC_int; ++j) {
-                        if (j < (int)req.var_names.size()) csv << req.var_names[j];
-                        else                                csv << "x" << j;
-                        csv << ",";
-                    }
-                    csv << "sync_error\n";
-                    for (int i = 0; i < (int)res.n_pts_traj; ++i) {
-                        for (int j = 0; j < amountOfIC_int; ++j)
-                            csv << res.traj_full[(size_t)i * amountOfIC_int + j] << ",";
-                        csv << res.sync_error[i] << "\n";
-                    }
+                    csv << std::setprecision(set_precision);
+                    data_export::write_fastsync_attractor(csv, res, req.var_names);
                 }
             }
 
@@ -4145,24 +4122,16 @@ struct ParametricEngine::Impl {
                 res.min_val = std::isfinite(vmin) ? vmin : 0.0;
                 res.max_val = std::isfinite(vmax) ? vmax : 0.0;
 
-                // ---- CSV (On Grid): 2 строки заголовка (X/Y ranges) +
-                // матрица n_pts × n_pts row-major (iy*n + ix). Format совпадает
-                // с legacy FastSynchro_2 в hostLibrary.cu (пробельный разделитель
-                // для ranges, запятые между значениями ошибки).
+                // CSV (On Grid): delegate to data_export so engine and the
+                // GUI right-click export share the same writer (and stay
+                // byte-identical). Layout: 2-line ranges header + n×n grid.
                 if (!req.csv_output_path.empty()) {
                     std::ofstream csv(req.csv_output_path);
                     if (csv.is_open()) {
-                        csv << std::setprecision(15);
-                        csv << req.axis_x_lo << " " << req.axis_x_hi << "\n";
-                        csv << req.axis_y_lo << " " << req.axis_y_hi << "\n";
-                        const int n = req.n_pts;
-                        for (int iy = 0; iy < n; ++iy) {
-                            for (int ix = 0; ix < n; ++ix) {
-                                csv << res.heatmap[(size_t)iy * n + ix];
-                                if (ix + 1 < n) csv << ",";
-                            }
-                            csv << "\n";
-                        }
+                        csv << std::setprecision(set_precision);
+                        data_export::write_fastsync_grid(csv, res,
+                            req.axis_x_lo, req.axis_x_hi,
+                            req.axis_y_lo, req.axis_y_hi);
                     }
                 }
             }

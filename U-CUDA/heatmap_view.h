@@ -5,6 +5,7 @@
 #include <glad/glad.h>
 #include <string>
 #include <vector>
+#include <functional>
 
 // HeatmapView — рисует 2D-скалярное поле n×m в виде хитмапы с colormap'ом.
 // Зеркало Plot2DView по структуре (свой AxisInfo, autofit, pan/zoom через ось),
@@ -52,6 +53,13 @@ public:
     // нетронутыми. Переключается кнопкой "Swap axes" в toolbar'е каждого
     // heatmap-плота; повторное переключение возвращает исходную ориентацию.
     bool   swap_axes = false;
+
+    // Optional callback for extra items in the right-click popup menu (after
+    // the standard Discrete-colorbar toggle). Caller assigns a lambda before
+    // each render(); the view invokes it inside its existing BeginPopup /
+    // EndPopup block. Used by gui.cpp to inject the "Export data..." action.
+    // Mirrors Plot2DView::popup_extras (see plot_view_2d.h).
+    std::function<void()> popup_extras;
 
     HeatmapView() = default;
     ~HeatmapView();

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include "configCUDA.h"   // typedef numb, BF_* feature codes, mult_avg_* defaults
+#include "data_export.h"  // snapshot structs embedded into *Result for right-click export
 
 struct Bifurcation1DRequest {
     // КРС
@@ -104,6 +105,11 @@ struct Bifurcation1DResult {
 
     // flags[i]: 1 — расчёт прошёл, -1 — траектория разошлась за max_value.
     std::vector<int> flags;
+
+    // Snapshot of the request fields needed to reproduce the _config.csv
+    // header on right-click export from the GUI. Filled by engine in
+    // run_bif1d() before any CSV write; consumed by data_export::export_bif1d.
+    data_export::Bif1DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -172,6 +178,9 @@ struct LLE1DResult {
     std::vector<double> lyapunov;
     // flags[i]: 1 (ok) / -1 (diverged) — для совместимости с UI-агрегацией.
     std::vector<int>    flags;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::LLE1DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -224,6 +233,9 @@ struct LS1DResult {
     std::vector<std::vector<double>> spectrum;
     // flags[i]: 1 (ok) / -1 (diverged) — все экспоненты разом.
     std::vector<int> flags;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::LS1DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -309,6 +321,9 @@ struct LLE2DResult {
     // (без 999/-999/nan/inf). Если валидных нет — обе 0.
     double min_val = 0.0;
     double max_val = 0.0;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::LLE2DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -387,6 +402,9 @@ struct Bifurcation2DResult {
     // Авто-нормализация для colormap (без -1/nan).
     double min_val = 0.0;
     double max_val = 0.0;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::Bif2DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -457,6 +475,9 @@ struct LS2DResult {
     // Размер == n_exponents; если валидных нет — обе 0.
     std::vector<double> min_val;
     std::vector<double> max_val;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::LS2DSnapshot snapshot;
 };
 
 // ============================================================================
@@ -529,6 +550,9 @@ struct BasinsResult {
     int    min_cluster_idx = 0;          // самый отрицательный (для FP cluster id)
     double avg_peaks_min     = 0.0, avg_peaks_max     = 0.0;
     double avg_intervals_min = 0.0, avg_intervals_max = 0.0;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::BasinsSnapshot snapshot;
 };
 
 // ============================================================================
@@ -615,6 +639,9 @@ struct FastSyncResult {
     // Min/max валидных значений sync_error/heatmap для autoscale colorbar.
     double min_val = 0.0;
     double max_val = 0.0;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::FastSyncSnapshot snapshot;
 };
 
 class ParametricEngine {

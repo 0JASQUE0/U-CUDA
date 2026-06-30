@@ -70,6 +70,11 @@ struct AnalysisResult {
     bool ok = false;
     std::string error;
     int generation = 0;
+
+    // Snapshot of the inputs that produced this trajectory set — used by
+    // right-click "Export data..." in the GUI to write the same scheme/IC
+    // metadata into <path>_config.csv that drove the compute.
+    data_export::PhaseSnapshot snapshot;
 };
 
 // Сессия анализа фазовых портретов: общие параметры системы +

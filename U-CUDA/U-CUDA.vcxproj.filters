@@ -88,6 +88,9 @@
     <ClCompile Include="app_config.cpp">
       <Filter>Library</Filter>
     </ClCompile>
+    <ClCompile Include="data_export.cpp">
+      <Filter>NVRTC</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sysparse.hpp">
@@ -175,6 +178,9 @@
       <Filter>Visualization</Filter>
     </ClInclude>
     <ClInclude Include="parametric_engine.h">
+      <Filter>NVRTC</Filter>
+    </ClInclude>
+    <ClInclude Include="data_export.h">
       <Filter>NVRTC</Filter>
     </ClInclude>
   </ItemGroup>
