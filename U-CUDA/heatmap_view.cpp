@@ -266,6 +266,12 @@ void HeatmapView::render(PlotRenderer& renderer,
             ImGui::InputInt("Levels (0=auto)", &discrete_levels, 0, 0);
             if (discrete_levels < 0) discrete_levels = 0;
         }
+        // Caller-injected items (e.g. "Export data..."). Mirrors the same
+        // hook on Plot2DView so both view types share the right-click pattern.
+        if (popup_extras) {
+            ImGui::Separator();
+            popup_extras();
+        }
         ImGui::EndPopup();
     }
 

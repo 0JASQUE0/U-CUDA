@@ -127,6 +127,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     </ClCompile>
     <ClCompile Include="app_model.cpp" />
     <ClCompile Include="codegen.cpp" />
+    <ClCompile Include="data_export.cpp" />
     <ClCompile Include="glad.c" />
     <ClCompile Include="gpu_line_series.cpp" />
     <ClCompile Include="gpu_line_series_3d.cpp" />
@@ -157,6 +158,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="configCUDA.h" />
     <ClInclude Include="cudaLibrary.cuh" />
     <ClInclude Include="cudaMacros.cuh" />
+    <ClInclude Include="data_export.h" />
     <ClInclude Include="gpu_line_series.h" />
     <ClInclude Include="gpu_line_series_3d.h" />
     <ClInclude Include="gui.h" />

@@ -67,6 +67,22 @@ static std::string pick_image_file_win() {
     return "";
 }
 
+// Save-file dialog for plot CSV export. OFN_OVERWRITEPROMPT makes Windows
+// confirm before clobbering an existing file. Default extension is appended
+// when the user types a bare filename. Mirrors pick_image_file_win above.
+static std::string pick_save_csv_file_win() {
+    char filename[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "CSV\0*.csv\0All\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOREADONLYRETURN;
+    if (GetSaveFileNameA(&ofn)) return std::string(filename);
+    return "";
+}
+
 static void set_clipboard_win(const std::string& text) {
     if (!OpenClipboard(nullptr)) return;
     EmptyClipboard();
@@ -120,6 +136,7 @@ int main() {
     GuiCallbacks cb;
     cb.pick_image_file = pick_image_file_win;
     cb.set_clipboard_text = set_clipboard_win;
+    cb.pick_save_file_csv = pick_save_csv_file_win;
 
     // --- инициализация GLFW + OpenGL + ImGui ---
     if (!glfwInit()) return 1;

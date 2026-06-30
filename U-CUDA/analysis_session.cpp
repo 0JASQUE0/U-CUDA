@@ -209,6 +209,23 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     result.ok = result.trajectories.size() > 0;
     if (!calc_ok && result.ok) result.error = calc_err;
 
+    // Snapshot of CSV-relevant inputs for the GUI right-click export.
+    result.snapshot.vars      = in.vars;
+    result.snapshot.params    = in.params;
+    result.snapshot.a         = a;
+    result.snapshot.scheme    = in.scheme;
+    result.snapshot.h         = h;
+    result.snapshot.t_max     = tsim;
+    result.snapshot.t_skip    = tskip;
+    result.snapshot.decimator = dec;
+    result.snapshot.ic_flat.assign(N, std::vector<double>(dim, 0.0));
+    result.snapshot.ic_labels.reserve(N);
+    for (int k = 0; k < N; ++k) {
+        for (int i = 0; i < dim; ++i)
+            result.snapshot.ic_flat[k][i] = ic_flat[(size_t)k * dim + i];
+        result.snapshot.ic_labels.push_back(in.ic_sets[k].label);
+    }
+
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
     if (result.error.empty())

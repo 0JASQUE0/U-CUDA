@@ -8,8 +8,10 @@
 #include "plot_view_3d.h"
 #include "heatmap_view.h"
 #include "app_config.h"
+#include "data_export.h"
 #include <map>
 #include <memory>
+#include <cstdio>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -900,9 +902,25 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
 }
 
 // Рисует окна проекций (каждая — отдельное docking-окно с графиком).
-static void draw_projection_windows(AppModel& model) {
+static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
     PhaseAnalysisSession& s = model.phase_session;
     const AnalysisResult& res = s.result;
+    // Lambda installed on every Phase2D / TimeDomain view that has data —
+    // right-click "Export data..." writes the full double-precision
+    // trajectory set (all coords for all ICs) + a _config.csv sidecar.
+    // Phase3D uses Plot3DView which has no popup_extras hook.
+    const bool phase_busy = s.in_flight;
+    auto phase_popup_extras = [&res, &cb, phase_busy]() {
+        const bool has_data = res.ok && !res.trajectories.empty();
+        if (ImGui::MenuItem("Export data...", nullptr, false,
+                            has_data && !phase_busy)) {
+            if (cb.pick_save_file_csv) {
+                std::string path = cb.pick_save_file_csv();
+                if (!path.empty())
+                    data_export::export_phase(res, res.snapshot, path);
+            }
+        }
+    };
     // Свой offscreen-рендерер (FBO/текстура) на КАЖДУЮ проекцию: иначе все окна
     // показывали бы одну общую текстуру (геометрию последней отрисованной).
     // PlotRenderer некопируемый -> храним через unique_ptr, подгоняем под число проекций.
@@ -1001,6 +1019,7 @@ static void draw_projection_windows(AppModel& model) {
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
+                    pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
@@ -1074,6 +1093,7 @@ static void draw_projection_windows(AppModel& model) {
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
+                    pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
@@ -1451,7 +1471,7 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
     }
 }
 
-static void draw_bifurcation_plot(AppModel& model) {
+static void draw_bifurcation_plot(AppModel& model, const GuiCallbacks& cb) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
@@ -1540,6 +1560,18 @@ static void draw_bifurcation_plot(AppModel& model) {
 
                 bool fit = bdact.fit_request_2d;
                 if (fit) bdact.fit_request_2d = false;
+
+                const bool bd_busy = s.in_flight && s.is_2d_run &&
+                                     s.active_diagram_index == s.running_diagram_index;
+                hb.popup_extras = [&bdact, &cb, bd_busy]() {
+                    if (ImGui::MenuItem("Export data...", nullptr, false, !bd_busy)) {
+                        if (cb.pick_save_file_csv) {
+                            std::string path = cb.pick_save_file_csv();
+                            if (!path.empty())
+                                data_export::export_bif2d(bdact.result_2d, path);
+                        }
+                    }
+                };
 
                 ImVec2 avail = ImGui::GetContentRegionAvail();
                 ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -1677,6 +1709,34 @@ static void draw_bifurcation_plot(AppModel& model) {
         data_gen = data_gen * 31 + bd.data_generation * 2 + (bd.plot_inter_peaks ? 1 : 0);
         if (bd.fit_request) { any_fit = true; bd.fit_request = false; }
     }
+
+    // Right-click "Export data..." for the bifurcation 1D line plot. The
+    // submenu lists each diagram that has a finished run; clicking one opens
+    // a save-file dialog and writes <path> + <path>_config.csv in the exact
+    // format engine produces when csv_save_enabled is on.
+    view->popup_extras = [&s, &cb]() {
+        if (ImGui::BeginMenu("Export data...")) {
+            bool any = false;
+            for (int i = 0; i < (int)s.diagrams.size(); ++i) {
+                const auto& bd = s.diagrams[i];
+                if (!bd.last_run_ok) continue;
+                any = true;
+                const bool busy = s.in_flight && i == s.running_diagram_index;
+                char item[192];
+                std::snprintf(item, sizeof(item), "%s##exp_bd_%d",
+                              bd.label.c_str(), i);
+                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
+                    if (cb.pick_save_file_csv) {
+                        std::string path = cb.pick_save_file_csv();
+                        if (!path.empty())
+                            data_export::export_bif1d(bd.result, path);
+                    }
+                }
+            }
+            if (!any) ImGui::TextDisabled("(no completed runs)");
+            ImGui::EndMenu();
+        }
+    };
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -1941,7 +2001,7 @@ static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
 // Plot LLE: линии (points_mode=false). Каждая кривая — λ(param).
 // При mode_2d=true у активной кривой вместо линий рисуется HeatmapView
 // (квадратная сетка λ(p1, p2) с colormap'ом).
-static void draw_lle_plot(AppModel& model) {
+static void draw_lle_plot(AppModel& model, const GuiCallbacks& cb) {
     LLEAnalysisSession& s = model.lle_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
@@ -2033,6 +2093,17 @@ static void draw_lle_plot(AppModel& model) {
 
         bool fit = cact.fit_request_2d;
         if (fit) cact.fit_request_2d = false;
+
+        const bool busy = s.in_flight && s.is_2d_run && act == s.running_curve_index;
+        heatmap.popup_extras = [&cact, &cb, busy]() {
+            if (ImGui::MenuItem("Export data...", nullptr, false, !busy)) {
+                if (cb.pick_save_file_csv) {
+                    std::string path = cb.pick_save_file_csv();
+                    if (!path.empty())
+                        data_export::export_lle2d(cact.result_2d, path);
+                }
+            }
+        };
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2145,6 +2216,30 @@ static void draw_lle_plot(AppModel& model) {
         data_gen = data_gen * 31 + c.data_generation;
         if (c.fit_request) { any_fit = true; c.fit_request = false; }
     }
+
+    view->popup_extras = [&s, &cb]() {
+        if (ImGui::BeginMenu("Export data...")) {
+            bool any = false;
+            for (int i = 0; i < (int)s.curves.size(); ++i) {
+                const auto& c = s.curves[i];
+                if (!c.last_run_ok) continue;
+                any = true;
+                const bool busy = s.in_flight && !s.is_2d_run && i == s.running_curve_index;
+                char item[192];
+                std::snprintf(item, sizeof(item), "%s##exp_lle_%d",
+                              c.label.c_str(), i);
+                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
+                    if (cb.pick_save_file_csv) {
+                        std::string path = cb.pick_save_file_csv();
+                        if (!path.empty())
+                            data_export::export_lle1d(c.result, path);
+                    }
+                }
+            }
+            if (!any) ImGui::TextDisabled("(no completed runs)");
+            ImGui::EndMenu();
+        }
+    };
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2405,7 +2500,7 @@ static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
 // При mode_2d=true у активной кривой вместо линий рисуется HeatmapView с
 // одной выбранной экспонентой; combo "Exponent" над хитмапой переключает
 // плоскость без повторного Run.
-static void draw_ls_plot(AppModel& model) {
+static void draw_ls_plot(AppModel& model, const GuiCallbacks& cb) {
     LyapunovSpectrumAnalysisSession& s = model.ls_session;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::unique_ptr<Plot2DView> view;
@@ -2521,6 +2616,17 @@ static void draw_ls_plot(AppModel& model) {
         // data_generation для VBO-кэша: смешиваем поколение чанка + индекс
         // экспоненты, чтобы переключение перезалило текстуру.
         int gen = cact.data_generation_2d * 64 + k;
+
+        const bool busy = s.in_flight && s.is_2d_run && act == s.running_curve_index;
+        heatmap_ls.popup_extras = [&cact, &cb, busy]() {
+            if (ImGui::MenuItem("Export data...", nullptr, false, !busy)) {
+                if (cb.pick_save_file_csv) {
+                    std::string path = cb.pick_save_file_csv();
+                    if (!path.empty())
+                        data_export::export_ls2d(cact.result_2d, path);
+                }
+            }
+        };
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2654,6 +2760,30 @@ static void draw_ls_plot(AppModel& model) {
         data_gen = data_gen * 31 + c.data_generation;
         if (c.fit_request) { any_fit = true; c.fit_request = false; }
     }
+
+    view->popup_extras = [&s, &cb]() {
+        if (ImGui::BeginMenu("Export data...")) {
+            bool any = false;
+            for (int i = 0; i < (int)s.curves.size(); ++i) {
+                const auto& c = s.curves[i];
+                if (!c.last_run_ok) continue;
+                any = true;
+                const bool busy = s.in_flight && !s.is_2d_run && i == s.running_curve_index;
+                char item[192];
+                std::snprintf(item, sizeof(item), "%s##exp_ls_%d",
+                              c.label.c_str(), i);
+                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
+                    if (cb.pick_save_file_csv) {
+                        std::string path = cb.pick_save_file_csv();
+                        if (!path.empty())
+                            data_export::export_ls1d(c.result, path);
+                    }
+                }
+            }
+            if (!any) ImGui::TextDisabled("(no completed runs)");
+            ImGui::EndMenu();
+        }
+    };
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2940,7 +3070,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 // data_generation=1 → cache не invalidate'тся и на чужой вкладке показывается
 // предыдущий buffer). Map с lazy-init решает это и сохраняет независимый
 // zoom/pan per (config, tab).
-static void draw_basins_plot(AppModel& model) {
+static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
     if (s.configs.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -2986,6 +3116,28 @@ static void draw_basins_plot(AppModel& model) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
+
+    // Right-click "Export data..." — exports the full 4-file Basins set
+    // (basin_idx, avg_peaks, avg_intervals, helpful_array) at the chosen
+    // path. All four heatmap views share the same source result, so the
+    // same lambda works for any tab. Scatter (tab 4) uses Plot2DView, so
+    // the same hook is set there too.
+    const bool basins_busy = s.in_flight &&
+                             s.active_config_index == s.running_config_index;
+    auto basins_export_extras = [&c, &cb, basins_busy]() {
+        if (ImGui::MenuItem("Export data...", nullptr, false, !basins_busy)) {
+            if (cb.pick_save_file_csv) {
+                std::string path = cb.pick_save_file_csv();
+                if (!path.empty())
+                    data_export::export_basins(c.result, path);
+            }
+        }
+    };
+    hm_basins_v.popup_extras = basins_export_extras;
+    hm_avgpk_v.popup_extras  = basins_export_extras;
+    hm_avgint_v.popup_extras = basins_export_extras;
+    hm_states_v.popup_extras = basins_export_extras;
+    scatter_v.popup_extras   = basins_export_extras;
 
     // Inner tab-bar — переключение по 5 видам.
     // Имена 2-го и 3-го табов нейтральные — они показывают выбранную фичу
@@ -3456,7 +3608,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 }
 
 // Plot Fast Synchro: либо colored trajectory (mode 0), либо heatmap (mode 1).
-static void draw_fastsync_plot(AppModel& model) {
+static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     FastSyncAnalysisSession& s = model.fastsync_session;
     if (s.configs.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -3640,7 +3792,9 @@ static void draw_fastsync_plot(AppModel& model) {
         // через popup_extras callback. vz/var_name захватываются по значению.
         const int   vz_capture       = vz;
         const std::string vz_name    = (vz >= 0) ? var_name(vz) : std::string{};
-        v.popup_extras = [vz_capture, vz_name, &c]() {
+        const bool fs_busy = s.in_flight &&
+                             s.active_config_index == s.running_config_index;
+        v.popup_extras = [vz_capture, vz_name, &c, &cb, fs_busy]() {
             if (vz_capture >= 0) {
                 std::string lbl = "Invert depth axis (" + vz_name + ")";
                 ImGui::MenuItem(lbl.c_str(), nullptr, &c.invert_depth);
@@ -3648,6 +3802,14 @@ static void draw_fastsync_plot(AppModel& model) {
                 ImGui::BeginDisabled();
                 ImGui::MenuItem("Invert depth axis (2D system — N/A)", nullptr, false);
                 ImGui::EndDisabled();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Export data...", nullptr, false, !fs_busy)) {
+                if (cb.pick_save_file_csv) {
+                    std::string path = cb.pick_save_file_csv();
+                    if (!path.empty())
+                        data_export::export_fastsync(c.result, path);
+                }
             }
         };
         v.render(*renderer, origin, plot_avail,
@@ -3707,6 +3869,17 @@ static void draw_fastsync_plot(AppModel& model) {
         h.swap_axes = c.swap_axes;
         h.x_axis.name = var_name(c.result.axis_x_var) + "(0)";
         h.y_axis.name = var_name(c.result.axis_y_var) + "(0)";
+        const bool fs_busy = s.in_flight &&
+                             s.active_config_index == s.running_config_index;
+        h.popup_extras = [&c, &cb, fs_busy]() {
+            if (ImGui::MenuItem("Export data...", nullptr, false, !fs_busy)) {
+                if (cb.pick_save_file_csv) {
+                    std::string path = cb.pick_save_file_csv();
+                    if (!path.empty())
+                        data_export::export_fastsync(c.result, path);
+                }
+            }
+        };
         h.render(*renderer, origin, avail,
                  /*owner_id*/ (int)base_oid, c.data_generation,
                  c.result.n_pts_grid, c.result.n_pts_grid,
@@ -4263,7 +4436,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             draw_phase_controls(model, lib);
         }
         ImGui::End();
-        draw_projection_windows(model);
+        draw_projection_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Parametric) {
         if (ImGui::Begin("Parametric Controls")) {
@@ -4271,15 +4444,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Bifurcation 1D")) {
-            draw_bifurcation_plot(model);
+            draw_bifurcation_plot(model, cb);
         }
         ImGui::End();
         if (ImGui::Begin("LLE 1D")) {
-            draw_lle_plot(model);
+            draw_lle_plot(model, cb);
         }
         ImGui::End();
         if (ImGui::Begin("Lyapunov Spectrum")) {
-            draw_ls_plot(model);
+            draw_ls_plot(model, cb);
         }
         ImGui::End();
     }
@@ -4289,7 +4462,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Basins of Attraction")) {
-            draw_basins_plot(model);
+            draw_basins_plot(model, cb);
         }
         ImGui::End();
     }
@@ -4299,7 +4472,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Fast Synchro")) {
-            draw_fastsync_plot(model);
+            draw_fastsync_plot(model, cb);
         }
         ImGui::End();
     }
