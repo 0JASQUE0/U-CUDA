@@ -3338,15 +3338,20 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         items.reserve(s.vars.size());
         for (const auto& v : s.vars) items.push_back(v.c_str());
 
+        const char* axis_role_x = c.grid_swap_master_slave ? "Axis X (slave IC)" : "Axis X (master IC)";
+        const char* axis_role_y = c.grid_swap_master_slave ? "Axis Y (slave IC)" : "Axis Y (master IC)";
         ImGui::SetNextItemWidth(160);
-        ImGui::Combo("Axis X (slave IC)", &c.axis_x_var, items.data(), (int)items.size());
+        ImGui::Combo(axis_role_x, &c.axis_x_var, items.data(), (int)items.size());
         InputNumStr("X lo", c.axis_x_lo_text, 120);
         InputNumStr("X hi", c.axis_x_hi_text, 120);
         ImGui::SetNextItemWidth(160);
-        ImGui::Combo("Axis Y (slave IC)", &c.axis_y_var, items.data(), (int)items.size());
+        ImGui::Combo(axis_role_y, &c.axis_y_var, items.data(), (int)items.size());
         InputNumStr("Y lo", c.axis_y_lo_text, 120);
         InputNumStr("Y hi", c.axis_y_hi_text, 120);
         InputNumStr("Resolution", c.n_pts_text, 120);
+        // Какую сторону перебирать по сетке: master IC (legacy default) или slave IC.
+        ImGui::Checkbox("Vary slave IC (master fixed)##fs_gridswap", &c.grid_swap_master_slave);
+        ImGui::TextDisabled("Off: grid sweeps master IC, slave fixed. On: grid sweeps slave IC, master fixed.");
         ImGui::Separator();
     }
     else if (c.mode == 0 && !s.vars.empty()) {
@@ -3386,6 +3391,17 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::SetNextItemWidth(280);
     ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
     InputNumStr("FS error trs.", c.fs_error_trs_text, 120);
+    ImGui::Separator();
+
+    // ----- CSV output -----
+    ImGui::Text("CSV output:");
+    ImGui::Checkbox("Save to file##fs_csv", &c.csv_save_enabled);
+    InputTextStr("##fs_csv_path", c.csv_output_path);
+    if (c.mode == 0) {
+        ImGui::TextDisabled("Writes one row per trajectory point: x[0],..,x[N-1],sync_error.");
+    } else {
+        ImGui::TextDisabled("Writes 2 header lines (X/Y ranges) + n_pts x n_pts error matrix (row-major).");
+    }
     ImGui::Separator();
 
     // ----- Per-var IC + coupling -----

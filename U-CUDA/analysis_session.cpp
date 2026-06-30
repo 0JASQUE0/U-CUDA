@@ -1262,12 +1262,16 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
     if (req.axis_x_hi < req.axis_x_lo) std::swap(req.axis_x_lo, req.axis_x_hi);
     if (req.axis_y_hi < req.axis_y_lo) std::swap(req.axis_y_lo, req.axis_y_hi);
     req.n_pts      = std::max(1, parse_i(c.n_pts_text, 200));
+    req.grid_swap_master_slave = c.grid_swap_master_slave;
 
     req.type_of_synch = (c.type_of_synch == 1) ? 1 : 0;
     int ee = c.error_estim;
     if (ee < 0 || ee > 2) ee = 2;
     req.error_estim   = ee;
     req.fs_error_trs  = parse_d(c.fs_error_trs_text, 1e-12);
+
+    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    req.var_names       = s.vars;
 
     return req;
 }

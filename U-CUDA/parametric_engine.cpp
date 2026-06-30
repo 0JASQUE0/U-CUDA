@@ -3982,6 +3982,27 @@ struct ParametricEngine::Impl {
             cudaFree(d_Xs); cudaFree(d_X0);
             cudaFree(d_values); cudaFree(d_kF); cudaFree(d_kB);
             #undef FS_CHECK
+
+            // ---- CSV (On Attractor): trajectory + sync_error per row ----
+            if (!req.csv_output_path.empty()) {
+                std::ofstream csv(req.csv_output_path);
+                if (csv.is_open()) {
+                    csv << std::setprecision(15);
+                    // Header: var-names + "sync_error".
+                    for (int j = 0; j < amountOfIC_int; ++j) {
+                        if (j < (int)req.var_names.size()) csv << req.var_names[j];
+                        else                                csv << "x" << j;
+                        csv << ",";
+                    }
+                    csv << "sync_error\n";
+                    for (int i = 0; i < (int)res.n_pts_traj; ++i) {
+                        for (int j = 0; j < amountOfIC_int; ++j)
+                            csv << res.traj_full[(size_t)i * amountOfIC_int + j] << ",";
+                        csv << res.sync_error[i] << "\n";
+                    }
+                }
+            }
+
             res.ok = true;
             return res;
             FS0_FAIL:
@@ -4074,6 +4095,7 @@ struct ParametricEngine::Impl {
                 double maxValue_arg              = req.max_value;
                 int    iterOfSynchr_int          = req.iter_of_synchr;
                 double* d_fs_err_chunk           = d_fs_err + i * originalNPtsLimiter;
+                int    swap_role_int             = req.grid_swap_master_slave ? 1 : 0;
 
                 void* args_grid[] = {
                     &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
@@ -4082,7 +4104,8 @@ struct ParametricEngine::Impl {
                     &d_values, &amountOfValues_int,
                     &amountOfIterations_int, &preScaller_int, &maxValue_arg, &iterOfSynchr_int,
                     &d_kF, &d_kB,
-                    &d_data, &d_helpful, &d_fs_err_chunk
+                    &d_data, &d_helpful, &d_fs_err_chunk,
+                    &swap_role_int
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
@@ -4121,6 +4144,27 @@ struct ParametricEngine::Impl {
                 }
                 res.min_val = std::isfinite(vmin) ? vmin : 0.0;
                 res.max_val = std::isfinite(vmax) ? vmax : 0.0;
+
+                // ---- CSV (On Grid): 2 строки заголовка (X/Y ranges) +
+                // матрица n_pts × n_pts row-major (iy*n + ix). Format совпадает
+                // с legacy FastSynchro_2 в hostLibrary.cu (пробельный разделитель
+                // для ranges, запятые между значениями ошибки).
+                if (!req.csv_output_path.empty()) {
+                    std::ofstream csv(req.csv_output_path);
+                    if (csv.is_open()) {
+                        csv << std::setprecision(15);
+                        csv << req.axis_x_lo << " " << req.axis_x_hi << "\n";
+                        csv << req.axis_y_lo << " " << req.axis_y_hi << "\n";
+                        const int n = req.n_pts;
+                        for (int iy = 0; iy < n; ++iy) {
+                            for (int ix = 0; ix < n; ++ix) {
+                                csv << res.heatmap[(size_t)iy * n + ix];
+                                if (ix + 1 < n) csv << ",";
+                            }
+                            csv << "\n";
+                        }
+                    }
+                }
             }
 
             FS1_CLEANUP:

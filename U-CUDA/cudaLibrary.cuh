@@ -55,6 +55,9 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	numb*			output,
 	const int		preScaller);
 
+// swapRole: 0 = grid varies master IC (legacy default — initialConditions
+// overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
+// (initialConditionsSlave overridden per cell, initialConditions fixed).
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -77,7 +80,8 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	const numb* kBackward,
 	numb* data,
 	int* maxValueCheckerArray,
-	numb* FastSynchroError);
+	numb* FastSynchroError,
+	int		swapRole = 0);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
