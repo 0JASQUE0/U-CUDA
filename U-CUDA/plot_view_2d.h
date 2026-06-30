@@ -5,12 +5,31 @@
 #include "plot_renderer.h"
 #include <vector>
 #include <string>
+#include <functional>
 
 struct PlotSeriesInput {
     const float* points = nullptr;
     int          n_points = 0;
     ImVec4       color = ImVec4(1, 1, 1, 1);
     std::string  label;
+
+    // Per-segment colored mode (опционально). Когда values != nullptr И imdraw_lines
+    // включён в Plot2DView, каждый сегмент i рисуется цветом cmap_sample(t, colormap)
+    // где t = clamp((values[i] - cmin) / (cmax - cmin), 0, 1). Длина values = n_points.
+    // Используется для FastSynchro colored trajectory. При nullptr — старое поведение
+    // (uniform color = `color`). points_mode и shader-line режим игнорируют это поле.
+    const float*    values = nullptr;
+    HeatmapColormap colormap = HeatmapColormap::Viridis;
+    float           cmin = 0.0f;
+    float           cmax = 1.0f;
+
+    // Optional painter's-algorithm draw order for line segments (только в
+    // imdraw_lines режиме). Длина = n_points - 1; segment_order[k] = индекс
+    // segment'а, который должен быть нарисован k-м (0 = первый = задний,
+    // последний = передний). Используется FastSync для depth-sorting по
+    // непоказываемой оси (трёхмерный аттрактор спроецированный на XY).
+    // При nullptr — рисуем в порядке возрастания индекса (как раньше).
+    const int*      segment_order = nullptr;
 };
 
 class Plot2DView {
@@ -56,6 +75,13 @@ public:
 
     // ��������� ����� � ���� � ������� ������ (������� ���������� ����� ����������).
     std::vector<bool> visible;
+
+    // Опционально: callback для добавления custom-пунктов в right-click popup
+    // (после стандартных Auto fit / Lock / Invert axis). Caller выставляет
+    // лямбду перед каждым render(); plot view вызывает её внутри своего
+    // BeginPopup/EndPopup. Используется, например, FastSync для "Invert depth
+    // axis" пункта без необходимости open'ить отдельный popup.
+    std::function<void()> popup_extras;
 
     // render:
     //  global_visible � ��������� �� ������� �� (�������, ����� �� ��� ��������),

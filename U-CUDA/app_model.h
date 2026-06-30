@@ -100,7 +100,7 @@ public:
     // --- режим приложения и сессия анализа (слой 2) ---
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.
-    enum class AppMode { Library, Analysis, Parametric, Basins, Settings };
+    enum class AppMode { Library, Analysis, Parametric, Basins, FastSync, Settings };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -116,6 +116,9 @@ public:
 
     // Basins of attraction — отдельный AppMode со своим Run и 5-плотным окном.
     BasinsAnalysisSession      basins_session;
+
+    // Fast Synchro — отдельный AppMode (anti-synchro analysis на attractor / IC grid).
+    FastSyncAnalysisSession    fastsync_session;
 
     // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
@@ -182,6 +185,7 @@ public:
     void remove_lle_curve(int i);
     void remove_ls_curve(int i);
     void remove_basins_config(int i);
+    void remove_fastsync_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
@@ -191,6 +195,7 @@ public:
     bool start_parametric_analysis();
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
+    bool start_fastsync_analysis();
 
     // ---- результат генерации ----
     std::string generated_code;    // итоговый код всех выбранных схем

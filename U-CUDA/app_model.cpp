@@ -250,6 +250,19 @@ bool AppModel::start_basins_analysis() {
     return true;
 }
 
+bool AppModel::start_fastsync_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    fastsync_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        fastsync_session.sys = built;
+    }
+    catch (...) {}
+    fastsync_session.loaded_system_name = name;
+    return true;
+}
+
 // ============================================================================
 // Cross-analysis batch queue
 // ============================================================================
@@ -324,6 +337,10 @@ void AppModel::remove_basins_config(int i) {
     }
     for (auto& it : basins_queue)
         if (it.index > i) --it.index;
+}
+
+void AppModel::remove_fastsync_config(int i) {
+    fastsync_session.remove_config(i);
 }
 
 bool AppModel::start_next_in_basins_queue() {

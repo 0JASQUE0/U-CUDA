@@ -45,9 +45,25 @@ constexpr bool LINEAR_OR_LOG_DISTRIB = 1;
 
 
 // --- CHOOSE AVG OR LOG10(AVG) ANALYSIS ---
-// 1 -- avg peak analysis; 
+// 1 -- avg peak analysis;
 // 0 -- log10(avg peak) analysis
-constexpr bool lin_or_log = 0; 
+constexpr bool lin_or_log = 0;
+
+// --- FAST SYNCHRO knobs (NVRTC-overridable) ---
+// Wrapped в #ifndef чтобы NVRTC-template мог переопределить через #define
+// перед #include "configCUDA.h" — даём GUI настраивать per-run. Без override
+// (Debug / legacy main_NonLinAnal.cu) — старые дефолты.
+#ifndef type_of_synch
+// 0 = unidirectional synchro; 1 = bidirectional synchro
+constexpr int type_of_synch = 0;
+#endif
+#ifndef error_estim
+// 0 = RMS(error) on last iter; 1 = #iters to reach FS_error_trs; 2 = RMS at last point on last iter
+constexpr int error_estim = 2;
+#endif
+#ifndef FS_error_trs
+constexpr numb FS_error_trs = 1e-12;
+#endif
 
 // --- CALCULATE ADDITIONALLY MEAN AND MEDIAN FREQUENCY? ---
 // 1 -- yes; 
@@ -120,18 +136,9 @@ constexpr int BF_FEATURE2_DEFAULT = BF_AVG_INTERVALS;
 constexpr int blockSize_setup = 32; // default blockSize value
 constexpr int set_precision  = 15; // precision of numbers in writng final csv files
 
-// ---  ---  ---  ---  --- Fast Synchro ---  ---  ---  ---  --- 
-
-constexpr numb FS_error_trs = 1e-12;
-
-// 0 - unidirictional sycnhro; 
-// 1 - bidirectional synchro
-constexpr int type_of_synch = 0; 
-
-// 0 - RMS(error) on the last iteration; 
-// 1 - number of iteration to achieve RMS(error) <= FS_error_trs; 
-// 2 - RMS(error) on the last point on the last iteration;
-constexpr int error_estim = 2; 
+// ---  ---  ---  ---  --- Fast Synchro ---  ---  ---  ---  ---
+// type_of_synch / error_estim / FS_error_trs объявлены выше (в #ifndef-блоках),
+// чтобы NVRTC-template мог их переопределить через #define перед include.
 
 constexpr int amount_GPU = 1920; // precision of numbers in writng final csv files
 constexpr numb pi	 = 3.1415926535897932384626433832795;

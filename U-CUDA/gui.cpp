@@ -944,6 +944,19 @@ static void draw_projection_windows(AppModel& model) {
                     pr.view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
                     pr.view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
 
+                    // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
+                    // с настраиваемой толщиной + α). По дефолту выключено → быстрый
+                    // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
+                    ImGui::Checkbox("Custom line style##phase2d", &pr.custom_line_style);
+                    if (pr.custom_line_style) {
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                    }
+                    pr.view2d->imdraw_lines      = pr.custom_line_style;
+                    pr.view2d->line_thickness_px = pr.line_width;
+
                     // подготовить серии: для каждой траектории выбираем координаты по (ax, ay)
                     // храним float-массивы локально в статике, чтобы указатели жили до конца кадра
                     static std::vector<std::vector<float>> series_data;
@@ -972,6 +985,9 @@ static void draw_projection_windows(AppModel& model) {
                         si.points = buf.data();
                         si.n_points = (int)(buf.size() / 2);
                         si.color = ic_base_color((int)k);
+                        // В custom_line_style режиме применяем α к цвету IC
+                        // (rendering: ImDrawList использует color.w как alpha).
+                        if (pr.custom_line_style) si.color.w = pr.alpha;
                         si.label = lab;
                         series_in.push_back(si);
 
@@ -3210,6 +3226,499 @@ static void draw_basins_plot(AppModel& model) {
 }
 
 // ============================================================
+// Fast Synchro Controls + Plot — recurrent synchronization (anti-sync).
+// Mode 0 = On Attractor (trajectory + per-point error); Mode 1 = On Grid.
+// ============================================================
+static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
+    FastSyncAnalysisSession& s = model.fastsync_session;
+
+    // Source of truth для custom-схем — AppModel (редактируются в Library).
+    // load_from_record() сохраняет снапшот ОДНОКРАТНО при входе в режим, поэтому
+    // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
+    // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
+    s.custom_schemes = model.custom_schemes;
+
+    ImGui::Text("Fast Synchro");
+    ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
+
+    // System picker.
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (s.in_flight) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("##fs_syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));
+                    model.start_fastsync_analysis();
+                    std::string jb = lib.load_session(model.loaded_name, "_last_fastsync");
+                    if (!jb.empty())
+                        session_from_json_fastsync(jb, model.fastsync_session);
+                } catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (s.in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // Tab bar для config'ов.
+    int active_now = -1, to_remove = -1;
+    if (ImGui::BeginTabBar("##fs_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.configs.size(); ++i) {
+            FastSyncConfig& fc = s.configs[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = fc.label + "###fs_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_config_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing | ImGuiTabItemFlags_NoTooltip))
+                s.add_config();
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_config_index = active_now;
+    if (to_remove >= 0)  model.remove_fastsync_config(to_remove);
+
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No FastSync configs. Press '+' to add one.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    FastSyncConfig& c = s.configs[s.active_config_index];
+
+    // Label rename.
+    {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s", c.label.c_str());
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::InputText("Label##fs_label", buf, sizeof(buf))) c.label = buf;
+    }
+    ImGui::Separator();
+
+    // ----- Mode -----
+    ImGui::Text("Mode:");
+    ImGui::RadioButton("On Attractor", &c.mode, 0); ImGui::SameLine();
+    ImGui::RadioButton("On Grid",      &c.mode, 1);
+    ImGui::Separator();
+
+    // ----- Scheme -----
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    if (c.scheme == "CD") InputNumStr("symmetry s", c.symmetry_s, 120);
+    ImGui::Separator();
+
+    // ----- Mode-specific axes -----
+    if (c.mode == 1 && !s.vars.empty()) {
+        if (c.axis_x_var < 0 || c.axis_x_var >= (int)s.vars.size()) c.axis_x_var = 0;
+        if (c.axis_y_var < 0 || c.axis_y_var >= (int)s.vars.size())
+            c.axis_y_var = (s.vars.size() > 1) ? 1 : 0;
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Axis X (slave IC)", &c.axis_x_var, items.data(), (int)items.size());
+        InputNumStr("X lo", c.axis_x_lo_text, 120);
+        InputNumStr("X hi", c.axis_x_hi_text, 120);
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Axis Y (slave IC)", &c.axis_y_var, items.data(), (int)items.size());
+        InputNumStr("Y lo", c.axis_y_lo_text, 120);
+        InputNumStr("Y hi", c.axis_y_hi_text, 120);
+        InputNumStr("Resolution", c.n_pts_text, 120);
+        ImGui::Separator();
+    }
+    else if (c.mode == 0 && !s.vars.empty()) {
+        // На траектории — какие 2 переменные показывать как X/Y фазового портрета.
+        std::vector<const char*> items;
+        items.reserve(s.vars.size());
+        for (const auto& v : s.vars) items.push_back(v.c_str());
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
+        ImGui::Separator();
+    }
+
+    ImGui::Text("Integration:");
+    InputNumStr("h",                c.h_text,              120);
+    if (c.mode == 0) {
+        InputNumStr("t_max",        c.t_max_text,          120);
+        InputNumStr("transient",    c.transient_text,      120);
+    }
+    InputNumStr("window",           c.window_text,         120);
+    InputNumStr("iter of synch",    c.iter_of_synchr_text, 120);
+    InputNumStr("decimator",        c.pre_scaller_text,    120);
+    InputNumStr("max value",        c.max_value_text,      120);
+    ImGui::Separator();
+
+    // ----- Runtime knobs -----
+    ImGui::Text("Synchro runtime:");
+    static const char* tos_names[] = { "Unidirectional", "Bidirectional" };
+    ImGui::SetNextItemWidth(160);
+    ImGui::Combo("Type of synch.", &c.type_of_synch, tos_names, IM_ARRAYSIZE(tos_names));
+    static const char* ee_names[] = {
+        "0: RMS on last iter",
+        "1: # iters to reach FS_error_trs",
+        "2: RMS at last point"
+    };
+    ImGui::SetNextItemWidth(280);
+    ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
+    InputNumStr("FS error trs.", c.fs_error_trs_text, 120);
+    ImGui::Separator();
+
+    // ----- Per-var IC + coupling -----
+    auto draw_var_block = [&](const char* title, std::map<std::string, std::string>& m, const char* id_prefix) {
+        ImGui::Text("%s", title);
+        for (const auto& v : s.vars) {
+            std::string pid = std::string(id_prefix) + v;
+            ImGui::PushID(pid.c_str());
+            InputNumStr(v.c_str(), m[v], 120);
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+    };
+    draw_var_block("Master initial conditions:",                                   c.ic_master,  "icm_");
+    draw_var_block("Slave initial conditions:",                                    c.ic_slave,   "ics_");
+    draw_var_block("K forward (coupling on forward step, h>0):",                   c.k_forward,  "kf_");
+    draw_var_block("K backward (coupling on backward step, h<0):",                 c.k_backward, "kb_");
+
+    ImGui::Text("Parameters:");
+    for (const auto& p : s.params) {
+        ImGui::PushID(p.c_str());
+        InputNumStr(p.c_str(), c.param_values[p], 120);
+        ImGui::PopID();
+    }
+    ImGui::Separator();
+
+    // (Visualization controls — colormap / autoscale / cmin-cmax / swap /
+    // line width / alpha — теперь живут в toolbar'е над плотом, см.
+    // draw_fastsync_plot. Здесь только compute-параметры.)
+    ImGui::Separator();
+
+    // ----- Run -----
+    bool do_run = false;
+    if (s.in_flight) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Running...", ImVec2(160, 0));
+        ImGui::EndDisabled();
+    } else {
+        do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+    }
+    if (!s.in_flight && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false))
+        do_run = true;
+    if (do_run) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine, s.active_config_index);
+    }
+    ImGui::SameLine();
+    if (s.in_flight && ImGui::Button("Cancel")) s.request_cancel();
+
+    if (c.last_run_ok) {
+        if (c.mode == 0)
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: traj %d pts, sync_err [%.4g, %.4g]",
+                c.result.n_pts_traj, c.result.min_val, c.result.max_val);
+        else
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: grid %dx%d, sync_err [%.4g, %.4g]",
+                c.result.n_pts_grid, c.result.n_pts_grid,
+                c.result.min_val, c.result.max_val);
+    } else if (!c.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 10);
+        ImGui::InputTextMultiline("##fs_err",
+            const_cast<char*>(c.last_error.c_str()),
+            c.last_error.size() + 1,
+            sz, ImGuiInputTextFlags_ReadOnly);
+    }
+}
+
+// Plot Fast Synchro: либо colored trajectory (mode 0), либо heatmap (mode 1).
+static void draw_fastsync_plot(AppModel& model) {
+    FastSyncAnalysisSession& s = model.fastsync_session;
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    FastSyncConfig& c = s.configs[s.active_config_index];
+
+    // ---- Visualization toolbar (как у basins / Bif-2D / LLE-2D) ----
+    {
+        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+        if (c.colormap_idx < 0 || c.colormap_idx > 3) c.colormap_idx = 2;
+        ImGui::SetNextItemWidth(140);
+        ImGui::Combo("Colormap##fs", &c.colormap_idx, cmap_names, IM_ARRAYSIZE(cmap_names));
+        ImGui::SameLine();
+        ImGui::Checkbox("Autoscale color##fs", &c.autoscale_color);
+        if (!c.autoscale_color) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            InputNumStr("vmin##fs", c.c_min_text, 80);
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+            InputNumStr("vmax##fs", c.c_max_text, 80);
+        }
+        if (c.mode == 0) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+            ImGui::SliderFloat("Line width##fs", &c.line_width, 0.1f, 5.0f, "%.2f");
+            ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+            ImGui::SliderFloat("Alpha##fs",      &c.alpha,      0.0f, 1.0f, "%.2f");
+            // Выбор Display X/Y живёт в Controls-панели (рядом с другими compute-
+            // параметрами) — дублировать здесь не нужно.
+        } else {
+            ImGui::SameLine();
+            if (ImGui::Button(c.swap_axes ? "Swap axes (on)##fs" : "Swap axes##fs"))
+                c.swap_axes = !c.swap_axes;
+        }
+    }
+
+    if (!c.last_run_ok) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    const unsigned base_oid = 0x5F50000u + (unsigned)s.active_config_index;
+    static std::unique_ptr<PlotRenderer> renderer;
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_map;
+    static std::map<unsigned, std::unique_ptr<Plot2DView>>  traj_map;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
+
+    bool fit = c.fit_request;
+    if (fit) c.fit_request = false;
+    ImVec2 avail  = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    auto var_name = [&](int idx) -> std::string {
+        if (idx >= 0 && idx < (int)s.vars.size()) return s.vars[idx];
+        return std::string("x");
+    };
+
+    auto parse_d_local = [](const std::string& s, double def) -> double {
+        if (s.empty()) return def;
+        try { return std::stod(s); } catch (...) { return def; }
+    };
+    // cmin/cmax: при autoscale берём диапазон актуальных значений из result.
+    double cmin, cmax;
+    if (c.autoscale_color) {
+        cmin = c.result.min_val;
+        cmax = c.result.max_val;
+        if (!(cmax > cmin)) cmax = cmin + 1.0;
+    } else {
+        cmin = parse_d_local(c.c_min_text, -12.0);
+        cmax = parse_d_local(c.c_max_text,   0.0);
+    }
+    HeatmapColormap cmap = (HeatmapColormap)((c.colormap_idx >= 0 && c.colormap_idx <= 3) ? c.colormap_idx : 2);
+
+    if (c.mode == 0) {
+        // Colored trajectory + manual colorbar справа.
+        const int nX = c.result.amountOfX_traj;
+        if (nX <= 0 || c.result.n_pts_traj <= 0) {
+            ImGui::TextDisabled("No trajectory data.");
+            return;
+        }
+        int vx = (c.axis_x_var >= 0 && c.axis_x_var < nX) ? c.axis_x_var : 0;
+        int vy = (c.axis_y_var >= 0 && c.axis_y_var < nX) ? c.axis_y_var : (nX > 1 ? 1 : 0);
+
+        // Резервируем место справа под colorbar (mirror HeatmapView layout).
+        const float colorbar_w   = 18.0f;
+        const float colorbar_gap = 12.0f;
+        const float tick_len     = 4.0f;
+        const float tick_text_gap = 2.0f;
+
+        // Прикинем максимальную ширину tick-подписей colorbar'а.
+        std::string lbl_lo = fmt_tick(cmin);
+        std::string lbl_hi = fmt_tick(cmax);
+        float max_tick_w = std::max(ImGui::CalcTextSize(lbl_lo.c_str()).x,
+                                    ImGui::CalcTextSize(lbl_hi.c_str()).x);
+        float cb_total = colorbar_w + colorbar_gap + tick_len + tick_text_gap + max_tick_w + 6.0f;
+
+        ImVec2 plot_avail(std::max(64.0f, avail.x - cb_total), avail.y);
+
+        auto& slot = traj_map[base_oid];
+        if (!slot) {
+            slot = std::make_unique<Plot2DView>();
+            slot->points_mode  = false;
+            slot->show_legend  = false;
+            slot->imdraw_lines = true;
+            slot->pad_x = true; slot->pad_y = true;
+        }
+        Plot2DView& v = *slot;
+        v.x_axis.name = var_name(vx);
+        v.y_axis.name = var_name(vy);
+        v.line_thickness_px = c.line_width;
+
+        // Если поменялись axes — форсим (a) fit, чтобы view нашёл новый bbox;
+        // (b) re-upload GPU-кэша точек, иначе series_cache_.bbox() даст старый
+        // диапазон. Поэтому передаём генерационный токен, зависящий от (vx,vy).
+        static std::map<unsigned, std::pair<int,int>> last_axes;
+        auto it_ax = last_axes.find(base_oid);
+        if (it_ax == last_axes.end() || it_ax->second.first != vx || it_ax->second.second != vy) {
+            v.view_valid = false;     // force autofit
+            last_axes[base_oid] = { vx, vy };
+        }
+
+        // Пересобираем XY/values из полного буфера (без decimator'а — рисуем
+        // все точки, ImDrawList сегмент-за-сегментом справляется).
+        int n_in = c.result.n_pts_traj;
+        static std::vector<float> xy_buf;
+        static std::vector<float> err_buf;
+        xy_buf.resize((size_t)n_in * 2);
+        err_buf.resize((size_t)n_in);
+        for (int i = 0; i < n_in; ++i) {
+            xy_buf[2*i + 0] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vx];
+            xy_buf[2*i + 1] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vy];
+            err_buf[i]      = (float)c.result.sync_error[i];
+        }
+
+        // Painter's algorithm: сортируем сегменты по средней координате оси Z
+        // (первая var, не равная vx/vy). Дальние сегменты рисуются первыми,
+        // ближние — поверх. Без сортировки артефакты "красное поверх синего"
+        // справа на скриншоте — последний по времени сегмент перекрывает
+        // более ранние независимо от их Z.
+        int vz = -1;
+        for (int k = 0; k < nX; ++k) if (k != vx && k != vy) { vz = k; break; }
+        static std::vector<int>   seg_order;
+        static std::vector<float> seg_z;
+        const int n_seg = n_in - 1;
+        seg_order.clear();
+        if (vz >= 0 && n_seg > 0) {
+            seg_order.resize(n_seg);
+            seg_z.resize(n_seg);
+            for (int k = 0; k < n_seg; ++k) {
+                seg_order[k] = k;
+                float za = (float)c.result.traj_full[(size_t)k       * nX + (size_t)vz];
+                float zb = (float)c.result.traj_full[(size_t)(k + 1) * nX + (size_t)vz];
+                seg_z[k] = 0.5f * (za + zb);
+            }
+            if (c.invert_depth) {
+                std::sort(seg_order.begin(), seg_order.end(),
+                          [&](int a, int b) { return seg_z[a] > seg_z[b]; });
+            } else {
+                std::sort(seg_order.begin(), seg_order.end(),
+                          [&](int a, int b) { return seg_z[a] < seg_z[b]; });
+            }
+        }
+
+        std::vector<PlotSeriesInput> series_in(1);
+        series_in[0].points   = xy_buf.data();
+        series_in[0].n_points = n_in;
+        series_in[0].color    = ImVec4(1, 1, 1, c.alpha);  // .w → alpha-multiplier на cmap_sample()
+        series_in[0].label    = "trajectory";
+        series_in[0].values   = err_buf.data();
+        series_in[0].colormap = cmap;
+        series_in[0].cmin     = (float)cmin;
+        series_in[0].cmax     = (float)cmax;
+        series_in[0].segment_order = seg_order.empty() ? nullptr : seg_order.data();
+        std::vector<bool> vis(1, true);
+        // Synthetic generation token: меняется при смене (data_generation, vx, vy),
+        // чтобы Plot2DView::series_cache_ перезалил GPU-буфер → bbox()/autofit
+        // подхватили новую X/Y проекцию.
+        int gen_token = c.data_generation * 1000 + vx * 10 + vy;
+        // Right-click popup получает дополнительный пункт "Invert depth axis"
+        // через popup_extras callback. vz/var_name захватываются по значению.
+        const int   vz_capture       = vz;
+        const std::string vz_name    = (vz >= 0) ? var_name(vz) : std::string{};
+        v.popup_extras = [vz_capture, vz_name, &c]() {
+            if (vz_capture >= 0) {
+                std::string lbl = "Invert depth axis (" + vz_name + ")";
+                ImGui::MenuItem(lbl.c_str(), nullptr, &c.invert_depth);
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::MenuItem("Invert depth axis (2D system — N/A)", nullptr, false);
+                ImGui::EndDisabled();
+            }
+        };
+        v.render(*renderer, origin, plot_avail,
+                 /*owner_id*/ (int)base_oid, gen_token,
+                 series_in, vis, vis, fit);
+        v.popup_extras = nullptr; // не утечь callback в другой кадр
+
+        // ---- Manual colorbar справа ----
+        // Зеркалит HeatmapView::render section 9. Plot2DView использует
+        // те же margin_left/top/bottom (78/20/46) — берём отсюда.
+        const float margin_left   = 78.0f;
+        const float margin_top    = 20.0f;
+        const float margin_bottom = 46.0f;
+        float plot_w = std::max(64.0f, plot_avail.x - margin_left - 20.0f);
+        float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
+        float cb_x = origin.x + margin_left + plot_w + colorbar_gap;
+        float cb_y = origin.y + margin_top;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const int n_strips = 64;
+        for (int k = 0; k < n_strips; ++k) {
+            float t0 = (float)k / n_strips;
+            float t1 = (float)(k + 1) / n_strips;
+            float y0 = cb_y + plot_h * (1.0f - t1);
+            float y1 = cb_y + plot_h * (1.0f - t0);
+            ImU32 col = cmap_sample((t0 + t1) * 0.5f, cmap);
+            dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + colorbar_w, y1), col);
+        }
+        dl->AddRect(ImVec2(cb_x, cb_y), ImVec2(cb_x + colorbar_w, cb_y + plot_h),
+                    IM_COL32(120, 120, 130, 200));
+        ImU32 col_text = IM_COL32(220, 220, 230, 255);
+        float font_h = ImGui::GetFontSize();
+        // Метки на 5 равномерно распределённых уровнях.
+        const int n_ticks = 5;
+        for (int k = 0; k < n_ticks; ++k) {
+            float t = (float)k / (n_ticks - 1);
+            double v = cmin + t * (cmax - cmin);
+            float y = cb_y + plot_h * (1.0f - t);
+            dl->AddLine(ImVec2(cb_x + colorbar_w, y),
+                        ImVec2(cb_x + colorbar_w + tick_len, y),
+                        IM_COL32(120, 120, 130, 200));
+            std::string s = fmt_tick(v);
+            dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
+                               y - font_h * 0.5f),
+                        col_text, s.c_str());
+        }
+
+    }
+    else {
+        // Heatmap.
+        auto& slot = hm_map[base_oid];
+        if (!slot) slot = std::make_unique<HeatmapView>();
+        HeatmapView& h = *slot;
+        h.colormap = cmap;
+        h.autoscale = c.autoscale_color;
+        h.manual_vmin = (float)cmin;
+        h.manual_vmax = (float)cmax;
+        h.swap_axes = c.swap_axes;
+        h.x_axis.name = var_name(c.result.axis_x_var) + "(0)";
+        h.y_axis.name = var_name(c.result.axis_y_var) + "(0)";
+        h.render(*renderer, origin, avail,
+                 /*owner_id*/ (int)base_oid, c.data_generation,
+                 c.result.n_pts_grid, c.result.n_pts_grid,
+                 c.result.heatmap.data(),
+                 c.result.axis_x_lo, c.result.axis_x_hi,
+                 c.result.axis_y_lo, c.result.axis_y_hi,
+                 c.result.min_val, c.result.max_val,
+                 fit);
+    }
+}
+
+// ============================================================
 // Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
 // ============================================================
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
@@ -3407,6 +3916,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last_basins",
                              session_to_json_basins(model.basins_session));
     }
+    // FastSync: poll worker future; on completion persist session JSON.
+    // Без этого вызова in_flight никогда не сбрасывается → "Running" висит вечно.
+    if (model.fastsync_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_fastsync",
+                             session_to_json_fastsync(model.fastsync_session));
+    }
 
     // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
     // очереди есть элементы — берём следующий и стартуем. start_next сам
@@ -3421,6 +3937,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
     ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
     ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
+    ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
@@ -3428,7 +3945,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
     // drains parametric_queue and basins_queue so remaining batch items
     // don't auto-start.
-    enum class BusyKind { None, Bif, LLE, LS, Basins, Phase };
+    enum class BusyKind { None, Bif, LLE, LS, Basins, Phase, FastSync };
     BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
@@ -3491,6 +4008,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             progress_fraction = model.basins_session.progress_token->load(std::memory_order_relaxed);
         if (model.basins_session.progress_phase_token)
             basins_phase = model.basins_session.progress_phase_token->load(std::memory_order_relaxed);
+    }
+    else if (model.fastsync_session.in_flight) {
+        int ri = model.fastsync_session.running_config_index;
+        busy_what = (ri >= 0 && ri < (int)model.fastsync_session.configs.size() &&
+                     !model.fastsync_session.configs[ri].label.empty())
+                        ? model.fastsync_session.configs[ri].label
+                        : std::string("fastsync");
+        busy_start = model.fastsync_session.compute_start_time;
+        busy_kind  = BusyKind::FastSync;
+        busy_cancelling = model.fastsync_session.cancel_token &&
+                          model.fastsync_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.fastsync_session.progress_token)
+            progress_fraction = model.fastsync_session.progress_token->load(std::memory_order_relaxed);
     }
     else {
         // Nothing in flight — pick the session whose last run finished most
@@ -3651,7 +4181,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Parametric;
     bool entering_basins = (AppModel::AppMode)mode == AppModel::AppMode::Basins &&
                            model.app_mode != AppModel::AppMode::Basins;
-    if (entering_phase || entering_par || entering_basins) {
+    bool entering_fastsync = (AppModel::AppMode)mode == AppModel::AppMode::FastSync &&
+                             model.app_mode != AppModel::AppMode::FastSync;
+    if (entering_phase || entering_par || entering_basins || entering_fastsync) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -3691,6 +4223,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty()) {
             std::string jb = lib.load_session(model.loaded_name, "_last_basins");
             if (!jb.empty()) session_from_json_basins(jb, model.basins_session);
+        }
+    }
+    auto fastsync_need_init = model.fastsync_session.loaded_system_name != model.name
+                           || model.fastsync_session.vars.empty()
+                           || model.fastsync_session.vars   != model.known_vars
+                           || model.fastsync_session.params != model.known_params;
+    if (entering_fastsync && fastsync_need_init) {
+        model.start_fastsync_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jf = lib.load_session(model.loaded_name, "_last_fastsync");
+            if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
         }
     }
     model.app_mode = (AppModel::AppMode)mode;
@@ -3747,6 +4290,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
         if (ImGui::Begin("Basins of Attraction")) {
             draw_basins_plot(model);
+        }
+        ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::FastSync) {
+        if (ImGui::Begin("FastSync Controls")) {
+            draw_fastsync_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Fast Synchro")) {
+            draw_fastsync_plot(model);
         }
         ImGui::End();
     }

@@ -200,19 +200,40 @@ void Plot2DView::render(PlotRenderer& renderer,
     // скачках LLE/LS визуально «рвётся» из-за miter-joins при острых углах.
     // Толщина >1px надёжна (ImGui триангулирует), порядок: после осей.
     if (imdraw_lines) {
-        ImVec2 cmin = img_pos;
-        ImVec2 cmax(img_pos.x + plot_w, img_pos.y + plot_h);
-        dl->PushClipRect(cmin, cmax, true);
+        ImVec2 cmin_clip = img_pos;
+        ImVec2 cmax_clip(img_pos.x + plot_w, img_pos.y + plot_h);
+        dl->PushClipRect(cmin_clip, cmax_clip, true);
         for (int k = (int)series_in.size() - 1; k >= 0; --k) {
             if (!eff_visible(k)) continue;
             const PlotSeriesInput& s = series_in[k];
             if (!s.points || s.n_points < 2) continue;
-            ImU32 col = ImGui::ColorConvertFloat4ToU32(s.color);
-            ImVec2 prev(X(s.points[0]), Y(s.points[1]));
-            for (int i = 1; i < s.n_points; ++i) {
-                ImVec2 cur(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
-                dl->AddLine(prev, cur, col, line_thickness_px);
-                prev = cur;
+            const bool   colored = (s.values != nullptr);
+            const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
+            const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(s.color);
+            const int    n_seg = s.n_points - 1;
+
+            // Если задан segment_order — painter's algorithm. Иначе линейный
+            // обход (старое поведение).
+            for (int sk = 0; sk < n_seg; ++sk) {
+                const int i = s.segment_order ? s.segment_order[sk] : sk;
+                if (i < 0 || i >= n_seg) continue;
+                ImVec2 a(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
+                ImVec2 b(X(s.points[2 * (i + 1) + 0]), Y(s.points[2 * (i + 1) + 1]));
+                ImU32 col = uniform_col;
+                if (colored) {
+                    // Цвет сегмента — по значению на его старте (i, не i+1) —
+                    // mirror MATLAB patch EdgeColor=flat.
+                    float t = (s.values[i] - s.cmin) / crange;
+                    if (t < 0) t = 0; else if (t > 1) t = 1;
+                    col = cmap_sample(t, s.colormap);
+                    // s.color.w — alpha-мультипликатор поверх cmap.
+                    if (s.color.w < 1.0f) {
+                        unsigned aa = (col >> IM_COL32_A_SHIFT) & 0xFF;
+                        aa = (unsigned)((float)aa * s.color.w);
+                        col = (col & ~IM_COL32_A_MASK) | (aa << IM_COL32_A_SHIFT);
+                    }
+                }
+                dl->AddLine(a, b, col, line_thickness_px);
             }
         }
         dl->PopClipRect();
@@ -460,6 +481,11 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        // Caller-injected пункты (например, FastSync "Invert depth axis").
+        if (popup_extras) {
+            ImGui::Separator();
+            popup_extras();
+        }
         ImGui::EndPopup();
     }
     std::snprintf(pop_id, sizeof(pop_id), "##xaxis_menu_%d", owner_id);

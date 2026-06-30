@@ -1,6 +1,24 @@
 #pragma once
 #include <glad/glad.h>
 #include <cstdint>
+#include "imgui.h"   // ImU32 для cmap_sample
+
+// 2D scalar → RGB colormap. Раньше жил в heatmap_view.h; перемещён в
+// plot_renderer.h, потому что:
+//   1) `PlotRenderer::draw_heatmap` уже его принимает (int colormap_id);
+//   2) `plot_view_2d.cpp` теперь использует то же сэмплирование для
+//      per-segment colored trajectory.
+enum class HeatmapColormap : int {
+    Viridis = 0,
+    Inferno = 1,
+    Turbo   = 2,
+    Gray    = 3,
+};
+
+// CPU-side колормап. Точное зеркало GLSL-полиномов из draw_heatmap (см.
+// plot_renderer.cpp::compile_shaders) — цвета совпадают bit-for-bit.
+// t clamp'ится в [0,1]. Возвращает ImU32 (используется ImDrawList).
+ImU32 cmap_sample(float t, HeatmapColormap m);
 
 class PlotRenderer {
 public:
