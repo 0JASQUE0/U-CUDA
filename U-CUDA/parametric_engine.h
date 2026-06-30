@@ -571,11 +571,19 @@ struct FastSyncRequest {
     double axis_x_lo = -10.0, axis_x_hi = 10.0;
     double axis_y_lo = -10.0, axis_y_hi = 10.0;
     int    n_pts = 200;
+    // false (default) — grid перебирает НУ мастера, НУ слейва фикс.
+    // true            — grid перебирает НУ слейва, НУ мастера фикс.
+    bool   grid_swap_master_slave = false;
 
     // Runtime knobs (substituted via NVRTC #define перед include configCUDA.h).
     int    type_of_synch = 0;
     int    error_estim   = 2;
     double fs_error_trs  = 1e-12;
+
+    // CSV вывод — пустая строка отключает запись.
+    std::string csv_output_path;
+    // var-names для шапки CSV (mode 0 attractor). Совпадает по длине с amountOfX.
+    std::vector<std::string> var_names;
 
     // Cancel + progress — мирорят Bifurcation*Request.
     std::shared_ptr<std::atomic<bool>>  cancel;
