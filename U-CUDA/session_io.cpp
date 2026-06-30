@@ -775,6 +775,7 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
     o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
     o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
+    o << "\"grid_swap_master_slave\":" << (c.grid_swap_master_slave ? "true" : "false") << ",";
     o << "\"type_of_synch\":"     << c.type_of_synch         << ",";
     o << "\"error_estim\":"       << c.error_estim           << ",";
     o << "\"fs_error_trs_text\":"; jstr(o, c.fs_error_trs_text); o << ",";
@@ -786,6 +787,8 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"alpha\":"             << c.alpha                 << ",";
     o << "\"swap_axes\":"         << (c.swap_axes ? "true" : "false") << ",";
     o << "\"invert_depth\":"      << (c.invert_depth ? "true" : "false") << ",";
+    o << "\"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",";
+    o << "\"csv_output_path\":";  jstr(o, c.csv_output_path);  o << ",";
     o << "\"ic_master\":";        jmap(o, c.ic_master);        o << ",";
     o << "\"ic_slave\":";         jmap(o, c.ic_slave);         o << ",";
     o << "\"k_forward\":";        jmap(o, c.k_forward);        o << ",";
@@ -815,6 +818,7 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "axis_y_lo_text")      c.axis_y_lo_text      = p.str();
     else if (key == "axis_y_hi_text")      c.axis_y_hi_text      = p.str();
     else if (key == "n_pts_text")          c.n_pts_text          = p.str();
+    else if (key == "grid_swap_master_slave") c.grid_swap_master_slave = p.boolean();
     else if (key == "type_of_synch")       c.type_of_synch       = std::stoi(p.str_or_num());
     else if (key == "error_estim")         c.error_estim         = std::stoi(p.str_or_num());
     else if (key == "fs_error_trs_text")   c.fs_error_trs_text   = p.str();
@@ -826,6 +830,8 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "alpha")               c.alpha               = (float)std::stod(p.str_or_num());
     else if (key == "swap_axes")           c.swap_axes           = p.boolean();
     else if (key == "invert_depth")        c.invert_depth        = p.boolean();
+    else if (key == "csv_save_enabled")    c.csv_save_enabled    = p.boolean();
+    else if (key == "csv_output_path")     c.csv_output_path     = p.str();
     else if (key == "decimator_view")      p.skip_value();   // legacy, не используется
     else if (key == "ic_master")           c.ic_master           = p.map_ss();
     else if (key == "ic_slave")            c.ic_slave            = p.map_ss();

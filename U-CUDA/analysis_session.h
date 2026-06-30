@@ -599,11 +599,22 @@ struct FastSyncConfig {
     std::string axis_y_lo_text   = "-10";
     std::string axis_y_hi_text   = "10";
     std::string n_pts_text       = "200";
+    // false — grid перебирает НУ мастера (legacy default).
+    // true  — grid перебирает НУ слейва, мастер фикс.
+    bool        grid_swap_master_slave = false;
 
     // ---- Runtime knobs (substituted в NVRTC #define) ----
     int         type_of_synch    = 0;     // 0=unidir, 1=bidir
     int         error_estim      = 2;     // 0|1|2
     std::string fs_error_trs_text = "1e-12";
+
+    // ---- CSV export ----
+    // mode 0 (On Attractor): один файл, строки = decimated trajectory points,
+    //   столбцы = vars[0..N-1] + sync_error.
+    // mode 1 (On Grid): один файл, две строки заголовка (X/Y ranges) + матрица
+    //   ошибок n_pts × n_pts row-major.
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
 
     // ---- Визуализация ----
     int         colormap_idx     = 2;     // Turbo

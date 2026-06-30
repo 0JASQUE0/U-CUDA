@@ -473,7 +473,8 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	const numb* kBackward,
 	numb* data,
 	int* maxValueCheckerArray,
-	numb* FastSynchroError)
+	numb* FastSynchroError,
+	int   swapRole)
 {
 	// --- Общая память в рамках одного блока ---
 	// --- Строение памяти: ---
@@ -489,21 +490,29 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Определяем localX[] начальными условиями ---
+	// --- Определяем localX[] начальными условиями master + lokalSlave для slave ---
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		localX[i] = initialConditions[i];
+	numb localSlave[AMOUNTOFX];
+	for (int i = 0; i < amountOfInitialConditions; ++i)
+		localSlave[i] = initialConditionsSlave[i];
 
 	// --- Определяем localValues[] начальными параметрами ---
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	// --- Меняем значение изменяемых параметров на результат функции getValueByIdx ---
-	for (int i = 0; i < dimension; ++i)
-		localX[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx,
+	// --- Применяем grid-override либо на master, либо на slave (по swapRole).
+	// swapRole=0 → varies master (legacy default), slave фиксирован.
+	// swapRole=1 → varies slave, master фиксирован.
+	for (int i = 0; i < dimension; ++i) {
+		numb v = getValueByIdx(amountOfCalculatedPoints + idx,
 			nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		if (swapRole == 0) localX[indicesOfMutVars[i]]     = v;
+		else               localSlave[indicesOfMutVars[i]] = v;
+	}
 
 	// 1 - stability, 0 - fixed point, -1 - unbound solution
-	FastSynchroError[idx] = loopCalculateDiscreteModelForFastSynchro_2(localX, initialConditionsSlave, localValues, h, amountOfIterations,
+	FastSynchroError[idx] = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
 		amountOfInitialConditions, preScaller, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock);
 
 	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
