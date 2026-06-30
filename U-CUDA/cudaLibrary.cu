@@ -780,8 +780,20 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 
 
 		if (data != nullptr) {
-			data[startDataIndex + i] = x[0] + pi* x[1] + euler*x[2];
-			//data[startDataIndex + i] = (x[writableVar]);
+			// writableVar < 0 -> комбинация первых до 3 переменных (port MATLAB).
+			// AMOUNTOFX в NVRTC раскрывается через #define {{AMOUNT_OF_X}},
+			// в обычной nvcc-сборке — constexpr int из configCUDA.h. В обоих
+			// случаях `if constexpr` выкидывает мёртвые ветки на этапе компиляции.
+			if (writableVar < 0) {
+				if constexpr (AMOUNTOFX >= 3)
+					data[startDataIndex + i] = x[0] + pi*x[1] + euler*x[2];
+				else if constexpr (AMOUNTOFX == 2)
+					data[startDataIndex + i] = x[0] + pi*x[1];
+				else
+					data[startDataIndex + i] = x[0];
+			} else {
+				data[startDataIndex + i] = x[writableVar];
+			}
 
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {

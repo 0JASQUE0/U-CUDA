@@ -263,6 +263,45 @@ bool AppModel::start_fastsync_analysis() {
     return true;
 }
 
+void AppModel::propagate_to_sessions() {
+    // refresh_symbols может упасть, если в полях ещё что-то невалидное —
+    // молча игнорим, оставим прежние vars/params, пользователь увидит ошибку
+    // на следующем Run.
+    refresh_symbols();
+
+    // custom_schemes — глубокая копия. Тот же sync, что и в draw_gui каждый
+    // кадр, но здесь он гарантирован сразу после Save (важно, если save
+    // вызвали, не открывая другие вкладки — кеш-ключ NVRTC по new body
+    // должен быть готов).
+    phase_session.custom_schemes       = custom_schemes;
+    bifurcation_session.custom_schemes = custom_schemes;
+    lle_session.custom_schemes         = custom_schemes;
+    ls_session.custom_schemes          = custom_schemes;
+    basins_session.custom_schemes      = custom_schemes;
+    fastsync_session.custom_schemes    = custom_schemes;
+
+    // sys обновляем для built-in схем (Euler/RK4/...): они используют
+    // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
+    // в Library поправили, без этой пересборки старый sys остаётся в сессиях
+    // до следующего start_*_analysis.
+    try {
+        System built = build_system();
+        phase_session.sys       = built;
+        bifurcation_session.sys = built;
+        lle_session.sys         = built;
+        ls_session.sys          = built;
+        basins_session.sys      = built;
+        fastsync_session.sys    = built;
+    }
+    catch (...) {
+        // система ещё неполна — следующий Run покажет ошибку парсинга.
+    }
+
+    // Phase кеширует krs_code. Принудительно инвалидируем — snapshot_phase
+    // на ближайшем Run пересчитает его от свежего sys / custom_schemes.
+    phase_session.krs_code.clear();
+}
+
 // ============================================================================
 // Cross-analysis batch queue
 // ============================================================================
@@ -341,6 +380,14 @@ void AppModel::remove_basins_config(int i) {
 
 void AppModel::remove_fastsync_config(int i) {
     fastsync_session.remove_config(i);
+    // Cleanup fastsync_queue: drop items pointing at the removed index, shift
+    // index > i down by one.
+    for (auto it = fastsync_queue.begin(); it != fastsync_queue.end(); ) {
+        if (it->index == i) it = fastsync_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : fastsync_queue)
+        if (it.index > i) --it.index;
 }
 
 bool AppModel::start_next_in_basins_queue() {
@@ -355,6 +402,21 @@ bool AppModel::start_next_in_basins_queue() {
         }
         // ok == false (krs пуст / индекс плохой) — last_error выставлен;
         // идём дальше.
+    }
+    return false;
+}
+
+bool AppModel::start_next_in_fastsync_queue() {
+    if (fastsync_session.in_flight) return false;
+    if (fastsync_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!fastsync_queue.empty()) {
+        FastSyncQueueItem it = fastsync_queue.front();
+        fastsync_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)fastsync_session.configs.size()) {
+            if (fastsync_session.run_async(*parametric_engine, it.index)) return true;
+        }
+        // ok == false — last_error выставлен соответствующим run_async; идём дальше.
     }
     return false;
 }

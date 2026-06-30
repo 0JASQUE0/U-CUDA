@@ -236,8 +236,12 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
 // Снапшот текущей session в PhaseRunInputs. Делается на главном потоке.
 static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
-    // krs_code должен быть свежим — если пустой, генерим перед снапшотом.
-    if (s.krs_code.empty()) s.regenerate_krs();
+    // krs_code должен быть свежим. Раньше регенерировали только при пустом
+    // кеше — это ломало правки тела custom-scheme: первый Run пёк krs_code из
+    // старого cs.body, дальнейшие правки в Library никак на него не влияли.
+    // Регенерация по факту дешёвая (codegen или просто копия cs.body), поэтому
+    // делаем её каждый Run.
+    s.regenerate_krs();
     PhaseRunInputs in;
     in.vars         = s.vars;
     in.params       = s.params;
@@ -449,7 +453,8 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.param_hi       = parse_d(bd.param_hi_text, 1.0);
     if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
     req.n_pts          = parse_i(bd.n_pts_text, 500);
-    req.writable_var   = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
+    // -1 — combination (см. loopCalculateDiscreteModel_int / draw_writable_var_combo).
+    req.writable_var   = (bd.writable_var >= -1 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
     req.h              = parse_d(bd.h_text, 0.01);
     req.t_max          = parse_d(bd.t_max_text, 100.0);
     req.transient_time = parse_d(bd.transient_text, 100.0);
@@ -1025,7 +1030,8 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     if (req.axis_x_hi < req.axis_x_lo) std::swap(req.axis_x_lo, req.axis_x_hi);
     if (req.axis_y_hi < req.axis_y_lo) std::swap(req.axis_y_lo, req.axis_y_hi);
     req.n_pts           = parse_i(c.n_pts_text, 200);
-    req.writable_var    = (c.writable_var >= 0 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
+    // -1 — combination (см. loopCalculateDiscreteModel_int / draw_writable_var_combo).
+    req.writable_var    = (c.writable_var >= -1 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
     req.h               = parse_d(c.h_text, 0.01);
     req.t_max           = parse_d(c.t_max_text, 1000.0);
     req.transient_time  = parse_d(c.transient_text, 10000.0);
@@ -1119,6 +1125,73 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) 
     run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
         return engine.run_basins(req);
     });
+    return true;
+}
+
+bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int config_idx) {
+    if (in_flight) return false;
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+
+    BasinsConfig& c = configs[config_idx];
+    if (!c.last_run_ok || c.result.avg_peaks.empty() ||
+        c.result.avg_intervals.empty() || c.result.helpful_array.empty() ||
+        c.result.n_pts <= 0) {
+        c.last_error = "Нет кэша фич — запусти полный Run сначала.";
+        return false;
+    }
+
+    // Берём krs_body/amountOfX/eps_dbscan из text-полей (как build_basins_request
+    // для обычного запуска). Кэш-ключ модуля совпадёт с предыдущим run_basins,
+    // если система не менялась — compile_basins_if_needed обойдётся no-op'ом.
+    BasinsRequest sim_req = build_basins_request(*this, c);
+    if (sim_req.krs_body.empty()) {
+        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        return false;
+    }
+
+    BasinsReclusterRequest req;
+    req.krs_body      = std::move(sim_req.krs_body);
+    req.amountOfX     = sim_req.amountOfX;
+    req.n_pts         = c.result.n_pts;
+    req.eps_dbscan    = sim_req.eps_dbscan;
+    req.avg_peaks     = c.result.avg_peaks;
+    req.avg_intervals = c.result.avg_intervals;
+    req.helpful_array = c.result.helpful_array;
+
+    c.last_error.clear();
+    last_run_label.clear();
+    cancel_token         = std::make_shared<std::atomic<bool>>(false);
+    progress_token       = std::make_shared<std::atomic<float>>(0.0f);
+    // Для recluster sim-фазы нет → ставим phase=2, чтобы топ-бар сразу показал
+    // "(2/2 cluster)" и progress соответствовал фазе кластеризации.
+    progress_phase_token = std::make_shared<std::atomic<int>>(2);
+    req.cancel   = cancel_token;
+    req.progress = progress_token;
+
+    in_flight = true;
+    running_config_index = config_idx;
+    compute_start_time = std::chrono::steady_clock::now();
+
+    // Снапшот текущего result'а — async-задача вернёт его с заменённым
+    // basin_idx/n_clusters. Так poll() через apply_basins_result сохранит
+    // все остальные поля (фичи, axis_*, snapshot) без копирования вручную.
+    BasinsResult base = c.result;
+    base.snapshot.eps_dbscan = req.eps_dbscan;
+
+    run_future = std::async(std::launch::async,
+        [&engine, req = std::move(req), base = std::move(base)]() mutable {
+            BasinsReclusterResult rc = engine.run_basins_recluster(req);
+            BasinsResult out = std::move(base);
+            out.ok        = rc.ok;
+            out.cancelled = rc.cancelled;
+            out.error     = std::move(rc.error);
+            if (rc.ok) {
+                out.basin_idx       = std::move(rc.basin_idx);
+                out.n_clusters      = rc.n_clusters;
+                out.min_cluster_idx = rc.min_cluster_idx;
+            }
+            return out;
+        });
     return true;
 }
 

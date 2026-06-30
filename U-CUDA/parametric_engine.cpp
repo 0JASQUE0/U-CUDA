@@ -515,7 +515,9 @@ struct ParametricEngine::Impl {
             if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index вне диапазона");
         }
-        if (req.writable_var < 0 || req.writable_var >= req.amountOfX)
+        // writable_var == -1 — sentinel "combination of first vars" (порт MATLAB
+        // выбора x[0]+pi*x[1]+euler*x[2] в loopCalculateDiscreteModel_int).
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
                                                                     return fail("writable_var вне диапазона");
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
@@ -2458,7 +2460,8 @@ struct ParametricEngine::Impl {
         if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
         if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
                                                                      return fail("param_index вне диапазона");
-        if (req.writable_var < 0 || req.writable_var >= req.amountOfX)
+        // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int).
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
                                                                      return fail("writable_var вне диапазона");
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
@@ -2728,7 +2731,7 @@ struct ParametricEngine::Impl {
         if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
         if (req.pre_scaller <= 0)    return fail("pre_scaller должно быть > 0");
         if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan должно быть > 0");
-        if (req.writable_var < 0 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
 
         // ---- par_or_var + swap_xy (та же логика что у run_lle_2d) ----
         auto check_param = [&](int p1based) -> bool {
@@ -3207,7 +3210,7 @@ struct ParametricEngine::Impl {
         if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
         if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
         if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (выбери разные переменные)");
-        if (req.writable_var < 0 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
@@ -3648,6 +3651,204 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef BAS_CHECK
         #undef BAS_CHECK_CU
+        res.ok = true;
+        return res;
+    }
+
+    // =========================================================================
+    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич.
+    // Зеркалит фазу 2 (host-DBSCAN) из run_basins, но пропускает sim-фазу:
+    // d_avgPeaks/d_avgIntervals/d_helpfulArray заливаются из request'а вместо
+    // выкатывания заново через avgPeakFinderCUDA. Мульты уже применены к
+    // загруженным фичам (см. run_basins фазу 1), поэтому здесь они не нужны.
+    // =========================================================================
+    BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req) {
+        BasinsReclusterResult res;
+        auto fail = [&](const std::string& msg) -> BasinsReclusterResult& {
+            res.error = msg; return res;
+        };
+
+        if (req.krs_body.empty())                                return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX вне допустимого диапазона");
+        if (req.n_pts <= 0)                                      return fail("n_pts должно быть > 0");
+        if (req.eps_dbscan <= 0.0)                               return fail("eps_dbscan должно быть > 0");
+        const size_t total_cells = (size_t)req.n_pts * (size_t)req.n_pts;
+        if (req.avg_peaks.size()     != total_cells)             return fail("avg_peaks: размер не совпадает с n_pts²");
+        if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: размер не совпадает с n_pts²");
+        if (req.helpful_array.size() != total_cells)             return fail("helpful_array: размер не совпадает с n_pts²");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+
+        constexpr int blockSize_setup = 32;
+        const double eps_dbscan = req.eps_dbscan;
+
+        int*    d_helpfulArray      = nullptr;
+        int*    d_dbscanResult      = nullptr;
+        double* d_avgPeaks          = nullptr;
+        double* d_avgIntervals      = nullptr;
+        int*    d_amountOfNeighbors = nullptr;
+        int*    d_neighbors         = nullptr;
+        int*    d_clearIdx          = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_helpfulArray)      cudaFree(d_helpfulArray);
+            if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_avgPeaks)          cudaFree(d_avgPeaks);
+            if (d_avgIntervals)      cudaFree(d_avgIntervals);
+            if (d_amountOfNeighbors) cudaFree(d_amountOfNeighbors);
+            if (d_neighbors)         cudaFree(d_neighbors);
+            if (d_clearIdx)          cudaFree(d_clearIdx);
+        };
+
+        #define BRC_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define BRC_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define BRC_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        BRC_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),    "cudaMalloc d_helpfulArray");
+        BRC_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),    "cudaMalloc d_dbscanResult");
+        BRC_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(double)), "cudaMalloc d_avgPeaks");
+        BRC_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(double)), "cudaMalloc d_avgIntervals");
+        BRC_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                  "cudaMalloc d_amountOfNeighbors");
+        BRC_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),    "cudaMalloc d_neighbors");
+        BRC_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                  "cudaMalloc d_clearIdx");
+
+        BRC_CHECK(cudaMemcpy(d_avgPeaks,     req.avg_peaks.data(),     total_cells * sizeof(double), cudaMemcpyHostToDevice), "memcpy avg_peaks H2D");
+        BRC_CHECK(cudaMemcpy(d_avgIntervals, req.avg_intervals.data(), total_cells * sizeof(double), cudaMemcpyHostToDevice), "memcpy avg_intervals H2D");
+        BRC_CHECK(cudaMemcpy(d_helpfulArray, req.helpful_array.data(), total_cells * sizeof(int),    cudaMemcpyHostToDevice), "memcpy helpful_array H2D");
+        BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
+        BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        const int blockSize_db = blockSize_setup;
+        const int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
+        const int amountOfData_int = (int)total_cells;
+
+        int amountOfClusters         = 0;
+        int amountOfNegativeClusters = 0;
+        std::vector<int> h_neighbors(total_cells, 0);
+        int h_amountOfNeighbors      = 0;
+        std::vector<int> h_dbscan_check(total_cells, 0);
+        auto last_progress_scan = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+
+        if (req.progress) req.progress->store(0.0f, std::memory_order_relaxed);
+
+        for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
+            BRC_CANCEL_CHECK();
+            int clearIdx_init = -1;
+            BRC_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
+
+            void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
+                                    (void*)&amountOfData_int, &d_clearIdx };
+            BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_fixed,
+                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                        0, nullptr, args_search, nullptr),
+                         "cuLaunchKernel(search_fixed)");
+            BRC_CHECK(cudaDeviceSynchronize(), "sync search_fixed");
+
+            int clearIdx = -1;
+            BRC_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H");
+
+            int resultClusters = 0;
+            if (clearIdx == -1) {
+                BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_clear,
+                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                            0, nullptr, args_search, nullptr),
+                             "cuLaunchKernel(search_clear)");
+                BRC_CHECK(cudaDeviceSynchronize(), "sync search_clear");
+                BRC_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
+                if (clearIdx == -1) break;
+                ++amountOfClusters;
+                resultClusters = amountOfClusters;
+            } else {
+                --amountOfNegativeClusters;
+                resultClusters = amountOfNegativeClusters;
+            }
+
+            h_amountOfNeighbors = 0;
+            BRC_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
+
+            double eps_arg = eps_dbscan;
+            void* args_db[] = {
+                &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
+                (void*)&amountOfData_int, &eps_arg, &resultClusters,
+                &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
+            };
+            BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                        0, nullptr, args_db, nullptr),
+                         "cuLaunchKernel(dbscan expand init)");
+            BRC_CHECK(cudaDeviceSynchronize(), "sync dbscan init");
+
+            BRC_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors D2H");
+            if (h_amountOfNeighbors > 0)
+                BRC_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
+                          "memcpy neighbors D2H");
+
+            for (size_t ni = 0; ni < (size_t)h_amountOfNeighbors; ++ni) {
+                int neighbor_idx = h_neighbors[ni];
+                void* args_db2[] = {
+                    &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
+                    (void*)&amountOfData_int, &eps_arg, &resultClusters,
+                    &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
+                };
+                BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
+                                            0, nullptr, args_db2, nullptr),
+                             "cuLaunchKernel(dbscan expand neighbor)");
+                BRC_CHECK(cudaDeviceSynchronize(), "sync dbscan neighbor");
+
+                BRC_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors loop");
+                if (h_amountOfNeighbors > 0)
+                    BRC_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
+                              "memcpy neighbors loop");
+            }
+
+            if (req.progress) {
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_progress_scan >= std::chrono::milliseconds(200)) {
+                    last_progress_scan = now;
+                    BRC_CHECK(cudaMemcpy(h_dbscan_check.data(), d_dbscanResult,
+                                         total_cells * sizeof(int), cudaMemcpyDeviceToHost),
+                              "memcpy dbscanResult D2H (progress)");
+                    size_t classified = 0;
+                    for (size_t k = 0; k < total_cells; ++k)
+                        if (h_dbscan_check[k] != 0) ++classified;
+                    req.progress->store(float(classified) / float(total_cells),
+                                        std::memory_order_relaxed);
+                }
+            }
+        }
+
+        res.n_pts = req.n_pts;
+        res.basin_idx.assign(total_cells, 0);
+        BRC_CHECK(cudaMemcpy(res.basin_idx.data(), d_dbscanResult, total_cells * sizeof(int), cudaMemcpyDeviceToHost), "memcpy basin_idx D2H");
+        res.n_clusters      = amountOfClusters;
+        res.min_cluster_idx = amountOfNegativeClusters;
+
+        cleanup();
+        #undef BRC_CHECK
+        #undef BRC_CHECK_CU
+        #undef BRC_CANCEL_CHECK
         res.ok = true;
         return res;
     }
@@ -4191,6 +4392,10 @@ LS2DResult ParametricEngine::run_ls_2d(const LS2DRequest& req) {
 
 BasinsResult ParametricEngine::run_basins(const BasinsRequest& req) {
     return impl_->run_basins(req);
+}
+
+BasinsReclusterResult ParametricEngine::run_basins_recluster(const BasinsReclusterRequest& req) {
+    return impl_->run_basins_recluster(req);
 }
 
 FastSyncResult ParametricEngine::run_fastsync(const FastSyncRequest& req) {

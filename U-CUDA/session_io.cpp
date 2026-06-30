@@ -697,6 +697,7 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
     o << "\"feature2\":"          << c.feature2            << ",";
     o << "\"mult_feature1_text\":"; jstr(o, c.mult_feature1_text); o << ",";
     o << "\"mult_feature2_text\":"; jstr(o, c.mult_feature2_text); o << ",";
+    o << "\"renumber_spiral\":"   << (c.renumber_spiral ? "true" : "false") << ",";
     o << "\"active_plot_tab\":"   << c.active_plot_tab;
     o << "}";
 }
@@ -731,6 +732,7 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "feature2")           c.feature2           = std::stoi(p.str_or_num());
     else if (key == "mult_feature1_text") c.mult_feature1_text = p.str();
     else if (key == "mult_feature2_text") c.mult_feature2_text = p.str();
+    else if (key == "renumber_spiral")    c.renumber_spiral    = p.boolean();
     else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
     else return false;
     return true;

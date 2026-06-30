@@ -171,10 +171,9 @@ int main() {
     ImPlot3D::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+    // Тема выбирается чуть ниже после load_app_config (model.dark_theme может
+    // приехать из настроек). Здесь только дефолтная инициализация.
     ImGui::StyleColorsDark();
-    // Базовый стиль сохраняем ДО первого ScaleAllSizes — на каждой смене масштаба
-    // сначала восстанавливаем его, потом скейлим. Иначе ScaleAllSizes накапливает.
-    ImGuiStyle base_style = ImGui::GetStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
@@ -203,12 +202,14 @@ int main() {
             model.basins_states_colormap = app_cfg.basins_states_colormap;
         if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
             model.tick_precision = app_cfg.tick_precision;
+        model.dark_theme = app_cfg.dark_theme;
     }
     set_tick_precision(model.tick_precision);
 
     // applied = -1 / opposite → форсируем apply на первом кадре.
     float applied_ui_scale     = -1.0f;
     bool  applied_font_builtin = !model.use_builtin_font;  // !=, форсирует первый apply
+    bool  applied_dark_theme   = !model.dark_theme;        // != — то же самое для темы
     auto apply_ui_scale = [&](float scale) {
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
@@ -240,8 +241,18 @@ int main() {
         // В ImGui 1.92+ backend сам обновит fonts texture при следующем NewFrame
         // через ImTextureData::Status — ручных Destroy/Create не нужно.
 
-        ImGui::GetStyle() = base_style;
+        // Стиль каждый раз пересоздаём от дефолтов + выбранной темы. Раньше
+        // кэшировали `base_style` после StyleColorsDark — но это блокировало
+        // переключение Dark/Light в Settings, потому что новая палитра не
+        // попадала в base_style. Перестроение дешёвое (memcpy + цвет-таблица).
+        ImGui::GetStyle() = ImGuiStyle{};
+        if (model.dark_theme) ImGui::StyleColorsDark();
+        else                  ImGui::StyleColorsLight();
         ImGui::GetStyle().ScaleAllSizes(scale);
+        // Плот-палитра (текст/сетка/рамки/фон FBO) живёт отдельно от ImGui
+        // style — её читают plot_view_2d/3d, heatmap_view, plot_legend и
+        // colorbar в gui.cpp. Тригерится одновременно со сменой темы.
+        set_plot_light_theme(!model.dark_theme);
     };
 
     while (!glfwWindowShouldClose(window)) {
@@ -263,10 +274,13 @@ int main() {
         // Применяем масштаб/шрифт ДО NewFrame — иначе пересоздание fonts texture
         // в середине кадра валит RenderDrawData.
         float wanted_scale = model.effective_ui_scale();
-        if (wanted_scale != applied_ui_scale || model.use_builtin_font != applied_font_builtin) {
+        if (wanted_scale != applied_ui_scale ||
+            model.use_builtin_font != applied_font_builtin ||
+            model.dark_theme       != applied_dark_theme) {
             apply_ui_scale(wanted_scale);
             applied_ui_scale     = wanted_scale;
             applied_font_builtin = model.use_builtin_font;
+            applied_dark_theme   = model.dark_theme;
         }
 
         ImGui_ImplOpenGL3_NewFrame();

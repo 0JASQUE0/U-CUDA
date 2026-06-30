@@ -503,6 +503,22 @@ struct BasinsConfig {
 
     // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
     int         active_plot_tab = 0;
+
+    // Перенумерация cluster id'ов через spiral-from-center порядок (порт MATLAB
+    // renumber_basins_spiral). Положительные id (Osc) -> 1,2,3... в порядке
+    // первого появления при обходе спиралью из центра, отрицательные (FP)
+    // -> -1,-2,-3... аналогично. Нули (diverged) не трогаем. Влияет на:
+    //   - heatmap "Basins" (tab 0) и его colorbar,
+    //   - scatter (tab 4) — цвет и подпись cluster'а,
+    //   - Export data... — пишет перенумерованный basin_idx в .csv.
+    bool        renumber_spiral = false;
+
+    // Транзиентный кэш перенумерованного basin_idx. Не сериализуется. Перезалив
+    // ленивый: если basin_idx_spiral_gen != data_generation, пересчитываем.
+    std::vector<int> basin_idx_spiral;
+    int         basin_idx_spiral_gen      = -1;
+    int         n_clusters_spiral          = 0;
+    int         min_cluster_idx_spiral     = 0;
 };
 
 struct BasinsAnalysisSession {
@@ -553,6 +569,14 @@ struct BasinsAnalysisSession {
 
     bool run(ParametricEngine& engine, int config_idx);
     bool run_async(ParametricEngine& engine, int config_idx);
+
+    // Reclustering: запуск DBSCAN-only прогона поверх уже сохранённых фич
+    // configs[config_idx].result.{avg_peaks,avg_intervals,helpful_array}.
+    // Использует те же in_flight/cancel/future-машинерию, что и run_async,
+    // так что polls/Stop/queue-логика в GUI обрабатывают его прозрачно.
+    // Возвращает false, если уже идёт другой расчёт, индекс невалиден или
+    // нет валидного предыдущего результата.
+    bool run_recluster_async(ParametricEngine& engine, int config_idx);
     void request_cancel();
     bool poll();
 };
