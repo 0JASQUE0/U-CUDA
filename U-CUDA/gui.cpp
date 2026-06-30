@@ -3232,6 +3232,12 @@ static void draw_basins_plot(AppModel& model) {
 static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     FastSyncAnalysisSession& s = model.fastsync_session;
 
+    // Source of truth для custom-схем — AppModel (редактируются в Library).
+    // load_from_record() сохраняет снапшот ОДНОКРАТНО при входе в режим, поэтому
+    // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
+    // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
+    s.custom_schemes = model.custom_schemes;
+
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
 
@@ -3586,6 +3592,35 @@ static void draw_fastsync_plot(AppModel& model) {
             err_buf[i]      = (float)c.result.sync_error[i];
         }
 
+        // Painter's algorithm: сортируем сегменты по средней координате оси Z
+        // (первая var, не равная vx/vy). Дальние сегменты рисуются первыми,
+        // ближние — поверх. Без сортировки артефакты "красное поверх синего"
+        // справа на скриншоте — последний по времени сегмент перекрывает
+        // более ранние независимо от их Z.
+        int vz = -1;
+        for (int k = 0; k < nX; ++k) if (k != vx && k != vy) { vz = k; break; }
+        static std::vector<int>   seg_order;
+        static std::vector<float> seg_z;
+        const int n_seg = n_in - 1;
+        seg_order.clear();
+        if (vz >= 0 && n_seg > 0) {
+            seg_order.resize(n_seg);
+            seg_z.resize(n_seg);
+            for (int k = 0; k < n_seg; ++k) {
+                seg_order[k] = k;
+                float za = (float)c.result.traj_full[(size_t)k       * nX + (size_t)vz];
+                float zb = (float)c.result.traj_full[(size_t)(k + 1) * nX + (size_t)vz];
+                seg_z[k] = 0.5f * (za + zb);
+            }
+            if (c.invert_depth) {
+                std::sort(seg_order.begin(), seg_order.end(),
+                          [&](int a, int b) { return seg_z[a] > seg_z[b]; });
+            } else {
+                std::sort(seg_order.begin(), seg_order.end(),
+                          [&](int a, int b) { return seg_z[a] < seg_z[b]; });
+            }
+        }
+
         std::vector<PlotSeriesInput> series_in(1);
         series_in[0].points   = xy_buf.data();
         series_in[0].n_points = n_in;
@@ -3595,14 +3630,30 @@ static void draw_fastsync_plot(AppModel& model) {
         series_in[0].colormap = cmap;
         series_in[0].cmin     = (float)cmin;
         series_in[0].cmax     = (float)cmax;
+        series_in[0].segment_order = seg_order.empty() ? nullptr : seg_order.data();
         std::vector<bool> vis(1, true);
         // Synthetic generation token: меняется при смене (data_generation, vx, vy),
         // чтобы Plot2DView::series_cache_ перезалил GPU-буфер → bbox()/autofit
         // подхватили новую X/Y проекцию.
         int gen_token = c.data_generation * 1000 + vx * 10 + vy;
+        // Right-click popup получает дополнительный пункт "Invert depth axis"
+        // через popup_extras callback. vz/var_name захватываются по значению.
+        const int   vz_capture       = vz;
+        const std::string vz_name    = (vz >= 0) ? var_name(vz) : std::string{};
+        v.popup_extras = [vz_capture, vz_name, &c]() {
+            if (vz_capture >= 0) {
+                std::string lbl = "Invert depth axis (" + vz_name + ")";
+                ImGui::MenuItem(lbl.c_str(), nullptr, &c.invert_depth);
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::MenuItem("Invert depth axis (2D system — N/A)", nullptr, false);
+                ImGui::EndDisabled();
+            }
+        };
         v.render(*renderer, origin, plot_avail,
                  /*owner_id*/ (int)base_oid, gen_token,
                  series_in, vis, vis, fit);
+        v.popup_extras = nullptr; // не утечь callback в другой кадр
 
         // ---- Manual colorbar справа ----
         // Зеркалит HeatmapView::render section 9. Plot2DView использует
@@ -3642,6 +3693,7 @@ static void draw_fastsync_plot(AppModel& model) {
                                y - font_h * 0.5f),
                         col_text, s.c_str());
         }
+
     }
     else {
         // Heatmap.

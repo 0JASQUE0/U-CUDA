@@ -785,6 +785,7 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"line_width\":"        << c.line_width            << ",";
     o << "\"alpha\":"             << c.alpha                 << ",";
     o << "\"swap_axes\":"         << (c.swap_axes ? "true" : "false") << ",";
+    o << "\"invert_depth\":"      << (c.invert_depth ? "true" : "false") << ",";
     o << "\"ic_master\":";        jmap(o, c.ic_master);        o << ",";
     o << "\"ic_slave\":";         jmap(o, c.ic_slave);         o << ",";
     o << "\"k_forward\":";        jmap(o, c.k_forward);        o << ",";
@@ -824,6 +825,7 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "line_width")          c.line_width          = (float)std::stod(p.str_or_num());
     else if (key == "alpha")               c.alpha               = (float)std::stod(p.str_or_num());
     else if (key == "swap_axes")           c.swap_axes           = p.boolean();
+    else if (key == "invert_depth")        c.invert_depth        = p.boolean();
     else if (key == "decimator_view")      p.skip_value();   // legacy, не используется
     else if (key == "ic_master")           c.ic_master           = p.map_ss();
     else if (key == "ic_slave")            c.ic_slave            = p.map_ss();

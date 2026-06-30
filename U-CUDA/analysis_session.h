@@ -610,6 +610,12 @@ struct FastSyncConfig {
     // (при α=1 далёкие/близкие проекции сливаются в одну плотную линию).
     float       alpha            = 0.5f;
     bool        swap_axes        = false; // grid mode: transpose heatmap
+    // Painter's algorithm для attractor-mode: сегменты сортируются по
+    // средней координате НЕпоказываемой оси (z = первая var, не равная
+    // axis_x_var / axis_y_var). invert_depth=false → дальние (малый z)
+    // рисуются первыми, ближние сверху (взгляд "сверху", z↑). При true —
+    // взгляд "снизу" (z↓).
+    bool        invert_depth     = false;
 
     // ---- Состояние ----
     FastSyncResult result;
