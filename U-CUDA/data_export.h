@@ -172,6 +172,7 @@ struct FastSyncSnapshot {
     std::vector<double> ic_slave;
     std::vector<double> k_forward;
     std::vector<double> k_backward;
+    std::vector<std::string> var_names;  // column headers for mode 0 CSV
     double h = 0.0;
     int    iter_of_synchr = 0;
     int    preScaller = 0;
@@ -187,6 +188,7 @@ struct FastSyncSnapshot {
     double axis_x_lo = 0.0, axis_x_hi = 0.0;
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int    n_pts = 0;
+    bool   grid_swap_master_slave = false;
 };
 
 // =============================================================================
@@ -253,11 +255,19 @@ void write_basins_ranges(std::ofstream& out, const BasinsSnapshot& s);
 void write_basins_grid_int(std::ofstream& out, int n_pts, const int* values);
 void write_basins_grid_double(std::ofstream& out, int n_pts, const double* values);
 
-// FastSync. No engine-side CSV existed before; the new format mirrors the
-// shape of other analyses (config sidecar + clean data file).
-//   mode 0: <path>_config.csv + <path> (header row: t_idx, x0..xN-1, sync_err)
-//   mode 1: <path>_config.csv + <path> (n_pts row-per-Y grid of sync errors)
+// FastSync — engine + GUI share these writers so on-disk format is
+// byte-identical (the engine-side path was added by PR #49).
+//   mode 0: <path> header "<var0>,...,<varN-1>,sync_error\n" + row per traj
+//           point. Engine optionally calls write_fastsync_config separately;
+//           the GUI export always writes both.
+//   mode 1: <path> two-line ranges header + n×n grid (row per Y) of sync
+//           errors with comma separator.
 void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s);
+void write_fastsync_attractor(std::ofstream& out, const FastSyncResult& res,
+                              const std::vector<std::string>& var_names);
+void write_fastsync_grid(std::ofstream& out, const FastSyncResult& res,
+                         double axis_x_lo, double axis_x_hi,
+                         double axis_y_lo, double axis_y_hi);
 
 // =============================================================================
 // GUI entry points. Writes both <path> (data) and <path>_config.csv (header).

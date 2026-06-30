@@ -510,6 +510,50 @@ void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s)
         out << "axis_x: " << s.axis_x_lo << " .. " << s.axis_x_hi << "\n";
         out << "axis_y: " << s.axis_y_lo << " .. " << s.axis_y_hi << "\n";
         out << "n_pts = " << s.n_pts << "x" << s.n_pts << "\n";
+        out << "grid_swap_master_slave = "
+            << (s.grid_swap_master_slave ? 1 : 0) << "\n";
+    }
+}
+
+// Mode 0 data: header "<var0>,<var1>,...,<varN-1>,sync_error\n" then one
+// row per trajectory point "v0,v1,...,v{N-1},err\n". No leading time column
+// (sample index is implicit). Matches the FastSync write added by PR #49 —
+// engine and GUI share this writer to keep formats byte-identical.
+void write_fastsync_attractor(std::ofstream& out, const FastSyncResult& res,
+                              const std::vector<std::string>& var_names)
+{
+    if (!out.is_open()) return;
+    const int nX = res.amountOfX_traj;
+    for (int j = 0; j < nX; ++j) {
+        if (j < (int)var_names.size()) out << var_names[j];
+        else                            out << "x" << j;
+        out << ",";
+    }
+    out << "sync_error\n";
+    const int n = res.n_pts_traj;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < nX; ++j)
+            out << res.traj_full[(std::size_t)i * nX + j] << ",";
+        out << res.sync_error[i] << "\n";
+    }
+}
+
+// Mode 1 data: 2-line ranges header + n×n grid row-major (iy*n + ix) with
+// comma separator. Same shape as the PR #49 engine grid write.
+void write_fastsync_grid(std::ofstream& out, const FastSyncResult& res,
+                         double axis_x_lo, double axis_x_hi,
+                         double axis_y_lo, double axis_y_hi)
+{
+    if (!out.is_open()) return;
+    out << axis_x_lo << " " << axis_x_hi << "\n";
+    out << axis_y_lo << " " << axis_y_hi << "\n";
+    const int n = res.n_pts_grid;
+    for (int iy = 0; iy < n; ++iy) {
+        for (int ix = 0; ix < n; ++ix) {
+            out << res.heatmap[(std::size_t)iy * n + ix];
+            if (ix + 1 < n) out << ",";
+        }
+        out << "\n";
     }
 }
 
@@ -629,29 +673,11 @@ bool export_fastsync(const FastSyncResult& res, const std::string& path)
     out << std::setprecision(set_precision);
 
     if (res.mode == 0) {
-        // Header row: step_idx, x0, x1, ..., x{N-1}, sync_err.
-        const int nX = res.amountOfX_traj;
-        out << "step";
-        for (int j = 0; j < nX; ++j) out << ", x" << j;
-        out << ", sync_err\n";
-        const int n = res.n_pts_traj;
-        for (int i = 0; i < n; ++i) {
-            out << i;
-            for (int j = 0; j < nX; ++j)
-                out << ", " << res.traj_full[(std::size_t)i * nX + j];
-            const double err = (i < (int)res.sync_error.size()) ? res.sync_error[i] : 0.0;
-            out << ", " << err << '\n';
-        }
+        write_fastsync_attractor(out, res, res.snapshot.var_names);
     } else {
-        // Mode 1: clean n_pts × n_pts heatmap grid (row per Y).
-        const int n = res.n_pts_grid;
-        for (int iy = 0; iy < n; ++iy) {
-            for (int ix = 0; ix < n; ++ix) {
-                out << res.heatmap[(std::size_t)iy * n + ix];
-                if (ix + 1 < n) out << ", ";
-            }
-            out << '\n';
-        }
+        write_fastsync_grid(out, res,
+                            res.snapshot.axis_x_lo, res.snapshot.axis_x_hi,
+                            res.snapshot.axis_y_lo, res.snapshot.axis_y_hi);
     }
     return true;
 }

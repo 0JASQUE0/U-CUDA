@@ -3811,6 +3811,8 @@ struct ParametricEngine::Impl {
         res.snapshot.axis_y_lo      = req.axis_y_lo;
         res.snapshot.axis_y_hi      = req.axis_y_hi;
         res.snapshot.n_pts          = req.n_pts;
+        res.snapshot.grid_swap_master_slave = req.grid_swap_master_slave;
+        res.snapshot.var_names      = req.var_names;
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -3968,23 +3970,13 @@ struct ParametricEngine::Impl {
             cudaFree(d_values); cudaFree(d_kF); cudaFree(d_kB);
             #undef FS_CHECK
 
-            // ---- CSV (On Attractor): trajectory + sync_error per row ----
+            // CSV (On Attractor): delegate to data_export so engine and the
+            // GUI right-click export produce byte-identical files.
             if (!req.csv_output_path.empty()) {
                 std::ofstream csv(req.csv_output_path);
                 if (csv.is_open()) {
-                    csv << std::setprecision(15);
-                    // Header: var-names + "sync_error".
-                    for (int j = 0; j < amountOfIC_int; ++j) {
-                        if (j < (int)req.var_names.size()) csv << req.var_names[j];
-                        else                                csv << "x" << j;
-                        csv << ",";
-                    }
-                    csv << "sync_error\n";
-                    for (int i = 0; i < (int)res.n_pts_traj; ++i) {
-                        for (int j = 0; j < amountOfIC_int; ++j)
-                            csv << res.traj_full[(size_t)i * amountOfIC_int + j] << ",";
-                        csv << res.sync_error[i] << "\n";
-                    }
+                    csv << std::setprecision(set_precision);
+                    data_export::write_fastsync_attractor(csv, res, req.var_names);
                 }
             }
 
@@ -4130,24 +4122,16 @@ struct ParametricEngine::Impl {
                 res.min_val = std::isfinite(vmin) ? vmin : 0.0;
                 res.max_val = std::isfinite(vmax) ? vmax : 0.0;
 
-                // ---- CSV (On Grid): 2 строки заголовка (X/Y ranges) +
-                // матрица n_pts × n_pts row-major (iy*n + ix). Format совпадает
-                // с legacy FastSynchro_2 в hostLibrary.cu (пробельный разделитель
-                // для ranges, запятые между значениями ошибки).
+                // CSV (On Grid): delegate to data_export so engine and the
+                // GUI right-click export share the same writer (and stay
+                // byte-identical). Layout: 2-line ranges header + n×n grid.
                 if (!req.csv_output_path.empty()) {
                     std::ofstream csv(req.csv_output_path);
                     if (csv.is_open()) {
-                        csv << std::setprecision(15);
-                        csv << req.axis_x_lo << " " << req.axis_x_hi << "\n";
-                        csv << req.axis_y_lo << " " << req.axis_y_hi << "\n";
-                        const int n = req.n_pts;
-                        for (int iy = 0; iy < n; ++iy) {
-                            for (int ix = 0; ix < n; ++ix) {
-                                csv << res.heatmap[(size_t)iy * n + ix];
-                                if (ix + 1 < n) csv << ",";
-                            }
-                            csv << "\n";
-                        }
+                        csv << std::setprecision(set_precision);
+                        data_export::write_fastsync_grid(csv, res,
+                            req.axis_x_lo, req.axis_x_hi,
+                            req.axis_y_lo, req.axis_y_hi);
                     }
                 }
             }
