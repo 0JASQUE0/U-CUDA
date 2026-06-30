@@ -64,6 +64,15 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     int iv = 0;
     if (parse_int_field(body, "heatmap_colormap", iv))
         out.heatmap_colormap = iv;
+    int bcm = 0;
+    if (parse_int_field(body, "basins_colormap", bcm))
+        out.basins_colormap = bcm;
+    if (parse_int_field(body, "basins_avgpk_colormap", bcm))
+        out.basins_avgpk_colormap = bcm;
+    if (parse_int_field(body, "basins_avgint_colormap", bcm))
+        out.basins_avgint_colormap = bcm;
+    if (parse_int_field(body, "basins_states_colormap", bcm))
+        out.basins_states_colormap = bcm;
     int tp = 0;
     if (parse_int_field(body, "tick_precision", tp))
         out.tick_precision = tp;
@@ -80,7 +89,11 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"ui_scale_override\": " << cfg.ui_scale_override << ",\n";
         f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << ",\n";
         f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << ",\n";
-        f << "  \"tick_precision\": "    << cfg.tick_precision << "\n";
+        f << "  \"basins_colormap\": "        << cfg.basins_colormap << ",\n";
+        f << "  \"basins_avgpk_colormap\": "  << cfg.basins_avgpk_colormap << ",\n";
+        f << "  \"basins_avgint_colormap\": " << cfg.basins_avgint_colormap << ",\n";
+        f << "  \"basins_states_colormap\": " << cfg.basins_states_colormap << ",\n";
+        f << "  \"tick_precision\": "         << cfg.tick_precision << "\n";
         f << "}\n";
         if (!f) return false;
     }

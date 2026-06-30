@@ -688,6 +688,10 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
     o << "\"csv_output_path\":";  jstr(o, c.csv_output_path);  o << ",";
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";     jmap(o, c.param_values);     o << ",";
+    o << "\"feature1\":"          << c.feature1            << ",";
+    o << "\"feature2\":"          << c.feature2            << ",";
+    o << "\"mult_feature1_text\":"; jstr(o, c.mult_feature1_text); o << ",";
+    o << "\"mult_feature2_text\":"; jstr(o, c.mult_feature2_text); o << ",";
     o << "\"active_plot_tab\":"   << c.active_plot_tab;
     o << "}";
 }
@@ -718,6 +722,10 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "csv_output_path")    c.csv_output_path   = p.str();
     else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
     else if (key == "param_values")       c.param_values      = p.map_ss();
+    else if (key == "feature1")           c.feature1           = std::stoi(p.str_or_num());
+    else if (key == "feature2")           c.feature2           = std::stoi(p.str_or_num());
+    else if (key == "mult_feature1_text") c.mult_feature1_text = p.str();
+    else if (key == "mult_feature2_text") c.mult_feature2_text = p.str();
     else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
     else return false;
     return true;

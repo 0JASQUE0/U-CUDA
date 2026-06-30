@@ -129,10 +129,38 @@ void HeatmapView::render(PlotRenderer& renderer,
         return;
     }
 
+    // 0. Swap-axes. Транспонируем values + меняем nx/ny и param-ranges; всё
+    // дальнейшее работает с этой "пост-swap" раскладкой как с исходной. При
+    // переключении флага форсируем re-upload (другая раскладка пикселей) и
+    // autofit (визуальный X теперь соответствует исходному data Y).
+    if (swap_axes != swap_axes_cached_) {
+        data_gen_cached = -1;
+        view_valid = false;
+        swap_axes_cached_ = swap_axes;
+    }
+    std::vector<double> swap_buf;
+    const double* eff_values = values;
+    if (swap_axes) {
+        swap_buf.resize((size_t)nx * (size_t)ny);
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i)
+                swap_buf[(size_t)i * (size_t)ny + (size_t)j]
+                    = values[(size_t)j * (size_t)nx + (size_t)i];
+        eff_values = swap_buf.data();
+        std::swap(nx, ny);
+        std::swap(param_lo_x, param_lo_y);
+        std::swap(param_hi_x, param_hi_y);
+    }
+    // Визуальные имена осей — каллер пишет в x_axis.name то, что относится
+    // к "data X". При swap_axes визуальный горизонтальный (= "post-swap X")
+    // = data Y → берём y_axis.name. И симметрично для визуального Y.
+    const std::string& vis_x_name = swap_axes ? y_axis.name : x_axis.name;
+    const std::string& vis_y_name = swap_axes ? x_axis.name : y_axis.name;
+
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
         ensure_tex(nx, ny);
-        upload_data(nx, ny, values);
+        upload_data(nx, ny, eff_values);
         data_gen_cached = data_generation;
     }
 
@@ -522,19 +550,24 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // 8. Названия осей (как в Plot2DView).
-    const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
-    const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+    // 8. Названия осей (как в Plot2DView). Используем vis_x_name/vis_y_name —
+    // они учитывают swap_axes без мутации x_axis.name / y_axis.name.
+    const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
+    const char* yl = vis_y_name.empty() ? "y" : vis_y_name.c_str();
     float font_h = ImGui::GetFontSize();
     ImVec2 xs = ImGui::CalcTextSize(xl);
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
     dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
 
-    // Y-метка — стопкой букв. Сдвигаем X-позицию столбца ДИНАМИЧЕСКИ за самые
-    // широкие Y-тики (как в Plot2DView), иначе подпись наезжает на цифры,
-    // когда сетка nice-step выдала длинные числа типа "0.09177".
-    size_t yl_len = std::strlen(yl);
-    if (yl_len > 0) {
+    // Y-метка — повёрнута на -90° (читается снизу вверх, mathematical
+    // convention). Рендерим горизонтально через AddText, затем поворачиваем
+    // все добавленные вершины вокруг pivot. На ТОЧНО -90° матрица имеет
+    // целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
+    // сохраняется → шрифт остаётся чётким (AA-шум бывает только на
+    // произвольных углах). X-позиция считается ДИНАМИЧЕСКИ за самыми
+    // широкими тиками, иначе подпись наезжает на длинные числа.
+    ImVec2 ts_yl = ImGui::CalcTextSize(yl);
+    if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
         double ey0 = y_axis.view_min, ey1 = y_axis.view_max;
         double vry = ey1 - ey0;
@@ -550,16 +583,24 @@ void HeatmapView::render(PlotRenderer& renderer,
                 if (w > max_tick_w) max_tick_w = w;
             }
         }
-        float row_h   = font_h * 1.05f;
-        float stack_h = row_h * (float)yl_len;
-        float y_start = img_pos.y + (plot_h - stack_h) * 0.5f;
-        // Колонка букв слева от тиков с зазором 8px.
-        float center_x = img_pos.x - max_tick_w - 8.0f - font_h * 0.5f;
-        for (size_t i = 0; i < yl_len; ++i) {
-            char ch[2] = { yl[i], '\0' };
-            ImVec2 cs = ImGui::CalcTextSize(ch);
-            dl->AddText(ImVec2(center_x - cs.x * 0.5f, y_start + (float)i * row_h),
-                        col_text, ch);
+        // Pivot — позиция левого-верхнего угла ДО поворота, она же центр
+        // вращения. После -90° (dx, dy) ↦ (dy, -dx):
+        //   • по X текст займёт [pivot.x, pivot.x + ts_yl.y]
+        //   • по Y — [pivot.y - ts_yl.x, pivot.y]
+        // Снапим к целым пикселям для чёткости глифов.
+        float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts_yl.y);
+        float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
+        ImVec2 pivot(pivot_x, pivot_y);
+
+        int idx_start = dl->VtxBuffer.Size;
+        dl->AddText(pivot, col_text, yl);
+        int idx_end = dl->VtxBuffer.Size;
+        for (int i = idx_start; i < idx_end; ++i) {
+            ImDrawVert& v = dl->VtxBuffer[i];
+            float dx = v.pos.x - pivot.x;
+            float dy = v.pos.y - pivot.y;
+            v.pos.x = pivot.x + dy;
+            v.pos.y = pivot.y - dx;
         }
     }
 
@@ -633,9 +674,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         int ix = (int)std::floor((dx - param_lo_x) / (param_hi_x - param_lo_x) * (double)nx);
         int iy = (int)std::floor((dy - param_lo_y) / (param_hi_y - param_lo_y) * (double)ny);
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-            double v = values[(size_t)iy * (size_t)nx + (size_t)ix];
-            const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
-            const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+            double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
+            const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
+            const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
             ImGui::BeginTooltip();
             if (!std::isfinite(v) || v == 999.0 || v == -999.0) {
                 ImGui::Text("%s = %.6g\n%s = %.6g\nlambda: diverged", xn, dx, yn, dy);

@@ -21,6 +21,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "configCUDA.h"   // typedef numb, BF_* feature codes, mult_avg_* defaults
 
 struct Bifurcation1DRequest {
     // КРС
@@ -486,6 +487,14 @@ struct BasinsRequest {
     int    pre_scaller    = 1;
     double max_value      = 1.0e6;
     double eps_dbscan     = 0.5;
+
+    // avgPeakFinderCUDA feature dispatch: какие фичи писать в outAvgPeaks/
+    // AvgTimeOfPeaks (см. BF_* в configCUDA.h) + множители ПОСЛЕ фич для
+    // подстройки масштаба DBSCAN. Дефолты дают pre-feature-selection поведение.
+    int  feature1 = BF_FEATURE1_DEFAULT;
+    int  feature2 = BF_FEATURE2_DEFAULT;
+    numb mult1    = mult_avg_peak;
+    numb mult2    = mult_avg_interval;
 
     std::string csv_output_path;
 

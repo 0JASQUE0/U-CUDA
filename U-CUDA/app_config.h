@@ -17,6 +17,13 @@ struct AppConfig {
     // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
     int heatmap_colormap = 0;
 
+    // Colormap для табов панели бассейнов (независимо для каждого таба). 0..3.
+    // Дефолты — Turbo: хорошо разделяет дискретные / категориальные значения.
+    int basins_colormap        = 2;
+    int basins_avgpk_colormap  = 2;
+    int basins_avgint_colormap = 2;
+    int basins_states_colormap = 2;
+
     // Кол-во значащих цифр в подписях тиков осей и colorbar'а. Минимум 2
     // (исключает пустые подписи), максимум 10 (предел double-precision в `%g`).
     // По умолчанию 4 (сохраняет старое поведение).

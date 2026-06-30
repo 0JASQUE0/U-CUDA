@@ -234,15 +234,17 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
                     col_text, xl);
 
-        // Y label — вертикально-стопкой (как на корешке книги): буквы
-        // обычные (без поворота), по одной на строку. Делаем так потому
-        // что настоящий поворот вершин даёт шум антиалиаса.
+        // Y label — повёрнут на -90° (читается снизу вверх, mathematical
+        // convention). Рендерим текст горизонтально через AddText, затем
+        // поворачиваем все добавленные вершины вокруг pivot. На ТОЧНО -90°
+        // матрица имеет целочисленные компоненты (cos=0, sin=-1), поэтому
+        // пиксельная сетка глифов сохраняется и шрифт остаётся чётким —
+        // никакого AA-шума, который бывает на произвольных углах.
         //
-        // Х-позиция колонки считается ДИНАМИЧЕСКИ — за самыми широкими
-        // Y-тиками, иначе подпись наезжает на длинные числа (e.g. "0.09177").
-        size_t yl_len = std::strlen(yl);
-        if (yl_len > 0) {
-            // Максимальная ширина тиков по текущему диапазону Y.
+        // Х-позиция считается ДИНАМИЧЕСКИ — за самыми широкими Y-тиками,
+        // иначе подпись наезжает на длинные числа (e.g. "0.09177").
+        ImVec2 ts = ImGui::CalcTextSize(yl);
+        if (ts.x > 0.0f && ts.y > 0.0f) {
             float max_tick_w = 0.0f;
             double vry = ey1 - ey0;
             if (std::abs(vry) >= 1e-30) {
@@ -257,16 +259,24 @@ void Plot2DView::render(PlotRenderer& renderer,
                     if (w > max_tick_w) max_tick_w = w;
                 }
             }
-            float row_h   = font_h * 1.05f;
-            float stack_h = row_h * (float)yl_len;
-            float y_start = img_pos.y + (plot_h - stack_h) * 0.5f;
-            // Колонка букв слева от тиков с зазором 8px.
-            float center_x = img_pos.x - max_tick_w - 8.0f - font_h * 0.5f;
-            for (size_t i = 0; i < yl_len; ++i) {
-                char ch[2] = { yl[i], '\0' };
-                ImVec2 cs = ImGui::CalcTextSize(ch);
-                dl->AddText(ImVec2(center_x - cs.x * 0.5f, y_start + (float)i * row_h),
-                            col_text, ch);
+            // Pivot — позиция левого-верхнего угла текста ДО поворота,
+            // одновременно центр вращения. После -90° (dx, dy) ↦ (dy, -dx):
+            //   • по X текст занимает [pivot.x, pivot.x + ts.y]
+            //   • по Y — [pivot.y - ts.x, pivot.y]
+            // Снапим к целым пикселям — критично для чёткости глифов.
+            float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts.y);
+            float pivot_y = std::floor(img_pos.y + (plot_h + ts.x) * 0.5f);
+            ImVec2 pivot(pivot_x, pivot_y);
+
+            int idx_start = dl->VtxBuffer.Size;
+            dl->AddText(pivot, col_text, yl);
+            int idx_end = dl->VtxBuffer.Size;
+            for (int i = idx_start; i < idx_end; ++i) {
+                ImDrawVert& v = dl->VtxBuffer[i];
+                float dx = v.pos.x - pivot.x;
+                float dy = v.pos.y - pivot.y;
+                v.pos.x = pivot.x + dy;
+                v.pos.y = pivot.y - dx;
             }
         }
     }

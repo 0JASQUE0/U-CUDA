@@ -1016,8 +1016,34 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.max_value       = parse_d(c.max_value_text, 1.0e6);
     req.eps_dbscan      = parse_d(c.eps_dbscan_text, 0.5);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+
+    // Feature dispatch для avgPeakFinderCUDA. Кэшируем сейчас, чтобы worker
+    // не зависел от GUI-state. Кламп в валидный диапазон на случай ручного
+    // редактирования сессии.
+    int f1 = c.feature1, f2 = c.feature2;
+    if (f1 < 0 || f1 >= BF_FEATURE_COUNT) f1 = BF_FEATURE1_DEFAULT;
+    if (f2 < 0 || f2 >= BF_FEATURE_COUNT) f2 = BF_FEATURE2_DEFAULT;
+    req.feature1 = f1;
+    req.feature2 = f2;
+    req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
+    req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
     return req;
 }
+
+// Гарантия синка enum class BasinFeature ↔ BF_* кодов из configCUDA.h.
+// Если кто-то изменит одну сторону без второй — фейл компиляции, а не runtime.
+static_assert((int)BasinFeature::AvgPeaks            == BF_AVG_PEAKS,            "BasinFeature drift: AvgPeaks");
+static_assert((int)BasinFeature::AvgIntervals        == BF_AVG_INTERVALS,        "BasinFeature drift: AvgIntervals");
+static_assert((int)BasinFeature::RMSPeaks            == BF_RMS_PEAKS,            "BasinFeature drift: RMSPeaks");
+static_assert((int)BasinFeature::RMSIntervals        == BF_RMS_INTERVALS,        "BasinFeature drift: RMSIntervals");
+static_assert((int)BasinFeature::StDevPeaks          == BF_STDEV_PEAKS,          "BasinFeature drift: StDevPeaks");
+static_assert((int)BasinFeature::StDevIntervals      == BF_STDEV_INTERVALS,      "BasinFeature drift: StDevIntervals");
+static_assert((int)BasinFeature::LogAvgPeaks         == BF_LOG_AVG_PEAKS,        "BasinFeature drift: LogAvgPeaks");
+static_assert((int)BasinFeature::LogAvgIntervals     == BF_LOG_AVG_INTERVALS,    "BasinFeature drift: LogAvgIntervals");
+static_assert((int)BasinFeature::LogRMSPeaks         == BF_LOG_RMS_PEAKS,        "BasinFeature drift: LogRMSPeaks");
+static_assert((int)BasinFeature::LogRMSIntervals     == BF_LOG_RMS_INTERVALS,    "BasinFeature drift: LogRMSIntervals");
+static_assert((int)BasinFeature::LogStDevPeaks       == BF_LOG_STDEV_PEAKS,      "BasinFeature drift: LogStDevPeaks");
+static_assert((int)BasinFeature::LogStDevIntervals   == BF_LOG_STDEV_INTERVALS,  "BasinFeature drift: LogStDevIntervals");
 
 static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
     c.result = std::move(r);
