@@ -113,6 +113,8 @@ struct ParametricEngine::Impl {
     std::string src_template_ls_2d;  // ls2d.template.cu
     std::string src_template_bif2d;  // bifurcation2d.template.cu
     std::string src_template_basins; // basins.template.cu
+    std::string src_template_fs_attr; // fastsync_attr.template.cu (mode 0)
+    std::string src_template_fs_grid; // fastsync_grid.template.cu (mode 1)
     bool srcs_loaded = false;
 
     struct CachedModule {
@@ -178,6 +180,22 @@ struct ParametricEngine::Impl {
     };
     CachedBasinsModule cached_basins;
 
+    // Fast Synchro — два модуля (mode 0 = on attractor, mode 1 = on grid).
+    // Каждый кэширует свой PTX, ключ = hash(krs_body)+amountOfX+":fs_attr"/":fs_grid"
+    // + (type_of_synch, error_estim, fs_error_trs) — все три substituted в #define
+    // перед include configCUDA.h, поэтому смена любого требует recompile.
+    struct CachedFastSyncModule {
+        std::string  key;
+        CUmodule     module          = nullptr;
+        // FS-specific. НЕ используем calculateDiscreteModelCUDA (та пишет
+        // скалярную сводку, не полный X[]).
+        CUfunction   kernel_fs_fill  = nullptr;  // fillFSMasterTrajectory (template, mode 0)
+        CUfunction   kernel_fs_traj  = nullptr;  // calculateDiscreteModelforFastSynchroCUDA (mode 0)
+        CUfunction   kernel_fs_grid  = nullptr;  // calculateDiscreteModelICCforFastSynchro (mode 1)
+    };
+    CachedFastSyncModule cached_fs_attr;
+    CachedFastSyncModule cached_fs_grid;
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
@@ -189,7 +207,30 @@ struct ParametricEngine::Impl {
             release_cont_module();
             release_bif2d_module();
             release_basins_module();
+            release_fs_attr_module();
+            release_fs_grid_module();
             cuCtxDestroy(context);
+        }
+    }
+
+    void release_fs_attr_module() {
+        if (cached_fs_attr.module) {
+            cuModuleUnload(cached_fs_attr.module);
+            cached_fs_attr.module         = nullptr;
+            cached_fs_attr.kernel_fs_fill = nullptr;
+            cached_fs_attr.kernel_fs_traj = nullptr;
+            cached_fs_attr.kernel_fs_grid = nullptr;
+            cached_fs_attr.key.clear();
+        }
+    }
+    void release_fs_grid_module() {
+        if (cached_fs_grid.module) {
+            cuModuleUnload(cached_fs_grid.module);
+            cached_fs_grid.module         = nullptr;
+            cached_fs_grid.kernel_fs_fill = nullptr;
+            cached_fs_grid.kernel_fs_traj = nullptr;
+            cached_fs_grid.kernel_fs_grid = nullptr;
+            cached_fs_grid.key.clear();
         }
     }
 
@@ -303,6 +344,8 @@ struct ParametricEngine::Impl {
         src_template_ls_2d    = read_text_file(root + "ls2d.template.cu",               e); if (!e.empty()) { err = e; return false; }
         src_template_bif2d    = read_text_file(root + "bifurcation2d.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_template_basins   = read_text_file(root + "basins.template.cu",            e); if (!e.empty()) { err = e; return false; }
+        src_template_fs_attr  = read_text_file(root + "fastsync_attr.template.cu",     e); if (!e.empty()) { err = e; return false; }
+        src_template_fs_grid  = read_text_file(root + "fastsync_grid.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -3649,6 +3692,459 @@ struct ParametricEngine::Impl {
         res.ok = true;
         return res;
     }
+
+    // =========================================================================
+    // FastSynchro — два режима.
+    // =========================================================================
+
+    // Один helper для обоих режимов — параметризован шаблоном и списком
+    // kernel-symbols. Ключ кэша включает все substituted-параметры
+    // (type_of_synch, error_estim, fs_error_trs), чтобы при их смене recompile
+    // действительно случился.
+    bool compile_fs_module(const std::string& src_template,
+                           const std::string& tag, // ":fs_attr" или ":fs_grid"
+                           int amountOfX,
+                           const std::string& krs_body,
+                           int type_of_synch_v, int error_estim_v, double fs_error_trs_v,
+                           const std::vector<const char*>& expr_kernels,
+                           CachedFastSyncModule& slot,
+                           std::string& err)
+    {
+        cuCtxSetCurrent(context);
+        char trs_buf[64];
+        std::snprintf(trs_buf, sizeof(trs_buf), "%.17g", fs_error_trs_v);
+        std::string key = hash_key(krs_body, amountOfX) + tag
+                        + ":t" + std::to_string(type_of_synch_v)
+                        + ":e" + std::to_string(error_estim_v)
+                        + ":r" + trs_buf;
+        if (slot.module && slot.key == key) return true;
+        if (slot.module) {
+            cuModuleUnload(slot.module);
+            slot.module = nullptr;
+            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = nullptr;
+            slot.key.clear();
+        }
+        if (!load_sources(err)) return false;
+
+        std::string src = src_template;
+        src = replace_all(src, "{{AMOUNT_OF_X}}",    std::to_string(amountOfX));
+        src = replace_all(src, "{{TYPE_OF_SYNCH}}", std::to_string(type_of_synch_v));
+        src = replace_all(src, "{{ERROR_ESTIM}}",    std::to_string(error_estim_v));
+        src = replace_all(src, "{{FS_ERROR_TRS}}",   std::string(trs_buf));
+        src = replace_all(src, "{{KRS_BODY}}",       krs_body);
+
+        const char* header_sources[] = {
+            src_cudaLibrary_cu.c_str(),
+            src_cudaLibrary_cuh.c_str(),
+            src_cudaMacros_cuh.c_str(),
+            src_configCUDA_h.c_str(),
+        };
+        const char* header_names[] = {
+            "cudaLibrary.cu",
+            "cudaLibrary.cuh",
+            "cudaMacros.cuh",
+            "configCUDA.h",
+        };
+        constexpr int n_headers = 4;
+
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "fastsync.cu",
+                                            n_headers, header_sources, header_names);
+        if (nr != NVRTC_SUCCESS) {
+            err = std::string("nvrtcCreateProgram(fastsync): ") + nvrtcGetErrorString(nr);
+            return false;
+        }
+        for (const char* sym : expr_kernels) nvrtcAddNameExpression(prog, sym);
+
+        char arch[64];
+        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
+        if (cuda_include_opt.empty()) { err = "CUDA_PATH не задан"; nvrtcDestroyProgram(&prog); return false; }
+        std::string std_opt = "--std=c++17";
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+        nr = nvrtcCompileProgram(prog, 4, opts);
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = "NVRTC compile failed (fastsync):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        std::string ptx(ptxsz, '\0');
+        nvrtcGetPTX(prog, &ptx[0]);
+
+        // Lowered names — берём ДО уничтожения program'ы.
+        std::vector<std::string> lowered;
+        lowered.reserve(expr_kernels.size());
+        for (const char* sym : expr_kernels) {
+            const char* lo = nullptr;
+            nvrtcGetLoweredName(prog, sym, &lo);
+            lowered.push_back(lo ? lo : sym);
+        }
+        nvrtcDestroyProgram(&prog);
+
+        CUresult r = cuModuleLoadDataEx(&slot.module, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(fastsync): " + cu_err(r); return false; }
+
+        // Связываем по expr_kernels индексу.
+        for (size_t i = 0; i < expr_kernels.size(); ++i) {
+            const std::string& sym_raw = lowered[i];
+            CUfunction f = nullptr;
+            r = cuModuleGetFunction(&f, slot.module, sym_raw.c_str());
+            if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + sym_raw + "): " + cu_err(r); release_fs_attr_module(); release_fs_grid_module(); return false; }
+            const std::string sym_name = expr_kernels[i];
+            if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
+            else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
+            else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       slot.kernel_fs_grid = f;
+        }
+        slot.key = key;
+        return true;
+    }
+
+    // ---- run_fastsync: dispatch по req.mode ----
+    FastSyncResult run_fastsync(const FastSyncRequest& req) {
+        FastSyncResult res;
+        res.mode = req.mode;
+        auto fail = [&](const std::string& msg) -> FastSyncResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                  return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+        if ((int)req.ic_master.size()  != req.amountOfX)           return fail("ic_master.size() != amountOfX");
+        if ((int)req.ic_slave.size()   != req.amountOfX)           return fail("ic_slave.size() != amountOfX");
+        if ((int)req.k_forward.size()  != req.amountOfX)           return fail("k_forward.size() != amountOfX");
+        if ((int)req.k_backward.size() != req.amountOfX)           return fail("k_backward.size() != amountOfX");
+        if ((int)req.values.size() > kMaxAmountOfValues)           return fail("values слишком много");
+        if (req.h <= 0.0)             return fail("h должно быть > 0");
+        if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr должно быть > 0");
+        if (req.pre_scaller <= 0)     return fail("pre_scaller должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+
+        // Drain any sticky error state from previous bad launch (e.g. OOB в
+        // shared memory). Без этого cudaMalloc на старте мгновенно падает
+        // "illegal memory access" — это echo прошлой ошибки, а не текущей.
+        // (Если контекст реально corrupted — он восстановится только
+        // рестартом приложения; здесь только сбрасываем sticky-флаг для
+        // случаев, когда GPU ещё работоспособен.)
+        cudaGetLastError();
+
+        if (req.mode == 0) {
+            // ===================== On Attractor =====================
+            if (req.t_max <= 0.0)         return fail("t_max должно быть > 0");
+            if (req.transient_time < 0)   return fail("transient_time должно быть >= 0");
+            if (req.window <= (numb)0.0)  return fail("window должно быть > 0");
+
+            // Two FS-specific kernels — НЕ calculateDiscreteModelCUDA:
+            //   fillFSMasterTrajectory (template, single-thread) — фильтрует
+            //   timeDomain полным X[] на каждом шаге через FS device function.
+            //   calculateDiscreteModelforFastSynchroCUDA — параллельный синхро-проход.
+            std::vector<const char*> exprs = {
+                "fillFSMasterTrajectory",
+                "calculateDiscreteModelforFastSynchroCUDA"
+            };
+            if (!compile_fs_module(src_template_fs_attr, ":fs_attr", req.amountOfX, req.krs_body,
+                                   req.type_of_synch, req.error_estim, req.fs_error_trs,
+                                   exprs, cached_fs_attr, err)) return fail(err);
+
+            const int amountOfNTPoints      = (int)(req.window / req.h);
+            const int amountOfCTPoints      = (int)(req.t_max / req.h);
+            const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+            const int nPts                  = amountOfCTPoints / (req.pre_scaller > 0 ? req.pre_scaller : 1);
+            if (nPts <= 0) return fail("computed nPts <= 0 (t_max/h/preScaller)");
+            // FS-kernel читает timeDomain[idx*preScaller*amountOfX + i*amountOfX + j]
+            // где idx ∈ [0..nPts), i ∈ [0..amountOfNTPoints). Поэтому буфер должен
+            // вмещать amountOfCTPoints + amountOfNTPoints точек (с padding'ом).
+            const int traj_len_pts          = amountOfCTPoints + amountOfNTPoints;
+
+            int amountOfIC_int     = req.amountOfX;
+            int amountOfValues_int = (int)req.values.size();
+
+            double* d_timeDomain = nullptr; double* d_output = nullptr;
+            double* d_Xs = nullptr;   double* d_X0 = nullptr;
+            double* d_values = nullptr;
+            double* d_kF = nullptr;   double* d_kB = nullptr;
+            #define FS_CHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS0_FAIL; } } while(0)
+
+            size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(double);
+            size_t out_bytes  = (size_t)nPts * sizeof(double);
+            FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
+            FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
+            FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(double)), "cudaMalloc d_Xs");
+            FS_CHECK(cudaMalloc((void**)&d_X0,         amountOfIC_int * sizeof(double)), "cudaMalloc d_X0");
+            FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(double)), "cudaMalloc d_values");
+            FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(double)), "cudaMalloc d_kF");
+            FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(double)), "cudaMalloc d_kB");
+
+            FS_CHECK(cudaMemcpy(d_X0,     req.ic_master.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy X0");
+            FS_CHECK(cudaMemcpy(d_Xs,     req.ic_slave.data(),   amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy Xs");
+            FS_CHECK(cudaMemcpy(d_values, req.values.data(),     amountOfValues_int * sizeof(double), cudaMemcpyHostToDevice), "memcpy values");
+            FS_CHECK(cudaMemcpy(d_kF,     req.k_forward.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kF");
+            FS_CHECK(cudaMemcpy(d_kB,     req.k_backward.data(), amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kB");
+
+            // Шаг 1: fillFSMasterTrajectory — single-thread, заливает d_timeDomain
+            // полным X[] на каждом шаге (через FS device function с K=0).
+            if (req.progress) req.progress->store(0.05f);
+            {
+                double  h_arg     = req.h;
+                int     skip_arg  = amountOfPointsForSkip;
+                int     pts_arg   = traj_len_pts;
+                void* args_fill[] = {
+                    &d_values, &h_arg, &d_X0, &skip_arg, &pts_arg, &d_timeDomain
+                };
+                CUresult r = cuLaunchKernel(cached_fs_attr.kernel_fs_fill,
+                                            1, 1, 1, 1, 1, 1,
+                                            0, nullptr, args_fill, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_attr fill): " + cu_err(r); goto FS0_FAIL; }
+                cudaDeviceSynchronize();
+            }
+            if (req.progress) req.progress->store(0.5f);
+
+            // Шаг 2: calculateDiscreteModelforFastSynchroCUDA — nPts threads, читает
+            // timeDomain, пишет d_output[idx] = ошибка синхронизации на точке idx.
+            {
+                int    nPts_int           = nPts;
+                int    nPtsLimiter_int    = nPts;
+                int    amountOfNTPoints_i = amountOfNTPoints;
+                double h_arg              = req.h;
+                int    iterOfSynchr_i     = req.iter_of_synchr;
+                int    preScaller_i       = req.pre_scaller;
+                double maxValue_arg       = req.max_value;
+                int    amountOfValues_i   = amountOfValues_int;
+
+                void* args_fs[] = {
+                    &nPts_int, &nPtsLimiter_int, &amountOfNTPoints_i, &h_arg,
+                    &d_Xs, &amountOfIC_int,
+                    &d_values, &d_kF, &d_kB,
+                    &iterOfSynchr_i, &amountOfValues_i, &amountOfNTPoints_i,
+                    &maxValue_arg,
+                    &d_timeDomain, &d_output, &preScaller_i
+                };
+                int blockSize = 32;
+                int gridSize  = (nPts + blockSize - 1) / blockSize;
+                CUresult r = cuLaunchKernel(cached_fs_attr.kernel_fs_traj,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            0, nullptr, args_fs, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_attr): " + cu_err(r); goto FS0_FAIL; }
+                cudaDeviceSynchronize();
+            }
+            if (req.progress) req.progress->store(0.95f);
+
+            // Шаг 3: D2H — trajectory + errors. timeDomain хранит RAW точки
+            // (без decimator'а); для визуализации выбираем точки с шагом preScaller.
+            {
+                std::vector<double> h_traj((size_t)traj_len_pts * (size_t)amountOfIC_int);
+                FS_CHECK(cudaMemcpy(h_traj.data(), d_timeDomain, traj_bytes, cudaMemcpyDeviceToHost), "memcpy traj D2H");
+
+                std::vector<double> h_out(nPts);
+                FS_CHECK(cudaMemcpy(h_out.data(), d_output, out_bytes, cudaMemcpyDeviceToHost), "memcpy out D2H");
+
+                // Сохраняем полную (decimated) траекторию — все каналы. GUI
+                // выберет axis_x_var / axis_y_var при отрисовке (re-render
+                // при смене combo'ов без повторного Run).
+                res.traj_full.resize((size_t)nPts * (size_t)amountOfIC_int);
+                for (int i = 0; i < nPts; ++i) {
+                    size_t row = (size_t)i * (size_t)req.pre_scaller;
+                    if (row >= (size_t)traj_len_pts) row = (size_t)traj_len_pts - 1;
+                    for (int j = 0; j < amountOfIC_int; ++j)
+                        res.traj_full[(size_t)i * amountOfIC_int + j]
+                            = h_traj[row * (size_t)amountOfIC_int + j];
+                }
+                res.sync_error    = std::move(h_out);
+                res.n_pts_traj    = nPts;
+                res.amountOfX_traj = amountOfIC_int;
+            }
+
+            // min/max sync_error для autoscale.
+            {
+                double vmin = std::numeric_limits<double>::infinity();
+                double vmax = -std::numeric_limits<double>::infinity();
+                for (double v : res.sync_error) {
+                    if (!std::isfinite(v)) continue;
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                }
+                res.min_val = std::isfinite(vmin) ? vmin : 0.0;
+                res.max_val = std::isfinite(vmax) ? vmax : 0.0;
+            }
+
+            cudaFree(d_timeDomain); cudaFree(d_output);
+            cudaFree(d_Xs); cudaFree(d_X0);
+            cudaFree(d_values); cudaFree(d_kF); cudaFree(d_kB);
+            #undef FS_CHECK
+            res.ok = true;
+            return res;
+            FS0_FAIL:
+                if (d_timeDomain) cudaFree(d_timeDomain);
+                if (d_output)     cudaFree(d_output);
+                if (d_Xs)         cudaFree(d_Xs);
+                if (d_X0)         cudaFree(d_X0);
+                if (d_values)     cudaFree(d_values);
+                if (d_kF)         cudaFree(d_kF);
+                if (d_kB)         cudaFree(d_kB);
+            return fail(err);
+        }
+        else {
+            // ======================== On Grid ========================
+            if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+            if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
+            if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
+            if (req.axis_x_var == req.axis_y_var) return fail("axis_x_var == axis_y_var");
+
+            std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
+            if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
+                                   req.type_of_synch, req.error_estim, req.fs_error_trs,
+                                   exprs, cached_fs_grid, err)) return fail(err);
+
+            // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
+            int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
+            if (amountOfPointsInBlock <= 0) return fail("computed amountOfPointsInBlock <= 0");
+            const size_t total_cells = (size_t)req.n_pts * (size_t)req.n_pts;
+            int amountOfIC_int     = req.amountOfX;
+            int amountOfValues_int = (int)req.values.size();
+
+            // Memory budget — per-cell trajectory buffer = sizeOfBlock * amountOfX * sizeof(double).
+            size_t freeMemory = 0, totalMemory = 0;
+            if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
+            freeMemory = (size_t)((double)freeMemory * 0.5);
+            size_t perCellBytes = (size_t)amountOfPointsInBlock * (size_t)amountOfIC_int * sizeof(double);
+            if (perCellBytes == 0) perCellBytes = sizeof(double);
+            size_t nPtsLimiter = freeMemory / perCellBytes;
+            if (nPtsLimiter == 0) nPtsLimiter = 32;
+            if (nPtsLimiter > total_cells) nPtsLimiter = total_cells;
+            const size_t originalNPtsLimiter = nPtsLimiter;
+
+            double* d_data    = nullptr; double* d_ranges = nullptr;
+            int*    d_idx_mv  = nullptr; double* d_ic_m   = nullptr; double* d_ic_s = nullptr;
+            double* d_values  = nullptr; double* d_kF     = nullptr; double* d_kB   = nullptr;
+            int*    d_helpful = nullptr; double* d_fs_err = nullptr;
+
+            #define FS_GCHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS1_FAIL; } } while(0)
+
+            FS_GCHECK(cudaMalloc((void**)&d_data,    (size_t)nPtsLimiter * perCellBytes), "cudaMalloc d_data");
+            FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(double)),                  "cudaMalloc d_ranges");
+            FS_GCHECK(cudaMalloc((void**)&d_idx_mv,  2 * sizeof(int)),                     "cudaMalloc d_idx_mv");
+            FS_GCHECK(cudaMalloc((void**)&d_ic_m,    amountOfIC_int * sizeof(double)),     "cudaMalloc d_ic_m");
+            FS_GCHECK(cudaMalloc((void**)&d_ic_s,    amountOfIC_int * sizeof(double)),     "cudaMalloc d_ic_s");
+            FS_GCHECK(cudaMalloc((void**)&d_values,  amountOfValues_int * sizeof(double)), "cudaMalloc d_values");
+            FS_GCHECK(cudaMalloc((void**)&d_kF,      amountOfIC_int * sizeof(double)),     "cudaMalloc d_kF");
+            FS_GCHECK(cudaMalloc((void**)&d_kB,      amountOfIC_int * sizeof(double)),     "cudaMalloc d_kB");
+            FS_GCHECK(cudaMalloc((void**)&d_helpful, nPtsLimiter * sizeof(int)),           "cudaMalloc d_helpful");
+            FS_GCHECK(cudaMalloc((void**)&d_fs_err,  total_cells * sizeof(double)),         "cudaMalloc d_fs_err");
+
+            {
+                double ranges_arr[4] = { req.axis_x_lo, req.axis_x_hi, req.axis_y_lo, req.axis_y_hi };
+                int    idx_mv_arr[2] = { req.axis_x_var, req.axis_y_var };
+                FS_GCHECK(cudaMemcpy(d_ranges, ranges_arr, 4 * sizeof(double),  cudaMemcpyHostToDevice), "memcpy ranges");
+                FS_GCHECK(cudaMemcpy(d_idx_mv, idx_mv_arr, 2 * sizeof(int),     cudaMemcpyHostToDevice), "memcpy idx_mv");
+                FS_GCHECK(cudaMemcpy(d_ic_m,   req.ic_master.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy ic_m");
+                FS_GCHECK(cudaMemcpy(d_ic_s,   req.ic_slave.data(),   amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy ic_s");
+                FS_GCHECK(cudaMemcpy(d_values, req.values.data(),     amountOfValues_int * sizeof(double), cudaMemcpyHostToDevice), "memcpy values");
+                FS_GCHECK(cudaMemcpy(d_kF,     req.k_forward.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kF");
+                FS_GCHECK(cudaMemcpy(d_kB,     req.k_backward.data(), amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kB");
+            }
+
+            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
+            for (size_t i = 0; i < amountOfIteration; ++i) {
+                size_t cur_limiter = nPtsLimiter;
+                if (i == amountOfIteration - 1) cur_limiter = total_cells - originalNPtsLimiter * i;
+
+                int    nPts_arg                  = req.n_pts;
+                int    nPtsLimiter_int           = (int)cur_limiter;
+                // sizeOfBlock — РАЗМЕР per-thread слота в `data` (в numb-элементах).
+                // loopCalculateDiscreteModelForFastSynchro_2 индексирует
+                // data[idx*sizeOfBlock + i*amountOfX + j] → нужно вместить
+                // amountOfIterations кадров по amountOfX компонент каждый.
+                int    sizeOfBlock_int           = amountOfPointsInBlock * amountOfIC_int;
+                int    amountOfCalculatedPoints  = (int)(i * originalNPtsLimiter);
+                int    dimension_arg             = 2;
+                double h_arg                     = req.h;
+                int    amountOfIterations_int    = amountOfPointsInBlock;
+                int    preScaller_int            = req.pre_scaller;
+                double maxValue_arg              = req.max_value;
+                int    iterOfSynchr_int          = req.iter_of_synchr;
+                double* d_fs_err_chunk           = d_fs_err + i * originalNPtsLimiter;
+
+                void* args_grid[] = {
+                    &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
+                    &dimension_arg, &d_ranges, &h_arg, &d_idx_mv,
+                    &d_ic_m, &d_ic_s, &amountOfIC_int,
+                    &d_values, &amountOfValues_int,
+                    &amountOfIterations_int, &preScaller_int, &maxValue_arg, &iterOfSynchr_int,
+                    &d_kF, &d_kB,
+                    &d_data, &d_helpful, &d_fs_err_chunk
+                };
+                int blockSize = 32;
+                int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
+                // Shared memory: kernel объявляет `extern __shared__ numb s[]`
+                // и кладёт туда localX[amountOfIC] + localValues[amountOfValues]
+                // per thread. blockSize threads × (IC + values) × 8 байт. Без
+                // правильного размера → OOB в shared → illegal memory access,
+                // корраптящий весь CUDA-контекст (sticky).
+                unsigned int shared_grid = (unsigned int)((amountOfIC_int + amountOfValues_int)
+                                                          * sizeof(double) * blockSize);
+                CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_grid,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            shared_grid, nullptr, args_grid, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_grid): " + cu_err(r); goto FS1_FAIL; }
+                cudaDeviceSynchronize();
+
+                if (req.progress) req.progress->store((float)(i + 1) / (float)amountOfIteration);
+                if (req.cancel && req.cancel->load()) { res.cancelled = true; goto FS1_CLEANUP; }
+            }
+
+            {
+                std::vector<double> h_out(total_cells);
+                FS_GCHECK(cudaMemcpy(h_out.data(), d_fs_err, total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy fs_err D2H");
+                res.heatmap = std::move(h_out);
+                res.n_pts_grid = req.n_pts;
+                res.axis_x_lo = req.axis_x_lo; res.axis_x_hi = req.axis_x_hi;
+                res.axis_y_lo = req.axis_y_lo; res.axis_y_hi = req.axis_y_hi;
+                res.axis_x_var = req.axis_x_var; res.axis_y_var = req.axis_y_var;
+
+                double vmin = std::numeric_limits<double>::infinity();
+                double vmax = -std::numeric_limits<double>::infinity();
+                for (double v : res.heatmap) {
+                    if (!std::isfinite(v)) continue;
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                }
+                res.min_val = std::isfinite(vmin) ? vmin : 0.0;
+                res.max_val = std::isfinite(vmax) ? vmax : 0.0;
+            }
+
+            FS1_CLEANUP:
+            cudaFree(d_data); cudaFree(d_ranges); cudaFree(d_idx_mv);
+            cudaFree(d_ic_m); cudaFree(d_ic_s); cudaFree(d_values);
+            cudaFree(d_kF); cudaFree(d_kB); cudaFree(d_helpful); cudaFree(d_fs_err);
+            #undef FS_GCHECK
+            if (!res.cancelled) res.ok = true;
+            return res;
+
+            FS1_FAIL:
+            if (d_data)    cudaFree(d_data);
+            if (d_ranges)  cudaFree(d_ranges);
+            if (d_idx_mv)  cudaFree(d_idx_mv);
+            if (d_ic_m)    cudaFree(d_ic_m);
+            if (d_ic_s)    cudaFree(d_ic_s);
+            if (d_values)  cudaFree(d_values);
+            if (d_kF)      cudaFree(d_kF);
+            if (d_kB)      cudaFree(d_kB);
+            if (d_helpful) cudaFree(d_helpful);
+            if (d_fs_err)  cudaFree(d_fs_err);
+            return fail(err);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -3682,4 +4178,8 @@ LS2DResult ParametricEngine::run_ls_2d(const LS2DRequest& req) {
 
 BasinsResult ParametricEngine::run_basins(const BasinsRequest& req) {
     return impl_->run_basins(req);
+}
+
+FastSyncResult ParametricEngine::run_fastsync(const FastSyncRequest& req) {
+    return impl_->run_fastsync(req);
 }

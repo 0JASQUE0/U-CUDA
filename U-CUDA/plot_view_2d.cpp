@@ -200,17 +200,33 @@ void Plot2DView::render(PlotRenderer& renderer,
     // скачках LLE/LS визуально «рвётся» из-за miter-joins при острых углах.
     // Толщина >1px надёжна (ImGui триангулирует), порядок: после осей.
     if (imdraw_lines) {
-        ImVec2 cmin = img_pos;
-        ImVec2 cmax(img_pos.x + plot_w, img_pos.y + plot_h);
-        dl->PushClipRect(cmin, cmax, true);
+        ImVec2 cmin_clip = img_pos;
+        ImVec2 cmax_clip(img_pos.x + plot_w, img_pos.y + plot_h);
+        dl->PushClipRect(cmin_clip, cmax_clip, true);
         for (int k = (int)series_in.size() - 1; k >= 0; --k) {
             if (!eff_visible(k)) continue;
             const PlotSeriesInput& s = series_in[k];
             if (!s.points || s.n_points < 2) continue;
-            ImU32 col = ImGui::ColorConvertFloat4ToU32(s.color);
+            const bool   colored = (s.values != nullptr);
+            const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
+            const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(s.color);
             ImVec2 prev(X(s.points[0]), Y(s.points[1]));
             for (int i = 1; i < s.n_points; ++i) {
                 ImVec2 cur(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
+                ImU32 col = uniform_col;
+                if (colored) {
+                    // Цвет сегмента от значения в его старте (MATLAB patch
+                    // EdgeColor=flat использует "от первого vertex").
+                    float t = (s.values[i - 1] - s.cmin) / crange;
+                    if (t < 0) t = 0; else if (t > 1) t = 1;
+                    col = cmap_sample(t, s.colormap);
+                    // s.color.w играет роль альфа-мультипликатора поверх cmap.
+                    if (s.color.w < 1.0f) {
+                        unsigned a = (col >> IM_COL32_A_SHIFT) & 0xFF;
+                        a = (unsigned)((float)a * s.color.w);
+                        col = (col & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+                    }
+                }
                 dl->AddLine(prev, cur, col, line_thickness_px);
                 prev = cur;
             }

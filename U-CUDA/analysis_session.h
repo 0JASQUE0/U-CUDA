@@ -40,6 +40,15 @@ struct Projection {
     std::vector<bool> show_var;
     bool open = true;        // окно открыто (крестик)
 
+    // Опционально: per-projection line styling. По дефолту false → быстрый
+    // GL shader-line путь (glLineWidth клампится драйвером, alpha = 1). При
+    // true → ImDrawList::AddLine per segment с заданными толщиной + α (живой
+    // line_width, alpha — но медленнее на длинных траекториях). Toolbar над
+    // плотом переключает + показывает слайдеры.
+    bool  custom_line_style = false;
+    float line_width        = 1.5f;
+    float alpha             = 1.0f;
+
     std::unique_ptr<Plot2DView> view2d;
     std::unique_ptr<Plot3DView> view3d;
     int prev_ax = -1, prev_ay = -1;
@@ -534,6 +543,114 @@ struct BasinsAnalysisSession {
 
     // Добавить config: глубокая копия последнего (если есть), иначе дефолт.
     // Label автоматически "Basins <N+1>", результат и флаги обнуляются.
+    void add_config();
+    void remove_config(int i);
+
+    bool run(ParametricEngine& engine, int config_idx);
+    bool run_async(ParametricEngine& engine, int config_idx);
+    void request_cancel();
+    bool poll();
+};
+
+// ============================================================================
+// Fast Synchro — анализ возвратной (recurrent) синхронизации. Два режима:
+//   mode 0 (On Attractor) — синхро-ошибка вдоль одной мастер-траектории;
+//   mode 1 (On Grid)      — синхро-ошибка на 2D-сетке slave IC.
+// Зеркалит BasinsConfig в стиле (multi-config, text-storage, futures worker).
+// ============================================================================
+struct FastSyncConfig {
+    std::string label  = "FastSync 1";
+    std::string scheme = "Euler";
+    std::string symmetry_s = "0.5"; // a[0] для CD
+
+    // Режим:
+    int mode = 0;   // 0 = On Attractor, 1 = On Grid
+
+    // ---- Общие параметры алгоритма (text-storage; parse при build_request) ----
+    std::string h_text              = "0.01";
+    std::string iter_of_synchr_text = "100";
+    std::string pre_scaller_text    = "1";
+    std::string max_value_text      = "1e6";
+
+    // Per-var значения. Все 4 секции инициализируются нулями в load_from_record.
+    std::map<std::string, std::string> ic_master;
+    std::map<std::string, std::string> ic_slave;
+    std::map<std::string, std::string> k_forward;
+    std::map<std::string, std::string> k_backward;
+    std::map<std::string, std::string> param_values;
+
+    // ---- mode == 0 (On Attractor) ----
+    std::string t_max_text         = "100";
+    std::string transient_text     = "0";
+    // Окно синхронизации (раньше называлось n_time). Хранится как text;
+    // парсится в numb при build_request.
+    std::string window_text        = "50";
+
+    // ---- mode == 1 (On Grid) ----
+    int         axis_x_var       = 0;
+    int         axis_y_var       = 1;
+    std::string axis_x_lo_text   = "-10";
+    std::string axis_x_hi_text   = "10";
+    std::string axis_y_lo_text   = "-10";
+    std::string axis_y_hi_text   = "10";
+    std::string n_pts_text       = "200";
+
+    // ---- Runtime knobs (substituted в NVRTC #define) ----
+    int         type_of_synch    = 0;     // 0=unidir, 1=bidir
+    int         error_estim      = 2;     // 0|1|2
+    std::string fs_error_trs_text = "1e-12";
+
+    // ---- Визуализация ----
+    int         colormap_idx     = 2;     // Turbo
+    bool        autoscale_color  = true;  // true → cmin/cmax = result.min_val/max_val
+    std::string c_min_text       = "-12";
+    std::string c_max_text       = "0";
+    float       line_width       = 1.0f;
+    // α=0.5 по дефолту — overlapping segments дают illusion глубины
+    // (при α=1 далёкие/близкие проекции сливаются в одну плотную линию).
+    float       alpha            = 0.5f;
+    bool        swap_axes        = false; // grid mode: transpose heatmap
+
+    // ---- Состояние ----
+    FastSyncResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+};
+
+struct FastSyncAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::string loaded_system_name;
+
+    std::vector<FastSyncConfig> configs;
+    int active_config_index = 0;
+    int running_config_index = -1;
+
+    std::future<FastSyncResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    std::shared_ptr<std::atomic<bool>>  cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
+    FastSyncAnalysisSession() = default;
+    FastSyncAnalysisSession(FastSyncAnalysisSession&&) = default;
+    FastSyncAnalysisSession& operator=(FastSyncAnalysisSession&&) = default;
+    FastSyncAnalysisSession(const FastSyncAnalysisSession&) = delete;
+    FastSyncAnalysisSession& operator=(const FastSyncAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+
     void add_config();
     void remove_config(int i);
 

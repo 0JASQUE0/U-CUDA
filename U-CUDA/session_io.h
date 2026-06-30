@@ -41,3 +41,7 @@ bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSessi
 // integration, DBSCAN eps, IC, params, CSV-настройки. Result в JSON не пишется.
 std::string session_to_json_basins(const BasinsAnalysisSession& s);
 bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s);
+
+// FastSync-сессия — multi-config layout как у basins. Result в JSON не пишется.
+std::string session_to_json_fastsync(const FastSyncAnalysisSession& s);
+bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s);

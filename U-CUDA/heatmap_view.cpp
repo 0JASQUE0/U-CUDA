@@ -55,63 +55,8 @@ void HeatmapView::do_autofit(double lo_x, double hi_x, double lo_y, double hi_y)
     view_valid = true;
 }
 
-// ---- C++-side colormap для colorbar'а (рисуется через ImDrawList) ----
-namespace {
-struct vec3f { float r, g, b; };
-inline vec3f operator+(vec3f a, vec3f b) { return {a.r+b.r, a.g+b.g, a.b+b.b}; }
-inline vec3f operator*(vec3f a, float s) { return {a.r*s, a.g*s, a.b*s}; }
-inline vec3f operator*(float s, vec3f a) { return a*s; }
-
-vec3f cmap_viridis(float t) {
-    const vec3f c0 = {0.2777273272f, 0.0054872578f, 0.3340998020f};
-    const vec3f c1 = {0.1057220655f, 1.4046380960f, 1.3845030177f};
-    const vec3f c2 = {-0.330001533f, 0.214825727f, 0.092491715f};
-    const vec3f c3 = {-4.634230600f, -5.799101469f, -19.33244091f};
-    const vec3f c4 = {6.228269936f, 14.17993089f, 56.69055318f};
-    const vec3f c5 = {4.776384997f, -13.74514904f, -65.35303153f};
-    const vec3f c6 = {-5.435455319f, 4.645852612f, 26.31243947f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3f cmap_inferno(float t) {
-    const vec3f c0 = {0.0002189403691f, 0.001651742368f, -0.01948089833f};
-    const vec3f c1 = {0.1065134194f, 0.5639564368f, 3.932712388f};
-    const vec3f c2 = {11.60249308f, -3.972853966f, -15.94239411f};
-    const vec3f c3 = {-41.70399613f, 17.43639888f, 44.35414519f};
-    const vec3f c4 = {77.16289500f, -33.40998897f, -81.80741196f};
-    const vec3f c5 = {-71.31942380f, 32.62606027f, 73.20951466f};
-    const vec3f c6 = {25.13112622f, -12.24266895f, -23.07032500f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3f cmap_turbo(float t) {
-    // Canonical Turbo (matplotlib polynomial fit). See plot_renderer.cpp for
-    // the matching GLSL version. Mirrors the shader bit-for-bit so colorbar
-    // strips agree with on-screen heatmap colors.
-    const vec3f c0 = {0.13572138f, 0.09140261f, 0.10667330f};
-    const vec3f c1 = {4.61539260f, 2.19418839f, 12.64194608f};
-    const vec3f c2 = {-42.66032258f, 4.84296658f, -60.58204836f};
-    const vec3f c3 = {132.13108234f, -14.18503333f, 110.36276771f};
-    const vec3f c4 = {-152.94239396f, 4.27729857f, -89.90310912f};
-    const vec3f c5 = {59.28637943f, 2.82956604f, 27.34824973f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
-}
-vec3f cmap_gray(float t) { return {t, t, t}; }
-
-ImU32 cmap_sample(float t, HeatmapColormap m) {
-    t = std::min(std::max(t, 0.0f), 1.0f);
-    vec3f c;
-    switch (m) {
-        case HeatmapColormap::Inferno: c = cmap_inferno(t); break;
-        case HeatmapColormap::Turbo:   c = cmap_turbo(t);   break;
-        case HeatmapColormap::Gray:    c = cmap_gray(t);    break;
-        case HeatmapColormap::Viridis:
-        default:                       c = cmap_viridis(t); break;
-    }
-    auto clamp01 = [](float v){ return std::min(std::max(v, 0.0f), 1.0f); };
-    return IM_COL32((int)(clamp01(c.r) * 255.0f),
-                    (int)(clamp01(c.g) * 255.0f),
-                    (int)(clamp01(c.b) * 255.0f), 255);
-}
-} // namespace
+// cmap_sample / HeatmapColormap перемещены в plot_renderer.h/.cpp —
+// используется ещё для colored trajectory в plot_view_2d.cpp.
 
 void HeatmapView::render(PlotRenderer& renderer,
                          ImVec2 block_origin, ImVec2 avail_size,

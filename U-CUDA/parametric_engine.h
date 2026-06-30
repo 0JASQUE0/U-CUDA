@@ -531,6 +531,84 @@ struct BasinsResult {
     double avg_intervals_min = 0.0, avg_intervals_max = 0.0;
 };
 
+// ============================================================================
+// Fast Synchro — анализ возвратной синхронизации.
+// Два режима:
+//   mode 0 ("On Attractor"): интегрируем master trajectory, в каждой её точке
+//     запускаем cycle synchro → ошибка per-point. Результат — массив точек
+//     (traj_x, traj_y) + sync_error длиной nPts (после decimator'а).
+//   mode 1 ("On Grid"): свип по двум IC (n_pts × n_pts), per-cell sync error.
+//     Результат — 2D heatmap.
+// type_of_synch / error_estim / fs_error_trs — knobs из configCUDA.h,
+// override'имые через NVRTC #define (поэтому PTX-кэш ключ включает их).
+// ============================================================================
+
+struct FastSyncRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> values;       // параметры системы (amountOfValues = values.size())
+
+    int mode = 0;                     // 0 = On Attractor, 1 = On Grid
+
+    // Общие параметры алгоритма.
+    double h               = 0.01;
+    int    iter_of_synchr  = 100;
+    int    pre_scaller     = 1;
+    double max_value       = 1e6;
+    std::vector<double> k_forward;    // length = amountOfX
+    std::vector<double> k_backward;   // length = amountOfX
+    std::vector<double> ic_master;    // length = amountOfX
+    std::vector<double> ic_slave;     // length = amountOfX
+
+    // mode == 0 (On Attractor):
+    double t_max          = 100.0;
+    double transient_time = 0.0;
+    numb   window         = (numb)50.0;  // окно синхронизации (numb для ABI-consistency с kernel-аргументами)
+
+    // mode == 1 (On Grid):
+    int    axis_x_var = 0;
+    int    axis_y_var = 1;
+    double axis_x_lo = -10.0, axis_x_hi = 10.0;
+    double axis_y_lo = -10.0, axis_y_hi = 10.0;
+    int    n_pts = 200;
+
+    // Runtime knobs (substituted via NVRTC #define перед include configCUDA.h).
+    int    type_of_synch = 0;
+    int    error_estim   = 2;
+    double fs_error_trs  = 1e-12;
+
+    // Cancel + progress — мирорят Bifurcation*Request.
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct FastSyncResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+    int  mode = 0;
+
+    // mode == 0: trajectory + per-point sync error.
+    // traj_full — row-major n_pts_traj × amountOfX_traj (полный вектор X в
+    // каждой decimated-точке). Позволяет GUI пересобирать (X, Y) проекции при
+    // смене axis_*_var БЕЗ повторного запуска расчёта.
+    int n_pts_traj = 0;
+    int amountOfX_traj = 0;
+    std::vector<double> traj_full;
+    std::vector<double> sync_error;        // length = n_pts_traj
+
+    // mode == 1: heatmap n_pts × n_pts row-major (iy*n + ix).
+    int n_pts_grid = 0;
+    double axis_x_lo = 0.0, axis_x_hi = 0.0;
+    double axis_y_lo = 0.0, axis_y_hi = 0.0;
+    int axis_x_var = 0, axis_y_var = 1;
+    std::vector<double> heatmap;
+
+    // Min/max валидных значений sync_error/heatmap для autoscale colorbar.
+    double min_val = 0.0;
+    double max_val = 0.0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -560,6 +638,9 @@ public:
 
     // Basins of attraction — карта на сетке IC. 4 output-поля + cluster ids.
     BasinsResult run_basins(const BasinsRequest& req);
+
+    // Fast Synchro — режим выбирается через req.mode (0 = traj, 1 = grid).
+    FastSyncResult run_fastsync(const FastSyncRequest& req);
 
 private:
     struct Impl;

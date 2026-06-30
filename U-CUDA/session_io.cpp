@@ -112,6 +112,8 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
         o << "{\"label\":"; jstr(o, p.label);
         o << ",\"type\":" << (int)p.type;
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
+        o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
+        o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
         o << "]}";
@@ -176,6 +178,9 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
                             else if (k == "ax")    pr.axis_x = std::stoi(p.str_or_num());
                             else if (k == "ay")    pr.axis_y = std::stoi(p.str_or_num());
                             else if (k == "az")    pr.axis_z = std::stoi(p.str_or_num());
+                            else if (k == "cls")   pr.custom_line_style = p.boolean();
+                            else if (k == "lw")    pr.line_width = (float)std::stod(p.str_or_num());
+                            else if (k == "al")    pr.alpha      = (float)std::stod(p.str_or_num());
                             else if (k == "show_var") {
                                 pr.show_var.clear();
                                 p.expect('[');
@@ -745,6 +750,147 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     o << "]\n";
     o << "}\n";
     return o.str();
+}
+
+// ============================================================================
+// FastSyncAnalysisSession JSON — multi-config layout как у basins.
+// ============================================================================
+static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c) {
+    o << "{";
+    o << "\"label\":";            jstr(o, c.label);            o << ",";
+    o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
+    o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"mode\":"              << c.mode                  << ",";
+    o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
+    o << "\"iter_of_synchr_text\":"; jstr(o, c.iter_of_synchr_text); o << ",";
+    o << "\"pre_scaller_text\":"; jstr(o, c.pre_scaller_text); o << ",";
+    o << "\"max_value_text\":";   jstr(o, c.max_value_text);   o << ",";
+    o << "\"t_max_text\":";       jstr(o, c.t_max_text);       o << ",";
+    o << "\"transient_text\":";   jstr(o, c.transient_text);   o << ",";
+    o << "\"window_text\":";      jstr(o, c.window_text);      o << ",";
+    o << "\"axis_x_var\":"        << c.axis_x_var            << ",";
+    o << "\"axis_y_var\":"        << c.axis_y_var            << ",";
+    o << "\"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text);   o << ",";
+    o << "\"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text);   o << ",";
+    o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
+    o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
+    o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
+    o << "\"type_of_synch\":"     << c.type_of_synch         << ",";
+    o << "\"error_estim\":"       << c.error_estim           << ",";
+    o << "\"fs_error_trs_text\":"; jstr(o, c.fs_error_trs_text); o << ",";
+    o << "\"colormap_idx\":"      << c.colormap_idx          << ",";
+    o << "\"autoscale_color\":"   << (c.autoscale_color ? "true" : "false") << ",";
+    o << "\"c_min_text\":";       jstr(o, c.c_min_text);       o << ",";
+    o << "\"c_max_text\":";       jstr(o, c.c_max_text);       o << ",";
+    o << "\"line_width\":"        << c.line_width            << ",";
+    o << "\"alpha\":"             << c.alpha                 << ",";
+    o << "\"swap_axes\":"         << (c.swap_axes ? "true" : "false") << ",";
+    o << "\"ic_master\":";        jmap(o, c.ic_master);        o << ",";
+    o << "\"ic_slave\":";         jmap(o, c.ic_slave);         o << ",";
+    o << "\"k_forward\":";        jmap(o, c.k_forward);        o << ",";
+    o << "\"k_backward\":";       jmap(o, c.k_backward);       o << ",";
+    o << "\"param_values\":";     jmap(o, c.param_values);
+    o << "}";
+}
+
+static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key) {
+    if      (key == "label")               c.label               = p.str();
+    else if (key == "scheme")              c.scheme              = p.str();
+    else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "mode")                c.mode                = std::stoi(p.str_or_num());
+    else if (key == "h_text")              c.h_text              = p.str();
+    else if (key == "iter_of_synchr_text") c.iter_of_synchr_text = p.str();
+    else if (key == "pre_scaller_text")    c.pre_scaller_text    = p.str();
+    else if (key == "max_value_text")      c.max_value_text      = p.str();
+    else if (key == "t_max_text")          c.t_max_text          = p.str();
+    else if (key == "transient_text")      c.transient_text      = p.str();
+    else if (key == "window_text")         c.window_text         = p.str();
+    // Backward-compat: старые сессии могли называть это поле "n_time_text".
+    else if (key == "n_time_text")         c.window_text         = p.str();
+    else if (key == "axis_x_var")          c.axis_x_var          = std::stoi(p.str_or_num());
+    else if (key == "axis_y_var")          c.axis_y_var          = std::stoi(p.str_or_num());
+    else if (key == "axis_x_lo_text")      c.axis_x_lo_text      = p.str();
+    else if (key == "axis_x_hi_text")      c.axis_x_hi_text      = p.str();
+    else if (key == "axis_y_lo_text")      c.axis_y_lo_text      = p.str();
+    else if (key == "axis_y_hi_text")      c.axis_y_hi_text      = p.str();
+    else if (key == "n_pts_text")          c.n_pts_text          = p.str();
+    else if (key == "type_of_synch")       c.type_of_synch       = std::stoi(p.str_or_num());
+    else if (key == "error_estim")         c.error_estim         = std::stoi(p.str_or_num());
+    else if (key == "fs_error_trs_text")   c.fs_error_trs_text   = p.str();
+    else if (key == "colormap_idx")        c.colormap_idx        = std::stoi(p.str_or_num());
+    else if (key == "autoscale_color")     c.autoscale_color     = p.boolean();
+    else if (key == "c_min_text")          c.c_min_text          = p.str();
+    else if (key == "c_max_text")          c.c_max_text          = p.str();
+    else if (key == "line_width")          c.line_width          = (float)std::stod(p.str_or_num());
+    else if (key == "alpha")               c.alpha               = (float)std::stod(p.str_or_num());
+    else if (key == "swap_axes")           c.swap_axes           = p.boolean();
+    else if (key == "decimator_view")      p.skip_value();   // legacy, не используется
+    else if (key == "ic_master")           c.ic_master           = p.map_ss();
+    else if (key == "ic_slave")            c.ic_slave            = p.map_ss();
+    else if (key == "k_forward")           c.k_forward           = p.map_ss();
+    else if (key == "k_backward")          c.k_backward          = p.map_ss();
+    else if (key == "param_values")        c.param_values        = p.map_ss();
+    else return false;
+    return true;
+}
+
+std::string session_to_json_fastsync(const FastSyncAnalysisSession& s) {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"active_config_index\":" << s.active_config_index << ",\n";
+    o << "  \"configs\":[";
+    for (size_t i = 0; i < s.configs.size(); ++i) {
+        if (i) o << ",";
+        o << "\n    ";
+        write_fastsync_config(o, s.configs[i]);
+    }
+    if (!s.configs.empty()) o << "\n  ";
+    o << "]\n";
+    o << "}\n";
+    return o.str();
+}
+
+bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "configs") {
+                s.configs.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        FastSyncConfig fc;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k2 = p.str(); p.expect(':');
+                                if (!read_fastsync_field(p, fc, k2)) p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        s.configs.push_back(std::move(fc));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else if (key == "active_config_index") s.active_config_index = std::stoi(p.str_or_num());
+            else                                    p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+            s.active_config_index = 0;
+        s.running_config_index = -1;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s) {

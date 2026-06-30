@@ -11,6 +11,16 @@ struct PlotSeriesInput {
     int          n_points = 0;
     ImVec4       color = ImVec4(1, 1, 1, 1);
     std::string  label;
+
+    // Per-segment colored mode (опционально). Когда values != nullptr И imdraw_lines
+    // включён в Plot2DView, каждый сегмент i рисуется цветом cmap_sample(t, colormap)
+    // где t = clamp((values[i] - cmin) / (cmax - cmin), 0, 1). Длина values = n_points.
+    // Используется для FastSynchro colored trajectory. При nullptr — старое поведение
+    // (uniform color = `color`). points_mode и shader-line режим игнорируют это поле.
+    const float*    values = nullptr;
+    HeatmapColormap colormap = HeatmapColormap::Viridis;
+    float           cmin = 0.0f;
+    float           cmax = 1.0f;
 };
 
 class Plot2DView {

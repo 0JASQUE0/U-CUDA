@@ -423,176 +423,32 @@ __device__ __host__ numb psi_m(numb x, numb M, numb d, numb k, numb dmargin) {
 
 __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1, numb* K, const numb* a, const numb h, const bool directionOfintegration)
 {
+	// Generic FastSynchro step. Раньше тело было ЗАХАРДКОЖЕНО под Lorenz CD;
+	// теперь делегируем сам ОДУ-шаг в user's `calculateDiscreteModel` (KRS_BODY
+	// от NVRTC template). FS-семантика:
+	//
+	//   • directionOfintegration = 1 (forward, h>0)  → caller передаёт K_forward
+	//   • directionOfintegration = 0 (backward, h<0) → caller передаёт K_backward
+	//     (см. loopCalculateDiscreteModelForFastSynchro — K_local меняется
+	//      между прямым и обратным проходами).
+	//
+	//   1. ОДУ-шаг с инвертированным знаком h на обратном проходе.
+	//   2. Coupling-тяга slave→master: ВСЕГДА с положительным h, независимо
+	//      от direction. Исходная конвенция FS-алгоритма (Lorenz-CD реализация
+	//      делала forward: X += N*h; backward: X -= (-N)*h — двойное отрицание
+	//      = +N*h). Так slave притягивается к master И на forward, И на backward
+	//      проходах. Если использовать eff_h здесь — backward пасс будет
+	//      отталкивать → расходимость.
+	const numb eff_h = directionOfintegration ? h : -h;
+	numb N[AMOUNTOFX];
 
-	numb N[AMOUNTOFX], h1, h2;
+	for (int i = 0; i < AMOUNTOFX; ++i)
+		N[i] = K[i] * (S1[i] - X[i]);
 
-	if (directionOfintegration == 1) {
-		h1 = h * a[0];
-		h2 = h * (1 - a[0]);
-		for (int i = 0 ; i < AMOUNTOFX; i ++)
-			N[i] = K[i] * (S1[i] - X[i]);
-	}
-	if (directionOfintegration == 0) {
-		h1 = -h * a[0];
-		h2 = -h * (1 - a[0]);
-		for (int i = 0; i < AMOUNTOFX; i++)
-			N[i] = -K[i] * (S1[i] - X[i]);
-	}
+	calculateDiscreteModel(X, a, eff_h);
 
-
-	//// --- CANG 4D CD ---
-	//X[0] =  X[0] + h1 * ( - a[1] * X[0] - a[5] * X[3] + X[1] * X[2]);
-	//X[1] =  X[1] + h1 * (  a[2] * X[1] + X[0] * X[2]);
-	//X[2] =  X[2] + h1 * (  a[3] * X[2] + a[6] * X[3] - X[0] * X[1]);
-	//X[3] =  X[3] + h1 * (  a[4] * X[3] - a[7] * X[2]);
-	//X[3] = (X[3] + h2 * ( - a[7] * X[2])) / (1 - h2 * a[4]);
-	//X[2] = (X[2] + h2 * (  a[6] * X[3] - X[0] * X[1])) / (1 - h2 * a[3]);
-	//X[1] = (X[1] + h2 * (  X[0] * X[2])) / (1 - h2 * a[2]);
-	//X[0] = (X[0] + h2 * ( - a[5] * X[3] + X[1] * X[2])) / (1 + h2 * a[1]);
-
-	////// --- Lorenz CD ---
-	X[0] = X[0] + h1 * (a[1] * (X[1] - X[0]) );
-	X[1] = X[1] + h1 * (X[0] * (a[2] - X[2]) - X[1] );
-	X[2] = X[2] + h1 * (X[0] * X[1] - a[3] * X[2] );
-	X[2] = (X[2] + h2 * (X[0] * X[1] )) / (1 + h2 * a[3]);
-	X[1] = (X[1] + h2 * (X[0] * (a[2] - X[2]) )) / (1 + h2);
-	X[0] = (X[0] + h2 * (a[1] * (X[1]) )) / (1 + a[1] * h2);
-
-	//// --- Nose-Hoover CD ---
-	//X[0] = X[0] + h1 * (a[1] * X[1] );
-	//X[1] = (X[1] - h1 * (X[0] )) / (1 - h1 * a[2] * X[2]);
-	//X[2] = X[2] + h1 * (1 - a[3] * X[1] * X[1] );
-	//X[2] = X[2] + h2 * (1 - a[3] * X[1] * X[1] );
-	//X[1] = X[1] + h2 * (a[2] * X[1] * X[2] - X[0] );
-	//X[0] = X[0] + h2 * (a[1] * X[1] );
-
-	// --- Rossler CD ---
-	//X[0] = X[0] + h1 * (-X[1] - X[2] );
-	//X[1] = (X[1] + h1 * (X[0] )) / (1.0 - a[1] * h1);
-	//X[2] = (X[2] + h1 * (a[2] )) / (1.0 - h1 * (X[0] - a[3]));
-	//X[2] = X[2] + h2 * (a[2] + X[2] * (X[0] - a[3]));
-	//X[1] = X[1] + h2 * (X[0] + a[1] * X[1] );
-	//X[0] = X[0] + h2 * (-X[1] - X[2] );
-
-	// --- Sprott14 CD ---
-	//X[0] = X[0] + h1 * (X[1] + 2.0 * X[0] * X[1] + X[0] * X[2]);
-	//X[1] = X[1] + h1 * (1.0 - 2.0 * X[0] * X[0] + X[1] * X[2]);
-	//X[2] = X[2] + h1 * (X[0] - X[0] * X[0] - X[1] * X[1]);
-	//X[2] = X[2] + h2 * (X[0] - X[0] * X[0] - X[1] * X[1]);
-	//X[1] = (X[1] + h2 * (1.0 - 2.0 * X[0] * X[0])) / (1.0 - h2 * X[2]);
-	//X[0] = (X[0] + h2 * (X[1])) / (1.0 - h2 * (2.0 * X[1] + X[2]));
-
-	// --- Lorenz-like 5D CD ---
-	//X[0] = X[0] + h1 * (a[1] * (X[1] - X[0]) + X[3]);
-	//X[1] = X[1] + h1 * (a[3] * X[0] - X[0] * X[2] + X[4]);
-	//X[2] = X[2] + h1 * (-a[2] * X[2] + X[0] * X[1]);
-	//X[3] = X[3] + h1 * (-a[4] * X[3] - X[0] * X[2]);
-	//X[4] = X[4] + h1 * (-a[5] * X[0] - a[6] * X[1]);
-	//X[4] = X[4] + h2 * (-a[5] * X[0] - a[6] * X[1]);
-	//X[3] = (X[3] + h2 * (-X[0] * X[2])) / (1.0 + h2 * a[4]);
-	//X[2] = (X[2] + h2 * X[0] * X[1]) / (1.0 + h2 * a[2]);
-	//X[1] = X[1] + h2 * (a[3] * X[0] - X[0] * X[2] + X[4]);
-	//X[0] = (X[0] + h2 * (a[1] * X[1] + X[3])) / (1.0 + h2 * a[1]);
-
-	//numb U[3];
-	//N[0] = (S1[0] - X[0]);
-	//N[1] = (S1[1] - X[1]);
-	//N[2] = (S1[2] - X[2]);
-	//if (directionOfintegration == 1) {
-	//	U[0] = K[0] * N[0];
-	//	U[1] = -(S1[0] * S1[2] - X[0] * X[2]) + K[1] * N[1];
-	//	U[2] = (S1[0] * S1[1] - X[0] * X[1]) + K[2] * N[2];
-	//	//U[0] = K[0] * N[0];
-	//	//U[1] = K[1] * N[1];
-	//	//U[2] = K[2] * N[2];
-	//	X[3] = X[3] + h * (N[0] * (X[1] - X[0]) - N[1] * X[0]); //a[1]
-	//	X[4] = X[4] + h * (-N[2] * X[2]);						//a[2]
-	//	X[5] = X[5] + h * (N[1] * (X[0] + X[1]));				//a[3]
-	//}
-	//if (directionOfintegration == 0) {
-	//	U[0] = -K[0] * N[0];
-	//	U[1] = -(S1[0] * S1[2] - X[0] * X[2]) - K[1] * N[1];
-	//	U[2] = (S1[0] * S1[1] - X[0] * X[1]) - K[2] * N[2];
-	//	//U[0] = -K[0] * N[0];
-	//	//U[1] = -K[1] * N[1];
-	//	//U[2] = -K[2] * N[2];
-	//	X[3] = X[3] - h * (N[0] * (X[1] - X[0]) - N[1] * X[0]); //a[1]
-	//	X[4] = X[4] - h * (-N[2] * X[2]);						//a[2]
-	//	X[5] = X[5] - h * (N[1] * (X[0] + X[1]));				//a[3]
-	//}
-	//X[0] = X[0] + h1 * ( U[0] + X[3] * (X[1] - X[0]));
-	//X[1] = X[1] + h1 * ( U[1] + (X[5] - X[3]) * X[0] - X[0] * X[2] + X[5] * X[1]);
-	//X[2] = X[2] + h1 * ( U[2] + X[0] * X[1] - X[4] * X[2]);
-	//X[2] = (X[2] + h2 * (U[2] + X[0] * X[1])) / (1 + X[4] * h2);
-	//X[1] = (X[1] + h2 * (U[1] + (X[5] - X[3]) * X[0] - X[0] * X[2])) / (1 - X[5] * h2);
-	//X[0] = (X[0] + h2 * (U[0] + X[3] * (X[1]))) / (1 + h2 * X[3]);
-
-	//Chua Shirnin CD
-	/*numb Ep = 1.0; //positive E
-	numb En = -0.9; //negative E
-	numb an = -2956.4381;
-	numb bn = -1133.7795;
-	numb cn = 4892.6766;
-	numb ap = 3140.4641;
-	numb bp = -1149.9195;
-	numb cp = 4894.9515;
-	numb ac = -38.7605;
-	numb bc = 2065.6838;
-	numb cc = 5031.1177;
-	numb dc = -122.2301;
-	numb py = 452.7923;
-	numb qy = -8916.0849;
-	numb ry = 8480.8662;
-	numb pz = 452.0403;
-	numb qz = -9447.7078;
-	numb rz = 8465.1742;
-	//numb h2 = h / 2.0;
-	numb x = X[0]; 
-	numb y = X[1]; 
-	numb z = X[2];
-
-	// half step forward (implicit)
-	z = (z + h2 * (pz * x + qz * y)) / (1 - h2 * rz);
-	y = (y + h2 * (py * x + ry * z)) / (1 - h2 * qy);
-	if (x < En) {
-		x = (x + h2 * (an + cn * y)) / (1 - h2 * bn);
-	}
-	else if (x > Ep) {
-		x = (x + h2 * (ap + cp * y)) / (1 - h2 * bp);
-	}
-	else {
-		x = (x + h2 * (ac + cc * y + dc * z)) / (1 - h2 * bc);
-	}
-
-	// half step forward(explicit)
-	if (x < En) {
-		x = x + h2 * (an + bn * x + cn * y);
-	}
-	else if (x > Ep) {
-		x = x + h2 * (ap + bp * x + cp * y);
-	}
-	else {
-		x = x + h2 * (ac + bc * x + cc * y + dc * z);
-	}
-	y = y + h2 * (py * x + qy * y + ry * z);
-	z = z + h2 * (pz * x + qz * y + rz * z);
-
-	X[0] = x; 
-	X[1] = y; 
-	X[2] = z;
-	*/
-
-	// Need for conventional FastSynchro
-	if (directionOfintegration == 1) {
-		for (int i = 0; i < AMOUNTOFX; i++)
-			X[i] = X[i] + N[i] * h;
-	}
-	if (directionOfintegration == 0) {
-		for (int i = 0; i < AMOUNTOFX; i++)
-			X[i] = X[i] - N[i] * h;
-	}
-
-
+	for (int i = 0; i < AMOUNTOFX; ++i)
+		X[i] += h * N[i];
 }
 
 __global__ void calculateDiscreteModelICCforFastSynchro(
@@ -3514,8 +3370,11 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 	}
 }
 
-// ===== Закрываем NVRTC-окно — FastSynchro дальше под guard'ом =====
-#ifndef __CUDACC_RTC__
+// ===== FastSynchro kernels — теперь ВНУТРИ NVRTC-окна =====
+// Раньше эта группа была спрятана под `#ifndef __CUDACC_RTC__`, но U-CUDA
+// run_fastsync (Release-режим через NVRTC) их подгружает по lowered-имени
+// (cuModuleGetFunction → "named symbol not found" иначе). NonLinAnal
+// (Debug-build) тоже компилирует их через обычный nvcc-путь — пути совместимы.
 
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,
@@ -3732,4 +3591,5 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	if (error_estim == 3)
 		return (numb)amountOfIterations*h;
 }
-#endif // __CUDACC_RTC__ (с конца файла — закрытие гарда от LLE до EOF)
+// (Закрытие NVRTC-guard'а, который ранее окружал FS-kernels, удалено —
+// теперь они видимы как обычные символы и для NVRTC, и для nvcc.)

@@ -19,12 +19,8 @@
 // HeatmapView заменит их на FLT_MAX перед загрузкой, шейдер отрисует
 // тёмно-серым.
 
-enum class HeatmapColormap : int {
-    Viridis = 0,
-    Inferno = 1,
-    Turbo   = 2,
-    Gray    = 3,
-};
+// HeatmapColormap определён в plot_renderer.h (используется ещё и для
+// colored trajectory). plot_renderer.h уже included через #include выше.
 
 class HeatmapView {
 public:
