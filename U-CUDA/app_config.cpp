@@ -76,6 +76,9 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     int tp = 0;
     if (parse_int_field(body, "tick_precision", tp))
         out.tick_precision = tp;
+    bool dark = true;
+    if (parse_bool_field(body, "dark_theme", dark))
+        out.dark_theme = dark;
     return true;
 }
 
@@ -93,7 +96,8 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"basins_avgpk_colormap\": "  << cfg.basins_avgpk_colormap << ",\n";
         f << "  \"basins_avgint_colormap\": " << cfg.basins_avgint_colormap << ",\n";
         f << "  \"basins_states_colormap\": " << cfg.basins_states_colormap << ",\n";
-        f << "  \"tick_precision\": "         << cfg.tick_precision << "\n";
+        f << "  \"tick_precision\": "         << cfg.tick_precision << ",\n";
+        f << "  \"dark_theme\": "             << (cfg.dark_theme ? "true" : "false") << "\n";
         f << "}\n";
         if (!f) return false;
     }

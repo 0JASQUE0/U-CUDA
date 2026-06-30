@@ -121,7 +121,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     axis_effective(y_axis, ey0, ey1);
 
     // 4. FBO render
-    renderer.begin_frame(plot_w, plot_h, 0.08f, 0.08f, 0.10f, 1.0f);
+    {
+        float br, bg, bb, ba;
+        plot_bg_color(br, bg, bb, ba);
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+    }
     float mvp[16];
     make_ortho_mvp(ex0, ex1, ey0, ey1, mvp);
     for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
@@ -179,9 +183,9 @@ void Plot2DView::render(PlotRenderer& renderer,
     bool plot_dbl = plot_h_ov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
     // 8. �����, ����
-    ImU32 col_grid = IM_COL32(80, 80, 90, 120);
-    ImU32 col_axis = IM_COL32(200, 200, 210, 200);
-    ImU32 col_text = IM_COL32(220, 220, 230, 255);
+    ImU32 col_grid = plot_col_grid();
+    ImU32 col_axis = plot_col_axis();
+    ImU32 col_text = plot_col_text();
     draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
     draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
 
@@ -240,7 +244,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     }
 
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
-        IM_COL32(120, 120, 130, 200), 0.0f, 0, 1.0f);
+        plot_col_border(), 0.0f, 0, 1.0f);
 
     // Названия осей: X — горизонтально, под тиками по центру плота.
     // Y — повёрнут на 90° против часовой, у левого края, по центру плота.

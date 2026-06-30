@@ -28,6 +28,11 @@ struct AppConfig {
     // (исключает пустые подписи), максимум 10 (предел double-precision в `%g`).
     // По умолчанию 4 (сохраняет старое поведение).
     int tick_precision = 4;
+
+    // Цветовая тема ImGui. true (дефолт) = StyleColorsDark, false = StyleColorsLight.
+    // Переключается в Settings. apply_ui_scale в app_main.cpp перечитывает
+    // это поле через model.dark_theme и пересоздаёт style на каждом изменении.
+    bool dark_theme = true;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл

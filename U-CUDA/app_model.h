@@ -39,6 +39,12 @@ struct BasinsQueueItem {
     int index = 0;
 };
 
+// Аналогично для FastSync: индекс config'а в fastsync_session.configs.
+// Отдельная очередь по той же причине — FastSync независим от parametric/basins.
+struct FastSyncQueueItem {
+    int index = 0;
+};
+
 // Состояние распознавания (для UI-индикации).
 enum class OcrState { Idle, Running, Done, Failed };
 
@@ -161,6 +167,12 @@ public:
     // set_tick_precision() из plot_axis.h, чтобы fmt_tick() сразу подхватил.
     int tick_precision = 4;
 
+    // ImGui color theme. true = Dark (default), false = Light. Применяется
+    // через apply_ui_scale в app_main.cpp: на каждый scale-apply сначала
+    // выбирается ImGui::StyleColorsDark/Light, потом скейлится. На изменение
+    // в Settings forced re-apply через сравнение applied_dark_theme.
+    bool dark_theme = true;
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 
@@ -176,6 +188,10 @@ public:
     // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
     std::deque<BasinsQueueItem> basins_queue;
     bool start_next_in_basins_queue();
+
+    // FastSync batch queue — независимая (см. FastSyncQueueItem).
+    std::deque<FastSyncQueueItem> fastsync_queue;
+    bool start_next_in_fastsync_queue();
 
     // Удаление конфига + чистка очереди (убрать item с этим индексом, у
     // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
@@ -196,6 +212,14 @@ public:
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
     bool start_fastsync_analysis();
+
+    // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params)
+    // во ВСЕ сессии без сброса per-config настроек. Используется в Save /
+    // Save as copy: после правки тела custom-схемы или уравнений системы
+    // следующий Run в любом режиме подхватит свежее состояние без
+    // переоткрытия вкладки. Phase'у дополнительно сбрасывается krs_code,
+    // чтобы regenerate_krs пересчитался от актуального cs.body / sys.
+    void propagate_to_sessions();
 
     // ---- результат генерации ----
     std::string generated_code;    // итоговый код всех выбранных схем

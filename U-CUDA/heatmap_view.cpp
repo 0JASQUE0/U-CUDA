@@ -220,7 +220,11 @@ void HeatmapView::render(PlotRenderer& renderer,
     float uv_scale_y = (float)((view_max_y - view_min_y) / data_ry);
 
     // 5. FBO render. (n_disc was resolved up-front in section 3.)
-    renderer.begin_frame(plot_w, plot_h, 0.08f, 0.08f, 0.10f, 1.0f);
+    {
+        float br, bg, bb, ba;
+        plot_bg_color(br, bg, bb, ba);
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+    }
     renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
                           n_disc);
@@ -414,8 +418,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 9. Тики осей БЕЗ grid-сетки: короткие штрихи 5px за пределами плота +
     //    числовые подписи. Без линий через весь плот — они отвлекают от
     //    цветового поля.
-    ImU32 col_text = IM_COL32(220, 220, 230, 255);
-    ImU32 col_axis = IM_COL32(180, 180, 190, 220);
+    ImU32 col_text = plot_col_text();
+    ImU32 col_axis = plot_col_border();
     // Tick'и: формула числа тиков и проверки overshoot/clip — те же, что в
     // plot_axis.cpp (draw_axis_x_grid/y_grid), но без сетки через плот.
     auto draw_x_ticks = [&]() {
@@ -463,7 +467,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     draw_x_ticks();
     draw_y_ticks();
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
-                IM_COL32(120, 120, 130, 200), 0.0f, 0, 1.0f);
+                plot_col_border(), 0.0f, 0, 1.0f);
 
     // Визуальная рамка rect-zoom во время drag'а ПКМ. Для оси (mode 2/3) —
     // полоса на всю ширину/высоту плота. Координаты в мире → экран.
@@ -584,7 +588,7 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
         dl->AddRect(ImVec2(cb_x, cb_y),
                     ImVec2(cb_x + colorbar_w, cb_y + cb_h),
-                    IM_COL32(120, 120, 130, 200));
+                    plot_col_border());
 
         // Tick marks + labels: use the pre-computed tick_vals so the labels
         // line up with the bands they describe and margin_right reserved the

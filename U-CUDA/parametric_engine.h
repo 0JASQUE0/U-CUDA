@@ -556,6 +556,36 @@ struct BasinsResult {
 };
 
 // ============================================================================
+// Basins recluster — DBSCAN-only прогон поверх кэшированных фич (avg_peaks /
+// avg_intervals / helpful_array из предыдущего run_basins). Используется
+// кнопкой "Clustering" в GUI: меняешь eps_dbscan, не пересчитывая всю
+// траекторно-feature часть (≈99% времени основного run_basins).
+// krs_body + amountOfX нужны, чтобы compile_basins_if_needed подхватил
+// кэш-ключ модуля; сами DBSCAN-kernel'ы не зависят от системы уравнений.
+// ============================================================================
+struct BasinsReclusterRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    int n_pts = 0;                        // total_cells = n_pts * n_pts
+    double eps_dbscan = 0.5;
+    std::vector<double> avg_peaks;        // size = n_pts²; mults уже применены
+    std::vector<double> avg_intervals;    // size = n_pts²
+    std::vector<int>    helpful_array;    // size = n_pts²; -1=FP, 0=Unbound, 1=Osc
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct BasinsReclusterResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+    int n_pts = 0;
+    std::vector<int> basin_idx;           // size = n_pts²
+    int n_clusters = 0;
+    int min_cluster_idx = 0;
+};
+
+// ============================================================================
 // Fast Synchro — анализ возвратной синхронизации.
 // Два режима:
 //   mode 0 ("On Attractor"): интегрируем master trajectory, в каждой её точке
@@ -673,6 +703,10 @@ public:
 
     // Basins of attraction — карта на сетке IC. 4 output-поля + cluster ids.
     BasinsResult run_basins(const BasinsRequest& req);
+
+    // DBSCAN-only прогон по уже посчитанным фичам (для перекластеризации при
+    // смене eps_dbscan без пересчёта траекторий).
+    BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req);
 
     // Fast Synchro — режим выбирается через req.mode (0 = traj, 1 = grid).
     FastSyncResult run_fastsync(const FastSyncRequest& req);

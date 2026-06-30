@@ -20,6 +20,38 @@ double nice_step(double range, int target_count) {
 // из app_main при загрузке config и из Settings UI при изменении слайдера).
 static int g_tick_precision = 4;
 
+// =====================================================================
+// Plot palette state. set_plot_light_theme зовётся из gui.cpp (Settings)
+// + app_main.cpp (startup, читает AppConfig::dark_theme). Геттеры
+// возвращают цвета под текущую тему — без перекомпиляции/ссылок на ImGui
+// стиль, чтобы plot-код не зависел от того, активен ли ImGui контекст.
+// =====================================================================
+static bool g_plot_light = false;
+
+void set_plot_light_theme(bool light) { g_plot_light = light; }
+bool plot_light_theme()               { return g_plot_light; }
+
+ImU32 plot_col_text() {
+    return g_plot_light ? IM_COL32( 30,  30,  40, 255)
+                        : IM_COL32(220, 220, 230, 255);
+}
+ImU32 plot_col_axis() {
+    return g_plot_light ? IM_COL32( 60,  60,  80, 220)
+                        : IM_COL32(200, 200, 210, 200);
+}
+ImU32 plot_col_grid() {
+    return g_plot_light ? IM_COL32(170, 170, 180, 200)
+                        : IM_COL32( 80,  80,  90, 120);
+}
+ImU32 plot_col_border() {
+    return g_plot_light ? IM_COL32(100, 100, 110, 220)
+                        : IM_COL32(120, 120, 130, 200);
+}
+void plot_bg_color(float& r, float& g, float& b, float& a) {
+    if (g_plot_light) { r = 0.985f; g = 0.985f; b = 0.985f; a = 1.0f; }
+    else              { r = 0.080f; g = 0.080f; b = 0.100f; a = 1.0f; }
+}
+
 void set_tick_precision(int n) {
     g_tick_precision = std::clamp(n, 2, 10);
 }
