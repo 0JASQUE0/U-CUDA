@@ -34,6 +34,10 @@ __pycache__/
 # Runtime UI state (ImGui layout)
 U-CUDA/imgui.ini
 
+# Local user library — kept per-machine. Baseline for new clones is in
+# library_template/, seeded on first run by app_main::seed_library_if_missing.
+U-CUDA/library/
+
 # Local-only project docs (not shared via git)
 docs/
 

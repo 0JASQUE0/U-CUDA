@@ -67,13 +67,12 @@
     </CudaCompile>
     <PostBuildEvent>
       <Command>xcopy /Y /I "$(ProjectDir)ocr_server.py" "$(OutDir)\"
-xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"
 xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cu"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cuh" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaMacros.cuh"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
-      <Message>Copying runtime data (ocr_server.py, library\, kernels\ + NonLinAnal sources) to $(OutDir)</Message>
+      <Message>Copying runtime data (ocr_server.py, kernels\ + NonLinAnal sources) to $(OutDir); library\ is resolved from source at runtime</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -100,13 +99,12 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     </CudaCompile>
     <PostBuildEvent>
       <Command>xcopy /Y /I "$(ProjectDir)ocr_server.py" "$(OutDir)\"
-xcopy /Y /E /I "$(ProjectDir)library" "$(OutDir)library\"
 xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cu"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cuh" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaMacros.cuh"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
-      <Message>Copying runtime data (ocr_server.py, library\, kernels\ + NonLinAnal sources) to $(OutDir)</Message>
+      <Message>Copying runtime data (ocr_server.py, kernels\ + NonLinAnal sources) to $(OutDir); library\ is resolved from source at runtime</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
