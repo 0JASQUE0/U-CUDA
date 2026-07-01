@@ -2459,12 +2459,14 @@ __global__ void LLEKernelCUDA(
 		return;
 	}
 
-	size_t seed = idx;
+	// Общий seed для всех потоков + номер подпоследовательности = idx.
+	// idx как seed давал коррелирующие потоки у соседних точек сетки —
+	// curand гарантирует независимость подпоследовательностей при общем seed,
+	// а не при разных seed'ах (см. NVIDIA curand guide, "Choosing Seed values").
+	const unsigned long long ppSeed = 1234567891ULL;
 	curandState_t state;
 
-	curand_init(seed, 0, 0, &state);
-
-	
+	curand_init(ppSeed, (unsigned long long)idx, 0, &state);
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 	{
@@ -2474,9 +2476,7 @@ __global__ void LLEKernelCUDA(
 	numb zPower = 0;
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 	{
-		curand_init(seed + i, 0, 0, &state);
 		z[i] = curand_uniform(&state) - 0.5;
-		//z[i] = 0.5 * (sinf(idx * (i * idx + 1) + 1));	// 0.2171828 change to z[i] = rand(0, 1) - 0.5;
 		zPower += z[i] * z[i];
 	}
 
@@ -2809,19 +2809,19 @@ __global__ void LSKernelCUDA(
 	}
 
 
-	size_t seed = idx;
+	// Общий seed для всех потоков + номер подпоследовательности = idx (см.
+	// LLEKernelCUDA выше — тот же аргумент против idx-как-seed).
+	const unsigned long long ppSeed = 1234567891ULL;
 	curandState_t state;
 
-	curand_init(seed, 0, 0, &state);
+	curand_init(ppSeed, (unsigned long long)idx, 0, &state);
 
 	for (int j = 0; j < amountOfInitialConditions; ++j)
 	{
 		numb zPower = 0;
 		for (int i = 0; i < amountOfInitialConditions; ++i)
 		{
-			curand_init(seed + j * amountOfInitialConditions + i, 0, 0, &state);
 			z[j * amountOfInitialConditions + i] = curand_uniform(&state) - 0.5;
-			//z[j * amountOfInitialConditions + i] = sinf(0.2171828 * (i + 1) * (j + 1) + idx + (0.2171828 + i * j * idx)) * 0.5;//0.5 * (sinf(idx * ((1 + i + j) * idx + 1) + 1));	// 0.2171828 change to z[i] = rand(0, 1) - 0.5;
 			zPower += z[j * amountOfInitialConditions + i] * z[j * amountOfInitialConditions + i];
 		}
 
