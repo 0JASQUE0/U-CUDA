@@ -58,8 +58,13 @@ public:
                       int n_discrete = 0);
 
     // ������ 3D-����� (vbo � float[3] �� �������).
+    // thick_style=false — старый быстрый путь: program_3d_ + glLineWidth
+    // (в core-profile драйвер обычно клампит до 1px, α не блендится).
+    // thick_style=true — раскрываем сегменты в screen-aligned quads через
+    // geometry shader, включаем BLEND для честного alpha compositing.
+    // Depth test работает в обоих случаях.
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
-        const float color[4], float line_width);
+        const float color[4], float line_width, bool thick_style = false);
 
     void end_frame();
 
@@ -81,9 +86,12 @@ private:
 
     GLuint program_2d_ = 0;
     GLuint program_3d_ = 0;
+    GLuint program_3d_thick_ = 0;
     GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;
+    GLint  loc_mvp_3d_thick_ = -1, loc_color_3d_thick_ = -1,
+           loc_viewport_3d_thick_ = -1, loc_thickness_3d_thick_ = -1;
     GLint  loc_heatmap_tex_ = -1, loc_heatmap_vmin_ = -1,
            loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
            loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1,

@@ -9,6 +9,7 @@
 #include "heatmap_view.h"
 #include "app_config.h"
 #include "data_export.h"
+#include "digit_input.h"
 #include <map>
 #include <memory>
 #include <cstdio>
@@ -78,6 +79,44 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+// Совмещённый callback: запятая→точка (CallbackCharFilter) + digit-step на
+// ↑/↓ (CallbackHistory). ImGui позволяет OR'ить флаги; здесь диспетчеризуем
+// по EventFlag. CallbackHistory — специальный event, который ImGui шлёт
+// когда в активном InputText нажали ↑/↓ (изначально сделан под REPL command
+// history). Ровно то, что нам нужно: клавиша уже отфильтрована и передана
+// нам через колбэк — не нужен ни IsKeyPressed, ни pending-cursor state.
+static int digit_step_callback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) {
+        if (data->EventChar == ',') data->EventChar = '.';
+        return 0;
+    }
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+        int dir = 0;
+        if (data->EventKey == ImGuiKey_UpArrow)   dir = +1;
+        if (data->EventKey == ImGuiKey_DownArrow) dir = -1;
+        if (dir == 0) return 0;
+
+        std::string text(data->Buf, data->Buf + data->BufTextLen);
+        std::string new_text;
+        int new_cursor = 0;
+        if (!DigitInput::ComputeStep(text, data->CursorPos, dir,
+                                     new_text, new_cursor)) {
+            return 0;  // Дробь / scientific / невалидный ввод — не трогаем.
+        }
+
+        // DeleteChars + InsertChars сами выставляют BufDirty=true, ImGui
+        // подхватит новую длину и вернёт changed=true из InputText.
+        data->DeleteChars(0, data->BufTextLen);
+        data->InsertChars(0, new_text.c_str());
+        if (new_cursor < 0) new_cursor = 0;
+        if (new_cursor > data->BufTextLen) new_cursor = data->BufTextLen;
+        data->CursorPos      = new_cursor;
+        data->SelectionStart = new_cursor;
+        data->SelectionEnd   = new_cursor;
+    }
+    return 0;
+}
+
 // Проверка: парсится ли строка как число (или валидная дробь "a/b")?
 // Важно: std::stod НЕ кидает на "5asdfaxcv" — он парсит ведущее "5"
 // и тихо игнорирует остальное. Поэтому проверяем pos — что вся строка
@@ -117,9 +156,13 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
     buf.resize(str.size() + 1024);
     buf[str.size()] = '\0';
     if (width > 0) ImGui::SetNextItemWidth(width);
+    // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_callback.
+    // CallbackCharFilter — прежняя замена запятой на точку, тоже в digit_step_callback.
     bool changed = ImGui::InputText(label, buf.data(), buf.size(),
-        ImGuiInputTextFlags_CallbackCharFilter, filter_comma_to_dot);
+        ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
+        digit_step_callback);
     if (changed) str = buf.data();
+
     // Inline-предупреждение, если содержимое не парсится как число.
     // Default из engine'а (0) всё равно применится, но пользователю
     // явно сигналим, что введённое значение игнорируется.
@@ -1045,6 +1088,19 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
 
+                    // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
+                    // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
+                    // путь (1px, α=1). Аналогично Phase2D.
+                    ImGui::Checkbox("Custom line style##timedomain", &pr.custom_line_style);
+                    if (pr.custom_line_style) {
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                    }
+                    pr.view2d->imdraw_lines      = pr.custom_line_style;
+                    pr.view2d->line_thickness_px = pr.line_width;
+
                     double h = atof(s.step_h.c_str()); if (h <= 0) h = 0.01;
                     int dec = atoi(s.decimation.c_str()); if (dec < 1) dec = 1;
                     double dt = h * dec;
@@ -1095,6 +1151,9 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                             si.points = buf.data();
                             si.n_points = n;
                             si.color = ic_var_shade((int)k, vi, nvars);
+                            // В custom_line_style режиме применяем α к цвету
+                            // (ImDrawList использует color.w как alpha).
+                            if (pr.custom_line_style) si.color.w = pr.alpha;
                             si.label = lab;
                             series_in.push_back(si);
                             init_vis.push_back(true);   // локальная (легенда) стартует с видимости НУ
@@ -1119,6 +1178,21 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                 }
                 else {
                     if (!pr.view3d) pr.view3d = std::make_unique<Plot3DView>();
+
+                    // Toolbar над плотом: opt-in custom line styling (толщина + α).
+                    // В 3D нет ImDrawList-fallback (потерялся бы depth-sorting),
+                    // толщина идёт через glLineWidth — драйвер может клампить,
+                    // α точно уходит в шейдер. При выключенной фиче — восстанавливаем
+                    // старый хардкод 1.5f, чтобы поведение осталось прежним.
+                    ImGui::Checkbox("Custom line style##phase3d", &pr.custom_line_style);
+                    if (pr.custom_line_style) {
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Line width##phase3d", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                    }
+                    pr.view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
+                    pr.view3d->custom_line_style = pr.custom_line_style;
 
                     pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
                     pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
@@ -1150,6 +1224,9 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                         si.points = buf.data();
                         si.n_points = (int)(buf.size() / 3);
                         si.color = ic_base_color((int)k);
+                        // В custom_line_style режиме применяем α к цвету IC
+                        // (draw_line_3d прокидывает color[3] в шейдер как альфа).
+                        if (pr.custom_line_style) si.color.w = pr.alpha;
                         si.label = lab;
                         series_in.push_back(si);
 
@@ -3248,8 +3325,11 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         auto& slot = m[oid];
         if (!slot) {
             slot = std::make_unique<HeatmapView>();
-            if (discrete_default) slot->discrete = true;
         }
+        // Флаг discrete_default читается в render() на первом кадре с данными
+        // и один раз применяется (см. heatmap_view.cpp). Ставим каждый кадр
+        // сам параметр — легко и дёшево; apply идёт ровно один раз.
+        slot->discrete_default = discrete_default;
         return *slot;
     };
     auto get_scatter = [](unsigned oid) -> Plot2DView& {

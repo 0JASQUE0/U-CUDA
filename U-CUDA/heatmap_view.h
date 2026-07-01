@@ -47,6 +47,14 @@ public:
     bool   discrete = false;
     int    discrete_levels = 0;
 
+    // Начальное значение `discrete`, применяемое на первом кадре с реальными
+    // данными (data_generation != data_gen_cached). Нужно чтобы caller мог
+    // задать «дефолт checked» для basins-heatmap'а до того, как пользователь
+    // начал крутить toggle. После первого apply флаг discrete_default_applied_
+    // взводится и render() больше в discrete не пишет — пользовательский
+    // toggle через popup работает нормально.
+    bool   discrete_default = false;
+
     // Swap-axes toggle: транспонирует картинку и меняет местами визуальный X<->Y
     // (диапазоны, тики, подписи и tooltip). Действует только на отрисовку —
     // исходные значения `values`, `param_lo/hi_*` и AxisInfo.name остаются
@@ -97,6 +105,10 @@ private:
     // кадра — форсируем re-upload текстуры (с транспонированной раскладкой)
     // и autofit (т.к. новые ranges).
     bool   swap_axes_cached_ = false;
+
+    // Однократный apply discrete_default в render(). Сбрасывается только
+    // при пересоздании HeatmapView (fresh app start), не при смене данных.
+    bool   discrete_default_applied_ = false;
 
     void ensure_tex(int w, int h);
     void upload_data(int nx, int ny, const double* values);

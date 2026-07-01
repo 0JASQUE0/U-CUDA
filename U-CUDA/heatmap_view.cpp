@@ -109,6 +109,15 @@ void HeatmapView::render(PlotRenderer& renderer,
         data_gen_cached = data_generation;
     }
 
+    // Применяем discrete_default один раз — на первом рендере с реальными
+    // данными. Идёт после upload'а, чтобы если caller взвёл discrete_default
+    // ЛЕНИВО (не в конструкторе), оно всё равно подхватилось. После apply
+    // пользовательский toggle через popup работает как обычно.
+    if (!discrete_default_applied_) {
+        if (discrete_default) discrete = true;
+        discrete_default_applied_ = true;
+    }
+
     if (!view_valid || fit_request) {
         do_autofit(param_lo_x, param_hi_x, param_lo_y, param_hi_y);
     }
