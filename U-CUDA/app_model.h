@@ -52,7 +52,7 @@ enum class OcrState { Idle, Running, Done, Failed };
 // UI читает поля и вызывает методы; долгие операции идут в фоне.
 class AppModel {
 public:
-    explicit AppModel(OcrFn ocr) : ocr_(std::move(ocr)) {}
+    explicit AppModel(OcrFn ocr) : AppModel(std::move(ocr), true) {}
 
     // ---- редактируемые UI-поля (UI читает/пишет напрямую) ----
     InputMode mode = InputMode::Image;
@@ -106,15 +106,18 @@ public:
     // --- Library-tab edit state (in-memory only, not persisted to session) ---
     // Library sub-tab has two states: a plain list (None) and an editor
     // (EditExisting for the "Edit" action, AddNew for "Add new system").
-    // Entering the editor snapshots to_record() into edit_snapshot; Cancel
-    // restores it via from_record(). Save runs validation, then rename+save
-    // for EditExisting or plain save for AddNew, and returns to None.
+    // The editor edits into library_edit_buffer (a scratch AppModel), never
+    // into this model directly, so opening/typing/Cancel never touches the
+    // globally active system used by Parametric/Phase/Basins/FastSync. Save
+    // validates, rename+saves (EditExisting) or saves (AddNew) the buffer to
+    // disk, and only mirrors it into this model if edit_original_name is the
+    // currently active system (see library_editor_save in gui.cpp).
     enum class LibraryEditMode { None, EditExisting, AddNew };
     LibraryEditMode library_edit_mode = LibraryEditMode::None;
     std::string     library_selected_name;   // row selected in the list (for note preview)
-    SystemRecord    edit_snapshot;           // snapshot for Cancel
     std::string     edit_original_name;      // on-disk name at the moment Edit was pressed
     std::string     edit_error;              // inline validation / rename error in the editor
+    std::unique_ptr<AppModel> library_edit_buffer; // scratch model the editor actually edits
 
     // --- режим приложения и сессия анализа (слой 2) ---
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
@@ -336,6 +339,15 @@ public:
     void clear();
 
 private:
+    // with_edit_buffer=false constructs the scratch library_edit_buffer
+    // itself, without recursing into another scratch buffer.
+    AppModel(OcrFn ocr, bool with_edit_buffer) : ocr_(std::move(ocr)) {
+        // std::make_unique can't reach this private constructor (it isn't a
+        // friend), so construct directly with new from within the class.
+        if (with_edit_buffer)
+            library_edit_buffer.reset(new AppModel(ocr_, false));
+    }
+
     OcrFn ocr_;
 
     // Форматирует сырой LaTeX в единообразный вид: каждое уравнение на своей
