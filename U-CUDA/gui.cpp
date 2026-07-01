@@ -3260,6 +3260,10 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
     static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
     static std::map<int, std::unique_ptr<Plot2DView>>    views;
     static std::map<int, std::map<int, std::unique_ptr<HeatmapView>>> heatmaps;
+    // Tracks the kind the Plot2DView was last configured for; when a
+    // window's kind changes (Type combo), re-run configure_plot_view so
+    // e.g. LLE doesn't inherit Bifurcation's points_mode=true.
+    static std::map<int, ParametricPlotWindow::Kind> view_configured_for;
 
     int to_remove = -1;
     for (int i = 0; i < (int)model.parametric_plot_windows.size(); ++i) {
@@ -3268,9 +3272,12 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
         auto& renderer = renderers[win.id];
         if (!renderer) renderer = std::make_unique<PlotRenderer>();
         auto& view = views[win.id];
-        if (!view) {
-            view = std::make_unique<Plot2DView>();
+        bool fresh_view = !view;
+        if (fresh_view) view = std::make_unique<Plot2DView>();
+        auto cf_it = view_configured_for.find(win.id);
+        if (fresh_view || cf_it == view_configured_for.end() || cf_it->second != win.kind) {
             configure_plot_view(*view, win.kind);
+            view_configured_for[win.id] = win.kind;
         }
         auto& hm_map = heatmaps[win.id];
 
@@ -3308,6 +3315,7 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
         renderers.erase(id);
         views.erase(id);
         heatmaps.erase(id);
+        view_configured_for.erase(id);
         model.remove_parametric_plot_window(to_remove);
     }
 }

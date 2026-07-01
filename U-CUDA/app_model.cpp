@@ -418,6 +418,14 @@ void AppModel::remove_parametric_plot_window(int pos) {
 void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
     if (!json.empty()) {
         session_from_json_parametric_windows(json, parametric_plot_windows);
+        // Bump next-id past the highest loaded id so subsequent Add window
+        // calls don't collide with existing ones (which would give two rows
+        // the same PushID and trigger ImGui's "conflicting ID" warning).
+        int max_id = 0;
+        for (const auto& w : parametric_plot_windows)
+            if (w.id > max_id) max_id = w.id;
+        if (max_id >= next_parametric_plot_window_id)
+            next_parametric_plot_window_id = max_id + 1;
         return;
     }
     parametric_plot_windows.clear();
