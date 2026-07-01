@@ -4465,7 +4465,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         float cb_x = origin.x + margin_left + plot_w + colorbar_gap;
         float cb_y = origin.y + margin_top;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        const int n_strips = 64;
+        const int n_strips = 256;
         for (int k = 0; k < n_strips; ++k) {
             float t0 = (float)k / n_strips;
             float t1 = (float)(k + 1) / n_strips;

@@ -679,14 +679,14 @@ void HeatmapView::render(PlotRenderer& renderer,
     }
 
     // 9. Colorbar on the right: horizontal strips via ImDrawList::AddRectFilled.
-    //    Continuous mode uses 64 strips (visually indistinguishable from LUT).
+    //    Continuous mode uses 256 strips (visually indistinguishable from LUT).
     //    Discrete mode uses one strip per band, sampled at the band center —
     //    matches the on-screen heatmap quantization exactly.
     {
         float cb_x = img_pos.x + plot_w + colorbar_gap;
         float cb_y = img_pos.y;
         float cb_h = (float)plot_h;
-        int n_strips = (n_disc > 0) ? n_disc : 64;
+        int n_strips = (n_disc > 0) ? n_disc : 256;
         for (int i = 0; i < n_strips; ++i) {
             float t0 = (float)i       / (float)n_strips;
             float t1 = (float)(i + 1) / (float)n_strips;
