@@ -73,6 +73,16 @@ public:
     // для точечных режимов остаётся через GL.
     bool imdraw_lines = false;
 
+    // Snap X-координаты курсора к узлам параметрической сетки (для 1D-графиков
+    // Bif/LLE/LS, где значение считалось в N узлах на [snap_x_min, snap_x_max]).
+    // Активируется при snap_x_to_grid && snap_x_n > 1. Y-координата остаётся
+    // непрерывной. Если курсор вне [min, max] — snap отключается для этой
+    // конкретной точки. Заполнять поля должен caller ПЕРЕД render'ом.
+    bool   snap_x_to_grid = false;
+    double snap_x_min = 0.0;
+    double snap_x_max = 1.0;
+    int    snap_x_n   = 0;
+
     // ��������� ����� � ���� � ������� ������ (������� ���������� ����� ����������).
     std::vector<bool> visible;
 
