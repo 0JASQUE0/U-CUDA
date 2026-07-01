@@ -84,7 +84,8 @@ void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float ou
 
 void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text)
+    ImU32 col_grid, ImU32 col_text,
+    double snap_lo, double snap_hi, int snap_n)
 {
     double emin, emax;
     axis_effective(x, emin, emax);
@@ -94,7 +95,22 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
     double sx = nice_step(std::abs(vrx), 8);
-    double xstart = std::ceil(lo / sx) * sx;
+    // Snap-to-node: округляем шаг тиков к целому кратному step_node и стартовую
+    // позицию тоже кратно этому шагу. Каждый тик тогда — узел параметрической
+    // сетки (snap_lo + k*step_node), без "промежуточных" значений.
+    double xstart;
+    double step_node = (snap_n > 1 && snap_hi > snap_lo)
+                       ? (snap_hi - snap_lo) / (double)(snap_n - 1) : 0.0;
+    if (step_node > 0.0) {
+        int mult = (int)std::lround(sx / step_node);
+        if (mult < 1) mult = 1;
+        sx = (double)mult * step_node;
+        int k_lo = (int)std::ceil((lo - snap_lo) / step_node - 1e-9);
+        int k_start = (int)std::ceil((double)k_lo / (double)mult - 1e-9) * mult;
+        xstart = snap_lo + (double)k_start * step_node;
+    } else {
+        xstart = std::ceil(lo / sx) * sx;
+    }
     // hi-xstart нормируется на sx → floor(...) + 1 даёт ровно столько тиков,
     // сколько помещается в [xstart, hi]. Эпсилон ловит floating-point случаи
     // когда xstart + k*sx должно совпадать с hi, но из-за accumulation lo чуть

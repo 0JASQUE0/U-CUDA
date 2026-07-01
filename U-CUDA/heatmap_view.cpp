@@ -468,6 +468,18 @@ void HeatmapView::render(PlotRenderer& renderer,
     //    x_axis/y_axis напрямую и показывают актуальное состояние.
     clamp_view();
 
+    // Гибрид тиков: без зума (view == весь диапазон данных) показываем
+    // «красивые» круглые числа обычным nice_step — они почти всегда совпадают
+    // с границами данных (пользователь сам их выбирает), выглядят привычно и
+    // не зависят от того, насколько «неровно» N делит диапазон. При зуме
+    // отдельные узлы становятся визуально различимы (один узел — несколько
+    // экранных пикселей), и тики привязываем к сетке, чтобы не «плавали»
+    // между цветовыми полосами. clamp_view() выше форсит view_min/max в ТОЧНОЕ
+    // равенство param_lo/hi, когда пользователь зумит дальше данных — поэтому
+    // сравнение на равенство (без эпсилон) надёжно отличает «без зума».
+    bool x_full_view = (nx <= 1) || (x_axis.view_min == param_lo_x && x_axis.view_max == param_hi_x);
+    bool y_full_view = (ny <= 1) || (y_axis.view_min == param_lo_y && y_axis.view_max == param_hi_y);
+
     // 9. Тики осей БЕЗ grid-сетки: короткие штрихи 5px за пределами плота +
     //    числовые подписи. Без линий через весь плот — они отвлекают от
     //    цветового поля.
@@ -475,18 +487,68 @@ void HeatmapView::render(PlotRenderer& renderer,
     ImU32 col_axis = plot_col_border();
     // Tick'и: формула числа тиков и проверки overshoot/clip — те же, что в
     // plot_axis.cpp (draw_axis_x_grid/y_grid), но без сетки через плот.
+    // Хелпер: собирает список tick-значений в [lo, hi] с nice-step, округлённым
+    // к кратному step_node (когда step_node > 0 и n_nodes > 1), плюс форс-
+    // включение крайних узлов (param_lo / param_hi), если они в кадре и не
+    // слишком близко к соседнему тику. Так, во-первых, тики всегда падают на
+    // узлы (нет промежуточных значений между цветовыми пикселями), и во-вторых
+    // крайнее значение диапазона всегда отрисовано (напр., "30" не пропадает
+    // при выборе mult, не делящего N-1).
+    auto compute_axis_ticks = [](double lo, double hi, int target_count,
+                            double step_node, double node_origin, int n_nodes)
+                        -> std::vector<double>
+    {
+        std::vector<double> out;
+        double vr = hi - lo;
+        if (std::abs(vr) < 1e-30) return out;
+        double sx = nice_step(std::abs(vr), target_count);
+        double xstart;
+        if (step_node > 0.0 && n_nodes > 1) {
+            int mult = (int)std::lround(sx / step_node);
+            if (mult < 1) mult = 1;
+            sx = (double)mult * step_node;
+            int k_lo = (int)std::ceil((lo - node_origin) / step_node - 1e-9);
+            int k_start = (int)std::ceil((double)k_lo / (double)mult - 1e-9) * mult;
+            xstart = node_origin + (double)k_start * step_node;
+        } else {
+            xstart = std::ceil(lo / sx) * sx;
+        }
+        int nt = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
+        if (nt < 0) nt = 0;
+        for (int i = 0; i < nt; ++i) {
+            double v = xstart + i * sx;
+            if (v > hi + sx * 1e-6 || v < lo - sx * 1e-6) continue;
+            out.push_back(v);
+        }
+        // Форс-включение крайних узлов. Порог "не слишком близко" = 40% от sx —
+        // подписи не будут наезжать друг на друга при обычных диапазонах.
+        if (step_node > 0.0 && n_nodes > 1) {
+            const double gap_min = sx * 0.4;
+            double first_node = node_origin;
+            double last_node  = node_origin + (double)(n_nodes - 1) * step_node;
+            if (last_node >= lo - step_node * 0.5 && last_node <= hi + step_node * 0.5) {
+                if (out.empty() || last_node - out.back() >= gap_min) {
+                    out.push_back(last_node);
+                }
+            }
+            if (first_node >= lo - step_node * 0.5 && first_node <= hi + step_node * 0.5) {
+                if (out.empty() || out.front() - first_node >= gap_min) {
+                    out.insert(out.begin(), first_node);
+                }
+            }
+        }
+        return out;
+    };
+
     auto draw_x_ticks = [&]() {
         double emin = vis_view_min_x, emax = vis_view_max_x;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        double sx = nice_step(std::abs(vrx), 8);
-        double xstart = std::ceil(lo / sx) * sx;
-        int nx_ticks = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
-        if (nx_ticks < 0) nx_ticks = 0;
-        for (int i = 0; i < nx_ticks; ++i) {
-            double xv = xstart + i * sx;
-            if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
+        auto ticks = x_full_view
+            ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0)
+            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx);
+        for (double xv : ticks) {
             float px = img_pos.x + (float)((xv - emin) / vrx) * plot_w;
             dl->AddLine(ImVec2(px, img_pos.y + plot_h),
                         ImVec2(px, img_pos.y + plot_h + 5.0f), col_axis, 1.0f);
@@ -501,13 +563,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        double sy = nice_step(std::abs(vry), 6);
-        double ystart = std::ceil(lo / sy) * sy;
-        int ny_ticks = (int)std::floor((hi - ystart) / sy + 1e-9) + 1;
-        if (ny_ticks < 0) ny_ticks = 0;
-        for (int i = 0; i < ny_ticks; ++i) {
-            double yv = ystart + i * sy;
-            if (yv > hi + sy * 1e-6 || yv < lo - sy * 1e-6) continue;
+        auto ticks = y_full_view
+            ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0)
+            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny);
+        for (double yv : ticks) {
             float py = img_pos.y + (float)((emax - yv) / vry) * plot_h;
             dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
                         ImVec2(img_pos.x,         py), col_axis, 1.0f);
@@ -577,16 +636,19 @@ void HeatmapView::render(PlotRenderer& renderer,
     ImVec2 ts_yl = ImGui::CalcTextSize(yl);
     if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
-        double ey0 = y_axis.view_min, ey1 = y_axis.view_max;
-        double vry = ey1 - ey0;
-        if (std::abs(vry) >= 1e-30) {
-            double lo = std::min(ey0, ey1);
-            double hi = std::max(ey0, ey1);
-            double sy = nice_step(std::abs(vry), 6);
-            double ystart = std::ceil(lo / sy) * sy;
-            int ny_ticks = (int)std::floor((hi - ystart) / sy + 1) + 1;
-            for (int it = 0; it < ny_ticks; ++it) {
-                std::string tl = fmt_tick(ystart + it * sy);
+        // Считаем через тот же compute_axis_ticks, что и draw_y_ticks — иначе
+        // при snap-to-node фактические подписи ("-19.8", "10.8") оказываются
+        // длиннее оценки по nice_step ("-20", "10") и Y-название наезжает
+        // на цифры. Работает в vis-домене (как и сам рендер тиков).
+        double vry_v = vis_view_max_y - vis_view_min_y;
+        if (std::abs(vry_v) >= 1e-30) {
+            double lo = std::min(vis_view_min_y, vis_view_max_y);
+            double hi = std::max(vis_view_min_y, vis_view_max_y);
+            auto ticks = y_full_view
+                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0)
+                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny);
+            for (double yv : ticks) {
+                std::string tl = fmt_tick(yv);
                 float w = ImGui::CalcTextSize(tl.c_str()).x;
                 if (w > max_tick_w) max_tick_w = w;
             }
@@ -596,7 +658,11 @@ void HeatmapView::render(PlotRenderer& renderer,
         //   • по X текст займёт [pivot.x, pivot.x + ts_yl.y]
         //   • по Y — [pivot.y - ts_yl.x, pivot.y]
         // Снапим к целым пикселям для чёткости глифов.
-        float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts_yl.y);
+        // label_gap — доп. зазор между самым широким тиком и Y-подписью:
+        // без него текст вплотную касается цифр (оба span'а стыкуются в одной
+        // точке img_pos.x - max_tick_w - 8).
+        const float label_gap = 6.0f;
+        float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - label_gap - ts_yl.y);
         float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
         ImVec2 pivot(pivot_x, pivot_y);
 
