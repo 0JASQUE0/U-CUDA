@@ -2454,10 +2454,10 @@ __global__ void LLEKernelCUDA(
 		return;
 	}
 
-	if (flag == -1) {
-		resultArray[idx] = -999;
-		return;
-	}
+	//if (flag == -1) {
+	//	resultArray[idx] = -999;
+	//	return;
+	//}
 
 	// Общий seed для всех потоков + номер подпоследовательности = idx.
 	// idx как seed давал коррелирующие потоки у соседних точек сетки —
