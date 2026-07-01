@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <cstdio>
+#include <regex>
 #include <unordered_map>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
@@ -149,6 +150,26 @@ static bool is_numeric_string(const std::string& s) {
         } catch (...) { return false; }
     }
     return parse_complete(s);
+}
+
+// Is `scheme_name` one of the session's custom KRS schemes (as opposed to a
+// built-in name)?
+static bool is_custom_scheme(const std::string& scheme_name,
+                              const std::vector<CustomScheme>& custom_schemes) {
+    for (const auto& cs : custom_schemes) if (cs.name == scheme_name) return true;
+    return false;
+}
+
+// Heuristic text match: does a custom KRS body actually reference a[0]
+// (the symmetry slot, same as built-in CD)? Raw C/CUDA source, not parsed
+// into an AST, so this is a regex over the literal text rather than a real
+// usage analysis — good enough since users write "a[0]" directly.
+static bool custom_scheme_uses_symmetry(const std::string& scheme_name,
+                                         const std::vector<CustomScheme>& custom_schemes) {
+    static const std::regex re(R"(a\s*\[\s*0\s*\])");
+    for (const auto& cs : custom_schemes)
+        if (cs.name == scheme_name) return std::regex_search(cs.body, re);
+    return false;
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
@@ -311,7 +332,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         model.custom_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled(
             "Raw C/CUDA in calculateDiscreteModel body. Available: X[0..N-1] (vars),\n"
-            "a[1..M] (params), h (step), AMOUNTOFX. if/for/while + math functions OK.");
+            "a[0] (symmetry s, same slot as CD), a[1..M] (params), h (step), AMOUNTOFX.\n"
+            "if/for/while + math functions OK.");
 
         // существующие схемы
         int to_delete = -1;
@@ -451,8 +473,10 @@ static void draw_parameters_tab(AppModel& model) {
 
 // ============================================================
 // Library tab: two states — list (table of saved systems + note preview)
-// and editor (System + Parameters sub-tabs with Save/Cancel). Entry into
-// editor snapshots to_record() into AppModel::edit_snapshot for Cancel.
+// and editor (System + Parameters sub-tabs with Save/Cancel). The editor
+// edits AppModel::library_edit_buffer (a scratch AppModel), never the live
+// model, so browsing/editing/Cancel never affects the system currently
+// active in Parametric/Phase/Basins/FastSync.
 // ============================================================
 
 // Trim leading/trailing ASCII whitespace.
@@ -464,15 +488,20 @@ static std::string trim_copy(const std::string& s) {
 }
 
 // Save-side logic for the editor: validate name, handle rename for
-// EditExisting, persist via SystemLibrary. On success returns to list mode;
-// on failure sets model.edit_error and stays in the editor.
+// EditExisting, persist the scratch buffer via SystemLibrary. Only mirrors
+// the save into the live model if the edited system is the one currently
+// active elsewhere — editing/saving any other (inactive) system must not
+// disturb what Parametric/Phase/Basins/FastSync currently have loaded. On
+// success returns to list mode; on failure sets model.edit_error and stays
+// in the editor.
 static void library_editor_save(AppModel& model, SystemLibrary& lib) {
-    std::string name = trim_copy(model.name);
+    AppModel& buf = *model.library_edit_buffer;
+    std::string name = trim_copy(buf.name);
     if (name.empty()) {
         model.edit_error = "Name is required.";
         return;
     }
-    model.name = name;
+    buf.name = name;
 
     try {
         if (model.library_edit_mode == AppModel::LibraryEditMode::EditExisting) {
@@ -494,13 +523,22 @@ static void library_editor_save(AppModel& model, SystemLibrary& lib) {
                 return;
             }
         }
-        model.name = lib.save(model.to_record());
-        model.loaded_name = model.name;
-        // Push live custom_schemes / sys / vars / params into every session
-        // so the next Run in Parametric/Basins/FastSync/Phase picks up the
-        // edited state without reopening the tab (mirrors legacy Save flow).
-        model.propagate_to_sessions();
-        model.generate();
+        buf.name = lib.save(buf.to_record());
+
+        const bool editing_active_system =
+            model.library_edit_mode == AppModel::LibraryEditMode::EditExisting &&
+            !model.loaded_name.empty() &&
+            model.edit_original_name == model.loaded_name;
+        if (editing_active_system) {
+            model.from_record(buf.to_record());
+            model.loaded_name = model.name;
+            // Push live custom_schemes / sys / vars / params into every session
+            // so the next Run in Parametric/Basins/FastSync/Phase picks up the
+            // edited state without reopening the tab.
+            model.propagate_to_sessions();
+            model.generate();
+        }
+
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
@@ -510,14 +548,14 @@ static void library_editor_save(AppModel& model, SystemLibrary& lib) {
 }
 
 // List state: table of saved systems + Add-new + note preview panel.
+// Interacting with this view (row select, Edit, Add new) only ever touches
+// model.library_edit_buffer — never the live model — so it never changes
+// the system currently active in Parametric/Phase/Basins/FastSync.
 static void draw_library_list(AppModel& model, SystemLibrary& lib) {
     if (ImGui::Button("Add new system")) {
-        // Snapshot BEFORE clear so Cancel restores the previous in-memory
-        // system (user may have had a loaded system active in other tabs).
-        model.edit_snapshot = model.to_record();
+        model.library_edit_buffer->clear();
         model.edit_original_name.clear();
         model.edit_error.clear();
-        model.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::AddNew;
     }
     ImGui::Separator();
@@ -534,15 +572,37 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
     static std::string pending_delete;
     static bool        want_open_confirm = false;
 
-    if (ImGui::BeginTable("libtbl", 5,
-        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
+    // Custom-scheme count per name, loaded once and reused both for sizing
+    // the Name column and for the row badge (avoids loading each system twice).
+    std::vector<int> cs_counts(names.size(), 0);
+    for (size_t i = 0; i < names.size(); ++i) {
+        try { cs_counts[i] = (int)lib.load(names[i]).custom_schemes.size(); } catch (...) {}
+    }
 
-        for (const auto& n : names) {
+    // Name column auto-sized to the longest (name [+ "[N custom]" badge]),
+    // instead of proportional stretch, so short names don't waste space.
+    float name_col_w = ImGui::CalcTextSize("Name").x;
+    for (size_t i = 0; i < names.size(); ++i) {
+        float w = ImGui::CalcTextSize(names[i].c_str()).x;
+        if (cs_counts[i] > 0) {
+            char badge[32];
+            std::snprintf(badge, sizeof(badge), " [%d custom]", cs_counts[i]);
+            w += ImGui::GetStyle().ItemSpacing.x + ImGui::CalcTextSize(badge).x;
+        }
+        if (w > name_col_w) name_col_w = w;
+    }
+    name_col_w += ImGui::GetStyle().CellPadding.x * 2.0f + 8.0f;
+
+    if (ImGui::BeginTable("libtbl", 4,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit |
+        ImGuiTableFlags_NoHostExtendX)) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, name_col_w);
+        ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
+
+        for (size_t row = 0; row < names.size(); ++row) {
+            const std::string& n = names[row];
             ImGui::TableNextRow();
             ImGui::PushID(n.c_str());
 
@@ -551,28 +611,16 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
             if (ImGui::Selectable(n.c_str(), selected)) {
                 model.library_selected_name = n;
             }
-            int cs_count = 0;
-            try { cs_count = (int)lib.load(n).custom_schemes.size(); } catch (...) {}
-            if (cs_count > 0) {
+            if (cs_counts[row] > 0) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f),
-                    " [%d custom]", cs_count);
+                    " [%d custom]", cs_counts[row]);
             }
 
             ImGui::TableSetColumnIndex(1);
-            if (ImGui::SmallButton("Load")) {
-                try {
-                    model.from_record(lib.load(n));
-                    model.library_selected_name = n;
-                }
-                catch (const std::exception& e) { model.error_message = e.what(); }
-            }
-
-            ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton("Edit")) {
                 try {
-                    model.from_record(lib.load(n));
-                    model.edit_snapshot = model.to_record();
+                    model.library_edit_buffer->from_record(lib.load(n));
                     model.edit_original_name = n;
                     model.edit_error.clear();
                     model.library_edit_mode = AppModel::LibraryEditMode::EditExisting;
@@ -580,13 +628,13 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
                 catch (const std::exception& e) { model.error_message = e.what(); }
             }
 
-            ImGui::TableSetColumnIndex(3);
+            ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton("Duplicate")) {
                 try { lib.duplicate(n); }
                 catch (const std::exception& e) { model.error_message = e.what(); }
             }
 
-            ImGui::TableSetColumnIndex(4);
+            ImGui::TableSetColumnIndex(3);
             if (ImGui::SmallButton("Delete")) {
                 pending_delete = n;
                 want_open_confirm = true;
@@ -644,8 +692,11 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
 }
 
 // Editor state: name/note header + System/Parameters sub-tabs + Save/Cancel.
+// Edits go into model.library_edit_buffer, not model itself — Cancel simply
+// drops the edit_mode without needing to restore anything on the live model.
 static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                 const GuiCallbacks& cb) {
+    AppModel& buf = *model.library_edit_buffer;
     const bool add_new = (model.library_edit_mode == AppModel::LibraryEditMode::AddNew);
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                        add_new ? "New system" : "Editing");
@@ -658,9 +709,9 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
     ImGui::Text("Name:");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
-    InputTextStr("##editor_name", model.name);
+    InputTextStr("##editor_name", buf.name);
     ImGui::Text("Note:");
-    InputTextMultilineStr("##editor_note", model.note, ImVec2(-1, 60));
+    InputTextMultilineStr("##editor_note", buf.note, ImVec2(-1, 60));
 
     if (!model.edit_error.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
@@ -671,11 +722,11 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 
     if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
-            draw_system_tab(model, cb);
+            draw_system_tab(buf, cb);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Parameters")) {
-            draw_parameters_tab(model);
+            draw_parameters_tab(buf);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -683,12 +734,13 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 
     ImGui::Separator();
 
-    if (ImGui::Button("Save", ImVec2(120, 0))) {
+    const bool save_clicked = ImGui::Button("Save", ImVec2(120, 0));
+    const bool save_shortcut = ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false);
+    if (save_clicked || save_shortcut) {
         library_editor_save(model, lib);
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-        model.from_record(model.edit_snapshot);
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
@@ -815,10 +867,6 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Method:"); ImGui::SameLine();
     ImGui::SetNextItemWidth(160);
     static const char* methods[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
-    auto is_custom_scheme = [&](const std::string& nm) {
-        for (const auto& cs : s.custom_schemes) if (cs.name == nm) return true;
-        return false;
-    };
     if (ImGui::BeginCombo("##method", s.scheme.c_str())) {
         for (auto m : methods)
             if (ImGui::Selectable(m, s.scheme == m)) {
@@ -834,7 +882,7 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
             }
         ImGui::EndCombo();
     }
-    if (is_custom_scheme(s.scheme) && !s.use_gpu) {
+    if (is_custom_scheme(s.scheme, s.custom_schemes) && !s.use_gpu) {
         // Если юзер вручную выключил GPU при custom — это не сработает.
         // Подсвечиваем и не даём так стрелять себе в ногу.
         ImGui::SameLine();
@@ -849,7 +897,9 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
     ImGui::Text("Skip(s):"); ImGui::SameLine();
     changed |= InputNumStr("##ssk", s.skip_time, 70);
-    if (s.scheme == "CD") {
+    // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
+    // only show the field if the body actually references a[0].
+    if (s.scheme == "CD" || custom_scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
         ImGui::Text("Symmetry s:"); ImGui::SameLine();
         changed |= InputNumStr("##sym", s.symmetry_s, 70);
     }
@@ -1583,7 +1633,7 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     // ----- Integration (collapsible) -----
     if (ImGui::CollapsingHeader("Integration##bd_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("h",              bd.h_text,           120);
-        if (bd.scheme == "CD")
+        if (bd.scheme == "CD" || custom_scheme_uses_symmetry(bd.scheme, s.custom_schemes))
             InputNumStr("symmetry s", bd.symmetry_s,       120);
         InputNumStr("computing time", bd.t_max_text,       120);
         InputNumStr("transient time", bd.transient_text,   120);
@@ -2149,7 +2199,7 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     // ----- Integration (collapsible) -----
     if (ImGui::CollapsingHeader("Integration##lle_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("h",              c.h_text,         120);
-        if (c.scheme == "CD")
+        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s,     120);
         InputNumStr("computing time", c.t_max_text,     120);
         InputNumStr("transient time", c.transient_text, 120);
@@ -2663,7 +2713,7 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     // ----- Integration (collapsible) -----
     if (ImGui::CollapsingHeader("Integration##ls_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("h",              c.h_text,         120);
-        if (c.scheme == "CD")
+        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s,     120);
         InputNumStr("computing time", c.t_max_text,     120);
         InputNumStr("transient time", c.transient_text, 120);
@@ -3301,7 +3351,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     // ----- Integration (collapsible, swapped above Features) -----
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("h",              c.h_text,           120);
-        if (c.scheme == "CD")
+        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s,       120);
         InputNumStr("computing time", c.t_max_text,       120);
         InputNumStr("transient time", c.transient_text,   120);
@@ -4013,7 +4063,8 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                 c.scheme = cs.name;
         ImGui::EndCombo();
     }
-    if (c.scheme == "CD") InputNumStr("symmetry s", c.symmetry_s, 120);
+    if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
+        InputNumStr("symmetry s", c.symmetry_s, 120);
     ImGui::Separator();
 
     // ----- Mode-specific axes -----
@@ -5066,8 +5117,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     if (model.app_mode == AppModel::AppMode::Library) {
         // Library mode: list view by default, editor view (System/Parameters
         // sub-tabs + Save/Cancel) after Edit or Add new. Top-level tab
-        // switching is intentionally allowed during edit — the working copy
-        // lives in AppModel until Save/Cancel.
+        // switching is safe during edit — the editor works on
+        // model.library_edit_buffer, a scratch AppModel, so it never touches
+        // the system currently active in Parametric/Phase/Basins/FastSync.
         if (ImGui::Begin("Editor")) {
             if (model.library_edit_mode == AppModel::LibraryEditMode::None)
                 draw_library_list(model, lib);
