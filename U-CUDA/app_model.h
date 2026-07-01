@@ -30,6 +30,35 @@ struct ParametricQueueItem {
     int  index = 0;
 };
 
+// One dynamic plot window in Parametric mode (mirrors PhaseAnalysisSession's
+// Projection, but must span 3 independent sessions — bifurcation_session /
+// lle_session / ls_session — so it lives on AppModel rather than inside any
+// one of them). Replaces the old fixed "Bifurcation 1D"/"LLE 1D"/"Lyapunov
+// Spectrum" windows and the per-diagram bool `visible`: a window's own
+// `members` list is now the only source of "what's shown here", since the
+// same diagram/curve can belong to zero, one, or several windows at once.
+struct ParametricPlotWindow {
+    enum class Kind { Bifurcation, LLE, LS };
+    Kind        kind    = Kind::Bifurcation;
+    bool        mode_2d = false;
+    std::string label   = "Plot 1";   // window title, user-editable
+    // Если false, label регенерируется из kind/mode_2d каждый кадр
+    // ("Bifurcation 1D" и т.п.). Ставится в true при ручной правке,
+    // сбрасывается при очистке поля. Дефолт true — старые сохранения
+    // без ключа не перезатираем.
+    bool        label_is_manual = true;
+    // Indices into bifurcation_session.diagrams / lle_session.curves /
+    // ls_session.curves (selected by `kind`), filtered to items whose
+    // .mode_2d matches this window's mode_2d. Multiple entries = overlay
+    // (typical for 1D); 2D windows are UI-nudged, not hard-capped, toward
+    // exactly one member.
+    std::vector<int> members;
+    // Stable identity for render-side caches (PlotRenderer/Plot2DView/
+    // HeatmapView instances keyed by this, not by vector position — position
+    // shifts when an earlier window is removed, this doesn't).
+    int id = 0;
+};
+
 // Один элемент basins-очереди — индекс config'а в basins_session.configs.
 // Basins живёт в отдельной очереди (а не в parametric_queue), потому что
 // сейчас параметрика и basins не пересекаются по UI: parametric "Run all"
@@ -200,6 +229,41 @@ public:
     // элемент с фронта и запускает run_async соответствующей сессии.
     // Возвращает true если что-то стартовало. Безопасно вызывать каждый кадр.
     bool start_next_in_parametric_queue();
+
+    // Dynamic plot windows for Parametric mode (see ParametricPlotWindow).
+    // Rendered by draw_parametric_plot_windows(); managed (add/remove/
+    // rename/membership) by the "Plot windows" section in
+    // draw_parametric_controls.
+    std::vector<ParametricPlotWindow> parametric_plot_windows;
+    int  next_parametric_plot_window_id = 1;
+    // Bumped by "Reset windows layout" in draw_parametric_controls — mirrors
+    // PhaseAnalysisSession::layout_generation, but shared across all 3 kinds
+    // (one button resets every parametric plot window's docking at once).
+    // Goes into each window's ImGui title so docking treats them as new
+    // windows after a reset. Not persisted (transient, like Phase's).
+    int  parametric_layout_generation = 0;
+    // Set by add/remove/membership edits on parametric_plot_windows; drained
+    // once per frame in draw_gui to trigger a "_last_parametric_windows"
+    // session save (avoids writing to disk every single frame).
+    bool parametric_plot_windows_dirty = false;
+
+    // Add a new plot window of (kind, mode_2d) with the given initial member
+    // indices (into the matching session's diagrams/curves list). Assigns a
+    // fresh id and a default "Plot N" label.
+    void add_parametric_plot_window(ParametricPlotWindow::Kind kind, bool mode_2d,
+                                     std::vector<int> initial_members);
+    // Remove by position in parametric_plot_windows (from the "X" in the
+    // Plot windows list, or a closed floating window).
+    void remove_parametric_plot_window(int pos);
+
+    // Load parametric_plot_windows from a previously-saved
+    // "_last_parametric_windows" JSON (json empty = file never existed for
+    // this system). If empty, synthesizes one default window per
+    // (kind, mode_2d) combo that has >=1 diagram/curve — reproduces the old
+    // "everything overlaid in one shared plot per kind" behavior as the
+    // day-one default. If json is present (even an empty window list,
+    // meaning the user deliberately closed everything), respects it as-is.
+    void load_or_init_parametric_plot_windows(const std::string& json);
 
     // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
     std::deque<BasinsQueueItem> basins_queue;

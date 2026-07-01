@@ -1,6 +1,8 @@
 #pragma once
 #include "analysis_session.h"
+#include "app_model.h"
 #include <string>
+#include <vector>
 
 // Сериализация рабочего состояния сессии анализа в JSON и обратно.
 // Сохраняется в sessions/<name>.json внутри папки системы.
@@ -45,3 +47,9 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
 // FastSync-сессия — multi-config layout как у basins. Result в JSON не пишется.
 std::string session_to_json_fastsync(const FastSyncAnalysisSession& s);
 bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s);
+
+// Parametric plot windows (AppModel::parametric_plot_windows) — the dynamic
+// window list, spans all 3 sessions so it's its own file (`_last_parametric_windows.json`)
+// rather than living inside one of the per-kind files above.
+std::string session_to_json_parametric_windows(const std::vector<ParametricPlotWindow>& wins);
+bool session_from_json_parametric_windows(const std::string& json, std::vector<ParametricPlotWindow>& wins);
