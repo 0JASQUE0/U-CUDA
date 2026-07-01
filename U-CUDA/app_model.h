@@ -103,6 +103,19 @@ public:
     // Пусто = система ещё не сохранена/загружена под именем.
     std::string loaded_name;
 
+    // --- Library-tab edit state (in-memory only, not persisted to session) ---
+    // Library sub-tab has two states: a plain list (None) and an editor
+    // (EditExisting for the "Edit" action, AddNew for "Add new system").
+    // Entering the editor snapshots to_record() into edit_snapshot; Cancel
+    // restores it via from_record(). Save runs validation, then rename+save
+    // for EditExisting or plain save for AddNew, and returns to None.
+    enum class LibraryEditMode { None, EditExisting, AddNew };
+    LibraryEditMode library_edit_mode = LibraryEditMode::None;
+    std::string     library_selected_name;   // row selected in the list (for note preview)
+    SystemRecord    edit_snapshot;           // snapshot for Cancel
+    std::string     edit_original_name;      // on-disk name at the moment Edit was pressed
+    std::string     edit_error;              // inline validation / rename error in the editor
+
     // --- режим приложения и сессия анализа (слой 2) ---
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.

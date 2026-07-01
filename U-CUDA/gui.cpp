@@ -450,119 +450,247 @@ static void draw_parameters_tab(AppModel& model) {
 }
 
 // ============================================================
-// Вкладка Library: имя, заметка, сохранение, список систем
+// Library tab: two states — list (table of saved systems + note preview)
+// and editor (System + Parameters sub-tabs with Save/Cancel). Entry into
+// editor snapshots to_record() into AppModel::edit_snapshot for Cancel.
 // ============================================================
-static void draw_library_tab(AppModel& model, SystemLibrary& lib) {
-    // кнопка начать новую систему с нуля (сбрасывает loaded_name)
-    if (ImGui::Button("New (clear all)")) {
-        model.clear();
+
+// Trim leading/trailing ASCII whitespace.
+static std::string trim_copy(const std::string& s) {
+    auto a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    auto b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// Save-side logic for the editor: validate name, handle rename for
+// EditExisting, persist via SystemLibrary. On success returns to list mode;
+// on failure sets model.edit_error and stays in the editor.
+static void library_editor_save(AppModel& model, SystemLibrary& lib) {
+    std::string name = trim_copy(model.name);
+    if (name.empty()) {
+        model.edit_error = "Name is required.";
+        return;
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("clears all fields to start a fresh system");
-    ImGui::Separator();
+    model.name = name;
 
-    // имя и заметка
-    ImGui::Text("System name:");
-    InputTextStr("##name", model.name);
-    ImGui::Text("Note (reference, link, comments):");
-    InputTextMultilineStr("##note", model.note, ImVec2(-1, 50));
-
-    if (ImGui::Button("Save")) {
-        try {
-            bool renaming = (!model.loaded_name.empty() && model.loaded_name != model.name);
-            // проверка уникальности: имя занято другой системой?
-            // (занято, если есть система с таким именем, и это не та, что редактируем)
-            if (model.name != model.loaded_name
-                && lib.exists(model.name)) {
-                model.error_message = "Name '" + model.name + "' already exists";
-            }
-            else {
-                if (renaming && lib.exists(model.loaded_name)) {
-                    lib.rename(model.loaded_name, model.name);
+    try {
+        if (model.library_edit_mode == AppModel::LibraryEditMode::EditExisting) {
+            const bool renaming = (name != model.edit_original_name);
+            if (renaming) {
+                if (lib.exists(name)) {
+                    model.edit_error = "Name '" + name + "' already exists.";
+                    return;
                 }
-                model.name = lib.save(model.to_record());
-                model.loaded_name = model.name;
-                model.error_message.clear();
-                // Прокинуть свежие custom_schemes / sys / vars / params во все
-                // сессии, чтобы следующий Run в Parametric/Basins/FastSync/
-                // Phase сразу использовал отредактированное состояние без
-                // переоткрытия вкладки. + перегенерировать preview.
-                model.propagate_to_sessions();
-                model.generate();
+                if (!lib.rename(model.edit_original_name, name)) {
+                    model.edit_error = "Rename failed.";
+                    return;
+                }
+            }
+        } else {
+            // AddNew
+            if (lib.exists(name)) {
+                model.edit_error = "Name '" + name + "' already exists.";
+                return;
             }
         }
-        catch (const std::exception& e) { model.error_message = e.what(); }
+        model.name = lib.save(model.to_record());
+        model.loaded_name = model.name;
+        // Push live custom_schemes / sys / vars / params into every session
+        // so the next Run in Parametric/Basins/FastSync/Phase picks up the
+        // edited state without reopening the tab (mirrors legacy Save flow).
+        model.propagate_to_sessions();
+        model.generate();
+        model.edit_error.clear();
+        model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Save as copy")) {
-        // сохранить отдельную копию, не трогая текущую систему на диске
-        SystemRecord r = model.to_record();
-        r.name = (model.name.empty() ? std::string("Untitled") : model.name) + " (copy)";
-        try {
-            lib.save(r);
-            // Save as copy не меняет loaded_name, но текущая система в RAM
-            // та же — sессии тоже надо обновить, чтобы правки до этого
-            // момента стали активны при следующем Run.
-            model.propagate_to_sessions();
-            model.generate();
-        }
-        catch (const std::exception& e) { model.error_message = e.what(); }
+    catch (const std::exception& e) {
+        model.edit_error = e.what();
     }
-    if (!model.error_message.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", model.error_message.c_str());
-    }
+}
 
+// List state: table of saved systems + Add-new + note preview panel.
+static void draw_library_list(AppModel& model, SystemLibrary& lib) {
+    if (ImGui::Button("Add new system")) {
+        // Snapshot BEFORE clear so Cancel restores the previous in-memory
+        // system (user may have had a loaded system active in other tabs).
+        model.edit_snapshot = model.to_record();
+        model.edit_original_name.clear();
+        model.edit_error.clear();
+        model.clear();
+        model.library_edit_mode = AppModel::LibraryEditMode::AddNew;
+    }
     ImGui::Separator();
-    ImGui::Text("Saved systems:");
 
-    // список с кнопками Load / Duplicate / Delete
     std::vector<std::string> names = lib.list();
     if (names.empty()) {
         ImGui::TextDisabled("(library is empty)");
+        return;
     }
-    else {
-        if (ImGui::BeginTable("libtbl", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
-            ImGui::TableSetupColumn("name");
-            ImGui::TableSetupColumn("");
-            ImGui::TableSetupColumn("");
-            ImGui::TableSetupColumn("");
-            for (const auto& n : names) {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::Text("%s", n.c_str());
-                // Бэйдж "N custom schemes" если у системы они есть.
-                int cs_count = 0;
-                try { cs_count = (int)lib.load(n).custom_schemes.size(); } catch (...) {}
-                if (cs_count > 0) {
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f),
-                        " [%d custom]", cs_count);
-                }
-                ImGui::TableSetColumnIndex(1);
-                {
-                    std::string id = "Load##" + n;
-                    if (ImGui::SmallButton(id.c_str())) {
-                        try { model.from_record(lib.load(n)); }
-                        catch (const std::exception& e) { model.error_message = e.what(); }
-                    }
-                }
-                ImGui::TableSetColumnIndex(2);
-                {
-                    std::string id = "Duplicate##" + n;
-                    if (ImGui::SmallButton(id.c_str())) {
-                        try { lib.duplicate(n); }
-                        catch (const std::exception& e) { model.error_message = e.what(); }
-                    }
-                }
-                ImGui::TableSetColumnIndex(3);
-                {
-                    std::string id = "Delete##" + n;
-                    if (ImGui::SmallButton(id.c_str())) lib.remove(n);
-                }
+
+    // Delete confirmation flow: row buttons only set pending_delete + a
+    // one-shot open flag; OpenPopup/BeginPopupModal are called at a stable
+    // ID-stack level below the table so the popup id stays consistent.
+    static std::string pending_delete;
+    static bool        want_open_confirm = false;
+
+    if (ImGui::BeginTable("libtbl", 5,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("",          ImGuiTableColumnFlags_WidthFixed);
+
+        for (const auto& n : names) {
+            ImGui::TableNextRow();
+            ImGui::PushID(n.c_str());
+
+            ImGui::TableSetColumnIndex(0);
+            bool selected = (model.library_selected_name == n);
+            if (ImGui::Selectable(n.c_str(), selected)) {
+                model.library_selected_name = n;
             }
-            ImGui::EndTable();
+            int cs_count = 0;
+            try { cs_count = (int)lib.load(n).custom_schemes.size(); } catch (...) {}
+            if (cs_count > 0) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f),
+                    " [%d custom]", cs_count);
+            }
+
+            ImGui::TableSetColumnIndex(1);
+            if (ImGui::SmallButton("Load")) {
+                try {
+                    model.from_record(lib.load(n));
+                    model.library_selected_name = n;
+                }
+                catch (const std::exception& e) { model.error_message = e.what(); }
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            if (ImGui::SmallButton("Edit")) {
+                try {
+                    model.from_record(lib.load(n));
+                    model.edit_snapshot = model.to_record();
+                    model.edit_original_name = n;
+                    model.edit_error.clear();
+                    model.library_edit_mode = AppModel::LibraryEditMode::EditExisting;
+                }
+                catch (const std::exception& e) { model.error_message = e.what(); }
+            }
+
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("Duplicate")) {
+                try { lib.duplicate(n); }
+                catch (const std::exception& e) { model.error_message = e.what(); }
+            }
+
+            ImGui::TableSetColumnIndex(4);
+            if (ImGui::SmallButton("Delete")) {
+                pending_delete = n;
+                want_open_confirm = true;
+            }
+
+            ImGui::PopID();
         }
+        ImGui::EndTable();
+    }
+
+    if (want_open_confirm) {
+        ImGui::OpenPopup("Delete system?");
+        want_open_confirm = false;
+    }
+
+    if (ImGui::BeginPopupModal("Delete system?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Delete \"%s\"?", pending_delete.c_str());
+        ImGui::TextDisabled("The system folder (including sessions/) will be removed.");
+        ImGui::Separator();
+        if (ImGui::Button("Delete", ImVec2(120, 0))) {
+            lib.remove(pending_delete);
+            if (model.library_selected_name == pending_delete)
+                model.library_selected_name.clear();
+            pending_delete.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            pending_delete.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Note preview panel for the selected row. Cached by name to avoid a
+    // disk read every frame.
+    ImGui::Separator();
+    if (model.library_selected_name.empty()) {
+        ImGui::TextDisabled("Click a row to preview its note.");
+    } else {
+        static std::string cached_name;
+        static std::string cached_note;
+        if (cached_name != model.library_selected_name) {
+            try { cached_note = lib.load(model.library_selected_name).note; }
+            catch (...) { cached_note.clear(); }
+            cached_name = model.library_selected_name;
+        }
+        ImGui::Text("Selected: %s", model.library_selected_name.c_str());
+        if (cached_note.empty()) {
+            ImGui::TextDisabled("(no note)");
+        } else {
+            ImGui::TextWrapped("%s", cached_note.c_str());
+        }
+    }
+}
+
+// Editor state: name/note header + System/Parameters sub-tabs + Save/Cancel.
+static void draw_library_editor(AppModel& model, SystemLibrary& lib,
+                                const GuiCallbacks& cb) {
+    const bool add_new = (model.library_edit_mode == AppModel::LibraryEditMode::AddNew);
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                       add_new ? "New system" : "Editing");
+    if (!add_new) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(original: %s)", model.edit_original_name.c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::Text("Name:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    InputTextStr("##editor_name", model.name);
+    ImGui::Text("Note:");
+    InputTextMultilineStr("##editor_note", model.note, ImVec2(-1, 60));
+
+    if (!model.edit_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                           "%s", model.edit_error.c_str());
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("editor_tabs")) {
+        if (ImGui::BeginTabItem("System")) {
+            draw_system_tab(model, cb);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Parameters")) {
+            draw_parameters_tab(model);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::Button("Save", ImVec2(120, 0))) {
+        library_editor_save(model, lib);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+        model.from_record(model.edit_snapshot);
+        model.edit_error.clear();
+        model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
 }
 
@@ -4936,14 +5064,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::End(); // MainHost
 
     if (model.app_mode == AppModel::AppMode::Library) {
-        // режим библиотеки: окно с вкладками System/Parameters/Library
+        // Library mode: list view by default, editor view (System/Parameters
+        // sub-tabs + Save/Cancel) after Edit or Add new. Top-level tab
+        // switching is intentionally allowed during edit — the working copy
+        // lives in AppModel until Save/Cancel.
         if (ImGui::Begin("Editor")) {
-            if (ImGui::BeginTabBar("tabs")) {
-                if (ImGui::BeginTabItem("System")) { draw_system_tab(model, cb); ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Parameters")) { draw_parameters_tab(model); ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Library")) { draw_library_tab(model, lib); ImGui::EndTabItem(); }
-                ImGui::EndTabBar();
-            }
+            if (model.library_edit_mode == AppModel::LibraryEditMode::None)
+                draw_library_list(model, lib);
+            else
+                draw_library_editor(model, lib, cb);
         }
         ImGui::End();
     }
