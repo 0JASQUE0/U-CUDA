@@ -2449,10 +2449,10 @@ __global__ void LLEKernelCUDA(
 
 	int flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
-	//if (flag == 0) {
-	//	resultArray[idx] = 999;
-	//	return;
-	//}
+	if (flag == 0) {
+		resultArray[idx] = 999;
+		return;
+	}
 
 	//if (flag == -1) {
 	//	resultArray[idx] = -999;
