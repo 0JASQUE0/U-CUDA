@@ -79,6 +79,38 @@ void main() {
 }
 )";
 
+// Geometry shader для thick 3D-линий. Каждая пара соседних вершин
+// GL_LINE_STRIP развёртывается в 4 клип-space вершины (triangle_strip)
+// шириной u_thickness_px в пикселях, aspect-корректно. gl_Position.z
+// сохраняем — depth test работает как для обычных линий, occlusion
+// корректный. Сегменты с точками за камерой (w<=0) пропускаем — иначе
+// perspective divide даёт бред и линия «взрывается» через весь экран.
+static const char* GS_3D_THICK = R"(
+#version 330 core
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+uniform vec2  u_viewport;
+uniform float u_thickness_px;
+void main() {
+    vec4 p0 = gl_in[0].gl_Position;
+    vec4 p1 = gl_in[1].gl_Position;
+    if (p0.w <= 0.0 || p1.w <= 0.0) return;
+    vec2 p0_ndc = p0.xy / p0.w;
+    vec2 p1_ndc = p1.xy / p1.w;
+    vec2 dir_px = (p1_ndc - p0_ndc) * (u_viewport * 0.5);
+    float len_px = length(dir_px);
+    if (len_px < 1e-6) return;
+    vec2 dir_n = dir_px / len_px;
+    vec2 nrm_px = vec2(-dir_n.y, dir_n.x);
+    vec2 off_ndc = (nrm_px * (u_thickness_px * 0.5)) / (u_viewport * 0.5);
+    gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    EndPrimitive();
+}
+)";
+
 static const char* FS = R"(
 #version 330 core
 uniform vec4 u_color;
@@ -217,6 +249,24 @@ static GLuint link_program(GLuint vs, GLuint fs) {
     return p;
 }
 
+static GLuint link_program_3(GLuint vs, GLuint gs, GLuint fs) {
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, gs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024]; GLsizei len = 0;
+        glGetProgramInfoLog(p, sizeof(log), &len, log);
+        fprintf(stderr, "[PlotRenderer] link error (3-stage): %.*s\n", len, log);
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
 PlotRenderer::PlotRenderer() {
     compile_shaders();
     glGenVertexArrays(1, &vao_);
@@ -224,9 +274,10 @@ PlotRenderer::PlotRenderer() {
 
 PlotRenderer::~PlotRenderer() {
     destroy_fbo();
-    if (program_2d_)      glDeleteProgram(program_2d_);
-    if (program_3d_)      glDeleteProgram(program_3d_);
-    if (program_heatmap_) glDeleteProgram(program_heatmap_);
+    if (program_2d_)       glDeleteProgram(program_2d_);
+    if (program_3d_)       glDeleteProgram(program_3d_);
+    if (program_3d_thick_) glDeleteProgram(program_3d_thick_);
+    if (program_heatmap_)  glDeleteProgram(program_heatmap_);
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
     if (vao_)             glDeleteVertexArrays(1, &vao_);
 }
@@ -235,6 +286,7 @@ void PlotRenderer::compile_shaders() {
     GLuint fs = compile(GL_FRAGMENT_SHADER, FS);
     GLuint vs2 = compile(GL_VERTEX_SHADER, VS_2D);
     GLuint vs3 = compile(GL_VERTEX_SHADER, VS_3D);
+    GLuint gs3t = compile(GL_GEOMETRY_SHADER, GS_3D_THICK);
     if (fs && vs2) {
         program_2d_ = link_program(vs2, fs);
         if (program_2d_) {
@@ -248,6 +300,15 @@ void PlotRenderer::compile_shaders() {
         if (program_3d_) {
             loc_mvp_3d_ = glGetUniformLocation(program_3d_, "u_mvp");
             loc_color_3d_ = glGetUniformLocation(program_3d_, "u_color");
+        }
+    }
+    if (fs && vs3 && gs3t) {
+        program_3d_thick_ = link_program_3(vs3, gs3t, fs);
+        if (program_3d_thick_) {
+            loc_mvp_3d_thick_       = glGetUniformLocation(program_3d_thick_, "u_mvp");
+            loc_color_3d_thick_     = glGetUniformLocation(program_3d_thick_, "u_color");
+            loc_viewport_3d_thick_  = glGetUniformLocation(program_3d_thick_, "u_viewport");
+            loc_thickness_3d_thick_ = glGetUniformLocation(program_3d_thick_, "u_thickness_px");
         }
     }
     GLuint fs_h = compile(GL_FRAGMENT_SHADER, FS_HEATMAP);
@@ -266,6 +327,7 @@ void PlotRenderer::compile_shaders() {
     }
     if (vs2)  glDeleteShader(vs2);
     if (vs3)  glDeleteShader(vs3);
+    if (gs3t) glDeleteShader(gs3t);
     if (vs_h) glDeleteShader(vs_h);
     if (fs_h) glDeleteShader(fs_h);
     if (fs)   glDeleteShader(fs);
@@ -423,21 +485,57 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
 }
 
 void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
-    const float color[4], float line_width) {
-    if (!program_3d_ || point_count < 2 || !vbo) return;
-    glUseProgram(program_3d_);
-    glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
-    glUniform4fv(loc_color_3d_, 1, color);
+    const float color[4], float line_width, bool thick_style) {
+    if (point_count < 2 || !vbo) return;
+
+    // Fallback на старый путь если thick program не собрался (нет поддержки GS).
+    const bool use_thick = thick_style && program_3d_thick_ != 0;
+
+    if (!use_thick) {
+        // --- СТАРЫЙ путь: побайтово как до Custom line style patch ---
+        if (!program_3d_) return;
+        glUseProgram(program_3d_);
+        glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_3d_, 1, color);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glLineWidth(line_width);
+        glDrawArrays(GL_LINE_STRIP, 0, point_count);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+        return;
+    }
+
+    // --- ТОЛСТЫЙ путь: geometry shader раскрывает сегменты в quads ---
+    // Alpha blending включаем только тут, чтобы OFF-путь не менял GL state.
+    GLboolean was_blend = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(program_3d_thick_);
+    glUniformMatrix4fv(loc_mvp_3d_thick_, 1, GL_FALSE, mvp);
+    glUniform4fv(loc_color_3d_thick_, 1, color);
+    if (loc_viewport_3d_thick_ >= 0)
+        glUniform2f(loc_viewport_3d_thick_, (float)fbo_w_, (float)fbo_h_);
+    if (loc_thickness_3d_thick_ >= 0)
+        glUniform1f(loc_thickness_3d_thick_, line_width);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glLineWidth(line_width);
     glDrawArrays(GL_LINE_STRIP, 0, point_count);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
+
+    // Точный blend func не восстанавливаем — ImGui сам ставит свой перед
+    // отрисовкой ImDrawList, "утечка" не важна.
+    if (!was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::end_frame() {

@@ -91,6 +91,9 @@
     <ClCompile Include="data_export.cpp">
       <Filter>NVRTC</Filter>
     </ClCompile>
+    <ClCompile Include="digit_input.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sysparse.hpp">
@@ -182,6 +185,9 @@
     </ClInclude>
     <ClInclude Include="data_export.h">
       <Filter>NVRTC</Filter>
+    </ClInclude>
+    <ClInclude Include="digit_input.h">
+      <Filter>GUI</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

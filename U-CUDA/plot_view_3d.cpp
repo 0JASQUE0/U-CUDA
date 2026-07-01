@@ -105,7 +105,8 @@ void Plot3DView::render(PlotRenderer& renderer,
         if (!g.valid()) continue;
         ImVec4 c = (k < (int)series_in.size()) ? series_in[k].color : ImVec4(1, 1, 1, 1);
         float color[4] = { c.x, c.y, c.z, c.w };
-        renderer.draw_line_3d(g.vbo, g.point_count, mvp, color, 1.5f);
+        renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
+                              line_thickness_px, custom_line_style);
     }
     // ������ ��� (X=�������, Y=������, Z=�����)
     if (show_axes) {
