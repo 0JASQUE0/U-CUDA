@@ -8,8 +8,12 @@ void draw_legend(ImDrawList* dl,
     const std::vector<LegendEntry>& entries,
     std::vector<bool>& visible,
     const std::vector<bool>& global_visible,
-    int owner_id)
+    int owner_id,
+    LegendPass pass)
 {
+    const bool do_visual   = (pass != LegendPass::Interact);
+    const bool do_interact = (pass != LegendPass::Draw);
+
     auto is_global_vis = [&](int k) -> bool {
         return (k < (int)global_visible.size()) ? global_visible[k] : true;
         };
@@ -37,14 +41,17 @@ void draw_legend(ImDrawList* dl,
 
     ImVec2 leg_min = ImVec2(img_pos.x + plot_w - legend_w - 6, img_pos.y + 6);
     ImVec2 leg_max = ImVec2(leg_min.x + legend_w, leg_min.y + legend_h);
-    // Bg+border легенды зависит от темы: на dark — почти-чёрный полупрозрачный
-    // блок, на light — почти-белый. Без этого в light-теме легенда оставалась
-    // чёрным пятном поверх белого плота.
-    ImU32 bg_col     = plot_light_theme() ? IM_COL32(248, 248, 248, 200)
-                                          : IM_COL32( 20,  20,  25, 180);
-    ImU32 border_col = plot_col_border();
-    dl->AddRectFilled(leg_min, leg_max, bg_col, 4.0f);
-    dl->AddRect(leg_min, leg_max, border_col, 4.0f);
+
+    if (do_visual) {
+        // Bg+border легенды зависит от темы: на dark — почти-чёрный полупрозрачный
+        // блок, на light — почти-белый. Без этого в light-теме легенда оставалась
+        // чёрным пятном поверх белого плота.
+        ImU32 bg_col     = plot_light_theme() ? IM_COL32(248, 248, 248, 200)
+                                              : IM_COL32( 20,  20,  25, 180);
+        ImU32 border_col = plot_col_border();
+        dl->AddRectFilled(leg_min, leg_max, bg_col, 4.0f);
+        dl->AddRect(leg_min, leg_max, border_col, 4.0f);
+    }
 
     int row = 0;
     for (int k = 0; k < (int)entries.size(); ++k) {
@@ -66,18 +73,28 @@ void draw_legend(ImDrawList* dl,
         float row_y = leg_min.y + pad + row * row_h;
         ImVec2 mmin = ImVec2(leg_min.x + pad, row_y + 2);
         ImVec2 mmax = ImVec2(mmin.x + marker_w, row_y + row_h - 2);
-        dl->AddRectFilled(mmin, mmax, cu);
-        dl->AddText(ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
+        if (do_visual) {
+            dl->AddRectFilled(mmin, mmax, cu);
+            dl->AddText(ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
+        }
         ImVec2 emin = ImVec2(leg_min.x + pad, row_y);
         ImVec2 emax = ImVec2(leg_max.x - pad, row_y + row_h);
-        ImGui::SetCursorScreenPos(emin);
-        char btn_id[48];
-        std::snprintf(btn_id, sizeof(btn_id), "##legend_%d_%d", owner_id, k);
-        ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y));
-        if (ImGui::IsItemHovered())
-            dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-            if (k < (int)visible.size()) visible[k] = !visible[k];
+
+        if (do_interact) {
+            ImGui::SetCursorScreenPos(emin);
+            char btn_id[48];
+            std::snprintf(btn_id, sizeof(btn_id), "##legend_%d_%d", owner_id, k);
+            ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y));
+            if (do_visual && ImGui::IsItemHovered())
+                dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                if (k < (int)visible.size()) visible[k] = !visible[k];
+            }
+        } else if (do_visual) {
+            // Draw-only pass: hover highlight без InvisibleButton (тот был
+            // создан в Interact-проходе, повторно нельзя — коллизия ID).
+            if (ImGui::IsMouseHoveringRect(emin, emax, false))
+                dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
         }
         ++row;
     }

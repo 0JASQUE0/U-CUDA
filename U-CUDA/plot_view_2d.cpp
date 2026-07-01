@@ -1,4 +1,5 @@
 #include "plot_view_2d.h"
+#include "grid_snap.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -147,13 +148,17 @@ void Plot2DView::render(PlotRenderer& renderer,
         img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         ImVec2(0, 1), ImVec2(1, 0));
 
-    // 6. ������� (������ ���� visible)
+    // 6. Legend — INTERACT-проход. Клики по entry-элементам обрабатываем ЗДЕСЬ,
+    // ДО плота-InvisibleButton (line ~178), чтобы легенда получала клики как
+    // и раньше. Сам визуал легенды рисуем в самом конце — тогда линии данных
+    // (imdraw_lines-путь ниже) не перекроют её.
+    std::vector<LegendEntry> legend_entries;
     if (show_legend) {
-        std::vector<LegendEntry> legend_entries;
         legend_entries.reserve(series_in.size());
         for (const auto& s : series_in)
             legend_entries.push_back({ s.label, s.color });
-        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible, owner_id);
+        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
+                    owner_id, LegendPass::Interact);
     }
 
     // 7. ���� �����������
@@ -246,6 +251,15 @@ void Plot2DView::render(PlotRenderer& renderer,
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         plot_col_border(), 0.0f, 0, 1.0f);
 
+    // Legend — DRAW-проход (визуал поверх линий данных, включая imdraw_lines
+    // путь custom line style). InvisibleButton'ы уже поданы в Interact-проходе
+    // выше — здесь только dl-> отрисовка. hover highlight через
+    // IsMouseHoveringRect (в отличие от IsItemHovered из Interact-прохода).
+    if (show_legend) {
+        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
+                    owner_id, LegendPass::Draw);
+    }
+
     // Названия осей: X — горизонтально, под тиками по центру плота.
     // Y — повёрнут на 90° против часовой, у левого края, по центру плота.
     {
@@ -313,6 +327,15 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGuiIO& io = ImGui::GetIO();
         double dx = ex0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (ex1 - ex0);
         double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
+        // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
+        // непрерывной (мы за пределами сетки движка).
+        if (snap_x_to_grid && snap_x_n > 1) {
+            double lo = std::min(snap_x_min, snap_x_max);
+            double hi = std::max(snap_x_min, snap_x_max);
+            int ix; double sx;
+            if (SnapCursorToGrid1D(dx, lo, hi, snap_x_n, ix, sx)) dx = sx;
+        }
         const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
         char buf[160];

@@ -1,4 +1,5 @@
 #include "heatmap_view.h"
+#include "grid_snap.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -223,10 +224,33 @@ void HeatmapView::render(PlotRenderer& renderer,
     if (std::abs(data_ry) < 1e-30) data_ry = 1.0;
     double view_min_x = x_axis.view_min, view_max_x = x_axis.view_max;
     double view_min_y = y_axis.view_min, view_max_y = y_axis.view_max;
-    float uv_off_x   = (float)((view_min_x - param_lo_x) / data_rx);
-    float uv_scale_x = (float)((view_max_x - view_min_x) / data_rx);
-    float uv_off_y   = (float)((view_min_y - param_lo_y) / data_ry);
-    float uv_scale_y = (float)((view_max_y - view_min_y) / data_ry);
+
+    // Node step (расстояние между соседними узлами). Values хранятся в N узлах
+    // на data range [param_lo, param_hi]: node k в позиции param_lo + k*step.
+    // Renderer рисует ровно N пикселей текстуры GL_NEAREST, значит визуально
+    // ширина пикселя должна равняться step_node, а не data_range/N — иначе
+    // тики на осях не выровнены по центрам пикселей и tooltip показывает
+    // не тот узел, что визуально закрашен под курсором.
+    //
+    // Решение: рендерим текстуру с полупиксельным паддингом с каждой стороны
+    // и оси/tooltip работают в этом "visual"-диапазоне. Внутреннее состояние
+    // x_axis.view_min/max остаётся в node-координатах — pan/zoom/rect-zoom
+    // конвертят между vis и node на входе/выходе.
+    double step_x = (nx > 1) ? data_rx / (double)(nx - 1) : 0.0;
+    double step_y = (ny > 1) ? data_ry / (double)(ny - 1) : 0.0;
+    double vis_view_min_x = view_min_x - step_x * 0.5;
+    double vis_view_max_x = view_max_x + step_x * 0.5;
+    double vis_view_min_y = view_min_y - step_y * 0.5;
+    double vis_view_max_y = view_max_y + step_y * 0.5;
+    double vis_data_rx    = data_rx + step_x;   // == N*step_x при nx>1
+    double vis_data_ry    = data_ry + step_y;
+    double vis_param_lo_x = param_lo_x - step_x * 0.5;
+    double vis_param_lo_y = param_lo_y - step_y * 0.5;
+
+    float uv_off_x   = (float)((vis_view_min_x - vis_param_lo_x) / vis_data_rx);
+    float uv_scale_x = (float)((vis_view_max_x - vis_view_min_x) / vis_data_rx);
+    float uv_off_y   = (float)((vis_view_min_y - vis_param_lo_y) / vis_data_ry);
+    float uv_scale_y = (float)((vis_view_max_y - vis_view_min_y) / vis_data_ry);
 
     // 5. FBO render. (n_disc was resolved up-front in section 3.)
     {
@@ -304,11 +328,16 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     ImGuiIO& io = ImGui::GetIO();
     // Хелпер: мировые координаты под текущей позицией курсора (учитывает Y↑).
+    // Работает в vis-домене — визуально левый край плота соответствует
+    // vis_view_min_x = view_min_x - step_x/2, чтобы центр пикселя визуально
+    // совпадал с позицией узла. Для нижестоящих операций (rect-zoom, wheel-
+    // zoom) это надо конвертить обратно в node-домен (view_min = vis - step/2
+    // и симметрично для max) — там где обновляем x_axis.view_min/view_max.
     auto mouse_world = [&](double& wx, double& wy) {
         double tx = (double)(io.MousePos.x - img_pos.x) / (double)plot_w;
         double ty = 1.0 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h;
-        wx = x_axis.view_min + tx * (x_axis.view_max - x_axis.view_min);
-        wy = y_axis.view_min + ty * (y_axis.view_max - y_axis.view_min);
+        wx = vis_view_min_x + tx * (vis_view_max_x - vis_view_min_x);
+        wy = vis_view_min_y + ty * (vis_view_max_y - vis_view_min_y);
     };
     // Хелпер: клампим view в пределы расчётных данных. Применяем после ВСЕХ
     // изменений view (pan, wheel-zoom, rect-zoom) — пользователь не может
@@ -351,34 +380,42 @@ void HeatmapView::render(PlotRenderer& renderer,
         float zoom_factor = (io.MouseWheel > 0) ? 1.0f / 1.2f : 1.2f;
         double tx = (double)(io.MousePos.x - img_pos.x) / (double)plot_w;
         double ty = 1.0 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h;
-        double world_x = x_axis.view_min + tx * (x_axis.view_max - x_axis.view_min);
-        double world_y = y_axis.view_min + ty * (y_axis.view_max - y_axis.view_min);
-        double new_rx = (x_axis.view_max - x_axis.view_min) * (double)zoom_factor;
-        double new_ry = (y_axis.view_max - y_axis.view_min) * (double)zoom_factor;
-        x_axis.view_min = world_x - tx * new_rx;
-        x_axis.view_max = x_axis.view_min + new_rx;
-        y_axis.view_min = world_y - ty * new_ry;
-        y_axis.view_max = y_axis.view_min + new_ry;
+        // Zoom вокруг курсора в vis-домене, чтобы пиксель под курсором
+        // визуально оставался под ним. Затем возвращаемся в node-домен для
+        // обновления x_axis.view_min/view_max.
+        double world_x = vis_view_min_x + tx * (vis_view_max_x - vis_view_min_x);
+        double world_y = vis_view_min_y + ty * (vis_view_max_y - vis_view_min_y);
+        double new_vis_rx = (vis_view_max_x - vis_view_min_x) * (double)zoom_factor;
+        double new_vis_ry = (vis_view_max_y - vis_view_min_y) * (double)zoom_factor;
+        double new_vis_min_x = world_x - tx * new_vis_rx;
+        double new_vis_min_y = world_y - ty * new_vis_ry;
+        x_axis.view_min = new_vis_min_x + step_x * 0.5;
+        x_axis.view_max = new_vis_min_x + new_vis_rx - step_x * 0.5;
+        y_axis.view_min = new_vis_min_y + step_y * 0.5;
+        y_axis.view_max = new_vis_min_y + new_vis_ry - step_y * 0.5;
     }
 
     // 8b. Pan ЛКМ — в плоте по обеим осям, в оси — только этой оси.
+    // Delta считаем в vis-домене (тогда 1 экранный пиксель → сдвиг ровно
+    // на один визуальный пиксель). Сама операция — симметричный сдвиг
+    // view_min/max, поэтому вис-и-нод-домен смещаются одинаково.
     if (plot_hov && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
         ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
-        double dwx = -(double)delta.x / (double)plot_w * (x_axis.view_max - x_axis.view_min);
-        double dwy =  (double)delta.y / (double)plot_h * (y_axis.view_max - y_axis.view_min);
+        double dwx = -(double)delta.x / (double)plot_w * (vis_view_max_x - vis_view_min_x);
+        double dwy =  (double)delta.y / (double)plot_h * (vis_view_max_y - vis_view_min_y);
         x_axis.view_min += dwx;  x_axis.view_max += dwx;
         y_axis.view_min += dwy;  y_axis.view_max += dwy;
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
     }
     if (xax_hov && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
         ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
-        double dwx = -(double)delta.x / (double)plot_w * (x_axis.view_max - x_axis.view_min);
+        double dwx = -(double)delta.x / (double)plot_w * (vis_view_max_x - vis_view_min_x);
         x_axis.view_min += dwx;  x_axis.view_max += dwx;
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
     }
     if (yax_hov && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
         ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
-        double dwy =  (double)delta.y / (double)plot_h * (y_axis.view_max - y_axis.view_min);
+        double dwy =  (double)delta.y / (double)plot_h * (vis_view_max_y - vis_view_min_y);
         y_axis.view_min += dwy;  y_axis.view_max += dwy;
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
     }
@@ -386,6 +423,9 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 8c. Rect-zoom ПКМ. Начало drag'а — запоминаем стартовую точку в мире и
     //    режим (плот / X / Y). На release — назначаем новый view по выделенной
     //    зоне. Во время drag'а — рисуем рамку (внизу, см. ниже).
+    // wx/wy приходят из mouse_world в vis-домене → на release конвертим в
+    // node-домен для x_axis.view_min/max: view = vis + step/2 для min и
+    // view = vis - step/2 для max.
     bool rmb_down = ImGui::IsMouseDown(ImGuiMouseButton_Right);
     if (rect_zoom_mode_ == 0 && rmb_down) {
         double wx, wy; mouse_world(wx, wy);
@@ -400,15 +440,19 @@ void HeatmapView::render(PlotRenderer& renderer,
             double xa = std::min(rect_zoom_x0_, wx), xb = std::max(rect_zoom_x0_, wx);
             double ya = std::min(rect_zoom_y0_, wy), yb = std::max(rect_zoom_y0_, wy);
             if (xb - xa > 1e-12 && yb - ya > 1e-12) {
-                x_axis.view_min = xa; x_axis.view_max = xb;
-                y_axis.view_min = ya; y_axis.view_max = yb;
+                x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
+                y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
             }
         } else if (rect_zoom_mode_ == 2) {
             double xa = std::min(rect_zoom_x0_, wx), xb = std::max(rect_zoom_x0_, wx);
-            if (xb - xa > 1e-12) { x_axis.view_min = xa; x_axis.view_max = xb; }
+            if (xb - xa > 1e-12) {
+                x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
+            }
         } else if (rect_zoom_mode_ == 3) {
             double ya = std::min(rect_zoom_y0_, wy), yb = std::max(rect_zoom_y0_, wy);
-            if (yb - ya > 1e-12) { y_axis.view_min = ya; y_axis.view_max = yb; }
+            if (yb - ya > 1e-12) {
+                y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
+            }
         }
         rect_zoom_mode_ = 0;
     }
@@ -432,7 +476,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // Tick'и: формула числа тиков и проверки overshoot/clip — те же, что в
     // plot_axis.cpp (draw_axis_x_grid/y_grid), но без сетки через плот.
     auto draw_x_ticks = [&]() {
-        double emin = x_axis.view_min, emax = x_axis.view_max;
+        double emin = vis_view_min_x, emax = vis_view_max_x;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
@@ -453,7 +497,7 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     };
     auto draw_y_ticks = [&]() {
-        double emin = y_axis.view_min, emax = y_axis.view_max;
+        double emin = vis_view_min_y, emax = vis_view_max_y;
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
@@ -483,12 +527,12 @@ void HeatmapView::render(PlotRenderer& renderer,
     if (rect_zoom_mode_ != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         double cur_wx, cur_wy; mouse_world(cur_wx, cur_wy);
         auto W2S_x = [&](double w) {
-            return img_pos.x + (float)((w - x_axis.view_min) /
-                   (x_axis.view_max - x_axis.view_min)) * plot_w;
+            return img_pos.x + (float)((w - vis_view_min_x) /
+                   (vis_view_max_x - vis_view_min_x)) * plot_w;
         };
         auto W2S_y = [&](double w) {
-            return img_pos.y + (float)((y_axis.view_max - w) /
-                   (y_axis.view_max - y_axis.view_min)) * plot_h;
+            return img_pos.y + (float)((vis_view_max_y - w) /
+                   (vis_view_max_y - vis_view_min_y)) * plot_h;
         };
         ImU32 col_fill = IM_COL32(255, 220, 80, 40);
         ImU32 col_edge = IM_COL32(255, 220, 80, 200);
@@ -628,24 +672,27 @@ void HeatmapView::render(PlotRenderer& renderer,
     }
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.
-    if (plot_hov) {
+    if (plot_hov && step_x > 0.0 && step_y > 0.0) {
         ImGuiIO& io = ImGui::GetIO();
-        double ex0 = x_axis.view_min, ex1 = x_axis.view_max;
-        double ey0 = y_axis.view_min, ey1 = y_axis.view_max;
-        double dx = ex0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (ex1 - ex0);
-        double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
-        // Индекс ячейки.
-        int ix = (int)std::floor((dx - param_lo_x) / (param_hi_x - param_lo_x) * (double)nx);
-        int iy = (int)std::floor((dy - param_lo_y) / (param_hi_y - param_lo_y) * (double)ny);
+        // Курсор в vis-домене: тот же линейный маппинг что у UV/ticks выше.
+        double dx = vis_view_min_x + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (vis_view_max_x - vis_view_min_x);
+        double dy = vis_view_max_y - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (vis_view_max_y - vis_view_min_y);
+        // Индекс пикселя = floor((dx - vis_param_lo) / step). Пиксель k
+        // визуально центрирован на позиции узла param_lo + k*step. Показываем
+        // именно эту (узловую) координату и значение узла k.
+        int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
+        int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
+            double snap_x = param_lo_x + (double)ix * step_x;
+            double snap_y = param_lo_y + (double)iy * step_y;
             double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
             ImGui::BeginTooltip();
             if (!std::isfinite(v) || v == 999.0 || v == -999.0) {
-                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda: diverged", xn, dx, yn, dy);
+                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda: diverged", xn, snap_x, yn, snap_y);
             } else {
-                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda = %.6g", xn, dx, yn, dy, v);
+                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda = %.6g", xn, snap_x, yn, snap_y, v);
             }
             ImGui::EndTooltip();
         }

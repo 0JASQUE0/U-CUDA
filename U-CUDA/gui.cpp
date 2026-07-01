@@ -1873,6 +1873,27 @@ static void draw_bifurcation_plot(AppModel& model, const GuiCallbacks& cb) {
         }
     };
 
+    // Snap X к узлам активной БД. Если у active нет успешного result —
+    // fallback на её param_lo/hi text + n_pts_text. Если и это не парсится —
+    // snap_x_n остаётся 0 и readout идёт непрерывный.
+    view->snap_x_to_grid = true;
+    view->snap_x_n       = 0;
+    if (s.active_diagram_index >= 0 && s.active_diagram_index < (int)s.diagrams.size()) {
+        const auto& abd = s.diagrams[s.active_diagram_index];
+        if (abd.last_run_ok && abd.result.n_pts > 1) {
+            view->snap_x_min = abd.result.param_lo;
+            view->snap_x_max = abd.result.param_hi;
+            view->snap_x_n   = abd.result.n_pts;
+        } else {
+            int n = std::atoi(abd.n_pts_text.c_str());
+            if (n > 1) {
+                view->snap_x_min = safe_stod(abd.param_lo_text, 0.0);
+                view->snap_x_max = safe_stod(abd.param_hi_text, 1.0);
+                view->snap_x_n   = n;
+            }
+        }
+    }
+
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
 
@@ -2371,6 +2392,25 @@ static void draw_lle_plot(AppModel& model, const GuiCallbacks& cb) {
             ImGui::EndMenu();
         }
     };
+
+    // Snap X к узлам активной кривой (см. Bif выше — та же логика).
+    view->snap_x_to_grid = true;
+    view->snap_x_n       = 0;
+    if (s.active_curve_index >= 0 && s.active_curve_index < (int)s.curves.size()) {
+        const auto& ac = s.curves[s.active_curve_index];
+        if (ac.last_run_ok && ac.result.n_pts > 1) {
+            view->snap_x_min = ac.result.param_lo;
+            view->snap_x_max = ac.result.param_hi;
+            view->snap_x_n   = ac.result.n_pts;
+        } else {
+            int n = std::atoi(ac.n_pts_text.c_str());
+            if (n > 1) {
+                view->snap_x_min = safe_stod(ac.param_lo_text, 0.0);
+                view->snap_x_max = safe_stod(ac.param_hi_text, 1.0);
+                view->snap_x_n   = n;
+            }
+        }
+    }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2909,6 +2949,25 @@ static void draw_ls_plot(AppModel& model, const GuiCallbacks& cb) {
             ImGui::EndMenu();
         }
     };
+
+    // Snap X к узлам активной LS-кривой (см. Bif/LLE выше).
+    view->snap_x_to_grid = true;
+    view->snap_x_n       = 0;
+    if (s.active_curve_index >= 0 && s.active_curve_index < (int)s.curves.size()) {
+        const auto& ac = s.curves[s.active_curve_index];
+        if (ac.last_run_ok && ac.result.n_pts > 1) {
+            view->snap_x_min = ac.result.param_lo;
+            view->snap_x_max = ac.result.param_hi;
+            view->snap_x_n   = ac.result.n_pts;
+        } else {
+            int n = std::atoi(ac.n_pts_text.c_str());
+            if (n > 1) {
+                view->snap_x_min = safe_stod(ac.param_lo_text, 0.0);
+                view->snap_x_max = safe_stod(ac.param_hi_text, 1.0);
+                view->snap_x_n   = n;
+            }
+        }
+    }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
