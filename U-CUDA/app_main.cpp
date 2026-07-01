@@ -25,6 +25,7 @@
 #include <string>
 #include <cstdio>
 #include <future>
+#include <filesystem>
 
 
 
@@ -38,6 +39,81 @@ std::string exe_dir() {
 }
 
 static const char* OCR_SCRIPT_NAME = "ocr_server.py";
+
+static bool dir_exists(const std::string& p) {
+    DWORD a = GetFileAttributesA(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Paths returned by resolve_library_paths. `library` is the writable
+// per-user copy (gitignored in dev, next-to-exe in deployed builds).
+// `tmpl` is the git-tracked baseline that seeds `library` on first run.
+struct LibraryPaths {
+    std::string library;   // writable per-user library
+    std::string tmpl;      // read-only baseline (git-tracked in dev)
+};
+
+// Resolve the pair {library, template}. The dev layout is detected by the
+// presence of library_template/ (which is always in git), so both branches
+// resolve deterministically even on a fresh clone where library/ does not
+// exist yet — seed_library_if_missing will create it.
+//
+//   env U_CUDA_LIBRARY set (and points to an existing dir)
+//       → library = <env>, tmpl = <env>_template (may or may not exist)
+//   dev layout via vcxproj (exe in U-CUDA\x64\{Cfg}\)
+//       → library_template lives at ..\..\library_template
+//         library sits alongside at ..\..\library
+//   dev layout via solution (exe in .\x64\{Cfg}\)
+//       → ..\..\U-CUDA\library_template and ..\..\U-CUDA\library
+//   deployed (exe with library_template next to it)
+//       → <exe_dir>\library and <exe_dir>\library_template
+static LibraryPaths resolve_library_paths(const std::string& exe_dir_with_sep) {
+    LibraryPaths p;
+
+    char env_buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("U_CUDA_LIBRARY", env_buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        p.library = std::string(env_buf, n);
+        p.tmpl    = p.library + "_template";
+        return p;
+    }
+
+    std::string vcx_tmpl = exe_dir_with_sep + "..\\..\\library_template";
+    if (dir_exists(vcx_tmpl)) {
+        p.tmpl    = vcx_tmpl;
+        p.library = exe_dir_with_sep + "..\\..\\library";
+        return p;
+    }
+
+    std::string sln_tmpl = exe_dir_with_sep + "..\\..\\U-CUDA\\library_template";
+    if (dir_exists(sln_tmpl)) {
+        p.tmpl    = sln_tmpl;
+        p.library = exe_dir_with_sep + "..\\..\\U-CUDA\\library";
+        return p;
+    }
+
+    p.library = exe_dir_with_sep + "library";
+    p.tmpl    = exe_dir_with_sep + "library_template";
+    return p;
+}
+
+// Copy the baseline into the writable library on first run. No-op if the
+// library dir already exists (user's private data wins) or if the template
+// is missing (deployed build without a template — start empty).
+static void seed_library_if_missing(const std::string& library_dir,
+                                    const std::string& template_dir) {
+    if (dir_exists(library_dir)) return;
+    if (!dir_exists(template_dir)) return;
+    try {
+        namespace fs = std::filesystem;
+        fs::create_directories(library_dir);
+        fs::copy(template_dir, library_dir,
+                 fs::copy_options::recursive | fs::copy_options::skip_existing);
+    } catch (...) {
+        // Best-effort seed. If it fails, SystemLibrary will start empty and
+        // the user can Add new / re-copy the template by hand.
+    }
+}
 
 // Ищем Python в таком порядке:
 //   1) переменная окружения U_CUDA_PYTHON (полный путь к python.exe)
@@ -96,11 +172,17 @@ static void set_clipboard_win(const std::string& text) {
 }
 
 int main() {
-    // ocr_server.py и library\ копируются рядом с exe в Post-Build Event.
+    // ocr_server.py, kernels\ и NVRTC-заголовки копируются рядом с exe в
+    // Post-Build Event. library\ живёт по другой схеме: baseline лежит в
+    // library_template\ (git-tracked), а рабочая library\ — per-user, в
+    // gitignore. Первый запуск клонирует template → library; дальше UI
+    // пишет только в library\, и git-status остаётся чистым.
     std::string dir = exe_dir() + "\\";
     //printf("Wait 10s, podnimaetsya server");
     std::string ocr_script = dir + "ocr_server.py";
-    std::string library_dir = dir + "library";
+    LibraryPaths lib_paths = resolve_library_paths(dir);
+    seed_library_if_missing(lib_paths.library, lib_paths.tmpl);
+    const std::string& library_dir = lib_paths.library;
 
     std::string python_exe = resolve_python_exe(dir);
 
