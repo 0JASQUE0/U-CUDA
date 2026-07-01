@@ -1,5 +1,7 @@
 #include "app_model.h"
 #include "codegen.hpp"
+#include "session_io.h"
+#include <algorithm>
 #include <cstdlib>
 #include "sysparse.hpp"
 #include <stdexcept>
@@ -349,21 +351,106 @@ void cleanup_queue_after_removal(std::deque<ParametricQueueItem>& q,
     for (auto& it : q)
         if (it.kind == k && it.index > removed) --it.index;
 }
+
+// Помощник: у окон того же kind убрать `removed` из members, у оставшихся
+// индексов > removed сделать --index. Окно, у которого members опустел
+// (был последний diagram/curve, его удалили) — удаляется целиком, чтобы не
+// висело пустое окно без данных.
+void cleanup_plot_windows_after_removal(std::vector<ParametricPlotWindow>& wins,
+                                        ParametricPlotWindow::Kind k, int removed) {
+    for (auto& w : wins) {
+        if (w.kind != k) continue;
+        auto& m = w.members;
+        m.erase(std::remove(m.begin(), m.end(), removed), m.end());
+        for (auto& idx : m) if (idx > removed) --idx;
+    }
+    wins.erase(std::remove_if(wins.begin(), wins.end(),
+                              [k](const ParametricPlotWindow& w) {
+                                  return w.kind == k && w.members.empty();
+                              }),
+               wins.end());
+}
 } // namespace
 
 void AppModel::remove_bifurcation_diagram(int i) {
     bifurcation_session.remove_diagram(i);
     cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::Bifurcation, i);
+    cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::Bifurcation, i);
+    parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_lle_curve(int i) {
     lle_session.remove_curve(i);
     cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LLE, i);
+    cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::LLE, i);
+    parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_ls_curve(int i) {
     ls_session.remove_curve(i);
     cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LS, i);
+    cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::LS, i);
+    parametric_plot_windows_dirty = true;
+}
+
+void AppModel::add_parametric_plot_window(ParametricPlotWindow::Kind kind, bool mode_2d,
+                                          std::vector<int> initial_members) {
+    ParametricPlotWindow w;
+    w.kind = kind;
+    w.mode_2d = mode_2d;
+    w.members = std::move(initial_members);
+    // A 2D window shows exactly one heatmap — enforce single-member here too,
+    // not just in the UI, since this is the one place all windows go through.
+    if (w.mode_2d && w.members.size() > 1) w.members.resize(1);
+    w.id = next_parametric_plot_window_id++;
+    w.label = "Plot " + std::to_string(w.id);
+    w.label_is_manual = false;   // fresh window → auto-label
+    parametric_plot_windows.push_back(std::move(w));
+    parametric_plot_windows_dirty = true;
+}
+
+void AppModel::remove_parametric_plot_window(int pos) {
+    if (pos < 0 || pos >= (int)parametric_plot_windows.size()) return;
+    parametric_plot_windows.erase(parametric_plot_windows.begin() + pos);
+    parametric_plot_windows_dirty = true;
+}
+
+void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
+    if (!json.empty()) {
+        session_from_json_parametric_windows(json, parametric_plot_windows);
+        return;
+    }
+    parametric_plot_windows.clear();
+
+    // 1D: one window overlaying every 1D diagram/curve of a kind (reproduces
+    // the old "everything on one shared plot" behavior). 2D: one window PER
+    // diagram/curve, since a 2D window can only ever show a single heatmap.
+    std::vector<int> bd1;
+    for (size_t i = 0; i < bifurcation_session.diagrams.size(); ++i) {
+        if (bifurcation_session.diagrams[i].mode_2d)
+            add_parametric_plot_window(ParametricPlotWindow::Kind::Bifurcation, true, { (int)i });
+        else
+            bd1.push_back((int)i);
+    }
+    if (!bd1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::Bifurcation, false, bd1);
+
+    std::vector<int> lle1;
+    for (size_t i = 0; i < lle_session.curves.size(); ++i) {
+        if (lle_session.curves[i].mode_2d)
+            add_parametric_plot_window(ParametricPlotWindow::Kind::LLE, true, { (int)i });
+        else
+            lle1.push_back((int)i);
+    }
+    if (!lle1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::LLE, false, lle1);
+
+    std::vector<int> ls1;
+    for (size_t i = 0; i < ls_session.curves.size(); ++i) {
+        if (ls_session.curves[i].mode_2d)
+            add_parametric_plot_window(ParametricPlotWindow::Kind::LS, true, { (int)i });
+        else
+            ls1.push_back((int)i);
+    }
+    if (!ls1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::LS, false, ls1);
 }
 
 void AppModel::remove_basins_config(int i) {

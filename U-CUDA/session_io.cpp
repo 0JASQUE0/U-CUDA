@@ -219,7 +219,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
 static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig& bd) {
     o << "{";
     o << "\"label\":";            jstr(o, bd.label);
-    o << ",\"visible\":"          << (bd.visible ? "true" : "false");
+    o << ",\"label_is_manual\":"  << (bd.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, bd.scheme);
     o << ",\"symmetry_s\":";      jstr(o, bd.symmetry_s);
     o << ",\"param_index\":"      << bd.param_index;
@@ -249,6 +249,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"param_lo_2_text\":";  jstr(o, bd.param_lo_2_text);
     o << ",\"param_hi_2_text\":";  jstr(o, bd.param_hi_2_text);
     o << ",\"eps_dbscan_text\":";  jstr(o, bd.eps_dbscan_text);
+    o << ",\"colormap_idx\":"      << bd.colormap_idx;
     o << "}";
 }
 
@@ -257,7 +258,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
 // разборе legacy-формата (плоские ключи на верхнем уровне = одна БД).
 static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::string& key) {
     if      (key == "label")              bd.label             = p.str();
-    else if (key == "visible")            bd.visible           = p.boolean();
+    else if (key == "label_is_manual")    bd.label_is_manual   = p.boolean();
     else if (key == "scheme")             bd.scheme            = p.str();
     else if (key == "symmetry_s")         bd.symmetry_s        = p.str();
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
@@ -288,6 +289,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "param_lo_2_text")    bd.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    bd.param_hi_2_text   = p.str();
     else if (key == "eps_dbscan_text")    bd.eps_dbscan_text   = p.str();
+    else if (key == "colormap_idx")       bd.colormap_idx      = std::stoi(p.str_or_num());
     else return false;
     return true;
 }
@@ -391,7 +393,7 @@ namespace {
 void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);
-    o << ",\"visible\":"          << (c.visible ? "true" : "false");
+    o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
@@ -419,12 +421,13 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"var_sweep_index_2\":" << c.var_sweep_index_2;
     o << ",\"param_lo_2_text\":";  jstr(o, c.param_lo_2_text);
     o << ",\"param_hi_2_text\":";  jstr(o, c.param_hi_2_text);
+    o << ",\"colormap_idx\":"      << c.colormap_idx;
     o << "}";
 }
 
 bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
-    else if (key == "visible")            c.visible           = p.boolean();
+    else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
@@ -451,6 +454,7 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "var_sweep_index_2")  c.var_sweep_index_2 = std::stoi(p.str_or_num());
     else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();
+    else if (key == "colormap_idx")       c.colormap_idx      = std::stoi(p.str_or_num());
     else return false;
     return true;
 }
@@ -532,7 +536,7 @@ namespace {
 void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);
-    o << ",\"visible\":"          << (c.visible ? "true" : "false");
+    o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
@@ -559,12 +563,13 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"param_lo_2_text\":";    jstr(o, c.param_lo_2_text);
     o << ",\"param_hi_2_text\":";    jstr(o, c.param_hi_2_text);
     o << ",\"display_exponent_idx\":" << c.display_exponent_idx;
+    o << ",\"colormap_idx\":"         << c.colormap_idx;
     o << "}";
 }
 
 bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
-    else if (key == "visible")            c.visible           = p.boolean();
+    else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
@@ -592,6 +597,7 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();
     else if (key == "display_exponent_idx") c.display_exponent_idx = std::stoi(p.str_or_num());
+    else if (key == "colormap_idx")         c.colormap_idx          = std::stoi(p.str_or_num());
     else return false;
     return true;
 }
@@ -972,6 +978,83 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
             s.active_config_index = 0;
         }
         s.running_config_index = -1;
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// Parametric plot windows: a flat array of {id, kind, mode_2d, label,
+// members[]}, modeled directly on the "projections" block above.
+std::string session_to_json_parametric_windows(const std::vector<ParametricPlotWindow>& wins) {
+    std::ostringstream o;
+    o << "{\n  \"windows\":[";
+    for (size_t i = 0; i < wins.size(); ++i) {
+        if (i) o << ",";
+        const auto& w = wins[i];
+        o << "{\"id\":" << w.id;
+        o << ",\"kind\":" << (int)w.kind;
+        o << ",\"mode_2d\":" << (w.mode_2d ? "true" : "false");
+        o << ",\"label\":"; jstr(o, w.label);
+        o << ",\"label_is_manual\":" << (w.label_is_manual ? "true" : "false");
+        o << ",\"members\":[";
+        for (size_t k = 0; k < w.members.size(); ++k) { if (k) o << ","; o << w.members[k]; }
+        o << "]}";
+    }
+    o << "]\n}\n";
+    return o.str();
+}
+
+bool session_from_json_parametric_windows(const std::string& json, std::vector<ParametricPlotWindow>& wins) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) { wins.clear(); return true; }
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "windows") {
+                wins.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        ParametricPlotWindow w;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k = p.str(); p.expect(':');
+                                if      (k == "id")      w.id      = std::stoi(p.str_or_num());
+                                else if (k == "kind")    w.kind    = (ParametricPlotWindow::Kind)std::stoi(p.str_or_num());
+                                else if (k == "mode_2d") w.mode_2d = p.boolean();
+                                else if (k == "label")   w.label   = p.str();
+                                else if (k == "label_is_manual") w.label_is_manual = p.boolean();
+                                else if (k == "members") {
+                                    w.members.clear();
+                                    p.expect('[');
+                                    if (!p.opt(']')) {
+                                        while (true) {
+                                            w.members.push_back(std::stoi(p.str_or_num()));
+                                            if (p.opt(',')) continue;
+                                            p.expect(']'); break;
+                                        }
+                                    }
+                                }
+                                else p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        wins.push_back(std::move(w));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
         return true;
     }
     catch (...) {

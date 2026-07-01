@@ -176,7 +176,11 @@ struct PhaseAnalysisSession {
 // Несколько БД оверлеятся на один график с легендой (см. BifurcationAnalysisSession).
 struct BifurcationDiagramConfig {
     std::string label   = "BD 1";   // подпись для легенды, редактируется
-    bool        visible = true;     // toggle в легенде (как visible у IC)
+    // Если false, label регенерируется каждый кадр из свипа (компактный
+    // итог: `sigma [0..30]` / `sigma x rho`). Ставится в true при ручной
+    // правке; сбрасывается в false, если пользователь очистил поле.
+    // Дефолт true — старые сохранения без ключа не перезатираем.
+    bool        label_is_manual = true;
 
     // Схема интегрирования: built-in имя или имя custom-схемы (resolve через
     // session.custom_schemes на момент Run).
@@ -244,6 +248,9 @@ struct BifurcationDiagramConfig {
     bool        last_run_2d_ok    = false;
     int         data_generation_2d = 0;
     bool        fit_request_2d    = false;
+    // Persisted heatmap colormap choice for this diagram (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx      = -1;
 };
 
 // Сессия параметрического анализа: одна система + список БД, каждая со своим
@@ -328,7 +335,7 @@ struct BifurcationAnalysisSession {
 //     ренормализациями, в единицах времени).
 struct LLECurveConfig {
     std::string label   = "LLE 1";
-    bool        visible = true;
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
@@ -384,6 +391,9 @@ struct LLECurveConfig {
     bool        last_run_2d_ok = false;
     int         data_generation_2d = 0;
     bool        fit_request_2d = false;
+    // Persisted heatmap colormap choice for this curve (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
 };
 
 // Сессия LLE-анализа. Структура и API — копия BifurcationAnalysisSession
@@ -711,7 +721,7 @@ struct FastSyncAnalysisSession {
 // каждую точку параметра, где N == |vars|.
 struct LSCurveConfig {
     std::string label   = "LS 1";
-    bool        visible = true;
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
@@ -764,6 +774,9 @@ struct LSCurveConfig {
 
     // Какую экспоненту показывать в heatmap (0-based, default λ₁).
     int         display_exponent_idx = 0;
+    // Persisted heatmap colormap choice for this curve (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
 };
 
 // LS-сессия — структура та же что у LLE-сессии, но другая Request/Result и
