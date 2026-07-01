@@ -39,9 +39,15 @@ typedef unsigned long long uint64_t;
 #define CURAND_KERNEL_H
 typedef struct { unsigned long long state; } curandState_t;
 typedef curandState_t curandStateXORWOW_t;
+// splitmix64-подобное перемешивание: раньше sequence/offset игнорировались,
+// и общий seed для всех потоков (см. cudaLibrary.cu) давал бы одинаковое
+// состояние на каждый idx. Теперь sequence реально участвует в перемешивании.
 __device__ __forceinline__ void curand_init(
-    unsigned long long seed, unsigned long long, unsigned long long, curandState_t* s) {
-    s->state = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+    unsigned long long seed, unsigned long long sequence, unsigned long long offset, curandState_t* s) {
+    unsigned long long z = seed + sequence * 0x9E3779B97F4A7C15ULL + offset;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    s->state = z ^ (z >> 31);
 }
 __device__ __forceinline__ float curand_uniform(curandState_t* s) {
     s->state = s->state * 6364136223846793005ULL + 1442695040888963407ULL;
