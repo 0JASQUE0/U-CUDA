@@ -32,9 +32,15 @@ void set_tick_precision(int n);
 void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float out[16]);
 
 // ��������� ����� � �������� �� X (������������ ����� + ����� �����).
+// Опциональный snap-to-node: если snap_n > 1 и snap_hi > snap_lo, шаг тиков
+// округляется к целому кратному step_node = (snap_hi - snap_lo)/(snap_n - 1),
+// стартовая позиция — тоже кратна этому шагу. Значит тики попадают ровно на
+// узлы параметрической сетки. Для 1D-графиков Bif/LLE/LS. Дефолты выключают
+// snap (старое поведение).
 void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 plot_pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text);
+    ImU32 col_grid, ImU32 col_text,
+    double snap_lo = 0.0, double snap_hi = 0.0, int snap_n = 0);
 
 // ��������� ����� � �������� �� Y (�������������� ����� + ����� �����).
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,

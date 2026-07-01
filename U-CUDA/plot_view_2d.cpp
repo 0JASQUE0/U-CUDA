@@ -191,7 +191,14 @@ void Plot2DView::render(PlotRenderer& renderer,
     ImU32 col_grid = plot_col_grid();
     ImU32 col_axis = plot_col_axis();
     ImU32 col_text = plot_col_text();
-    draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
+    // Snap-to-node тиков X — активируется, когда caller выставил snap-конфиг
+    // (1D Bif/LLE/LS). Оси других графиков (Phase/TimeDomain) идут по дефолту
+    // без snap.
+    double snap_axis_lo = std::min(snap_x_min, snap_x_max);
+    double snap_axis_hi = std::max(snap_x_min, snap_x_max);
+    int    snap_axis_n  = (snap_x_to_grid && snap_x_n > 1) ? snap_x_n : 0;
+    draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
+                     snap_axis_lo, snap_axis_hi, snap_axis_n);
     draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
 
     double vrx = ex1 - ex0;
