@@ -23,19 +23,17 @@ static bool cu_ok(CUresult r, std::string& err, const char* where) {
 
 NvrtcEngine::NvrtcEngine() {}
 NvrtcEngine::~NvrtcEngine() {
-    unload_all();
+    release_module();
     if (context_) { cuCtxDestroy((CUcontext)context_); context_ = nullptr; }
 }
 
-void NvrtcEngine::unload_all() {
-    for (auto& e : cache_) cuModuleUnload((CUmodule)e.module);
-    cache_.clear();
+void NvrtcEngine::release_module() {
+    if (module_) { cuModuleUnload((CUmodule)module_); module_ = nullptr; }
     kernel_ = nullptr;
     compiled_ = false;
 }
 
 bool NvrtcEngine::init() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (inited_) return true;
     CUOK(cuInit(0), "cuInit");
     CUdevice dev;
@@ -56,36 +54,13 @@ bool NvrtcEngine::init() {
 }
 
 bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!inited_ && !init()) return false;
     // Если этот worker-thread унаследовал чужой текущий контекст (например от
     // ParametricEngine, который работал в той же thread-pool ячейке), модуль
     // и kernel из нашего контекста дадут "invalid resource handle @ launch".
     // Жёстко выставляем НАШ контекст текущим перед любыми CU/NVRTC-вызовами.
     cuCtxSetCurrent((CUcontext)context_);
-
-    // Ключ кэша: КРС-текст + размерность. 0x1F — разделитель (не встречается
-    // в сгенерированном коде), иначе "foo"+"12" неотличимо от "foo1"+"2".
-    std::string key = krs_body;
-    key += '\x1f';
-    key += std::to_string(amountOfX);
-
-    // Cache hit: систему/метод уже компилировали в этой сессии — переключаемся
-    // на готовый модуль без обращения к NVRTC.
-    for (size_t i = 0; i < cache_.size(); ++i) {
-        if (cache_[i].key == key) {
-            kernel_ = cache_[i].kernel;
-            amountOfX_ = amountOfX;
-            compiled_ = true;
-            if (i + 1 != cache_.size()) {           // MRU: hit -> в конец
-                CacheEntry hit = cache_[i];
-                cache_.erase(cache_.begin() + i);
-                cache_.push_back(hit);
-            }
-            return true;
-        }
-    }
-
+    release_module();
     amountOfX_ = amountOfX;
 
     // Собираем полный CUDA-исходник: тип, КРС как __device__, ядро траектории.
@@ -137,15 +112,9 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
 
     CUmodule mod;
     CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad");
+    module_ = mod;
     CUfunction fn;
     CUOK(cuModuleGetFunction(&fn, mod, "phase_kernel"), "getFunction");
-
-    // При переполнении кэша вытесняем самый старый (LRU, начало вектора).
-    if (cache_.size() >= kCacheCapacity) {
-        cuModuleUnload((CUmodule)cache_.front().module);
-        cache_.erase(cache_.begin());
-    }
-    cache_.push_back({ key, mod, fn });
     kernel_ = fn;
     compiled_ = true;
     return true;
@@ -155,7 +124,6 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     const std::vector<double>& values,
     double h, int total, int skip,
     std::vector<std::vector<std::vector<double>>>& out) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     out.clear();
     // см. комментарий в compile() — нужно выставить НАШ контекст текущим.
     cuCtxSetCurrent((CUcontext)context_);
