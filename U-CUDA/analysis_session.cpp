@@ -347,6 +347,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     diagrams.clear();
     BifurcationDiagramConfig bd;
     bd.label = "BD 1";
+    bd.label_is_manual = false;   // fresh diagram → auto-label
     bd.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
     bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
@@ -384,6 +385,7 @@ void BifurcationAnalysisSession::add_diagram() {
         for (const auto& p : params) bd.param_values[p] = "";
     }
     bd.label = "BD " + std::to_string(diagrams.size() + 1);
+    bd.label_is_manual = false;   // fresh diagram → auto-label
     diagrams.push_back(std::move(bd));
     active_diagram_index = (int)diagrams.size() - 1;
 }
@@ -664,6 +666,7 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     curves.clear();
     LLECurveConfig c;
     c.label = "LLE 1";
+    c.label_is_manual = false;   // fresh curve → auto-label
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
@@ -698,6 +701,7 @@ void LLEAnalysisSession::add_curve() {
         for (const auto& p : params) c.param_values[p] = "";
     }
     c.label = "LLE " + std::to_string(curves.size() + 1);
+    c.label_is_manual = false;   // fresh curve → auto-label
     curves.push_back(std::move(c));
     active_curve_index = (int)curves.size() - 1;
 }
@@ -1335,7 +1339,10 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
     req.mode           = (c.mode == 1) ? 1 : 0;
     req.h              = parse_d(c.h_text, 0.01);
     req.iter_of_synchr = std::max(1, parse_i(c.iter_of_synchr_text, 100));
-    req.pre_scaller    = std::max(1, parse_i(c.pre_scaller_text, 1));
+    // On Grid: decimator не применяется к сетке ошибок синхронизации —
+    // всегда полная точность, чтобы _config.csv не расходился с реальным
+    // расчётом.
+    req.pre_scaller    = (req.mode == 1) ? 1 : std::max(1, parse_i(c.pre_scaller_text, 1));
     req.max_value      = parse_d(c.max_value_text, 1e6);
 
     req.t_max          = parse_d(c.t_max_text, 100.0);
@@ -1460,6 +1467,7 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     curves.clear();
     LSCurveConfig c;
     c.label = "LS 1";
+    c.label_is_manual = false;   // fresh curve → auto-label
     c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
@@ -1494,6 +1502,7 @@ void LyapunovSpectrumAnalysisSession::add_curve() {
         for (const auto& p : params) c.param_values[p] = "";
     }
     c.label = "LS " + std::to_string(curves.size() + 1);
+    c.label_is_manual = false;   // fresh curve → auto-label
     curves.push_back(std::move(c));
     active_curve_index = (int)curves.size() - 1;
 }

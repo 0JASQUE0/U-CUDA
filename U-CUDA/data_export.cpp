@@ -466,6 +466,20 @@ bool export_basins(const BasinsResult& res, const std::string& path)
 // FastSync
 // =============================================================================
 
+// Names must match the combo box entries in gui.cpp (FastSync "Synchro
+// runtime" section) so the config file reads the same as the UI.
+static const char* type_of_synch_name(int v) {
+    return v == 1 ? "Bidirectional" : "Unidirectional";
+}
+
+static const char* error_estim_name(int v) {
+    switch (v) {
+        case 1:  return "# iters to reach FS_error_trs";
+        case 2:  return "RMS at last point";
+        default: return "RMS on last iter";
+    }
+}
+
 static void write_fastsync_common(std::ofstream& out, const FastSyncSnapshot& s)
 {
     const int nv  = static_cast<int>(s.values.size());
@@ -488,8 +502,9 @@ static void write_fastsync_common(std::ofstream& out, const FastSyncSnapshot& s)
     out << "h = " << s.h << "\n";
     out << "iter_of_synchr = " << s.iter_of_synchr << "\n";
     out << "decimator = " << s.preScaller << "\n";
-    out << "type_of_synch = " << s.type_of_synch
-        << ", error_estim = " << s.error_estim
+    out << "window = " << s.window << "\n";
+    out << "type_of_synch = " << type_of_synch_name(s.type_of_synch)
+        << ", error_estim = " << error_estim_name(s.error_estim)
         << ", fs_error_trs = " << s.fs_error_trs << "\n";
 }
 
@@ -504,8 +519,8 @@ void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s)
 
     if (s.mode == 0) {
         out << "CT = " << s.tMax << "\nTT = " << s.transientTime << "\n";
-        out << "window = " << s.window << "\n";
     } else {
+        out << "TT = " << s.transientTime << "\n";
         out << "axis_x_var = " << s.axis_x_var << ", axis_y_var = " << s.axis_y_var << "\n";
         out << "axis_x: " << s.axis_x_lo << " .. " << s.axis_x_hi << "\n";
         out << "axis_y: " << s.axis_y_lo << " .. " << s.axis_y_hi << "\n";
