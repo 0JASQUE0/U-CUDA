@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -26,6 +27,12 @@ namespace {
 constexpr int kBlockSize         = 32;     // как в NonLinAnal::bifurcation1D
 constexpr int kMaxAmountOfX      = 32;
 constexpr int kMaxAmountOfValues = 64;
+// Сколько последних уникальных вариантов (КРС+размерность+флаги) держим
+// скомпилированными одновременно на кэш-слот (1 активный + до
+// kModuleCacheCapacity-1 "холодных"). Переключение между недавно
+// использованными системами/методами в пределах этого окна не требует
+// перекомпиляции — см. try_reuse_cached/park_active_before_overwrite ниже.
+constexpr size_t kModuleCacheCapacity = 8;
 
 std::string exe_dir() {
     char buf[MAX_PATH];
@@ -84,6 +91,53 @@ std::string cu_err(CUresult r) {
 inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
     if (nPts <= 1) return lo;
     return lo + (hi - lo) * (double)idx / (double)(nPts - 1);
+}
+
+// --- LRU для module-кэшей (bif1d/lle/ls/basins/fastsync и т.д.) ---
+// Каждый кэш-слот — один "активный" CachedXModule (как раньше) + вектор
+// "холодных" (недавно активных, вытесненных). CachedT — любая из структур
+// вида { std::string key; CUmodule module; CUfunction kernel_...; }.
+
+// true + ничего не меняет, если key уже активен. Если key найден среди
+// холодных — переставляет местами с активным (O(capacity), без NVRTC).
+// false, если нужна компиляция с нуля (вызывающий сам заполнит active).
+template <typename CachedT>
+bool try_reuse_cached(CachedT& active, std::vector<CachedT>& cold, const std::string& key) {
+    if (active.module && active.key == key) return true;
+    for (size_t i = 0; i < cold.size(); ++i) {
+        if (cold[i].key == key) {
+            std::swap(active, cold[i]);
+            if (i + 1 != cold.size()) {           // MRU: hit -> в конец
+                CachedT tmp = std::move(cold[i]);
+                cold.erase(cold.begin() + i);
+                cold.push_back(std::move(tmp));
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Перед перезаписью active новым модулем — парковать старый (если валиден)
+// в cold вместо немедленной выгрузки, вытесняя старейший при переполнении.
+// Обязательно зовётся ПОСЛЕ try_reuse_cached() вернувшего false.
+template <typename CachedT>
+void park_active_before_overwrite(CachedT& active, std::vector<CachedT>& cold, size_t cold_capacity) {
+    if (!active.module) return;
+    cold.push_back(std::move(active));
+    active = CachedT{};   // move не обнуляет raw-указатели — сбрасываем явно,
+                          // иначе module/kernel-хэндлы задублируются с cold.back()
+    if (cold.size() > cold_capacity) {
+        cuModuleUnload(cold.front().module);
+        cold.erase(cold.begin());
+    }
+}
+
+// Выгружает и очищает весь холодный кэш (деструктор Impl).
+template <typename CachedT>
+void unload_cold(std::vector<CachedT>& cold) {
+    for (auto& e : cold) if (e.module) cuModuleUnload(e.module);
+    cold.clear();
 }
 
 }  // namespace
@@ -179,6 +233,7 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_search_clear     = nullptr;  // CUDA_dbscan_search_clear_points_kernel
     };
     CachedBasinsModule cached_basins;
+    std::vector<CachedBasinsModule> cached_basins_cold;  // LRU, см. try_reuse_cached
 
     // Fast Synchro — два модуля (mode 0 = on attractor, mode 1 = on grid).
     // Каждый кэширует свой PTX, ключ = hash(krs_body)+amountOfX+":fs_attr"/":fs_grid"
@@ -196,6 +251,8 @@ struct ParametricEngine::Impl {
     };
     CachedFastSyncModule cached_fs_attr;
     CachedFastSyncModule cached_fs_grid;
+    std::vector<CachedFastSyncModule> cached_fs_attr_cold;  // LRU, см. try_reuse_cached
+    std::vector<CachedFastSyncModule> cached_fs_grid_cold;
 
     ~Impl() {
         if (inited) {
@@ -210,6 +267,9 @@ struct ParametricEngine::Impl {
             release_basins_module();
             release_fs_attr_module();
             release_fs_grid_module();
+            unload_cold(cached_basins_cold);
+            unload_cold(cached_fs_attr_cold);
+            unload_cold(cached_fs_grid_cold);
             cuCtxDestroy(context);
         }
     }
@@ -3093,8 +3153,8 @@ struct ParametricEngine::Impl {
                                   std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":basins";
-        if (cached_basins.module && cached_basins.key == key) return true;
-        release_basins_module();
+        if (try_reuse_cached(cached_basins, cached_basins_cold, key)) return true;
+        park_active_before_overwrite(cached_basins, cached_basins_cold, kModuleCacheCapacity - 1);
 
         if (!load_sources(err)) return false;
 
@@ -3869,6 +3929,7 @@ struct ParametricEngine::Impl {
                            int type_of_synch_v, int error_estim_v, double fs_error_trs_v,
                            const std::vector<const char*>& expr_kernels,
                            CachedFastSyncModule& slot,
+                           std::vector<CachedFastSyncModule>& cold,
                            std::string& err)
     {
         cuCtxSetCurrent(context);
@@ -3878,13 +3939,8 @@ struct ParametricEngine::Impl {
                         + ":t" + std::to_string(type_of_synch_v)
                         + ":e" + std::to_string(error_estim_v)
                         + ":r" + trs_buf;
-        if (slot.module && slot.key == key) return true;
-        if (slot.module) {
-            cuModuleUnload(slot.module);
-            slot.module = nullptr;
-            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = slot.kernel_fs_transient = nullptr;
-            slot.key.clear();
-        }
+        if (try_reuse_cached(slot, cold, key)) return true;
+        park_active_before_overwrite(slot, cold, kModuleCacheCapacity - 1);
         if (!load_sources(err)) return false;
 
         std::string src = src_template;
@@ -4045,7 +4101,7 @@ struct ParametricEngine::Impl {
             };
             if (!compile_fs_module(src_template_fs_attr, ":fs_attr", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_attr, err)) return fail(err);
+                                   exprs, cached_fs_attr, cached_fs_attr_cold, err)) return fail(err);
 
             const int amountOfNTPoints      = (int)(req.window / req.h);
             const int amountOfCTPoints      = (int)(req.t_max / req.h);
@@ -4211,7 +4267,7 @@ struct ParametricEngine::Impl {
             std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro", "fillFSTransientIC" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_grid, err)) return fail(err);
+                                   exprs, cached_fs_grid, cached_fs_grid_cold, err)) return fail(err);
 
             // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
