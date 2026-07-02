@@ -451,6 +451,28 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 		X[i] += h * N[i];
 }
 
+// Single-thread transient settler для FastSynchro On Grid: интегрирует ОДНУ
+// траекторию (uncoupled, K=0) на amountOfPointsForSkip шагов от X0, пишет
+// результат обратно в X0 (in place). Используется, чтобы "фиксированная"
+// (не свипуемая по сетке) IC — master или slave — стартовала на аттракторе,
+// как и master в режиме On Attractor (fillFSMasterTrajectory).
+extern "C" __global__ void fillFSTransientIC(
+	const numb* values,
+	const numb h,
+	numb* X0,
+	const int amountOfPointsForSkip)
+{
+	if (threadIdx.x != 0 || blockIdx.x != 0) return;
+	numb X[AMOUNTOFX];
+	numb zeros[AMOUNTOFX];
+	for (int i = 0; i < AMOUNTOFX; ++i) { X[i] = X0[i]; zeros[i] = 0; }
+
+	for (int i = 0; i < amountOfPointsForSkip; ++i)
+		calculateDiscreteModelforFastSynchro(X, X, zeros, values, h, 1);
+
+	for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = X[i];
+}
+
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,

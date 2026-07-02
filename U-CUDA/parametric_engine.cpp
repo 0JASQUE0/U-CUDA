@@ -192,6 +192,7 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_fs_fill  = nullptr;  // fillFSMasterTrajectory (template, mode 0)
         CUfunction   kernel_fs_traj  = nullptr;  // calculateDiscreteModelforFastSynchroCUDA (mode 0)
         CUfunction   kernel_fs_grid  = nullptr;  // calculateDiscreteModelICCforFastSynchro (mode 1)
+        CUfunction   kernel_fs_transient = nullptr; // fillFSTransientIC (mode 1, optional TT pre-pass)
     };
     CachedFastSyncModule cached_fs_attr;
     CachedFastSyncModule cached_fs_grid;
@@ -3881,7 +3882,7 @@ struct ParametricEngine::Impl {
         if (slot.module) {
             cuModuleUnload(slot.module);
             slot.module = nullptr;
-            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = nullptr;
+            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = slot.kernel_fs_transient = nullptr;
             slot.key.clear();
         }
         if (!load_sources(err)) return false;
@@ -3965,6 +3966,7 @@ struct ParametricEngine::Impl {
             if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
             else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
             else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       slot.kernel_fs_grid = f;
+            else if (sym_name == "fillFSTransientIC")                             slot.kernel_fs_transient = f;
         }
         slot.key = key;
         return true;
@@ -4174,6 +4176,11 @@ struct ParametricEngine::Impl {
             // CSV (On Attractor): delegate to data_export so engine and the
             // GUI right-click export produce byte-identical files.
             if (!req.csv_output_path.empty()) {
+                std::ofstream cfg(req.csv_output_path + "_config.csv");
+                if (cfg.is_open()) {
+                    cfg << std::setprecision(set_precision);
+                    data_export::write_fastsync_config(cfg, res.snapshot);
+                }
                 std::ofstream csv(req.csv_output_path);
                 if (csv.is_open()) {
                     csv << std::setprecision(set_precision);
@@ -4199,8 +4206,9 @@ struct ParametricEngine::Impl {
             if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
             if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
             if (req.axis_x_var == req.axis_y_var) return fail("axis_x_var == axis_y_var");
+            if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
 
-            std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
+            std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro", "fillFSTransientIC" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
                                    exprs, cached_fs_grid, err)) return fail(err);
@@ -4251,6 +4259,26 @@ struct ParametricEngine::Impl {
                 FS_GCHECK(cudaMemcpy(d_values, req.values.data(),     amountOfValues_int * sizeof(double), cudaMemcpyHostToDevice), "memcpy values");
                 FS_GCHECK(cudaMemcpy(d_kF,     req.k_forward.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kF");
                 FS_GCHECK(cudaMemcpy(d_kB,     req.k_backward.data(), amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kB");
+            }
+
+            // Transient (TT): доводим до аттрактора ту IC, которую сетка НЕ
+            // свипует. swapRole==0 (default, "Vary slave IC" снята) — сетка
+            // свипует master, slave фиксирован → транзиент для slave.
+            // swapRole==1 — сетка свипует slave, master фиксирован →
+            // транзиент для master.
+            if (req.transient_time > 0.0) {
+                const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+                if (amountOfPointsForSkip > 0) {
+                    double* d_fixed_ic = req.grid_swap_master_slave ? d_ic_m : d_ic_s;
+                    double  h_arg      = req.h;
+                    int     skip_arg   = amountOfPointsForSkip;
+                    void* args_transient[] = { &d_values, &h_arg, &d_fixed_ic, &skip_arg };
+                    CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_transient,
+                                                1, 1, 1, 1, 1, 1,
+                                                0, nullptr, args_transient, nullptr);
+                    if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_grid transient): " + cu_err(r); goto FS1_FAIL; }
+                    cudaDeviceSynchronize();
+                }
             }
 
             size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
@@ -4327,6 +4355,11 @@ struct ParametricEngine::Impl {
                 // GUI right-click export share the same writer (and stay
                 // byte-identical). Layout: 2-line ranges header + n×n grid.
                 if (!req.csv_output_path.empty()) {
+                    std::ofstream cfg(req.csv_output_path + "_config.csv");
+                    if (cfg.is_open()) {
+                        cfg << std::setprecision(set_precision);
+                        data_export::write_fastsync_config(cfg, res.snapshot);
+                    }
                     std::ofstream csv(req.csv_output_path);
                     if (csv.is_open()) {
                         csv << std::setprecision(set_precision);
