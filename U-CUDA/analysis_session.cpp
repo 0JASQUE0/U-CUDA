@@ -1339,7 +1339,10 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
     req.mode           = (c.mode == 1) ? 1 : 0;
     req.h              = parse_d(c.h_text, 0.01);
     req.iter_of_synchr = std::max(1, parse_i(c.iter_of_synchr_text, 100));
-    req.pre_scaller    = std::max(1, parse_i(c.pre_scaller_text, 1));
+    // On Grid: decimator не применяется к сетке ошибок синхронизации —
+    // всегда полная точность, чтобы _config.csv не расходился с реальным
+    // расчётом.
+    req.pre_scaller    = (req.mode == 1) ? 1 : std::max(1, parse_i(c.pre_scaller_text, 1));
     req.max_value      = parse_d(c.max_value_text, 1e6);
 
     req.t_max          = parse_d(c.t_max_text, 100.0);

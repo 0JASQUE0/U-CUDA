@@ -4276,11 +4276,31 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         InputNumStr("h",                c.h_text,              120);
         if (c.mode == 0) {
             InputNumStr("t_max",        c.t_max_text,          120);
-            InputNumStr("transient",    c.transient_text,      120);
         }
-        InputNumStr("window",           c.window_text,         120);
-        InputNumStr("iter of synch",    c.iter_of_synchr_text, 120);
-        InputNumStr("decimator",        c.pre_scaller_text,    120);
+        InputNumStr("transient",        c.transient_text,      120);
+        bool window_changed = InputNumStr("window",           c.window_text,         120);
+        bool iter_changed   = InputNumStr("iter of synch",    c.iter_of_synchr_text, 120);
+        if (!window_changed && !iter_changed) {
+            // window/iter — источник истины в этом кадре (или ничего не
+            // менялось, напр. только что загрузили сессию): пересчитываем
+            // total sync time ДО отрисовки его поля, без задержки в кадр.
+            double window_v = std::atof(c.window_text.c_str());
+            double iter_v   = std::max(1.0, std::atof(c.iter_of_synchr_text.c_str()));
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.10g", (2.0 * iter_v - 1.0) * window_v);
+            c.total_time_text = buf;
+        }
+        if (InputNumStr("total sync time", c.total_time_text, 120)) {
+            // Пользователь правит total → пересчитываем window (iter фиксирован).
+            double total_v = std::atof(c.total_time_text.c_str());
+            double iter_v  = std::max(1.0, std::atof(c.iter_of_synchr_text.c_str()));
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.10g", total_v / (2.0 * iter_v - 1.0));
+            c.window_text = buf;
+        }
+        if (c.mode == 0) {
+            InputNumStr("decimator",    c.pre_scaller_text,    120);
+        }
         InputNumStr("max value",        c.max_value_text,      120);
     }
 

@@ -624,6 +624,11 @@ struct FastSyncConfig {
     // Окно синхронизации (раньше называлось n_time). Хранится как text;
     // парсится в numb при build_request.
     std::string window_text        = "50";
+    // Производное поле (UI-only, не сериализуется): суммарное время всей
+    // fast-sync траектории = (2*iter_of_synchr - 1) * window. Правка любого
+    // из трёх полей (window / iter_of_synchr / total_time) пересчитывает
+    // оставшиеся — см. gui.cpp Integration-секцию FastSync-панели.
+    std::string total_time_text    = "9950";
 
     // ---- mode == 1 (On Grid) ----
     int         axis_x_var       = 0;
