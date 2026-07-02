@@ -133,6 +133,12 @@ struct PhaseAnalysisSession {
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
+    // Фоновый прогрев NVRTC-кэша сразу при смене system/scheme (см.
+    // regenerate_krs) — к моменту реального Run модуль уже готов. Хранится
+    // тут же: деструктор future (async-политика) сам дождётся завершения,
+    // если сессия закрывается посреди прогрева.
+    std::future<void> prewarm_future;
+
     // session не копируется (содержит future) — только move.
     PhaseAnalysisSession() = default;
     PhaseAnalysisSession(PhaseAnalysisSession&&) = default;

@@ -303,15 +303,32 @@ void PhaseAnalysisSession::regenerate_krs() {
     krs_code.clear();
     // Сначала ищем среди custom — имя имеет приоритет над built-in (если бы
     // совпали, что мы блокируем в System tab).
+    bool found_custom = false;
     for (const auto& cs : custom_schemes) {
-        if (cs.name == scheme) { krs_code = cs.body; return; }
+        if (cs.name == scheme) { krs_code = cs.body; found_custom = true; break; }
     }
-    if (sys.rhs.empty()) return; // нет уравнений — нечего генерировать
-    try {
-        krs_code = codegen_scheme(sys, scheme_from_string(scheme));
+    if (!found_custom && !sys.rhs.empty()) {
+        try {
+            krs_code = codegen_scheme(sys, scheme_from_string(scheme));
+        }
+        catch (...) {
+            krs_code.clear();
+        }
     }
-    catch (...) {
-        krs_code.clear();
+
+    // Фоновый прогрев NVRTC-кэша под новую систему/метод — не дожидаемся
+    // Run. Не запускаем новый прогрев, пока предыдущий ещё не закончился:
+    // присвоение prewarm_future иначе заблокировало бы ЭТОТ (UI) поток на
+    // деструкторе предыдущей async-future. Best-effort — если не успеваем
+    // прогреть, настоящий Run просто скомпилирует синхронно, как раньше.
+    bool prewarm_busy = prewarm_future.valid() &&
+        prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    if (use_gpu && !krs_code.empty() && !prewarm_busy) {
+        std::string krs = krs_code;
+        int dim = (int)vars.size();
+        prewarm_future = std::async(std::launch::async, [krs, dim] {
+            prewarmPhasePortraitsNVRTC(krs, dim);
+        });
     }
 }
 
