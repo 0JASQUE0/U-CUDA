@@ -3334,6 +3334,19 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 	return;
 }
 
+// Seed-поиск (search_fixed / search_clear / search_unbound ниже) находит
+// ЛЮБУЮ ещё не размеченную точку нужного типа, чтобы начать от неё новый
+// кластер. Раньше все подходящие потоки писали `*res = idx` голой записью
+// без атомарности — какой именно idx "победит", зависело от порядка
+// завершения warp'ов/блоков и мог отличаться между запусками на одних и тех
+// же данных. Из-за этого DBSCAN каждый прогон стартовал кластеры в разном
+// порядке → одна и та же физическая область бассейна получала другой
+// числовой label → heatmap красил её другим цветом, хотя разбиение на
+// кластеры (границы бассейнов) оставалось верным и не менялось.
+// Фикс: atomicMin вместо голой записи — детерминированно выбираем
+// наименьший idx среди подходящих. Sentinel -1 (бит-паттерн 0xFFFFFFFF)
+// численно равен UINT_MAX, поэтому конвенция "res == -1 => не найдено"
+// переживает unsigned-перетолкование без изменений на host-стороне.
 __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 	const int amountOfData, const numb eps, int amountOfClusters,
 	int* amountOfNeighbors, int* neighbors, int idxCurPoint, int* helpfulArray)
@@ -3378,7 +3391,7 @@ __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* interva
 
 	if (labels[idx] == 0 && helpfulArray[idx] == 1)
 	{
-		*res = idx;
+		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
 	}
 }
@@ -3394,7 +3407,7 @@ __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* interva
 
 	if (helpfulArray[idx] == -1 && labels[idx] == 0)
 	{
-		*res = idx;
+		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
 	}
 }
@@ -3408,7 +3421,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 
 	if (helpfulArray[idx] == 0 && labels[idx] == 0)
 	{
-		*res = idx;
+		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
 	}
 }

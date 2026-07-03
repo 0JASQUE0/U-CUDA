@@ -36,6 +36,14 @@ public:
     bool   autoscale = true;
     float  manual_vmin = 0.0f;
     float  manual_vmax = 1.0f;
+    // Текстовое представление manual_vmin/vmax для UI — тот же InputNumStr
+    // (gui.cpp), что у Initial conditions/Parameters/Fast Synchro vmin/vmax,
+    // с шаговым вводом через ↑/↓ (digit_step_callback), а не InputFloat со
+    // сломанными при step=0 кнопками. Caller парсит их в manual_vmin/vmax
+    // сам каждый кадр (см. draw_bifurcation_plot/draw_lle_plot/draw_ls_plot,
+    // по образцу FastSync) — HeatmapView не тянет зависимость на gui.cpp.
+    std::string manual_vmin_text = "0";
+    std::string manual_vmax_text = "1";
     // Авто-рассчитанные на последнем render (для UI-отображения).
     float  shown_vmin = 0.0f;
     float  shown_vmax = 1.0f;
@@ -61,6 +69,13 @@ public:
     // нетронутыми. Переключается кнопкой "Swap axes" в toolbar'е каждого
     // heatmap-плота; повторное переключение возвращает исходную ориентацию.
     bool   swap_axes = false;
+
+    // Индекс отображаемой экспоненты (λ1/λ2/...) — актуально только для LS2D
+    // (draw_ls_plot в gui.cpp держит свою копию здесь, а не в общем
+    // LSCurveConfig::display_exponent_idx, чтобы два окна с одной и той же
+    // кривой не дёргали одну и ту же переменную). Остальные потребители
+    // HeatmapView (Bifurcation2D/LLE2D/Basins) поле не используют.
+    int    display_exponent_idx = 0;
 
     // Optional callback for extra items in the right-click popup menu (after
     // the standard Discrete-colorbar toggle). Caller assigns a lambda before

@@ -120,17 +120,44 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     int nx = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
     if (nx < 0) nx = 0;
 
-    for (int ix = 0; ix < nx; ++ix) {
-        double xv = xstart + ix * sx;
-        if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
+    // Подпись центрирована по px — её половина уезжает в margin_left/right
+    // (они для этого и оставлены в layout'е плота). Не клампим текст в
+    // ширину плота, иначе крайние tick'и без подписей.
+    auto draw_tick = [&](double xv) {
         float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
-        // Подпись центрирована по px — её половина уезжает в margin_left/right
-        // (они для этого и оставлены в layout'е плота). Не клампим текст в
-        // ширину плота, иначе крайние tick'и без подписей.
         dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
         std::string lbl = fmt_tick(xv);
         ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
         dl->AddText(ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
+    };
+
+    // Порог растёт вместе с tick precision (Settings): чем больше значащих
+    // цифр в подписи (fmt_tick), тем она шире, и тем больший зазор нужен,
+    // чтобы edge-tick не наезжал текстом на соседний регулярный тик.
+    double edge_frac;
+    if      (g_tick_precision <= 2) edge_frac = 0.25;
+    else if (g_tick_precision == 3) edge_frac = 0.30;
+    else if (g_tick_precision == 4) edge_frac = 0.35;
+    else                            edge_frac = 0.40;
+    const double edge_eps = sx * edge_frac;
+    bool lo_covered = false, hi_covered = false;
+
+    for (int ix = 0; ix < nx; ++ix) {
+        double xv = xstart + ix * sx;
+        if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
+        if (ix == 0)      lo_covered = std::abs(xv - lo) <= edge_eps;
+        if (ix == nx - 1) hi_covered = std::abs(xv - hi) <= edge_eps;
+        draw_tick(xv);
+    }
+
+    // Границы свипа (snap_lo/snap_hi) должны быть видны всегда, даже если
+    // регулярный шаг тиков на них не попадает — иначе крайняя точка расчёта
+    // визуально теряется (напр. подписи доходят до -0.0996, а не до 0).
+    // Только для 1D Bif/LLE/LS (snap активен); Phase/TimeDomain (snap_n==0)
+    // не затрагиваются.
+    if (snap_n > 1) {
+        if (!lo_covered) draw_tick(lo);
+        if (!hi_covered) draw_tick(hi);
     }
 }
 

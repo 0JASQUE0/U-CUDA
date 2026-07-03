@@ -394,14 +394,17 @@ void AppModel::remove_ls_curve(int i) {
 }
 
 void AppModel::add_parametric_plot_window(ParametricPlotWindow::Kind kind, bool mode_2d,
-                                          std::vector<int> initial_members) {
+                                          std::vector<int> initial_members,
+                                          bool colored_1d) {
     ParametricPlotWindow w;
     w.kind = kind;
     w.mode_2d = mode_2d;
+    w.colored_1d = colored_1d;
     w.members = std::move(initial_members);
-    // A 2D window shows exactly one heatmap — enforce single-member here too,
-    // not just in the UI, since this is the one place all windows go through.
-    if (w.mode_2d && w.members.size() > 1) w.members.resize(1);
+    // A 2D/Colored-1D window shows exactly one heatmap — enforce single-member
+    // here too, not just in the UI, since this is the one place all windows
+    // go through.
+    if ((w.mode_2d || w.colored_1d) && w.members.size() > 1) w.members.resize(1);
     w.id = next_parametric_plot_window_id++;
     w.label = "Plot " + std::to_string(w.id);
     w.label_is_manual = false;   // fresh window → auto-label
@@ -435,8 +438,11 @@ void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
     // diagram/curve, since a 2D window can only ever show a single heatmap.
     std::vector<int> bd1;
     for (size_t i = 0; i < bifurcation_session.diagrams.size(); ++i) {
-        if (bifurcation_session.diagrams[i].mode_2d)
+        const auto& bd = bifurcation_session.diagrams[i];
+        if (bd.mode_2d)
             add_parametric_plot_window(ParametricPlotWindow::Kind::Bifurcation, true, { (int)i });
+        else if (bd.colored_1d)
+            add_parametric_plot_window(ParametricPlotWindow::Kind::Bifurcation, false, { (int)i }, true);
         else
             bd1.push_back((int)i);
     }

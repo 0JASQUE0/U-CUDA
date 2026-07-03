@@ -256,7 +256,37 @@ struct BifurcationDiagramConfig {
     bool        fit_request_2d    = false;
     // Persisted heatmap colormap choice for this diagram (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    // Shared with colored_1d ниже (диаграмма всегда только в одном из двух
+    // heatmap-режимов одновременно).
     int         colormap_idx      = -1;
+
+    // ---- Colored 1D diagram (density heatmap поверх классической БД) ----
+    // Мутуально исключает mode_2d (см. config editor). Использует уже
+    // посчитанный `result` (bifurcation_points/peak_times) — доп. Run не
+    // нужен, гистограмма строится лениво в draw_bifurcation_plot.
+    bool        colored_1d           = false;
+    std::string colored_1d_b_text    = "601";  // Y-resolution (число бинов); X — существующий n_pts_text
+    bool        colored_1d_custom_y  = false;  // false → авто min/max±2.5% (см. MATLAB Sup/Slow)
+    std::string colored_1d_ymin_text = "0";
+    std::string colored_1d_ymax_text = "1";
+    bool        colored_1d_log       = true;   // логарифмическая плотность (см. isItLog)
+
+    // Кэш density-хитмапы (B x n_pts, row-major: idx = row*n_pts + col).
+    // Перестраивается лениво, когда расходится с текущими настройками — не
+    // каждый кадр. colored_1d_cache_gen — монотонный счётчик, бампается на
+    // каждой перестройке; отдаётся в HeatmapView::render как data_generation
+    // (отдельно от built_from, т.к. rebuild может случиться и без нового Run).
+    std::vector<double> colored_1d_cache;
+    double      colored_1d_cache_vmin = 0.0;
+    double      colored_1d_cache_vmax = 1.0;
+    int         colored_1d_cache_gen  = 0;
+    int         colored_1d_built_from = -1;    // data_generation, из которого построен кэш
+    int         colored_1d_cache_b            = -1;
+    bool        colored_1d_cache_log          = false;
+    bool        colored_1d_cache_custom_y     = false;
+    bool        colored_1d_cache_inter_peaks  = false;
+    double      colored_1d_cache_ymin_used = 0.0;
+    double      colored_1d_cache_ymax_used = 1.0;
 };
 
 // Сессия параметрического анализа: одна система + список БД, каждая со своим
@@ -783,11 +813,21 @@ struct LSCurveConfig {
     int         data_generation_2d = 0;
     bool        fit_request_2d = false;
 
-    // Какую экспоненту показывать в heatmap (0-based, default λ₁).
+    // Какую экспоненту показывать в heatmap (0-based, default λ₁); -1 = "sum
+    // L_i" (поэлементная сумма всех N плоскостей, см. sum_cache ниже).
     int         display_exponent_idx = 0;
     // Persisted heatmap colormap choice for this curve (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
     int         colormap_idx = -1;
+
+    // Кэш "sum L_i" — считается лениво в draw_ls_plot (gui.cpp) при первом
+    // выборе, не при каждом Run/кадре. sum_cache_gen хранит data_generation_2d,
+    // для которого кэш валиден (-1 = ещё не считан). Общий для всех окон,
+    // т.к. сами данные не зависят от того, какое окно на них смотрит.
+    std::vector<double> sum_cache;
+    double      sum_cache_min = 0.0;
+    double      sum_cache_max = 0.0;
+    int         sum_cache_gen = -1;
 };
 
 // LS-сессия — структура та же что у LLE-сессии, но другая Request/Result и
