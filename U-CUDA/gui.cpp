@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <regex>
 #include <unordered_map>
+#include <limits>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -230,7 +231,8 @@ static std::string auto_label_ls(const LSCurveConfig& c,
 static std::string auto_label_window(const ParametricPlotWindow& w) {
     const char* kn = w.kind == ParametricPlotWindow::Kind::Bifurcation ? "Bifurcation"
                     : w.kind == ParametricPlotWindow::Kind::LLE ? "LLE" : "LS";
-    return std::string(kn) + " " + (w.mode_2d ? "2D" : "1D");
+    const char* suffix = w.colored_1d ? "Colored 1D" : (w.mode_2d ? "2D" : "1D");
+    return std::string(kn) + " " + suffix;
 }
 
 static void refresh_auto_labels(AppModel& model) {
@@ -246,6 +248,14 @@ static void refresh_auto_labels(AppModel& model) {
     for (auto& w : model.parametric_plot_windows)
         if (!w.label_is_manual)
             w.label = auto_label_window(w);
+}
+
+// Общий парсер для полей вроде HeatmapView::manual_vmin_text — тот же
+// try/stod-с-дефолтом, что и локальный parse_d_local в FastSync-плоте, но
+// переиспользуемый (нужен в 4 местах: Bif2D/Colored1D/LLE2D/LS2D vmin/vmax).
+static double parse_num_or(const std::string& s, double def) {
+    if (s.empty()) return def;
+    try { return std::stod(s); } catch (...) { return def; }
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
@@ -1651,7 +1661,8 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // ----- 2D mode: хитмап «период»(p1, p2) через DBSCAN -----
-    ImGui::Checkbox("2D mode (period heatmap)", &bd.mode_2d);
+    if (ImGui::Checkbox("2D mode (period heatmap)", &bd.mode_2d) && bd.mode_2d)
+        bd.colored_1d = false;   // взаимоисключающе с Colored 1D diagram
     if (bd.mode_2d) {
         ImGui::Indent();
         if (!s.params.empty() || !s.vars.empty()) {
@@ -1704,6 +1715,23 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
             bd.fit_request = true;
 
     ImGui::Separator();
+
+    // ----- Colored 1D diagram (collapsible): density-хитмапа поверх
+    // классической БД. Вкл/выкл — чекбоксом в тулбаре над самим плотом
+    // (draw_bifurcation_plot), не здесь. Здесь — только настройки, видны
+    // когда режим уже активен.
+    if (bd.colored_1d && ImGui::CollapsingHeader("Colored 1D diagram##bd_c1d", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("Toggle this mode from the plot toolbar.");
+        InputNumStr("Y resolution", bd.colored_1d_b_text, 120);
+        ImGui::TextDisabled("X resolution follows Resolution above.");
+        ImGui::Checkbox("Custom Y range", &bd.colored_1d_custom_y);
+        if (bd.colored_1d_custom_y) {
+            InputNumStr("Ymin", bd.colored_1d_ymin_text, 120);
+            InputNumStr("Ymax", bd.colored_1d_ymax_text, 120);
+            ImGui::TextDisabled("Points outside [Ymin, Ymax] are discarded.");
+        }
+        ImGui::Checkbox("Logarithmic density scale", &bd.colored_1d_log);
+    }
 
     // ----- Integration (collapsible) -----
     if (ImGui::CollapsingHeader("Integration##bd_int", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1880,7 +1908,7 @@ static void configure_plot_view(Plot2DView& view, ParametricPlotWindow::Kind kin
 // `heatmap_map` are this window's own render-state instances, owned and
 // cached by draw_parametric_plot_windows (keyed by win.id).
 static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
-                                   const ParametricPlotWindow& win,
+                                   ParametricPlotWindow& win,
                                    PlotRenderer& renderer, Plot2DView& view,
                                    std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
@@ -1903,6 +1931,31 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     if (win.members.empty()) {
         ImGui::TextDisabled("No diagrams assigned to this window.");
         return;
+    }
+
+    // Тулбар-тумблер над плотом: переключает ЭТО окно между classic scatter
+    // и colored-1D heatmap напрямую, без похода в Plot windows → Type →
+    // Members. Держит diagram-флаг синхронно с window-флагом. Если членов
+    // больше одного (overlay в classic-режиме) — оставляем первого как
+    // "фокусного", остальные отбрасываются (heatmap-режимы — single-member,
+    // как и раньше при переключении через Type combo).
+    {
+        bool c1d = win.colored_1d;
+        if (ImGui::Checkbox("Colored 1D diagram##bdtoolbar", &c1d)) {
+            win.colored_1d = c1d;
+            if (c1d) win.mode_2d = false;
+            int focus = win.members[0];
+            if (win.members.size() > 1) win.members.resize(1);
+            if (focus >= 0 && focus < (int)s.diagrams.size()) {
+                s.diagrams[focus].colored_1d = c1d;
+                if (c1d) s.diagrams[focus].mode_2d = false;
+                if (!model.loaded_name.empty())
+                    lib.save_session(model.loaded_name, "_last_parametric",
+                                     session_to_json_parametric(model.bifurcation_session));
+            }
+            model.parametric_plot_windows_dirty = true;
+        }
+        ImGui::Separator();
     }
 
     if (win.mode_2d) {
@@ -1930,10 +1983,12 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             ImGui::SameLine();
             ImGui::Checkbox("Autoscale color##bdhm", &hb.autoscale);
             if (!hb.autoscale) {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmin##bdhm", &hb.manual_vmin, 0.0f, 0.0f, "%.4g");
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmax##bdhm", &hb.manual_vmax, 0.0f, 0.0f, "%.4g");
+                ImGui::SameLine();
+                InputNumStr("vmin##bdhm", hb.manual_vmin_text, 80);
+                hb.manual_vmin = (float)parse_num_or(hb.manual_vmin_text, hb.manual_vmin);
+                ImGui::SameLine();
+                InputNumStr("vmax##bdhm", hb.manual_vmax_text, 80);
+                hb.manual_vmax = (float)parse_num_or(hb.manual_vmax_text, hb.manual_vmax);
             }
             ImGui::SameLine();
             if (ImGui::Button(hb.swap_axes ? "Swap axes (on)##bdhm" : "Swap axes##bdhm"))
@@ -1976,6 +2031,191 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                       bdact.result_2d.param_lo,   bdact.result_2d.param_hi,
                       bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
                       bdact.result_2d.min_val, bdact.result_2d.max_val,
+                      fit);
+            ImGui::PopID();
+        }
+        return;
+    }
+
+    if (win.colored_1d) {
+        auto safe_stod = [](const std::string& v, double def) -> double {
+            if (v.empty()) return def;
+            size_t slash = v.find('/');
+            if (slash != std::string::npos) {
+                double num = std::atof(v.substr(0, slash).c_str());
+                double den = std::atof(v.substr(slash + 1).c_str());
+                if (den != 0) return num / den;
+            }
+            return std::atof(v.c_str());
+        };
+        for (size_t mi = 0; mi < win.members.size(); ++mi) {
+            int idx = win.members[mi];
+            if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
+            BifurcationDiagramConfig& bdact = s.diagrams[idx];
+            if (mi > 0) ImGui::Separator();
+            ImGui::PushID(idx);
+
+            const unsigned c1d_oid = 0xBD1D0000u + (unsigned)idx;
+            HeatmapView& hc = get_bd_heatmap(idx);
+
+            static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
+            int cmap_idx = (int)hc.colormap;
+            ImGui::SetNextItemWidth(140);
+            if (ImGui::Combo("Colormap##bdc1d", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+                hc.colormap = (HeatmapColormap)cmap_idx;
+                bdact.colormap_idx = cmap_idx;   // persist per-diagram only (shared with mode_2d)
+                if (!model.loaded_name.empty())
+                    lib.save_session(model.loaded_name, "_last_parametric",
+                                     session_to_json_parametric(model.bifurcation_session));
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("Autoscale color##bdc1d", &hc.autoscale);
+            if (!hc.autoscale) {
+                ImGui::SameLine();
+                InputNumStr("vmin##bdc1d", hc.manual_vmin_text, 80);
+                hc.manual_vmin = (float)parse_num_or(hc.manual_vmin_text, hc.manual_vmin);
+                ImGui::SameLine();
+                InputNumStr("vmax##bdc1d", hc.manual_vmax_text, 80);
+                hc.manual_vmax = (float)parse_num_or(hc.manual_vmax_text, hc.manual_vmax);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(hc.swap_axes ? "Swap axes (on)##bdc1d" : "Swap axes##bdc1d"))
+                hc.swap_axes = !hc.swap_axes;
+
+            if (!bdact.last_run_ok || bdact.result.bifurcation_points.empty()) {
+                ImGui::TextDisabled("No 1D data yet. Press Run.");
+                ImGui::PopID();
+                continue;
+            }
+
+            const auto& source = bdact.plot_inter_peaks ? bdact.result.peak_times
+                                                         : bdact.result.bifurcation_points;
+            int npts = bdact.result.n_pts;
+            int B = std::atoi(bdact.colored_1d_b_text.c_str());
+            if (B < 2) B = 2;
+
+            // Y-диапазон: авто (глобальный min/max ±2.5%, см. MATLAB Sup/Slow)
+            // либо ручной (точки за пределами отбрасываются при биннинге).
+            double ylo, yhi;
+            if (bdact.colored_1d_custom_y) {
+                ylo = safe_stod(bdact.colored_1d_ymin_text, 0.0);
+                yhi = safe_stod(bdact.colored_1d_ymax_text, 1.0);
+                if (yhi < ylo) std::swap(ylo, yhi);
+                if (yhi - ylo < 1e-12) yhi = ylo + 1.0;
+            } else {
+                double vmin =  std::numeric_limits<double>::infinity();
+                double vmax = -std::numeric_limits<double>::infinity();
+                for (int k = 0; k < npts && k < (int)source.size(); ++k) {
+                    if (k < (int)bdact.result.flags.size() && bdact.result.flags[k] < 0) continue;
+                    for (double y : source[k]) {
+                        if (y < vmin) vmin = y;
+                        if (y > vmax) vmax = y;
+                    }
+                }
+                if (!std::isfinite(vmin) || !std::isfinite(vmax)) { vmin = 0.0; vmax = 1.0; }
+                double dd = vmax - vmin;
+                if (dd < 1e-12) dd = 1.0;
+                ylo = vmin - dd * 0.025;
+                yhi = vmax + dd * 0.025;
+            }
+
+            bool stale = bdact.colored_1d_built_from       != bdact.data_generation
+                      || bdact.colored_1d_cache_b           != B
+                      || bdact.colored_1d_cache_log         != bdact.colored_1d_log
+                      || bdact.colored_1d_cache_custom_y    != bdact.colored_1d_custom_y
+                      || bdact.colored_1d_cache_inter_peaks != bdact.plot_inter_peaks
+                      || bdact.colored_1d_cache_ymin_used   != ylo
+                      || bdact.colored_1d_cache_ymax_used   != yhi;
+            if (stale) {
+                size_t plane_size = (size_t)B * (size_t)npts;
+                bdact.colored_1d_cache.assign(plane_size, 999.0);
+                std::vector<int> counts((size_t)B);
+                double vmin =  std::numeric_limits<double>::infinity();
+                double vmax = -std::numeric_limits<double>::infinity();
+                double yrange = yhi - ylo;
+                for (int k = 0; k < npts; ++k) {
+                    bool diverged = k >= (int)bdact.result.flags.size() || bdact.result.flags[k] < 0;
+                    if (diverged) continue;   // остаётся 999 (тот же серый sentinel, что и mode_2d)
+                    std::fill(counts.begin(), counts.end(), 0);
+                    int colmax = 0;
+                    if (k < (int)source.size()) {
+                        for (double y : source[k]) {
+                            if (bdact.colored_1d_custom_y && (y < ylo || y > yhi)) continue;
+                            int bin = (int)std::lround((y - ylo) / yrange * (B - 1));
+                            if (bin < 0) bin = 0; else if (bin >= B) bin = B - 1;
+                            int cnt = ++counts[(size_t)bin];
+                            if (cnt > colmax) colmax = cnt;
+                        }
+                    }
+                    if (colmax <= 0) {
+                        // Не diverged, просто ни одна точка не попала в диапазон —
+                        // 0-плотность по колонке (не sentinel: это не "нет данных
+                        // из-за расхождения траектории", а просто пустой срез).
+                        double v0 = bdact.colored_1d_log ? std::log10(1e-6) : 0.0;
+                        for (int b = 0; b < B; ++b)
+                            bdact.colored_1d_cache[(size_t)b * (size_t)npts + (size_t)k] = v0;
+                        continue;
+                    }
+                    double inv = 1.0 / (double)colmax;
+                    for (int b = 0; b < B; ++b) {
+                        double density = counts[(size_t)b] * inv;
+                        double v = bdact.colored_1d_log ? std::log10(std::max(density, 1e-6)) : density;
+                        bdact.colored_1d_cache[(size_t)b * (size_t)npts + (size_t)k] = v;
+                        if (v < vmin) vmin = v;
+                        if (v > vmax) vmax = v;
+                    }
+                }
+                bdact.colored_1d_cache_vmin = std::isfinite(vmin) ? vmin : 0.0;
+                bdact.colored_1d_cache_vmax = std::isfinite(vmax) ? vmax : 1.0;
+                bdact.colored_1d_built_from      = bdact.data_generation;
+                bdact.colored_1d_cache_b         = B;
+                bdact.colored_1d_cache_log       = bdact.colored_1d_log;
+                bdact.colored_1d_cache_custom_y  = bdact.colored_1d_custom_y;
+                bdact.colored_1d_cache_inter_peaks = bdact.plot_inter_peaks;
+                bdact.colored_1d_cache_ymin_used = ylo;
+                bdact.colored_1d_cache_ymax_used = yhi;
+                ++bdact.colored_1d_cache_gen;
+            }
+
+            hc.x_axis.name = auto_axis_name(s.params, s.vars, bdact.param_index,
+                                             bdact.sweep_over_var, bdact.var_sweep_index);
+            hc.y_axis.name = (bdact.writable_var >= 0 && bdact.writable_var < (int)s.vars.size())
+                            ? s.vars[bdact.writable_var] : "X";
+            if (bdact.plot_inter_peaks) hc.y_axis.name += " interval";
+
+            bool fit = bdact.fit_request;
+            if (fit) bdact.fit_request = false;
+
+            const bool c1d_busy = s.in_flight && !s.is_2d_run && idx == s.running_diagram_index;
+            hc.popup_extras = [&bdact, &cb, c1d_busy]() {
+                if (ImGui::MenuItem("Export data...", nullptr, false, !c1d_busy)) {
+                    if (cb.pick_save_file_csv) {
+                        std::string path = cb.pick_save_file_csv();
+                        if (!path.empty())
+                            data_export::export_bif1d(bdact.result, path);
+                    }
+                }
+            };
+
+            // Тот же lo/hi/reverse-разбор, что и у классического scatter'а
+            // ниже (continuation хранит снапшот в result, иначе — из текстов).
+            double lo = (bdact.continuation && bdact.result.param_hi != bdact.result.param_lo)
+                        ? bdact.result.param_lo : safe_stod(bdact.param_lo_text, 0.0);
+            double hi = (bdact.continuation && bdact.result.param_hi != bdact.result.param_lo)
+                        ? bdact.result.param_hi : safe_stod(bdact.param_hi_text, 1.0);
+            bool rev = bdact.result.continuation_reverse;
+            double x0 = rev ? hi : lo;
+            double x1 = rev ? lo : hi;
+
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            hc.render(renderer, origin, avail,
+                      /*owner_id*/ c1d_oid, bdact.colored_1d_cache_gen,
+                      npts, B,
+                      bdact.colored_1d_cache.data(),
+                      x0, x1,
+                      ylo, yhi,
+                      bdact.colored_1d_cache_vmin, bdact.colored_1d_cache_vmax,
                       fit);
             ImGui::PopID();
         }
@@ -2483,10 +2723,12 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             ImGui::SameLine();
             ImGui::Checkbox("Autoscale color", &heatmap.autoscale);
             if (!heatmap.autoscale) {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmin", &heatmap.manual_vmin, 0.0f, 0.0f, "%.4g");
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmax", &heatmap.manual_vmax, 0.0f, 0.0f, "%.4g");
+                ImGui::SameLine();
+                InputNumStr("vmin##llehm", heatmap.manual_vmin_text, 80);
+                heatmap.manual_vmin = (float)parse_num_or(heatmap.manual_vmin_text, heatmap.manual_vmin);
+                ImGui::SameLine();
+                InputNumStr("vmax##llehm", heatmap.manual_vmax_text, 80);
+                heatmap.manual_vmax = (float)parse_num_or(heatmap.manual_vmax_text, heatmap.manual_vmax);
             }
             ImGui::SameLine();
             if (ImGui::Button(heatmap.swap_axes ? "Swap axes (on)##llehm" : "Swap axes##llehm"))
@@ -2955,6 +3197,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             int cm = (idx >= 0 && idx < (int)s.curves.size() && s.curves[idx].colormap_idx >= 0)
                      ? s.curves[idx].colormap_idx : model.heatmap_colormap;
             if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+            if (idx >= 0 && idx < (int)s.curves.size())
+                slot->display_exponent_idx = s.curves[idx].display_exponent_idx;
         }
         return *slot;
     };
@@ -2987,29 +3231,50 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                                      session_to_json_ls(model.ls_session));
             }
 
-            // Combo exponent: λ₁..λ_N. Active при наличии данных; clamp idx под N.
+            // Combo exponent: λ₁..λ_N + "sum L_i", разделены Separator'ом —
+            // та же схема, что у параметров/переменных в комбо "Sweep".
+            // Живёт в heatmap_ls (per-window), а не в cact — иначе два окна с
+            // одной и той же кривой дёргают один и тот же индекс друг у друга.
+            // Sentinel -1 = "sum L_i" (не N, чтобы не путаться, если N
+            // поменяется на новом Run).
             if (cact.last_run_2d_ok && cact.result_2d.n_exponents > 0) {
                 int N = cact.result_2d.n_exponents;
-                if (cact.display_exponent_idx < 0 || cact.display_exponent_idx >= N)
-                    cact.display_exponent_idx = 0;
-                std::vector<std::string> names;
-                names.reserve(N);
-                for (int j = 0; j < N; ++j) names.push_back("L" + std::to_string(j + 1));
-                std::vector<const char*> cnames;
-                cnames.reserve(N);
-                for (auto& s2 : names) cnames.push_back(s2.c_str());
+                if (heatmap_ls.display_exponent_idx != -1 &&
+                    (heatmap_ls.display_exponent_idx < 0 || heatmap_ls.display_exponent_idx >= N))
+                    heatmap_ls.display_exponent_idx = 0;
+                std::string preview = (heatmap_ls.display_exponent_idx == -1)
+                    ? "sum L_i" : ("L" + std::to_string(heatmap_ls.display_exponent_idx + 1));
+                auto pick_exponent = [&](int j) {
+                    heatmap_ls.display_exponent_idx = j;
+                    cact.display_exponent_idx = j;   // persist per-curve only
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_ls",
+                                         session_to_json_ls(model.ls_session));
+                };
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(100);
-                ImGui::Combo("Exponent##lshm", &cact.display_exponent_idx, cnames.data(), N);
+                if (ImGui::BeginCombo("Exponent##lshm", preview.c_str())) {
+                    for (int j = 0; j < N; ++j) {
+                        std::string lbl = "L" + std::to_string(j + 1);
+                        if (ImGui::Selectable(lbl.c_str(), heatmap_ls.display_exponent_idx == j))
+                            pick_exponent(j);
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Selectable("sum L_i", heatmap_ls.display_exponent_idx == -1))
+                        pick_exponent(-1);
+                    ImGui::EndCombo();
+                }
             }
 
             ImGui::SameLine();
             ImGui::Checkbox("Autoscale color##lshm", &heatmap_ls.autoscale);
             if (!heatmap_ls.autoscale) {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmin##lshm", &heatmap_ls.manual_vmin, 0.0f, 0.0f, "%.4g");
-                ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-                ImGui::InputFloat("vmax##lshm", &heatmap_ls.manual_vmax, 0.0f, 0.0f, "%.4g");
+                ImGui::SameLine();
+                InputNumStr("vmin##lshm", heatmap_ls.manual_vmin_text, 80);
+                heatmap_ls.manual_vmin = (float)parse_num_or(heatmap_ls.manual_vmin_text, heatmap_ls.manual_vmin);
+                ImGui::SameLine();
+                InputNumStr("vmax##lshm", heatmap_ls.manual_vmax_text, 80);
+                heatmap_ls.manual_vmax = (float)parse_num_or(heatmap_ls.manual_vmax_text, heatmap_ls.manual_vmax);
             }
             ImGui::SameLine();
             if (ImGui::Button(heatmap_ls.swap_axes ? "Swap axes (on)##lshm" : "Swap axes##lshm"))
@@ -3033,16 +3298,51 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             bool fit = cact.fit_request_2d;
             if (fit) cact.fit_request_2d = false;
 
-            // Указатель на нужную плоскость + её per-plane min/max.
-            int k = cact.display_exponent_idx;
+            // Указатель на нужную плоскость + её per-plane min/max. k==-1 —
+            // "sum L_i": считаем поэлементную сумму всех N плоскостей один раз
+            // на data_generation_2d (не каждый кадр), кэш в cact — общий для
+            // всех окон с этой кривой. Diverged-ячейки (flags<0) получают
+            // sentinel 999.0 — тот же, что engine пишет в одиночные плоскости,
+            // чтобы HeatmapView закрасил их тем же серым.
+            int k = heatmap_ls.display_exponent_idx;
             size_t plane_size = (size_t)cact.result_2d.n_pts * (size_t)cact.result_2d.n_pts;
-            const double* plane_ptr = cact.result_2d.values.data() + (size_t)k * plane_size;
-            double vmin = (k >= 0 && k < (int)cact.result_2d.min_val.size()) ? cact.result_2d.min_val[k] : 0.0;
-            double vmax = (k >= 0 && k < (int)cact.result_2d.max_val.size()) ? cact.result_2d.max_val[k] : 0.0;
-
-            // data_generation для VBO-кэша: смешиваем поколение чанка + индекс
-            // экспоненты, чтобы переключение перезалило текстуру.
-            int gen = cact.data_generation_2d * 64 + k;
+            const double* plane_ptr;
+            double vmin, vmax;
+            int gen;
+            if (k == -1) {
+                if (cact.sum_cache_gen != cact.data_generation_2d) {
+                    int N = cact.result_2d.n_exponents;
+                    cact.sum_cache.assign(plane_size, 0.0);
+                    double smin =  std::numeric_limits<double>::infinity();
+                    double smax = -std::numeric_limits<double>::infinity();
+                    for (size_t c2 = 0; c2 < plane_size; ++c2) {
+                        if (c2 < cact.result_2d.flags.size() && cact.result_2d.flags[c2] < 0) {
+                            cact.sum_cache[c2] = 999.0;
+                            continue;
+                        }
+                        double sum = 0.0;
+                        for (int j = 0; j < N; ++j)
+                            sum += cact.result_2d.values[(size_t)j * plane_size + c2];
+                        cact.sum_cache[c2] = sum;
+                        if (sum < smin) smin = sum;
+                        if (sum > smax) smax = sum;
+                    }
+                    cact.sum_cache_min = std::isfinite(smin) ? smin : 0.0;
+                    cact.sum_cache_max = std::isfinite(smax) ? smax : 0.0;
+                    cact.sum_cache_gen = cact.data_generation_2d;
+                }
+                plane_ptr = cact.sum_cache.data();
+                vmin = cact.sum_cache_min;
+                vmax = cact.sum_cache_max;
+                gen  = cact.data_generation_2d * 64 + cact.result_2d.n_exponents;
+            } else {
+                plane_ptr = cact.result_2d.values.data() + (size_t)k * plane_size;
+                vmin = (k >= 0 && k < (int)cact.result_2d.min_val.size()) ? cact.result_2d.min_val[k] : 0.0;
+                vmax = (k >= 0 && k < (int)cact.result_2d.max_val.size()) ? cact.result_2d.max_val[k] : 0.0;
+                // data_generation для VBO-кэша: смешиваем поколение чанка +
+                // индекс экспоненты, чтобы переключение перезалило текстуру.
+                gen = cact.data_generation_2d * 64 + k;
+            }
 
             const bool busy = s.in_flight && s.is_2d_run && idx == s.running_curve_index;
             heatmap_ls.popup_extras = [&cact, &cb, busy]() {
@@ -4809,9 +5109,36 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     // Batch Run all — global across BD/LLE/LS. Popup shows checkboxes for
     // every configured diagram/curve/spectrum; Run pushes selected to
     // model.parametric_queue and starts the first one. draw_gui ticks the
-    // queue after polls.
+    // queue after polls. picks_* и run_all_marked живут вне if(BeginPopup) —
+    // Ctrl+Shift+R должен пушить те же отметки, даже если попап ни разу не
+    // открывали в этой сессии (тогда picks_* просто "всё отмечено" по fit()).
+    static std::vector<bool> picks_bd, picks_lle, picks_ls;
+    auto fit = [&](std::vector<bool>& v, size_t n) {
+        if (v.size() != n) v.assign(n, true);
+    };
+    fit(picks_bd,  model.bifurcation_session.diagrams.size());
+    fit(picks_lle, model.lle_session.curves.size());
+    fit(picks_ls,  model.ls_session.curves.size());
+
+    auto run_all_marked = [&]() {
+        for (size_t i = 0; i < picks_bd.size(); ++i)
+            if (picks_bd[i])
+                model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, (int)i});
+        for (size_t i = 0; i < picks_lle.size(); ++i)
+            if (picks_lle[i])
+                model.parametric_queue.push_back({ParametricQueueItem::Kind::LLE, (int)i});
+        for (size_t i = 0; i < picks_ls.size(); ++i)
+            if (picks_ls[i])
+                model.parametric_queue.push_back({ParametricQueueItem::Kind::LS, (int)i});
+        model.start_next_in_parametric_queue();
+    };
+
+    if (!any_in_flight && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false))
+        run_all_marked();
+
     if (any_in_flight) ImGui::BeginDisabled();
-    if (ImGui::Button("Run all..."))
+    if (ImGui::Button("Run all... (Ctrl+Shift+R)"))
         ImGui::OpenPopup("##run_all_parametric");
     if (any_in_flight) ImGui::EndDisabled();
     if (!model.parametric_queue.empty()) {
@@ -4819,14 +5146,6 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::TextDisabled("(%zu queued)", model.parametric_queue.size());
     }
     if (ImGui::BeginPopup("##run_all_parametric")) {
-        static std::vector<bool> picks_bd, picks_lle, picks_ls;
-        auto fit = [&](std::vector<bool>& v, size_t n) {
-            if (v.size() != n) v.assign(n, true);
-        };
-        fit(picks_bd,  model.bifurcation_session.diagrams.size());
-        fit(picks_lle, model.lle_session.curves.size());
-        fit(picks_ls,  model.ls_session.curves.size());
-
         ImGui::TextDisabled("Sequential (one CUDA context).");
 
         if (!picks_bd.empty()) {
@@ -4871,16 +5190,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Run")) {
-            for (size_t i = 0; i < picks_bd.size(); ++i)
-                if (picks_bd[i])
-                    model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, (int)i});
-            for (size_t i = 0; i < picks_lle.size(); ++i)
-                if (picks_lle[i])
-                    model.parametric_queue.push_back({ParametricQueueItem::Kind::LLE, (int)i});
-            for (size_t i = 0; i < picks_ls.size(); ++i)
-                if (picks_ls[i])
-                    model.parametric_queue.push_back({ParametricQueueItem::Kind::LS, (int)i});
-            model.start_next_in_parametric_queue();
+            run_all_marked();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -4933,6 +5243,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         }
         return out;
     };
+    // Colored 1D — не отдельный "kind" в этом комбо, а тумблер поверх плота
+    // (draw_bifurcation_plot). Type combo снова различает только 1D/2D, как
+    // у LLE/LS.
     static const char* type_names[] = { "Bifurcation 1D", "Bifurcation 2D", "LLE 1D", "LLE 2D", "LS 1D", "LS 2D" };
     auto type_index_of = [](ParametricPlotWindow::Kind kind, bool mode_2d) -> int {
         int base = kind == ParametricPlotWindow::Kind::Bifurcation ? 0
@@ -4967,6 +5280,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
             if (new_kind != win.kind || new_2d != win.mode_2d) {
                 win.kind = new_kind;
                 win.mode_2d = new_2d;
+                win.colored_1d = false;   // combo больше не умеет выбирать Colored 1D — сбрасываем; включается тумблером над плотом
                 win.members.clear();
                 model.parametric_plot_windows_dirty = true;
             }
@@ -4978,9 +5292,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
             auto items = matching_items(win.kind, win.mode_2d);
             if (items.empty()) {
                 ImGui::TextDisabled("(none available)");
-            } else if (win.mode_2d) {
-                // 2D shows exactly one heatmap — single-select (radio), not
-                // independent checkboxes.
+            } else if (win.mode_2d || win.colored_1d) {
+                // 2D / Colored 1D (сейчас включён тумблером над плотом) show
+                // heatmaps — single-select (radio), not independent checkboxes.
                 for (const auto& item : items) {
                     bool sel = !win.members.empty() && win.members[0] == item.index;
                     std::string lbl = item.label + "##mem" + std::to_string(item.index);

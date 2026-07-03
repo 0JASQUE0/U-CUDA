@@ -1632,7 +1632,9 @@ static void apply_ls2d_result(LSCurveConfig& c, LS2DResult&& r) {
     c.last_run_2d_ok = c.result_2d.ok;
     if (!c.result_2d.ok) c.last_error = c.result_2d.error;
     // Clamp выбранной экспоненты под новый n_exponents (если N изменился).
+    // -1 ("sum L_i") не трогаем — сумма валидна для любого N.
     if (c.result_2d.n_exponents > 0 &&
+        c.display_exponent_idx != -1 &&
         c.display_exponent_idx >= c.result_2d.n_exponents) {
         c.display_exponent_idx = 0;
     }

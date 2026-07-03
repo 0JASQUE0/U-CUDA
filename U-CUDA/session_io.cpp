@@ -250,6 +250,12 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"param_hi_2_text\":";  jstr(o, bd.param_hi_2_text);
     o << ",\"eps_dbscan_text\":";  jstr(o, bd.eps_dbscan_text);
     o << ",\"colormap_idx\":"      << bd.colormap_idx;
+    o << ",\"colored_1d\":"            << (bd.colored_1d ? "true" : "false");
+    o << ",\"colored_1d_b_text\":";    jstr(o, bd.colored_1d_b_text);
+    o << ",\"colored_1d_custom_y\":"   << (bd.colored_1d_custom_y ? "true" : "false");
+    o << ",\"colored_1d_ymin_text\":"; jstr(o, bd.colored_1d_ymin_text);
+    o << ",\"colored_1d_ymax_text\":"; jstr(o, bd.colored_1d_ymax_text);
+    o << ",\"colored_1d_log\":"        << (bd.colored_1d_log ? "true" : "false");
     o << "}";
 }
 
@@ -290,6 +296,12 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "param_hi_2_text")    bd.param_hi_2_text   = p.str();
     else if (key == "eps_dbscan_text")    bd.eps_dbscan_text   = p.str();
     else if (key == "colormap_idx")       bd.colormap_idx      = std::stoi(p.str_or_num());
+    else if (key == "colored_1d")            bd.colored_1d            = p.boolean();
+    else if (key == "colored_1d_b_text")     bd.colored_1d_b_text     = p.str();
+    else if (key == "colored_1d_custom_y")   bd.colored_1d_custom_y   = p.boolean();
+    else if (key == "colored_1d_ymin_text")  bd.colored_1d_ymin_text  = p.str();
+    else if (key == "colored_1d_ymax_text")  bd.colored_1d_ymax_text  = p.str();
+    else if (key == "colored_1d_log")        bd.colored_1d_log        = p.boolean();
     else return false;
     return true;
 }
@@ -996,6 +1008,7 @@ std::string session_to_json_parametric_windows(const std::vector<ParametricPlotW
         o << "{\"id\":" << w.id;
         o << ",\"kind\":" << (int)w.kind;
         o << ",\"mode_2d\":" << (w.mode_2d ? "true" : "false");
+        o << ",\"colored_1d\":" << (w.colored_1d ? "true" : "false");
         o << ",\"label\":"; jstr(o, w.label);
         o << ",\"label_is_manual\":" << (w.label_is_manual ? "true" : "false");
         o << ",\"members\":[";
@@ -1027,6 +1040,7 @@ bool session_from_json_parametric_windows(const std::string& json, std::vector<P
                                 if      (k == "id")      w.id      = std::stoi(p.str_or_num());
                                 else if (k == "kind")    w.kind    = (ParametricPlotWindow::Kind)std::stoi(p.str_or_num());
                                 else if (k == "mode_2d") w.mode_2d = p.boolean();
+                                else if (k == "colored_1d") w.colored_1d = p.boolean();
                                 else if (k == "label")   w.label   = p.str();
                                 else if (k == "label_is_manual") w.label_is_manual = p.boolean();
                                 else if (k == "members") {

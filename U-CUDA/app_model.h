@@ -41,6 +41,10 @@ struct ParametricPlotWindow {
     enum class Kind { Bifurcation, LLE, LS };
     Kind        kind    = Kind::Bifurcation;
     bool        mode_2d = false;
+    // "Colored 1D diagram" (density-хитмапа) — 3-й display kind, только для
+    // Bifurcation. Никогда не true одновременно с mode_2d (см.
+    // draw_bifurcation_plot). Для LLE/LS остаётся false и не используется.
+    bool        colored_1d = false;
     std::string label   = "Plot 1";   // window title, user-editable
     // Если false, label регенерируется из kind/mode_2d каждый кадр
     // ("Bifurcation 1D" и т.п.). Ставится в true при ручной правке,
@@ -49,9 +53,9 @@ struct ParametricPlotWindow {
     bool        label_is_manual = true;
     // Indices into bifurcation_session.diagrams / lle_session.curves /
     // ls_session.curves (selected by `kind`), filtered to items whose
-    // .mode_2d matches this window's mode_2d. Multiple entries = overlay
-    // (typical for 1D); 2D windows are UI-nudged, not hard-capped, toward
-    // exactly one member.
+    // .mode_2d/.colored_1d matches this window's own. Multiple entries =
+    // overlay (typical for 1D); 2D/Colored-1D windows are UI-nudged, not
+    // hard-capped, toward exactly one member.
     std::vector<int> members;
     // Stable identity for render-side caches (PlotRenderer/Plot2DView/
     // HeatmapView instances keyed by this, not by vector position — position
@@ -251,7 +255,8 @@ public:
     // indices (into the matching session's diagrams/curves list). Assigns a
     // fresh id and a default "Plot N" label.
     void add_parametric_plot_window(ParametricPlotWindow::Kind kind, bool mode_2d,
-                                     std::vector<int> initial_members);
+                                     std::vector<int> initial_members,
+                                     bool colored_1d = false);
     // Remove by position in parametric_plot_windows (from the "X" in the
     // Plot windows list, or a closed floating window).
     void remove_parametric_plot_window(int pos);
