@@ -3681,10 +3681,24 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
         // Batch "Run all..." across basin configs. Pushes selected indices
         // into model.basins_queue; draw_gui ticks the queue after polls.
+        // picks — вне if(BeginPopup): Ctrl+Shift+R должен пушить те же
+        // отметки, даже если попап ни разу не открывали (см. Parametric).
+        static std::vector<bool> picks;
+        if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
+        auto run_all_marked = [&]() {
+            for (size_t i = 0; i < picks.size(); ++i)
+                if (picks[i])
+                    model.basins_queue.push_back({(int)i});
+            model.start_next_in_basins_queue();
+        };
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift &&
+            ImGui::IsKeyPressed(ImGuiKey_R, false))
+            run_all_marked();
+
         ImGui::SameLine();
         const bool block_run_all = s.in_flight || no_cfg;
         if (block_run_all) ImGui::BeginDisabled();
-        if (ImGui::Button("Run all..."))
+        if (ImGui::Button("Run all... (Ctrl+Shift+R)"))
             ImGui::OpenPopup("##run_all_basins");
         if (block_run_all) ImGui::EndDisabled();
         if (!model.basins_queue.empty()) {
@@ -3692,9 +3706,6 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             ImGui::TextDisabled("(%zu queued)", model.basins_queue.size());
         }
         if (ImGui::BeginPopup("##run_all_basins")) {
-            static std::vector<bool> picks;
-            if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
-
             ImGui::TextDisabled("Sequential (one CUDA context).");
             for (size_t i = 0; i < picks.size(); ++i) {
                 bool v = picks[i];
@@ -3708,10 +3719,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             if (ImGui::Button("None")) { for (auto&& b : picks) b = false; }
             ImGui::SameLine();
             if (ImGui::Button("Run")) {
-                for (size_t i = 0; i < picks.size(); ++i)
-                    if (picks[i])
-                        model.basins_queue.push_back({(int)i});
-                model.start_next_in_basins_queue();
+                run_all_marked();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
@@ -4429,10 +4437,24 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
         // Batch "Run all..." across FastSync configs. Pushes selected indices
         // into model.fastsync_queue; draw_gui ticks the queue after polls.
+        // picks — вне if(BeginPopup): Ctrl+Shift+R должен пушить те же
+        // отметки, даже если попап ни разу не открывали (см. Parametric).
+        static std::vector<bool> picks;
+        if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
+        auto run_all_marked = [&]() {
+            for (size_t i = 0; i < picks.size(); ++i)
+                if (picks[i])
+                    model.fastsync_queue.push_back({(int)i});
+            model.start_next_in_fastsync_queue();
+        };
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift &&
+            ImGui::IsKeyPressed(ImGuiKey_R, false))
+            run_all_marked();
+
         ImGui::SameLine();
         const bool block_run_all = s.in_flight || no_cfg;
         if (block_run_all) ImGui::BeginDisabled();
-        if (ImGui::Button("Run all..."))
+        if (ImGui::Button("Run all... (Ctrl+Shift+R)"))
             ImGui::OpenPopup("##run_all_fastsync");
         if (block_run_all) ImGui::EndDisabled();
         if (!model.fastsync_queue.empty()) {
@@ -4440,9 +4462,6 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             ImGui::TextDisabled("(%zu queued)", model.fastsync_queue.size());
         }
         if (ImGui::BeginPopup("##run_all_fastsync")) {
-            static std::vector<bool> picks;
-            if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
-
             ImGui::TextDisabled("Sequential (one CUDA context).");
             for (size_t i = 0; i < picks.size(); ++i) {
                 bool v = picks[i];
@@ -4456,10 +4475,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             if (ImGui::Button("None")) { for (auto&& b : picks) b = false; }
             ImGui::SameLine();
             if (ImGui::Button("Run")) {
-                for (size_t i = 0; i < picks.size(); ++i)
-                    if (picks[i])
-                        model.fastsync_queue.push_back({(int)i});
-                model.start_next_in_fastsync_queue();
+                run_all_marked();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
