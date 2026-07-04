@@ -90,6 +90,88 @@ bool export_bif1d(const Bifurcation1DResult& res, const std::string& path)
 }
 
 // =============================================================================
+// 1D DFT
+// =============================================================================
+
+void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+
+    out << "1D bifurcation DFT\n";
+    out << "Parameter estimation\n";
+
+    const int nv = static_cast<int>(s.values.size());
+    out << "a[" << nv << "] = { ";
+    for (int kk = 0; kk < nv; ++kk) {
+        out << s.values[kk];
+        if (kk != nv - 1) out << ", "; else out << " }\n";
+    }
+    const int nic = static_cast<int>(s.initial_conditions.size());
+    out << "X0[" << nic << "] = { ";
+    for (int kk = 0; kk < nic; ++kk) {
+        out << s.initial_conditions[kk];
+        if (kk != nic - 1) out << ", "; else out << " }\n";
+    }
+
+    out << "CT = "       << s.tMax << "\n";
+    out << "TT = "       << s.transientTime << "\n";
+    out << "h = "        << s.h << "\n";
+    out << "decimator = " << s.preScaller << "\n";
+    out << "indexVar for DFT = " << s.writableVar << "\n";
+    out << "indexPar for estimation = " << s.indexOfMutVar << "\n";
+    out << "start value = " << s.range_lo << ", stop value = " << s.range_hi << "\n";
+    out << "n_freq = " << s.n_freq << "\n";
+    out << "freq_lo = " << s.freq_lo << ", freq_hi = " << s.freq_hi << "\n";
+    const char* win_name = s.window_type == 0 ? "None" : s.window_type == 2 ? "Hamming" : "Hanning";
+    out << "window = " << win_name << "\n";
+}
+
+void write_dft1d_header(std::ofstream& out, const Dft1DSnapshot& s)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    // Comma separator — matches hostLibrary.cu's bifurcation_DFT_1D exactly
+    // (and the pre-existing MATLAB script that reads these files), unlike
+    // write_basins_ranges' space-separated header.
+    out << s.range_lo << ", " << s.range_hi << "\n";
+    out << s.freq_lo  << ", " << s.freq_hi  << "\n";
+}
+
+void write_dft1d_matrix(std::ofstream& out, const double* matrix,
+                        std::size_t row_offset, int n_rows, int n_freq)
+{
+    if (!out.is_open()) return;
+    for (int i = 0; i < n_rows; ++i) {
+        const double* row = matrix + (row_offset + (std::size_t)i) * (std::size_t)n_freq;
+        for (int j = 0; j < n_freq; ++j) {
+            out << row[j];
+            if (j != n_freq - 1) out << ", "; else out << "\n";
+        }
+    }
+}
+
+bool export_dft1d(const Dft1DResult& res, const std::string& path)
+{
+    std::ofstream cfg(path + "_config.csv");
+    if (!cfg.is_open()) return false;
+    write_dft1d_config(cfg, res.snapshot);
+    cfg.close();
+
+    std::ofstream akFile(path + "_AkCOS.csv");
+    std::ofstream bkFile(path + "_BkSIN.csv");
+    if (!akFile.is_open() || !bkFile.is_open()) return false;
+    akFile << std::setprecision(set_precision);
+    bkFile << std::setprecision(set_precision);
+
+    write_dft1d_header(akFile, res.snapshot);
+    write_dft1d_header(bkFile, res.snapshot);
+    write_dft1d_matrix(akFile, res.ak_cos.data(), 0, res.n_pts, res.n_freq);
+    write_dft1d_matrix(bkFile, res.bk_sin.data(), 0, res.n_pts, res.n_freq);
+    return true;
+}
+
+// =============================================================================
 // LLE1D
 // =============================================================================
 

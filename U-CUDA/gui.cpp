@@ -235,6 +235,15 @@ static std::string auto_label_window(const ParametricPlotWindow& w) {
     return std::string(kn) + " " + suffix;
 }
 
+static std::string auto_label_dft1d(const Dft1DConfig& c,
+                                    const std::vector<std::string>& params,
+                                    const std::vector<std::string>& vars) {
+    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index);
+    const std::string& lo = c.param_lo_text.empty() ? std::string("?") : c.param_lo_text;
+    const std::string& hi = c.param_hi_text.empty() ? std::string("?") : c.param_hi_text;
+    return x + " [" + lo + ".." + hi + "]";
+}
+
 static void refresh_auto_labels(AppModel& model) {
     for (auto& bd : model.bifurcation_session.diagrams)
         if (!bd.label_is_manual)
@@ -245,9 +254,15 @@ static void refresh_auto_labels(AppModel& model) {
     for (auto& c : model.ls_session.curves)
         if (!c.label_is_manual)
             c.label = auto_label_ls(c, model.ls_session.params, model.ls_session.vars);
+    for (auto& c : model.dft1d_session.configs)
+        if (!c.label_is_manual)
+            c.label = auto_label_dft1d(c, model.dft1d_session.params, model.dft1d_session.vars);
     for (auto& w : model.parametric_plot_windows)
         if (!w.label_is_manual)
             w.label = auto_label_window(w);
+    for (auto& w : model.dft1d_plot_windows)
+        if (!w.label_is_manual)
+            w.label = "DFT 1D";
 }
 
 // Общий парсер для полей вроде HeatmapView::manual_vmin_text — тот же
@@ -1923,7 +1938,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             // never had its own colormap set.
             int cm = (idx >= 0 && idx < (int)s.diagrams.size() && s.diagrams[idx].colormap_idx >= 0)
                      ? s.diagrams[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
         }
         return *slot;
     };
@@ -1970,10 +1985,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             HeatmapView& hb = get_bd_heatmap(idx);
 
             // Colormap combo + autoscale над плотом.
-            static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
             int cmap_idx = (int)hb.colormap;
             ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##bdhm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            if (ImGui::Combo("Colormap##bdhm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
                 hb.colormap = (HeatmapColormap)cmap_idx;
                 bdact.colormap_idx = cmap_idx;   // persist per-diagram only
                 if (!model.loaded_name.empty())
@@ -2058,10 +2072,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             const unsigned c1d_oid = 0xBD1D0000u + (unsigned)idx;
             HeatmapView& hc = get_bd_heatmap(idx);
 
-            static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
             int cmap_idx = (int)hc.colormap;
             ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##bdc1d", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            if (ImGui::Combo("Colormap##bdc1d", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
                 hc.colormap = (HeatmapColormap)cmap_idx;
                 bdact.colormap_idx = cmap_idx;   // persist per-diagram only (shared with mode_2d)
                 if (!model.loaded_name.empty())
@@ -2688,7 +2701,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             slot = std::make_unique<HeatmapView>();
             int cm = (idx >= 0 && idx < (int)s.curves.size() && s.curves[idx].colormap_idx >= 0)
                      ? s.curves[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
         }
         return *slot;
     };
@@ -2710,10 +2723,9 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             HeatmapView& heatmap = get_lle_heatmap(idx);
 
             // Combo для выбора colormap'а — над плотом.
-            static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
             int cmap_idx = (int)heatmap.colormap;
             ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            if (ImGui::Combo("Colormap", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
                 heatmap.colormap = (HeatmapColormap)cmap_idx;
                 cact.colormap_idx = cmap_idx;   // persist per-curve only
                 if (!model.loaded_name.empty())
@@ -3196,7 +3208,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             slot = std::make_unique<HeatmapView>();
             int cm = (idx >= 0 && idx < (int)s.curves.size() && s.curves[idx].colormap_idx >= 0)
                      ? s.curves[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm <= 3) slot->colormap = (HeatmapColormap)cm;
+            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
             if (idx >= 0 && idx < (int)s.curves.size())
                 slot->display_exponent_idx = s.curves[idx].display_exponent_idx;
         }
@@ -3220,10 +3232,9 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             HeatmapView& heatmap_ls = get_ls_heatmap(idx);
 
             // Combo colormap (persisted в _app_config.json, как у LLE/BD).
-            static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
             int cmap_idx = (int)heatmap_ls.colormap;
             ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##lshm", &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            if (ImGui::Combo("Colormap##lshm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
                 heatmap_ls.colormap = (HeatmapColormap)cmap_idx;
                 cact.colormap_idx = cmap_idx;   // persist per-curve only
                 if (!model.loaded_name.empty())
@@ -3617,6 +3628,543 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
         heatmaps.erase(id);
         view_configured_for.erase(id);
         model.remove_parametric_plot_window(to_remove);
+    }
+}
+
+// ============================================================
+// 1D DFT: controls (system picker + Run/Run all + config tab bar, mirrors
+// draw_basins_controls) + dynamic Plot windows (mirrors draw_parametric_
+// controls' manager + draw_bifurcation_plot's colored_1d heatmap toolbar).
+// ============================================================
+
+static bool draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
+    Dft1DConfig& c = s.configs[idx];
+
+    ImGui::SetNextItemWidth(160);
+    if (InputTextStr("Label", c.label))
+        c.label_is_manual = !c.label.empty();   // empty → back to auto
+    ImGui::Separator();
+
+    // ----- Scheme (built-in + custom) -----
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!s.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : s.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+
+    // ----- Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls -----
+    if (!s.params.empty() || !s.vars.empty()) {
+        if (c.param_index < 0 || c.param_index >= (int)s.params.size())
+            c.param_index = 0;
+        if (c.var_sweep_index < 0 || c.var_sweep_index >= (int)s.vars.size())
+            c.var_sweep_index = 0;
+
+        std::string preview;
+        if (c.sweep_over_var && !s.vars.empty())
+            preview = s.vars[c.var_sweep_index] + " (IC)";
+        else if (!s.params.empty())
+            preview = s.params[c.param_index];
+        else
+            preview = "?";
+
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::BeginCombo("Sweep", preview.c_str())) {
+            for (int i = 0; i < (int)s.params.size(); ++i) {
+                bool sel = !c.sweep_over_var && c.param_index == i;
+                if (ImGui::Selectable(s.params[i].c_str(), sel)) {
+                    c.sweep_over_var = false;
+                    c.param_index = i;
+                }
+            }
+            if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
+            for (int i = 0; i < (int)s.vars.size(); ++i) {
+                std::string lbl = s.vars[i] + " (IC)";
+                bool sel = c.sweep_over_var && c.var_sweep_index == i;
+                if (ImGui::Selectable(lbl.c_str(), sel)) {
+                    c.sweep_over_var = true;
+                    c.var_sweep_index = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    } else {
+        ImGui::TextDisabled("No parameters/variables (select a system first)");
+    }
+    InputNumStr("Param lo", c.param_lo_text, 120);
+    InputNumStr("Param hi", c.param_hi_text, 120);
+
+    // Continuation — требует param-sweep (см. run_dft1d_continuation); UI не
+    // блокирует sweep_over_var=true+continuation=true явно (как Bifurcation
+    // не блокирует до Run), engine вернёт понятную ошибку в last_error.
+    {
+        bool cont = c.continuation;
+        if (ImGui::Checkbox("Continuation", &cont)) c.continuation = cont;
+        if (c.continuation) {
+            ImGui::SameLine();
+            int dir = c.continuation_reverse ? 1 : 0;
+            ImGui::RadioButton("forward",  &dir, 0); ImGui::SameLine();
+            ImGui::RadioButton("backward", &dir, 1);
+            c.continuation_reverse = (dir == 1);
+        }
+    }
+    ImGui::Separator();
+
+    // ----- Variable + Resolution X -----
+    draw_writable_var_combo(s.vars, c.writable_var, "Writable var##dft_wv");
+    InputNumStr("Resolution X", c.n_pts_text, 120);
+    ImGui::Separator();
+
+    // ----- Resolution Y / Frequency range (обязательные поля для rangesFreq;
+    // без auto-режима — частотный диапазон всегда физически осмыслен только
+    // когда задан явно, в отличие от colored_1d's Y auto-range). -----
+    if (ImGui::CollapsingHeader("Resolution Y##dft_freq", ImGuiTreeNodeFlags_DefaultOpen)) {
+        InputNumStr("Resolution Y", c.n_freq_text, 120);
+        InputNumStr("Freq lo", c.freq_lo_text, 120);
+        InputNumStr("Freq hi", c.freq_hi_text, 120);
+        static const char* windows[] = { "None", "Hanning", "Hamming" };
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
+    }
+
+    // ----- Display mode + normalize -----
+    if (ImGui::CollapsingHeader("Display##dft_disp", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static const char* modes[] = { "Power spectrum", "Amplitude", "Phase" };
+        ImGui::SetNextItemWidth(160);
+        ImGui::Combo("Mode", &c.display_mode, modes, IM_ARRAYSIZE(modes));
+        ImGui::Checkbox("Normalize?", &c.normalize);
+    }
+
+    // ----- Integration (collapsible) -----
+    if (ImGui::CollapsingHeader("Integration##dft_int", ImGuiTreeNodeFlags_DefaultOpen)) {
+        InputNumStr("h",              c.h_text,           120);
+        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
+            InputNumStr("symmetry s", c.symmetry_s,       120);
+        InputNumStr("computing time", c.t_max_text,       120);
+        InputNumStr("transient time", c.transient_text,   120);
+        InputNumStr("decimator",      c.pre_scaller_text, 120);
+        InputNumStr("max value",      c.max_value_text,   120);
+    }
+
+    // ----- Initial conditions (collapsible) -----
+    if (ImGui::CollapsingHeader("Initial conditions##dft_ic", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (const auto& v : s.vars) {
+            ImGui::PushID(v.c_str());
+            InputNumStr(v.c_str(), c.initial_conditions[v], 120);
+            ImGui::PopID();
+        }
+    }
+
+    // ----- Parameters (collapsible) -----
+    if (ImGui::CollapsingHeader("Parameters##dft_par", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (const auto& p : s.params) {
+            ImGui::PushID(p.c_str());
+            InputNumStr(p.c_str(), c.param_values[p], 120);
+            ImGui::PopID();
+        }
+    }
+
+    // ----- CSV output (collapsible, moved to the bottom) -----
+    if (ImGui::CollapsingHeader("CSV output##dft_csv")) {
+        ImGui::Checkbox("Save to file", &c.csv_save_enabled);
+        InputTextStr("##dft_csv_path", c.csv_output_path);
+        ImGui::TextDisabled("Writes <path>_config.csv, _AkCOS.csv, _BkSIN.csv.");
+    }
+
+    if (c.last_run_ok) {
+        int diverged = 0;
+        for (int f : c.result.flags) if (f <= 0) ++diverged;
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            "OK: n_pts=%d, n_freq=%d", c.result.n_pts, c.result.n_freq);
+        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+    } else if (!c.last_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+        ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
+        ImGui::InputTextMultiline("##dft_err",
+            const_cast<char*>(c.last_error.c_str()),
+            c.last_error.size() + 1,
+            sz,
+            ImGuiInputTextFlags_ReadOnly);
+    }
+    return false;  // Run-кнопка живёт в draw_dft1d_controls, как у Bifurcation/Basins.
+}
+
+static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
+    Dft1DAnalysisSession& s = model.dft1d_session;
+
+    ImGui::Text("1D DFT");
+    ImGui::TextDisabled("Parametric discrete Fourier transform via NVRTC + DFT_custom.");
+
+    // ----- System picker (как у Basins) -----
+    ImGui::Text("System:"); ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    std::string current = model.name.empty() ? "(current)" : model.name;
+    if (s.in_flight) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("##dft1d_syssel", current.c_str())) {
+        for (const auto& nm : lib.list()) {
+            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
+                try {
+                    model.from_record(lib.load(nm));
+                    model.start_dft1d_analysis();
+                    std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
+                    if (!jd.empty())
+                        session_from_json_dft1d(jd, model.dft1d_session);
+                    std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
+                    model.load_or_init_dft1d_plot_windows(jw);
+                }
+                catch (...) {}
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (s.in_flight) ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // ----- Run / Run all... -----
+    {
+        bool no_cfg = s.configs.empty();
+        bool do_run = false;
+        if (s.in_flight) {
+            ImGui::BeginDisabled();
+            ImGui::Button("Running...", ImVec2(160, 0));
+            ImGui::EndDisabled();
+        } else {
+            if (no_cfg) ImGui::BeginDisabled();
+            do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
+            if (no_cfg) ImGui::EndDisabled();
+        }
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl &&
+            ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            do_run = true;
+        }
+        if (do_run) {
+            if (!model.parametric_engine)
+                model.parametric_engine = std::make_unique<ParametricEngine>();
+            s.run_async(*model.parametric_engine, s.active_config_index);
+        }
+
+        static std::vector<bool> picks;
+        if (picks.size() != s.configs.size()) picks.assign(s.configs.size(), true);
+        auto run_all_marked = [&]() {
+            for (size_t i = 0; i < picks.size(); ++i)
+                if (picks[i])
+                    model.dft1d_queue.push_back({(int)i});
+            model.start_next_in_dft1d_queue();
+        };
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift &&
+            ImGui::IsKeyPressed(ImGuiKey_R, false))
+            run_all_marked();
+
+        ImGui::SameLine();
+        const bool block_run_all = s.in_flight || no_cfg;
+        if (block_run_all) ImGui::BeginDisabled();
+        if (ImGui::Button("Run all... (Ctrl+Shift+R)"))
+            ImGui::OpenPopup("##run_all_dft1d");
+        if (block_run_all) ImGui::EndDisabled();
+        if (!model.dft1d_queue.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%zu queued)", model.dft1d_queue.size());
+        }
+        if (ImGui::BeginPopup("##run_all_dft1d")) {
+            ImGui::TextDisabled("Sequential (one CUDA context).");
+            for (size_t i = 0; i < picks.size(); ++i) {
+                bool v = picks[i];
+                std::string lbl = s.configs[i].label + "###pdft1d_" + std::to_string(i);
+                if (ImGui::Checkbox(lbl.c_str(), &v)) picks[i] = v;
+            }
+            ImGui::Separator();
+            if (ImGui::Button("All"))  { for (auto&& b : picks) b = true;  }
+            ImGui::SameLine();
+            if (ImGui::Button("None")) { for (auto&& b : picks) b = false; }
+            ImGui::SameLine();
+            if (ImGui::Button("Run")) {
+                run_all_marked();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+    ImGui::Separator();
+
+    // Tab bar: одна вкладка на config + "+" для add. Зеркалит draw_basins_controls.
+    int active_now = -1;
+    int to_remove = -1;
+    if (ImGui::BeginTabBar("##dft1d_tabs",
+                           ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)s.configs.size(); ++i) {
+            Dft1DConfig& c = s.configs[i];
+            ImGui::PushID(i);
+            bool open = true;
+            std::string tab_id = c.label + "###dft1d_tab_" + std::to_string(i);
+            bool can_close = !(s.in_flight && s.running_config_index == i);
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+                active_now = i;
+                ImGui::EndTabItem();
+            }
+            if (!open) to_remove = i;
+            ImGui::PopID();
+        }
+        if (!s.in_flight) {
+            if (ImGui::TabItemButton("+",
+                                     ImGuiTabItemFlags_Trailing |
+                                     ImGuiTabItemFlags_NoTooltip)) {
+                s.add_config();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (active_now >= 0) s.active_config_index = active_now;
+    if (to_remove >= 0) model.remove_dft1d_config(to_remove);
+
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No DFT configs. Press '+' to add one.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+
+    draw_dft1d_diagram_controls(s, s.active_config_index);
+
+    // ----- Plot windows: dynamic list, mirrors Parametric's manager section -----
+    // No Type combo needed (DFT1D has only one display kind); "Members..."
+    // is single-select (radio) — each window shows exactly one config's
+    // heatmap, same as Bifurcation's colored_1d/mode_2d windows.
+    ImGui::Separator();
+    ImGui::SeparatorText("Plot windows");
+    int win_to_remove = -1;
+    for (int i = 0; i < (int)model.dft1d_plot_windows.size(); ++i) {
+        Dft1DPlotWindow& win = model.dft1d_plot_windows[i];
+        ImGui::PushID(win.id);
+        ImGui::SetNextItemWidth(220);
+        if (InputTextStr("##wlabel", win.label)) {
+            win.label_is_manual = !win.label.empty();   // empty → back to auto
+            model.dft1d_plot_windows_dirty = true;
+        }
+        ImGui::SameLine();
+
+        if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_dft1d_window_members");
+        if (ImGui::BeginPopup("edit_dft1d_window_members")) {
+            if (s.configs.empty()) {
+                ImGui::TextDisabled("(none available)");
+            } else {
+                // Single-select (radio) — a DFT1D window shows exactly one
+                // config's heatmap, same as Bifurcation's mode_2d/colored_1d.
+                for (int ci = 0; ci < (int)s.configs.size(); ++ci) {
+                    bool sel = !win.members.empty() && win.members[0] == ci;
+                    std::string lbl = s.configs[ci].label + "##dftmem" + std::to_string(ci);
+                    if (ImGui::RadioButton(lbl.c_str(), sel)) {
+                        win.members.assign(1, ci);
+                        model.dft1d_plot_windows_dirty = true;
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) win_to_remove = i;
+        ImGui::PopID();
+    }
+    if (win_to_remove >= 0) model.remove_dft1d_plot_window(win_to_remove);
+
+    if (ImGui::Button("Add window")) {
+        model.add_dft1d_plot_window({});
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset windows layout")) { model.dft1d_layout_generation++; }
+}
+
+// Per-window heatmap rendering — mirrors the colored_1d block of
+// draw_bifurcation_plot (toolbar + lazy display-cache rebuild + render()) and
+// draw_basins_plot's colormap/autoscale/swap-axes toolbar.
+static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
+                           Dft1DPlotWindow& win,
+                           PlotRenderer& renderer,
+                           std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
+    Dft1DAnalysisSession& s = model.dft1d_session;
+    auto get_hm = [&](int idx) -> HeatmapView& {
+        auto& slot = heatmap_map[idx];
+        if (!slot) {
+            slot = std::make_unique<HeatmapView>();
+            int cm = (idx >= 0 && idx < (int)s.configs.size() && s.configs[idx].colormap_idx >= 0)
+                     ? s.configs[idx].colormap_idx : model.heatmap_colormap;
+            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
+        }
+        return *slot;
+    };
+
+    if (win.members.empty()) {
+        ImGui::TextDisabled("No DFT configs assigned to this window.");
+        return;
+    }
+
+    for (size_t mi = 0; mi < win.members.size(); ++mi) {
+        int idx = win.members[mi];
+        if (idx < 0 || idx >= (int)s.configs.size()) continue;
+        Dft1DConfig& c = s.configs[idx];
+        if (mi > 0) ImGui::Separator();
+        ImGui::PushID(idx);
+
+        const unsigned oid = 0xD1FD0000u + (unsigned)idx;
+        HeatmapView& hc = get_hm(idx);
+
+        int cmap_idx = (int)hc.colormap;
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::Combo("Colormap##dfthm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
+            hc.colormap = (HeatmapColormap)cmap_idx;
+            c.colormap_idx = cmap_idx;   // persist per-config
+            if (!model.loaded_name.empty())
+                lib.save_session(model.loaded_name, "_last_dft1d",
+                                 session_to_json_dft1d(model.dft1d_session));
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Autoscale color##dfthm", &hc.autoscale);
+        if (!hc.autoscale) {
+            ImGui::SameLine();
+            InputNumStr("vmin##dfthm", hc.manual_vmin_text, 80);
+            hc.manual_vmin = (float)parse_num_or(hc.manual_vmin_text, hc.manual_vmin);
+            ImGui::SameLine();
+            InputNumStr("vmax##dfthm", hc.manual_vmax_text, 80);
+            hc.manual_vmax = (float)parse_num_or(hc.manual_vmax_text, hc.manual_vmax);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(hc.swap_axes ? "Swap axes (on)##dfthm" : "Swap axes##dfthm"))
+            hc.swap_axes = !hc.swap_axes;
+
+        if (!c.last_run_ok || c.result.ak_cos.empty()) {
+            ImGui::TextDisabled("No data yet. Press Run.");
+            ImGui::PopID();
+            continue;
+        }
+
+        int npts  = c.result.n_pts;
+        int nfreq = c.result.n_freq;
+
+        // Лениво (пере)строим display_cache, когда расходится с текущими
+        // настройками — не каждый кадр. Та же staleness-схема, что и у
+        // colored_1d_cache в draw_bifurcation_plot.
+        bool stale = c.display_built_from    != c.data_generation
+                  || c.display_cache_mode      != c.display_mode
+                  || c.display_cache_normalize != c.normalize;
+        if (stale) {
+            size_t plane_size = (size_t)nfreq * (size_t)npts;
+            // freq-major/param-minor (idx = f*n_pts+pt) — конвенция
+            // HeatmapView::render(nx=n_pts, ny=n_freq, ...). 999.0 — тот же
+            // sentinel, что и colored_1d/Basins используют для "нет данных".
+            c.display_cache.assign(plane_size, 999.0);
+            double vmin =  std::numeric_limits<double>::infinity();
+            double vmax = -std::numeric_limits<double>::infinity();
+            std::vector<double> col((size_t)nfreq);
+            for (int pt = 0; pt < npts; ++pt) {
+                bool diverged = pt >= (int)c.result.flags.size() || c.result.flags[pt] <= 0;
+                if (diverged) continue;   // остаётся 999 sentinel — DFT_custom не считал эту точку
+
+                double colmax = 0.0;
+                for (int f = 0; f < nfreq; ++f) {
+                    double ak = c.result.ak_cos[(size_t)pt * (size_t)nfreq + (size_t)f];
+                    double bk = c.result.bk_sin[(size_t)pt * (size_t)nfreq + (size_t)f];
+                    double v;
+                    if      (c.display_mode == 0) v = ak * ak + bk * bk;            // power spectrum
+                    else if (c.display_mode == 1) v = std::sqrt(ak * ak + bk * bk); // amplitude
+                    else                          v = std::atan2(bk, ak);          // phase
+                    col[(size_t)f] = v;
+                    double av = std::fabs(v);
+                    if (av > colmax) colmax = av;
+                }
+                for (int f = 0; f < nfreq; ++f) {
+                    double v = col[(size_t)f];
+                    if (c.normalize && colmax > 0.0) v /= colmax;
+                    // dB-масштаб как в референсном MATLAB-скрипте (10*log10) —
+                    // только для power/amplitude; phase остаётся в радианах.
+                    if (c.display_mode != 2) v = 10.0 * std::log10(std::max(v, 1e-12));
+                    c.display_cache[(size_t)f * (size_t)npts + (size_t)pt] = v;
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                }
+            }
+            c.display_cache_vmin = std::isfinite(vmin) ? vmin : 0.0;
+            c.display_cache_vmax = std::isfinite(vmax) ? vmax : 1.0;
+            c.display_built_from      = c.data_generation;
+            c.display_cache_mode      = c.display_mode;
+            c.display_cache_normalize = c.normalize;
+            ++c.display_cache_gen;
+        }
+
+        hc.x_axis.name = auto_axis_name(s.params, s.vars, c.param_index,
+                                        c.sweep_over_var, c.var_sweep_index);
+        hc.y_axis.name = "Frequency";
+
+        bool fit = c.fit_request;
+        if (fit) c.fit_request = false;
+
+        const bool busy = s.in_flight && idx == s.running_config_index;
+        hc.popup_extras = [&c, &cb, busy]() {
+            if (ImGui::MenuItem("Export data...", nullptr, false, !busy)) {
+                if (cb.pick_save_file_csv) {
+                    std::string path = cb.pick_save_file_csv();
+                    if (!path.empty())
+                        data_export::export_dft1d(c.result, path);
+                }
+            }
+        };
+
+        double lo = c.result.param_lo, hi = c.result.param_hi;
+        bool rev = c.result.continuation_reverse;
+        double x0 = rev ? hi : lo;
+        double x1 = rev ? lo : hi;
+
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        hc.render(renderer, origin, avail,
+                  /*owner_id*/ oid, c.display_cache_gen,
+                  npts, nfreq,
+                  c.display_cache.data(),
+                  x0, x1,
+                  c.result.freq_lo, c.result.freq_hi,
+                  c.display_cache_vmin, c.display_cache_vmax,
+                  fit);
+        ImGui::PopID();
+    }
+}
+
+static void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
+    static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
+    static std::map<int, std::map<int, std::unique_ptr<HeatmapView>>> heatmaps;
+
+    int to_remove = -1;
+    for (int i = 0; i < (int)model.dft1d_plot_windows.size(); ++i) {
+        Dft1DPlotWindow& win = model.dft1d_plot_windows[i];
+
+        auto& renderer = renderers[win.id];
+        if (!renderer) renderer = std::make_unique<PlotRenderer>();
+        auto& hm_map = heatmaps[win.id];
+
+        std::string title = win.label + "###dftwin" + std::to_string(win.id)
+                           + "_g" + std::to_string(model.dft1d_layout_generation);
+        bool open = true;
+        float ox = 60.0f + (float)(i % 5) * 35.0f, oy = 80.0f + (float)(i % 5) * 35.0f;
+        ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &open)) {
+            ImGui::PushID(win.id);
+            draw_dft1d_plot(model, lib, cb, win, *renderer, hm_map);
+            ImGui::PopID();
+        }
+        ImGui::End();
+        if (!open) to_remove = i;
+    }
+    if (to_remove >= 0) {
+        int id = model.dft1d_plot_windows[to_remove].id;
+        renderers.erase(id);
+        heatmaps.erase(id);
+        model.remove_dft1d_plot_window(to_remove);
     }
 }
 
@@ -4121,7 +4669,6 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
     // затрагивает, и наоборот. Scatter-таб использует Plot2DView, без
     // colormap.
     {
-        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
         int* field = nullptr;
         const char* combo_id = nullptr;
         HeatmapView* active_hm = nullptr;
@@ -4134,9 +4681,9 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         }
         if (field) {
             int cmap_idx = *field;
-            if (cmap_idx < 0 || cmap_idx > 3) cmap_idx = 2;
+            if (cmap_idx < 0 || cmap_idx >= kHeatmapColormapCount) cmap_idx = 2;
             ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo(combo_id, &cmap_idx, cmap_names, IM_ARRAYSIZE(cmap_names))) {
+            if (ImGui::Combo(combo_id, &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
                 *field = cmap_idx;
                 AppConfig cfg;
                 cfg.ui_scale_override      = model.ui_scale_override;
@@ -4223,7 +4770,7 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         if (vmax < vmin) vmax = vmin;
         {
             int cm = model.basins_colormap;
-            hm_basins_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+            hm_basins_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
         }
         hm_basins_v.x_axis.name = ax_x;
         hm_basins_v.y_axis.name = ax_y;
@@ -4240,7 +4787,7 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
     else if (c.active_plot_tab == 1) {
         {
             int cm = model.basins_avgpk_colormap;
-            hm_avgpk_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+            hm_avgpk_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
         }
         hm_avgpk_v.x_axis.name = ax_x;
         hm_avgpk_v.y_axis.name = ax_y;
@@ -4253,7 +4800,7 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
     else if (c.active_plot_tab == 2) {
         {
             int cm = model.basins_avgint_colormap;
-            hm_avgint_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+            hm_avgint_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
         }
         hm_avgint_v.x_axis.name = ax_x;
         hm_avgint_v.y_axis.name = ax_y;
@@ -4278,7 +4825,7 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         }
         {
             int cm = model.basins_states_colormap;
-            hm_states_v.colormap = (HeatmapColormap)((cm >= 0 && cm <= 3) ? cm : 2);
+            hm_states_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
         }
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
@@ -4747,10 +5294,9 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
 
     // ---- Visualization toolbar (как у basins / Bif-2D / LLE-2D) ----
     {
-        static const char* cmap_names[] = { "Viridis", "Inferno", "Turbo", "Gray" };
-        if (c.colormap_idx < 0 || c.colormap_idx > 3) c.colormap_idx = 2;
+        if (c.colormap_idx < 0 || c.colormap_idx >= kHeatmapColormapCount) c.colormap_idx = 2;
         ImGui::SetNextItemWidth(140);
-        ImGui::Combo("Colormap##fs", &c.colormap_idx, cmap_names, IM_ARRAYSIZE(cmap_names));
+        ImGui::Combo("Colormap##fs", &c.colormap_idx, kHeatmapColormapNames, kHeatmapColormapCount);
         ImGui::SameLine();
         ImGui::Checkbox("Autoscale color##fs", &c.autoscale_color);
         if (!c.autoscale_color) {
@@ -4817,7 +5363,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     double cmin = std::min(cmin_user, cmax_user);
     double cmax = std::max(cmin_user, cmax_user);
     if (!(cmax > cmin)) cmax = cmin + 1.0;
-    HeatmapColormap cmap = (HeatmapColormap)((c.colormap_idx >= 0 && c.colormap_idx <= 3) ? c.colormap_idx : 2);
+    HeatmapColormap cmap = (HeatmapColormap)((c.colormap_idx >= 0 && c.colormap_idx < kHeatmapColormapCount) ? c.colormap_idx : 2);
 
     if (c.mode == 0) {
         // Colored trajectory + manual colorbar справа.
@@ -5375,6 +5921,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.bifurcation_session.custom_schemes = model.custom_schemes;
     model.lle_session.custom_schemes         = model.custom_schemes;
     model.ls_session.custom_schemes          = model.custom_schemes;
+    model.dft1d_session.custom_schemes       = model.custom_schemes;
     model.basins_session.custom_schemes      = model.custom_schemes;
     model.fastsync_session.custom_schemes    = model.custom_schemes;
 
@@ -5408,6 +5955,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                              session_to_json_parametric_windows(model.parametric_plot_windows));
         model.parametric_plot_windows_dirty = false;
     }
+    // DFT1D: independent multi-config session (own queue, own poll) — same
+    // save-after-poll + dirty-plot-windows pattern as above.
+    if (model.dft1d_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_dft1d",
+                             session_to_json_dft1d(model.dft1d_session));
+    }
+    if (model.dft1d_plot_windows_dirty) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_dft1d_windows",
+                             session_to_json_dft1d_windows(model.dft1d_plot_windows));
+        model.dft1d_plot_windows_dirty = false;
+    }
     if (model.phase_session.poll()) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last",
@@ -5432,6 +5992,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // очереди есть элементы — берём следующий и стартуем. start_next сам
     // проверяет условие и безопасен к вызову каждый кадр.
     model.start_next_in_parametric_queue();
+    // То же для dft1d-очереди (независимая).
+    model.start_next_in_dft1d_queue();
     // То же для basins-очереди (независимая).
     model.start_next_in_basins_queue();
     // То же для fastsync-очереди (независимая).
@@ -5442,6 +6004,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
     ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
     ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
+    ImGui::RadioButton("1D DFT", &mode, (int)AppModel::AppMode::Dft1D); ImGui::SameLine();
     ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
     ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
@@ -5451,7 +6014,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
     // drains parametric_queue and basins_queue so remaining batch items
     // don't auto-start.
-    enum class BusyKind { None, Bif, LLE, LS, Basins, Phase, FastSync };
+    enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync };
     BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
@@ -5495,6 +6058,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (model.ls_session.progress_token)
             progress_fraction = model.ls_session.progress_token->load(std::memory_order_relaxed);
     }
+    else if (model.dft1d_session.in_flight) {
+        int ri = model.dft1d_session.running_config_index;
+        busy_what = (ri >= 0 && ri < (int)model.dft1d_session.configs.size() &&
+                     !model.dft1d_session.configs[ri].label.empty())
+                        ? model.dft1d_session.configs[ri].label
+                        : std::string("dft1d");
+        busy_start = model.dft1d_session.compute_start_time;
+        busy_kind  = BusyKind::Dft1D;
+        busy_cancelling = model.dft1d_session.cancel_token &&
+                          model.dft1d_session.cancel_token->load(std::memory_order_relaxed);
+        if (model.dft1d_session.progress_token)
+            progress_fraction = model.dft1d_session.progress_token->load(std::memory_order_relaxed);
+    }
     else if (model.phase_session.in_flight) {
         busy_what  = "phase";
         busy_start = model.phase_session.compute_start_time;
@@ -5532,7 +6108,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Nothing in flight — pick the session whose last run finished most
         // recently (across the 4 cancellable ones) and show persistent info.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[4] = {
+        DoneCand candidates[5] = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -5545,6 +6121,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               &model.ls_session.last_run_label,
               model.ls_session.last_run_succeeded,
               model.ls_session.last_run_seconds },
+            { BusyKind::Dft1D,  model.dft1d_session.last_run_completed_at,
+              &model.dft1d_session.last_run_label,
+              model.dft1d_session.last_run_succeeded,
+              model.dft1d_session.last_run_seconds },
             { BusyKind::Basins, model.basins_session.last_run_completed_at,
               &model.basins_session.last_run_label,
               model.basins_session.last_run_succeeded,
@@ -5589,6 +6169,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             size_t queue_n = 0;
             if      (busy_kind == BusyKind::Basins)   queue_n = model.basins_queue.size();
             else if (busy_kind == BusyKind::FastSync) queue_n = model.fastsync_queue.size();
+            else if (busy_kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
             else                                      queue_n = model.parametric_queue.size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
@@ -5643,12 +6224,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Bif:      model.bifurcation_session.request_cancel(); break;
                     case BusyKind::LLE:      model.lle_session.request_cancel();         break;
                     case BusyKind::LS:       model.ls_session.request_cancel();          break;
+                    case BusyKind::Dft1D:    model.dft1d_session.request_cancel();       break;
                     case BusyKind::Basins:   model.basins_session.request_cancel();      break;
                     case BusyKind::FastSync: model.fastsync_session.request_cancel();    break;
                     default: break;
                 }
                 // Drain all batch queues so remaining items don't auto-start.
                 model.parametric_queue.clear();
+                model.dft1d_queue.clear();
                 model.basins_queue.clear();
                 model.fastsync_queue.clear();
             }
@@ -5688,11 +6271,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Analysis;
     bool entering_par    = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
                            model.app_mode != AppModel::AppMode::Parametric;
+    bool entering_dft1d  = (AppModel::AppMode)mode == AppModel::AppMode::Dft1D &&
+                           model.app_mode != AppModel::AppMode::Dft1D;
     bool entering_basins = (AppModel::AppMode)mode == AppModel::AppMode::Basins &&
                            model.app_mode != AppModel::AppMode::Basins;
     bool entering_fastsync = (AppModel::AppMode)mode == AppModel::AppMode::FastSync &&
                              model.app_mode != AppModel::AppMode::FastSync;
-    if (entering_phase || entering_par || entering_basins || entering_fastsync) {
+    if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -5723,6 +6308,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (!js.empty()) session_from_json_ls(js, model.ls_session);
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
+        }
+    }
+    auto dft1d_need_init = model.dft1d_session.loaded_system_name != model.name
+                        || model.dft1d_session.vars.empty()
+                        || model.dft1d_session.vars   != model.known_vars
+                        || model.dft1d_session.params != model.known_params;
+    if (entering_dft1d && dft1d_need_init) {
+        model.start_dft1d_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
+            if (!jd.empty()) session_from_json_dft1d(jd, model.dft1d_session);
+            std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
+            model.load_or_init_dft1d_plot_windows(jw);
         }
     }
     auto basins_need_init = model.basins_session.loaded_system_name != model.name
@@ -5788,6 +6386,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         draw_parametric_plot_windows(model, lib, cb);
+    }
+    else if (model.app_mode == AppModel::AppMode::Dft1D) {
+        // DFT1D mode: controls window (system picker + Run/Run all + config
+        // tab bar + Plot windows manager) + a dynamic list of heatmap plot
+        // windows, mirrors Parametric mode's shape.
+        if (ImGui::Begin("DFT1D Controls")) {
+            draw_dft1d_controls(model, lib);
+        }
+        ImGui::End();
+        draw_dft1d_plot_windows(model, lib, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Basins) {
         if (ImGui::Begin("Basins Controls")) {

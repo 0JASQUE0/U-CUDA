@@ -1647,7 +1647,11 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	size_t startDataIndex = idx * sizeOfBlock;
 	size_t startIndexFreq = idx * nFreq;
 
-	if (checkerArray[idx] == -1)
+	// Читаем один раз через read-only cache вместо двух отдельных обращений
+	// к глобальной памяти (было: checkerArray[idx] в каждом if отдельно).
+	const int checker = __ldg(&checkerArray[idx]);
+
+	if (checker == -1)
 	{
 		for (size_t i = 0; i < nFreq; i++) {
 			AkCOS[startIndexFreq + i] = -1.0;
@@ -1656,7 +1660,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 		return;
 	}
 
-	if (checkerArray[idx] == 0)
+	if (checker == 0)
 	{
 		for (size_t i = 0; i < nFreq; i++) {
 			AkCOS[startIndexFreq + i] = 0.0;
@@ -1667,8 +1671,10 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 
 	const int RESET_INTERVAL = 1000;
 
-	const numb f_step = (rangesFreq[1] - rangesFreq[0]) / (numb)(nFreq - 1);
-	const numb f_start = rangesFreq[0];
+	const numb freq_lo = __ldg(&rangesFreq[0]);
+	const numb freq_hi = __ldg(&rangesFreq[1]);
+	const numb f_step = (freq_hi - freq_lo) / (numb)(nFreq - 1);
+	const numb f_start = freq_lo;
 	const numb gamma = 2 * pi / (sizeOfBlock - 1.0);
 	const numb psi = 2 * pi * h;
 	numb f_k = 0;
@@ -1687,6 +1693,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 		sin_theta = sin(2.0 * pi * h * f_k);
 		cos_n = 1.0;
 		sin_n = 0.0;
+		int reset_counter = RESET_INTERVAL;
 
 		for (size_t n = 0; n < sizeOfBlock; n++) {
 
@@ -1697,18 +1704,28 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 			//AkCOS[startIndexFreq + k] += data[startDataIndex + n] * cos(theta * f_k * (numb)n);
 			//BkSIN[startIndexFreq + k] += data[startDataIndex + n] * sin(theta * f_k * (numb)n);
 
-			AkCOS[startIndexFreq + k] += window[n] * data[startDataIndex + n] * cos_n;
-			BkSIN[startIndexFreq + k] += window[n] * data[startDataIndex + n] * sin_n;
+			// window[n]*data[n] раньше считалось дважды подряд (для AkCOS и
+			// для BkSIN отдельно) — считаем один раз и переиспользуем. Оба
+			// массива этот kernel только читает — __ldg() (read-only cache).
+			const numb wd = __ldg(&window[n]) * __ldg(&data[startDataIndex + n]);
+			AkCOS[startIndexFreq + k] += wd * cos_n;
+			BkSIN[startIndexFreq + k] += wd * sin_n;
 
 			numb new_cos = cos_n * cos_theta - sin_n * sin_theta;
 			numb new_sin = sin_n * cos_theta + cos_n * sin_theta;
 			cos_n = new_cos;
 			sin_n = new_sin;
 
-			if ((n + 1) % RESET_INTERVAL == 0 && (n + 1) < sizeOfBlock) {
-				numb exact_angle = psi * f_k * (numb)(n + 1.0);
-				cos_n = cosf(exact_angle);
-				sin_n = sinf(exact_angle);
+			// Та же семантика, что и (n+1)%RESET_INTERVAL==0 && (n+1)<sizeOfBlock,
+			// но декрементирующий счётчик вместо деления по модулю на каждой
+			// итерации (modulo на GPU заметно дороже сравнения/декремента).
+			if (--reset_counter == 0) {
+				reset_counter = RESET_INTERVAL;
+				if (n + 1 < sizeOfBlock) {
+					numb exact_angle = psi * f_k * (numb)(n + 1.0);
+					cos_n = cosf(exact_angle);
+					sin_n = sinf(exact_angle);
+				}
 			}
 		}
 		AkCOS[startIndexFreq + k] /= (numb)sizeOfBlock;

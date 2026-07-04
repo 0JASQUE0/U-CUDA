@@ -39,6 +39,12 @@ bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);
 std::string session_to_json_ls(const LyapunovSpectrumAnalysisSession& s);
 bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSession& s);
 
+// Dft1D-сессия — multi-config layout как у Basins/FastSync. Сохраняем
+// sweep/integration/IC/params/frequency-range/display/normalize/CSV.
+// Result и display_cache* в JSON не пишутся.
+std::string session_to_json_dft1d(const Dft1DAnalysisSession& s);
+bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisSession& s);
+
 // Basins-сессия — один config (без curves-vector). Сохраняем axes/ranges,
 // integration, DBSCAN eps, IC, params, CSV-настройки. Result в JSON не пишется.
 std::string session_to_json_basins(const BasinsAnalysisSession& s);
@@ -53,3 +59,8 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession
 // rather than living inside one of the per-kind files above.
 std::string session_to_json_parametric_windows(const std::vector<ParametricPlotWindow>& wins);
 bool session_from_json_parametric_windows(const std::string& json, std::vector<ParametricPlotWindow>& wins);
+
+// DFT1D plot windows (AppModel::dft1d_plot_windows) — same idea, its own file
+// (`_last_dft1d_windows.json`), minus the kind/mode_2d/colored_1d fields.
+std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins);
+bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DPlotWindow>& wins);

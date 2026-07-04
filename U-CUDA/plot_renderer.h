@@ -13,11 +13,27 @@ enum class HeatmapColormap : int {
     Inferno = 1,
     Turbo   = 2,
     Gray    = 3,
+    // 4-8: не полиномиальные — сэмплятся из LUT-текстуры (256x5 RGB8), не
+    // из полиномов (эти colormap'ы matplotlib слишком немонотонны/многоэкс-
+    // тремумны для низкостепенного fit'а). См. colormap_lut_data.h.
+    GistStern    = 4,
+    GnuPlot      = 5,
+    GistRainbow  = 6,
+    NipySpectral = 7,
+    GistNcar     = 8,
 };
 
-// CPU-side колормап. Точное зеркало GLSL-полиномов из draw_heatmap (см.
-// plot_renderer.cpp::compile_shaders) — цвета совпадают bit-for-bit.
-// t clamp'ится в [0,1]. Возвращает ImU32 (используется ImDrawList).
+// Общий список имён для ImGui::Combo — единственный источник истины (раньше
+// было по копии "Viridis"/"Inferno"/"Turbo"/"Gray" в каждом combo по коду;
+// добавление новой colormap правится теперь в одном месте).
+extern const char* const kHeatmapColormapNames[9];
+constexpr int kHeatmapColormapCount = 9;
+
+// CPU-side колормап. Полиномиальные (0-3) — точное зеркало GLSL из
+// draw_heatmap (см. plot_renderer.cpp::compile_shaders), цвета совпадают
+// bit-for-bit. LUT-based (4-8) — линейная интерполяция между соседними
+// элементами таблицы (визуально идентично GPU-пути, не гарантированно
+// bit-exact). t clamp'ится в [0,1]. Возвращает ImU32 (используется ImDrawList).
 ImU32 cmap_sample(float t, HeatmapColormap m);
 
 class PlotRenderer {
@@ -52,10 +68,12 @@ public:
     // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер
     // отображает тёмно-серым (используется engine'ом для diverged/spec).
     // n_discrete: 0 = continuous shading, N>0 = quantize into N color bands.
+    // reverse: true -> t := 1-t перед сэмплированием colormap'а (после
+    // discrete-квантования), т.е. разворачивает градиент целиком.
     void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                       float uv_off_x, float uv_off_y,
                       float uv_scale_x, float uv_scale_y,
-                      int n_discrete = 0);
+                      int n_discrete = 0, bool reverse = false);
 
     // ������ 3D-����� (vbo � float[3] �� �������).
     // thick_style=false — старый быстрый путь: program_3d_ + glLineWidth
@@ -76,6 +94,10 @@ private:
     void ensure_fbo(int w, int h, bool with_depth);
     void compile_shaders();
     void destroy_fbo();
+    // Одна 256x5 RGB8-текстура на все 5 LUT-colormap'ов (см. HeatmapColormap
+    // 4-8) — строки в порядке GistStern/GnuPlot/GistRainbow/NipySpectral/
+    // GistNcar. Создаётся один раз в конструкторе, как и шейдеры.
+    void ensure_lut_texture();
 
     GLuint fbo_ = 0;
     GLuint color_tex_ = 0;
@@ -95,8 +117,10 @@ private:
     GLint  loc_heatmap_tex_ = -1, loc_heatmap_vmin_ = -1,
            loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
            loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1,
-           loc_heatmap_discrete_n_ = -1;
+           loc_heatmap_discrete_n_ = -1, loc_heatmap_lut_ = -1,
+           loc_heatmap_reverse_ = -1;
     GLuint heatmap_vbo_ = 0;     // ленивая инициализация fullscreen quad
+    GLuint lut_tex_ = 0;         // 256x5 RGB8, см. ensure_lut_texture()
 
     GLuint vao_ = 0;
 

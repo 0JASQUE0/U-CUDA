@@ -13,6 +13,7 @@
 // `_config.csv` header after compute (when the original Request is gone).
 //
 
+#include <cstddef>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@
 // snapshot structs do not need parametric_engine.h.
 struct Bifurcation1DResult;
 struct Bifurcation2DResult;
+struct Dft1DResult;
 struct LLE1DResult;
 struct LLE2DResult;
 struct LS1DResult;
@@ -50,6 +52,25 @@ struct Bif1DSnapshot {
     int    indexOfMutVar = 0;                // 1-based for param, 0-based for IC
     double range_lo = 0.0;
     double range_hi = 0.0;
+};
+
+// 1D DFT — same sweep/integration fields as Bif1DSnapshot, plus the frequency
+// axis (n_freq/freq_lo/freq_hi). AkCOS/BkSIN files share this one snapshot.
+struct Dft1DSnapshot {
+    std::vector<double> values;
+    std::vector<double> initial_conditions;
+    double tMax = 0.0;
+    double transientTime = 0.0;
+    double h = 0.0;
+    int    preScaller = 0;
+    int    writableVar = 0;
+    int    indexOfMutVar = 0;
+    double range_lo = 0.0;
+    double range_hi = 0.0;
+    int    n_freq = 0;
+    double freq_lo = 0.0;
+    double freq_hi = 0.0;
+    int    window_type = 1;   // 0=None, 1=Hanning, 2=Hamming — см. Dft1DRequest::window_type
 };
 
 struct LLE1DSnapshot {
@@ -221,6 +242,25 @@ inline double param_value_at(std::size_t idx, int n_pts, double lo, double hi) {
                             static_cast<double>(n_pts - 1);
 }
 
+// 1D DFT. Engine writes 3 files sharing one path prefix: <path>_config.csv
+// (human-readable metadata, write_dft1d_config), <path>_AkCOS.csv and
+// <path>_BkSIN.csv (write_dft1d_header once + write_dft1d_matrix per chunk/
+// in full). Header rows use COMMA separators (unlike write_basins_ranges'
+// space separator) to stay byte-compatible with the pre-existing MATLAB
+// script that reads these files (and with hostLibrary.cu's own bifurcation_
+// DFT_1D, which writes the same 2-row comma-separated header).
+void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s);
+
+// Writes the 2 header rows: "range_lo, range_hi\n" then "freq_lo, freq_hi\n".
+// Call once per file (AkCOS/BkSIN) before any data rows.
+void write_dft1d_header(std::ofstream& out, const Dft1DSnapshot& s);
+
+// Appends `n_rows` rows of `n_freq` comma-separated values, starting at
+// matrix[row_offset*n_freq]. Called once per chunk by the engine (streaming
+// append) and once with the full matrix (row_offset=0) by export_dft1d.
+void write_dft1d_matrix(std::ofstream& out, const double* matrix,
+                        std::size_t row_offset, int n_rows, int n_freq);
+
 // LLE1D / LS1D — same row shape as engine (chunked append).
 void write_lle1d_config(std::ofstream& out, const LLE1DSnapshot& s);
 void write_lle1d_row(std::ofstream& out, double param, double lyapunov);
@@ -277,6 +317,7 @@ void write_fastsync_grid(std::ofstream& out, const FastSyncResult& res,
 // =============================================================================
 
 bool export_bif1d(const Bifurcation1DResult& res, const std::string& path);
+bool export_dft1d (const Dft1DResult&         res, const std::string& path);
 bool export_lle1d(const LLE1DResult&         res, const std::string& path);
 bool export_ls1d (const LS1DResult&          res, const std::string& path);
 bool export_bif2d(const Bifurcation2DResult& res, const std::string& path);

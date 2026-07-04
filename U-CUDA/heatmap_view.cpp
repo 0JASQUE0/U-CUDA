@@ -260,7 +260,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     }
     renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
-                          n_disc);
+                          n_disc, reverse_colormap);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
@@ -303,6 +303,7 @@ void HeatmapView::render(PlotRenderer& renderer,
             ImGui::InputInt("Levels (0=auto)", &discrete_levels, 0, 0);
             if (discrete_levels < 0) discrete_levels = 0;
         }
+        ImGui::Checkbox("Reverse colormap", &reverse_colormap);
         // Caller-injected items (e.g. "Export data..."). Mirrors the same
         // hook on Plot2DView so both view types share the right-click pattern.
         if (popup_extras) {
@@ -702,7 +703,7 @@ void HeatmapView::render(PlotRenderer& renderer,
             } else {
                 t_samp = (t0 + t1) * 0.5f;
             }
-            ImU32 col = cmap_sample(t_samp, colormap);
+            ImU32 col = cmap_sample(reverse_colormap ? (1.0f - t_samp) : t_samp, colormap);
             dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + colorbar_w, y1), col);
         }
         dl->AddRect(ImVec2(cb_x, cb_y),

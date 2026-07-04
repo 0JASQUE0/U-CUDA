@@ -11,6 +11,7 @@
 #include <nvrtc.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -122,8 +123,9 @@ struct ParametricEngine::Impl {
         CUmodule    module      = nullptr;
         CUfunction  kernel_traj = nullptr;  // calculateDiscreteModelCUDA
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d classical branch)
     };
-    CachedModule cached;          // bif1d kernels (traj + peak)
+    CachedModule cached;          // bif1d kernels (traj + peak + dft)
 
     // Отдельный модуль для LLE — другой шаблон, другой kernel.
     struct CachedLleModule {
@@ -154,6 +156,7 @@ struct ParametricEngine::Impl {
         CUmodule    module     = nullptr;
         CUfunction  kernel_cont = nullptr;  // bifurcation1dContinuationKernel
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d continuation branch)
     };
     CachedContModule cached_cont;
 
@@ -241,6 +244,7 @@ struct ParametricEngine::Impl {
             cached.module = nullptr;
             cached.kernel_traj = nullptr;
             cached.kernel_peak = nullptr;
+            cached.kernel_dft = nullptr;
             cached.key.clear();
         }
     }
@@ -287,6 +291,7 @@ struct ParametricEngine::Impl {
             cached_cont.module = nullptr;
             cached_cont.kernel_cont = nullptr;
             cached_cont.kernel_peak = nullptr;
+            cached_cont.kernel_dft = nullptr;
             cached_cont.key.clear();
         }
     }
@@ -401,6 +406,10 @@ struct ParametricEngine::Impl {
         // nvrtcGetLoweredName достать их mangled-варианты для cuModuleGetFunction.
         nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
         nvrtcAddNameExpression(prog, "peakFinderCUDA");
+        // DFT_custom уже присутствует в этом же модуле (шаблон #include'ит
+        // cudaLibrary.cu целиком) — регистрируем его тоже, чтобы run_dft_1d
+        // мог переиспользовать этот кэш без отдельной компиляции.
+        nvrtcAddNameExpression(prog, "DFT_custom");
 
         char arch[64];
         snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
@@ -435,14 +444,17 @@ struct ParametricEngine::Impl {
             return false;
         }
 
-        // Mangled-имена для обоих kernel-ов. Нужно скопировать в свои строки
+        // Mangled-имена для всех kernel'ов. Нужно скопировать в свои строки
         // ДО nvrtcDestroyProgram — после destroy указатели становятся невалидны.
         const char* mangled_traj_ptr = nullptr;
         const char* mangled_peak_ptr = nullptr;
+        const char* mangled_dft_ptr  = nullptr;
         nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA", &mangled_traj_ptr);
         nvrtcGetLoweredName(prog, "peakFinderCUDA",             &mangled_peak_ptr);
+        nvrtcGetLoweredName(prog, "DFT_custom",                 &mangled_dft_ptr);
         std::string mangled_traj = mangled_traj_ptr ? mangled_traj_ptr : "calculateDiscreteModelCUDA";
         std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
+        std::string mangled_dft  = mangled_dft_ptr  ? mangled_dft_ptr  : "DFT_custom";
 
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
@@ -460,6 +472,11 @@ struct ParametricEngine::Impl {
         r = cuModuleGetFunction(&cached.kernel_peak, cached.module, mangled_peak.c_str());
         if (r != CUDA_SUCCESS) {
             err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
+            release_module(); return false;
+        }
+        r = cuModuleGetFunction(&cached.kernel_dft, cached.module, mangled_dft.c_str());
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(" + mangled_dft + "): " + cu_err(r);
             release_module(); return false;
         }
 
@@ -2391,6 +2408,9 @@ struct ParametricEngine::Impl {
         // bifurcation1dContinuationKernel — extern "C" (имя не мангается).
         // peakFinderCUDA — обычный C++ символ, регистрируем для mangled-имени.
         nvrtcAddNameExpression(prog, "peakFinderCUDA");
+        // DFT_custom — тоже обычный C++ символ, уже в этом модуле (шаблон
+        // #include'ит cudaLibrary.cu целиком); нужен run_dft_1d continuation-ветке.
+        nvrtcAddNameExpression(prog, "DFT_custom");
 
         char arch[64];
         snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
@@ -2419,8 +2439,11 @@ struct ParametricEngine::Impl {
         }
 
         const char* mangled_peak_ptr = nullptr;
+        const char* mangled_dft_ptr  = nullptr;
         nvrtcGetLoweredName(prog, "peakFinderCUDA", &mangled_peak_ptr);
+        nvrtcGetLoweredName(prog, "DFT_custom",     &mangled_dft_ptr);
         std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
+        std::string mangled_dft  = mangled_dft_ptr  ? mangled_dft_ptr  : "DFT_custom";
 
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
@@ -2439,6 +2462,11 @@ struct ParametricEngine::Impl {
         r = cuModuleGetFunction(&cached_cont.kernel_peak, cached_cont.module, mangled_peak.c_str());
         if (r != CUDA_SUCCESS) {
             err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
+            release_cont_module(); return false;
+        }
+        r = cuModuleGetFunction(&cached_cont.kernel_dft, cached_cont.module, mangled_dft.c_str());
+        if (r != CUDA_SUCCESS) {
+            err = "cuModuleGetFunction(" + mangled_dft + "): " + cu_err(r);
             release_cont_module(); return false;
         }
 
@@ -2610,6 +2638,575 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef C_CHECK
         #undef C_CHECK_CU
+        res.ok = true;
+        return res;
+    }
+
+    // =========================================================================
+    // run_dft_1d — 1D DFT (порт bifurcation_DFT_1D из hostLibrary.cu:4900-5315).
+    // Диспетчер: continuation требует param-sweep (та же причина, что и у
+    // run_bif1d) — делегирует в run_dft1d_continuation, иначе classical.
+    // =========================================================================
+    Dft1DResult run_dft_1d(const Dft1DRequest& req) {
+        if (req.continuation) {
+            if (req.sweep_over_var) {
+                Dft1DResult r;
+                r.error = "continuation требует param-sweep, не IC-sweep";
+                return r;
+            }
+            return run_dft1d_continuation(req);
+        }
+        return run_dft1d_classical(req);
+    }
+
+    // Общая для classical/continuation: строит оконную функцию длиной
+    // sizeOfBlock. DFT_custom принимает готовое окно аргументом (НЕ считает
+    // его сам) — см. cudaLibrary.cu:DFT_custom. Три формулы совпадают с теми,
+    // что в hostLibrary.cu::bifurcation_DFT_1D закомментированы/активны как
+    // взаимоисключающие альтернативы (строки 4984-4989):
+    //   0 = None (rectangular, "h_window[n] = 1.0")
+    //   1 = Hanning (default — активная строка в hostLibrary.cu)
+    //   2 = Hamming (закомментированная строка в hostLibrary.cu)
+    static void build_window(std::vector<double>& out, int sizeOfBlock, int window_type) {
+        out.resize((size_t)sizeOfBlock);
+        if (window_type == 0) {
+            std::fill(out.begin(), out.end(), 1.0);
+            return;
+        }
+        const double gamma = 2.0 * pi / (double)(sizeOfBlock - 1);
+        if (window_type == 2) {
+            for (int n = 0; n < sizeOfBlock; ++n)
+                out[(size_t)n] = 0.53836 - 0.46164 * std::cos(gamma * (double)n);
+        } else {
+            for (int n = 0; n < sizeOfBlock; ++n)
+                out[(size_t)n] = 0.5 * (1.0 - std::cos(gamma * (double)n));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // run_dft1d_classical — порт classical-ветки bifurcation_DFT_1D. Реюзает
+    // cached.kernel_traj (calculateDiscreteModelCUDA, тот же PTX-кэш что и
+    // run_bif1d) для генерации сырых траекторий, затем cached.kernel_dft
+    // (DFT_custom) вместо peakFinderCUDA. Chunked по nPtsLimiter как run_bif1d.
+    // -------------------------------------------------------------------------
+    Dft1DResult run_dft1d_classical(const Dft1DRequest& req) {
+        Dft1DResult res;
+        auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
+
+        // ---- валидация (как run_bif1d + n_freq/freq range) ----
+        if (req.krs_body.empty())                                   return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if (req.sweep_over_var) {
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index вне диапазона");
+        } else {
+            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                return fail("param_index вне диапазона");
+        }
+        // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int
+        // / Bifurcation1DRequest::writable_var) — тот же calculateDiscreteModelCUDA,
+        // так что DFT1D поддерживает её точно так же.
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                    return fail("writable_var вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_if_needed(req.krs_body, req.amountOfX,
+                               req.sweep_over_var ? 0 : 1, err)) return fail(err);
+
+        const double tMax                       = req.t_max;
+        const int    nPts                       = req.n_pts;
+        const int    nFreq                      = req.n_freq;
+        const double h                          = req.h;
+        const int    amountOfInitialConditions  = req.amountOfX;
+        const double* initialConditions         = req.initial_conditions.data();
+        double ranges[2]                        = { req.param_lo, req.param_hi };
+        double rangesFreq[2]                    = { req.freq_lo, req.freq_hi };
+        int    indicesOfMutVars[1]              = { req.sweep_over_var
+                                                    ? req.var_sweep_index
+                                                    : req.param_index };
+        const int    writableVar                = req.writable_var;
+        const double maxValue                   = req.max_value;
+        const double transientTime              = req.transient_time;
+        const double* values                    = req.base_values.data();
+        const int    amountOfValues             = (int)req.base_values.size();
+        const int    preScaller                 = req.pre_scaller;
+        const std::string& OUT_FILE_PATH        = req.csv_output_path;
+
+        constexpr int blockSize_setup = 32;
+        constexpr int set_precision   = 15;
+
+        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        int amountOfPointsForSkip = (int)(transientTime / h);
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+
+        // --- Memory budget: как run_bif1d, но выход DFT (AkCOS/BkSIN,
+        // nPtsLimiter*n_freq каждый) обычно намного меньше, чем outPeaks/
+        // timeOfPeaks (nPtsLimiter*amountOfPointsInBlock каждый) — n_freq
+        // почти всегда << amountOfPointsInBlock. d_window — константа,
+        // не масштабируется с nPtsLimiter.
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.92);
+
+        size_t memPerSystem =
+            (size_t)amountOfPointsInBlock * sizeof(double) +      // d_data
+            2 * (size_t)nFreq * sizeof(double) +                   // d_AkCOS + d_BkSIN (per-point share)
+            sizeof(int);                                           // d_amountOfPeaks
+        size_t memConstants =
+            2 * sizeof(double) +                                    // d_ranges
+            2 * sizeof(double) +                                    // d_rangesFreq
+            sizeof(int) +                                           // d_indicesOfMutVars
+            (size_t)amountOfInitialConditions * sizeof(double) +
+            (size_t)amountOfValues * sizeof(double) +
+            (size_t)amountOfPointsInBlock * sizeof(double);         // d_window
+        constexpr double SAFETY_FACTOR = 0.9;
+        size_t safeFree = (size_t)((double)freeMemory * SAFETY_FACTOR);
+        if (memConstants >= safeFree) return fail("not enough GPU memory for constants");
+        size_t availableMemory = safeFree - memConstants;
+
+        size_t nPtsLimiter = availableMemory / memPerSystem;
+        if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
+        if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
+        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
+        if (nPtsLimiter == 0)
+            return fail("not enough GPU memory: per-system buffer too large");
+        size_t originalNPtsLimiter = nPtsLimiter;
+
+        std::vector<double> h_AkCOS(nPtsLimiter * (size_t)nFreq);
+        std::vector<double> h_BkSIN(nPtsLimiter * (size_t)nFreq);
+        std::vector<int>    h_amountOfPeaks(nPtsLimiter);
+        std::vector<double> h_window;
+        build_window(h_window, amountOfPointsInBlock, req.window_type);
+
+        double* d_data              = nullptr;
+        double* d_ranges            = nullptr;
+        double* d_rangesFreq        = nullptr;
+        int*    d_indicesOfMutVars  = nullptr;
+        double* d_initialConditions = nullptr;
+        double* d_values            = nullptr;
+        int*    d_amountOfPeaks     = nullptr;
+        double* d_AkCOS             = nullptr;
+        double* d_BkSIN             = nullptr;
+        double* d_window            = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_data)              cudaFree(d_data);
+            if (d_ranges)            cudaFree(d_ranges);
+            if (d_rangesFreq)        cudaFree(d_rangesFreq);
+            if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
+            if (d_initialConditions) cudaFree(d_initialConditions);
+            if (d_values)            cudaFree(d_values);
+            if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            if (d_AkCOS)             cudaFree(d_AkCOS);
+            if (d_BkSIN)             cudaFree(d_BkSIN);
+            if (d_window)            cudaFree(d_window);
+        };
+
+        #define DFT_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define DFT_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define DFT_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        DFT_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
+        DFT_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                          "cudaMalloc d_ranges");
+        DFT_CHECK(cudaMalloc((void**)&d_rangesFreq,        2 * sizeof(double)),                                          "cudaMalloc d_rangesFreq");
+        DFT_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                             "cudaMalloc d_indicesOfMutVars");
+        DFT_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),          "cudaMalloc d_initialConditions");
+        DFT_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                     "cudaMalloc d_values");
+        DFT_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
+        DFT_CHECK(cudaMalloc((void**)&d_AkCOS,             nPtsLimiter * (size_t)nFreq * sizeof(double)),                "cudaMalloc d_AkCOS");
+        DFT_CHECK(cudaMalloc((void**)&d_BkSIN,             nPtsLimiter * (size_t)nFreq * sizeof(double)),                "cudaMalloc d_BkSIN");
+        DFT_CHECK(cudaMalloc((void**)&d_window,            (size_t)amountOfPointsInBlock * sizeof(double)),             "cudaMalloc d_window");
+
+        DFT_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
+        DFT_CHECK(cudaMemcpy(d_rangesFreq,        rangesFreq,         2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
+        DFT_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,   1 * sizeof(int),                                   cudaMemcpyHostToDevice), "memcpy d_indices");
+        DFT_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
+        DFT_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        DFT_CHECK(cudaMemcpy(d_window,            h_window.data(),   (size_t)amountOfPointsInBlock * sizeof(double),     cudaMemcpyHostToDevice), "memcpy d_window");
+        DFT_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
+
+        res.snapshot.values.assign(values, values + amountOfValues);
+        res.snapshot.initial_conditions.assign(initialConditions,
+            initialConditions + amountOfInitialConditions);
+        res.snapshot.tMax          = tMax;
+        res.snapshot.transientTime = transientTime;
+        res.snapshot.h             = h;
+        res.snapshot.preScaller    = preScaller;
+        res.snapshot.writableVar   = writableVar;
+        res.snapshot.indexOfMutVar = indicesOfMutVars[0];
+        res.snapshot.range_lo      = ranges[0];
+        res.snapshot.range_hi      = ranges[1];
+        res.snapshot.n_freq        = nFreq;
+        res.snapshot.freq_lo       = rangesFreq[0];
+        res.snapshot.freq_hi       = rangesFreq[1];
+        res.snapshot.window_type   = req.window_type;
+
+        std::ofstream akFile, bkFile;
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            data_export::write_dft1d_config(cfg, res.snapshot);
+            akFile.open(OUT_FILE_PATH + "_AkCOS.csv");
+            bkFile.open(OUT_FILE_PATH + "_BkSIN.csv");
+            data_export::write_dft1d_header(akFile, res.snapshot);
+            data_export::write_dft1d_header(bkFile, res.snapshot);
+            akFile.close();
+            bkFile.close();
+        }
+
+        res.n_pts  = nPts;
+        res.n_freq = nFreq;
+        res.param_lo = ranges[0];
+        res.param_hi = ranges[1];
+        res.freq_lo  = rangesFreq[0];
+        res.freq_hi  = rangesFreq[1];
+        res.flags.assign(nPts, 0);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            DFT_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            if (iter == amountOfIteration - 1)
+                nPtsLimiter = nPts - (originalNPtsLimiter * iter);
+
+            int blockSize = 32;
+            int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
+
+            int    nPts_int                  = nPts;
+            int    nPtsLimiter_int           = (int)nPtsLimiter;
+            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;  // for kernel_traj (size_t param)
+            int    sizeOfBlock_i             = amountOfPointsInBlock;          // for DFT_custom (int param — see gotcha #3)
+            size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
+            size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
+            int    dimension                 = 1;
+            double h_arg                     = h;
+            int    amountOfInitialConditions_int = amountOfInitialConditions;
+            int    amountOfValues_int        = amountOfValues;
+            size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
+            int    preScaller_int            = preScaller;
+            int    writableVar_int           = writableVar;
+            double maxValue_arg              = maxValue;
+            bool   par_or_var_arg            = !req.sweep_over_var;
+
+            void* args_traj[] = {
+                &nPts_int,
+                &nPtsLimiter_int,
+                &sizeOfBlock_s,
+                &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s,
+                &dimension,
+                &d_ranges,
+                &h_arg,
+                &d_indicesOfMutVars,
+                &d_initialConditions,
+                &amountOfInitialConditions_int,
+                &d_values,
+                &amountOfValues_int,
+                &amountOfIterations_arg,
+                &preScaller_int,
+                &writableVar_int,
+                &maxValue_arg,
+                &d_data,
+                &d_amountOfPeaks,
+                &par_or_var_arg
+            };
+
+            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+
+            DFT_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared, nullptr, args_traj, nullptr),
+                         "cuLaunchKernel(traj)");
+            DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
+
+            // DFT_custom(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
+            // BkSIN, rangesFreq, window, nFreq, h) — h здесь ШАГ МЕЖДУ decimated
+            // сэмплами (h*preScaller), как и у peakFinderCUDA (см. run_bif1d).
+            int    nFreq_int    = nFreq;
+            double timeStep_arg = h * (double)preScaller;
+            void* args_dft[] = {
+                &d_data,
+                &sizeOfBlock_i,
+                &nPtsLimiter_int,
+                &d_amountOfPeaks,
+                &d_AkCOS,
+                &d_BkSIN,
+                &d_rangesFreq,
+                &d_window,
+                &nFreq_int,
+                &timeStep_arg
+            };
+            DFT_CHECK_CU(cuLaunchKernel(cached.kernel_dft,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        0, nullptr, args_dft, nullptr),
+                         "cuLaunchKernel(dft)");
+            DFT_CHECK(cudaDeviceSynchronize(), "sync after dft");
+
+            DFT_CHECK(cudaMemcpy(h_AkCOS.data(),         d_AkCOS,          nPtsLimiter * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_AkCOS");
+            DFT_CHECK(cudaMemcpy(h_BkSIN.data(),         d_BkSIN,          nPtsLimiter * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_BkSIN");
+            DFT_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks,  nPtsLimiter * sizeof(int),                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
+            DFT_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+            if (!OUT_FILE_PATH.empty()) {
+                akFile.open(OUT_FILE_PATH + "_AkCOS.csv", std::ios::app);
+                bkFile.open(OUT_FILE_PATH + "_BkSIN.csv", std::ios::app);
+                if (akFile.is_open()) akFile << std::setprecision(set_precision);
+                if (bkFile.is_open()) bkFile << std::setprecision(set_precision);
+                data_export::write_dft1d_matrix(akFile, h_AkCOS.data(), 0, (int)nPtsLimiter, nFreq);
+                data_export::write_dft1d_matrix(bkFile, h_BkSIN.data(), 0, (int)nPtsLimiter, nFreq);
+                akFile.close();
+                bkFile.close();
+            }
+
+            size_t global_offset = originalNPtsLimiter * iter;
+            for (size_t k = 0; k < nPtsLimiter; ++k) {
+                size_t global_idx = global_offset + k;
+                res.flags[global_idx] = h_amountOfPeaks[k];
+                std::copy(h_AkCOS.begin() + (ptrdiff_t)(k * (size_t)nFreq),
+                          h_AkCOS.begin() + (ptrdiff_t)((k + 1) * (size_t)nFreq),
+                          res.ak_cos.begin() + (ptrdiff_t)(global_idx * (size_t)nFreq));
+                std::copy(h_BkSIN.begin() + (ptrdiff_t)(k * (size_t)nFreq),
+                          h_BkSIN.begin() + (ptrdiff_t)((k + 1) * (size_t)nFreq),
+                          res.bk_sin.begin() + (ptrdiff_t)(global_idx * (size_t)nFreq));
+            }
+        }
+
+        cleanup();
+        #undef DFT_CHECK
+        #undef DFT_CHECK_CU
+        #undef DFT_CANCEL_CHECK
+        res.ok = true;
+        return res;
+    }
+
+    // -------------------------------------------------------------------------
+    // run_dft1d_continuation — реюзает bifurcation1dContinuationKernel как есть
+    // (он уже пишет полную decimated-траекторию в d_data + флаги в
+    // d_amountOfPeaks для ВСЕГО nPts за один монолитный запуск — см. kernels/
+    // bifurcation1d_cont.template.cu). Второй проход — DFT_custom вместо
+    // peakFinderCUDA, над теми же буферами. Монолитно (без chunking), как и
+    // run_bif1d_continuation.
+    // -------------------------------------------------------------------------
+    Dft1DResult run_dft1d_continuation(const Dft1DRequest& req) {
+        Dft1DResult res;
+        auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                    return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+                                                                     return fail("param_index вне диапазона");
+        // writable_var == -1 — sentinel "combination" (см. run_bif1d_continuation).
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+        if (req.h <= 0.0)           return fail("h должно быть > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err))
+            return fail(err);
+
+        const int amountOfPointsInBlock = (int)(req.t_max / req.h / req.pre_scaller);
+        const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+        if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+        const int nPts  = req.n_pts;
+        const int nFreq = req.n_freq;
+        double rangesFreq[2] = { req.freq_lo, req.freq_hi };
+
+        std::vector<double> h_window;
+        build_window(h_window, amountOfPointsInBlock, req.window_type);
+
+        double* d_data       = nullptr;
+        double* d_baseValues = nullptr;
+        double* d_baseX      = nullptr;
+        int*    d_amountOfPeaks = nullptr;
+        double* d_AkCOS      = nullptr;
+        double* d_BkSIN      = nullptr;
+        double* d_rangesFreq = nullptr;
+        double* d_window     = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_data)       cudaFree(d_data);
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_amountOfPeaks) cudaFree(d_amountOfPeaks);
+            if (d_AkCOS)      cudaFree(d_AkCOS);
+            if (d_BkSIN)      cudaFree(d_BkSIN);
+            if (d_rangesFreq) cudaFree(d_rangesFreq);
+            if (d_window)     cudaFree(d_window);
+        };
+        #define DFTC_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define DFTC_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+        #define DFTC_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        const size_t dataBytes = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(double);
+        DFTC_CHECK(cudaMalloc((void**)&d_data,         dataBytes),                                       "cudaMalloc d_data");
+        DFTC_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(double)), "cudaMalloc d_baseValues");
+        DFTC_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(double)),          "cudaMalloc d_baseX");
+        DFTC_CHECK(cudaMalloc((void**)&d_amountOfPeaks,(size_t)nPts * sizeof(int)),                      "cudaMalloc d_amountOfPeaks");
+        DFTC_CHECK(cudaMalloc((void**)&d_AkCOS,        (size_t)nPts * (size_t)nFreq * sizeof(double)),   "cudaMalloc d_AkCOS");
+        DFTC_CHECK(cudaMalloc((void**)&d_BkSIN,        (size_t)nPts * (size_t)nFreq * sizeof(double)),   "cudaMalloc d_BkSIN");
+        DFTC_CHECK(cudaMalloc((void**)&d_rangesFreq,   2 * sizeof(double)),                               "cudaMalloc d_rangesFreq");
+        DFTC_CHECK(cudaMalloc((void**)&d_window,       (size_t)amountOfPointsInBlock * sizeof(double)),  "cudaMalloc d_window");
+
+        DFTC_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
+                           req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        DFTC_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
+                           (size_t)req.amountOfX * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseX");
+        DFTC_CHECK(cudaMemcpy(d_rangesFreq, rangesFreq, 2 * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
+        DFTC_CHECK(cudaMemcpy(d_window, h_window.data(),
+                           (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_window");
+        DFTC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        // --- Launch continuation kernel (unchanged — same as run_bif1d_continuation) ---
+        int    nPts_arg              = nPts;
+        double lo_arg                = req.param_lo;
+        double hi_arg                = req.param_hi;
+        bool   reverse_arg           = req.continuation_reverse;
+        int    mutParamIdx_arg       = req.param_index;
+        int    amountOfValues_arg    = (int)req.base_values.size();
+        int    amountOfX_arg         = req.amountOfX;
+        double h_arg                 = req.h;
+        int    transient_steps_arg   = amountOfPointsForSkip;
+        int    sizeOfBlock_arg       = amountOfPointsInBlock;
+        int    preScaller_arg        = req.pre_scaller;
+        int    writableVar_arg       = req.writable_var;
+        double maxValue_arg          = req.max_value;
+
+        void* cont_args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg,
+            &mutParamIdx_arg,
+            &d_baseValues, &amountOfValues_arg,
+            &d_baseX,      &amountOfX_arg,
+            &h_arg, &transient_steps_arg, &sizeOfBlock_arg, &preScaller_arg,
+            &writableVar_arg, &maxValue_arg,
+            &d_data, &d_amountOfPeaks
+        };
+        DFTC_CANCEL_CHECK();
+        DFTC_CHECK_CU(cuLaunchKernel(cached_cont.kernel_cont,
+                                  1, 1, 1, 1, 1, 1, 0, nullptr, cont_args, nullptr),
+                   "cuLaunchKernel(cont)");
+        DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
+        if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
+
+        // --- DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks ---
+        int    sizeOfBlock_i = amountOfPointsInBlock;  // int, не size_t — см. gotcha #3
+        int    nFreq_int     = nFreq;
+        double timeStep      = req.h * (double)req.pre_scaller;
+        void* dft_args[] = {
+            &d_data, &sizeOfBlock_i, &nPts_arg,
+            &d_amountOfPeaks, &d_AkCOS, &d_BkSIN, &d_rangesFreq, &d_window,
+            &nFreq_int, &timeStep
+        };
+        int    dftBlock = 32;
+        int    dftGrid  = (nPts + dftBlock - 1) / dftBlock;
+        DFTC_CHECK_CU(cuLaunchKernel(cached_cont.kernel_dft,
+                                  dftGrid, 1, 1, dftBlock, 1, 1,
+                                  0, nullptr, dft_args, nullptr),
+                   "cuLaunchKernel(dft)");
+        DFTC_CHECK(cudaDeviceSynchronize(), "sync after dft");
+
+        res.n_pts  = nPts;
+        res.n_freq = nFreq;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.freq_lo  = rangesFreq[0];
+        res.freq_hi  = rangesFreq[1];
+        res.continuation_reverse = req.continuation_reverse;
+        res.flags.assign((size_t)nPts, 0);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+
+        std::vector<int> h_amountOfPeaks((size_t)nPts);
+        DFTC_CHECK(cudaMemcpy(res.ak_cos.data(), d_AkCOS, (size_t)nPts * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy out d_AkCOS");
+        DFTC_CHECK(cudaMemcpy(res.bk_sin.data(), d_BkSIN, (size_t)nPts * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy out d_BkSIN");
+        DFTC_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy out d_amountOfPeaks");
+        DFTC_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+        for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = h_amountOfPeaks[(size_t)j];
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+
+        if (!req.csv_output_path.empty()) {
+            res.snapshot.values = req.base_values;
+            res.snapshot.initial_conditions = req.initial_conditions;
+            res.snapshot.tMax          = req.t_max;
+            res.snapshot.transientTime = req.transient_time;
+            res.snapshot.h             = req.h;
+            res.snapshot.preScaller    = req.pre_scaller;
+            res.snapshot.writableVar   = req.writable_var;
+            res.snapshot.indexOfMutVar = req.param_index;
+            res.snapshot.range_lo      = req.param_lo;
+            res.snapshot.range_hi      = req.param_hi;
+            res.snapshot.n_freq        = nFreq;
+            res.snapshot.freq_lo       = rangesFreq[0];
+            res.snapshot.freq_hi       = rangesFreq[1];
+            res.snapshot.window_type   = req.window_type;
+
+            std::ofstream cfg(req.csv_output_path + "_config.csv");
+            data_export::write_dft1d_config(cfg, res.snapshot);
+            std::ofstream akFile(req.csv_output_path + "_AkCOS.csv");
+            std::ofstream bkFile(req.csv_output_path + "_BkSIN.csv");
+            akFile << std::setprecision(15);
+            bkFile << std::setprecision(15);
+            data_export::write_dft1d_header(akFile, res.snapshot);
+            data_export::write_dft1d_header(bkFile, res.snapshot);
+            data_export::write_dft1d_matrix(akFile, res.ak_cos.data(), 0, nPts, nFreq);
+            data_export::write_dft1d_matrix(bkFile, res.bk_sin.data(), 0, nPts, nFreq);
+        }
+
+        cleanup();
+        #undef DFTC_CHECK
+        #undef DFTC_CHECK_CU
+        #undef DFTC_CANCEL_CHECK
         res.ok = true;
         return res;
     }
@@ -4401,6 +4998,10 @@ ParametricEngine::~ParametricEngine() = default;
 
 Bifurcation1DResult ParametricEngine::run_bifurcation_1d(const Bifurcation1DRequest& req) {
     return impl_->run_bif1d(req);
+}
+
+Dft1DResult ParametricEngine::run_dft_1d(const Dft1DRequest& req) {
+    return impl_->run_dft_1d(req);
 }
 
 Bifurcation2DResult ParametricEngine::run_bifurcation_2d(const Bifurcation2DRequest& req) {

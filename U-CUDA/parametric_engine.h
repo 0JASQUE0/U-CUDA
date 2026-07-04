@@ -113,6 +113,94 @@ struct Bifurcation1DResult {
 };
 
 // ============================================================================
+// 1D DFT — параметрическое дискретное преобразование Фурье. Для каждой точки
+// свипа (параметр или IC, как в Bifurcation1D) считает decimated-траекторию
+// writable_var, накладывает окно Ханна и находит nFreq косинус/синус
+// коэффициентов (AkCOS/BkSIN) в диапазоне частот [freq_lo, freq_hi] через
+// kernel DFT_custom (cudaLibrary.cuh). Порт bifurcation_DFT_1D из
+// hostLibrary.cu на NVRTC-пайплайн; classical-ветка переиспользует тот же
+// kernel_traj что и Bifurcation1D (calculateDiscreteModelCUDA), continuation
+// переиспользует bifurcation1dContinuationKernel как есть — оба уже пишут
+// сырую траекторию в d_data, DFT_custom просто второй проход по тем же данным.
+// ============================================================================
+
+struct Dft1DRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;  // длина == amountOfX
+    std::vector<double> base_values;         // все параметры системы
+
+    // Sweep target — см. Bifurcation1DRequest.
+    int  param_index    = 0;
+    bool sweep_over_var = false;
+    int  var_sweep_index = 0;
+    // Continuation — см. Bifurcation1DRequest. Как и там, требует
+    // sweep_over_var = false (валидатор отказывает иначе).
+    bool continuation = false;
+    bool continuation_reverse = false;
+    double param_lo = 0.0;
+    double param_hi = 1.0;
+    int n_pts = 1000;                        // разрешение по параметру (Resolution X)
+
+    int writable_var = 0;                    // индекс X-переменной для DFT
+
+    // Интегрирование — см. Bifurcation1DRequest.
+    double h = 0.01;
+    double transient_time = 0.0;
+    double t_max = 0.0;
+    int pre_scaller = 1;
+    double max_value = 1.0e6;
+
+    // DFT-специфика: число частот (Resolution Y) и диапазон частот.
+    int    n_freq  = 200;
+    double freq_lo = 0.0;
+    double freq_hi = 10.0;
+
+    // Оконная функция, применяемая к сэмплам перед DFT (см. build_window в
+    // parametric_engine.cpp — те же 3 формулы, что закомментированы в
+    // hostLibrary.cu::bifurcation_DFT_1D): 0=None (rectangular), 1=Hanning
+    // (default, совпадает с текущим поведением hostLibrary.cu), 2=Hamming.
+    int window_type = 1;
+
+    // Если не пусто — engine пишет <path>_config.csv / _AkCOS.csv / _BkSIN.csv
+    // (см. data_export::export_dft1d, формат совместим с hostLibrary.cu).
+    std::string csv_output_path;
+
+    // See Bifurcation1DRequest::cancel.
+    std::shared_ptr<std::atomic<bool>> cancel;
+
+    // See Bifurcation1DRequest::progress.
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct Dft1DResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    bool continuation_reverse = false;
+    double param_lo = 0.0;
+    double param_hi = 1.0;
+    int n_pts  = 0;
+    int n_freq = 0;
+    double freq_lo = 0.0;
+    double freq_hi = 0.0;
+
+    // Row-major, param-major/freq-minor: ak_cos[pt*n_freq + f]. Совпадает с
+    // layout'ом h_AkCOS/h_BkSIN в hostLibrary.cu (MATLAB-совместимость).
+    std::vector<double> ak_cos;
+    std::vector<double> bk_sin;
+
+    // flags[i]: 1 = ok, 0 = diverged, -1 = fixed point. Та же семантика, что
+    // checkerArray, который DFT_custom получает на входе (см. cudaLibrary.cu).
+    std::vector<int> flags;
+
+    // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
+    data_export::Dft1DSnapshot snapshot;
+};
+
+// ============================================================================
 // LLE (Largest Lyapunov Exponent) 1D — свип параметра, λ(param).
 // Алгоритм: Wolf/Benettin с малым возмущением. Реализован в NonLinAnal
 // (cudaLibrary.cu:LLEKernelCUDA), engine подключает его через NVRTC и
@@ -684,6 +772,11 @@ public:
     // 1D-бифуркация. Если КРС не изменился с прошлого запуска — переиспользуется
     // скомпилированный PTX (кэш по хэшу krs_body + amountOfX).
     Bifurcation1DResult run_bifurcation_1d(const Bifurcation1DRequest& req);
+
+    // 1D DFT — параметрическое преобразование Фурье. Использует тот же PTX-кэш
+    // (classical и continuation), что и run_bifurcation_1d — DFT_custom уже
+    // скомпилирован в оба модуля, просто ищется дополнительно.
+    Dft1DResult run_dft_1d(const Dft1DRequest& req);
 
     // 2D-бифуркация — период(p1, p2) через DBSCAN на квадратной сетке.
     Bifurcation2DResult run_bifurcation_2d(const Bifurcation2DRequest& req);
