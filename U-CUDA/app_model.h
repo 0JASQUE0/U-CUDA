@@ -63,6 +63,26 @@ struct ParametricPlotWindow {
     int id = 0;
 };
 
+// Dynamic plot window for DFT1D mode — mirrors ParametricPlotWindow, but
+// simplified: only one display kind exists (heatmap), so no `kind`/`mode_2d`/
+// `colored_1d` fields are needed. `members` indexes dft1d_session.configs and
+// always holds at most one entry — a DFT1D window shows exactly one config's
+// heatmap (same as Bifurcation's 2D/colored-1D windows; single-select radio
+// in the "Members..." popup, enforced again in add_dft1d_plot_window).
+struct Dft1DPlotWindow {
+    std::string label = "Plot 1";
+    bool        label_is_manual = true;
+    std::vector<int> members;
+    int id = 0;
+};
+
+// Один элемент DFT1D-очереди — индекс config'а в dft1d_session.configs.
+// Отдельная очередь по той же причине, что и у Basins/FastSync — DFT1D
+// независим от parametric/basins по UI.
+struct Dft1DQueueItem {
+    int index = 0;
+};
+
 // Один элемент basins-очереди — индекс config'а в basins_session.configs.
 // Basins живёт в отдельной очереди (а не в parametric_queue), потому что
 // сейчас параметрика и basins не пересекаются по UI: parametric "Run all"
@@ -155,7 +175,7 @@ public:
     // --- режим приложения и сессия анализа (слой 2) ---
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.
-    enum class AppMode { Library, Analysis, Parametric, Basins, FastSync, Settings };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Settings };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -168,6 +188,10 @@ public:
     BifurcationAnalysisSession bifurcation_session;
     LLEAnalysisSession         lle_session;
     LyapunovSpectrumAnalysisSession ls_session;
+
+    // 1D DFT — отдельный AppMode (между Parametric и Basins), своя очередь и
+    // список конфигов (см. Dft1DAnalysisSession в analysis_session.h).
+    Dft1DAnalysisSession       dft1d_session;
 
     // Basins of attraction — отдельный AppMode со своим Run и 5-плотным окном.
     BasinsAnalysisSession      basins_session;
@@ -270,6 +294,21 @@ public:
     // meaning the user deliberately closed everything), respects it as-is.
     void load_or_init_parametric_plot_windows(const std::string& json);
 
+    // DFT1D batch queue — независимая от parametric_queue (см. Dft1DQueueItem).
+    std::deque<Dft1DQueueItem> dft1d_queue;
+    bool start_next_in_dft1d_queue();
+
+    // Dynamic plot windows for DFT1D mode (see Dft1DPlotWindow) — mirrors
+    // parametric_plot_windows, minus the kind/mode_2d/colored_1d dimensions.
+    std::vector<Dft1DPlotWindow> dft1d_plot_windows;
+    int  next_dft1d_plot_window_id = 1;
+    int  dft1d_layout_generation = 0;
+    bool dft1d_plot_windows_dirty = false;
+
+    void add_dft1d_plot_window(std::vector<int> initial_members);
+    void remove_dft1d_plot_window(int pos);
+    void load_or_init_dft1d_plot_windows(const std::string& json);
+
     // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
     std::deque<BasinsQueueItem> basins_queue;
     bool start_next_in_basins_queue();
@@ -285,6 +324,7 @@ public:
     void remove_bifurcation_diagram(int i);
     void remove_lle_curve(int i);
     void remove_ls_curve(int i);
+    void remove_dft1d_config(int i);
     void remove_basins_config(int i);
     void remove_fastsync_config(int i);
 
@@ -294,6 +334,8 @@ public:
     // Инициализирует ВСЕ parametric-сессии (bif/LLE/LS) из текущей системы —
     // пользователь ждёт одинаковые vars/params в любом верхнем табе.
     bool start_parametric_analysis();
+    // Инициализирует dft1d-сессию из текущей системы.
+    bool start_dft1d_analysis();
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
     bool start_fastsync_analysis();

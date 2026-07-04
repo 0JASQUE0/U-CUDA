@@ -480,6 +480,132 @@ struct LLEAnalysisSession {
 };
 
 // ============================================================================
+// 1D DFT — параметрическое дискретное преобразование Фурье. Структурно
+// зеркалит BasinsConfig/BasinsAnalysisSession (один "kind", несколько
+// конфигов в списке, своя очередь) — НЕ Bifurcation/LLE/LS-паттерн с общим
+// табом на 3 kind'а. Sweep/Integration/IC/Parameters-поля зеркалят
+// BifurcationDiagramConfig (тот же UX для этой части).
+// ============================================================================
+
+struct Dft1DConfig {
+    std::string label = "DFT 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme     = "Euler";
+    std::string symmetry_s = "0.5";       // a[0] для CD
+
+    // Свип — см. BifurcationDiagramConfig (то же самое: параметр или НУ,
+    // с опциональным continuation). Continuation требует sweep_over_var=false
+    // (то же ограничение, что и у Bifurcation1D).
+    int         param_index     = 0;
+    bool        sweep_over_var  = false;
+    int         var_sweep_index = 0;
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    std::string param_lo_text = "0";
+    std::string param_hi_text = "1";
+    std::string n_pts_text    = "500";    // Resolution X
+
+    int         writable_var  = 0;        // переменная, чью траекторию преобразуем
+
+    // Частотная ось (Resolution Y) — обязательные поля для rangesFreq,
+    // без auto-режима (в отличие от colored_1d_custom_y): частотный диапазон
+    // всегда физически осмыслен только если задан явно.
+    std::string n_freq_text  = "200";
+    std::string freq_lo_text = "0";
+    std::string freq_hi_text = "10";
+    // Оконная функция перед DFT: 0=None (rectangular), 1=Hanning (default),
+    // 2=Hamming — см. parametric_engine.cpp::build_window.
+    int         window_type = 1;
+
+    // Интегрирование — см. BifurcationDiagramConfig.
+    std::string h_text           = "0.01";
+    std::string t_max_text       = "100";
+    std::string transient_text   = "100";
+    std::string pre_scaller_text = "1";
+    std::string max_value_text   = "1e6";
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    // Режим отображения хитмапы: 0=power spectrum (ak²+bk²), 1=amplitude
+    // (sqrt), 2=phase (atan2(bk,ak)). Normalize — деление каждой колонки
+    // (по параметру) на её максимум по частоте, см. draw_dft1d_plot.
+    int         display_mode = 0;
+    bool        normalize    = true;
+
+    Dft1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // Persisted heatmap colormap choice (-1 = unset, falls back to
+    // AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
+
+    // Кэш хитмапы для отображения (freq-major/param-minor: idx = f*n_pts+pt,
+    // то есть nx=n_pts, ny=n_freq — конвенция HeatmapView::render). Строится
+    // лениво в draw_dft1d_plot из result.ak_cos/bk_sin по display_mode/
+    // normalize; колонки с result.flags[pt] <= 0 получают sentinel 999.0
+    // (см. draw_bifurcation_plot::colored_1d_cache — тот же sentinel).
+    std::vector<double> display_cache;
+    double      display_cache_vmin = 0.0;
+    double      display_cache_vmax = 1.0;
+    int         display_cache_gen  = 0;
+    int         display_built_from = -1;      // data_generation, из которого построен кэш
+    int         display_cache_mode      = -1;
+    bool        display_cache_normalize = false;
+};
+
+struct Dft1DAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::string loaded_system_name;
+
+    std::vector<Dft1DConfig> configs;
+    int active_config_index = 0;
+    int running_config_index = -1;
+
+    std::future<Dft1DResult> run_future;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    // Cooperative cancellation — see BifurcationAnalysisSession::cancel_token.
+    std::shared_ptr<std::atomic<bool>>  cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
+    Dft1DAnalysisSession() = default;
+    Dft1DAnalysisSession(Dft1DAnalysisSession&&) = default;
+    Dft1DAnalysisSession& operator=(Dft1DAnalysisSession&&) = default;
+    Dft1DAnalysisSession(const Dft1DAnalysisSession&) = delete;
+    Dft1DAnalysisSession& operator=(const Dft1DAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+
+    // Добавить config: глубокая копия последнего (если есть), иначе дефолт.
+    // Label автоматически "DFT <N+1>", результат и флаги обнуляются.
+    void add_config();
+    void remove_config(int i);
+
+    bool run(ParametricEngine& engine, int config_idx);
+    bool run_async(ParametricEngine& engine, int config_idx);
+    void request_cancel();
+    bool poll();
+};
+
+// ============================================================================
 // Basins of Attraction — карта классификации траекторий на сетке IC.
 // Одна конфигурация на сессию (без inner tab-bar — basin расчёт тяжёлый).
 // 5 плотов в окне результата переключаются внутренним tab-bar'ом.

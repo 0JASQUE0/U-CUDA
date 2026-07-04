@@ -272,15 +272,15 @@ int main() {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
-        if (app_cfg.heatmap_colormap >= 0 && app_cfg.heatmap_colormap <= 3)
+        if (app_cfg.heatmap_colormap >= 0 && app_cfg.heatmap_colormap < kHeatmapColormapCount)
             model.heatmap_colormap = app_cfg.heatmap_colormap;
-        if (app_cfg.basins_colormap >= 0 && app_cfg.basins_colormap <= 3)
+        if (app_cfg.basins_colormap >= 0 && app_cfg.basins_colormap < kHeatmapColormapCount)
             model.basins_colormap = app_cfg.basins_colormap;
-        if (app_cfg.basins_avgpk_colormap >= 0 && app_cfg.basins_avgpk_colormap <= 3)
+        if (app_cfg.basins_avgpk_colormap >= 0 && app_cfg.basins_avgpk_colormap < kHeatmapColormapCount)
             model.basins_avgpk_colormap = app_cfg.basins_avgpk_colormap;
-        if (app_cfg.basins_avgint_colormap >= 0 && app_cfg.basins_avgint_colormap <= 3)
+        if (app_cfg.basins_avgint_colormap >= 0 && app_cfg.basins_avgint_colormap < kHeatmapColormapCount)
             model.basins_avgint_colormap = app_cfg.basins_avgint_colormap;
-        if (app_cfg.basins_states_colormap >= 0 && app_cfg.basins_states_colormap <= 3)
+        if (app_cfg.basins_states_colormap >= 0 && app_cfg.basins_states_colormap < kHeatmapColormapCount)
             model.basins_states_colormap = app_cfg.basins_states_colormap;
         if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
             model.tick_precision = app_cfg.tick_precision;

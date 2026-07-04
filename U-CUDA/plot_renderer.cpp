@@ -1,5 +1,7 @@
 #include "plot_renderer.h"
+#include "colormap_lut_data.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 // ---- CPU-side colormap (зеркало GLSL fragment-полиномов draw_heatmap) ----
@@ -41,17 +43,43 @@ vec3f cmap_turbo(float t) {
     return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
 }
 vec3f cmap_gray(float t) { return {t, t, t}; }
+
+// LUT-based colormap (4-8): линейная интерполяция между соседними записями
+// 256-элементной таблицы. Визуально соответствует GPU-пути (bilinear sample
+// текстуры на той же таблице), но не гарантированно bit-exact, в отличие от
+// полиномиальных 0-3.
+vec3f cmap_lut_sample(float t, const unsigned char lut[256][3]) {
+    float pos = t * 255.0f;
+    int i0 = (int)pos;
+    if (i0 < 0) i0 = 0; else if (i0 > 255) i0 = 255;
+    int i1 = (i0 < 255) ? i0 + 1 : 255;
+    float frac = pos - (float)i0;
+    auto to_f = [](const unsigned char* c) -> vec3f {
+        return { c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f };
+    };
+    return to_f(lut[i0]) * (1.0f - frac) + to_f(lut[i1]) * frac;
+}
 } // namespace
+
+const char* const kHeatmapColormapNames[9] = {
+    "Viridis", "Inferno", "Turbo", "Gray",
+    "GistStern", "GnuPlot", "GistRainbow", "NipySpectral", "GistNcar",
+};
 
 ImU32 cmap_sample(float t, HeatmapColormap m) {
     t = std::min(std::max(t, 0.0f), 1.0f);
     vec3f c;
     switch (m) {
-        case HeatmapColormap::Inferno: c = cmap_inferno(t); break;
-        case HeatmapColormap::Turbo:   c = cmap_turbo(t);   break;
-        case HeatmapColormap::Gray:    c = cmap_gray(t);    break;
+        case HeatmapColormap::Inferno:      c = cmap_inferno(t); break;
+        case HeatmapColormap::Turbo:        c = cmap_turbo(t);   break;
+        case HeatmapColormap::Gray:         c = cmap_gray(t);    break;
+        case HeatmapColormap::GistStern:    c = cmap_lut_sample(t, kLutGistStern);    break;
+        case HeatmapColormap::GnuPlot:      c = cmap_lut_sample(t, kLutGnuPlot);      break;
+        case HeatmapColormap::GistRainbow:  c = cmap_lut_sample(t, kLutGistRainbow);  break;
+        case HeatmapColormap::NipySpectral: c = cmap_lut_sample(t, kLutNipySpectral); break;
+        case HeatmapColormap::GistNcar:     c = cmap_lut_sample(t, kLutGistNcar);     break;
         case HeatmapColormap::Viridis:
-        default:                       c = cmap_viridis(t); break;
+        default:                            c = cmap_viridis(t); break;
     }
     auto clamp01 = [](float v){ return std::min(std::max(v, 0.0f), 1.0f); };
     return IM_COL32((int)(clamp01(c.r) * 255.0f),
@@ -140,10 +168,12 @@ static const char* FS_HEATMAP = R"(
 #version 330 core
 in vec2 v_uv;
 uniform sampler2D u_tex;
+uniform sampler2D u_cmap_lut;  // 256x5 RGB8, строки = GistStern/GnuPlot/GistRainbow/NipySpectral/GistNcar (colormap 4-8)
 uniform float u_vmin;
 uniform float u_vmax;
 uniform int   u_colormap;
 uniform int   u_discrete_n;  // 0 = continuous, N>0 = quantize t into N bands
+uniform int   u_reverse;     // 1 = t := 1-t before colormap sampling
 uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
 out vec4 frag_color;
@@ -207,11 +237,19 @@ void main() {
         if (k >= n) k = n - 1.0;
         t = (n > 1.0) ? (k / (n - 1.0)) : 0.5;
     }
+    if (u_reverse != 0) t = 1.0 - t;
     vec3 col;
     if      (u_colormap == 0) col = viridis(t);
     else if (u_colormap == 1) col = inferno(t);
     else if (u_colormap == 2) col = turbo(t);
-    else                       col = vec3(t);
+    else if (u_colormap == 3) col = vec3(t);
+    else {
+        // LUT colormap (4-8, см. HeatmapColormap): строка row = colormap-4,
+        // сэмплим ровно в центре строки, чтобы vertical-bilinear не смешивал
+        // соседние colormap'ы между собой.
+        float row = float(u_colormap - 4) + 0.5;
+        col = texture(u_cmap_lut, vec2(t, row / 5.0)).rgb;
+    }
     frag_color = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 )";
@@ -269,6 +307,7 @@ static GLuint link_program_3(GLuint vs, GLuint gs, GLuint fs) {
 
 PlotRenderer::PlotRenderer() {
     compile_shaders();
+    ensure_lut_texture();
     glGenVertexArrays(1, &vao_);
 }
 
@@ -279,7 +318,33 @@ PlotRenderer::~PlotRenderer() {
     if (program_3d_thick_) glDeleteProgram(program_3d_thick_);
     if (program_heatmap_)  glDeleteProgram(program_heatmap_);
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
+    if (lut_tex_)         glDeleteTextures(1, &lut_tex_);
     if (vao_)             glDeleteVertexArrays(1, &vao_);
+}
+
+void PlotRenderer::ensure_lut_texture() {
+    if (lut_tex_) return;
+    // 256 (t) x 5 (colormap index 4..8) RGB8. Строки в порядке
+    // GistStern/GnuPlot/GistRainbow/NipySpectral/GistNcar — см.
+    // colormap_lut_data.h и HeatmapColormap-enum offset (-4).
+    unsigned char pixels[5 * 256 * 3];
+    auto copy_row = [&](int row, const unsigned char src[256][3]) {
+        std::memcpy(pixels + (size_t)row * 256 * 3, src, 256 * 3);
+    };
+    copy_row(0, kLutGistStern);
+    copy_row(1, kLutGnuPlot);
+    copy_row(2, kLutGistRainbow);
+    copy_row(3, kLutNipySpectral);
+    copy_row(4, kLutGistNcar);
+
+    glGenTextures(1, &lut_tex_);
+    glBindTexture(GL_TEXTURE_2D, lut_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 256, 5, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void PlotRenderer::compile_shaders() {
@@ -317,12 +382,14 @@ void PlotRenderer::compile_shaders() {
         program_heatmap_ = link_program(vs_h, fs_h);
         if (program_heatmap_) {
             loc_heatmap_tex_      = glGetUniformLocation(program_heatmap_, "u_tex");
+            loc_heatmap_lut_      = glGetUniformLocation(program_heatmap_, "u_cmap_lut");
             loc_heatmap_vmin_     = glGetUniformLocation(program_heatmap_, "u_vmin");
             loc_heatmap_vmax_     = glGetUniformLocation(program_heatmap_, "u_vmax");
             loc_heatmap_cmap_     = glGetUniformLocation(program_heatmap_, "u_colormap");
             loc_heatmap_uv_off_   = glGetUniformLocation(program_heatmap_, "u_uv_off");
             loc_heatmap_uv_scale_ = glGetUniformLocation(program_heatmap_, "u_uv_scale");
             loc_heatmap_discrete_n_ = glGetUniformLocation(program_heatmap_, "u_discrete_n");
+            loc_heatmap_reverse_   = glGetUniformLocation(program_heatmap_, "u_reverse");
         }
     }
     if (vs2)  glDeleteShader(vs2);
@@ -441,7 +508,7 @@ void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
 void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                                 float uv_off_x, float uv_off_y,
                                 float uv_scale_x, float uv_scale_y,
-                                int n_discrete) {
+                                int n_discrete, bool reverse) {
     if (!program_heatmap_ || !tex) return;
     if (!heatmap_vbo_) {
         // Fullscreen triangle-strip: 4 точки × (pos.xy, uv.xy). Текстурные
@@ -461,12 +528,17 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     if (loc_heatmap_tex_      >= 0) glUniform1i(loc_heatmap_tex_, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, lut_tex_);
+    if (loc_heatmap_lut_      >= 0) glUniform1i(loc_heatmap_lut_, 1);
+    glActiveTexture(GL_TEXTURE0);
     if (loc_heatmap_vmin_     >= 0) glUniform1f(loc_heatmap_vmin_, vmin);
     if (loc_heatmap_vmax_     >= 0) glUniform1f(loc_heatmap_vmax_, vmax);
     if (loc_heatmap_cmap_     >= 0) glUniform1i(loc_heatmap_cmap_, colormap_id);
     if (loc_heatmap_uv_off_   >= 0) glUniform2f(loc_heatmap_uv_off_, uv_off_x, uv_off_y);
     if (loc_heatmap_uv_scale_ >= 0) glUniform2f(loc_heatmap_uv_scale_, uv_scale_x, uv_scale_y);
     if (loc_heatmap_discrete_n_ >= 0) glUniform1i(loc_heatmap_discrete_n_, n_discrete);
+    if (loc_heatmap_reverse_  >= 0) glUniform1i(loc_heatmap_reverse_, reverse ? 1 : 0);
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, heatmap_vbo_);
@@ -480,6 +552,9 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
 }

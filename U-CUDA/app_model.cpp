@@ -239,6 +239,19 @@ bool AppModel::start_parametric_analysis() {
     return true;
 }
 
+bool AppModel::start_dft1d_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    dft1d_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        dft1d_session.sys = built;
+    }
+    catch (...) {}
+    dft1d_session.loaded_system_name = name;
+    return true;
+}
+
 bool AppModel::start_basins_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
@@ -279,6 +292,7 @@ void AppModel::propagate_to_sessions() {
     bifurcation_session.custom_schemes = custom_schemes;
     lle_session.custom_schemes         = custom_schemes;
     ls_session.custom_schemes          = custom_schemes;
+    dft1d_session.custom_schemes       = custom_schemes;
     basins_session.custom_schemes      = custom_schemes;
     fastsync_session.custom_schemes    = custom_schemes;
 
@@ -292,6 +306,7 @@ void AppModel::propagate_to_sessions() {
         bifurcation_session.sys = built;
         lle_session.sys         = built;
         ls_session.sys          = built;
+        dft1d_session.sys       = built;
         basins_session.sys      = built;
         fastsync_session.sys    = built;
     }
@@ -465,6 +480,84 @@ void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
             ls1.push_back((int)i);
     }
     if (!ls1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::LS, false, ls1);
+}
+
+void AppModel::remove_dft1d_config(int i) {
+    dft1d_session.remove_config(i);
+    // Cleanup dft1d_queue: drop items pointing at the removed index, shift
+    // index > i down by one (same pattern as remove_basins_config).
+    for (auto it = dft1d_queue.begin(); it != dft1d_queue.end(); ) {
+        if (it->index == i) it = dft1d_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : dft1d_queue)
+        if (it.index > i) --it.index;
+
+    // Plot windows: drop `i` from members, shift indices > i down by one;
+    // drop windows left with no members (same pattern as
+    // cleanup_plot_windows_after_removal, but DFT1D windows have no `kind`).
+    for (auto& w : dft1d_plot_windows) {
+        auto& m = w.members;
+        m.erase(std::remove(m.begin(), m.end(), i), m.end());
+        for (auto& idx : m) if (idx > i) --idx;
+    }
+    dft1d_plot_windows.erase(std::remove_if(dft1d_plot_windows.begin(), dft1d_plot_windows.end(),
+                                            [](const Dft1DPlotWindow& w) { return w.members.empty(); }),
+                             dft1d_plot_windows.end());
+    dft1d_plot_windows_dirty = true;
+}
+
+void AppModel::add_dft1d_plot_window(std::vector<int> initial_members) {
+    Dft1DPlotWindow w;
+    w.members = std::move(initial_members);
+    // A DFT1D window always shows exactly one config's heatmap (unlike
+    // Parametric's classic-1D windows, which can overlay several) — enforce
+    // here too, not just in the "Members..." popup's radio buttons.
+    if (w.members.size() > 1) w.members.resize(1);
+    w.id = next_dft1d_plot_window_id++;
+    w.label = "Plot " + std::to_string(w.id);
+    w.label_is_manual = false;   // fresh window → auto-label
+    dft1d_plot_windows.push_back(std::move(w));
+    dft1d_plot_windows_dirty = true;
+}
+
+void AppModel::remove_dft1d_plot_window(int pos) {
+    if (pos < 0 || pos >= (int)dft1d_plot_windows.size()) return;
+    dft1d_plot_windows.erase(dft1d_plot_windows.begin() + pos);
+    dft1d_plot_windows_dirty = true;
+}
+
+void AppModel::load_or_init_dft1d_plot_windows(const std::string& json) {
+    if (!json.empty()) {
+        session_from_json_dft1d_windows(json, dft1d_plot_windows);
+        int max_id = 0;
+        for (const auto& w : dft1d_plot_windows)
+            if (w.id > max_id) max_id = w.id;
+        if (max_id >= next_dft1d_plot_window_id)
+            next_dft1d_plot_window_id = max_id + 1;
+        return;
+    }
+    dft1d_plot_windows.clear();
+    // One window per config, same as Bifurcation's 2D/colored-1D default —
+    // a DFT heatmap isn't overlay-friendly, so there is no shared-window case.
+    for (size_t i = 0; i < dft1d_session.configs.size(); ++i)
+        add_dft1d_plot_window({ (int)i });
+}
+
+bool AppModel::start_next_in_dft1d_queue() {
+    if (dft1d_session.in_flight) return false;
+    if (dft1d_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!dft1d_queue.empty()) {
+        Dft1DQueueItem it = dft1d_queue.front();
+        dft1d_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)dft1d_session.configs.size()) {
+            if (dft1d_session.run_async(*parametric_engine, it.index)) return true;
+        }
+        // ok == false (krs пуст / индекс плохой) — last_error выставлен;
+        // идём дальше.
+    }
+    return false;
 }
 
 void AppModel::remove_basins_config(int i) {

@@ -70,6 +70,13 @@ public:
     // heatmap-плота; повторное переключение возвращает исходную ориентацию.
     bool   swap_axes = false;
 
+    // Reverse colormap: t := 1-t перед сэмплированием (и в GPU-шейдере, и в
+    // colorbar'е). Не персистится (сессионный toggle, как swap_axes) — каждый
+    // HeatmapView уже создаётся отдельно на диаграмму/config, так что флаг
+    // автоматически независим между ними. Переключается чекбоксом в том же
+    // right-click меню, что и Discrete colorbar (см. render()).
+    bool   reverse_colormap = false;
+
     // Индекс отображаемой экспоненты (λ1/λ2/...) — актуально только для LS2D
     // (draw_ls_plot в gui.cpp держит свою копию здесь, а не в общем
     // LSCurveConfig::display_exponent_idx, чтобы два окна с одной и той же

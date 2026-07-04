@@ -682,6 +682,139 @@ bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSessi
 }
 
 // ============================================================================
+// Dft1DAnalysisSession — `_last_dft1d.json`. Multi-config layout как у
+// Basins/FastSync (см. read_fastsync_field — тот же "чистый", без legacy
+// fallback, шаблон, т.к. это новая фича без старых сохранений). Result не
+// сохраняется, как и display_cache* (транзиентный, перестраивается лениво).
+// ============================================================================
+static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
+    o << "{";
+    o << "\"label\":";              jstr(o, c.label);              o << ",";
+    o << "\"label_is_manual\":"     << (c.label_is_manual ? "true" : "false") << ",";
+    o << "\"scheme\":";             jstr(o, c.scheme);             o << ",";
+    o << "\"symmetry_s\":";         jstr(o, c.symmetry_s);         o << ",";
+    o << "\"param_index\":"         << c.param_index              << ",";
+    o << "\"sweep_over_var\":"      << (c.sweep_over_var ? "true" : "false") << ",";
+    o << "\"var_sweep_index\":"     << c.var_sweep_index          << ",";
+    o << "\"continuation\":"        << (c.continuation ? "true" : "false") << ",";
+    o << "\"continuation_reverse\":"<< (c.continuation_reverse ? "true" : "false") << ",";
+    o << "\"param_lo_text\":";      jstr(o, c.param_lo_text);      o << ",";
+    o << "\"param_hi_text\":";      jstr(o, c.param_hi_text);      o << ",";
+    o << "\"n_pts_text\":";         jstr(o, c.n_pts_text);         o << ",";
+    o << "\"writable_var\":"        << c.writable_var             << ",";
+    o << "\"n_freq_text\":";        jstr(o, c.n_freq_text);        o << ",";
+    o << "\"freq_lo_text\":";       jstr(o, c.freq_lo_text);       o << ",";
+    o << "\"freq_hi_text\":";       jstr(o, c.freq_hi_text);       o << ",";
+    o << "\"window_type\":"         << c.window_type              << ",";
+    o << "\"h_text\":";             jstr(o, c.h_text);             o << ",";
+    o << "\"t_max_text\":";         jstr(o, c.t_max_text);         o << ",";
+    o << "\"transient_text\":";     jstr(o, c.transient_text);     o << ",";
+    o << "\"pre_scaller_text\":";   jstr(o, c.pre_scaller_text);   o << ",";
+    o << "\"max_value_text\":";     jstr(o, c.max_value_text);     o << ",";
+    o << "\"csv_save_enabled\":"    << (c.csv_save_enabled ? "true" : "false") << ",";
+    o << "\"csv_output_path\":";    jstr(o, c.csv_output_path);    o << ",";
+    o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
+    o << "\"param_values\":";       jmap(o, c.param_values);       o << ",";
+    o << "\"display_mode\":"       << c.display_mode             << ",";
+    o << "\"normalize\":"          << (c.normalize ? "true" : "false") << ",";
+    o << "\"colormap_idx\":"       << c.colormap_idx;
+    o << "}";
+}
+
+static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
+    if      (key == "label")               c.label               = p.str();
+    else if (key == "label_is_manual")     c.label_is_manual     = p.boolean();
+    else if (key == "scheme")              c.scheme              = p.str();
+    else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "param_index")         c.param_index         = std::stoi(p.str_or_num());
+    else if (key == "sweep_over_var")      c.sweep_over_var      = p.boolean();
+    else if (key == "var_sweep_index")     c.var_sweep_index     = std::stoi(p.str_or_num());
+    else if (key == "continuation")        c.continuation        = p.boolean();
+    else if (key == "continuation_reverse")c.continuation_reverse= p.boolean();
+    else if (key == "param_lo_text")       c.param_lo_text       = p.str();
+    else if (key == "param_hi_text")       c.param_hi_text       = p.str();
+    else if (key == "n_pts_text")          c.n_pts_text          = p.str();
+    else if (key == "writable_var")        c.writable_var        = std::stoi(p.str_or_num());
+    else if (key == "n_freq_text")         c.n_freq_text         = p.str();
+    else if (key == "freq_lo_text")        c.freq_lo_text        = p.str();
+    else if (key == "freq_hi_text")        c.freq_hi_text        = p.str();
+    else if (key == "window_type")         c.window_type         = std::stoi(p.str_or_num());
+    else if (key == "h_text")              c.h_text              = p.str();
+    else if (key == "t_max_text")          c.t_max_text          = p.str();
+    else if (key == "transient_text")      c.transient_text      = p.str();
+    else if (key == "pre_scaller_text")    c.pre_scaller_text    = p.str();
+    else if (key == "max_value_text")      c.max_value_text      = p.str();
+    else if (key == "csv_save_enabled")    c.csv_save_enabled    = p.boolean();
+    else if (key == "csv_output_path")     c.csv_output_path     = p.str();
+    else if (key == "initial_conditions")  c.initial_conditions  = p.map_ss();
+    else if (key == "param_values")        c.param_values        = p.map_ss();
+    else if (key == "display_mode")        c.display_mode        = std::stoi(p.str_or_num());
+    else if (key == "normalize")           c.normalize           = p.boolean();
+    else if (key == "colormap_idx")        c.colormap_idx        = std::stoi(p.str_or_num());
+    else return false;
+    return true;
+}
+
+std::string session_to_json_dft1d(const Dft1DAnalysisSession& s) {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"active_config_index\":" << s.active_config_index << ",\n";
+    o << "  \"configs\":[";
+    for (size_t i = 0; i < s.configs.size(); ++i) {
+        if (i) o << ",";
+        o << "\n    ";
+        write_dft1d_config(o, s.configs[i]);
+    }
+    if (!s.configs.empty()) o << "\n  ";
+    o << "]\n";
+    o << "}\n";
+    return o.str();
+}
+
+bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "configs") {
+                s.configs.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        Dft1DConfig c;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k2 = p.str(); p.expect(':');
+                                if (!read_dft1d_field(p, c, k2)) p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        s.configs.push_back(std::move(c));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else if (key == "active_config_index") s.active_config_index = std::stoi(p.str_or_num());
+            else                                    p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+            s.active_config_index = 0;
+        s.running_config_index = -1;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// ============================================================================
 // BasinsAnalysisSession — `_last_basins.json`. Один config на сессию
 // (без curves-vector). Result не сохраняется.
 // ============================================================================
@@ -1043,6 +1176,79 @@ bool session_from_json_parametric_windows(const std::string& json, std::vector<P
                                 else if (k == "colored_1d") w.colored_1d = p.boolean();
                                 else if (k == "label")   w.label   = p.str();
                                 else if (k == "label_is_manual") w.label_is_manual = p.boolean();
+                                else if (k == "members") {
+                                    w.members.clear();
+                                    p.expect('[');
+                                    if (!p.opt(']')) {
+                                        while (true) {
+                                            w.members.push_back(std::stoi(p.str_or_num()));
+                                            if (p.opt(',')) continue;
+                                            p.expect(']'); break;
+                                        }
+                                    }
+                                }
+                                else p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        wins.push_back(std::move(w));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// DFT1D plot windows: same flat-array shape as parametric windows, minus
+// kind/mode_2d/colored_1d (DFT1D has only one display kind).
+std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins) {
+    std::ostringstream o;
+    o << "{\n  \"windows\":[";
+    for (size_t i = 0; i < wins.size(); ++i) {
+        if (i) o << ",";
+        const auto& w = wins[i];
+        o << "{\"id\":" << w.id;
+        o << ",\"label\":"; jstr(o, w.label);
+        o << ",\"label_is_manual\":" << (w.label_is_manual ? "true" : "false");
+        o << ",\"members\":[";
+        for (size_t k = 0; k < w.members.size(); ++k) { if (k) o << ","; o << w.members[k]; }
+        o << "]}";
+    }
+    o << "]\n}\n";
+    return o.str();
+}
+
+bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DPlotWindow>& wins) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) { wins.clear(); return true; }
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "windows") {
+                wins.clear();
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        Dft1DPlotWindow w;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k = p.str(); p.expect(':');
+                                if      (k == "id")               w.id               = std::stoi(p.str_or_num());
+                                else if (k == "label")            w.label            = p.str();
+                                else if (k == "label_is_manual")  w.label_is_manual  = p.boolean();
                                 else if (k == "members") {
                                     w.members.clear();
                                     p.expect('[');
