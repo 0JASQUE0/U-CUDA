@@ -304,6 +304,11 @@ void HeatmapView::render(PlotRenderer& renderer,
             if (discrete_levels < 0) discrete_levels = 0;
         }
         ImGui::Checkbox("Reverse colormap", &reverse_colormap);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy image to clipboard")) {
+            request_plot_screenshot(block_origin,
+                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+        }
         // Caller-injected items (e.g. "Export data..."). Mirrors the same
         // hook on Plot2DView so both view types share the right-click pattern.
         if (popup_extras) {

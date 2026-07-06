@@ -1,6 +1,7 @@
 #pragma once
 #include "imgui.h"
 #include <string>
+#include <functional>
 
 // AxisInfo - ��������� ����� ���.
 // �������� ������ Plot2DView, ��������� � render-������� �� ������.
@@ -64,3 +65,16 @@ ImU32 plot_col_border();      // рамка плота, тики на colorbar
 
 // Цвет очистки FBO под плот. Передаётся в PlotRenderer::begin_frame.
 void  plot_bg_color(float& r, float& g, float& b, float& a);
+
+// =====================================================================
+// Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
+// диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
+// — рект в экранных координатах ImGui (весь блок диаграммы: оси/colorbar/
+// подписи, block_origin..+avail_size, не только FBO-картинка). app_main.cpp
+// один раз подключает sink при старте (тот же принцип "set once, вызывается
+// откуда угодно из plot-кода", что и set_plot_light_theme выше) — сам захват
+// пикселей происходит НЕ синхронно внутри сюда, а через пару кадров (см.
+// AppModel::PendingScreenshot), чтобы в кадр не попал ещё не закрывшийся popup.
+// =====================================================================
+void set_screenshot_request_sink(std::function<void(ImVec2 min, ImVec2 max)> sink);
+void request_plot_screenshot(ImVec2 min, ImVec2 max);

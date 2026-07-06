@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <vector>
 #include <cstring>
+#include <algorithm>
 
 // ---- Файловый источник (без изменений) ----
 std::vector<unsigned char> FileImageSource::get_png() {
@@ -14,6 +15,7 @@ std::vector<unsigned char> FileImageSource::get_png() {
 
 // ---- Источник из буфера обмена (Windows) ----
 #ifdef _WIN32
+#include <glad/glad.h>
 #include <windows.h>
 
 // stb_image_write для кодирования в PNG. STB_IMAGE_WRITE_IMPLEMENTATION
@@ -105,8 +107,63 @@ std::vector<unsigned char> ClipboardImageSource::get_png() {
     return png;
 }
 
+// Обратное направление: экран → буфер обмена ("Copy image to clipboard" на
+// диаграммах). Захватывает прямоугольник ТЕКУЩЕГО default
+// framebuffer'а — вызывается сразу после ImGui_ImplOpenGL3_RenderDrawData и
+// до glfwSwapBuffers, пока последний отрисованный кадр ещё в нём.
+bool copy_framebuffer_rect_to_clipboard(int x0, int y0_top, int x1, int y1_top) {
+    GLint vp[4];
+    glGetIntegerv(GL_VIEWPORT, vp);
+    int fb_w = vp[2], fb_h = vp[3];
+
+    // Клампим к границам framebuffer'а — окно могли ресайзнуть между кликом
+    // и захватом (см. AppModel::PendingScreenshot — захват через пару кадров).
+    x0     = (std::max)(0, (std::min)(x0, fb_w));
+    x1     = (std::max)(0, (std::min)(x1, fb_w));
+    y0_top = (std::max)(0, (std::min)(y0_top, fb_h));
+    y1_top = (std::max)(0, (std::min)(y1_top, fb_h));
+
+    int w = x1 - x0, h = y1_top - y0_top;
+    if (w <= 0 || h <= 0) return false;
+
+    // glReadPixels — Y снизу-вверх; на входе экранные (top-left) координаты.
+    int gl_y0 = fb_h - y1_top;
+
+    std::vector<unsigned char> rgba((size_t)w * (size_t)h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x0, gl_y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    // DIB (biHeight>0) хранит строки снизу-вверх — так же, как glReadPixels,
+    // поэтому переворот не нужен, только порядок каналов (BGRA), как в
+    // ClipboardImageSource::get_png() выше, но в обратную сторону.
+    BITMAPINFOHEADER bih{};
+    bih.biSize = sizeof(BITMAPINFOHEADER);
+    bih.biWidth = w; bih.biHeight = h;
+    bih.biPlanes = 1; bih.biBitCount = 32; bih.biCompression = BI_RGB;
+    bih.biSizeImage = (DWORD)((size_t)w * (size_t)h * 4);
+
+    if (!OpenClipboard(nullptr)) return false;
+    EmptyClipboard();
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeof(bih) + rgba.size());
+    if (!hMem) { CloseClipboard(); return false; }
+    unsigned char* dst = reinterpret_cast<unsigned char*>(GlobalLock(hMem));
+    memcpy(dst, &bih, sizeof(bih));
+    unsigned char* px = dst + sizeof(bih);
+    for (size_t i = 0; i < (size_t)w * (size_t)h; ++i) {
+        px[i * 4 + 0] = rgba[i * 4 + 2]; // B
+        px[i * 4 + 1] = rgba[i * 4 + 1]; // G
+        px[i * 4 + 2] = rgba[i * 4 + 0]; // R
+        px[i * 4 + 3] = rgba[i * 4 + 3]; // A
+    }
+    GlobalUnlock(hMem);
+    SetClipboardData(CF_DIB, hMem);
+    CloseClipboard();
+    return true;
+}
+
 #else // не Windows — заглушка
 std::vector<unsigned char> ClipboardImageSource::get_png() {
     throw std::runtime_error("clipboard image source: Windows only");
 }
+bool copy_framebuffer_rect_to_clipboard(int, int, int, int) { return false; }
 #endif

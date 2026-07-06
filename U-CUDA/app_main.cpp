@@ -18,6 +18,7 @@
 #include "gui.h"
 #include "system_library.h"
 #include "ocr_client_win.h"   // OcrClient + b64encode
+#include "image_source.h"     // copy_framebuffer_rect_to_clipboard
 
 #include <windows.h>
 #include <commdlg.h>          // GetOpenFileName
@@ -220,6 +221,17 @@ int main() {
     cb.set_clipboard_text = set_clipboard_win;
     cb.pick_save_file_csv = pick_save_csv_file_win;
 
+    // Право-клик "Copy image to clipboard" на любой диаграмме стекается
+    // сюда (см. plot_axis.h set_screenshot_request_sink).
+    // Здесь только фиксируем rect + отсрочку; сам захват — в главном цикле
+    // ниже, после того как right-click popup реально закроется.
+    set_screenshot_request_sink([&model](ImVec2 mn, ImVec2 mx) {
+        model.pending_screenshot.active = true;
+        model.pending_screenshot.frames_left = 2; // popup закрывается на след. кадре, +1 запас
+        model.pending_screenshot.min_x = mn.x; model.pending_screenshot.min_y = mn.y;
+        model.pending_screenshot.max_x = mx.x; model.pending_screenshot.max_y = mx.y;
+    });
+
     // --- инициализация GLFW + OpenGL + ImGui ---
     if (!glfwInit()) return 1;
 
@@ -396,6 +408,24 @@ int main() {
         glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        // Отложенный "copy diagram to clipboard" (см. set_screenshot_request_sink
+        // выше) — ждём, пока right-click popup, из которого могли вызвать
+        // запрос, реально закроется (ImGui закрывает popup только со
+        // СЛЕДУЮЩЕГО кадра), иначе он попадёт в захваченную картинку.
+        // DPI 1:1 — экранные координаты ImGui берутся как есть, без
+        // домножения на io.DisplayFramebufferScale.
+        if (model.pending_screenshot.active) {
+            if (model.pending_screenshot.frames_left > 0) {
+                model.pending_screenshot.frames_left--;
+            } else {
+                const auto& ps = model.pending_screenshot;
+                copy_framebuffer_rect_to_clipboard(
+                    (int)ps.min_x, (int)ps.min_y, (int)ps.max_x, (int)ps.max_y);
+                model.pending_screenshot.active = false;
+            }
+        }
+
         glfwSwapBuffers(window);
     }
 

@@ -515,6 +515,11 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy image to clipboard")) {
+            request_plot_screenshot(block_origin,
+                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+        }
         // Caller-injected пункты (например, FastSync "Invert depth axis").
         if (popup_extras) {
             ImGui::Separator();
