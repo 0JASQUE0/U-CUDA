@@ -239,6 +239,11 @@ void Plot3DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         ImGui::MenuItem("Show legend", nullptr, &show_legend);
         ImGui::MenuItem("Show axes", nullptr, &show_axes);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy image to clipboard")) {
+            request_plot_screenshot(block_origin,
+                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+        }
         ImGui::EndPopup();
     }
 }

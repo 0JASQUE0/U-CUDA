@@ -31,6 +31,18 @@ static bool g_plot_light = false;
 void set_plot_light_theme(bool light) { g_plot_light = light; }
 bool plot_light_theme()               { return g_plot_light; }
 
+// =====================================================================
+// Screenshot-to-clipboard sink. См. plot_axis.h.
+// =====================================================================
+static std::function<void(ImVec2, ImVec2)> g_screenshot_sink;
+
+void set_screenshot_request_sink(std::function<void(ImVec2, ImVec2)> sink) {
+    g_screenshot_sink = std::move(sink);
+}
+void request_plot_screenshot(ImVec2 min, ImVec2 max) {
+    if (g_screenshot_sink) g_screenshot_sink(min, max);
+}
+
 ImU32 plot_col_text() {
     return g_plot_light ? IM_COL32( 30,  30,  40, 255)
                         : IM_COL32(220, 220, 230, 255);

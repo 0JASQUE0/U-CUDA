@@ -101,11 +101,26 @@ struct FastSyncQueueItem {
 // Состояние распознавания (для UI-индикации).
 enum class OcrState { Idle, Running, Done, Failed };
 
+// Отложенный запрос "скопировать диаграмму в буфер" (правый клик "Copy
+// image to clipboard" — см. plot_axis.h request_plot_screenshot).
+// Разбирается один раз в главном цикле app_main.cpp: сам glReadPixels ждёт
+// пару кадров после
+// запроса, потому что right-click popup закрывается только на СЛЕДУЮЩЕМ
+// кадре (семантика ImGui) — иначе он попадёт в захваченную картинку.
+struct PendingScreenshot {
+    bool  active = false;
+    int   frames_left = 0;
+    float min_x = 0, min_y = 0, max_x = 0, max_y = 0; // экранные координаты ImGui
+};
+
 // Модель приложения: всё состояние + логика. НЕ знает про ImGui.
 // UI читает поля и вызывает методы; долгие операции идут в фоне.
 class AppModel {
 public:
     explicit AppModel(OcrFn ocr) : AppModel(std::move(ocr), true) {}
+
+    // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
+    PendingScreenshot pending_screenshot;
 
     // ---- редактируемые UI-поля (UI читает/пишет напрямую) ----
     InputMode mode = InputMode::Image;
