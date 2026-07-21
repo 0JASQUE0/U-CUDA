@@ -3839,7 +3839,7 @@ static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
             do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
             if (no_cfg) ImGui::EndDisabled();
         }
-        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl &&
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_R, false)) {
             do_run = true;
         }
@@ -4217,7 +4217,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
             if (no_cfg) ImGui::EndDisabled();
         }
-        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl &&
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_R, false)) {
             do_run = true;
         }
@@ -4971,7 +4971,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(160, 0));
             if (no_cfg) ImGui::EndDisabled();
         }
-        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl &&
+        if (!s.in_flight && !no_cfg && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_R, false))
             do_run = true;
         if (do_run) {
@@ -5652,7 +5652,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
             do_run = ImGui::Button("Run (Ctrl+R)", ImVec2(140, 0));
             if (no_active) ImGui::EndDisabled();
         }
-        if (!any_in_flight && !no_active && ImGui::GetIO().KeyCtrl &&
+        if (!any_in_flight && !no_active && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_R, false))
             do_run = true;
         if (do_run && active_idx >= 0) {
