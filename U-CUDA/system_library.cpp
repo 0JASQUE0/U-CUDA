@@ -370,26 +370,3 @@ std::string SystemLibrary::load_session(const std::string& sysname,
     return ss.str();
 }
 
-bool SystemLibrary::has_session(const std::string& sysname, const std::string& session) const {
-    return fs::exists((fs::path(sessions_dir(dir_for(sysname))) / (sanitize(session) + ".json")).string());
-}
-
-bool SystemLibrary::remove_session(const std::string& sysname, const std::string& session) const {
-    std::error_code ec;
-    return fs::remove((fs::path(sessions_dir(dir_for(sysname))) / (sanitize(session) + ".json")).string(), ec);
-}
-
-std::vector<std::string> SystemLibrary::list_sessions(const std::string& sysname) const {
-    std::vector<std::string> names;
-    std::error_code ec;
-    std::string sd = sessions_dir(dir_for(sysname));
-    if (!fs::exists(sd, ec)) return names;
-    for (auto& e : fs::directory_iterator(sd, ec)) {
-        if (e.path().extension() != ".json") continue;
-        std::string stem = e.path().stem().string();
-        // авто-сессии не показываем в списке именованных
-        if (stem == "_last" || stem == "_last_parametric") continue;
-        names.push_back(stem);
-    }
-    return names;
-}
