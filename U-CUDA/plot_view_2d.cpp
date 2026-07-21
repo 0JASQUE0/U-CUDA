@@ -103,6 +103,65 @@ void Plot2DView::render(PlotRenderer& renderer,
     // 2. ������� ��� ������ ������ ��� �� ������ ������� (fit_request)
     if (!view_valid || fit_request) do_autofit();
 
+    // Bounds for view clamping — computed once per frame, applied by clamp_view
+    // below after all interactions. Padded on continuous data to match the 5%
+    // autofit padding so a freshly-fit view is not immediately clipped; for
+    // BD/LLE/LS the X-axis follows the explicit sweep range (no padding).
+    double clamp_lo_x = 0.0, clamp_hi_x = 0.0, clamp_lo_y = 0.0, clamp_hi_y = 0.0;
+    bool has_bounds_x = false, has_bounds_y = false;
+    {
+        float xmn, xmx, ymn, ymx;
+        bool ok = render_visible_mask_.empty()
+                    ? series_cache_.bbox(xmn, xmx, ymn, ymx)
+                    : series_cache_.bbox_filtered(xmn, xmx, ymn, ymx, render_visible_mask_);
+        if (x_fit_use_explicit) {
+            clamp_lo_x = std::min(x_fit_min, x_fit_max);
+            clamp_hi_x = std::max(x_fit_min, x_fit_max);
+            has_bounds_x = true;
+        } else if (ok) {
+            double padx = pad_x ? (xmx - xmn) * 0.05 : 0.0;
+            if (pad_x && padx < 1e-9) padx = 1.0;
+            clamp_lo_x = xmn - padx;
+            clamp_hi_x = xmx + padx;
+            has_bounds_x = true;
+        }
+        if (ok) {
+            double pady = pad_y ? (ymx - ymn) * 0.05 : 0.0;
+            if (pad_y && pady < 1e-9) pady = 1.0;
+            clamp_lo_y = ymn - pady;
+            clamp_hi_y = ymx + pady;
+            has_bounds_y = true;
+        }
+    }
+    auto clamp_view = [&]() {
+        if (has_bounds_x && !x_axis.lock) {
+            double rx = x_axis.view_max - x_axis.view_min;
+            if (rx >= clamp_hi_x - clamp_lo_x) {
+                x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_hi_x;
+            } else {
+                if (x_axis.view_min < clamp_lo_x) {
+                    x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_lo_x + rx;
+                }
+                if (x_axis.view_max > clamp_hi_x) {
+                    x_axis.view_max = clamp_hi_x; x_axis.view_min = clamp_hi_x - rx;
+                }
+            }
+        }
+        if (has_bounds_y && !y_axis.lock) {
+            double ry = y_axis.view_max - y_axis.view_min;
+            if (ry >= clamp_hi_y - clamp_lo_y) {
+                y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_hi_y;
+            } else {
+                if (y_axis.view_min < clamp_lo_y) {
+                    y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_lo_y + ry;
+                }
+                if (y_axis.view_max > clamp_hi_y) {
+                    y_axis.view_max = clamp_hi_y; y_axis.view_min = clamp_hi_y - ry;
+                }
+            }
+        }
+    };
+
     // 3. ������� � �������
     // margin_left/bottom увеличены, чтобы вместить тики + центрированное
     // название оси (X — под тиками, Y — повернутое вертикально слева).
@@ -565,4 +624,9 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
         ImGui::EndPopup();
     }
+
+    // Clamp view to data bounds — after ALL interactions this frame (wheel/pan
+    // on plot & axes, rect-zoom, and popup min/max InputText). Mirrors the
+    // one-call-at-end pattern from heatmap_view.cpp. Bounds & lock respected.
+    clamp_view();
 }
