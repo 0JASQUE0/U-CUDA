@@ -862,32 +862,6 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Phase portrait analysis");
     ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
 
-    // выбор системы из библиотеки
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    // Во время async-расчёта смена системы запрещена — результат worker'а
-    // применится к уже подменённой сессии.
-    if (s.in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));   // загрузить систему (базовые значения)
-                    model.start_phase_analysis();      // подготовить сессию из эталона
-                    // поверх эталона — последняя рабочая сессия, если есть
-                    std::string j = lib.load_session(model.loaded_name, "_last");
-                    if (!j.empty()) {
-                        session_from_json(j, model.phase_session);
-                    }
-                }
-                catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (s.in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
 
     // --- именованные сессии (для текущей системы) ---
     if (!model.loaded_name.empty()) {
@@ -3801,30 +3775,6 @@ static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("1D DFT");
     ImGui::TextDisabled("Parametric discrete Fourier transform via NVRTC + DFT_custom.");
 
-    // ----- System picker (как у Basins) -----
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    if (s.in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##dft1d_syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));
-                    model.start_dft1d_analysis();
-                    std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
-                    if (!jd.empty())
-                        session_from_json_dft1d(jd, model.dft1d_session);
-                    std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
-                    model.load_or_init_dft1d_plot_windows(jw);
-                }
-                catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (s.in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
 
     // ----- Run / Run all... -----
     {
@@ -4177,30 +4127,6 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
-
-    // ----- System picker (как у Parametric) -----
-    // Смена системы во время async-расчёта запрещена.
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    if (s.in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##basins_syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));
-                    model.start_basins_analysis();
-                    std::string jb = lib.load_session(model.loaded_name, "_last_basins");
-                    if (!jb.empty())
-                        session_from_json_basins(jb, model.basins_session);
-                }
-                catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (s.in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
 
     // ----- Run / Run all... (moved up to sit right under the system picker,
     // above the tab bar — these drive the currently active config so they
@@ -4934,28 +4860,6 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
 
-    // System picker.
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    if (s.in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##fs_syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));
-                    model.start_fastsync_analysis();
-                    std::string jb = lib.load_session(model.loaded_name, "_last_fastsync");
-                    if (!jb.empty())
-                        session_from_json_fastsync(jb, model.fastsync_session);
-                } catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (s.in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
-
     // ----- Run / Cancel / Run all... (moved up to sit right under the system
     // picker, above the tab bar — these buttons drive the currently active
     // config, so they stay accessible without scrolling past all sections). -----
@@ -5586,42 +5490,13 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Parametric analysis");
     ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
 
-    // Общий селектор системы — одна система на все три sub-анализа (Bif/LLE/LS).
-    // Во время async-расчёта смена системы запрещена — иначе worker применит
-    // результат к уже подменённой сессии.
+    // Union used by the Run / Run all... buttons below to disable themselves
+    // while any sub-analysis (Bif/LLE/LS) is computing. Kept after the tab's
+    // System combo was moved to the top-bar; the top-bar combo has its own
+    // wider union across all 7 sessions.
     bool any_in_flight = model.bifurcation_session.in_flight
                       || model.lle_session.in_flight
                       || model.ls_session.in_flight;
-    ImGui::Text("System:"); ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    std::string current = model.name.empty() ? "(current)" : model.name;
-    if (any_in_flight) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##par_syssel", current.c_str())) {
-        for (const auto& nm : lib.list()) {
-            if (ImGui::Selectable(nm.c_str(), model.name == nm)) {
-                try {
-                    model.from_record(lib.load(nm));
-                    model.start_parametric_analysis();
-                    // Поверх эталона — последние рабочие сейвы для обеих сессий.
-                    std::string jb = lib.load_session(model.loaded_name, "_last_parametric");
-                    if (!jb.empty())
-                        session_from_json_parametric(jb, model.bifurcation_session);
-                    std::string jl = lib.load_session(model.loaded_name, "_last_lle");
-                    if (!jl.empty())
-                        session_from_json_lle(jl, model.lle_session);
-                    std::string js = lib.load_session(model.loaded_name, "_last_ls");
-                    if (!js.empty())
-                        session_from_json_ls(js, model.ls_session);
-                    std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
-                    model.load_or_init_parametric_plot_windows(jw);
-                }
-                catch (...) {}
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (any_in_flight) ImGui::EndDisabled();
-    ImGui::Separator();
 
     // ----- Run (active sub-tab, active config) -----
     // Кнопка единая для Bif/LLE/LS, диспатчится по parametric_active_analysis
@@ -5889,6 +5764,61 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset windows layout")) { model.parametric_layout_generation++; }
+}
+
+// Global system switch — fired from the top-bar combo. Loads the record and
+// re-inits the CURRENT tab (mirrors what each per-tab combo used to do).
+// Other tabs re-init on entry via the block in draw_gui.
+static void apply_system_switch(AppModel& model, SystemLibrary& lib,
+                                const std::string& name)
+{
+    try {
+        model.from_record(lib.load(name));
+        switch (model.app_mode) {
+        case AppModel::AppMode::Analysis: {
+            model.start_phase_analysis();
+            std::string j = lib.load_session(model.loaded_name, "_last");
+            if (!j.empty()) session_from_json(j, model.phase_session);
+            break;
+        }
+        case AppModel::AppMode::Parametric: {
+            model.start_parametric_analysis();
+            std::string jb = lib.load_session(model.loaded_name, "_last_parametric");
+            if (!jb.empty()) session_from_json_parametric(jb, model.bifurcation_session);
+            std::string jl = lib.load_session(model.loaded_name, "_last_lle");
+            if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
+            std::string js = lib.load_session(model.loaded_name, "_last_ls");
+            if (!js.empty()) session_from_json_ls(js, model.ls_session);
+            std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
+            model.load_or_init_parametric_plot_windows(jw);
+            break;
+        }
+        case AppModel::AppMode::Dft1D: {
+            model.start_dft1d_analysis();
+            std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
+            if (!jd.empty()) session_from_json_dft1d(jd, model.dft1d_session);
+            std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
+            model.load_or_init_dft1d_plot_windows(jw);
+            break;
+        }
+        case AppModel::AppMode::Basins: {
+            model.start_basins_analysis();
+            std::string jb = lib.load_session(model.loaded_name, "_last_basins");
+            if (!jb.empty()) session_from_json_basins(jb, model.basins_session);
+            break;
+        }
+        case AppModel::AppMode::FastSync: {
+            model.start_fastsync_analysis();
+            std::string jf = lib.load_session(model.loaded_name, "_last_fastsync");
+            if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
+            break;
+        }
+        case AppModel::AppMode::Library:
+        case AppModel::AppMode::Settings:
+        default:
+            break;
+        }
+    } catch (...) {}
 }
 
 // ============================================================
@@ -6239,24 +6169,34 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
     }
 
-    // Имя выбранной системы — по центру топ-бара. Рисуем после radio-кнопок
-    // и busy-индикатора, чтобы не сдвигать их разметку (SetCursorPosX выходит
-    // из cursor-flow). Если система не загружена — показываем плейсхолдер.
+    // Global system picker — centered on the top-bar. One combo replaces the
+    // five per-tab System: combos that used to live in each draw_*_controls.
+    // Disabled while ANY session is in-flight so a switch can't race a worker
+    // that will apply its result to the already-swapped session.
     {
-        std::string sys_label = model.name.empty()
-            ? std::string("(no system loaded)")
-            : (std::string("System: ") + model.name);
-        ImVec2 ts = ImGui::CalcTextSize(sys_label.c_str());
-        float cx  = (ImGui::GetWindowSize().x - ts.x) * 0.5f;
-        // У radio-кнопок Y был установлен по первому SameLine'у; берём ту же Y,
-        // что у текущего курсора в начале строки (до индикатора).
-        // SetCursorPosX переносит только по X — Y остаётся в текущей строке.
+        bool any_in_flight =
+              model.phase_session.in_flight
+           || model.bifurcation_session.in_flight
+           || model.lle_session.in_flight
+           || model.ls_session.in_flight
+           || model.dft1d_session.in_flight
+           || model.basins_session.in_flight
+           || model.fastsync_session.in_flight;
+        const float combo_w = 240.0f;
+        std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
+        float cx = (ImGui::GetWindowSize().x - combo_w) * 0.5f;
         ImGui::SameLine();
         ImGui::SetCursorPosX(cx);
-        ImColor col = model.name.empty()
-            ? ImColor(150, 150, 160, 200)
-            : ImColor(220, 220, 230, 255);
-        ImGui::TextColored(col, "%s", sys_label.c_str());
+        ImGui::SetNextItemWidth(combo_w);
+        if (any_in_flight) ImGui::BeginDisabled();
+        if (ImGui::BeginCombo("##topsyssel", preview.c_str())) {
+            for (const auto& nm : lib.list()) {
+                if (ImGui::Selectable(nm.c_str(), model.name == nm))
+                    apply_system_switch(model, lib, nm);
+            }
+            ImGui::EndCombo();
+        }
+        if (any_in_flight) ImGui::EndDisabled();
     }
     // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать
     // сессию. Init происходит когда:
