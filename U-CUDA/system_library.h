@@ -41,10 +41,6 @@ public:
         const std::string& json) const;
     std::string load_session(const std::string& sysname,
         const std::string& session) const; // "" если нет
-    bool has_session(const std::string& sysname, const std::string& session) const;
-    bool remove_session(const std::string& sysname, const std::string& session) const;
-    // Список именованных сессий (без "_last").
-    std::vector<std::string> list_sessions(const std::string& sysname) const;
 
 private:
     std::string dir_;
