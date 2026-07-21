@@ -43,6 +43,7 @@ docs/
 
 # Local-only Claude session notes / tooling state
 CLAUDE.md
+CLAUDE_QUICKREF.md
 .understand-anything/
 
 # Python virtual environment
