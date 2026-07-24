@@ -201,10 +201,21 @@ struct BifurcationDiagramConfig {
     // переключаем только индекс + флаг в engine — никакой пересборки PTX.
     bool        sweep_over_var = false;
     int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не
+    // параметр/НУ (взаимоисключающе с sweep_over_var). Диапазон переиспользует
+    // param_lo_text/param_hi_text. t_max/transient остаются фиксированными —
+    // число итераций пересчитывается на GPU из h per-thread (hSweepAxis в
+    // calculateDiscreteModelCUDA, cudaLibrary.cu); буфер данных/пиков при этом
+    // выделяется под худший случай (минимальный h в диапазоне).
+    bool        sweep_over_h   = false;
+    // Log-масштаб сетки по этой оси (любой sweep target — param/IC/h).
+    // Требует lo>0 и hi>0 (валидатор отказывает иначе) — см. run_bif1d/2d.
+    bool        log_scale = false;
     // Continuation: следующая точка параметра стартует с конечного x[]
-    // предыдущей. Требует sweep_over_var=false. Reverse — направление
-    // обхода (forward lo→hi vs backward hi→lo) для visualisation of
-    // hysteresis (forward и reverse BD на одном плоте).
+    // предыдущей. Требует sweep_over_var=false и sweep_over_h=false (это
+    // отдельный single-thread sequential kernel, dt-sweep там не поддержан).
+    // Reverse — направление обхода (forward lo→hi vs backward hi→lo) для
+    // visualisation of hysteresis (forward и reverse BD на одном плоте).
     bool        continuation = false;
     bool        continuation_reverse = false;
     std::string param_lo_text  = "0";
@@ -246,6 +257,8 @@ struct BifurcationDiagramConfig {
     int         param_index_2     = 0;
     bool        sweep_over_var_2  = false;
     int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2    = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2       = false;  // см. log_scale
     std::string param_lo_2_text   = "0";
     std::string param_hi_2_text   = "1";
     std::string eps_dbscan_text   = "0.1";
@@ -382,6 +395,13 @@ struct LLECurveConfig {
     // соответствующий par_or_var compile-time через template substitution.
     bool        sweep_over_var = false;
     int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не
+    // параметр/НУ (взаимоисключающе с sweep_over_var). Диапазон переиспользует
+    // param_lo_text/param_hi_text. t_max/transient/NT остаются фиксированными —
+    // число итераций пересчитывается на GPU из h per-thread (см. hSweepAxis в
+    // LLEKernelCUDA, cudaLibrary.cu).
+    bool        sweep_over_h   = false;
+    bool        log_scale      = false;  // см. BifurcationDiagramConfig::log_scale
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";
@@ -418,6 +438,8 @@ struct LLECurveConfig {
     int         param_index_2 = 0;
     bool        sweep_over_var_2 = false;
     int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2   = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2      = false;  // см. log_scale
     std::string param_lo_2_text = "0";
     std::string param_hi_2_text = "1";
     // n_pts_2_text не нужен: kernel-getValueByIdx работает только на квадратной
@@ -899,6 +921,13 @@ struct LSCurveConfig {
     // соответствующий par_or_var compile-time через template substitution.
     bool        sweep_over_var = false;
     int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не
+    // параметр/НУ (взаимоисключающе с sweep_over_var). Диапазон переиспользует
+    // param_lo_text/param_hi_text. t_max/transient/NT остаются фиксированными —
+    // число итераций пересчитывается на GPU из h per-thread (см. hSweepAxis в
+    // LSKernelCUDA, cudaLibrary.cu).
+    bool        sweep_over_h   = false;
+    bool        log_scale      = false;  // см. BifurcationDiagramConfig::log_scale
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";
@@ -931,6 +960,8 @@ struct LSCurveConfig {
     int         param_index_2 = 0;
     bool        sweep_over_var_2 = false;
     int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2   = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2      = false;  // см. log_scale
     std::string param_lo_2_text = "0";
     std::string param_hi_2_text = "1";
 

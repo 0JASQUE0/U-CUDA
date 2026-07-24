@@ -501,7 +501,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     // крайнее значение диапазона всегда отрисовано (напр., "30" не пропадает
     // при выборе mult, не делящего N-1).
     auto compute_axis_ticks = [](double lo, double hi, int target_count,
-                            double step_node, double node_origin, int n_nodes)
+                            double step_node, double node_origin, int n_nodes,
+                            double force_lo, double force_hi)
                         -> std::vector<double>
     {
         std::vector<double> out;
@@ -526,10 +527,11 @@ void HeatmapView::render(PlotRenderer& renderer,
             if (v > hi + sx * 1e-6 || v < lo - sx * 1e-6) continue;
             out.push_back(v);
         }
-        // Форс-включение крайних узлов. Порог "не слишком близко" = 40% от sx —
-        // подписи не будут наезжать друг на друга при обычных диапазонах.
+        // Форс-включение крайних узлов сетки (snap-режим при зуме). Порог "не
+        // слишком близко" = 40% от sx — подписи не будут наезжать друг на
+        // друга при обычных диапазонах.
+        const double gap_min = sx * 0.4;
         if (step_node > 0.0 && n_nodes > 1) {
-            const double gap_min = sx * 0.4;
             double first_node = node_origin;
             double last_node  = node_origin + (double)(n_nodes - 1) * step_node;
             if (last_node >= lo - step_node * 0.5 && last_node <= hi + step_node * 0.5) {
@@ -543,17 +545,37 @@ void HeatmapView::render(PlotRenderer& renderer,
                 }
             }
         }
+        // Форс-включение истинных границ диапазона (force_lo/force_hi) --
+        // ВСЕГДА, а не только в snap-режиме. Без этого край мог пропасть,
+        // если он не кратен "красивому" nice_step шагу (напр. 0.001 при шаге
+        // 0.005) -- баг, репортнутый для h-свипа в линейном масштабе.
+        if (force_hi >= lo - 1e-12 && force_hi <= hi + 1e-12) {
+            if (out.empty() || force_hi - out.back() >= gap_min) out.push_back(force_hi);
+        }
+        if (force_lo >= lo - 1e-12 && force_lo <= hi + 1e-12) {
+            if (out.empty() || out.front() - force_lo >= gap_min) out.insert(out.begin(), force_lo);
+        }
         return out;
     };
 
     auto draw_x_ticks = [&]() {
-        double emin = vis_view_min_x, emax = vis_view_max_x;
+        // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы
+        // цветовые ячейки центрировались на узлах. Для log-оси линейный
+        // полушаг у границ (напр. 0.001) даёт заметный сдвиг подписи --
+        // берём точный view_min/max без этого паддинга.
+        double emin = x_axis.log_scale ? x_axis.view_min : vis_view_min_x;
+        double emax = x_axis.log_scale ? x_axis.view_max : vis_view_max_x;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        auto ticks = x_full_view
-            ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0)
-            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx);
+        // Log-масштаб: см. plot_axis.cpp draw_axis_x_grid -- нет настоящей
+        // лог-оси, поэтому вместо "красивых" линейных тиков (которые
+        // подписали бы значения, никогда не просимулированные) рисуем
+        // только границы текущего view.
+        std::vector<double> ticks = x_axis.log_scale
+            ? std::vector<double>{ lo, hi }
+            : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x)
+                            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x));
         for (double xv : ticks) {
             float px = img_pos.x + (float)((xv - emin) / vrx) * plot_w;
             dl->AddLine(ImVec2(px, img_pos.y + plot_h),
@@ -565,13 +587,17 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     };
     auto draw_y_ticks = [&]() {
-        double emin = vis_view_min_y, emax = vis_view_max_y;
+        // См. draw_x_ticks выше про vis_view-паддинг и log-масштаб.
+        double emin = y_axis.log_scale ? y_axis.view_min : vis_view_min_y;
+        double emax = y_axis.log_scale ? y_axis.view_max : vis_view_max_y;
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        auto ticks = y_full_view
-            ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0)
-            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny);
+        // См. draw_x_ticks выше.
+        std::vector<double> ticks = y_axis.log_scale
+            ? std::vector<double>{ lo, hi }
+            : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
+                            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y));
         for (double yv : ticks) {
             float py = img_pos.y + (float)((emax - yv) / vry) * plot_h;
             dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
@@ -651,8 +677,8 @@ void HeatmapView::render(PlotRenderer& renderer,
             double lo = std::min(vis_view_min_y, vis_view_max_y);
             double hi = std::max(vis_view_min_y, vis_view_max_y);
             auto ticks = y_full_view
-                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0)
-                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny);
+                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
+                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y);
             for (double yv : ticks) {
                 std::string tl = fmt_tick(yv);
                 float w = ImGui::CalcTextSize(tl.c_str()).x;

@@ -463,6 +463,8 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     }
     req.param_index = (bd.param_index >= 0 && bd.param_index < nparams) ? bd.param_index + 1 : 1;
     req.sweep_over_var = bd.sweep_over_var;
+    req.sweep_over_h   = bd.sweep_over_h;
+    req.log_scale      = bd.log_scale;
     req.var_sweep_index = (bd.var_sweep_index >= 0 && bd.var_sweep_index < req.amountOfX)
                           ? bd.var_sweep_index : 0;
     req.continuation = bd.continuation;
@@ -514,6 +516,10 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
 
     req.sweep_over_var     = bd.sweep_over_var;
     req.sweep_over_var_2   = bd.sweep_over_var_2;
+    req.sweep_over_h       = bd.sweep_over_h;
+    req.sweep_over_h_2     = bd.sweep_over_h_2;
+    req.log_scale          = bd.log_scale;
+    req.log_scale_2        = bd.log_scale_2;
     req.param_index        = (bd.param_index >= 0 && bd.param_index < nparams) ? bd.param_index + 1 : 1;
     req.param_index_2      = (bd.param_index_2 >= 0 && bd.param_index_2 < nparams) ? bd.param_index_2 + 1 : 1;
     req.var_sweep_index    = (bd.var_sweep_index >= 0 && bd.var_sweep_index < req.amountOfX)
@@ -754,6 +760,8 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     }
     req.param_index = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
     req.sweep_over_var = c.sweep_over_var;
+    req.sweep_over_h   = c.sweep_over_h;
+    req.log_scale      = c.log_scale;
     req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
                           ? c.var_sweep_index : 0;
 
@@ -804,6 +812,10 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
 
     req.sweep_over_var     = c.sweep_over_var;
     req.sweep_over_var_2   = c.sweep_over_var_2;
+    req.sweep_over_h       = c.sweep_over_h;
+    req.sweep_over_h_2     = c.sweep_over_h_2;
+    req.log_scale          = c.log_scale;
+    req.log_scale_2        = c.log_scale_2;
     req.param_index        = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
     req.param_index_2      = (c.param_index_2 >= 0 && c.param_index_2 < nparams) ? c.param_index_2 + 1 : 1;
     req.var_sweep_index    = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
@@ -1762,6 +1774,8 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     }
     req.param_index = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
     req.sweep_over_var = c.sweep_over_var;
+    req.sweep_over_h   = c.sweep_over_h;
+    req.log_scale      = c.log_scale;
     req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
                           ? c.var_sweep_index : 0;
 
@@ -1810,6 +1824,10 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
 
     req.sweep_over_var     = c.sweep_over_var;
     req.sweep_over_var_2   = c.sweep_over_var_2;
+    req.sweep_over_h       = c.sweep_over_h;
+    req.sweep_over_h_2     = c.sweep_over_h_2;
+    req.log_scale          = c.log_scale;
+    req.log_scale_2        = c.log_scale_2;
     req.param_index        = (c.param_index >= 0 && c.param_index < nparams) ? c.param_index + 1 : 1;
     req.param_index_2      = (c.param_index_2 >= 0 && c.param_index_2 < nparams) ? c.param_index_2 + 1 : 1;
     req.var_sweep_index    = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)

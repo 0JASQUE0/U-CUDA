@@ -41,9 +41,16 @@ struct Bifurcation1DRequest {
     int  param_index    = 0;
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
+    // dt-sweep: свипуется h вместо param/IC (взаимоисключающе с sweep_over_var).
+    // Диапазон переиспользует param_lo/param_hi. t_max/transient_time остаются
+    // фиксированными -- число шагов пересчитывается на GPU из h per-thread, а
+    // буфер данных/пиков выделяется под худший случай (минимальный h).
+    bool sweep_over_h = false;
+    // Log-масштаб сетки (любой sweep target). Требует param_lo>0 и param_hi>0.
+    bool log_scale = false;
     // Continuation: каждая новая точка параметра стартует с конечного x[]
     // предыдущей (вместо сброса на initial_conditions). Игнорируется при
-    // sweep_over_var = true (валидатор отказывает).
+    // sweep_over_var = true или sweep_over_h = true (валидатор отказывает).
     //   continuation_reverse = false → forward (lo→hi)
     //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
     bool continuation = false;
@@ -220,6 +227,11 @@ struct LLE1DRequest {
     //   var_sweep_index — 0-based индекс в initial_conditions.
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
+    // dt-sweep: свипуется h вместо param/IC (взаимоисключающе с sweep_over_var).
+    // Диапазон переиспользует param_lo/param_hi. transient_time/t_max/NT остаются
+    // фиксированными -- число шагов пересчитывается на GPU из h per-thread.
+    bool sweep_over_h = false;
+    bool log_scale = false;  // требует param_lo>0 и param_hi>0
     int param_index = 0;                     // индекс в base_values (1-based)
     double param_lo = 0.0;
     double param_hi = 1.0;
@@ -286,6 +298,8 @@ struct LS1DRequest {
     // См. LLE1DRequest — те же поля sweep target'а.
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
+    bool sweep_over_h = false;  // см. LLE1DRequest::sweep_over_h
+    bool log_scale = false;     // требует param_lo>0 и param_hi>0
     int param_index = 0;
     double param_lo = 0.0;
     double param_hi = 1.0;
@@ -357,6 +371,13 @@ struct LLE2DRequest {
     // Sweep target по обеим осям. По умолчанию оба по параметру (par_or_var=1).
     bool sweep_over_var  = false;  // ось X
     bool sweep_over_var_2 = false; // ось Y
+    // dt-sweep для каждой оси (взаимоисключающе с sweep_over_var/_2 своей оси,
+    // и обе оси одновременно = true не допускаются -- см. run_lle_2d). Диапазон
+    // переиспользует param_lo/hi (_2). transient_time/t_max/NT фиксированы.
+    bool sweep_over_h    = false;  // ось X свипует h
+    bool sweep_over_h_2  = false;  // ось Y свипует h
+    bool log_scale       = false;  // ось X: требует param_lo>0 и param_hi>0
+    bool log_scale_2     = false;  // ось Y: требует param_lo_2>0 и param_hi_2>0
     // Индексы целей свипа. При sweep_over_var_*=true берётся var_sweep_index_*
     // (0-based в initial_conditions); иначе param_index_* (1-based в base_values).
     int  param_index      = 0;
@@ -437,11 +458,18 @@ struct Bifurcation2DRequest {
 
     // Ось X (первая).
     bool sweep_over_var  = false;
+    // dt-sweep для этой оси (взаимоисключающе с sweep_over_var своей оси; обе
+    // оси = true одновременно не допускаются — см. run_bif2d). Диапазон —
+    // param_lo/hi(_2). t_max/transient_time фиксированы.
+    bool sweep_over_h    = false;
+    bool log_scale       = false;   // требует param_lo>0 и param_hi>0
     int  var_sweep_index = 0;
     int  param_index     = 0;       // 1-based в base_values
 
     // Ось Y (вторая).
     bool sweep_over_var_2  = false;
+    bool sweep_over_h_2    = false; // см. sweep_over_h
+    bool log_scale_2       = false; // требует param_lo_2>0 и param_hi_2>0
     int  var_sweep_index_2 = 0;
     int  param_index_2     = 0;
 
@@ -512,6 +540,11 @@ struct LS2DRequest {
 
     bool sweep_over_var  = false;  // ось X
     bool sweep_over_var_2 = false; // ось Y
+    // См. LLE2DRequest — dt-sweep для каждой оси, те же ограничения.
+    bool sweep_over_h    = false;  // ось X свипует h
+    bool sweep_over_h_2  = false;  // ось Y свипует h
+    bool log_scale       = false;  // ось X: требует param_lo>0 и param_hi>0
+    bool log_scale_2     = false;  // ось Y: требует param_lo_2>0 и param_hi_2>0
     int  param_index      = 0;
     int  var_sweep_index  = 0;
     int  param_index_2    = 0;

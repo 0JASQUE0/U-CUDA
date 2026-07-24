@@ -87,6 +87,16 @@ inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
     return lo + (hi - lo) * (double)idx / (double)(nPts - 1);
 }
 
+// Host-копия getValueByIdx_log из cudaLibrary.cu -- та же формула, что кернел
+// реально использовал для этой точки при log_scale=true. Нужна, чтобы CSV
+// (см. getValueByIdx_local) сообщал то самое значение параметра, что было
+// просимулировано, а не линейную интерполяцию поверх log-распределённой сетки.
+inline double getValueByIdx_log_local(size_t idx, int nPts, double lo, double hi) {
+    if (nPts <= 1) return lo;
+    double log_lo = std::log10(lo), log_hi = std::log10(hi);
+    return std::pow(10.0, log_lo + (log_hi - log_lo) * (double)idx / (double)(nPts - 1));
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -514,6 +524,11 @@ struct ParametricEngine::Impl {
                 r.error = "continuation требует param-sweep, не IC-sweep";
                 return r;
             }
+            if (req.sweep_over_h) {
+                Bifurcation1DResult r;
+                r.error = "continuation несовместим со sweep_over_h (single-thread sequential kernel)";
+                return r;
+            }
             return run_bif1d_continuation(req);
         }
 
@@ -526,7 +541,10 @@ struct ParametricEngine::Impl {
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         // base_values уже идёт со сдвигом +1 (a[0] зарезервирован):
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.sweep_over_var) {
+        if (req.sweep_over_h) {
+            if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
+                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+        } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
@@ -542,6 +560,16 @@ struct ParametricEngine::Impl {
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
         if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
         if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0");
+
+        // dt-sweep: t_max/transient_time фиксированы, число шагов на GPU
+        // пересчитывается из h per-thread (см. hSweepAxis в
+        // calculateDiscreteModelCUDA). hSweepAxis=0 -- в 1D всегда единственная
+        // ось X.
+        const int hSweepAxis = req.sweep_over_h ? 0 : -1;
+        // Log-масштаб сетки (любой sweep target) -- бит 0, т.к. в 1D одна ось.
+        const int logAxisMask = req.log_scale ? 1 : 0;
 
         // ---- init + контекст ----
         std::string err;
@@ -587,7 +615,12 @@ struct ParametricEngine::Impl {
         // см. комментарий в шапке функции.
 
         // --- amountOfPointsInBlock / amountOfPointsForSkip — порт строк 196-200 NL ---
-        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        // dt-sweep: буфер/sizeOfBlock должен вмещать худший случай (минимальный
+        // h в диапазоне = param_lo после lo<=hi нормализации = больше всего
+        // шагов); per-thread реальное число шагов пересчитывается в кернеле и
+        // не превышает эту аллокацию (см. actualIterations).
+        double worstCaseH = (hSweepAxis != -1) ? ranges[0] : h;
+        int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
         int amountOfPointsForSkip = (int)(transientTime / h);
 
         if (amountOfPointsInBlock <= 0)
@@ -637,6 +670,7 @@ struct ParametricEngine::Impl {
         int*    d_amountOfPeaks     = nullptr;
         double* d_outPeaks          = nullptr;
         double* d_timeOfPeaks       = nullptr;
+        int*    d_actualIterations  = nullptr;
 
         auto cleanup = [&]() {
             if (d_data)              cudaFree(d_data);
@@ -647,6 +681,7 @@ struct ParametricEngine::Impl {
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
             if (d_outPeaks)          cudaFree(d_outPeaks);
             if (d_timeOfPeaks)       cudaFree(d_timeOfPeaks);
+            if (d_actualIterations)  cudaFree(d_actualIterations);
         };
 
         // [ADAPT] gpuErrorCheck → BIF_CHECK: пишем в res.error и выходим с cleanup
@@ -681,6 +716,7 @@ struct ParametricEngine::Impl {
         BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_outPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_actualIterations");
 
         // --- H2D констант (порт строк 314-319 NL) ---
         BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
@@ -750,6 +786,10 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = writableVar;
             double maxValue_arg              = maxValue;
             bool   par_or_var_arg            = !req.sweep_over_var; // true=param, false=IC
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            double tMax_arg                  = tMax;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args_traj[] = {
                 &nPts_int,
@@ -771,7 +811,12 @@ struct ParametricEngine::Impl {
                 &maxValue_arg,
                 &d_data,
                 &d_amountOfPeaks,
-                &par_or_var_arg
+                &par_or_var_arg,
+                &hSweepAxis_arg,
+                &transientTime_arg,
+                &tMax_arg,
+                &d_actualIterations,
+                &logAxisMask_arg
             };
 
             unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
@@ -791,7 +836,8 @@ struct ParametricEngine::Impl {
                 &d_amountOfPeaks,
                 &d_outPeaks,
                 &d_timeOfPeaks,
-                &timeStep_arg
+                &timeStep_arg,
+                &d_actualIterations
             };
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_peak,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -814,7 +860,8 @@ struct ParametricEngine::Impl {
 
             for (size_t k = 0; k < nPtsLimiter; ++k) {
                 size_t global_idx = originalNPtsLimiter * iter + k;
-                double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
+                double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
+                                                   : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 int    npeaks     = h_amountOfPeaks[k];
 
                 if (out.is_open()) {
@@ -962,7 +1009,10 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.sweep_over_var) {
+        if (req.sweep_over_h) {
+            if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
+                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+        } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
@@ -975,6 +1025,14 @@ struct ParametricEngine::Impl {
         if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
         if (req.NT <= 0.0)          return fail("NT должно быть > 0");
         if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0");
+
+        // dt-sweep: t_max/transient_time/NT остаются фиксированными (см.
+        // sweep_over_h в analysis_session.h), число шагов пересчитывается на GPU
+        // из h per-thread -- kernel получает hSweepAxis вместо compile-time флага.
+        const int hSweepAxis = req.sweep_over_h ? 0 : -1;
+        const int logAxisMask = req.log_scale ? 1 : 0;
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -1130,6 +1188,9 @@ struct ParametricEngine::Impl {
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
             double maxValue_arg              = maxValue;
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
                 &nPts_arg,
@@ -1152,7 +1213,10 @@ struct ParametricEngine::Impl {
                 &preScaller_arg,
                 &writableVar_arg,
                 &maxValue_arg,
-                &d_lleResult
+                &d_lleResult,
+                &hSweepAxis_arg,
+                &transientTime_arg,
+                &logAxisMask_arg
             };
 
             // Shared = (3 * amountOfIC + amountOfValues) * sizeof(double) * blockSize
@@ -1177,7 +1241,8 @@ struct ParametricEngine::Impl {
             }
             for (size_t k = 0; k < nPtsLimiter; ++k) {
                 size_t global_idx = originalNPtsLimiter * iter + k;
-                double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
+                double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
+                                                   : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 double v          = h_lleResult[k];
 
                 res.lyapunov[global_idx] = v;
@@ -1331,8 +1396,55 @@ struct ParametricEngine::Impl {
         int  idx_axis_x, idx_axis_y;   // что передаём в indicesOfMutVars[0/1]
         double ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y;
         bool swap_xy = false;
+        int  hSweepAxis = -1;          // -1=off, 0=X свипует h, 1=Y свипует h
+        // log_axis_x/y следуют тому же swap, что и ranges_lo_x/y ниже -- в
+        // кернел они идут как биты того же физического слота (0=X,1=Y), а не
+        // пользовательской оси. Валидация (lo/hi>0) проверяется по
+        // ПОЛЬЗОВАТЕЛЬСКИМ req.log_scale/_2 отдельно, ниже, до свопа.
+        bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;
 
-        if (req.sweep_over_var == req.sweep_over_var_2) {
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось X)");
+        if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось Y)");
+
+        if (req.sweep_over_h && req.sweep_over_h_2)
+            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+
+        if (req.sweep_over_h || req.sweep_over_h_2) {
+            // Ровно одна ось -- h; другая -- param либо IC. Кернел-слоты X/Y
+            // совпадают с пользовательскими X/Y напрямую -- swap_xy тут не нужен
+            // (в отличие от смешанного param/IC случая ниже: там swap существует
+            // только потому что kernel-ветка par_or_var==2 захардкожена под одну
+            // конкретную пару слотов; здесь par_or_var симметричен по слотам).
+            hSweepAxis = req.sweep_over_h ? 0 : 1;
+            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
+            par_or_var = other_is_var ? 0 : 1;
+
+            if (req.sweep_over_h) {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.param_index_2;
+                } else {
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.var_sweep_index_2;
+                }
+                idx_axis_x = 0; // dummy -- слот X пропускается в кернеле (i == hSweepAxis)
+            } else {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    idx_axis_x = req.param_index;
+                } else {
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    idx_axis_x = req.var_sweep_index;
+                }
+                idx_axis_y = 0; // dummy
+            }
+            // ranges для h-оси переиспользуют тот же param_lo/hi(_2), что и для
+            // param/IC -- семантика диапазона просто меняется на "значения h".
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var == req.sweep_over_var_2) {
             par_or_var = req.sweep_over_var ? 0 : 1;
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
@@ -1368,7 +1480,10 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
             ranges_lo_y = req.param_lo;   ranges_hi_y = req.param_hi;
             swap_xy = true;
+            log_axis_x = req.log_scale_2; log_axis_y = req.log_scale;  // тот же своп, что и ranges выше
         }
+
+        int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -1532,6 +1647,9 @@ struct ParametricEngine::Impl {
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
             double maxValue_arg              = maxValue;
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
                 &nPts_arg,
@@ -1554,7 +1672,10 @@ struct ParametricEngine::Impl {
                 &preScaller_arg,
                 &writableVar_arg,
                 &maxValue_arg,
-                &d_lleResult
+                &d_lleResult,
+                &hSweepAxis_arg,
+                &transientTime_arg,
+                &logAxisMask_arg
             };
 
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
@@ -1731,7 +1852,10 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.sweep_over_var) {
+        if (req.sweep_over_h) {
+            if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
+                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+        } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
@@ -1744,6 +1868,13 @@ struct ParametricEngine::Impl {
         if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
         if (req.NT <= 0.0)          return fail("NT должно быть > 0");
         if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0");
+
+        // dt-sweep: см. run_lle_1d -- t_max/transient_time/NT фиксированы, число
+        // шагов пересчитывается на GPU из h per-thread.
+        const int hSweepAxis = req.sweep_over_h ? 0 : -1;
+        const int logAxisMask = req.log_scale ? 1 : 0;
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -1901,6 +2032,9 @@ struct ParametricEngine::Impl {
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
             double maxValue_arg              = maxValue;
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
@@ -1908,7 +2042,7 @@ struct ParametricEngine::Impl {
                 &d_ranges, &h_arg, &eps_arg, &d_indicesOfMutVars, &d_initialConditions,
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
-                &d_lsResult
+                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg
             };
 
             // Shared = (3N + 2N² + nValues) * sizeof(double) * blockSize
@@ -1936,7 +2070,8 @@ struct ParametricEngine::Impl {
             }
             for (size_t k = 0; k < nPtsLimiter; ++k) {
                 size_t global_idx = originalNPtsLimiter * iter + k;
-                double param_val  = getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
+                double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
+                                                   : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
 
                 // первая экспонента используется как ground-truth для флага
                 double first = h_lsResult[k * (size_t)amountOfInitialConditions + 0];
@@ -2086,8 +2221,45 @@ struct ParametricEngine::Impl {
         int  idx_axis_x, idx_axis_y;
         double ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y;
         bool swap_xy = false;
+        int  hSweepAxis = -1;
+        bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;  // см. run_lle_2d
 
-        if (req.sweep_over_var == req.sweep_over_var_2) {
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось X)");
+        if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось Y)");
+
+        if (req.sweep_over_h && req.sweep_over_h_2)
+            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+
+        if (req.sweep_over_h || req.sweep_over_h_2) {
+            // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
+            hSweepAxis = req.sweep_over_h ? 0 : 1;
+            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
+            par_or_var = other_is_var ? 0 : 1;
+
+            if (req.sweep_over_h) {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.param_index_2;
+                } else {
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.var_sweep_index_2;
+                }
+                idx_axis_x = 0;
+            } else {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    idx_axis_x = req.param_index;
+                } else {
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    idx_axis_x = req.var_sweep_index;
+                }
+                idx_axis_y = 0;
+            }
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var == req.sweep_over_var_2) {
             par_or_var = req.sweep_over_var ? 0 : 1;
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
@@ -2119,7 +2291,10 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
             ranges_lo_y = req.param_lo;   ranges_hi_y = req.param_hi;
             swap_xy = true;
+            log_axis_x = req.log_scale_2; log_axis_y = req.log_scale;
         }
+
+        int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -2285,6 +2460,9 @@ struct ParametricEngine::Impl {
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
             double maxValue_arg              = maxValue;
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
@@ -2292,7 +2470,7 @@ struct ParametricEngine::Impl {
                 &d_ranges, &h_arg, &eps_arg, &d_indicesOfMutVars, &d_initialConditions,
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
-                &d_lsResult
+                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg
             };
 
             unsigned int shared = (unsigned int)((3 * N + 2 * N * N + amountOfValues)
@@ -3343,8 +3521,47 @@ struct ParametricEngine::Impl {
         int    idx_axis_x, idx_axis_y;
         double ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y;
         bool   swap_xy = false;
+        int    hSweepAxis = -1;
+        bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;  // см. run_lle_2d
 
-        if (req.sweep_over_var == req.sweep_over_var_2) {
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось X)");
+        if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
+            return fail("log scale требует param lo/hi > 0 (ось Y)");
+
+        if (req.sweep_over_h && req.sweep_over_h_2)
+            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+
+        if (req.sweep_over_h || req.sweep_over_h_2) {
+            // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
+            hSweepAxis = req.sweep_over_h ? 0 : 1;
+            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
+            par_or_var = other_is_var ? 0 : 1;
+
+            if (req.sweep_over_h) {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.param_index_2;
+                } else {
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    idx_axis_y = req.var_sweep_index_2;
+                }
+                idx_axis_x = 0;
+            } else {
+                if (par_or_var == 1) {
+                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    idx_axis_x = req.param_index;
+                } else {
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    idx_axis_x = req.var_sweep_index;
+                }
+                idx_axis_y = 0;
+            }
+            if (req.param_lo <= 0.0 || req.param_hi <= 0.0 || req.param_lo_2 <= 0.0 || req.param_hi_2 <= 0.0)
+                return fail("h lo/hi должны быть > 0 при sweep_over_h/_2");
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var == req.sweep_over_var_2) {
             par_or_var = req.sweep_over_var ? 0 : 1;
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))   return fail("param_index (ось X) вне диапазона");
@@ -3376,7 +3593,10 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
             ranges_lo_y = req.param_lo;   ranges_hi_y = req.param_hi;
             swap_xy = true;
+            log_axis_x = req.log_scale_2; log_axis_y = req.log_scale;
         }
+
+        int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -3403,7 +3623,10 @@ struct ParametricEngine::Impl {
         constexpr int  blockSize_setup          = 32;
         constexpr int  set_precision            = 15;
 
-        int amountOfPointsInBlock = (int)(tMax / h / preScaller);
+        // dt-sweep: буфер должен вмещать худший случай (минимальный h в
+        // диапазоне h-оси) -- см. run_bif1d.
+        double worstCaseH = (hSweepAxis == 0) ? ranges[0] : (hSweepAxis == 1) ? ranges[2] : h;
+        int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
         int amountOfPointsForSkip = (int)(transientTime / h);
 
         if (amountOfPointsInBlock <= 0)
@@ -3440,6 +3663,7 @@ struct ParametricEngine::Impl {
         double* d_intervals         = nullptr;
         double* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
+        int*    d_actualIterations  = nullptr;
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
         // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
@@ -3457,6 +3681,7 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_actualIterations)  cudaFree(d_actualIterations);
             if (stream)              cuStreamDestroy(stream);
         };
 
@@ -3491,6 +3716,7 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        BIF2D_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_actualIterations");
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -3560,6 +3786,10 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = writableVar;
             double maxValue_arg              = maxValue;
             bool   par_or_var_arg            = (par_or_var != 0);  // true=param, false=IC (runtime hint, kernel использует compile-time макрос)
+            int    hSweepAxis_arg            = hSweepAxis;
+            double transientTime_arg         = transientTime;
+            double tMax_arg                  = tMax;
+            int    logAxisMask_arg           = logAxisMask;
 
             void* args_traj[] = {
                 &nPts_int,
@@ -3581,7 +3811,12 @@ struct ParametricEngine::Impl {
                 &maxValue_arg,
                 &d_data,
                 &d_amountOfPeaks,
-                &par_or_var_arg
+                &par_or_var_arg,
+                &hSweepAxis_arg,
+                &transientTime_arg,
+                &tMax_arg,
+                &d_actualIterations,
+                &logAxisMask_arg
             };
             unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
@@ -3599,7 +3834,8 @@ struct ParametricEngine::Impl {
                 &d_amountOfPeaks,
                 &d_data,        // outPeaks — in-place поверх траектории
                 &d_intervals,
-                &timeStep_arg
+                &timeStep_arg,
+                &d_actualIterations
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_peak,
                                           gridSize, 1, 1, blockSize, 1, 1,

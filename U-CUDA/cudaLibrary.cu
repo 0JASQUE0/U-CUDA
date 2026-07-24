@@ -957,16 +957,21 @@ __global__ void calculateDiscreteModelCUDA(
 	const int		amountOfValues,
 	const size_t		amountOfIterations, 
 	const int		preScaller,
-	const int		writableVar, 
-	const numb	maxValue, 
-	numb*			data, 
-	int*			maxValueCheckerArray, 
-	const bool		Par_or_Var)
+	const int		writableVar,
+	const numb	maxValue,
+	numb*			data,
+	int*			maxValueCheckerArray,
+	const bool		Par_or_Var,
+	const int		hSweepAxis,
+	const numb	transientTime,
+	const numb	tMax,
+	int*			actualIterations,
+	const int		logAxisMask)
 {
 	// --- Общая память в рамках одного блока ---
 	// --- Строение памяти: ---
 	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
-	
+
 	extern __shared__ numb s[];
 	//////// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
 	numb* localX = s + ( threadIdx.x * amountOfInitialConditions );
@@ -977,6 +982,35 @@ __global__ void calculateDiscreteModelCUDA(
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
+
+	// Per-thread h override for a dt-sweep axis; falls back to the uniform
+	// launch-wide h otherwise (identical to the pre-dt-sweep behaviour).
+	numb h_local = h;
+	if (hSweepAxis == 0)
+		h_local = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+	else if (hSweepAxis == 1)
+		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+
+	// Degenerate/zero step: skip entirely, same as an unbound/diverged solution
+	// (flag=-1) -- downstream (peakFinderCUDA, host unpack) already treats -1
+	// as "no data for this point", so no separate NaN-fill is needed here.
+	if (h_local <= 0) {
+		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
+		if (actualIterations != nullptr)     actualIterations[idx] = 0;
+		return;
+	}
+
+	// `data`/`outPeaks` are sized for the worst case (smallest h in the swept
+	// range -> most steps) when hSweepAxis != -1; sizeOfBlock/amountOfIterations
+	// stay the uniform (worst-case) allocation, while the actual per-thread
+	// step counts are recomputed here from h_local and reported via
+	// actualIterations so peakFinderCUDA only scans the valid prefix.
+	size_t skip_local  = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local)             : amountOfPointsForSkip;
+	size_t iters_local = (hSweepAxis != -1) ? (size_t)ceil(tMax / h_local / (numb)preScaller)   : amountOfIterations;
+	if (iters_local > amountOfIterations) iters_local = amountOfIterations;  // defensive clamp to the allocated buffer
+	if (actualIterations != nullptr) actualIterations[idx] = (int)iters_local;
 
 	// --- Определяем localX[] начальными условиями ---
 	#pragma unroll
@@ -1000,30 +1034,36 @@ __global__ void calculateDiscreteModelCUDA(
 
 	if (par_or_var == 1) {
 		for (int i = 0; i < dimension; ++i) {
-			if (LINEAR_OR_LOG_DISTRIB == 1) localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-			if (LINEAR_OR_LOG_DISTRIB == 0) localValues[indicesOfMutVars[i]] = getValueByIdx_forLogBains(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localValues[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                          : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		}
 	}
 	else if (par_or_var == 0) {
 		for (int i = 0; i < dimension; ++i) {
-			if (LINEAR_OR_LOG_DISTRIB == 1) localX[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-			if (LINEAR_OR_LOG_DISTRIB == 0) localX[indicesOfMutVars[i]] = getValueByIdx_forLogBains(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localX[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		}
 	}
 	else if (par_or_var == 2) {
-		if (LINEAR_OR_LOG_DISTRIB == 1) localX[indicesOfMutVars[0]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-		if (LINEAR_OR_LOG_DISTRIB == 1) localValues[indicesOfMutVars[1]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
-		if (LINEAR_OR_LOG_DISTRIB == 0) localX[indicesOfMutVars[0]] = getValueByIdx_forLogBains(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-		if (LINEAR_OR_LOG_DISTRIB == 0) localValues[indicesOfMutVars[1]] = getValueByIdx_forLogBains(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+		// Host never combines mixed param/IC (par_or_var==2) with an h-axis in
+		// the same request (see run_bif2d) -- this branch is unaffected.
+		localX[indicesOfMutVars[0]]      = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
 	// 1 - stability, 0 - fixed point, -1 - unbound solution
-	int flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfPointsForSkip,
+	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1);
 
-	// --- Теперь уже по-взрослому моделируем систему --- 
+	// --- Теперь уже по-взрослому моделируем систему ---
 	if (flag == 1 || flag == -1)
-		flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfIterations,
+		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1);
 
 	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
@@ -1345,6 +1385,16 @@ __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 		* ((numb)(log10(finishRange) - log10(startRange)) / (numb)(nPts - 1)));
 }
 
+// getValueByIdx для log-равномерной сетки (drop-in замена getValueByIdx, тот
+// же calling convention) -- требует startRange, finishRange > 0 (проверяется
+// на host-стороне до запуска kernel'а). Оборачивает getValueByIdxLog, которая
+// возвращает log10(value); тут возводим обратно в исходный масштаб.
+__device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const int nPts,
+	const numb startRange, const numb finishRange, const int valueNumber)
+{
+	return pow(10.0, getValueByIdxLog(idx, nPts, startRange, finishRange, valueNumber));
+}
+
 
 
 // ---------------------------------------------------------------------------------------------------
@@ -1589,7 +1639,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 // ----------------------------------------------------------------
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
+	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations)
 {
 	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1609,8 +1659,17 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		return;
 	}
 
-	
-	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h );
+	// dt-sweep: only the first actualIterations[idx] samples of this thread's
+	// (worst-case-sized) block are real data -- the rest is stale/uninitialised
+	// from a previous chunk. nullptr (non-swept path) keeps scanning the full
+	// sizeOfBlock, unchanged from before.
+	size_t scanLen = sizeOfBlock;
+	if (actualIterations != nullptr) {
+		size_t a = (size_t)actualIterations[idx];
+		if (a < scanLen) scanLen = a;
+	}
+
+	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, scanLen, outPeaks, timeOfPeaks, h );
 	return;
 }
 
@@ -2443,7 +2502,10 @@ __global__ void LLEKernelCUDA(
 	const int		preScaller,
 	const int		writableVar,
 	const numb	maxValue,
-	numb*			resultArray)
+	numb*			resultArray,
+	const int		hSweepAxis,
+	const numb	transientTime,
+	const int		logAxisMask)
 {
 	extern __shared__ numb s[];
 	numb* x = s + threadIdx.x * amountOfInitialConditions;
@@ -2453,10 +2515,35 @@ __global__ void LLEKernelCUDA(
 
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-	size_t amountOfNTPoints = NT / h;
-
 	if (idx >= nPtsLimiter)
 		return;
+
+	// Per-thread h override for a dt-sweep axis; falls back to the uniform
+	// launch-wide h otherwise (identical to the pre-dt-sweep behaviour).
+	numb h_local = h;
+	if (hSweepAxis == 0)
+		h_local = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+	else if (hSweepAxis == 1)
+		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+
+	// Degenerate/zero step: ceil(NT/h_local) below would divide by zero.
+	// Flag the point as unusable instead of crashing/hanging the thread.
+	// nan("") (CUDA math API function), not the NAN macro -- NVRTC doesn't
+	// pull in <math.h> here, so the macro is undefined even though builtin
+	// device functions like sqrt/pow/log (used elsewhere in this file) are.
+	if (h_local <= 0) {
+		resultArray[idx] = nan("");
+		return;
+	}
+
+	// tMax/NT (# of NT-blocks) stays host-computed & uniform -- it's h-independent.
+	// Only steps-per-block (NT/h) and skip-steps (transient/h) depend on h, so only
+	// those are recomputed per-thread when swept, rounded up so we never fall short
+	// of transientTime/NT.
+	size_t amountOfNTPoints = (hSweepAxis != -1) ? (size_t)ceil(NT / h_local) : (size_t)(NT / h);
+	size_t amountOfPointsForSkip_local = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local) : (size_t)amountOfPointsForSkip;
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		x[i] = initialConditions[i];
@@ -2474,19 +2561,31 @@ __global__ void LLEKernelCUDA(
 	//}
 
 	if (par_or_var == 1) {
-		for (int i = 0; i < dimension; ++i)
-			localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localValues[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                          : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
 	}
 	else if (par_or_var == 0) {
-		for (int i = 0; i < dimension; ++i)
-			x[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			x[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
 	}
 	else if (par_or_var == 2) {
-		x[indicesOfMutVars[0]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-		localValues[indicesOfMutVars[1]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+		// Host never combines mixed param/IC (par_or_var==2) with an h-axis in the
+		// same request (see run_lle_2d/run_ls_2d) -- this branch is unaffected.
+		x[indicesOfMutVars[0]]           = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 	if (flag == 0) {
 		resultArray[idx] = 999;
@@ -2542,14 +2641,14 @@ __global__ void LLEKernelCUDA(
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
-		flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
 			return;
 		}
 
-		flag = loopCalculateDiscreteModel_int(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
@@ -2795,7 +2894,10 @@ __global__ void LSKernelCUDA(
 	const int preScaller,
 	const int writableVar,
 	const numb maxValue,
-	numb* resultArray)
+	numb* resultArray,
+	const int hSweepAxis,
+	const numb transientTime,
+	const int logAxisMask)
 {
 	extern __shared__ numb s[];
 
@@ -2819,10 +2921,28 @@ __global__ void LSKernelCUDA(
 
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-	size_t amountOfNTPoints = NT / h;
-
 	if (idx >= nPtsLimiter)
 		return;
+
+	// Per-thread h override for a dt-sweep axis; falls back to the uniform
+	// launch-wide h otherwise (identical to the pre-dt-sweep behaviour).
+	numb h_local = h;
+	if (hSweepAxis == 0)
+		h_local = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+	else if (hSweepAxis == 1)
+		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+
+	// Degenerate/zero step -- see LLEKernelCUDA above. LS writes N doubles/thread.
+	if (h_local <= 0) {
+		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = nan("");
+		return;
+	}
+
+	// See LLEKernelCUDA above for the tMax/NT vs NT/h reasoning.
+	size_t amountOfNTPoints = (hSweepAxis != -1) ? (size_t)ceil(NT / h_local) : (size_t)(NT / h);
+	size_t amountOfPointsForSkip_local = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local) : (size_t)amountOfPointsForSkip;
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 	{
@@ -2835,16 +2955,28 @@ __global__ void LSKernelCUDA(
 		localValues[i] = values[i];
 
 	if (par_or_var == 1) {
-		for (int i = 0; i < dimension; ++i)
-			localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localValues[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                          : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
 	}
 	else if (par_or_var == 0) {
-		for (int i = 0; i < dimension; ++i)
-			x[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			x[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
 	}
 	else if (par_or_var == 2) {
-			x[indicesOfMutVars[0]]			 = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-			localValues[indicesOfMutVars[1]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+			// Host never combines mixed param/IC (par_or_var==2) with an h-axis in
+			// the same request (see run_ls_2d) -- this branch is unaffected.
+			x[indicesOfMutVars[0]]			  = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+			                                                              : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+			localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+			                                                              : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
 
@@ -2872,7 +3004,7 @@ __global__ void LSKernelCUDA(
 		}
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 	if (flag == 0) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
@@ -2896,14 +3028,14 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < sizeOfBlock; ++i)
 	{
-		flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		if (flag == 0) {
 			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
 			return;
 		}
 		for (int j = 0; j < amountOfInitialConditions; ++j)
 		{
-			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 			if (flag == 0) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
 				return;

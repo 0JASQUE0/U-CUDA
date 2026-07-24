@@ -1,0 +1,4 @@
+// GLFW's Win32 backend auto-loads a resource named exactly "GLFW_ICON" as the
+// window/taskbar icon (see glfwCreateWindow in app_main.cpp); the same entry
+// also becomes the .exe's file icon shown by Explorer and any shortcut to it.
+GLFW_ICON ICON "app.ico"
