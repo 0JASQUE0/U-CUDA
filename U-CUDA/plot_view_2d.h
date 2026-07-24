@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <limits>
 
 struct PlotSeriesInput {
     const float* points = nullptr;
@@ -93,6 +94,38 @@ public:
     // axis" пункта без необходимости open'ить отдельный popup.
     std::function<void()> popup_extras;
 
+    // Crosshair-commit callback: fires on release of a crosshair gesture
+    // (MMB or Shift+LMB) inside the plot, unless it was a double-click.
+    // Argument is the world X under the cursor (snapped if snap_x_to_grid).
+    // Plain LMB is reserved for pan and does NOT trigger this — the
+    // Parametric habit of clicking a series to focus it must not enqueue
+    // a phase run in Custom. Used by the Custom-tab 1D slice to drill
+    // into Phase at the released parameter value.
+    std::function<void(double world_x)> on_left_click;
+
+    // Live-drag callback for the crosshair gesture (MMB or Shift+LMB).
+    // Fires every frame while the button is held inside the plot, with
+    // the current cursor's world X (snapped if snap_x_to_grid). Used by
+    // the Custom-tab so the fix_x / fix_y crosshair on 1D plots follows
+    // the cursor during a drag while the heavy recompute waits for
+    // release (on_left_click).
+    std::function<void(double world_x)> on_left_drag;
+
+    // Vertical/horizontal crosshair overlay drawn on top of the data.
+    // NaN disables the corresponding axis; both NaN (default) → nothing
+    // drawn, zero cost. Used by the Custom-tab to mark the fix_x sweep
+    // position on 1D slice plots (like ImPlot::PlotInfLines did before).
+    // Double-stroked (black halo + coloured core). Default core colours
+    // match the Custom-tab convention: vertical = X-sweep (blue),
+    // horizontal = Y-sweep (orange) — so the same colour on a heatmap
+    // and its slice tells you which axis the crosshair belongs to.
+    // Callers can override the ImU32 colours per view before render().
+    double crosshair_x = std::numeric_limits<double>::quiet_NaN();
+    double crosshair_y = std::numeric_limits<double>::quiet_NaN();
+    // ARGB (0xAA_RR_GG_BB) — matches IM_COL32 default layout on Windows.
+    unsigned crosshair_x_color = 0xFF50A0FFu;  // blue-ish (X sweep)
+    unsigned crosshair_y_color = 0xFFFF9028u;  // orange   (Y sweep)
+
     // render:
     //  global_visible � ��������� �� ������� �� (�������, ����� �� ��� ��������),
     //                   ����������� ������ ����, recompute �� �����.
@@ -114,6 +147,11 @@ private:
     // Обновляется в начале render(); do_autofit/fit_x/fit_y используют её,
     // чтобы НЕ включать скрытые серии в авто-диапазон.
     std::vector<bool> render_visible_mask_;
+    // Snapshot of the previous frame's mask — compared each frame to detect
+    // legend toggles. Any change (either on or off) fires an autofit so the
+    // newly-visible series come into view instead of staying outside the
+    // clamped-in range set by whatever was visible before.
+    std::vector<bool> render_visible_mask_prev_;
 
     bool   rect_zoom_pending_ = false;
     bool   rect_zoom_active_ = false;

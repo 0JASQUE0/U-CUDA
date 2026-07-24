@@ -278,6 +278,33 @@ bool AppModel::start_fastsync_analysis() {
     return true;
 }
 
+bool AppModel::start_custom_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    custom_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        custom_session.sys = built;
+        // Each owned sub-session also needs the built System for KRS codegen.
+        custom_session.bif_session.sys    = built;
+        custom_session.lle_session.sys    = built;
+        custom_session.ls_session.sys     = built;
+        custom_session.phase_session.sys  = built;
+        custom_session.basins_session.sys = built;
+        custom_session.phase_session.regenerate_krs();
+    }
+    catch (...) {
+        // system incomplete — next Run will surface the error.
+    }
+    custom_session.loaded_system_name        = name;
+    custom_session.bif_session.loaded_system_name    = name;
+    custom_session.lle_session.loaded_system_name    = name;
+    custom_session.ls_session.loaded_system_name     = name;
+    custom_session.phase_session.loaded_system_name  = name;
+    custom_session.basins_session.loaded_system_name = name;
+    return true;
+}
+
 void AppModel::propagate_to_sessions() {
     // refresh_symbols может упасть, если в полях ещё что-то невалидное —
     // молча игнорим, оставим прежние vars/params, пользователь увидит ошибку
@@ -295,6 +322,12 @@ void AppModel::propagate_to_sessions() {
     dft1d_session.custom_schemes       = custom_schemes;
     basins_session.custom_schemes      = custom_schemes;
     fastsync_session.custom_schemes    = custom_schemes;
+    custom_session.custom_schemes                = custom_schemes;
+    custom_session.bif_session.custom_schemes    = custom_schemes;
+    custom_session.lle_session.custom_schemes    = custom_schemes;
+    custom_session.ls_session.custom_schemes     = custom_schemes;
+    custom_session.phase_session.custom_schemes  = custom_schemes;
+    custom_session.basins_session.custom_schemes = custom_schemes;
 
     // sys обновляем для built-in схем (Euler/RK4/...): они используют
     // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
@@ -309,6 +342,12 @@ void AppModel::propagate_to_sessions() {
         dft1d_session.sys       = built;
         basins_session.sys      = built;
         fastsync_session.sys    = built;
+        custom_session.sys                = built;
+        custom_session.bif_session.sys    = built;
+        custom_session.lle_session.sys    = built;
+        custom_session.ls_session.sys     = built;
+        custom_session.phase_session.sys  = built;
+        custom_session.basins_session.sys = built;
     }
     catch (...) {
         // система ещё неполна — следующий Run покажет ошибку парсинга.
@@ -350,6 +389,160 @@ bool AppModel::start_next_in_parametric_queue() {
         if (ok) return true;
         // ok == false (например, krs пуст / индекс плохой) — last_error
         // выставлен соответствующим run_async; идём дальше.
+    }
+    return false;
+}
+
+// ============================================================================
+// Custom-tab pipeline queue drainer
+// ============================================================================
+
+namespace {
+// Format a double for insertion into a text-based numeric input field. Enough
+// precision to survive round-trip through parse_d (see analysis_session.cpp).
+std::string fmt_num_for_input(double v) {
+    char buf[64];
+    // %.6g strips float→double round-trip noise (0.20000000298 → "0.2")
+    // for values that came from a SliderFloat or heatmap-pixel snap. If a
+    // caller ever needs more precision, promote this helper's format.
+    std::snprintf(buf, sizeof(buf), "%.6g", v);
+    return buf;
+}
+
+// Pin the "other axis" parameter (the one held fixed while the swept axis
+// varies) into the per-config param_values. Only applies when the fixed axis
+// sweeps a parameter — for var-sweeps, the "fix" applies to an initial
+// condition, not a param, so we handle those separately below.
+void pin_fixed_param(std::map<std::string,std::string>& pv,
+                     const std::vector<std::string>& params,
+                     int par_index, bool over_var, double value) {
+    if (over_var) return;
+    if (par_index < 0 || par_index >= (int)params.size()) return;
+    pv[params[par_index]] = fmt_num_for_input(value);
+}
+
+void pin_fixed_ic(std::map<std::string,std::string>& ic,
+                  const std::vector<std::string>& vars,
+                  int var_index, bool over_var, double value) {
+    if (!over_var) return;
+    if (var_index < 0 || var_index >= (int)vars.size()) return;
+    ic[vars[var_index]] = fmt_num_for_input(value);
+}
+} // namespace
+
+bool AppModel::start_next_in_custom_queue() {
+    if (custom_session.any_in_flight()) return false;
+    if (custom_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+
+    using K = CustomQueueItem::Kind;
+    auto& cs = custom_session;
+    const auto& shared = cs.shared;
+
+    while (!custom_queue.empty()) {
+        CustomQueueItem it = custom_queue.front();
+        custom_queue.pop_front();
+        bool ok = false;
+
+        switch (it.kind) {
+        case K::Bif2D:
+            if (cs.bif_session.diagrams.size() > 0) {
+                apply_shared_to_bif2d(shared, cs.bif_session.diagrams[0]);
+                ok = cs.bif_session.run_async(*parametric_engine, 0);
+            }
+            break;
+        case K::LLE2D:
+            if (cs.lle_session.curves.size() > 0) {
+                apply_shared_to_lle2d(shared, cs.lle_session.curves[0]);
+                ok = cs.lle_session.run_async(*parametric_engine, 0);
+            }
+            break;
+        case K::LS2D:
+            if (cs.ls_session.curves.size() > 0) {
+                apply_shared_to_ls2d(shared, cs.ls_session.curves[0]);
+                ok = cs.ls_session.run_async(*parametric_engine, 0);
+            }
+            break;
+
+        case K::Bif1D_X:
+            if (cs.bif_session.diagrams.size() > 1) {
+                auto& c = cs.bif_session.diagrams[1];
+                apply_shared_to_bif1d(shared, c, 0);
+                // Pin the OTHER (Y) axis at fix_y.
+                EffectiveSweep swy = effective_sweep_y(shared);
+                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                ok = cs.bif_session.run_async(*parametric_engine, 1);
+            }
+            break;
+        case K::Bif1D_Y:
+            if (cs.bif_session.diagrams.size() > 2) {
+                auto& c = cs.bif_session.diagrams[2];
+                apply_shared_to_bif1d(shared, c, 1);
+                EffectiveSweep swx = effective_sweep_x(shared);
+                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                ok = cs.bif_session.run_async(*parametric_engine, 2);
+            }
+            break;
+        case K::LLE1D_X:
+            if (cs.lle_session.curves.size() > 1) {
+                auto& c = cs.lle_session.curves[1];
+                apply_shared_to_lle1d(shared, c, 0);
+                EffectiveSweep swy = effective_sweep_y(shared);
+                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                ok = cs.lle_session.run_async(*parametric_engine, 1);
+            }
+            break;
+        case K::LLE1D_Y:
+            if (cs.lle_session.curves.size() > 2) {
+                auto& c = cs.lle_session.curves[2];
+                apply_shared_to_lle1d(shared, c, 1);
+                EffectiveSweep swx = effective_sweep_x(shared);
+                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                ok = cs.lle_session.run_async(*parametric_engine, 2);
+            }
+            break;
+        case K::LS1D_X:
+            if (cs.ls_session.curves.size() > 1) {
+                auto& c = cs.ls_session.curves[1];
+                apply_shared_to_ls1d(shared, c, 0);
+                EffectiveSweep swy = effective_sweep_y(shared);
+                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                ok = cs.ls_session.run_async(*parametric_engine, 1);
+            }
+            break;
+        case K::LS1D_Y:
+            if (cs.ls_session.curves.size() > 2) {
+                auto& c = cs.ls_session.curves[2];
+                apply_shared_to_ls1d(shared, c, 1);
+                EffectiveSweep swx = effective_sweep_x(shared);
+                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                ok = cs.ls_session.run_async(*parametric_engine, 2);
+            }
+            break;
+
+        case K::Phase: {
+            apply_shared_to_phase(shared, cs.phase_session, cs.vars);
+            cs.phase_session.regenerate_krs();
+            ok = cs.phase_session.recompute_async();
+            break;
+        }
+        case K::Basins:
+            if (cs.basins_session.configs.size() > 0) {
+                auto& c = cs.basins_session.configs[0];
+                apply_shared_to_basins(shared, c);
+                ok = cs.basins_session.run_async(*parametric_engine, 0);
+            }
+            break;
+        }
+
+        if (ok) return true;
+        // ok == false — skip and try the next item.
     }
     return false;
 }

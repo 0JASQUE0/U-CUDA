@@ -1,5 +1,6 @@
 #pragma once
 #include "analysis_session.h"
+#include "custom_session.h"
 #include "app_model.h"
 #include <string>
 #include <vector>
@@ -64,3 +65,10 @@ bool session_from_json_parametric_windows(const std::string& json, std::vector<P
 // (`_last_dft1d_windows.json`), minus the kind/mode_2d/colored_1d fields.
 std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins);
 bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DPlotWindow>& wins);
+
+// Custom-tab bundle (`_last_custom.json`) — wraps shared pipeline config plus
+// each of the five owned sub-sessions in one file. Sub-sessions are embedded
+// as nested objects using the existing per-mode writers, so future fields on
+// any sub-session flow into the bundle automatically.
+std::string session_to_json_custom(const CustomSession& s);
+bool session_from_json_custom(const std::string& json, CustomSession& s);

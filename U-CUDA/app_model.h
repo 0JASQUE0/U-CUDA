@@ -4,6 +4,7 @@
 #include "image_source.h"
 #include "system_record.h"
 #include "analysis_session.h"
+#include "custom_session.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -190,7 +191,7 @@ public:
     // --- режим приложения и сессия анализа (слой 2) ---
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Settings };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -213,6 +214,12 @@ public:
 
     // Fast Synchro — отдельный AppMode (anti-synchro analysis на attractor / IC grid).
     FastSyncAnalysisSession    fastsync_session;
+
+    // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
+    // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
+    // Phase/Basins sub-sessions (see CustomSession); never shares state with
+    // parametric_/phase_/basins_session above.
+    CustomSession              custom_session;
 
     // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
@@ -332,6 +339,13 @@ public:
     std::deque<FastSyncQueueItem> fastsync_queue;
     bool start_next_in_fastsync_queue();
 
+    // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
+    // Items are pushed by the Run buttons and by drill-down clicks; drained
+    // sequentially by start_next_in_custom_queue() so the shared engine
+    // processes them one at a time (like parametric_queue).
+    std::deque<CustomQueueItem> custom_queue;
+    bool start_next_in_custom_queue();
+
     // Удаление конфига + чистка очереди (убрать item с этим индексом, у
     // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
     // вместо прямого session.remove_*, чтобы очередь не указывала на
@@ -354,6 +368,9 @@ public:
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
     bool start_fastsync_analysis();
+    // Initialise the Custom pipeline: seeds shared config from the record and
+    // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
+    bool start_custom_analysis();
 
     // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params)
     // во ВСЕ сессии без сброса per-config настроек. Используется в Save /

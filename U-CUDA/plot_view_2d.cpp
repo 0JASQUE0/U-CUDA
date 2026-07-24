@@ -100,8 +100,24 @@ void Plot2DView::render(PlotRenderer& renderer,
     for (int k = 0; k < series_cache_.size(); ++k)
         render_visible_mask_[k] = eff_visible(k);
 
+    // Detect legend-toggle across frames (legend clicks flip visible[k] later
+    // in this render, so the change lands in NEXT frame's mask). Any bit
+    // that flipped → autofit, so newly-visible series come into view (was
+    // asymmetric before: turning OFF shrunk view via clamp, turning ON left
+    // the clamp bounds wider but view stayed zoomed).
+    bool visibility_changed = false;
+    if (render_visible_mask_prev_.size() == render_visible_mask_.size()) {
+        for (size_t k = 0; k < render_visible_mask_.size(); ++k) {
+            if (render_visible_mask_prev_[k] != render_visible_mask_[k]) {
+                visibility_changed = true;
+                break;
+            }
+        }
+    }
+    render_visible_mask_prev_ = render_visible_mask_;
+
     // 2. ������� ��� ������ ������ ��� �� ������ ������� (fit_request)
-    if (!view_valid || fit_request) do_autofit();
+    if (!view_valid || fit_request || visibility_changed) do_autofit();
 
     // Bounds for view clamping — computed once per frame, applied by clamp_view
     // below after all interactions. Padded on continuous data to match the 5%
@@ -314,6 +330,28 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->PopClipRect();
     }
 
+    // Crosshair overlay — dark halo + coloured core. Colours encode which
+    // sweep-axis the line belongs to (vertical = X-sweep, horizontal =
+    // Y-sweep by convention; caller can override crosshair_*_color).
+    // Mirrors HeatmapView's crosshair path.
+    if (std::isfinite(crosshair_x) || std::isfinite(crosshair_y)) {
+        ImU32 col_halo = IM_COL32(0, 0, 0, 220);
+        if (std::isfinite(crosshair_x) && crosshair_x >= std::min(ex0, ex1)
+                                       && crosshair_x <= std::max(ex0, ex1)) {
+            float px = X(crosshair_x);
+            ImVec2 a(px, img_pos.y), b(px, img_pos.y + (float)plot_h);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_x_color, 1.5f);
+        }
+        if (std::isfinite(crosshair_y) && crosshair_y >= std::min(ey0, ey1)
+                                       && crosshair_y <= std::max(ey0, ey1)) {
+            float py = Y(crosshair_y);
+            ImVec2 a(img_pos.x, py), b(img_pos.x + (float)plot_w, py);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_y_color, 1.5f);
+        }
+    }
+
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         plot_col_border(), 0.0f, 0, 1.0f);
 
@@ -412,6 +450,34 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddText(ImVec2(cx, cy), col_text, buf);
     }
 
+    // 8b. Crosshair gestures — MMB drag or Shift+LMB drag inside the plot
+    // fire `on_left_drag(world_x)` every frame; release of either gesture
+    // fires `on_left_click(world_x)`. Plain LMB is left to pan alone; it
+    // does NOT trigger drill-down (a bare click just to focus the window
+    // shouldn't kick off a phase run).
+    if (plot_h_ov && (on_left_drag || on_left_click)) {
+        ImGuiIO& io = ImGui::GetIO();
+        auto cursor_wx = [&]() -> double {
+            double wx = ex0 + (double)(io.MousePos.x - img_pos.x)
+                              / (double)plot_w * (ex1 - ex0);
+            if (snap_x_to_grid && snap_x_n > 1) {
+                double lo = std::min(snap_x_min, snap_x_max);
+                double hi = std::max(snap_x_min, snap_x_max);
+                int ix; double sx;
+                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx)) wx = sx;
+            }
+            return wx;
+        };
+        bool crosshair_held = ImGui::IsMouseDown(ImGuiMouseButton_Middle)
+                           || (ImGui::IsMouseDown(ImGuiMouseButton_Left) && io.KeyShift);
+        if (crosshair_held && on_left_drag) on_left_drag(cursor_wx());
+
+        bool crosshair_released = ImGui::IsMouseReleased(ImGuiMouseButton_Middle)
+                               || (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.KeyShift);
+        if (crosshair_released && on_left_click && !plot_dbl)
+            on_left_click(cursor_wx());
+    }
+
     // 9. ������� �����
     if (xax_dbl)   fit_x();
     if (yax_dbl)   fit_y();
@@ -436,7 +502,9 @@ void Plot2DView::render(PlotRenderer& renderer,
                 y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
             }
         }
-        if (plot_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+        // LMB pan — skip when Shift is held (that's a crosshair gesture).
+        if (plot_a && !io.KeyShift
+            && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
             ImVec2 d = io.MouseDelta;
             if (!x_axis.lock) {
                 double dx_data = -(double)d.x / plot_w * (ex1 - ex0);
