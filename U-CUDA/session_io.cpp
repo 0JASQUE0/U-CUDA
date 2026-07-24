@@ -1281,3 +1281,186 @@ bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DP
         return false;
     }
 }
+
+// ============================================================================
+// Custom-tab bundle: shared config + five embedded sub-session objects.
+// ============================================================================
+
+namespace {
+void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) {
+    auto B = [&](const char* name, bool v) {
+        o << "\""<<name<<"\":" << (v ? "true" : "false") << ",";
+    };
+    auto S = [&](const char* name, const std::string& v) {
+        o << "\""<<name<<"\":"; jstr(o, v); o << ",";
+    };
+    auto I = [&](const char* name, int v) { o << "\""<<name<<"\":" << v << ","; };
+    auto D = [&](const char* name, double v) {
+        char buf[64]; std::snprintf(buf, sizeof(buf), "%.17g", v);
+        o << "\""<<name<<"\":" << buf << ",";
+    };
+    o << "{";
+    B("level_2d_enabled",    c.level_2d_enabled);
+    B("level_1d_enabled",    c.level_1d_enabled);
+    B("level_phase_enabled", c.level_phase_enabled);
+    S("scheme",              c.scheme);
+    S("symmetry_s",          c.symmetry_s);
+    S("h_text",              c.h_text);
+    S("t_max_text",          c.t_max_text);
+    S("transient_text",      c.transient_text);
+    S("pre_scaller_text",    c.pre_scaller_text);
+    S("max_value_text",      c.max_value_text);
+    o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
+    o << "\"param_values\":";       jmap(o, c.param_values);       o << ",";
+    I("axis_x_par_index",    c.axis_x_par_index);
+    B("axis_x_over_var",     c.axis_x_over_var);
+    I("axis_x_var_index",    c.axis_x_var_index);
+    S("axis_x_lo_text",      c.axis_x_lo_text);
+    S("axis_x_hi_text",      c.axis_x_hi_text);
+    S("n_x_text",            c.n_x_text);
+    I("axis_y_par_index",    c.axis_y_par_index);
+    B("axis_y_over_var",     c.axis_y_over_var);
+    I("axis_y_var_index",    c.axis_y_var_index);
+    S("axis_y_lo_text",      c.axis_y_lo_text);
+    S("axis_y_hi_text",      c.axis_y_hi_text);
+    S("n_y_text",            c.n_y_text);
+    B("bif2d_enabled",       c.bif2d_enabled);
+    B("lle2d_enabled",       c.lle2d_enabled);
+    B("ls2d_enabled",        c.ls2d_enabled);
+    B("inherit_sweep_from_2d", c.inherit_sweep_from_2d);
+    I("sweep_x_par_index",   c.sweep_x_par_index);
+    B("sweep_x_over_var",    c.sweep_x_over_var);
+    I("sweep_x_var_index",   c.sweep_x_var_index);
+    S("sweep_x_lo_text",     c.sweep_x_lo_text);
+    S("sweep_x_hi_text",     c.sweep_x_hi_text);
+    S("n_x_1d_text",         c.n_x_1d_text);
+    I("sweep_y_par_index",   c.sweep_y_par_index);
+    B("sweep_y_over_var",    c.sweep_y_over_var);
+    I("sweep_y_var_index",   c.sweep_y_var_index);
+    S("sweep_y_lo_text",     c.sweep_y_lo_text);
+    S("sweep_y_hi_text",     c.sweep_y_hi_text);
+    S("n_y_1d_text",         c.n_y_1d_text);
+    B("bif1d_x_enabled",     c.bif1d_x_enabled);
+    B("bif1d_y_enabled",     c.bif1d_y_enabled);
+    B("lle1d_x_enabled",     c.lle1d_x_enabled);
+    B("lle1d_y_enabled",     c.lle1d_y_enabled);
+    B("ls1d_x_enabled",      c.ls1d_x_enabled);
+    B("ls1d_y_enabled",      c.ls1d_y_enabled);
+    B("continuation_1d_enabled", c.continuation_1d_enabled);
+    D("fix_x_value",         c.fix_x_value);
+    D("fix_y_value",         c.fix_y_value);
+    B("auto_recompute_1d",   c.auto_recompute_1d);
+    I("level3_kind",         c.level3_kind);
+    B("autorun_on_drilldown", c.autorun_on_drilldown);
+    o << "\"phase_use_shared_ic\":" << (c.phase_use_shared_ic ? "true" : "false");
+    o << "}";
+}
+} // namespace
+
+std::string session_to_json_custom(const CustomSession& s) {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"shared\":";  write_shared_config(o, s.shared);            o << ",\n";
+    o << "  \"bif\":";     o << session_to_json_parametric(s.bif_session); o << ",\n";
+    o << "  \"lle\":";     o << session_to_json_lle(s.lle_session);        o << ",\n";
+    o << "  \"ls\":";      o << session_to_json_ls(s.ls_session);          o << ",\n";
+    o << "  \"phase\":";   o << session_to_json(s.phase_session);          o << ",\n";
+    o << "  \"basins\":";  o << session_to_json_basins(s.basins_session);
+    o << "\n}\n";
+    return o.str();
+}
+
+bool session_from_json_custom(const std::string& json, CustomSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            p.ws();
+            size_t val_start = p.i;
+            p.skip_value();
+            size_t val_end = p.i;
+            std::string raw = json.substr(val_start, val_end - val_start);
+
+            if (key == "shared") {
+                JP q(raw); auto& c = s.shared;
+                q.expect('{');
+                if (!q.opt('}')) {
+                    while (true) {
+                        std::string k = q.str(); q.expect(':');
+                        if      (k == "level_2d_enabled")        c.level_2d_enabled = q.boolean();
+                        else if (k == "level_1d_enabled")        c.level_1d_enabled = q.boolean();
+                        else if (k == "level_phase_enabled")     c.level_phase_enabled = q.boolean();
+                        else if (k == "scheme")                  c.scheme = q.str();
+                        else if (k == "symmetry_s")              c.symmetry_s = q.str();
+                        else if (k == "h_text")                  c.h_text = q.str();
+                        else if (k == "t_max_text")              c.t_max_text = q.str();
+                        else if (k == "transient_text")          c.transient_text = q.str();
+                        else if (k == "pre_scaller_text")        c.pre_scaller_text = q.str();
+                        else if (k == "max_value_text")          c.max_value_text = q.str();
+                        else if (k == "initial_conditions")      c.initial_conditions = q.map_ss();
+                        else if (k == "param_values")            c.param_values = q.map_ss();
+                        else if (k == "axis_x_par_index")        c.axis_x_par_index = std::stoi(q.str_or_num());
+                        else if (k == "axis_x_over_var")         c.axis_x_over_var = q.boolean();
+                        else if (k == "axis_x_var_index")        c.axis_x_var_index = std::stoi(q.str_or_num());
+                        else if (k == "axis_x_lo_text")          c.axis_x_lo_text = q.str();
+                        else if (k == "axis_x_hi_text")          c.axis_x_hi_text = q.str();
+                        else if (k == "n_x_text")                c.n_x_text = q.str();
+                        else if (k == "axis_y_par_index")        c.axis_y_par_index = std::stoi(q.str_or_num());
+                        else if (k == "axis_y_over_var")         c.axis_y_over_var = q.boolean();
+                        else if (k == "axis_y_var_index")        c.axis_y_var_index = std::stoi(q.str_or_num());
+                        else if (k == "axis_y_lo_text")          c.axis_y_lo_text = q.str();
+                        else if (k == "axis_y_hi_text")          c.axis_y_hi_text = q.str();
+                        else if (k == "n_y_text")                c.n_y_text = q.str();
+                        else if (k == "bif2d_enabled")           c.bif2d_enabled = q.boolean();
+                        else if (k == "lle2d_enabled")           c.lle2d_enabled = q.boolean();
+                        else if (k == "ls2d_enabled")            c.ls2d_enabled = q.boolean();
+                        else if (k == "inherit_sweep_from_2d")   c.inherit_sweep_from_2d = q.boolean();
+                        else if (k == "sweep_x_par_index")       c.sweep_x_par_index = std::stoi(q.str_or_num());
+                        else if (k == "sweep_x_over_var")        c.sweep_x_over_var = q.boolean();
+                        else if (k == "sweep_x_var_index")       c.sweep_x_var_index = std::stoi(q.str_or_num());
+                        else if (k == "sweep_x_lo_text")         c.sweep_x_lo_text = q.str();
+                        else if (k == "sweep_x_hi_text")         c.sweep_x_hi_text = q.str();
+                        else if (k == "n_x_1d_text")             c.n_x_1d_text = q.str();
+                        else if (k == "sweep_y_par_index")       c.sweep_y_par_index = std::stoi(q.str_or_num());
+                        else if (k == "sweep_y_over_var")        c.sweep_y_over_var = q.boolean();
+                        else if (k == "sweep_y_var_index")       c.sweep_y_var_index = std::stoi(q.str_or_num());
+                        else if (k == "sweep_y_lo_text")         c.sweep_y_lo_text = q.str();
+                        else if (k == "sweep_y_hi_text")         c.sweep_y_hi_text = q.str();
+                        else if (k == "n_y_1d_text")             c.n_y_1d_text = q.str();
+                        else if (k == "bif1d_x_enabled")         c.bif1d_x_enabled = q.boolean();
+                        else if (k == "bif1d_y_enabled")         c.bif1d_y_enabled = q.boolean();
+                        else if (k == "lle1d_x_enabled")         c.lle1d_x_enabled = q.boolean();
+                        else if (k == "lle1d_y_enabled")         c.lle1d_y_enabled = q.boolean();
+                        else if (k == "ls1d_x_enabled")          c.ls1d_x_enabled = q.boolean();
+                        else if (k == "ls1d_y_enabled")          c.ls1d_y_enabled = q.boolean();
+                        else if (k == "continuation_1d_enabled") c.continuation_1d_enabled = q.boolean();
+                        else if (k == "fix_x_value")             c.fix_x_value = std::stod(q.str_or_num());
+                        else if (k == "fix_y_value")             c.fix_y_value = std::stod(q.str_or_num());
+                        else if (k == "auto_recompute_1d")       c.auto_recompute_1d = q.boolean();
+                        else if (k == "level3_kind")             c.level3_kind = std::stoi(q.str_or_num());
+                        else if (k == "autorun_on_drilldown")    c.autorun_on_drilldown = q.boolean();
+                        else if (k == "phase_use_shared_ic")     c.phase_use_shared_ic = q.boolean();
+                        else                                     q.skip_value();
+                        if (q.opt(',')) continue;
+                        q.expect('}'); break;
+                    }
+                }
+            }
+            else if (key == "bif")    session_from_json_parametric(raw, s.bif_session);
+            else if (key == "lle")    session_from_json_lle(raw, s.lle_session);
+            else if (key == "ls")     session_from_json_ls(raw, s.ls_session);
+            else if (key == "phase")  session_from_json(raw, s.phase_session);
+            else if (key == "basins") session_from_json_basins(raw, s.basins_session);
+
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}

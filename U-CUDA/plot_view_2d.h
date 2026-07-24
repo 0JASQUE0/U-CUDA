@@ -93,6 +93,14 @@ public:
     // axis" пункта без необходимости open'ить отдельный popup.
     std::function<void()> popup_extras;
 
+    // Optional left-click callback: fires on release inside the plot when the
+    // gesture was NOT a pan-drag and NOT a double-click. Argument is the
+    // world X coordinate under the cursor (Y from the plot is usually not
+    // meaningful for 1D drill-down — the caller already knows which series
+    // this plot represents). Used by the Custom-tab to drill from a 1D slice
+    // into a Phase portrait at the clicked parameter value.
+    std::function<void(double world_x)> on_left_click;
+
     // render:
     //  global_visible � ��������� �� ������� �� (�������, ����� �� ��� ��������),
     //                   ����������� ������ ����, recompute �� �����.

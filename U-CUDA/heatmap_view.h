@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <limits>
 
 // HeatmapView — рисует 2D-скалярное поле n×m в виде хитмапы с colormap'ом.
 // Зеркало Plot2DView по структуре (свой AxisInfo, autofit, pan/zoom через ось),
@@ -90,6 +91,22 @@ public:
     // EndPopup block. Used by gui.cpp to inject the "Export data..." action.
     // Mirrors Plot2DView::popup_extras (see plot_view_2d.h).
     std::function<void()> popup_extras;
+
+    // Optional left-click callback: fires on mouse release inside the plot
+    // when the gesture was NOT a pan-drag (release-without-drag) and NOT a
+    // double-click. Arguments: pixel indices (nx_idx, ny_idx) and the
+    // snapped world coordinates of that pixel's node centre (same math the
+    // hover tooltip uses). Used by the Custom-tab for drill-down: click a
+    // Bif2D pixel → set the Phase param_values to (snap_x, snap_y).
+    std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_click;
+
+    // Crosshair overlay — vertical and horizontal lines drawn on top of the
+    // heatmap at the given world coordinates. NaN disables the corresponding
+    // axis (both NaN by default → nothing rendered, zero cost). Used by the
+    // Custom-tab to visualise fix_x/fix_y slider positions across all three
+    // 2D heatmaps.
+    double crosshair_x = std::numeric_limits<double>::quiet_NaN();
+    double crosshair_y = std::numeric_limits<double>::quiet_NaN();
 
     HeatmapView() = default;
     ~HeatmapView();

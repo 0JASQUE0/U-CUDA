@@ -623,6 +623,29 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
+    // Crosshair overlay — thin lines at world coords (crosshair_x, crosshair_y).
+    // NaN disables the corresponding axis; both NaN → nothing drawn (zero cost).
+    // Used by the Custom-tab to visualise fix_x/fix_y slider positions.
+    if (std::isfinite(crosshair_x) || std::isfinite(crosshair_y)) {
+        ImU32 col_cross = IM_COL32(255, 220, 80, 200);
+        double range_x = vis_view_max_x - vis_view_min_x;
+        double range_y = vis_view_max_y - vis_view_min_y;
+        if (std::isfinite(crosshair_x) && std::abs(range_x) > 1e-30
+            && crosshair_x >= std::min(vis_view_min_x, vis_view_max_x)
+            && crosshair_x <= std::max(vis_view_min_x, vis_view_max_x)) {
+            float px = img_pos.x + (float)((crosshair_x - vis_view_min_x) / range_x) * plot_w;
+            dl->AddLine(ImVec2(px, img_pos.y),
+                        ImVec2(px, img_pos.y + plot_h), col_cross, 1.5f);
+        }
+        if (std::isfinite(crosshair_y) && std::abs(range_y) > 1e-30
+            && crosshair_y >= std::min(vis_view_min_y, vis_view_max_y)
+            && crosshair_y <= std::max(vis_view_min_y, vis_view_max_y)) {
+            float py = img_pos.y + (float)((vis_view_max_y - crosshair_y) / range_y) * plot_h;
+            dl->AddLine(ImVec2(img_pos.x,         py),
+                        ImVec2(img_pos.x + plot_w, py), col_cross, 1.5f);
+        }
+    }
+
     // 8. Названия осей (как в Plot2DView). Используем vis_x_name/vis_y_name —
     // они учитывают swap_axes без мутации x_axis.name / y_axis.name.
     const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
@@ -767,6 +790,31 @@ void HeatmapView::render(PlotRenderer& renderer,
                 ImGui::Text("%s = %.6g\n%s = %.6g\nlambda = %.6g", xn, snap_x, yn, snap_y, v);
             }
             ImGui::EndTooltip();
+        }
+    }
+
+    // 10b. Left-click drill-down: fires on release when the gesture was NOT a
+    // pan-drag and NOT a double-click. Uses the same pixel snap math as the
+    // tooltip block above. Compatible with existing LMB pan (IsMouseDragging
+    // is what triggers pan — release-without-drag misses it) and RMB rect-zoom.
+    if (plot_hov && on_left_click
+        && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
+        && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
+        && step_x > 0.0 && step_y > 0.0) {
+        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
+            ImGuiIO& io = ImGui::GetIO();
+            double dx = vis_view_min_x + (double)(io.MousePos.x - img_pos.x) / (double)plot_w
+                        * (vis_view_max_x - vis_view_min_x);
+            double dy = vis_view_max_y - (double)(io.MousePos.y - img_pos.y) / (double)plot_h
+                        * (vis_view_max_y - vis_view_min_y);
+            int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
+            int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
+            if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
+                double snap_x = param_lo_x + (double)ix * step_x;
+                double snap_y = param_lo_y + (double)iy * step_y;
+                on_left_click(ix, iy, snap_x, snap_y);
+            }
         }
     }
 

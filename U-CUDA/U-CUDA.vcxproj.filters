@@ -52,6 +52,9 @@
     <ClCompile Include="analysis_session.cpp">
       <Filter>Compute</Filter>
     </ClCompile>
+    <ClCompile Include="custom_session.cpp">
+      <Filter>Compute</Filter>
+    </ClCompile>
     <ClCompile Include="phase_portrait_nvrtc.cpp">
       <Filter>NVRTC</Filter>
     </ClCompile>
@@ -145,6 +148,9 @@
       <Filter>Compute</Filter>
     </ClInclude>
     <ClInclude Include="analysis_session.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
+    <ClInclude Include="custom_session.h">
       <Filter>Compute</Filter>
     </ClInclude>
     <ClInclude Include="nvrtc_engine.h">

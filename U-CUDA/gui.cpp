@@ -16,6 +16,8 @@
 #include <regex>
 #include <unordered_map>
 #include <limits>
+#include <array>
+#include <deque>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -5738,12 +5740,1128 @@ static void apply_system_switch(AppModel& model, SystemLibrary& lib,
             if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
             break;
         }
+        case AppModel::AppMode::Custom: {
+            model.start_custom_analysis();
+            std::string jc = lib.load_session(model.loaded_name, "_last_custom");
+            if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
+            break;
+        }
         case AppModel::AppMode::Library:
         case AppModel::AppMode::Settings:
         default:
             break;
         }
     } catch (...) {}
+}
+
+// ============================================================
+// Custom tab (master-detail pipeline) — see custom_session.h
+// ============================================================
+
+namespace {
+
+// Parameter/variable combo shared by shared-config sweep pickers. Renders a
+// combo whose current preview is the selected name; on selection updates
+// (par_index, over_var, var_index) together — the same shape existing draw_*
+// blocks in this file use, just extracted here for reuse.
+void draw_sweep_target_combo(const char* label,
+                             const std::vector<std::string>& params,
+                             const std::vector<std::string>& vars,
+                             int& par_index, bool& over_var, int& var_index) {
+    const std::string preview = over_var
+        ? (var_index >= 0 && var_index < (int)vars.size() ? vars[var_index] : std::string("var"))
+        : (par_index >= 0 && par_index < (int)params.size() ? params[par_index] : std::string("par"));
+    ImGui::SetNextItemWidth(120.0f);
+    if (ImGui::BeginCombo(label, preview.c_str())) {
+        for (int i = 0; i < (int)params.size(); ++i) {
+            bool sel = !over_var && par_index == i;
+            if (ImGui::Selectable(params[i].c_str(), sel)) {
+                par_index = i; over_var = false;
+            }
+        }
+        if (!vars.empty()) ImGui::Separator();
+        for (int i = 0; i < (int)vars.size(); ++i) {
+            bool sel = over_var && var_index == i;
+            std::string lbl = std::string("IC ") + vars[i];
+            if (ImGui::Selectable(lbl.c_str(), sel)) {
+                var_index = i; over_var = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+}
+
+// Parse a text-formatted numeric field. Empty / bad → default 0. Used only
+// to clamp sliders — the actual engine calls parse_d/parse_val on its own.
+double parse_num_default(const std::string& s, double def) {
+    if (s.empty()) return def;
+    try { return std::stod(s); } catch (...) { return def; }
+}
+
+// ---- Shared config panel ----
+
+void draw_shared_config(CustomTabSharedConfig& c,
+                        const std::vector<std::string>& vars,
+                        const std::vector<std::string>& params,
+                        const std::vector<CustomScheme>& custom_schemes) {
+    ImGui::SeparatorText("Shared config");
+
+    // Scheme combo — mirrors draw_diagram_controls / draw_lle_controls layout
+    // so users get the same familiar picker with built-ins + custom schemes.
+    static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        for (auto m : schemes)
+            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+        if (!custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
+                c.scheme = cs.name;
+        ImGui::EndCombo();
+    }
+
+    // Integration group — mirrors "Integration##bd_int" collapsing header in
+    // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓).
+    if (ImGui::CollapsingHeader("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
+        InputNumStr("h",              c.h_text,           120);
+        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, custom_schemes))
+            InputNumStr("symmetry s", c.symmetry_s,       120);
+        InputNumStr("computing time", c.t_max_text,       120);
+        InputNumStr("transient time", c.transient_text,   120);
+        InputNumStr("decimator",      c.pre_scaller_text, 120);
+        InputNumStr("max value",      c.max_value_text,   120);
+    }
+
+    // Initial conditions — one InputNumStr per line, matching draw_diagram_controls.
+    if (ImGui::CollapsingHeader("Initial conditions##custom_ic", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (const auto& v : vars) {
+            ImGui::PushID(v.c_str());
+            InputNumStr(v.c_str(), c.initial_conditions[v], 120);
+            ImGui::PopID();
+        }
+    }
+
+    // Parameters — same per-line layout; skip disable for params that are
+    // swept on any enabled level (they get their values from the sweep).
+    if (ImGui::CollapsingHeader("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::vector<bool> is_swept(params.size(), false);
+        if (c.level_2d_enabled) {
+            if (!c.axis_x_over_var && c.axis_x_par_index >= 0 && c.axis_x_par_index < (int)params.size())
+                is_swept[c.axis_x_par_index] = true;
+            if (!c.axis_y_over_var && c.axis_y_par_index >= 0 && c.axis_y_par_index < (int)params.size())
+                is_swept[c.axis_y_par_index] = true;
+        }
+        if (c.level_1d_enabled && !(c.inherit_sweep_from_2d && c.level_2d_enabled)) {
+            if (!c.sweep_x_over_var && c.sweep_x_par_index >= 0 && c.sweep_x_par_index < (int)params.size())
+                is_swept[c.sweep_x_par_index] = true;
+            if (!c.sweep_y_over_var && c.sweep_y_par_index >= 0 && c.sweep_y_par_index < (int)params.size())
+                is_swept[c.sweep_y_par_index] = true;
+        }
+        for (int i = 0; i < (int)params.size(); ++i) {
+            const auto& p = params[i];
+            ImGui::PushID(p.c_str());
+            if (is_swept[i]) ImGui::BeginDisabled();
+            InputNumStr(p.c_str(), c.param_values[p], 120);
+            if (is_swept[i]) {
+                ImGui::SameLine(); ImGui::TextDisabled("(swept)");
+                ImGui::EndDisabled();
+            }
+            ImGui::PopID();
+        }
+    }
+}
+
+// ---- Level 2D detail ----
+
+void draw_level2d_detail(CustomSession& cs) {
+    auto& c = cs.shared;
+    ImGui::SeparatorText("Level 2D — Bif / LLE / LS on a shared grid");
+
+    ImGui::Checkbox("Bif",  &c.bif2d_enabled); ImGui::SameLine();
+    ImGui::Checkbox("LLE",  &c.lle2d_enabled); ImGui::SameLine();
+    ImGui::Checkbox("LS",   &c.ls2d_enabled);
+
+    // Axis X — combo (sweep target) + lo/hi/N on separate lines so the
+    // per-field digit-step (↑/↓) and comma→dot filter work reliably (they
+    // don't when InputText's are packed onto one SameLine chain).
+    ImGui::TextUnformatted("Axis X:"); ImGui::SameLine();
+    draw_sweep_target_combo("##ax", cs.params, cs.vars,
+                            c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index);
+    InputNumStr("lo##ax", c.axis_x_lo_text, 120);
+    InputNumStr("hi##ax", c.axis_x_hi_text, 120);
+    InputNumStr("N##ax",  c.n_x_text,        120);
+
+    ImGui::TextUnformatted("Axis Y:"); ImGui::SameLine();
+    draw_sweep_target_combo("##ay", cs.params, cs.vars,
+                            c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index);
+    InputNumStr("lo##ay", c.axis_y_lo_text, 120);
+    InputNumStr("hi##ay", c.axis_y_hi_text, 120);
+    InputNumStr("N##ay",  c.n_y_text,        120);
+
+    // Per-type options edited directly on the sub-session's slot [0] (2D config).
+    ImGui::Separator();
+    if (c.bif2d_enabled && !cs.bif_session.diagrams.empty())
+        InputNumStr("Bif DBSCAN eps", cs.bif_session.diagrams[0].eps_dbscan_text, 120);
+    if (c.lle2d_enabled && !cs.lle_session.curves.empty()) {
+        InputNumStr("LLE eps", cs.lle_session.curves[0].eps_text, 120);
+        InputNumStr("LLE NT",  cs.lle_session.curves[0].nt_text,  120);
+    }
+    if (c.ls2d_enabled && !cs.ls_session.curves.empty()) {
+        InputNumStr("LS eps", cs.ls_session.curves[0].eps_text, 120);
+        InputNumStr("LS NT",  cs.ls_session.curves[0].nt_text,  120);
+    }
+    ImGui::Separator();
+
+    // Run buttons live on the top row of draw_custom_controls — this panel
+    // is edit-only.
+}
+
+// ---- Level 1D detail ----
+
+void draw_level1d_detail(CustomSession& cs) {
+    auto& c = cs.shared;
+    ImGui::SeparatorText("Level 1D — slices through the 2D area");
+
+    if (!c.level_2d_enabled) ImGui::BeginDisabled();
+    ImGui::Checkbox("Inherit sweep from Level 2D", &c.inherit_sweep_from_2d);
+    if (!c.level_2d_enabled) {
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(Level 2D off — L1D uses its own sweep)");
+    }
+
+    const bool inheriting = c.inherit_sweep_from_2d && c.level_2d_enabled;
+    EffectiveSweep sx = effective_sweep_x(c);
+    EffectiveSweep sy = effective_sweep_y(c);
+
+    ImGui::TextUnformatted("X-sweep:"); ImGui::SameLine();
+    if (inheriting) ImGui::BeginDisabled();
+    draw_sweep_target_combo("##sxp", cs.params, cs.vars,
+                            c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index);
+    InputNumStr("lo##sx", c.sweep_x_lo_text, 120);
+    InputNumStr("hi##sx", c.sweep_x_hi_text, 120);
+    InputNumStr("N##sx",  c.n_x_1d_text,      120);
+    if (inheriting) ImGui::EndDisabled();
+
+    ImGui::TextUnformatted("Y-sweep:"); ImGui::SameLine();
+    if (inheriting) ImGui::BeginDisabled();
+    draw_sweep_target_combo("##syp", cs.params, cs.vars,
+                            c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index);
+    InputNumStr("lo##sy", c.sweep_y_lo_text, 120);
+    InputNumStr("hi##sy", c.sweep_y_hi_text, 120);
+    InputNumStr("N##sy",  c.n_y_1d_text,      120);
+    if (inheriting) ImGui::EndDisabled();
+
+    ImGui::Separator();
+    // Slice sliders — clamped to the current effective ranges. Any user
+    // change re-arms the debounced auto-recompute (start_next drainer picks
+    // this up on the next frame after the slider settles).
+    double fx_lo = parse_num_default(sx.lo_text, 0.0);
+    double fx_hi = parse_num_default(sx.hi_text, 1.0);
+    double fy_lo = parse_num_default(sy.lo_text, 0.0);
+    double fy_hi = parse_num_default(sy.hi_text, 1.0);
+    if (fx_hi < fx_lo) std::swap(fx_lo, fx_hi);
+    if (fy_hi < fy_lo) std::swap(fy_lo, fy_hi);
+    float fx = (float)c.fix_x_value;
+    float fy = (float)c.fix_y_value;
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::SliderFloat("fix X", &fx, (float)fx_lo, (float)fx_hi)) {
+        c.fix_x_value = fx;
+        c.last_slider_change_time = ImGui::GetTime();
+    }
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::SliderFloat("fix Y", &fy, (float)fy_lo, (float)fy_hi)) {
+        c.fix_y_value = fy;
+        c.last_slider_change_time = ImGui::GetTime();
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Enable slices:");
+    ImGui::Checkbox("Bif-X", &c.bif1d_x_enabled); ImGui::SameLine();
+    ImGui::Checkbox("Bif-Y", &c.bif1d_y_enabled); ImGui::SameLine();
+    ImGui::Checkbox("LLE-X", &c.lle1d_x_enabled); ImGui::SameLine();
+    ImGui::Checkbox("LLE-Y", &c.lle1d_y_enabled); ImGui::SameLine();
+    ImGui::Checkbox("LS-X",  &c.ls1d_x_enabled);  ImGui::SameLine();
+    ImGui::Checkbox("LS-Y",  &c.ls1d_y_enabled);
+
+    ImGui::Separator();
+    ImGui::Checkbox("Continuation (1D)", &c.continuation_1d_enabled);
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-recompute 1D on slider/sweep change", &c.auto_recompute_1d);
+}
+
+// ---- Level 3 detail ----
+
+void draw_level3_detail(CustomSession& cs) {
+    auto& c = cs.shared;
+    ImGui::SeparatorText("Level 3 — Phase / Time-domain or Basins");
+    ImGui::RadioButton("Phase + Time-domain", &c.level3_kind, 0); ImGui::SameLine();
+    ImGui::RadioButton("Basins",              &c.level3_kind, 1);
+
+    ImGui::Separator();
+    ImGui::Checkbox("Auto-run on drill-down click", &c.autorun_on_drilldown);
+    ImGui::SameLine();
+    ImGui::Checkbox("Use shared IC (else edit per sub-session)", &c.phase_use_shared_ic);
+
+    ImGui::Separator();
+    if (c.level3_kind == 0) {
+        // Phase sub-panel: minimal fields — sim_time, skip_time, decimation.
+        // Actual IC/params come from shared. Projections are edited via the
+        // rendered plot windows (like existing PhaseAnalysisSession).
+        InputNumStr("Sim time",  cs.phase_session.sim_time,   120);
+        InputNumStr("Skip time", cs.phase_session.skip_time,  120);
+        InputNumStr("Decim",     cs.phase_session.decimation, 120);
+        ImGui::TextDisabled("Projections are configured on the plot window(s).");
+    } else {
+        // Basins sub-panel: IC-space axes + features. All of scheme/h/t_max/
+        // etc. come from shared; DBSCAN eps stays per-config.
+        if (cs.basins_session.configs.empty()) {
+            ImGui::TextDisabled("Basins config not initialised.");
+        } else {
+            auto& bc = cs.basins_session.configs[0];
+            ImGui::TextUnformatted("IC-space X var:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##bxv",
+                bc.axis_x_var >= 0 && bc.axis_x_var < (int)cs.vars.size()
+                    ? cs.vars[bc.axis_x_var].c_str() : "var")) {
+                for (int i = 0; i < (int)cs.vars.size(); ++i)
+                    if (ImGui::Selectable(cs.vars[i].c_str(), bc.axis_x_var == i))
+                        bc.axis_x_var = i;
+                ImGui::EndCombo();
+            }
+            InputNumStr("lo##bx", bc.axis_x_lo_text, 120);
+            InputNumStr("hi##bx", bc.axis_x_hi_text, 120);
+
+            ImGui::TextUnformatted("IC-space Y var:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##byv",
+                bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size()
+                    ? cs.vars[bc.axis_y_var].c_str() : "var")) {
+                for (int i = 0; i < (int)cs.vars.size(); ++i)
+                    if (ImGui::Selectable(cs.vars[i].c_str(), bc.axis_y_var == i))
+                        bc.axis_y_var = i;
+                ImGui::EndCombo();
+            }
+            InputNumStr("lo##by", bc.axis_y_lo_text, 120);
+            InputNumStr("hi##by", bc.axis_y_hi_text, 120);
+            InputNumStr("N##bxy", bc.n_pts_text,     120);
+
+            ImGui::InputInt("feature1", &bc.feature1);
+            ImGui::InputInt("feature2", &bc.feature2);
+            InputNumStr("DBSCAN eps", bc.eps_dbscan_text, 120);
+        }
+    }
+}
+
+// ---- Pipeline column (master) ----
+
+const char* level_status_badge(bool enabled, bool in_flight, bool has_result, bool has_error) {
+    if (!enabled)    return "off";
+    if (in_flight)   return "running";
+    if (has_error)   return "error";
+    if (has_result)  return "ok";
+    return "idle";
+}
+
+void draw_pipeline_column(CustomSession& cs, int& selected_level) {
+    auto& c = cs.shared;
+    ImGui::TextUnformatted("Pipeline");
+    ImGui::Separator();
+
+    auto row = [&](int idx, const char* name, bool& enabled, const char* status) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), " [%-7s] %s", status, name);
+        ImGui::PushID(idx);
+        ImGui::Checkbox("##en", &enabled);
+        ImGui::SameLine();
+        if (ImGui::Selectable(buf, selected_level == idx))
+            selected_level = idx;
+        ImGui::PopID();
+    };
+
+    bool bif2_run = cs.bif_session.in_flight && cs.bif_session.running_diagram_index == 0;
+    bool lle2_run = cs.lle_session.in_flight && cs.lle_session.running_curve_index   == 0;
+    bool ls2_run  = cs.ls_session.in_flight  && cs.ls_session.running_curve_index    == 0;
+    bool level2_running = bif2_run || lle2_run || ls2_run;
+    bool level2_hasres  =
+        (!cs.bif_session.diagrams.empty() && cs.bif_session.diagrams[0].last_run_2d_ok) ||
+        (!cs.lle_session.curves.empty()   && cs.lle_session.curves[0].last_run_2d_ok)   ||
+        (!cs.ls_session.curves.empty()    && cs.ls_session.curves[0].last_run_2d_ok);
+
+    row(0, "Level 2D (Bif/LLE/LS)", c.level_2d_enabled,
+        level_status_badge(c.level_2d_enabled, level2_running, level2_hasres, false));
+
+    bool level1_running =
+        (cs.bif_session.in_flight && cs.bif_session.running_diagram_index > 0) ||
+        (cs.lle_session.in_flight && cs.lle_session.running_curve_index   > 0) ||
+        (cs.ls_session.in_flight  && cs.ls_session.running_curve_index    > 0);
+    bool level1_hasres = false;
+    if (cs.bif_session.diagrams.size() > 1 && cs.bif_session.diagrams[1].last_run_ok) level1_hasres = true;
+    if (cs.bif_session.diagrams.size() > 2 && cs.bif_session.diagrams[2].last_run_ok) level1_hasres = true;
+    if (cs.lle_session.curves.size()   > 1 && cs.lle_session.curves[1].last_run_ok)   level1_hasres = true;
+    if (cs.lle_session.curves.size()   > 2 && cs.lle_session.curves[2].last_run_ok)   level1_hasres = true;
+    if (cs.ls_session.curves.size()    > 1 && cs.ls_session.curves[1].last_run_ok)    level1_hasres = true;
+    if (cs.ls_session.curves.size()    > 2 && cs.ls_session.curves[2].last_run_ok)    level1_hasres = true;
+
+    row(1, "Level 1D (slices)", c.level_1d_enabled,
+        level_status_badge(c.level_1d_enabled, level1_running, level1_hasres, false));
+
+    bool level3_running = cs.phase_session.in_flight || cs.basins_session.in_flight;
+    bool level3_hasres  = cs.phase_session.result.ok ||
+                          (!cs.basins_session.configs.empty() && cs.basins_session.configs[0].last_run_ok);
+    const char* l3_name = c.level3_kind == 0 ? "Level 3 (Phase / Time-domain)" : "Level 3 (Basins)";
+    row(2, l3_name, c.level_phase_enabled,
+        level_status_badge(c.level_phase_enabled, level3_running, level3_hasres, false));
+}
+
+} // namespace (draw helpers)
+
+static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
+    (void)lib;
+    auto& cs = model.custom_session;
+    auto& c  = cs.shared;
+
+    // Top row: Run pipeline + Stop + status.
+    if (ImGui::Button("Run pipeline")) {
+        // Push level 2D → 1D → 3 in order. Existing queue items (from prior
+        // clicks) stay in front; new items are appended at the tail.
+        cs.enqueue_level_2d(model.custom_queue);
+        cs.enqueue_level_1d(model.custom_queue);
+        cs.enqueue_level_3 (model.custom_queue);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Stop / clear queue")) {
+        model.custom_session.request_cancel_all();
+        model.custom_queue.clear();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu queued)", model.custom_queue.size());
+
+    // Auto-recompute 1D on slider settle. Debounce 200 ms + no in-flight.
+    if (c.auto_recompute_1d && c.level_1d_enabled && !cs.any_in_flight()) {
+        double now = ImGui::GetTime();
+        if (c.last_slider_change_time > 0.0
+            && now - c.last_slider_change_time > 0.2
+            && model.custom_queue.empty()) {
+            // Cancel-and-restart any pending 1D items by pushing fresh ones.
+            cs.enqueue_level_1d(model.custom_queue);
+            c.last_slider_change_time = 0.0;
+        }
+    }
+
+    // Shared config panel — always visible at the top.
+    draw_shared_config(c, cs.vars, cs.params, cs.custom_schemes);
+
+    // Pipeline column + inline per-level detail panels below (linear flow —
+    // pipeline row shows enable/status, then the level's config is directly
+    // underneath in a CollapsingHeader; no separate right-side column).
+    static int selected_level = 0;
+    ImGui::Separator();
+    draw_pipeline_column(cs, selected_level);
+    ImGui::Separator();
+
+    // Each level's detail as its own CollapsingHeader. Auto-open the header
+    // for the currently-selected level; user can still fold/open others
+    // independently. Header title matches the pipeline row label.
+    ImGui::SetNextItemOpen(selected_level == 0, ImGuiCond_Always);
+    if (ImGui::CollapsingHeader("Level 2D config##custom_l2d"))
+        draw_level2d_detail(cs);
+    ImGui::SetNextItemOpen(selected_level == 1, ImGuiCond_Always);
+    if (ImGui::CollapsingHeader("Level 1D config##custom_l1d"))
+        draw_level1d_detail(cs);
+    ImGui::SetNextItemOpen(selected_level == 2, ImGuiCond_Always);
+    if (ImGui::CollapsingHeader("Level 3 config##custom_l3"))
+        draw_level3_detail(cs);
+}
+
+// ---- Custom-tab plot windows ----
+//
+// Minimal renderer for the pipeline output. Full-featured versions with
+// colormap toolbars, colorbar controls, and colored-1D density are TODO;
+// this MVP shows results + wires drill-down clicks / crosshairs.
+namespace {
+
+// Helper: bind slider fix_x/fix_y as crosshair on the given heatmap view,
+// and install a drill-down click callback that updates shared.param_values
+// + fix_x/y and optionally enqueues a Phase/Basins run.
+void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
+                                 std::deque<CustomQueueItem>& q) {
+    hv.crosshair_x = cs.shared.level_1d_enabled ? cs.shared.fix_x_value
+                                                : std::numeric_limits<double>::quiet_NaN();
+    hv.crosshair_y = cs.shared.level_1d_enabled ? cs.shared.fix_y_value
+                                                : std::numeric_limits<double>::quiet_NaN();
+    hv.on_left_click = [&cs, &q](int, int, double snap_x, double snap_y) {
+        auto& s = cs.shared;
+        // Update fix_x/fix_y (also drives crosshair on other 2D windows).
+        s.fix_x_value = snap_x;
+        s.fix_y_value = snap_y;
+        s.last_slider_change_time = ImGui::GetTime();
+        // Update shared.param_values so any subsequent Phase/Basins run reads
+        // the drilled-down location. Only pins param-sweeps (var-sweeps stay
+        // as IC edits — pipeline drainer handles that path).
+        if (!s.axis_x_over_var && s.axis_x_par_index >= 0 &&
+            s.axis_x_par_index < (int)cs.params.size()) {
+            char buf[64]; std::snprintf(buf, sizeof(buf), "%.10g", snap_x);
+            s.param_values[cs.params[s.axis_x_par_index]] = buf;
+        }
+        if (!s.axis_y_over_var && s.axis_y_par_index >= 0 &&
+            s.axis_y_par_index < (int)cs.params.size()) {
+            char buf[64]; std::snprintf(buf, sizeof(buf), "%.10g", snap_y);
+            s.param_values[cs.params[s.axis_y_par_index]] = buf;
+        }
+        if (s.autorun_on_drilldown && s.level_phase_enabled) {
+            q.push_back({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
+                                             : CustomQueueItem::Kind::Basins });
+        }
+    };
+}
+
+} // namespace
+
+static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
+    (void)lib; (void)cb;
+    auto& cs = model.custom_session;
+    auto& q  = model.custom_queue;
+
+    // Persistent per-window renderers + views. Indexed by fixed slots so their
+    // ImGui-IDs stay stable across frames.
+    static std::array<std::unique_ptr<PlotRenderer>, 3> renderers_2d;
+    static std::array<HeatmapView, 3>                   heatmaps;
+    for (auto& r : renderers_2d) if (!r) r = std::make_unique<PlotRenderer>();
+
+    auto axis_name = [&](bool over_var, int par_i, int var_i) -> std::string {
+        if (over_var) return (var_i >= 0 && var_i < (int)cs.vars.size())
+                             ? cs.vars[var_i] + " (IC)" : "x";
+        return (par_i >= 0 && par_i < (int)cs.params.size()) ? cs.params[par_i] : "param";
+    };
+    const std::string ax_x = axis_name(cs.shared.axis_x_over_var,
+                                       cs.shared.axis_x_par_index,
+                                       cs.shared.axis_x_var_index);
+    const std::string ax_y = axis_name(cs.shared.axis_y_over_var,
+                                       cs.shared.axis_y_par_index,
+                                       cs.shared.axis_y_var_index);
+
+    // --- Level 2D heatmaps ---
+    struct L2Slot {
+        const char* title;
+        bool        show;
+        bool        has_data;
+        int         n_pts;
+        const double* values;
+        double lo_x, hi_x, lo_y, hi_y;
+        double vmin, vmax;
+        int    data_gen;
+        int    owner_id;
+    };
+    L2Slot slots[3] = {};
+    if (cs.shared.level_2d_enabled) {
+        if (cs.shared.bif2d_enabled && !cs.bif_session.diagrams.empty()) {
+            auto& d = cs.bif_session.diagrams[0];
+            slots[0] = { "Custom Bif 2D", true, d.last_run_2d_ok && !d.result_2d.values.empty(),
+                         d.result_2d.n_pts, d.result_2d.values.data(),
+                         d.result_2d.param_lo, d.result_2d.param_hi,
+                         d.result_2d.param_lo_2, d.result_2d.param_hi_2,
+                         d.result_2d.min_val, d.result_2d.max_val,
+                         d.data_generation_2d, 0xCB1F2D };
+        }
+        if (cs.shared.lle2d_enabled && !cs.lle_session.curves.empty()) {
+            auto& c = cs.lle_session.curves[0];
+            slots[1] = { "Custom LLE 2D", true, c.last_run_2d_ok && !c.result_2d.values.empty(),
+                         c.result_2d.n_pts, c.result_2d.values.data(),
+                         c.result_2d.param_lo, c.result_2d.param_hi,
+                         c.result_2d.param_lo_2, c.result_2d.param_hi_2,
+                         c.result_2d.min_val, c.result_2d.max_val,
+                         c.data_generation_2d, 0xCE1E2D };
+        }
+        if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
+            auto& c = cs.ls_session.curves[0];
+            int k = c.display_exponent_idx;
+            bool k_ok = (c.result_2d.n_exponents > 0 && k >= 0 && k < c.result_2d.n_exponents);
+            const double* values_k = (k_ok && !c.result_2d.values.empty())
+                ? &c.result_2d.values[(size_t)k * c.result_2d.n_pts * c.result_2d.n_pts]
+                : nullptr;
+            double vmin = (k_ok && k < (int)c.result_2d.min_val.size()) ? c.result_2d.min_val[k] : 0.0;
+            double vmax = (k_ok && k < (int)c.result_2d.max_val.size()) ? c.result_2d.max_val[k] : 1.0;
+            slots[2] = { "Custom LS 2D", true, c.last_run_2d_ok && values_k != nullptr,
+                         c.result_2d.n_pts, values_k,
+                         c.result_2d.param_lo, c.result_2d.param_hi,
+                         c.result_2d.param_lo_2, c.result_2d.param_hi_2,
+                         vmin, vmax, c.data_generation_2d, 0xC152D0 };
+        }
+    }
+    // One-time init of per-slot HeatmapView colormap from the sub-session
+    // config (or app default). Runs whenever the sub-session-level slot's
+    // colormap changes, so first appearance of a slot picks up the persisted
+    // choice; subsequent user picks from the toolbar update both places.
+    static std::array<int, 3> hm_init_cmap_seen = { -2, -2, -2 };
+    auto init_cmap_from_config = [&](int i, int cfg_cmap) {
+        if (hm_init_cmap_seen[i] == cfg_cmap) return;
+        hm_init_cmap_seen[i] = cfg_cmap;
+        int cm = cfg_cmap >= 0 ? cfg_cmap : model.heatmap_colormap;
+        if (cm >= 0 && cm < kHeatmapColormapCount)
+            heatmaps[i].colormap = (HeatmapColormap)cm;
+    };
+    if (!cs.bif_session.diagrams.empty())
+        init_cmap_from_config(0, cs.bif_session.diagrams[0].colormap_idx);
+    if (!cs.lle_session.curves.empty())
+        init_cmap_from_config(1, cs.lle_session.curves[0].colormap_idx);
+    if (!cs.ls_session.curves.empty())
+        init_cmap_from_config(2, cs.ls_session.curves[0].colormap_idx);
+
+    for (int i = 0; i < 3; ++i) {
+        if (!slots[i].show) continue;
+        if (ImGui::Begin(slots[i].title)) {
+            HeatmapView& hv = heatmaps[i];
+
+            // Toolbar — mirrors draw_bifurcation_plot / draw_ls_plot layout
+            // (colormap combo + autoscale + vmin/vmax + swap axes + LS
+            // exponent picker for slot 2).
+            ImGui::PushID(i);
+            int cmap_idx = (int)hv.colormap;
+            ImGui::SetNextItemWidth(140);
+            if (ImGui::Combo("Colormap", &cmap_idx,
+                             kHeatmapColormapNames, kHeatmapColormapCount)) {
+                hv.colormap = (HeatmapColormap)cmap_idx;
+                // Persist per-slot in the owning sub-session config, so a
+                // saved _last_custom.json restores the choice.
+                if      (i == 0 && !cs.bif_session.diagrams.empty())
+                    cs.bif_session.diagrams[0].colormap_idx = cmap_idx;
+                else if (i == 1 && !cs.lle_session.curves.empty())
+                    cs.lle_session.curves[0].colormap_idx = cmap_idx;
+                else if (i == 2 && !cs.ls_session.curves.empty())
+                    cs.ls_session.curves[0].colormap_idx = cmap_idx;
+                hm_init_cmap_seen[i] = cmap_idx;
+            }
+
+            // LS exponent picker (only for slot 2). Same schema as
+            // draw_ls_plot: λ₁..λ_N + "sum L_i" (sentinel -1). Recomputes
+            // the plane pointer/vmin/vmax below if the user picks a new
+            // exponent — falls back to the current frame's chosen index.
+            int ls_k = -999;   // sentinel: not LS slot
+            const double* ls_plane = nullptr;
+            double        ls_vmin = 0.0, ls_vmax = 1.0;
+            int           ls_gen  = slots[i].data_gen;
+            if (i == 2 && !cs.ls_session.curves.empty()) {
+                auto& cact = cs.ls_session.curves[0];
+                if (cact.last_run_2d_ok && cact.result_2d.n_exponents > 0) {
+                    int N = cact.result_2d.n_exponents;
+                    if (hv.display_exponent_idx != -1 &&
+                        (hv.display_exponent_idx < 0 || hv.display_exponent_idx >= N))
+                        hv.display_exponent_idx = 0;
+                    std::string preview = (hv.display_exponent_idx == -1)
+                        ? "sum L_i" : ("L" + std::to_string(hv.display_exponent_idx + 1));
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(100);
+                    if (ImGui::BeginCombo("Exponent", preview.c_str())) {
+                        for (int j = 0; j < N; ++j) {
+                            std::string lbl = "L" + std::to_string(j + 1);
+                            if (ImGui::Selectable(lbl.c_str(), hv.display_exponent_idx == j)) {
+                                hv.display_exponent_idx = j;
+                                cact.display_exponent_idx = j;
+                            }
+                        }
+                        ImGui::Separator();
+                        if (ImGui::Selectable("sum L_i", hv.display_exponent_idx == -1)) {
+                            hv.display_exponent_idx = -1;
+                            cact.display_exponent_idx = -1;
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ls_k = hv.display_exponent_idx;
+                    size_t plane_size = (size_t)cact.result_2d.n_pts *
+                                        (size_t)cact.result_2d.n_pts;
+                    if (ls_k == -1) {
+                        // "sum L_i" — reuse the per-curve sum_cache built by
+                        // draw_ls_plot when the user has ever opened Parametric,
+                        // OR compute lazily on data_generation change here.
+                        if (cact.sum_cache_gen != cact.data_generation_2d) {
+                            cact.sum_cache.assign(plane_size, 0.0);
+                            double smin =  std::numeric_limits<double>::infinity();
+                            double smax = -std::numeric_limits<double>::infinity();
+                            for (size_t c2 = 0; c2 < plane_size; ++c2) {
+                                if (c2 < cact.result_2d.flags.size() &&
+                                    cact.result_2d.flags[c2] < 0) {
+                                    cact.sum_cache[c2] = 999.0;
+                                    continue;
+                                }
+                                double sum = 0.0;
+                                for (int j = 0; j < N; ++j)
+                                    sum += cact.result_2d.values[(size_t)j * plane_size + c2];
+                                cact.sum_cache[c2] = sum;
+                                if (sum < smin) smin = sum;
+                                if (sum > smax) smax = sum;
+                            }
+                            cact.sum_cache_min = std::isfinite(smin) ? smin : 0.0;
+                            cact.sum_cache_max = std::isfinite(smax) ? smax : 0.0;
+                            cact.sum_cache_gen = cact.data_generation_2d;
+                        }
+                        ls_plane = cact.sum_cache.data();
+                        ls_vmin  = cact.sum_cache_min;
+                        ls_vmax  = cact.sum_cache_max;
+                        ls_gen   = cact.data_generation_2d * 64 + N;
+                    } else if (ls_k >= 0) {
+                        ls_plane = cact.result_2d.values.data() + (size_t)ls_k * plane_size;
+                        ls_vmin  = (ls_k < (int)cact.result_2d.min_val.size())
+                                    ? cact.result_2d.min_val[ls_k] : 0.0;
+                        ls_vmax  = (ls_k < (int)cact.result_2d.max_val.size())
+                                    ? cact.result_2d.max_val[ls_k] : 1.0;
+                        ls_gen   = cact.data_generation_2d * 64 + ls_k;
+                    }
+                }
+            }
+
+            ImGui::SameLine();
+            ImGui::Checkbox("Autoscale", &hv.autoscale);
+            if (!hv.autoscale) {
+                ImGui::SameLine();
+                InputNumStr("vmin", hv.manual_vmin_text, 80);
+                hv.manual_vmin = (float)parse_num_or(hv.manual_vmin_text, hv.manual_vmin);
+                ImGui::SameLine();
+                InputNumStr("vmax", hv.manual_vmax_text, 80);
+                hv.manual_vmax = (float)parse_num_or(hv.manual_vmax_text, hv.manual_vmax);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(hv.swap_axes ? "Swap axes (on)" : "Swap axes"))
+                hv.swap_axes = !hv.swap_axes;
+
+            if (!slots[i].has_data) {
+                ImGui::TextDisabled("No data yet. Press Run pipeline / Run Level 2D.");
+                ImGui::PopID();
+            } else {
+                hv.x_axis.name = ax_x;
+                hv.y_axis.name = ax_y;
+                wire_2d_heatmap_interaction(hv, cs, q);
+
+                // Export menu on right-click (parity with Parametric).
+                const bool bd_busy = (i == 0) && cs.bif_session.in_flight
+                                     && cs.bif_session.is_2d_run
+                                     && cs.bif_session.running_diagram_index == 0;
+                const bool lle_busy = (i == 1) && cs.lle_session.in_flight
+                                      && cs.lle_session.is_2d_run
+                                      && cs.lle_session.running_curve_index == 0;
+                const bool ls_busy = (i == 2) && cs.ls_session.in_flight
+                                     && cs.ls_session.is_2d_run
+                                     && cs.ls_session.running_curve_index == 0;
+                hv.popup_extras = [i, &cs, &cb, bd_busy, lle_busy, ls_busy]() {
+                    const bool busy = bd_busy || lle_busy || ls_busy;
+                    if (ImGui::MenuItem("Export data...", nullptr, false, !busy)) {
+                        if (!cb.pick_save_file_csv) return;
+                        std::string path = cb.pick_save_file_csv();
+                        if (path.empty()) return;
+                        if      (i == 0 && !cs.bif_session.diagrams.empty())
+                            data_export::export_bif2d(cs.bif_session.diagrams[0].result_2d, path);
+                        else if (i == 1 && !cs.lle_session.curves.empty())
+                            data_export::export_lle2d(cs.lle_session.curves[0].result_2d, path);
+                        else if (i == 2 && !cs.ls_session.curves.empty())
+                            data_export::export_ls2d(cs.ls_session.curves[0].result_2d, path);
+                    }
+                };
+
+                // Route through LS-specific plane/vmin/vmax if the user
+                // picked a different exponent; otherwise use the pre-baked
+                // slot values.
+                const double* values_ptr = (i == 2 && ls_plane) ? ls_plane : slots[i].values;
+                double        vmin_use   = (i == 2 && ls_plane) ? ls_vmin  : slots[i].vmin;
+                double        vmax_use   = (i == 2 && ls_plane) ? ls_vmax  : slots[i].vmax;
+                int           gen_use    = (i == 2 && ls_plane) ? ls_gen   : slots[i].data_gen;
+
+                ImVec2 avail  = ImGui::GetContentRegionAvail();
+                ImVec2 origin = ImGui::GetCursorScreenPos();
+                hv.render(*renderers_2d[i], origin, avail,
+                          slots[i].owner_id, gen_use,
+                          slots[i].n_pts, slots[i].n_pts,
+                          values_ptr,
+                          slots[i].lo_x, slots[i].hi_x,
+                          slots[i].lo_y, slots[i].hi_y,
+                          vmin_use, vmax_use,
+                          /*fit_request*/ false);
+                ImGui::PopID();
+            }
+        }
+        ImGui::End();
+    }
+
+    // --- Level 1D slice plots (six independently toggleable) ---
+    // Kind enum for the slot dispatch. Each slot picks its data from the
+    // owning sub-session's slot [1] (X-slice) or [2] (Y-slice).
+    enum class L1Kind { Bif, LLE, LS };
+    struct L1Slot {
+        const char* title = nullptr;
+        bool        show = false;
+        L1Kind      kind = L1Kind::Bif;
+        int         cfg_idx = -1;   // 1 = X-slice, 2 = Y-slice inside sub-session
+        double      fix_pt = 0.0;   // world X of the OTHER-axis crosshair
+    };
+    L1Slot lslots[6] = {};
+    if (cs.shared.level_1d_enabled) {
+        double fx = cs.shared.fix_x_value;
+        double fy = cs.shared.fix_y_value;
+        if (cs.shared.bif1d_x_enabled) lslots[0] = { "Custom Bif 1D (X-slice)", true, L1Kind::Bif, 1, fx };
+        if (cs.shared.bif1d_y_enabled) lslots[1] = { "Custom Bif 1D (Y-slice)", true, L1Kind::Bif, 2, fy };
+        if (cs.shared.lle1d_x_enabled) lslots[2] = { "Custom LLE 1D (X-slice)", true, L1Kind::LLE, 1, fx };
+        if (cs.shared.lle1d_y_enabled) lslots[3] = { "Custom LLE 1D (Y-slice)", true, L1Kind::LLE, 2, fy };
+        if (cs.shared.ls1d_x_enabled)  lslots[4] = { "Custom LS 1D (X-slice)",  true, L1Kind::LS,  1, fx };
+        if (cs.shared.ls1d_y_enabled)  lslots[5] = { "Custom LS 1D (Y-slice)",  true, L1Kind::LS,  2, fy };
+    }
+
+    // Persistent per-slot Plot2DView + renderer. Fixed 6-slot layout keeps
+    // ImGui IDs and gpu-buffer identity stable across frames (mirrors the
+    // heatmap slot pattern above).
+    static std::array<std::unique_ptr<Plot2DView>,  6> l1_views;
+    static std::array<std::unique_ptr<PlotRenderer>, 6> l1_renderers;
+    // Per-slot buffer scratch — kept static so pointers passed into
+    // PlotSeriesInput stay valid until render() returns.
+    static std::array<std::vector<float>,           6> l1_bufs;
+    // LS slot exponent picker (per-slot session state). Sentinel -1 = sum L_i.
+    static std::array<int, 6> l1_ls_exp = { 0, 0, 0, 0, 0, 0 };
+
+    for (int i = 0; i < 6; ++i) {
+        if (!lslots[i].show) continue;
+        if (!l1_views[i])     l1_views[i]     = std::make_unique<Plot2DView>();
+        if (!l1_renderers[i]) l1_renderers[i] = std::make_unique<PlotRenderer>();
+        Plot2DView&  view = *l1_views[i];
+        PlotRenderer& rnd = *l1_renderers[i];
+
+        if (!ImGui::Begin(lslots[i].title)) { ImGui::End(); continue; }
+        ImGui::PushID(i);
+
+        // Resolve owning config + result + real sweep-range from *_text
+        // fields (result.param_lo/hi is often 0..1 default until engine
+        // fills it — falling back to config text keeps the axis correct
+        // when the user set 0.1..0.35 on the sweep).
+        const auto safe_stod = [](const std::string& s, double def) {
+            if (s.empty()) return def;
+            size_t sl = s.find('/');
+            if (sl != std::string::npos) {
+                double n = std::atof(s.substr(0, sl).c_str());
+                double d = std::atof(s.substr(sl + 1).c_str());
+                if (d != 0.0) return n / d;
+            }
+            return std::atof(s.c_str());
+        };
+        const auto axis_label_for_slot = [&](int cfg_idx, bool is_bif, bool is_lle, bool is_ls) -> std::string {
+            (void)is_lle; (void)is_ls;
+            // cfg_idx 1 = X-slice → sweep_x_par_index or axis_x if inherit;
+            // cfg_idx 2 = Y-slice → sweep_y_*.
+            EffectiveSweep e = (cfg_idx == 1) ? effective_sweep_x(cs.shared)
+                                              : effective_sweep_y(cs.shared);
+            (void)is_bif;
+            if (e.over_var)
+                return (e.var_index >= 0 && e.var_index < (int)cs.vars.size())
+                        ? cs.vars[e.var_index] + " (IC)" : "x (IC)";
+            return (e.par_index >= 0 && e.par_index < (int)cs.params.size())
+                    ? cs.params[e.par_index] : "param";
+        };
+
+        bool ok = false;
+        int  data_gen = 0;
+        double param_lo = 0.0, param_hi = 1.0;
+        int    n_pts = 0;
+        // Y-axis label + series bookkeeping filled per-kind below.
+
+        if (lslots[i].kind == L1Kind::Bif) {
+            int idx = lslots[i].cfg_idx;
+            if (idx < 0 || idx >= (int)cs.bif_session.diagrams.size()) { ImGui::PopID(); ImGui::End(); continue; }
+            auto& d = cs.bif_session.diagrams[idx];
+            ok = d.last_run_ok;
+            data_gen = d.data_generation;
+            param_lo = safe_stod(d.param_lo_text, 0.0);
+            param_hi = safe_stod(d.param_hi_text, 1.0);
+            n_pts = d.result.n_pts;
+            view.x_axis.name = axis_label_for_slot(idx, true, false, false);
+            view.y_axis.name = (d.writable_var >= 0 && d.writable_var < (int)cs.vars.size())
+                               ? cs.vars[d.writable_var] : "X";
+            view.points_mode = true;
+            view.point_size_px = 2.0f;
+            view.pad_x = false;
+        } else if (lslots[i].kind == L1Kind::LLE) {
+            int idx = lslots[i].cfg_idx;
+            if (idx < 0 || idx >= (int)cs.lle_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
+            auto& c = cs.lle_session.curves[idx];
+            ok = c.last_run_ok;
+            data_gen = c.data_generation;
+            param_lo = safe_stod(c.param_lo_text, 0.0);
+            param_hi = safe_stod(c.param_hi_text, 1.0);
+            n_pts = (int)c.result.lyapunov.size();
+            view.x_axis.name = axis_label_for_slot(idx, false, true, false);
+            view.y_axis.name = "lambda";
+            view.points_mode = false;
+            view.imdraw_lines = true;
+            view.line_thickness_px = 1.5f;
+        } else { // LS
+            int idx = lslots[i].cfg_idx;
+            if (idx < 0 || idx >= (int)cs.ls_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
+            auto& c = cs.ls_session.curves[idx];
+            ok = c.last_run_ok;
+            data_gen = c.data_generation;
+            param_lo = safe_stod(c.param_lo_text, 0.0);
+            param_hi = safe_stod(c.param_hi_text, 1.0);
+            n_pts = c.result.n_pts;
+            view.x_axis.name = axis_label_for_slot(idx, false, false, true);
+            view.y_axis.name = "lambda";
+            view.points_mode = false;
+            view.imdraw_lines = true;
+            view.line_thickness_px = 1.5f;
+
+            // Exponent picker toolbar — L1..LN + sum L_i (sentinel -1).
+            if (ok && c.result.n_exponents > 0) {
+                int N = c.result.n_exponents;
+                if (l1_ls_exp[i] != -1 && (l1_ls_exp[i] < 0 || l1_ls_exp[i] >= N))
+                    l1_ls_exp[i] = 0;
+                std::string preview = (l1_ls_exp[i] == -1)
+                    ? "sum L_i" : ("L" + std::to_string(l1_ls_exp[i] + 1));
+                ImGui::SetNextItemWidth(100);
+                if (ImGui::BeginCombo("Exponent", preview.c_str())) {
+                    for (int j = 0; j < N; ++j) {
+                        std::string lbl = "L" + std::to_string(j + 1);
+                        if (ImGui::Selectable(lbl.c_str(), l1_ls_exp[i] == j))
+                            l1_ls_exp[i] = j;
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Selectable("sum L_i", l1_ls_exp[i] == -1))
+                        l1_ls_exp[i] = -1;
+                    ImGui::EndCombo();
+                }
+            }
+        }
+
+        if (!ok) {
+            ImGui::TextDisabled("No data yet.");
+            ImGui::PopID(); ImGui::End(); continue;
+        }
+
+        // X range for autofit (independent of point density).
+        view.x_fit_use_explicit = true;
+        view.x_fit_min = std::min(param_lo, param_hi);
+        view.x_fit_max = std::max(param_lo, param_hi);
+
+        // Build one series per slot. Bif = scatter of all peak samples;
+        // LLE = single line; LS = one line for the selected exponent (or
+        // per-point sum of all).
+        std::vector<PlotSeriesInput> series_in;
+        std::vector<bool> init_vis, glob_vis;
+        auto& buf = l1_bufs[i];
+        buf.clear();
+
+        int series_gen = data_gen;
+        if (lslots[i].kind == L1Kind::Bif) {
+            const auto& r = cs.bif_session.diagrams[lslots[i].cfg_idx].result;
+            int n = r.n_pts > 0 ? r.n_pts : 1;
+            for (int p = 0; p < (int)r.bifurcation_points.size(); ++p) {
+                double px = param_lo + (param_hi - param_lo) * (double)p /
+                            (double)(n - 1 > 0 ? n - 1 : 1);
+                for (double y : r.bifurcation_points[p]) {
+                    buf.push_back((float)px);
+                    buf.push_back((float)y);
+                }
+            }
+            PlotSeriesInput si;
+            si.points = buf.data();
+            si.n_points = (int)(buf.size() / 2);
+            si.color = ic_base_color(0);
+            si.label = "bd";
+            series_in.push_back(si);
+        } else if (lslots[i].kind == L1Kind::LLE) {
+            const auto& r = cs.lle_session.curves[lslots[i].cfg_idx].result;
+            int n = (int)r.lyapunov.size();
+            buf.reserve(n * 2);
+            for (int p = 0; p < n; ++p) {
+                double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
+                                       (double)(n - 1) : param_lo;
+                buf.push_back((float)px);
+                buf.push_back((float)r.lyapunov[p]);
+            }
+            PlotSeriesInput si;
+            si.points = buf.data();
+            si.n_points = n;
+            si.color = ic_base_color(0);
+            si.label = "LLE";
+            series_in.push_back(si);
+        } else { // LS
+            const auto& r = cs.ls_session.curves[lslots[i].cfg_idx].result;
+            int n = r.n_pts;
+            int N = r.n_exponents;
+            int k = l1_ls_exp[i];
+            if (N > 0 && n > 0 && (int)r.spectrum.size() == n) {
+                buf.reserve(n * 2);
+                for (int p = 0; p < n; ++p) {
+                    double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
+                                           (double)(n - 1) : param_lo;
+                    double y;
+                    if (k == -1) {
+                        y = 0.0;
+                        if (!r.spectrum[p].empty())
+                            for (int j = 0; j < N && j < (int)r.spectrum[p].size(); ++j)
+                                y += r.spectrum[p][j];
+                    } else {
+                        y = (k >= 0 && k < (int)r.spectrum[p].size()) ? r.spectrum[p][k] : 0.0;
+                    }
+                    buf.push_back((float)px);
+                    buf.push_back((float)y);
+                }
+                PlotSeriesInput si;
+                si.points = buf.data();
+                si.n_points = n;
+                si.color = ic_base_color(std::max(k, 0));
+                si.label = (k == -1) ? "sum L_i" : ("L" + std::to_string(k + 1));
+                series_in.push_back(si);
+                series_gen = data_gen * 64 + (k + 2);  // rebuild VBO on exponent switch
+            }
+        }
+        init_vis.assign(series_in.size(), true);
+        glob_vis.assign(series_in.size(), true);
+
+        // Autofit whenever the underlying result changed (bif/lle/ls each
+        // set fit_request in apply_*_result on completion of run_async).
+        bool fit = false;
+        if (lslots[i].kind == L1Kind::Bif) {
+            auto& d = cs.bif_session.diagrams[lslots[i].cfg_idx];
+            fit = d.fit_request; if (fit) d.fit_request = false;
+        } else if (lslots[i].kind == L1Kind::LLE) {
+            auto& c = cs.lle_session.curves[lslots[i].cfg_idx];
+            fit = c.fit_request; if (fit) c.fit_request = false;
+        } else {
+            auto& c = cs.ls_session.curves[lslots[i].cfg_idx];
+            fit = c.fit_request; if (fit) c.fit_request = false;
+        }
+
+        ImVec2 avail  = ImGui::GetContentRegionAvail();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        view.render(rnd, origin, avail,
+                    /*owner_id*/ 0xC10000 + i,
+                    series_gen,
+                    series_in, init_vis, glob_vis, fit);
+        ImGui::PopID();
+        ImGui::End();
+    }
+
+    // --- Level 3 window: Phase portrait (2D projection) or Basins heatmap ---
+    if (cs.shared.level_phase_enabled) {
+        const char* title = cs.shared.level3_kind == 0
+            ? "Custom Phase / Time-domain"
+            : "Custom Basins";
+        if (ImGui::Begin(title)) {
+            if (cs.shared.level3_kind == 0) {
+                // Phase — mirrors Analysis-tab Phase2D projection rendering
+                // (see draw_phase_plot at gui.cpp:~1189). Fixed axes: pick
+                // first two variables of the system for X/Y projection.
+                auto& ps = cs.phase_session;
+                if (ps.in_flight) {
+                    ImGui::TextDisabled("Computing phase portrait...");
+                } else if (!ps.result.ok || ps.result.trajectories.empty()) {
+                    ImGui::TextDisabled("No phase result yet. Click a 2D pixel or press Run pipeline.");
+                } else {
+                    static int         phase_ax = 0;
+                    static int         phase_ay = 1;
+                    static Plot2DView  phase_view;
+                    static PlotRenderer phase_renderer;
+                    int nvars = (int)cs.vars.size();
+                    if (phase_ax >= nvars) phase_ax = 0;
+                    if (phase_ay >= nvars) phase_ay = std::min(1, nvars - 1);
+
+                    // Axis picker toolbar (X / Y projection).
+                    auto var_combo = [&](const char* lbl, int& v) {
+                        ImGui::SetNextItemWidth(80);
+                        const char* prev = (v >= 0 && v < nvars) ? cs.vars[v].c_str() : "?";
+                        if (ImGui::BeginCombo(lbl, prev)) {
+                            for (int j = 0; j < nvars; ++j)
+                                if (ImGui::Selectable(cs.vars[j].c_str(), v == j)) v = j;
+                            ImGui::EndCombo();
+                        }
+                    };
+                    var_combo("X##phase_ax", phase_ax); ImGui::SameLine();
+                    var_combo("Y##phase_ay", phase_ay);
+
+                    phase_view.x_axis.name = (phase_ax >= 0 && phase_ax < nvars) ? cs.vars[phase_ax] : "x";
+                    phase_view.y_axis.name = (phase_ay >= 0 && phase_ay < nvars) ? cs.vars[phase_ay] : "y";
+
+                    // Build series: one per IC-trajectory, points (x[ax], x[ay]).
+                    static std::vector<std::vector<float>> phase_series_data;
+                    phase_series_data.clear();
+                    phase_series_data.resize(ps.result.trajectories.size());
+                    std::vector<PlotSeriesInput> series_in;
+                    series_in.reserve(ps.result.trajectories.size());
+                    std::vector<bool> init_vis(ps.result.trajectories.size(), true);
+                    std::vector<bool> glob_vis(ps.result.trajectories.size(), true);
+                    for (size_t k = 0; k < ps.result.trajectories.size(); ++k) {
+                        const auto& traj = ps.result.trajectories[k];
+                        auto& buf = phase_series_data[k];
+                        buf.reserve(traj.size() * 2);
+                        for (const auto& pt : traj) {
+                            buf.push_back((float)pt[phase_ax < (int)pt.size() ? phase_ax : 0]);
+                            buf.push_back((float)pt[phase_ay < (int)pt.size() ? phase_ay : 0]);
+                        }
+                        PlotSeriesInput si;
+                        si.points   = buf.data();
+                        si.n_points = (int)(buf.size() / 2);
+                        si.color    = ic_base_color((int)k);
+                        si.label    = (k < ps.result.labels.size()) ? ps.result.labels[k]
+                                                                     : ("IC " + std::to_string(k + 1));
+                        series_in.push_back(si);
+                    }
+                    int data_gen = ps.data_generation * 100 + phase_ax * 10 + phase_ay;
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    phase_view.render(phase_renderer, origin, avail,
+                                      /*owner_id*/ 0xCFA5E00, data_gen,
+                                      series_in, init_vis, glob_vis, ps.fit_request);
+                    if (ps.fit_request) ps.fit_request = false;
+                }
+            } else {
+                // Basins — HeatmapView of basin_idx (cluster id) — simpler
+                // than draw_basins_plot's toolbar (feature switch stays in
+                // detail panel), matches user request for a visible result.
+                auto& bsn = cs.basins_session;
+                if (bsn.in_flight) {
+                    ImGui::TextDisabled("Computing basins...");
+                } else if (bsn.configs.empty() || !bsn.configs[0].last_run_ok) {
+                    ImGui::TextDisabled("No basins result yet.");
+                } else {
+                    static HeatmapView  bsn_hv;
+                    static PlotRenderer bsn_renderer;
+                    const auto& bc = bsn.configs[0];
+                    const auto& r  = bc.result;
+                    if (r.n_pts <= 0 || r.basin_idx.empty()) {
+                        ImGui::TextDisabled("Basins result empty.");
+                    } else {
+                        // Convert int cluster ids to double for HeatmapView.
+                        static std::vector<double> bsn_values;
+                        bsn_values.resize(r.basin_idx.size());
+                        double vmin =  std::numeric_limits<double>::infinity();
+                        double vmax = -std::numeric_limits<double>::infinity();
+                        for (size_t k = 0; k < r.basin_idx.size(); ++k) {
+                            double v = (double)r.basin_idx[k];
+                            bsn_values[k] = v;
+                            if (v < vmin) vmin = v;
+                            if (v > vmax) vmax = v;
+                        }
+                        if (!std::isfinite(vmin)) { vmin = 0.0; vmax = 1.0; }
+                        int cmap_idx = (int)bsn_hv.colormap;
+                        ImGui::SetNextItemWidth(140);
+                        if (ImGui::Combo("Colormap##bsn", &cmap_idx,
+                                         kHeatmapColormapNames, kHeatmapColormapCount))
+                            bsn_hv.colormap = (HeatmapColormap)cmap_idx;
+                        bsn_hv.x_axis.name = (bc.axis_x_var >= 0 && bc.axis_x_var < (int)cs.vars.size())
+                                              ? cs.vars[bc.axis_x_var] : "x";
+                        bsn_hv.y_axis.name = (bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size())
+                                              ? cs.vars[bc.axis_y_var] : "y";
+                        ImVec2 avail  = ImGui::GetContentRegionAvail();
+                        ImVec2 origin = ImGui::GetCursorScreenPos();
+                        bsn_hv.render(bsn_renderer, origin, avail,
+                                      /*owner_id*/ 0xCBA51E5,
+                                      bc.data_generation,
+                                      r.n_pts, r.n_pts,
+                                      bsn_values.data(),
+                                      r.axis_x_lo, r.axis_x_hi,
+                                      r.axis_y_lo, r.axis_y_hi,
+                                      vmin, vmax,
+                                      /*fit_request*/ false);
+                    }
+                }
+            }
+        }
+        ImGui::End();
+    }
 }
 
 // ============================================================
@@ -5779,6 +6897,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.dft1d_session.custom_schemes       = model.custom_schemes;
     model.basins_session.custom_schemes      = model.custom_schemes;
     model.fastsync_session.custom_schemes    = model.custom_schemes;
+    // Custom tab owns 5 isolated sub-sessions — same per-frame sync applies.
+    model.custom_session.custom_schemes                = model.custom_schemes;
+    model.custom_session.bif_session.custom_schemes    = model.custom_schemes;
+    model.custom_session.lle_session.custom_schemes    = model.custom_schemes;
+    model.custom_session.ls_session.custom_schemes     = model.custom_schemes;
+    model.custom_session.phase_session.custom_schemes  = model.custom_schemes;
+    model.custom_session.basins_session.custom_schemes = model.custom_schemes;
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.
@@ -5842,6 +6967,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last_fastsync",
                              session_to_json_fastsync(model.fastsync_session));
     }
+    // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on
+    // any completion so we don't rewrite _last_custom.json five times.
+    if (model.custom_session.poll_all()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_custom",
+                             session_to_json_custom(model.custom_session));
+    }
 
     // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
     // очереди есть элементы — берём следующий и стартуем. start_next сам
@@ -5853,6 +6985,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.start_next_in_basins_queue();
     // То же для fastsync-очереди (независимая).
     model.start_next_in_fastsync_queue();
+    // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
+    model.start_next_in_custom_queue();
 
     // переключатель режимов
     int mode = (int)model.app_mode;
@@ -5862,6 +6996,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("1D DFT", &mode, (int)AppModel::AppMode::Dft1D); ImGui::SameLine();
     ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
     ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
+    ImGui::RadioButton("Custom", &mode, (int)AppModel::AppMode::Custom); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
@@ -5869,7 +7004,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
     // drains parametric_queue and basins_queue so remaining batch items
     // don't auto-start.
-    enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync };
+    enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom };
     BusyKind busy_kind = BusyKind::None;
     std::string busy_what;
     std::chrono::steady_clock::time_point busy_start;
@@ -5959,6 +7094,58 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (model.fastsync_session.progress_token)
             progress_fraction = model.fastsync_session.progress_token->load(std::memory_order_relaxed);
     }
+    else if (model.custom_session.any_in_flight()) {
+        // Custom-tab: queue is drained serially, so at most one sub-session is
+        // in-flight at any time — pick whichever one it is and surface its
+        // label/progress under a "Custom: ..." prefix.
+        auto& cs = model.custom_session;
+        if (cs.bif_session.in_flight) {
+            int ri = cs.bif_session.running_diagram_index;
+            busy_what = std::string("Custom: ") +
+                        ((ri >= 0 && ri < (int)cs.bif_session.diagrams.size())
+                            ? cs.bif_session.diagrams[ri].label : std::string("Bif"));
+            busy_start = cs.bif_session.compute_start_time;
+            if (cs.bif_session.progress_token)
+                progress_fraction = cs.bif_session.progress_token->load(std::memory_order_relaxed);
+            busy_cancelling = cs.bif_session.cancel_token &&
+                              cs.bif_session.cancel_token->load(std::memory_order_relaxed);
+        } else if (cs.lle_session.in_flight) {
+            int ri = cs.lle_session.running_curve_index;
+            busy_what = std::string("Custom: ") +
+                        ((ri >= 0 && ri < (int)cs.lle_session.curves.size())
+                            ? cs.lle_session.curves[ri].label : std::string("LLE"));
+            busy_start = cs.lle_session.compute_start_time;
+            if (cs.lle_session.progress_token)
+                progress_fraction = cs.lle_session.progress_token->load(std::memory_order_relaxed);
+            busy_cancelling = cs.lle_session.cancel_token &&
+                              cs.lle_session.cancel_token->load(std::memory_order_relaxed);
+        } else if (cs.ls_session.in_flight) {
+            int ri = cs.ls_session.running_curve_index;
+            busy_what = std::string("Custom: ") +
+                        ((ri >= 0 && ri < (int)cs.ls_session.curves.size())
+                            ? cs.ls_session.curves[ri].label : std::string("LS"));
+            busy_start = cs.ls_session.compute_start_time;
+            if (cs.ls_session.progress_token)
+                progress_fraction = cs.ls_session.progress_token->load(std::memory_order_relaxed);
+            busy_cancelling = cs.ls_session.cancel_token &&
+                              cs.ls_session.cancel_token->load(std::memory_order_relaxed);
+        } else if (cs.phase_session.in_flight) {
+            busy_what  = "Custom: phase";
+            busy_start = cs.phase_session.compute_start_time;
+        } else if (cs.basins_session.in_flight) {
+            int ri = cs.basins_session.running_config_index;
+            busy_what = std::string("Custom: ") +
+                        ((ri >= 0 && ri < (int)cs.basins_session.configs.size() &&
+                          !cs.basins_session.configs[ri].label.empty())
+                            ? cs.basins_session.configs[ri].label : std::string("basins"));
+            busy_start = cs.basins_session.compute_start_time;
+            if (cs.basins_session.progress_token)
+                progress_fraction = cs.basins_session.progress_token->load(std::memory_order_relaxed);
+            busy_cancelling = cs.basins_session.cancel_token &&
+                              cs.basins_session.cancel_token->load(std::memory_order_relaxed);
+        }
+        busy_kind = BusyKind::Custom;
+    }
     else {
         // Nothing in flight — pick the session whose last run finished most
         // recently (across the 4 cancellable ones) and show persistent info.
@@ -6025,6 +7212,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if      (busy_kind == BusyKind::Basins)   queue_n = model.basins_queue.size();
             else if (busy_kind == BusyKind::FastSync) queue_n = model.fastsync_queue.size();
             else if (busy_kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
+            else if (busy_kind == BusyKind::Custom)   queue_n = model.custom_queue.size();
             else                                      queue_n = model.parametric_queue.size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
@@ -6082,6 +7270,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Dft1D:    model.dft1d_session.request_cancel();       break;
                     case BusyKind::Basins:   model.basins_session.request_cancel();      break;
                     case BusyKind::FastSync: model.fastsync_session.request_cancel();    break;
+                    case BusyKind::Custom:   model.custom_session.request_cancel_all();  break;
                     default: break;
                 }
                 // Drain all batch queues so remaining items don't auto-start.
@@ -6089,6 +7278,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 model.dft1d_queue.clear();
                 model.basins_queue.clear();
                 model.fastsync_queue.clear();
+                model.custom_queue.clear();
             }
             ImGui::PopStyleColor(3);
         }
@@ -6106,7 +7296,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
            || model.ls_session.in_flight
            || model.dft1d_session.in_flight
            || model.basins_session.in_flight
-           || model.fastsync_session.in_flight;
+           || model.fastsync_session.in_flight
+           || model.custom_session.any_in_flight();
         const float combo_w = 240.0f;
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
         float cx = (ImGui::GetWindowSize().x - combo_w) * 0.5f;
@@ -6142,7 +7333,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Basins;
     bool entering_fastsync = (AppModel::AppMode)mode == AppModel::AppMode::FastSync &&
                              model.app_mode != AppModel::AppMode::FastSync;
-    if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync) {
+    bool entering_custom = (AppModel::AppMode)mode == AppModel::AppMode::Custom &&
+                           model.app_mode != AppModel::AppMode::Custom;
+    if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync || entering_custom) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -6208,6 +7401,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty()) {
             std::string jf = lib.load_session(model.loaded_name, "_last_fastsync");
             if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
+        }
+    }
+    auto custom_need_init = model.custom_session.loaded_system_name != model.name
+                         || model.custom_session.vars.empty()
+                         || model.custom_session.vars   != model.known_vars
+                         || model.custom_session.params != model.known_params;
+    if (entering_custom && custom_need_init) {
+        model.start_custom_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jc = lib.load_session(model.loaded_name, "_last_custom");
+            if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
         }
     }
     model.app_mode = (AppModel::AppMode)mode;
@@ -6281,6 +7485,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             draw_fastsync_plot(model, cb);
         }
         ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::Custom) {
+        // Custom hierarchical pipeline: master-detail controls window + up
+        // to 3 heatmap windows + 6 line-slice windows + Phase/Basins window.
+        if (ImGui::Begin("Custom Controls")) {
+            draw_custom_controls(model, lib);
+        }
+        ImGui::End();
+        draw_custom_plot_windows(model, lib, cb);
     }
     else { // AppMode::Settings
         if (ImGui::Begin("Settings")) {

@@ -412,6 +412,26 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddText(ImVec2(cx, cy), col_text, buf);
     }
 
+    // 8b. Left-click drill-down: fires on release inside the plot when the
+    // gesture was NOT a pan-drag and NOT a double-click. Emits the X world
+    // coordinate under the cursor (snapped if snap_x_to_grid is set), so a
+    // Custom-tab caller can build a Phase portrait at that parameter value.
+    if (plot_h_ov && on_left_click
+        && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !plot_dbl) {
+        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
+            ImGuiIO& io = ImGui::GetIO();
+            double wx = ex0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (ex1 - ex0);
+            if (snap_x_to_grid && snap_x_n > 1) {
+                double lo = std::min(snap_x_min, snap_x_max);
+                double hi = std::max(snap_x_min, snap_x_max);
+                int ix; double sx;
+                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx)) wx = sx;
+            }
+            on_left_click(wx);
+        }
+    }
+
     // 9. ������� �����
     if (xax_dbl)   fit_x();
     if (yax_dbl)   fit_y();
