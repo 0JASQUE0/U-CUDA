@@ -224,6 +224,8 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"symmetry_s\":";      jstr(o, bd.symmetry_s);
     o << ",\"param_index\":"      << bd.param_index;
     o << ",\"sweep_over_var\":"   << (bd.sweep_over_var ? "true" : "false");
+    o << ",\"sweep_over_h\":"     << (bd.sweep_over_h ? "true" : "false");
+    o << ",\"log_scale\":"        << (bd.log_scale ? "true" : "false");
     o << ",\"var_sweep_index\":"  << bd.var_sweep_index;
     o << ",\"continuation\":"     << (bd.continuation ? "true" : "false");
     o << ",\"continuation_reverse\":" << (bd.continuation_reverse ? "true" : "false");
@@ -245,6 +247,8 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"mode_2d\":"           << (bd.mode_2d ? "true" : "false");
     o << ",\"param_index_2\":"     << bd.param_index_2;
     o << ",\"sweep_over_var_2\":"  << (bd.sweep_over_var_2 ? "true" : "false");
+    o << ",\"sweep_over_h_2\":"    << (bd.sweep_over_h_2 ? "true" : "false");
+    o << ",\"log_scale_2\":"       << (bd.log_scale_2 ? "true" : "false");
     o << ",\"var_sweep_index_2\":" << bd.var_sweep_index_2;
     o << ",\"param_lo_2_text\":";  jstr(o, bd.param_lo_2_text);
     o << ",\"param_hi_2_text\":";  jstr(o, bd.param_hi_2_text);
@@ -269,6 +273,8 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "symmetry_s")         bd.symmetry_s        = p.str();
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     bd.sweep_over_var    = p.boolean();
+    else if (key == "sweep_over_h")       bd.sweep_over_h      = p.boolean();
+    else if (key == "log_scale")          bd.log_scale         = p.boolean();
     else if (key == "var_sweep_index")    bd.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "continuation")       bd.continuation      = p.boolean();
     else if (key == "continuation_reverse") bd.continuation_reverse = p.boolean();
@@ -291,6 +297,8 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "mode_2d")            bd.mode_2d           = p.boolean();
     else if (key == "param_index_2")      bd.param_index_2     = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var_2")   bd.sweep_over_var_2  = p.boolean();
+    else if (key == "sweep_over_h_2")     bd.sweep_over_h_2    = p.boolean();
+    else if (key == "log_scale_2")        bd.log_scale_2       = p.boolean();
     else if (key == "var_sweep_index_2")  bd.var_sweep_index_2 = std::stoi(p.str_or_num());
     else if (key == "param_lo_2_text")    bd.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    bd.param_hi_2_text   = p.str();
@@ -410,6 +418,8 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
+    o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
+    o << ",\"log_scale\":"        << (c.log_scale ? "true" : "false");
     o << ",\"var_sweep_index\":"  << c.var_sweep_index;
     o << ",\"param_lo_text\":";   jstr(o, c.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, c.param_hi_text);
@@ -430,6 +440,8 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"mode_2d\":"           << (c.mode_2d ? "true" : "false");
     o << ",\"param_index_2\":"     << c.param_index_2;
     o << ",\"sweep_over_var_2\":"  << (c.sweep_over_var_2 ? "true" : "false");
+    o << ",\"sweep_over_h_2\":"    << (c.sweep_over_h_2 ? "true" : "false");
+    o << ",\"log_scale_2\":"       << (c.log_scale_2 ? "true" : "false");
     o << ",\"var_sweep_index_2\":" << c.var_sweep_index_2;
     o << ",\"param_lo_2_text\":";  jstr(o, c.param_lo_2_text);
     o << ",\"param_hi_2_text\":";  jstr(o, c.param_hi_2_text);
@@ -444,6 +456,8 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
+    else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
+    else if (key == "log_scale")          c.log_scale         = p.boolean();
     else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "param_lo_text")      c.param_lo_text     = p.str();
     else if (key == "param_hi_text")      c.param_hi_text     = p.str();
@@ -463,6 +477,8 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "mode_2d")            c.mode_2d           = p.boolean();
     else if (key == "param_index_2")      c.param_index_2     = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var_2")   c.sweep_over_var_2  = p.boolean();
+    else if (key == "sweep_over_h_2")     c.sweep_over_h_2    = p.boolean();
+    else if (key == "log_scale_2")        c.log_scale_2       = p.boolean();
     else if (key == "var_sweep_index_2")  c.var_sweep_index_2 = std::stoi(p.str_or_num());
     else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();
@@ -553,6 +569,8 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
+    o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
+    o << ",\"log_scale\":"        << (c.log_scale ? "true" : "false");
     o << ",\"var_sweep_index\":"  << c.var_sweep_index;
     o << ",\"param_lo_text\":";   jstr(o, c.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, c.param_hi_text);
@@ -571,6 +589,8 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"mode_2d\":"             << (c.mode_2d ? "true" : "false");
     o << ",\"param_index_2\":"       << c.param_index_2;
     o << ",\"sweep_over_var_2\":"    << (c.sweep_over_var_2 ? "true" : "false");
+    o << ",\"sweep_over_h_2\":"      << (c.sweep_over_h_2 ? "true" : "false");
+    o << ",\"log_scale_2\":"         << (c.log_scale_2 ? "true" : "false");
     o << ",\"var_sweep_index_2\":"   << c.var_sweep_index_2;
     o << ",\"param_lo_2_text\":";    jstr(o, c.param_lo_2_text);
     o << ",\"param_hi_2_text\":";    jstr(o, c.param_hi_2_text);
@@ -586,6 +606,8 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
+    else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
+    else if (key == "log_scale")          c.log_scale         = p.boolean();
     else if (key == "var_sweep_index")    c.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "param_lo_text")      c.param_lo_text     = p.str();
     else if (key == "param_hi_text")      c.param_hi_text     = p.str();
@@ -605,6 +627,8 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "mode_2d")            c.mode_2d           = p.boolean();
     else if (key == "param_index_2")      c.param_index_2     = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var_2")   c.sweep_over_var_2  = p.boolean();
+    else if (key == "sweep_over_h_2")     c.sweep_over_h_2    = p.boolean();
+    else if (key == "log_scale_2")        c.log_scale_2       = p.boolean();
     else if (key == "var_sweep_index_2")  c.var_sweep_index_2 = std::stoi(p.str_or_num());
     else if (key == "param_lo_2_text")    c.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    c.param_hi_2_text   = p.str();

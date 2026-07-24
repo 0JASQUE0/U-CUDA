@@ -230,7 +230,12 @@ __global__ void calculateDiscreteModelCUDA(
 	const numb	maxValue = 0,
 	numb*			data = nullptr,
 	int*			maxValueCheckerArray = nullptr,
-	const bool		Par_or_Var = 1);
+	const bool		Par_or_Var = 1,
+	const int		hSweepAxis = -1,          // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
+	const numb	transientTime = 0,        // raw transient time; only read when hSweepAxis != -1
+	const numb	tMax = 0,                 // raw computing time; only read when hSweepAxis != -1
+	int*			actualIterations = nullptr, // per-thread actual sample count written to `data` (worst-case-sized buffer); read by peakFinderCUDA
+	const int		logAxisMask = 0);         // bit i = axis slot i (X=0,Y=1) is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
 
 
 // --------------------------------------------------------------------------
@@ -388,6 +393,13 @@ __device__ __host__ numb getValueByIdx_forLogBains(const int idx, const int nPts
 __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber);
 
+// getValueByIdx для log-равномерной сетки (drop-in замена getValueByIdx) --
+// требует startRange, finishRange > 0. Определение см. cudaLibrary.cu, рядом
+// с getValueByIdxLog (эту декларацию сюда обязательно, иначе calculateDiscreteModelCUDA
+// вызывает её раньше точки определения в .cu -- NVRTC компилирует файл линейно).
+__device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const int nPts,
+	const numb startRange, const numb finishRange, const int valueNumber);
+
 
 
 /**
@@ -432,7 +444,8 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 	int* amountOfPeaks, numb* outPeaks);
 
 __global__ void peakFinderCUDA( numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-	int* amountOfPeaks = nullptr, numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h = 0.0025 );
+	int* amountOfPeaks = nullptr, numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h = 0.0025,
+	const int* actualIterations = nullptr ); // per-thread valid prefix of `data`; nullptr = always scan full sizeOfBlock
 
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq);
@@ -560,7 +573,10 @@ __global__ void LLEKernelCUDA(
 	const int		preScaller = 0,
 	const int		writableVar = 0,
 	const numb	maxValue = 0,
-	numb*			resultArray = nullptr);
+	numb*			resultArray = nullptr,
+	const int		hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
+	const numb	transientTime = 0,   // raw transient time; only read when hSweepAxis != -1
+	const int		logAxisMask = 0);    // bit i = axis slot i is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
 
 
 
@@ -662,7 +678,10 @@ __global__ void LSKernelCUDA(
 	const int preScaller = 0,
 	const int writableVar = 0,
 	const numb maxValue = 0,
-	numb* resultArray = nullptr);
+	numb* resultArray = nullptr,
+	const int hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
+	const numb transientTime = 0,  // raw transient time; only read when hSweepAxis != -1
+	const int logAxisMask = 0);    // bit i = axis slot i is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
 
 __global__ void LSKernelICCUDA(
 	const int nPts,

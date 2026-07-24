@@ -32,7 +32,6 @@
   <ImportGroup Label="ExtensionSettings">
     <!-- Pick whichever CUDA toolset is actually installed on this machine,
          so the project builds unmodified on both 12.8 and 13.0 dev machines. -->
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props')" />
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props')" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -187,9 +186,12 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="system_library.h" />
     <ClInclude Include="system_record.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="U-CUDA.rc" />
+    <None Include="app.ico" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets')" />
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets')" />
   </ImportGroup>
 </Project>
