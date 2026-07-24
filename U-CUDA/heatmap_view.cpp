@@ -781,8 +781,20 @@ void HeatmapView::render(PlotRenderer& renderer,
         int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
         int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-            double snap_x = param_lo_x + (double)ix * step_x;
-            double snap_y = param_lo_y + (double)iy * step_y;
+            // log_scale: узлы движка лежат на лог-равномерной сетке
+            // (getValueByIdx_log), не на линейной param_lo + ix*step — см.
+            // draw_x_ticks/draw_y_ticks выше про ту же лог-специфику. Доп.
+            // guard >0 — live-чекбокс может быть включён при param_lo/hi<=0
+            // (ещё не запускали Run) — log10(0)=-inf даёт NaN дальше по
+            // формуле, деградируем на линейную ноду вместо NaN в tooltip'е.
+            double snap_x = (x_axis.log_scale && param_lo_x > 0.0 && param_hi_x > 0.0)
+                ? std::pow(10.0, std::log10(param_lo_x)
+                    + (double)ix * (std::log10(param_hi_x) - std::log10(param_lo_x)) / (double)(nx - 1))
+                : param_lo_x + (double)ix * step_x;
+            double snap_y = (y_axis.log_scale && param_lo_y > 0.0 && param_hi_y > 0.0)
+                ? std::pow(10.0, std::log10(param_lo_y)
+                    + (double)iy * (std::log10(param_hi_y) - std::log10(param_lo_y)) / (double)(ny - 1))
+                : param_lo_y + (double)iy * step_y;
             double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
