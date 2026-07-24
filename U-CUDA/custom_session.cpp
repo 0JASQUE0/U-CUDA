@@ -12,7 +12,8 @@ namespace {
 // through the string-based InputText fields the rest of the codebase uses.
 std::string fmt_d(double v) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    // %.6g strips float→double round-trip noise from SliderFloat inputs.
+    std::snprintf(buf, sizeof(buf), "%.6g", v);
     return buf;
 }
 
@@ -47,20 +48,22 @@ void copy_prescaller(const CustomTabSharedConfig&,   LSCurveConfig&)  { /* no su
 EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s) {
     EffectiveSweep e;
     if (s.inherit_sweep_from_2d && s.level_2d_enabled) {
+        // Inherit: sweep AXIS (par/lo/hi) comes from L2D. Resolution
+        // stays L1D's own — L1D is cheap and interactive, users often
+        // want higher N there than the expensive N_x·N_y L2D grid.
         e.par_index  = s.axis_x_par_index;
         e.over_var   = s.axis_x_over_var;
         e.var_index  = s.axis_x_var_index;
         e.lo_text    = s.axis_x_lo_text;
         e.hi_text    = s.axis_x_hi_text;
-        e.n_pts_text = s.n_x_text;
     } else {
         e.par_index  = s.sweep_x_par_index;
         e.over_var   = s.sweep_x_over_var;
         e.var_index  = s.sweep_x_var_index;
         e.lo_text    = s.sweep_x_lo_text;
         e.hi_text    = s.sweep_x_hi_text;
-        e.n_pts_text = s.n_x_1d_text;
     }
+    e.n_pts_text = s.n_x_1d_text;
     return e;
 }
 
@@ -72,15 +75,14 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
         e.var_index  = s.axis_y_var_index;
         e.lo_text    = s.axis_y_lo_text;
         e.hi_text    = s.axis_y_hi_text;
-        e.n_pts_text = s.n_y_text;
     } else {
         e.par_index  = s.sweep_y_par_index;
         e.over_var   = s.sweep_y_over_var;
         e.var_index  = s.sweep_y_var_index;
         e.lo_text    = s.sweep_y_lo_text;
         e.hi_text    = s.sweep_y_hi_text;
-        e.n_pts_text = s.n_y_1d_text;
     }
+    e.n_pts_text = s.n_y_1d_text;
     return e;
 }
 
@@ -110,6 +112,10 @@ void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramCon
 void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c, int dir) {
     copy_integrator_and_state(s, c);
     copy_prescaller(s, c);
+    // L1D-specific integrator overrides (finer h / different TT/CT than L2D).
+    c.h_text         = s.l1d_h_text;
+    c.transient_text = s.l1d_transient_text;
+    c.t_max_text     = s.l1d_t_max_text;
     c.mode_2d      = false;
     c.colored_1d   = false;
     c.continuation = s.continuation_1d_enabled;
@@ -162,6 +168,9 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
 
 void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, int dir) {
     copy_integrator_and_state(s, c);
+    c.h_text         = s.l1d_h_text;
+    c.transient_text = s.l1d_transient_text;
+    c.t_max_text     = s.l1d_t_max_text;
     c.mode_2d = false;
     EffectiveSweep sweep = (dir == 0) ? effective_sweep_x(s) : effective_sweep_y(s);
     c.param_index     = sweep.par_index;
@@ -190,6 +199,9 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
 
 void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int dir) {
     copy_integrator_and_state(s, c);
+    c.h_text         = s.l1d_h_text;
+    c.transient_text = s.l1d_transient_text;
+    c.t_max_text     = s.l1d_t_max_text;
     c.mode_2d = false;
     EffectiveSweep sweep = (dir == 0) ? effective_sweep_x(s) : effective_sweep_y(s);
     c.param_index     = sweep.par_index;
@@ -201,28 +213,24 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int 
 }
 
 void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession& ph,
-                           const std::vector<std::string>& vars) {
+                           const std::vector<std::string>& /*vars*/) {
+    // Shared config drives the integrator + parameter values on Run.
+    // IC-sets are owned by PhaseAnalysisSession and edited via the L3
+    // Phase controls panel (parity with Analysis tab), so the shared
+    // "Initial conditions" block affects only BD/LLE/LS/Basins — not
+    // phase, which typically wants several ICs the shared field can't
+    // express. Ensure at least one slot exists so recompute_async has
+    // something to run.
     ph.scheme     = s.scheme;
     ph.symmetry_s = s.symmetry_s;
     ph.step_h     = s.h_text;
     ph.sim_time   = s.t_max_text;
     ph.skip_time  = s.transient_text;
     ph.param_values = s.param_values;
-
-    if (s.phase_use_shared_ic) {
-        // Keep as many ic_sets as the user has, but rewrite ic_sets[0] values
-        // from shared IC (default sandbox drill-down slot).
-        if (ph.ic_sets.empty()) {
-            InitialConditionSet ic;
-            ic.label = "IC 1";
-            for (const auto& v : vars) ic.values[v] = "";
-            ph.ic_sets.push_back(std::move(ic));
-        }
-        auto& ic0 = ph.ic_sets[0];
-        for (const auto& v : vars) {
-            auto it = s.initial_conditions.find(v);
-            ic0.values[v] = (it != s.initial_conditions.end()) ? it->second : std::string();
-        }
+    if (ph.ic_sets.empty()) {
+        InitialConditionSet ic;
+        ic.label = "IC 1";
+        ph.ic_sets.push_back(std::move(ic));
     }
 }
 
@@ -249,6 +257,11 @@ void CustomSession::load_from_record(const SystemRecord& r,
     shared.scheme         = "Euler";
     shared.symmetry_s     = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     shared.h_text         = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    // Seed L1D integrator overrides from the same shared defaults; user
+    // can drift them apart later in the L1D detail panel.
+    shared.l1d_h_text         = shared.h_text;
+    shared.l1d_transient_text = shared.transient_text;
+    shared.l1d_t_max_text     = shared.t_max_text;
     shared.initial_conditions.clear();
     for (const auto& v : vars) {
         auto it = r.init_conditions.find(v);
@@ -349,4 +362,182 @@ bool CustomSession::poll_all() {
     if (phase_session.poll())   any = true;
     if (basins_session.poll())  any = true;
     return any;
+}
+
+// ============================================================================
+// Level signatures — string blobs summarising every input a level consumes.
+// Two identical strings ⇒ downstream compute lands on identical data ⇒ the
+// Run drainer can skip the level.
+// ============================================================================
+namespace {
+    // Append map<string, string> sorted by key for deterministic output.
+    void sig_append_map(std::string& o, const char* tag,
+                        const std::map<std::string, std::string>& m) {
+        o += tag; o += "{";
+        for (const auto& kv : m) { o += kv.first; o += "="; o += kv.second; o += ";"; }
+        o += "}";
+    }
+    void sig_append_int(std::string& o, const char* tag, int v) {
+        o += tag; o += "="; o += std::to_string(v); o += ";";
+    }
+    void sig_append_bool(std::string& o, const char* tag, bool v) {
+        o += tag; o += "="; o += (v ? "1" : "0"); o += ";";
+    }
+    void sig_append_str(std::string& o, const char* tag, const std::string& v) {
+        o += tag; o += "="; o += v; o += ";";
+    }
+    void sig_append_double(std::string& o, const char* tag, double v) {
+        char b[64]; std::snprintf(b, sizeof(b), "%.17g", v);
+        o += tag; o += "="; o += b; o += ";";
+    }
+    // Shared integrator + IC + params — feed all three levels.
+    void sig_append_shared_state(std::string& o, const CustomTabSharedConfig& s) {
+        sig_append_str(o, "sc", s.scheme);
+        sig_append_str(o, "sym", s.symmetry_s);
+        sig_append_str(o, "h",   s.h_text);
+        sig_append_str(o, "tt",  s.transient_text);
+        sig_append_str(o, "ct",  s.t_max_text);
+        sig_append_str(o, "dec", s.pre_scaller_text);
+        sig_append_str(o, "mv",  s.max_value_text);
+        sig_append_map(o, "ic", s.initial_conditions);
+        sig_append_map(o, "pv", s.param_values);
+    }
+}
+
+std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
+    std::string o; o.reserve(512);
+    sig_append_bool(o, "en", s.level_2d_enabled);
+    sig_append_shared_state(o, s);
+    sig_append_int (o, "axp",  s.axis_x_par_index);
+    sig_append_bool(o, "axv",  s.axis_x_over_var);
+    sig_append_int (o, "axvi", s.axis_x_var_index);
+    sig_append_str (o, "axlo", s.axis_x_lo_text);
+    sig_append_str (o, "axhi", s.axis_x_hi_text);
+    sig_append_str (o, "nx",   s.n_x_text);
+    sig_append_int (o, "ayp",  s.axis_y_par_index);
+    sig_append_bool(o, "ayv",  s.axis_y_over_var);
+    sig_append_int (o, "ayvi", s.axis_y_var_index);
+    sig_append_str (o, "aylo", s.axis_y_lo_text);
+    sig_append_str (o, "ayhi", s.axis_y_hi_text);
+    sig_append_str (o, "ny",   s.n_y_text);
+    sig_append_bool(o, "b2",   s.bif2d_enabled);
+    sig_append_bool(o, "l2",   s.lle2d_enabled);
+    sig_append_bool(o, "s2",   s.ls2d_enabled);
+    if (!cs.bif_session.diagrams.empty())
+        sig_append_str(o, "beps", cs.bif_session.diagrams[0].eps_dbscan_text);
+    if (!cs.lle_session.curves.empty()) {
+        sig_append_str(o, "leps", cs.lle_session.curves[0].eps_text);
+        sig_append_str(o, "lnt",  cs.lle_session.curves[0].nt_text);
+    }
+    if (!cs.ls_session.curves.empty()) {
+        sig_append_str(o, "seps", cs.ls_session.curves[0].eps_text);
+        sig_append_str(o, "snt",  cs.ls_session.curves[0].nt_text);
+    }
+    return o;
+}
+
+std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
+    (void)cs;
+    std::string o; o.reserve(512);
+    sig_append_bool(o, "en", s.level_1d_enabled);
+    sig_append_shared_state(o, s);
+    // L1D integrator overrides.
+    sig_append_str(o, "lh",  s.l1d_h_text);
+    sig_append_str(o, "ltt", s.l1d_transient_text);
+    sig_append_str(o, "lct", s.l1d_t_max_text);
+    // Effective sweep — resolves inherit vs own automatically.
+    EffectiveSweep sx = effective_sweep_x(s);
+    EffectiveSweep sy = effective_sweep_y(s);
+    sig_append_int (o, "sxp",  sx.par_index);
+    sig_append_bool(o, "sxv",  sx.over_var);
+    sig_append_int (o, "sxvi", sx.var_index);
+    sig_append_str (o, "sxlo", sx.lo_text);
+    sig_append_str (o, "sxhi", sx.hi_text);
+    sig_append_str (o, "sxn",  sx.n_pts_text);
+    sig_append_int (o, "syp",  sy.par_index);
+    sig_append_bool(o, "syv",  sy.over_var);
+    sig_append_int (o, "syvi", sy.var_index);
+    sig_append_str (o, "sylo", sy.lo_text);
+    sig_append_str (o, "syhi", sy.hi_text);
+    sig_append_str (o, "syn",  sy.n_pts_text);
+    // Fix positions — X-slice pins Y at fix_y, Y-slice pins X at fix_x.
+    sig_append_double(o, "fx", s.fix_x_value);
+    sig_append_double(o, "fy", s.fix_y_value);
+    sig_append_bool(o, "cnt", s.continuation_1d_enabled);
+    sig_append_bool(o, "bx", s.bif1d_x_enabled);
+    sig_append_bool(o, "by", s.bif1d_y_enabled);
+    sig_append_bool(o, "lx", s.lle1d_x_enabled);
+    sig_append_bool(o, "ly", s.lle1d_y_enabled);
+    sig_append_bool(o, "sx", s.ls1d_x_enabled);
+    sig_append_bool(o, "sy", s.ls1d_y_enabled);
+    return o;
+}
+
+std::string build_l3_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
+    std::string o; o.reserve(512);
+    sig_append_bool(o, "en", s.level_phase_enabled);
+    sig_append_int (o, "kind", s.level3_kind);
+    sig_append_shared_state(o, s);
+    if (s.level3_kind == 0) {
+        // Phase: sim/skip/decimation + all ic_sets (each IC is a map<var,text>).
+        sig_append_str(o, "st", cs.phase_session.sim_time);
+        sig_append_str(o, "sk", cs.phase_session.skip_time);
+        sig_append_str(o, "dc", cs.phase_session.decimation);
+        for (size_t i = 0; i < cs.phase_session.ic_sets.size(); ++i) {
+            std::string tag = "ic" + std::to_string(i);
+            sig_append_map(o, tag.c_str(), cs.phase_session.ic_sets[i].values);
+        }
+    } else if (!cs.basins_session.configs.empty()) {
+        const auto& bc = cs.basins_session.configs[0];
+        sig_append_int(o, "bxv",  bc.axis_x_var);
+        sig_append_str(o, "bxlo", bc.axis_x_lo_text);
+        sig_append_str(o, "bxhi", bc.axis_x_hi_text);
+        sig_append_int(o, "byv",  bc.axis_y_var);
+        sig_append_str(o, "bylo", bc.axis_y_lo_text);
+        sig_append_str(o, "byhi", bc.axis_y_hi_text);
+        sig_append_str(o, "bn",   bc.n_pts_text);
+        sig_append_int(o, "f1",   bc.feature1);
+        sig_append_int(o, "f2",   bc.feature2);
+        sig_append_str(o, "beps", bc.eps_dbscan_text);
+    }
+    return o;
+}
+
+void CustomSession::commit_pending_signatures() {
+    // Read each level's success from its sub-sessions' last_run flags.
+    // Sticky flags — reflect the most recent completed run on that slot,
+    // exactly what we want to attribute to the pending commit.
+    bool l2d_ok = false;
+    if (shared.bif2d_enabled && !bif_session.diagrams.empty()
+        && bif_session.diagrams[0].last_run_2d_ok) l2d_ok = true;
+    if (shared.lle2d_enabled && !lle_session.curves.empty()
+        && lle_session.curves[0].last_run_2d_ok)   l2d_ok = true;
+    if (shared.ls2d_enabled  && !ls_session.curves.empty()
+        && ls_session.curves[0].last_run_2d_ok)    l2d_ok = true;
+
+    bool l1d_ok = false;
+    auto slot_ok = [](auto& coll, size_t i) {
+        return coll.size() > i && coll[i].last_run_ok;
+    };
+    if (shared.bif1d_x_enabled && slot_ok(bif_session.diagrams, 1)) l1d_ok = true;
+    if (shared.bif1d_y_enabled && slot_ok(bif_session.diagrams, 2)) l1d_ok = true;
+    if (shared.lle1d_x_enabled && slot_ok(lle_session.curves,   1)) l1d_ok = true;
+    if (shared.lle1d_y_enabled && slot_ok(lle_session.curves,   2)) l1d_ok = true;
+    if (shared.ls1d_x_enabled  && slot_ok(ls_session.curves,    1)) l1d_ok = true;
+    if (shared.ls1d_y_enabled  && slot_ok(ls_session.curves,    2)) l1d_ok = true;
+
+    bool l3_ok = false;
+    if (shared.level3_kind == 0) l3_ok = phase_session.result.ok;
+    else l3_ok = !basins_session.configs.empty() && basins_session.configs[0].last_run_ok;
+
+    auto commit = [](LevelSig& sig, bool ok) {
+        if (!sig.pending_armed) return;
+        sig.committed     = sig.pending;
+        sig.committed_ok  = ok;
+        sig.pending_armed = false;
+        sig.pending.clear();
+    };
+    commit(sig_l2d, l2d_ok);
+    commit(sig_l1d, l1d_ok);
+    commit(sig_l3,  l3_ok);
 }

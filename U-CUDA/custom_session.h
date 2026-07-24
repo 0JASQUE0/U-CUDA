@@ -87,6 +87,15 @@ struct CustomTabSharedConfig {
     std::string sweep_y_hi_text    = "1";
     std::string n_y_1d_text        = "500";
 
+    // Per-L1D integrator overrides. L1D is cheap and interactive, so users
+    // often want finer h / longer TT / shorter CT than L2D (or Phase).
+    // Seeded from shared defaults on load_from_record; edited independently
+    // in the L1D detail panel regardless of `inherit_sweep_from_2d` — that
+    // flag only controls the sweep axis (par/lo/hi), not integrator params.
+    std::string l1d_h_text          = "0.01";
+    std::string l1d_transient_text  = "100";
+    std::string l1d_t_max_text      = "100";
+
     // 6 per-type-per-direction enable flags.
     bool bif1d_x_enabled = true;
     bool bif1d_y_enabled = false;
@@ -114,7 +123,6 @@ struct CustomTabSharedConfig {
     // ---- Level 3: Phase / Basins selector + drill-down policy ----
     int  level3_kind             = 0;      // 0 = Phase, 1 = Basins
     bool autorun_on_drilldown    = true;
-    bool phase_use_shared_ic     = true;
 };
 
 // One item in the Custom pipeline queue — mirrors the per-mode QueueItem
@@ -159,6 +167,23 @@ struct CustomSession {
     // rendered from their own last_error fields.
     std::string last_error;
 
+    // Dirty-tracking for the Run button. Every level owns a "committed"
+    // signature — a string built from every input the level cares about
+    // (integrator + IC + params + sweep axis + resolution + enable flags
+    // + level-specific bits like eps/exponent). Enqueueing the level bumps
+    // its pending signature; a successful sub-session completion promotes
+    // pending → committed. The Run button skips a level when its current
+    // build matches committed and the last commit was OK — so hitting Run
+    // after changing only N_x1d recomputes only L1D, leaving L2D and L3
+    // as-is. Per-level Run buttons (if added later) bypass this check.
+    struct LevelSig {
+        std::string committed;
+        std::string pending;
+        bool committed_ok = false;
+        bool pending_armed = false;
+    };
+    LevelSig sig_l2d, sig_l1d, sig_l3;
+
     // Non-copyable: sub-sessions hold std::future.
     CustomSession() = default;
     CustomSession(CustomSession&&) = default;
@@ -188,6 +213,12 @@ struct CustomSession {
     // Aggregate poll — polls each sub-session. Returns true if ANY completed
     // this frame (caller writes _last_custom on that signal).
     bool poll_all();
+
+    // Called by the drainer when the pipeline drains (queue empty + no
+    // sub-session in flight). Promotes each level's `pending` signature
+    // → `committed` and marks committed_ok from the sub-session's
+    // last_run_* flags. Called from draw_gui after poll_all returns true.
+    void commit_pending_signatures();
 };
 
 // ---- Shared -> sub-session field synchronisation ----
@@ -220,3 +251,13 @@ struct EffectiveSweep {
 };
 EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s);
 EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s);
+
+// Level-signature builders. Each returns a string that reflects EVERY
+// input consumed by that level's Run — text of every numeric field,
+// map serialisations, enable flags, sweep target indices, etc. Two
+// invocations with the same shared+cs return equal strings iff the
+// downstream compute would land on identical data. Used by the Run
+// dirty-tracking (skip level if signature matches last committed).
+std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSession& cs);
+std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs);
+std::string build_l3_signature (const CustomTabSharedConfig& s, const CustomSession& cs);

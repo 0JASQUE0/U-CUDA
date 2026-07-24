@@ -402,7 +402,10 @@ namespace {
 // precision to survive round-trip through parse_d (see analysis_session.cpp).
 std::string fmt_num_for_input(double v) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    // %.6g strips float→double round-trip noise (0.20000000298 → "0.2")
+    // for values that came from a SliderFloat or heatmap-pixel snap. If a
+    // caller ever needs more precision, promote this helper's format.
+    std::snprintf(buf, sizeof(buf), "%.6g", v);
     return buf;
 }
 

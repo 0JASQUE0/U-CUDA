@@ -405,13 +405,42 @@ void HeatmapView::render(PlotRenderer& renderer,
     // Delta считаем в vis-домене (тогда 1 экранный пиксель → сдвиг ровно
     // на один визуальный пиксель). Сама операция — симметричный сдвиг
     // view_min/max, поэтому вис-и-нод-домен смещаются одинаково.
-    if (plot_hov && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
-        ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
-        double dwx = -(double)delta.x / (double)plot_w * (vis_view_max_x - vis_view_min_x);
-        double dwy =  (double)delta.y / (double)plot_h * (vis_view_max_y - vis_view_min_y);
-        x_axis.view_min += dwx;  x_axis.view_max += dwx;
-        y_axis.view_min += dwy;  y_axis.view_max += dwy;
-        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    // Crosshair drag gestures (Custom-tab): MMB drag OR Shift+LMB drag →
+    // move fix_x/y crosshair. Plain LMB drag (no Shift) stays a pan gesture,
+    // same as Parametric, so a zoomed-in view can still be panned. The heavy
+    // recompute is deferred to release (see on_left_click block below).
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        bool crosshair_gesture = on_left_drag && step_x > 0.0 && step_y > 0.0 &&
+            (ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
+             (ImGui::IsMouseDown(ImGuiMouseButton_Left) && io.KeyShift));
+        if (plot_hov && crosshair_gesture) {
+            double dx = vis_view_min_x + (double)(io.MousePos.x - img_pos.x) / (double)plot_w
+                        * (vis_view_max_x - vis_view_min_x);
+            double dy = vis_view_max_y - (double)(io.MousePos.y - img_pos.y) / (double)plot_h
+                        * (vis_view_max_y - vis_view_min_y);
+            int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
+            int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
+            if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
+                double snap_x = param_lo_x + (double)ix * step_x;
+                double snap_y = param_lo_y + (double)iy * step_y;
+                on_left_drag(ix, iy, snap_x, snap_y);
+            }
+            // Consume any accumulated LMB drag delta so the pan branch below
+            // (if it fires on Shift+LMB) stays a no-op.
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+        // LMB pan — as before, unless Shift is held (that's a crosshair
+        // gesture). Applies regardless of on_left_drag (Parametric parity).
+        if (plot_hov && !io.KeyShift &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+            ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+            double dwx = -(double)delta.x / (double)plot_w * (vis_view_max_x - vis_view_min_x);
+            double dwy =  (double)delta.y / (double)plot_h * (vis_view_max_y - vis_view_min_y);
+            x_axis.view_min += dwx;  x_axis.view_max += dwx;
+            y_axis.view_min += dwy;  y_axis.view_max += dwy;
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
     }
     if (xax_hov && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
         ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
@@ -653,22 +682,27 @@ void HeatmapView::render(PlotRenderer& renderer,
     // NaN disables the corresponding axis; both NaN → nothing drawn (zero cost).
     // Used by the Custom-tab to visualise fix_x/fix_y slider positions.
     if (std::isfinite(crosshair_x) || std::isfinite(crosshair_y)) {
-        ImU32 col_cross = IM_COL32(255, 220, 80, 200);
+        // Double-stroke: dark halo (3px) + coloured core (1.5px). The halo
+        // keeps the line visible on any colormap band; the core encodes
+        // which sweep-axis the line belongs to (see crosshair_*_color).
+        ImU32 col_halo = IM_COL32(0, 0, 0, 220);
         double range_x = vis_view_max_x - vis_view_min_x;
         double range_y = vis_view_max_y - vis_view_min_y;
         if (std::isfinite(crosshair_x) && std::abs(range_x) > 1e-30
             && crosshair_x >= std::min(vis_view_min_x, vis_view_max_x)
             && crosshair_x <= std::max(vis_view_min_x, vis_view_max_x)) {
             float px = img_pos.x + (float)((crosshair_x - vis_view_min_x) / range_x) * plot_w;
-            dl->AddLine(ImVec2(px, img_pos.y),
-                        ImVec2(px, img_pos.y + plot_h), col_cross, 1.5f);
+            ImVec2 a(px, img_pos.y), b(px, img_pos.y + plot_h);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_x_color, 1.5f);
         }
         if (std::isfinite(crosshair_y) && std::abs(range_y) > 1e-30
             && crosshair_y >= std::min(vis_view_min_y, vis_view_max_y)
             && crosshair_y <= std::max(vis_view_min_y, vis_view_max_y)) {
             float py = img_pos.y + (float)((vis_view_max_y - crosshair_y) / range_y) * plot_h;
-            dl->AddLine(ImVec2(img_pos.x,         py),
-                        ImVec2(img_pos.x + plot_w, py), col_cross, 1.5f);
+            ImVec2 a(img_pos.x, py), b(img_pos.x + plot_w, py);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_y_color, 1.5f);
         }
     }
 
@@ -819,17 +853,22 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // 10b. Left-click drill-down: fires on release when the gesture was NOT a
-    // pan-drag and NOT a double-click. Uses the same pixel snap math as the
-    // tooltip block above. Compatible with existing LMB pan (IsMouseDragging
-    // is what triggers pan — release-without-drag misses it) and RMB rect-zoom.
-    if (plot_hov && on_left_click
-        && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
-        && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
-        && step_x > 0.0 && step_y > 0.0) {
-        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
-        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
-            ImGuiIO& io = ImGui::GetIO();
+    // 10b. Drill-down / crosshair-commit callback. Fires ONLY on release
+    // of a crosshair gesture (MMB or Shift+LMB) — the drag itself was
+    // live-crosshair, release means "commit + recompute". Plain LMB is
+    // reserved for pan; a bare LMB click no longer moves the crosshair
+    // (that was surprising when just clicking to focus the window).
+    if (plot_hov && on_left_click && step_x > 0.0 && step_y > 0.0
+        && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        ImGuiIO& io = ImGui::GetIO();
+        bool trigger = false;
+        // Shift+LMB release — modifier gesture.
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.KeyShift)
+            trigger = true;
+        // MMB release — end of middle-button crosshair drag.
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle))
+            trigger = true;
+        if (trigger) {
             double dx = vis_view_min_x + (double)(io.MousePos.x - img_pos.x) / (double)plot_w
                         * (vis_view_max_x - vis_view_min_x);
             double dy = vis_view_max_y - (double)(io.MousePos.y - img_pos.y) / (double)plot_h

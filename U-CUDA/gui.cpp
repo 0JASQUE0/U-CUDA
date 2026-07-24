@@ -858,9 +858,11 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 
 // Панель настроек сессии: параметры (общие), НУ (список), проекции (список),
 // время/шаг, метод (заглушка), кнопка пересчёта.
-static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
-    PhaseAnalysisSession& s = model.phase_session;
-
+// Reset lambda: what happens when the user hits "Reset to defaults".
+// Analysis-tab passes model.from_record + start_phase_analysis; Custom-tab
+// passes nullptr (Custom users reload from System tab or Run pipeline).
+static void draw_phase_controls(PhaseAnalysisSession& s,
+                                std::function<void()> on_reset_defaults) {
     bool changed = false;
 
     ImGui::Text("Phase portrait analysis");
@@ -1107,15 +1109,11 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
         }
     }
 
-    ImGui::Separator();
-    if (ImGui::Button("Reset to defaults")) {
-        try {
-            if (!model.loaded_name.empty()) {
-                model.from_record(lib.load(model.loaded_name)); // эталон с диска
-                model.start_phase_analysis();
-            }
+    if (on_reset_defaults) {
+        ImGui::Separator();
+        if (ImGui::Button("Reset to defaults")) {
+            try { on_reset_defaults(); } catch (...) {}
         }
-        catch (...) {}
     }
 
     ImGui::Separator();
@@ -1141,8 +1139,7 @@ static void draw_phase_controls(AppModel& model, SystemLibrary& lib) {
 }
 
 // Рисует окна проекций (каждая — отдельное docking-окно с графиком).
-static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
-    PhaseAnalysisSession& s = model.phase_session;
+static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every Phase2D / TimeDomain view that has data —
     // right-click "Export data..." writes the full double-precision
@@ -1200,6 +1197,10 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                     // обновить имена осей
                     pr.view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
                     pr.view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+                    // No zero-axis on phase 2D — x=0 / y=0 have no meaning
+                    // for a state-space trajectory.
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = false;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
@@ -1269,6 +1270,10 @@ static void draw_projection_windows(AppModel& model, const GuiCallbacks& cb) {
                 }
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+                    // No zero-axis for time-domain — the X-axis is time,
+                    // y=0 rarely coincides with a meaningful reference.
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = false;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
@@ -5933,8 +5938,10 @@ void draw_shared_config(CustomTabSharedConfig& c,
         InputNumStr("h",              c.h_text,           120);
         if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s,       120);
-        InputNumStr("computing time", c.t_max_text,       120);
+        // TT before CT: transient runs first, computing-time is what's
+        // actually sampled after — order matches conceptual flow.
         InputNumStr("transient time", c.transient_text,   120);
+        InputNumStr("computing time", c.t_max_text,       120);
         InputNumStr("decimator",      c.pre_scaller_text, 120);
         InputNumStr("max value",      c.max_value_text,   120);
     }
@@ -5982,7 +5989,7 @@ void draw_shared_config(CustomTabSharedConfig& c,
 
 void draw_level2d_detail(CustomSession& cs) {
     auto& c = cs.shared;
-    ImGui::SeparatorText("Level 2D — Bif / LLE / LS on a shared grid");
+    // Header title carries the level name — no SeparatorText here.
 
     ImGui::Checkbox("Bif",  &c.bif2d_enabled); ImGui::SameLine();
     ImGui::Checkbox("LLE",  &c.lle2d_enabled); ImGui::SameLine();
@@ -6027,28 +6034,32 @@ void draw_level2d_detail(CustomSession& cs) {
 
 void draw_level1d_detail(CustomSession& cs) {
     auto& c = cs.shared;
-    ImGui::SeparatorText("Level 1D — slices through the 2D area");
+    // Header title carries the level name — no SeparatorText here.
 
     if (!c.level_2d_enabled) ImGui::BeginDisabled();
     ImGui::Checkbox("Inherit sweep from Level 2D", &c.inherit_sweep_from_2d);
     if (!c.level_2d_enabled) {
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextDisabled("(Level 2D off — L1D uses its own sweep)");
+        ImGui::TextDisabled("(Level 2D off - L1D uses its own sweep)");
     }
 
     const bool inheriting = c.inherit_sweep_from_2d && c.level_2d_enabled;
     EffectiveSweep sx = effective_sweep_x(c);
     EffectiveSweep sy = effective_sweep_y(c);
 
+    // Inherit disables ONLY the sweep axis (par target + lo/hi), leaving
+    // N and the L1D-specific integrator fields (h/TT/CT below) always
+    // editable — L1D is cheap and interactive, so users may want a finer
+    // grid or a longer transient than L2D even when sharing the same axis.
     ImGui::TextUnformatted("X-sweep:"); ImGui::SameLine();
     if (inheriting) ImGui::BeginDisabled();
     draw_sweep_target_combo("##sxp", cs.params, cs.vars,
                             c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index);
     InputNumStr("lo##sx", c.sweep_x_lo_text, 120);
     InputNumStr("hi##sx", c.sweep_x_hi_text, 120);
-    InputNumStr("N##sx",  c.n_x_1d_text,      120);
     if (inheriting) ImGui::EndDisabled();
+    InputNumStr("N##sx",  c.n_x_1d_text,      120);
 
     ImGui::TextUnformatted("Y-sweep:"); ImGui::SameLine();
     if (inheriting) ImGui::BeginDisabled();
@@ -6056,31 +6067,96 @@ void draw_level1d_detail(CustomSession& cs) {
                             c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index);
     InputNumStr("lo##sy", c.sweep_y_lo_text, 120);
     InputNumStr("hi##sy", c.sweep_y_hi_text, 120);
-    InputNumStr("N##sy",  c.n_y_1d_text,      120);
     if (inheriting) ImGui::EndDisabled();
+    InputNumStr("N##sy",  c.n_y_1d_text,      120);
+
+    // L1D-specific integrator overrides — order TT before CT (per user
+    // convention: transient runs first, then computing time is what's
+    // actually sampled).
+    ImGui::Separator();
+    ImGui::TextUnformatted("L1D integrator (independent of shared):");
+    InputNumStr("h##l1d",              c.l1d_h_text,          120);
+    InputNumStr("transient time##l1d", c.l1d_transient_text,  120);
+    InputNumStr("computing time##l1d", c.l1d_t_max_text,      120);
 
     ImGui::Separator();
-    // Slice sliders — clamped to the current effective ranges. Any user
-    // change re-arms the debounced auto-recompute (start_next drainer picks
-    // this up on the next frame after the slider settles).
+    // Slice sliders — clamped to the current effective ranges. Values are
+    // snapped to the 2D grid nodes (same coordinates the heatmap draws
+    // pixels at), so dragging the slider walks exactly through the pixels
+    // a Y-slice cross-hair would land on. Snap uses the L2D resolution
+    // (`n_x_text` / `n_y_text`) — the grid the 2D compute actually ran on
+    // — so an L1D own-sweep with a different N doesn't drift the snap.
+    // SliderScalar<Double> stays in double throughout (SliderFloat would
+    // downcast to float and land 0.2 as 0.20000000298023224). Drag only
+    // moves the crosshair; recompute fires on IsItemDeactivatedAfterEdit.
     double fx_lo = parse_num_default(sx.lo_text, 0.0);
     double fx_hi = parse_num_default(sx.hi_text, 1.0);
     double fy_lo = parse_num_default(sy.lo_text, 0.0);
     double fy_hi = parse_num_default(sy.hi_text, 1.0);
     if (fx_hi < fx_lo) std::swap(fx_lo, fx_hi);
     if (fy_hi < fy_lo) std::swap(fy_lo, fy_hi);
-    float fx = (float)c.fix_x_value;
-    float fy = (float)c.fix_y_value;
-    ImGui::SetNextItemWidth(240.0f);
-    if (ImGui::SliderFloat("fix X", &fx, (float)fx_lo, (float)fx_hi)) {
-        c.fix_x_value = fx;
-        c.last_slider_change_time = ImGui::GetTime();
-    }
-    ImGui::SetNextItemWidth(240.0f);
-    if (ImGui::SliderFloat("fix Y", &fy, (float)fy_lo, (float)fy_hi)) {
-        c.fix_y_value = fy;
-        c.last_slider_change_time = ImGui::GetTime();
-    }
+    // Discrete slider via index-value trick: SliderScalar<Int> steps by 1
+    // (thumb snaps hard, no continuous drift), value = grid index. Format
+    // string is a LITERAL world-coord string (no % specifier), so the
+    // bubble shows "0.158730" instead of "5". Bubble text is precomputed
+    // from the CURRENT idx before SliderScalar runs — during drag it
+    // shows the previous frame's snapped world value (1-frame lag on the
+    // text only, but the thumb itself always sits on a grid node).
+    int n_snap_x = std::atoi(c.n_x_text.c_str()); if (n_snap_x < 2) n_snap_x = 64;
+    int n_snap_y = std::atoi(c.n_y_text.c_str()); if (n_snap_y < 2) n_snap_y = 64;
+    auto idx_from_world = [](double v, double lo, double hi, int n) {
+        if (n < 2 || hi <= lo) return 0;
+        double step = (hi - lo) / (double)(n - 1);
+        int i = (int)std::round((v - lo) / step);
+        if (i < 0) i = 0; if (i > n - 1) i = n - 1;
+        return i;
+    };
+    auto world_from_idx = [](int i, double lo, double hi, int n) {
+        if (n < 2 || hi <= lo) return lo;
+        return lo + (double)i * (hi - lo) / (double)(n - 1);
+    };
+
+    // Step-arrows + slider row. Arrows walk idx by ±1 (repeat on hold),
+    // slider is the discrete int-index widget from above. Same pattern
+    // for X and Y — factored into a lambda.
+    auto arrow_row = [&](const char* id,
+                         int& idx, int idx_min, int idx_max,
+                         double lo, double hi, int n_snap,
+                         double& fix_value,
+                         const char* slider_label) {
+        ImGui::PushID(id);
+        ImGui::PushButtonRepeat(true);
+        bool step_changed = false;
+        if (ImGui::ArrowButton("l", ImGuiDir_Left)) {
+            if (idx > idx_min) { --idx; step_changed = true; }
+        }
+        ImGui::SameLine(0.0f, 2.0f);
+        if (ImGui::ArrowButton("r", ImGuiDir_Right)) {
+            if (idx < idx_max) { ++idx; step_changed = true; }
+        }
+        ImGui::PopButtonRepeat();
+        ImGui::PopID();
+        ImGui::SameLine();
+        char fmt[64];
+        std::snprintf(fmt, sizeof(fmt), "%.6g", world_from_idx(idx, lo, hi, n_snap));
+        ImGui::SetNextItemWidth(240.0f);
+        ImGui::SliderScalar(slider_label, ImGuiDataType_S32, &idx,
+                            &idx_min, &idx_max, fmt);
+        bool released = ImGui::IsItemDeactivatedAfterEdit();
+        fix_value = world_from_idx(idx, lo, hi, n_snap);
+        // Arrow clicks fire the same debounce path as slider release —
+        // step-changed → immediate commit, no need to wait for release.
+        if (released || step_changed)
+            c.last_slider_change_time = ImGui::GetTime();
+    };
+
+    int idx_x = idx_from_world(c.fix_x_value, fx_lo, fx_hi, n_snap_x);
+    arrow_row("##fix_x_arr", idx_x, 0, n_snap_x - 1,
+              fx_lo, fx_hi, n_snap_x, c.fix_x_value, "fix X");
+
+    int idx_y = idx_from_world(c.fix_y_value, fy_lo, fy_hi, n_snap_y);
+    arrow_row("##fix_y_arr", idx_y, 0, n_snap_y - 1,
+              fy_lo, fy_hi, n_snap_y, c.fix_y_value, "fix Y");
 
     ImGui::Separator();
     ImGui::TextUnformatted("Enable slices:");
@@ -6101,24 +6177,21 @@ void draw_level1d_detail(CustomSession& cs) {
 
 void draw_level3_detail(CustomSession& cs) {
     auto& c = cs.shared;
-    ImGui::SeparatorText("Level 3 — Phase / Time-domain or Basins");
+    // Header title carries the level name — no SeparatorText here.
     ImGui::RadioButton("Phase + Time-domain", &c.level3_kind, 0); ImGui::SameLine();
     ImGui::RadioButton("Basins",              &c.level3_kind, 1);
 
     ImGui::Separator();
-    ImGui::Checkbox("Auto-run on drill-down click", &c.autorun_on_drilldown);
-    ImGui::SameLine();
-    ImGui::Checkbox("Use shared IC (else edit per sub-session)", &c.phase_use_shared_ic);
+    ImGui::Checkbox("Auto-run", &c.autorun_on_drilldown);
 
     ImGui::Separator();
     if (c.level3_kind == 0) {
-        // Phase sub-panel: minimal fields — sim_time, skip_time, decimation.
-        // Actual IC/params come from shared. Projections are edited via the
-        // rendered plot windows (like existing PhaseAnalysisSession).
-        InputNumStr("Sim time",  cs.phase_session.sim_time,   120);
-        InputNumStr("Skip time", cs.phase_session.skip_time,  120);
-        InputNumStr("Decim",     cs.phase_session.decimation, 120);
-        ImGui::TextDisabled("Projections are configured on the plot window(s).");
+        // Phase: full IC-sets / integrator / projections UI is embedded
+        // right here, so everything lives inside the pipeline's L3 config
+        // (no separate top-level window). The Analysis-tab uses the same
+        // helper with model.phase_session — here we pass Custom's own
+        // isolated cs.phase_session.
+        draw_phase_controls(cs.phase_session, nullptr);
     } else {
         // Basins sub-panel: IC-space axes + features. All of scheme/h/t_max/
         // etc. come from shared; DBSCAN eps stays per-config.
@@ -6176,13 +6249,23 @@ void draw_pipeline_column(CustomSession& cs, int& selected_level) {
     ImGui::Separator();
 
     auto row = [&](int idx, const char* name, bool& enabled, const char* status) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), " [%-7s] %s", status, name);
+        // Status shown as a tinted trailing label instead of a [tag] prefix
+        // so the level name stays flush-left and readable.
         ImGui::PushID(idx);
         ImGui::Checkbox("##en", &enabled);
         ImGui::SameLine();
-        if (ImGui::Selectable(buf, selected_level == idx))
+        if (ImGui::Selectable(name, selected_level == idx))
             selected_level = idx;
+        if (status && status[0] && std::string_view(status) != "idle") {
+            ImGui::SameLine();
+            ImVec4 col(0.6f, 0.6f, 0.6f, 1.0f);
+            std::string_view sv(status);
+            if      (sv == "running") col = ImVec4(1.0f, 0.85f, 0.35f, 1.0f);
+            else if (sv == "ok")      col = ImVec4(0.5f, 0.9f,  0.5f,  1.0f);
+            else if (sv == "error")   col = ImVec4(1.0f, 0.45f, 0.4f,  1.0f);
+            else if (sv == "off")     col = ImVec4(0.5f, 0.5f,  0.5f,  1.0f);
+            ImGui::TextColored(col, "%s", status);
+        }
         ImGui::PopID();
     };
 
@@ -6228,13 +6311,30 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     auto& cs = model.custom_session;
     auto& c  = cs.shared;
 
-    // Top row: Run pipeline + Stop + status.
-    if (ImGui::Button("Run pipeline")) {
-        // Push level 2D → 1D → 3 in order. Existing queue items (from prior
-        // clicks) stay in front; new items are appended at the tail.
-        cs.enqueue_level_2d(model.custom_queue);
-        cs.enqueue_level_1d(model.custom_queue);
-        cs.enqueue_level_3 (model.custom_queue);
+    // Top row: Run + Stop + status. Also bound to Ctrl+R (same shortcut
+    // Phase controls / Bif controls use for their local Run). Dirty-tracked:
+    // build each level's signature, compare with the last committed one; if
+    // nothing changed for a level AND its last run succeeded, skip enqueue.
+    // Newly-enqueued signatures land in `pending_armed`; a successful poll
+    // then promotes pending → committed (see poll_and_commit below).
+    bool run_now = ImGui::Button("Run");
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false))
+        run_now = true;
+    if (run_now) {
+        auto try_enqueue = [&](CustomSession::LevelSig& sig,
+                               const std::string& current,
+                               std::function<void()> do_enqueue) {
+            if (current == sig.committed && sig.committed_ok) return;
+            do_enqueue();
+            sig.pending = current;
+            sig.pending_armed = true;
+        };
+        try_enqueue(cs.sig_l2d, build_l2d_signature(c, cs),
+                    [&](){ cs.enqueue_level_2d(model.custom_queue); });
+        try_enqueue(cs.sig_l1d, build_l1d_signature(c, cs),
+                    [&](){ cs.enqueue_level_1d(model.custom_queue); });
+        try_enqueue(cs.sig_l3,  build_l3_signature (c, cs),
+                    [&](){ cs.enqueue_level_3 (model.custom_queue); });
     }
     ImGui::SameLine();
     if (ImGui::Button("Stop / clear queue")) {
@@ -6244,14 +6344,36 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::SameLine();
     ImGui::TextDisabled("(%zu queued)", model.custom_queue.size());
 
-    // Auto-recompute 1D on slider settle. Debounce 200 ms + no in-flight.
-    if (c.auto_recompute_1d && c.level_1d_enabled && !cs.any_in_flight()) {
+    // Auto-recompute 1D on slider settle, plus Phase (if L3=Phase and
+    // autorun_on_drilldown is on) so drag-releasing the crosshair or the
+    // slider gives immediate feedback. Debounce 200 ms + no in-flight.
+    // Also picks up the LMB-release from HeatmapView::on_left_drag —
+    // wire_2d_heatmap_interaction bumps last_slider_change_time on every
+    // drag tick, and on_left_click enqueues Phase explicitly, so this path
+    // handles the slider case symmetrically.
+    if (c.level_1d_enabled && !cs.any_in_flight()) {
         double now = ImGui::GetTime();
-        if (c.last_slider_change_time > 0.0
-            && now - c.last_slider_change_time > 0.2
-            && model.custom_queue.empty()) {
-            // Cancel-and-restart any pending 1D items by pushing fresh ones.
-            cs.enqueue_level_1d(model.custom_queue);
+        bool settled = c.last_slider_change_time > 0.0
+                    && now - c.last_slider_change_time > 0.2
+                    && model.custom_queue.empty();
+        if (settled) {
+            if (c.auto_recompute_1d)
+                cs.enqueue_level_1d(model.custom_queue);
+            if (c.autorun_on_drilldown && c.level_phase_enabled) {
+                // Sync param_values with the current fix_x/y so Phase reads
+                // the drilled-down parameter set (mirror of on_left_click).
+                auto pin_param = [&](int par_i, bool over_var, double v) {
+                    if (over_var) return;
+                    if (par_i < 0 || par_i >= (int)cs.params.size()) return;
+                    char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
+                    c.param_values[cs.params[par_i]] = buf;
+                };
+                pin_param(c.axis_x_par_index, c.axis_x_over_var, c.fix_x_value);
+                pin_param(c.axis_y_par_index, c.axis_y_over_var, c.fix_y_value);
+                model.custom_queue.push_back({ c.level3_kind == 0
+                    ? CustomQueueItem::Kind::Phase
+                    : CustomQueueItem::Kind::Basins });
+            }
             c.last_slider_change_time = 0.0;
         }
     }
@@ -6259,26 +6381,76 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     // Shared config panel — always visible at the top.
     draw_shared_config(c, cs.vars, cs.params, cs.custom_schemes);
 
-    // Pipeline column + inline per-level detail panels below (linear flow —
-    // pipeline row shows enable/status, then the level's config is directly
-    // underneath in a CollapsingHeader; no separate right-side column).
-    static int selected_level = 0;
-    ImGui::Separator();
-    draw_pipeline_column(cs, selected_level);
     ImGui::Separator();
 
-    // Each level's detail as its own CollapsingHeader. Auto-open the header
-    // for the currently-selected level; user can still fold/open others
-    // independently. Header title matches the pipeline row label.
-    ImGui::SetNextItemOpen(selected_level == 0, ImGuiCond_Always);
-    if (ImGui::CollapsingHeader("Level 2D config##custom_l2d"))
-        draw_level2d_detail(cs);
-    ImGui::SetNextItemOpen(selected_level == 1, ImGuiCond_Always);
-    if (ImGui::CollapsingHeader("Level 1D config##custom_l1d"))
-        draw_level1d_detail(cs);
-    ImGui::SetNextItemOpen(selected_level == 2, ImGuiCond_Always);
-    if (ImGui::CollapsingHeader("Level 3 config##custom_l3"))
-        draw_level3_detail(cs);
+    // Each level = enable-checkbox + CollapsingHeader + status label,
+    // headers stay open/closed as the user last left them (SetNextItemOpen
+    // uses FirstUseEver, so the first-ever appearance opens L2D and closes
+    // the others; later, the ImGui-managed state wins). Multiple headers
+    // can be open at once — no forced current-level.
+    auto level_header = [&](const char* enable_id,
+                            bool& enabled,
+                            const char* title,
+                            bool running, bool has_result,
+                            bool default_open,
+                            const std::function<void()>& body) {
+        ImGui::Checkbox(enable_id, &enabled);
+        ImGui::SameLine();
+        // Tinted status suffix on the header title itself so it's visible
+        // even when the header is collapsed.
+        const char* status =
+            !enabled ? "off" :
+            running  ? "running" :
+            has_result ? "ok" : "idle";
+        ImVec4 status_col(0.6f, 0.6f, 0.6f, 1.0f);
+        if      (!std::strcmp(status, "running")) status_col = ImVec4(1.0f, 0.85f, 0.35f, 1.0f);
+        else if (!std::strcmp(status, "ok"))      status_col = ImVec4(0.5f, 0.9f,  0.5f,  1.0f);
+        else if (!std::strcmp(status, "off"))     status_col = ImVec4(0.5f, 0.5f,  0.5f,  1.0f);
+        char header_label[128];
+        std::snprintf(header_label, sizeof(header_label), "%s##hdr_%s", title, enable_id);
+        ImGui::SetNextItemOpen(default_open, ImGuiCond_FirstUseEver);
+        bool open = ImGui::CollapsingHeader(header_label);
+        // Status label on the SAME line as the header (rendered AFTER the
+        // header so it sits inline).
+        ImGui::SameLine();
+        ImGui::TextColored(status_col, "[%s]", status);
+        if (open) body();
+    };
+
+    // Derive status flags (same logic that used to live in draw_pipeline_column).
+    bool level2_running =
+        (cs.bif_session.in_flight && cs.bif_session.running_diagram_index == 0) ||
+        (cs.lle_session.in_flight && cs.lle_session.running_curve_index   == 0) ||
+        (cs.ls_session.in_flight  && cs.ls_session.running_curve_index    == 0);
+    bool level2_hasres  =
+        (!cs.bif_session.diagrams.empty() && cs.bif_session.diagrams[0].last_run_2d_ok) ||
+        (!cs.lle_session.curves.empty()   && cs.lle_session.curves[0].last_run_2d_ok)   ||
+        (!cs.ls_session.curves.empty()    && cs.ls_session.curves[0].last_run_2d_ok);
+    bool level1_running =
+        (cs.bif_session.in_flight && cs.bif_session.running_diagram_index > 0) ||
+        (cs.lle_session.in_flight && cs.lle_session.running_curve_index   > 0) ||
+        (cs.ls_session.in_flight  && cs.ls_session.running_curve_index    > 0);
+    bool level1_hasres = false;
+    if (cs.bif_session.diagrams.size() > 1 && cs.bif_session.diagrams[1].last_run_ok) level1_hasres = true;
+    if (cs.bif_session.diagrams.size() > 2 && cs.bif_session.diagrams[2].last_run_ok) level1_hasres = true;
+    if (cs.lle_session.curves.size()   > 1 && cs.lle_session.curves[1].last_run_ok)   level1_hasres = true;
+    if (cs.lle_session.curves.size()   > 2 && cs.lle_session.curves[2].last_run_ok)   level1_hasres = true;
+    if (cs.ls_session.curves.size()    > 1 && cs.ls_session.curves[1].last_run_ok)    level1_hasres = true;
+    if (cs.ls_session.curves.size()    > 2 && cs.ls_session.curves[2].last_run_ok)    level1_hasres = true;
+    bool level3_running = cs.phase_session.in_flight || cs.basins_session.in_flight;
+    bool level3_hasres  = cs.phase_session.result.ok ||
+                          (!cs.basins_session.configs.empty() && cs.basins_session.configs[0].last_run_ok);
+    const char* l3_title = c.level3_kind == 0 ? "Level 3 - Phase / Time-domain" : "Level 3 - Basins";
+
+    level_header("##en_l2d", c.level_2d_enabled, "Level 2D - Bif / LLE / LS",
+                 level2_running, level2_hasres, /*default_open=*/true,
+                 [&](){ draw_level2d_detail(cs); });
+    level_header("##en_l1d", c.level_1d_enabled, "Level 1D - slices",
+                 level1_running, level1_hasres, /*default_open=*/false,
+                 [&](){ draw_level1d_detail(cs); });
+    level_header("##en_l3", c.level_phase_enabled, l3_title,
+                 level3_running, level3_hasres, /*default_open=*/false,
+                 [&](){ draw_level3_detail(cs); });
 }
 
 // ---- Custom-tab plot windows ----
@@ -6297,6 +6469,16 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
                                                 : std::numeric_limits<double>::quiet_NaN();
     hv.crosshair_y = cs.shared.level_1d_enabled ? cs.shared.fix_y_value
                                                 : std::numeric_limits<double>::quiet_NaN();
+    // Drag callback: fires every frame while LMB is held inside the plot
+    // (see HeatmapView on_left_drag). Cheap — just moves the crosshair by
+    // updating fix_x/fix_y so the shared crosshair on every 2D window
+    // follows the cursor. Recompute (Phase/Basins enqueue + param_values
+    // update) is deferred to on_left_click on release.
+    hv.on_left_drag = [&cs](int, int, double snap_x, double snap_y) {
+        cs.shared.fix_x_value = snap_x;
+        cs.shared.fix_y_value = snap_y;
+        cs.shared.last_slider_change_time = ImGui::GetTime();
+    };
     hv.on_left_click = [&cs, &q](int, int, double snap_x, double snap_y) {
         auto& s = cs.shared;
         // Update fix_x/fix_y (also drives crosshair on other 2D windows).
@@ -6308,12 +6490,12 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         // as IC edits — pipeline drainer handles that path).
         if (!s.axis_x_over_var && s.axis_x_par_index >= 0 &&
             s.axis_x_par_index < (int)cs.params.size()) {
-            char buf[64]; std::snprintf(buf, sizeof(buf), "%.10g", snap_x);
+            char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", snap_x);
             s.param_values[cs.params[s.axis_x_par_index]] = buf;
         }
         if (!s.axis_y_over_var && s.axis_y_par_index >= 0 &&
             s.axis_y_par_index < (int)cs.params.size()) {
-            char buf[64]; std::snprintf(buf, sizeof(buf), "%.10g", snap_y);
+            char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", snap_y);
             s.param_values[cs.params[s.axis_y_par_index]] = buf;
         }
         if (s.autorun_on_drilldown && s.level_phase_enabled) {
@@ -6382,15 +6564,17 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         }
         if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
             auto& c = cs.ls_session.curves[0];
-            int k = c.display_exponent_idx;
-            bool k_ok = (c.result_2d.n_exponents > 0 && k >= 0 && k < c.result_2d.n_exponents);
-            const double* values_k = (k_ok && !c.result_2d.values.empty())
-                ? &c.result_2d.values[(size_t)k * c.result_2d.n_pts * c.result_2d.n_pts]
-                : nullptr;
-            double vmin = (k_ok && k < (int)c.result_2d.min_val.size()) ? c.result_2d.min_val[k] : 0.0;
-            double vmax = (k_ok && k < (int)c.result_2d.max_val.size()) ? c.result_2d.max_val[k] : 1.0;
-            slots[2] = { "Custom LS 2D", true, c.last_run_2d_ok && values_k != nullptr,
-                         c.result_2d.n_pts, values_k,
+            // Fallback plane pointer = first exponent (L1). Real plane for
+            // has_data / render is picked later in the toolbar block, so
+            // has_data must NOT depend on which exponent (or "sum") is
+            // currently selected — otherwise picking "sum L_i" flips the
+            // slot to "No data yet" because the fallback here goes nullptr.
+            const double* values_default = c.result_2d.values.empty()
+                ? nullptr : c.result_2d.values.data();
+            double vmin = c.result_2d.min_val.empty() ? 0.0 : c.result_2d.min_val[0];
+            double vmax = c.result_2d.max_val.empty() ? 1.0 : c.result_2d.max_val[0];
+            slots[2] = { "Custom LS 2D", true, c.last_run_2d_ok && !c.result_2d.values.empty(),
+                         c.result_2d.n_pts, values_default,
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
                          vmin, vmax, c.data_generation_2d, 0xC152D0 };
@@ -6408,6 +6592,20 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         if (cm >= 0 && cm < kHeatmapColormapCount)
             heatmaps[i].colormap = (HeatmapColormap)cm;
     };
+    // Sync LS exponent choice from the sub-session's persisted
+    // display_exponent_idx (sentinel -1 = sum L_i) on first appearance —
+    // otherwise session_from_json_custom loads the pref but the HeatmapView
+    // silently starts at 0 (L1) until the user re-picks. Uses the same
+    // "seen" pattern as the colormap sync so subsequent user picks aren't
+    // clobbered.
+    static int ls_init_exp_seen = -999;
+    if (!cs.ls_session.curves.empty()) {
+        int cfg_exp = cs.ls_session.curves[0].display_exponent_idx;
+        if (ls_init_exp_seen != cfg_exp) {
+            ls_init_exp_seen = cfg_exp;
+            heatmaps[2].display_exponent_idx = cfg_exp;
+        }
+    }
     if (!cs.bif_session.diagrams.empty())
         init_cmap_from_config(0, cs.bif_session.diagrams[0].colormap_idx);
     if (!cs.lle_session.curves.empty())
@@ -6532,7 +6730,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 hv.swap_axes = !hv.swap_axes;
 
             if (!slots[i].has_data) {
-                ImGui::TextDisabled("No data yet. Press Run pipeline / Run Level 2D.");
+                ImGui::TextDisabled("No data yet. Press Run / Run Level 2D.");
                 ImGui::PopID();
             } else {
                 hv.x_axis.name = ax_x;
@@ -6617,10 +6815,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     static std::array<std::unique_ptr<Plot2DView>,  6> l1_views;
     static std::array<std::unique_ptr<PlotRenderer>, 6> l1_renderers;
     // Per-slot buffer scratch — kept static so pointers passed into
-    // PlotSeriesInput stay valid until render() returns.
-    static std::array<std::vector<float>,           6> l1_bufs;
-    // LS slot exponent picker (per-slot session state). Sentinel -1 = sum L_i.
-    static std::array<int, 6> l1_ls_exp = { 0, 0, 0, 0, 0, 0 };
+    // PlotSeriesInput stay valid until render() returns. Per-slot vector of
+    // series-buffers (one buffer per series) so LS 1D can show N exponents
+    // as N coloured lines, matching draw_ls_plot in Parametric.
+    static std::array<std::vector<std::vector<float>>, 6> l1_bufs;
 
     for (int i = 0; i < 6; ++i) {
         if (!lslots[i].show) continue;
@@ -6680,7 +6878,6 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                ? cs.vars[d.writable_var] : "X";
             view.points_mode = true;
             view.point_size_px = 2.0f;
-            view.pad_x = false;
         } else if (lslots[i].kind == L1Kind::LLE) {
             int idx = lslots[i].cfg_idx;
             if (idx < 0 || idx >= (int)cs.lle_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
@@ -6709,28 +6906,17 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             view.points_mode = false;
             view.imdraw_lines = true;
             view.line_thickness_px = 1.5f;
-
-            // Exponent picker toolbar — L1..LN + sum L_i (sentinel -1).
-            if (ok && c.result.n_exponents > 0) {
-                int N = c.result.n_exponents;
-                if (l1_ls_exp[i] != -1 && (l1_ls_exp[i] < 0 || l1_ls_exp[i] >= N))
-                    l1_ls_exp[i] = 0;
-                std::string preview = (l1_ls_exp[i] == -1)
-                    ? "sum L_i" : ("L" + std::to_string(l1_ls_exp[i] + 1));
-                ImGui::SetNextItemWidth(100);
-                if (ImGui::BeginCombo("Exponent", preview.c_str())) {
-                    for (int j = 0; j < N; ++j) {
-                        std::string lbl = "L" + std::to_string(j + 1);
-                        if (ImGui::Selectable(lbl.c_str(), l1_ls_exp[i] == j))
-                            l1_ls_exp[i] = j;
-                    }
-                    ImGui::Separator();
-                    if (ImGui::Selectable("sum L_i", l1_ls_exp[i] == -1))
-                        l1_ls_exp[i] = -1;
-                    ImGui::EndCombo();
-                }
-            }
+            // LS shows every exponent as its own coloured line (parity with
+            // draw_ls_plot in Parametric) — no exponent picker here; series
+            // are built in the render block below.
         }
+
+        // Common per-frame view knobs for all L1D kinds — data flush to the
+        // side borders and no zero-axis line (it's noise on a bifurcation
+        // diagram, LLE, and LS spectrum where y=0 has no special meaning).
+        view.pad_x        = false;
+        view.show_zero_x  = false;
+        view.show_zero_y  = false;
 
         if (!ok) {
             ImGui::TextDisabled("No data yet.");
@@ -6742,18 +6928,55 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         view.x_fit_min = std::min(param_lo, param_hi);
         view.x_fit_max = std::max(param_lo, param_hi);
 
-        // Build one series per slot. Bif = scatter of all peak samples;
-        // LLE = single line; LS = one line for the selected exponent (or
-        // per-point sum of all).
+        // Sweep-position crosshair — vertical line at fix_x (X-slice)
+        // or fix_y (Y-slice), synced with the slider / drag on 2D heatmaps.
+        // Hidden if Level 1D isn't the driver (falls out to NaN → no draw).
+        view.crosshair_x = cs.shared.level_1d_enabled
+                           ? lslots[i].fix_pt
+                           : std::numeric_limits<double>::quiet_NaN();
+        // Colour the vertical crosshair by which sweep this slice belongs
+        // to, so the same colour on the 2D heatmap and its 1D slice tells
+        // the eye which axis you're looking at.
+        //  cfg_idx == 1 → X-slice → matches heatmap's vertical X-sweep line
+        //  cfg_idx == 2 → Y-slice → matches heatmap's horizontal Y-sweep line
+        view.crosshair_x_color = (lslots[i].cfg_idx == 2)
+                                  ? 0xFFFF9028u   // orange = Y sweep
+                                  : 0xFF50A0FFu;  // blue   = X sweep
+
+        // Wire crosshair drag: MMB or Shift+LMB inside the plot moves the
+        // corresponding fix_* value along the sweep axis of this slice.
+        // Release triggers the shared auto-recompute (Level 1D + Phase)
+        // via last_slider_change_time — same debounce path the L2D
+        // heatmap drag and the fix sliders already go through, so all
+        // three sources produce identical downstream behaviour.
+        //  cfg_idx == 1 → X-slice sweeps X → drag updates fix_x
+        //  cfg_idx == 2 → Y-slice sweeps Y → drag updates fix_y
+        const bool slice_is_x = (lslots[i].cfg_idx == 1);
+        view.on_left_drag = [&cs, slice_is_x](double world_x) {
+            if (slice_is_x) cs.shared.fix_x_value = world_x;
+            else            cs.shared.fix_y_value = world_x;
+            cs.shared.last_slider_change_time = ImGui::GetTime();
+        };
+        view.on_left_click = [&cs, slice_is_x](double world_x) {
+            if (slice_is_x) cs.shared.fix_x_value = world_x;
+            else            cs.shared.fix_y_value = world_x;
+            cs.shared.last_slider_change_time = ImGui::GetTime();
+        };
+
+        // Build series. Bif = one scatter series with all peak samples;
+        // LLE = one line; LS = N line series, one per exponent (parity
+        // with draw_ls_plot).
         std::vector<PlotSeriesInput> series_in;
         std::vector<bool> init_vis, glob_vis;
-        auto& buf = l1_bufs[i];
-        buf.clear();
+        auto& bufs = l1_bufs[i];
+        bufs.clear();
 
         int series_gen = data_gen;
         if (lslots[i].kind == L1Kind::Bif) {
             const auto& r = cs.bif_session.diagrams[lslots[i].cfg_idx].result;
             int n = r.n_pts > 0 ? r.n_pts : 1;
+            bufs.emplace_back();
+            auto& buf = bufs.back();
             for (int p = 0; p < (int)r.bifurcation_points.size(); ++p) {
                 double px = param_lo + (param_hi - param_lo) * (double)p /
                             (double)(n - 1 > 0 ? n - 1 : 1);
@@ -6771,6 +6994,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         } else if (lslots[i].kind == L1Kind::LLE) {
             const auto& r = cs.lle_session.curves[lslots[i].cfg_idx].result;
             int n = (int)r.lyapunov.size();
+            bufs.emplace_back();
+            auto& buf = bufs.back();
             buf.reserve(n * 2);
             for (int p = 0; p < n; ++p) {
                 double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
@@ -6784,35 +7009,38 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             si.color = ic_base_color(0);
             si.label = "LLE";
             series_in.push_back(si);
-        } else { // LS
+        } else { // LS — N series, one per exponent (parity with draw_ls_plot).
             const auto& r = cs.ls_session.curves[lslots[i].cfg_idx].result;
             int n = r.n_pts;
             int N = r.n_exponents;
-            int k = l1_ls_exp[i];
             if (N > 0 && n > 0 && (int)r.spectrum.size() == n) {
-                buf.reserve(n * 2);
-                for (int p = 0; p < n; ++p) {
-                    double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
-                                           (double)(n - 1) : param_lo;
-                    double y;
-                    if (k == -1) {
-                        y = 0.0;
-                        if (!r.spectrum[p].empty())
-                            for (int j = 0; j < N && j < (int)r.spectrum[p].size(); ++j)
-                                y += r.spectrum[p][j];
-                    } else {
-                        y = (k >= 0 && k < (int)r.spectrum[p].size()) ? r.spectrum[p][k] : 0.0;
+                bufs.reserve(N);
+                for (int j = 0; j < N; ++j) {
+                    bufs.emplace_back();
+                    auto& buf = bufs.back();
+                    buf.reserve(n * 2);
+                    int total_pts = 0;
+                    for (int p = 0; p < n; ++p) {
+                        if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
+                        if (p >= (int)r.spectrum.size()) continue;
+                        const auto& row = r.spectrum[p];
+                        if (j >= (int)row.size()) continue;
+                        double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
+                                               (double)(n - 1) : param_lo;
+                        double y = row[j];
+                        if (!std::isfinite(y)) continue;
+                        buf.push_back((float)px);
+                        buf.push_back((float)y);
+                        ++total_pts;
                     }
-                    buf.push_back((float)px);
-                    buf.push_back((float)y);
+                    PlotSeriesInput si;
+                    si.points = buf.empty() ? nullptr : buf.data();
+                    si.n_points = total_pts;
+                    si.color = ic_base_color(j);
+                    si.label = "L" + std::to_string(j + 1);
+                    series_in.push_back(si);
                 }
-                PlotSeriesInput si;
-                si.points = buf.data();
-                si.n_points = n;
-                si.color = ic_base_color(std::max(k, 0));
-                si.label = (k == -1) ? "sum L_i" : ("L" + std::to_string(k + 1));
-                series_in.push_back(si);
-                series_gen = data_gen * 64 + (k + 2);  // rebuild VBO on exponent switch
+                series_gen = data_gen * 64 + N;  // rebuild VBO if N changes
             }
         }
         init_vis.assign(series_in.size(), true);
@@ -6842,79 +7070,15 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         ImGui::End();
     }
 
-    // --- Level 3 window: Phase portrait (2D projection) or Basins heatmap ---
-    if (cs.shared.level_phase_enabled) {
-        const char* title = cs.shared.level3_kind == 0
-            ? "Custom Phase / Time-domain"
-            : "Custom Basins";
-        if (ImGui::Begin(title)) {
-            if (cs.shared.level3_kind == 0) {
-                // Phase — mirrors Analysis-tab Phase2D projection rendering
-                // (see draw_phase_plot at gui.cpp:~1189). Fixed axes: pick
-                // first two variables of the system for X/Y projection.
-                auto& ps = cs.phase_session;
-                if (ps.in_flight) {
-                    ImGui::TextDisabled("Computing phase portrait...");
-                } else if (!ps.result.ok || ps.result.trajectories.empty()) {
-                    ImGui::TextDisabled("No phase result yet. Click a 2D pixel or press Run pipeline.");
-                } else {
-                    static int         phase_ax = 0;
-                    static int         phase_ay = 1;
-                    static Plot2DView  phase_view;
-                    static PlotRenderer phase_renderer;
-                    int nvars = (int)cs.vars.size();
-                    if (phase_ax >= nvars) phase_ax = 0;
-                    if (phase_ay >= nvars) phase_ay = std::min(1, nvars - 1);
-
-                    // Axis picker toolbar (X / Y projection).
-                    auto var_combo = [&](const char* lbl, int& v) {
-                        ImGui::SetNextItemWidth(80);
-                        const char* prev = (v >= 0 && v < nvars) ? cs.vars[v].c_str() : "?";
-                        if (ImGui::BeginCombo(lbl, prev)) {
-                            for (int j = 0; j < nvars; ++j)
-                                if (ImGui::Selectable(cs.vars[j].c_str(), v == j)) v = j;
-                            ImGui::EndCombo();
-                        }
-                    };
-                    var_combo("X##phase_ax", phase_ax); ImGui::SameLine();
-                    var_combo("Y##phase_ay", phase_ay);
-
-                    phase_view.x_axis.name = (phase_ax >= 0 && phase_ax < nvars) ? cs.vars[phase_ax] : "x";
-                    phase_view.y_axis.name = (phase_ay >= 0 && phase_ay < nvars) ? cs.vars[phase_ay] : "y";
-
-                    // Build series: one per IC-trajectory, points (x[ax], x[ay]).
-                    static std::vector<std::vector<float>> phase_series_data;
-                    phase_series_data.clear();
-                    phase_series_data.resize(ps.result.trajectories.size());
-                    std::vector<PlotSeriesInput> series_in;
-                    series_in.reserve(ps.result.trajectories.size());
-                    std::vector<bool> init_vis(ps.result.trajectories.size(), true);
-                    std::vector<bool> glob_vis(ps.result.trajectories.size(), true);
-                    for (size_t k = 0; k < ps.result.trajectories.size(); ++k) {
-                        const auto& traj = ps.result.trajectories[k];
-                        auto& buf = phase_series_data[k];
-                        buf.reserve(traj.size() * 2);
-                        for (const auto& pt : traj) {
-                            buf.push_back((float)pt[phase_ax < (int)pt.size() ? phase_ax : 0]);
-                            buf.push_back((float)pt[phase_ay < (int)pt.size() ? phase_ay : 0]);
-                        }
-                        PlotSeriesInput si;
-                        si.points   = buf.data();
-                        si.n_points = (int)(buf.size() / 2);
-                        si.color    = ic_base_color((int)k);
-                        si.label    = (k < ps.result.labels.size()) ? ps.result.labels[k]
-                                                                     : ("IC " + std::to_string(k + 1));
-                        series_in.push_back(si);
-                    }
-                    int data_gen = ps.data_generation * 100 + phase_ax * 10 + phase_ay;
-                    ImVec2 avail  = ImGui::GetContentRegionAvail();
-                    ImVec2 origin = ImGui::GetCursorScreenPos();
-                    phase_view.render(phase_renderer, origin, avail,
-                                      /*owner_id*/ 0xCFA5E00, data_gen,
-                                      series_in, init_vis, glob_vis, ps.fit_request);
-                    if (ps.fit_request) ps.fit_request = false;
-                }
-            } else {
+    // --- Level 3: phase controls live inside the L3 config panel (see
+    // draw_level3_detail). Here we only spawn the projection windows so
+    // 2D / 3D / TimeDomain plots dock alongside the other custom plots.
+    if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 0) {
+        draw_projection_windows(cs.phase_session, cb);
+    }
+    // --- Level 3 Basins window (unchanged HeatmapView minimal renderer) ---
+    if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
+        if (ImGui::Begin("Custom Basins")) {
                 // Basins — HeatmapView of basin_idx (cluster id) — simpler
                 // than draw_basins_plot's toolbar (feature switch stays in
                 // detail panel), matches user request for a visible result.
@@ -6966,7 +7130,6 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                     }
                 }
             }
-        }
         ImGui::End();
     }
 }
@@ -7080,6 +7243,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_custom",
                              session_to_json_custom(model.custom_session));
+        // When the whole pipeline is drained (queue empty AND nothing left
+        // running), promote pending → committed for each level's signature
+        // so the next Run knows which levels are still up-to-date.
+        if (model.custom_queue.empty() && !model.custom_session.any_in_flight())
+            model.custom_session.commit_pending_signatures();
     }
 
     // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
@@ -7547,10 +7715,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (model.app_mode == AppModel::AppMode::Analysis) {
         // режим анализа: панель настроек + окна проекций (докаются пользователем)
         if (ImGui::Begin("Controls")) {
-            draw_phase_controls(model, lib);
+            draw_phase_controls(model.phase_session, [&model, &lib]() {
+                if (!model.loaded_name.empty()) {
+                    model.from_record(lib.load(model.loaded_name));   // reference from disk
+                    model.start_phase_analysis();
+                }
+            });
         }
         ImGui::End();
-        draw_projection_windows(model, cb);
+        draw_projection_windows(model.phase_session, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Parametric) {
         // Parametric mode: controls window (Bif/LLE/LS config tabs + "Plot

@@ -92,13 +92,24 @@ public:
     // Mirrors Plot2DView::popup_extras (see plot_view_2d.h).
     std::function<void()> popup_extras;
 
-    // Optional left-click callback: fires on mouse release inside the plot
-    // when the gesture was NOT a pan-drag (release-without-drag) and NOT a
-    // double-click. Arguments: pixel indices (nx_idx, ny_idx) and the
-    // snapped world coordinates of that pixel's node centre (same math the
-    // hover tooltip uses). Used by the Custom-tab for drill-down: click a
-    // Bif2D pixel → set the Phase param_values to (snap_x, snap_y).
+    // Optional left-click callback: fires on mouse release inside the plot.
+    // Not called on double-click. Arguments: pixel indices (nx_idx, ny_idx)
+    // and the snapped world coordinates of that pixel's node centre (same
+    // math the hover tooltip uses). Used by the Custom-tab for drill-down:
+    // release LMB after a click or drag → enqueue a Phase run at (snap_x,
+    // snap_y). When `on_left_drag` is also set (see below), this fires on
+    // release regardless of whether the gesture was a drag; when only
+    // on_left_click is set, it fires only if release-without-drag.
     std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_click;
+
+    // Optional live-drag callback for LMB. When set, holding LMB inside the
+    // plot no longer pans — every frame while the button is down the callback
+    // is invoked with the current cursor's pixel indices and snapped world
+    // coordinates. Used by the Custom-tab so the fix_x/fix_y crosshair
+    // follows the cursor during a drag while the heavy recompute is deferred
+    // to on_left_click (release). Leave unset in Parametric to keep the
+    // classic LMB-pan behaviour.
+    std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_drag;
 
     // Crosshair overlay — vertical and horizontal lines drawn on top of the
     // heatmap at the given world coordinates. NaN disables the corresponding
@@ -107,6 +118,12 @@ public:
     // 2D heatmaps.
     double crosshair_x = std::numeric_limits<double>::quiet_NaN();
     double crosshair_y = std::numeric_limits<double>::quiet_NaN();
+    // ARGB (0xAA_RR_GG_BB) — matches IM_COL32 default layout. Two colours
+    // so the vertical line (X sweep) and horizontal line (Y sweep) read
+    // as different axes at a glance, and match the same-axis crosshair
+    // on the corresponding 1D slice plot.
+    unsigned crosshair_x_color = 0xFF50A0FFu;  // blue-ish (X sweep)
+    unsigned crosshair_y_color = 0xFFFF9028u;  // orange   (Y sweep)
 
     HeatmapView() = default;
     ~HeatmapView();

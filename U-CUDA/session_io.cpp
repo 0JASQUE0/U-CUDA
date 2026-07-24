@@ -1364,6 +1364,9 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     S("sweep_y_lo_text",     c.sweep_y_lo_text);
     S("sweep_y_hi_text",     c.sweep_y_hi_text);
     S("n_y_1d_text",         c.n_y_1d_text);
+    S("l1d_h_text",          c.l1d_h_text);
+    S("l1d_transient_text",  c.l1d_transient_text);
+    S("l1d_t_max_text",      c.l1d_t_max_text);
     B("bif1d_x_enabled",     c.bif1d_x_enabled);
     B("bif1d_y_enabled",     c.bif1d_y_enabled);
     B("lle1d_x_enabled",     c.lle1d_x_enabled);
@@ -1375,8 +1378,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     D("fix_y_value",         c.fix_y_value);
     B("auto_recompute_1d",   c.auto_recompute_1d);
     I("level3_kind",         c.level3_kind);
-    B("autorun_on_drilldown", c.autorun_on_drilldown);
-    o << "\"phase_use_shared_ic\":" << (c.phase_use_shared_ic ? "true" : "false");
+    o << "\"autorun_on_drilldown\":" << (c.autorun_on_drilldown ? "true" : "false");
     o << "}";
 }
 } // namespace
@@ -1454,6 +1456,9 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "sweep_y_lo_text")         c.sweep_y_lo_text = q.str();
                         else if (k == "sweep_y_hi_text")         c.sweep_y_hi_text = q.str();
                         else if (k == "n_y_1d_text")             c.n_y_1d_text = q.str();
+                        else if (k == "l1d_h_text")              c.l1d_h_text = q.str();
+                        else if (k == "l1d_transient_text")      c.l1d_transient_text = q.str();
+                        else if (k == "l1d_t_max_text")          c.l1d_t_max_text = q.str();
                         else if (k == "bif1d_x_enabled")         c.bif1d_x_enabled = q.boolean();
                         else if (k == "bif1d_y_enabled")         c.bif1d_y_enabled = q.boolean();
                         else if (k == "lle1d_x_enabled")         c.lle1d_x_enabled = q.boolean();
@@ -1466,7 +1471,6 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "auto_recompute_1d")       c.auto_recompute_1d = q.boolean();
                         else if (k == "level3_kind")             c.level3_kind = std::stoi(q.str_or_num());
                         else if (k == "autorun_on_drilldown")    c.autorun_on_drilldown = q.boolean();
-                        else if (k == "phase_use_shared_ic")     c.phase_use_shared_ic = q.boolean();
                         else                                     q.skip_value();
                         if (q.opt(',')) continue;
                         q.expect('}'); break;
