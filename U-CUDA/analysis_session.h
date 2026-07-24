@@ -536,6 +536,9 @@ struct Dft1DConfig {
     std::string n_freq_text  = "200";
     std::string freq_lo_text = "0";
     std::string freq_hi_text = "10";
+    // Лог-сетка по оси Y (частота) — см. BifurcationDiagramConfig::log_scale.
+    // Требует freq_lo/hi > 0 (валидатор отказывает иначе).
+    bool        freq_log_scale = false;
     // Оконная функция перед DFT: 0=None (rectangular), 1=Hanning (default),
     // 2=Hamming — см. parametric_engine.cpp::build_window.
     int         window_type = 1;
