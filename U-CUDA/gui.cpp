@@ -180,7 +180,9 @@ static bool custom_scheme_uses_symmetry(const std::string& scheme_name,
 
 static std::string auto_axis_name(const std::vector<std::string>& params,
                                    const std::vector<std::string>& vars,
-                                   int param_idx, bool sweep_over_var, int var_idx) {
+                                   int param_idx, bool sweep_over_var, int var_idx,
+                                   bool sweep_over_h = false) {
+    if (sweep_over_h) return "h";
     if (sweep_over_var) {
         if (var_idx >= 0 && var_idx < (int)vars.size()) return vars[var_idx] + " (IC)";
         return "var";
@@ -192,9 +194,9 @@ static std::string auto_axis_name(const std::vector<std::string>& params,
 static std::string auto_label_bd(const BifurcationDiagramConfig& bd,
                                   const std::vector<std::string>& params,
                                   const std::vector<std::string>& vars) {
-    std::string x = auto_axis_name(params, vars, bd.param_index, bd.sweep_over_var, bd.var_sweep_index);
+    std::string x = auto_axis_name(params, vars, bd.param_index, bd.sweep_over_var, bd.var_sweep_index, bd.sweep_over_h);
     if (bd.mode_2d) {
-        std::string y = auto_axis_name(params, vars, bd.param_index_2, bd.sweep_over_var_2, bd.var_sweep_index_2);
+        std::string y = auto_axis_name(params, vars, bd.param_index_2, bd.sweep_over_var_2, bd.var_sweep_index_2, bd.sweep_over_h_2);
         return x + " x " + y;
     }
     const std::string& lo = bd.param_lo_text.empty() ? std::string("?") : bd.param_lo_text;
@@ -205,9 +207,9 @@ static std::string auto_label_bd(const BifurcationDiagramConfig& bd,
 static std::string auto_label_lle(const LLECurveConfig& c,
                                    const std::vector<std::string>& params,
                                    const std::vector<std::string>& vars) {
-    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index);
+    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index, c.sweep_over_h);
     if (c.mode_2d) {
-        std::string y = auto_axis_name(params, vars, c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2);
+        std::string y = auto_axis_name(params, vars, c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2, c.sweep_over_h_2);
         return x + " x " + y;
     }
     const std::string& lo = c.param_lo_text.empty() ? std::string("?") : c.param_lo_text;
@@ -218,9 +220,9 @@ static std::string auto_label_lle(const LLECurveConfig& c,
 static std::string auto_label_ls(const LSCurveConfig& c,
                                   const std::vector<std::string>& params,
                                   const std::vector<std::string>& vars) {
-    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index);
+    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index, c.sweep_over_h);
     if (c.mode_2d) {
-        std::string y = auto_axis_name(params, vars, c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2);
+        std::string y = auto_axis_name(params, vars, c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2, c.sweep_over_h_2);
         return x + " x " + y;
     }
     const std::string& lo = c.param_lo_text.empty() ? std::string("?") : c.param_lo_text;
@@ -1512,7 +1514,9 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
             bd.var_sweep_index = 0;
 
         std::string preview;
-        if (bd.sweep_over_var && !s.vars.empty())
+        if (bd.sweep_over_h)
+            preview = "dt (h)";
+        else if (bd.sweep_over_var && !s.vars.empty())
             preview = s.vars[bd.var_sweep_index] + " (IC)";
         else if (!s.params.empty())
             preview = s.params[bd.param_index];
@@ -1522,19 +1526,29 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         ImGui::SetNextItemWidth(160);
         if (ImGui::BeginCombo("Sweep", preview.c_str())) {
             for (int i = 0; i < (int)s.params.size(); ++i) {
-                bool sel = !bd.sweep_over_var && bd.param_index == i;
+                bool sel = !bd.sweep_over_var && !bd.sweep_over_h && bd.param_index == i;
                 if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                     bd.sweep_over_var = false;
+                    bd.sweep_over_h = false;
                     bd.param_index = i;
                 }
             }
             if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
             for (int i = 0; i < (int)s.vars.size(); ++i) {
                 std::string lbl = s.vars[i] + " (IC)";
-                bool sel = bd.sweep_over_var && bd.var_sweep_index == i;
+                bool sel = bd.sweep_over_var && !bd.sweep_over_h && bd.var_sweep_index == i;
                 if (ImGui::Selectable(lbl.c_str(), sel)) {
                     bd.sweep_over_var = true;
+                    bd.sweep_over_h = false;
                     bd.var_sweep_index = i;
+                }
+            }
+            if (!bd.continuation) {  // continuation требует param-sweep; dt-sweep несовместим с ним (см. run_bif1d)
+                ImGui::Separator();
+                if (ImGui::Selectable("dt (h)", bd.sweep_over_h)) {
+                    bd.sweep_over_h = true;
+                    bd.sweep_over_var = false;
+                    if (bd.mode_2d) bd.sweep_over_h_2 = false;  // ровно одна ось = h
                 }
             }
             ImGui::EndCombo();
@@ -1543,8 +1557,10 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     else {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
     }
-    InputNumStr("Param lo", bd.param_lo_text, 120);
-    InputNumStr("Param hi", bd.param_hi_text, 120);
+    InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, 120);
+    InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, 120);
+    ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
+    if (bd.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
     // Continuation: каждая следующая точка стартует с конечного x[] предыдущей
     // (single-thread GPU-kernel; см. parametric_engine::run_bif1d_continuation).
@@ -1585,7 +1601,9 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
             if (bd.var_sweep_index_2 < 0 || bd.var_sweep_index_2 >= (int)s.vars.size())
                 bd.var_sweep_index_2 = 0;
             std::string preview2;
-            if (bd.sweep_over_var_2 && !s.vars.empty())
+            if (bd.sweep_over_h_2)
+                preview2 = "dt (h)";
+            else if (bd.sweep_over_var_2 && !s.vars.empty())
                 preview2 = s.vars[bd.var_sweep_index_2] + " (IC)";
             else if (!s.params.empty())
                 preview2 = s.params[bd.param_index_2];
@@ -1594,26 +1612,37 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
             ImGui::SetNextItemWidth(160);
             if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
                 for (int i = 0; i < (int)s.params.size(); ++i) {
-                    bool sel = !bd.sweep_over_var_2 && bd.param_index_2 == i;
+                    bool sel = !bd.sweep_over_var_2 && !bd.sweep_over_h_2 && bd.param_index_2 == i;
                     if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                         bd.sweep_over_var_2 = false;
+                        bd.sweep_over_h_2 = false;
                         bd.param_index_2 = i;
                     }
                 }
                 if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
                 for (int i = 0; i < (int)s.vars.size(); ++i) {
                     std::string lbl = s.vars[i] + " (IC)";
-                    bool sel = bd.sweep_over_var_2 && bd.var_sweep_index_2 == i;
+                    bool sel = bd.sweep_over_var_2 && !bd.sweep_over_h_2 && bd.var_sweep_index_2 == i;
                     if (ImGui::Selectable(lbl.c_str(), sel)) {
                         bd.sweep_over_var_2 = true;
+                        bd.sweep_over_h_2 = false;
                         bd.var_sweep_index_2 = i;
+                    }
+                }
+                if (!bd.sweep_over_h) {  // ровно одна ось = h -- X уже занял её
+                    ImGui::Separator();
+                    if (ImGui::Selectable("dt (h)", bd.sweep_over_h_2)) {
+                        bd.sweep_over_h_2 = true;
+                        bd.sweep_over_var_2 = false;
                     }
                 }
                 ImGui::EndCombo();
             }
         }
-        InputNumStr("Param2 lo",  bd.param_lo_2_text, 120);
-        InputNumStr("Param2 hi",  bd.param_hi_2_text, 120);
+        InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, 120);
+        InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, 120);
+        ImGui::Checkbox("Log scale##bd_log2", &bd.log_scale_2);
+        if (bd.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         InputNumStr("DBSCAN eps", bd.eps_dbscan_text, 120);
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
         ImGui::Unindent();
@@ -1853,16 +1882,16 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     // больше одного (overlay в classic-режиме) — оставляем первого как
     // "фокусного", остальные отбрасываются (heatmap-режимы — single-member,
     // как и раньше при переключении через Type combo).
-    {
+    // Только для Bifurcation 1D — Colored 1D не имеет смысла поверх настоящего
+    // 2D bifurcation (уже heatmap по двум параметрам).
+    if (!win.mode_2d) {
         bool c1d = win.colored_1d;
         if (ImGui::Checkbox("Colored 1D diagram##bdtoolbar", &c1d)) {
             win.colored_1d = c1d;
-            if (c1d) win.mode_2d = false;
             int focus = win.members[0];
             if (win.members.size() > 1) win.members.resize(1);
             if (focus >= 0 && focus < (int)s.diagrams.size()) {
                 s.diagrams[focus].colored_1d = c1d;
-                if (c1d) s.diagrams[focus].mode_2d = false;
                 if (!model.loaded_name.empty())
                     lib.save_session(model.loaded_name, "_last_parametric",
                                      session_to_json_parametric(model.bifurcation_session));
@@ -1913,13 +1942,16 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 continue;
             }
 
-            auto ax_name = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+            auto ax_name = [&](bool sweep_h, bool sweep_var, int p_idx, int v_idx) -> std::string {
+                if (sweep_h) return "h";
                 if (sweep_var)
                     return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
                 return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
             };
-            hb.x_axis.name = ax_name(bdact.sweep_over_var,   bdact.param_index,   bdact.var_sweep_index);
-            hb.y_axis.name = ax_name(bdact.sweep_over_var_2, bdact.param_index_2, bdact.var_sweep_index_2);
+            hb.x_axis.name = ax_name(bdact.sweep_over_h,   bdact.sweep_over_var,   bdact.param_index,   bdact.var_sweep_index);
+            hb.y_axis.name = ax_name(bdact.sweep_over_h_2, bdact.sweep_over_var_2, bdact.param_index_2, bdact.var_sweep_index_2);
+            hb.x_axis.log_scale = bdact.log_scale;
+            hb.y_axis.log_scale = bdact.log_scale_2;
 
             bool fit = bdact.fit_request_2d;
             if (fit) bdact.fit_request_2d = false;
@@ -2090,7 +2122,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             }
 
             hc.x_axis.name = auto_axis_name(s.params, s.vars, bdact.param_index,
-                                             bdact.sweep_over_var, bdact.var_sweep_index);
+                                             bdact.sweep_over_var, bdact.var_sweep_index, bdact.sweep_over_h);
+            hc.x_axis.log_scale = bdact.log_scale;
             hc.y_axis.name = (bdact.writable_var >= 0 && bdact.writable_var < (int)s.vars.size())
                             ? s.vars[bdact.writable_var] : "X";
             if (bdact.plot_inter_peaks) hc.y_axis.name += " interval";
@@ -2166,16 +2199,19 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     bool var_idx_mixed = false;  // отдельный флаг — нельзя реюзать -1 (теперь это combination)
     double x_fit_lo = 0.0, x_fit_hi = 0.0;
     bool   x_fit_any = false;
+    bool   shared_log = false, log_seen = false, log_mismatch = false;
     for (int idx : win.members) {
         if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
         const auto& bd = s.diagrams[idx];
         if (!bd.last_run_ok) continue;
-        int kind = bd.sweep_over_var ? 1 : 0;
-        int kidx = bd.sweep_over_var ? bd.var_sweep_index : bd.param_index;
+        int kind = bd.sweep_over_h ? 2 : (bd.sweep_over_var ? 1 : 0);
+        int kidx = bd.sweep_over_h ? -1 : (bd.sweep_over_var ? bd.var_sweep_index : bd.param_index);
         if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
         else if (shared_kind != kind || shared_idx != kidx) {
             shared_kind = -1; shared_idx = -1;
         }
+        if (!log_seen) { shared_log = bd.log_scale; log_seen = true; }
+        else if (shared_log != bd.log_scale) { log_mismatch = true; }
         if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
         else if (shared_var_idx != bd.writable_var) var_idx_mixed = true;
         // X-range: continuation сохраняет lo/hi в result, иначе берём из текстов.
@@ -2190,10 +2226,13 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     view.x_fit_use_explicit = x_fit_any;
     view.x_fit_min = x_fit_lo;
     view.x_fit_max = x_fit_hi;
+    view.x_axis.log_scale = shared_log && !log_mismatch;
     if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
         view.x_axis.name = s.params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
         view.x_axis.name = s.vars[shared_idx] + " (IC)";
+    else if (shared_kind == 2)
+        view.x_axis.name = "h";
     else
         view.x_axis.name = "parameter";
     // Y-label: combination (-1) -> "x0+pi*x1+e*x2"; single var -> имя переменной;
@@ -2372,7 +2411,9 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         if (c.var_sweep_index < 0 || c.var_sweep_index >= (int)s.vars.size())
             c.var_sweep_index = 0;
         std::string preview;
-        if (c.sweep_over_var && !s.vars.empty())
+        if (c.sweep_over_h)
+            preview = "dt (h)";
+        else if (c.sweep_over_var && !s.vars.empty())
             preview = s.vars[c.var_sweep_index] + " (IC)";
         else if (!s.params.empty())
             preview = s.params[c.param_index];
@@ -2381,20 +2422,28 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         ImGui::SetNextItemWidth(160);
         if (ImGui::BeginCombo("Sweep", preview.c_str())) {
             for (int i = 0; i < (int)s.params.size(); ++i) {
-                bool sel = !c.sweep_over_var && c.param_index == i;
+                bool sel = !c.sweep_over_var && !c.sweep_over_h && c.param_index == i;
                 if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                     c.sweep_over_var = false;
+                    c.sweep_over_h = false;
                     c.param_index = i;
                 }
             }
             if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
             for (int i = 0; i < (int)s.vars.size(); ++i) {
                 std::string lbl = s.vars[i] + " (IC)";
-                bool sel = c.sweep_over_var && c.var_sweep_index == i;
+                bool sel = c.sweep_over_var && !c.sweep_over_h && c.var_sweep_index == i;
                 if (ImGui::Selectable(lbl.c_str(), sel)) {
                     c.sweep_over_var = true;
+                    c.sweep_over_h = false;
                     c.var_sweep_index = i;
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("dt (h)", c.sweep_over_h)) {
+                c.sweep_over_h = true;
+                c.sweep_over_var = false;
+                if (c.mode_2d) c.sweep_over_h_2 = false;  // ровно одна ось = h
             }
             ImGui::EndCombo();
         }
@@ -2402,8 +2451,10 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     else {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
     }
-    InputNumStr("Param lo", c.param_lo_text, 120);
-    InputNumStr("Param hi", c.param_hi_text, 120);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, 120);
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, 120);
+    ImGui::Checkbox("Log scale##lle_log", &c.log_scale);
+    if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
 
     ImGui::Separator();
@@ -2419,7 +2470,9 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
             if (c.var_sweep_index_2 < 0 || c.var_sweep_index_2 >= (int)s.vars.size())
                 c.var_sweep_index_2 = 0;
             std::string preview2;
-            if (c.sweep_over_var_2 && !s.vars.empty())
+            if (c.sweep_over_h_2)
+                preview2 = "dt (h)";
+            else if (c.sweep_over_var_2 && !s.vars.empty())
                 preview2 = s.vars[c.var_sweep_index_2] + " (IC)";
             else if (!s.params.empty())
                 preview2 = s.params[c.param_index_2];
@@ -2428,26 +2481,37 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
             ImGui::SetNextItemWidth(160);
             if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
                 for (int i = 0; i < (int)s.params.size(); ++i) {
-                    bool sel = !c.sweep_over_var_2 && c.param_index_2 == i;
+                    bool sel = !c.sweep_over_var_2 && !c.sweep_over_h_2 && c.param_index_2 == i;
                     if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                         c.sweep_over_var_2 = false;
+                        c.sweep_over_h_2 = false;
                         c.param_index_2 = i;
                     }
                 }
                 if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
                 for (int i = 0; i < (int)s.vars.size(); ++i) {
                     std::string lbl = s.vars[i] + " (IC)";
-                    bool sel = c.sweep_over_var_2 && c.var_sweep_index_2 == i;
+                    bool sel = c.sweep_over_var_2 && !c.sweep_over_h_2 && c.var_sweep_index_2 == i;
                     if (ImGui::Selectable(lbl.c_str(), sel)) {
                         c.sweep_over_var_2 = true;
+                        c.sweep_over_h_2 = false;
                         c.var_sweep_index_2 = i;
+                    }
+                }
+                if (!c.sweep_over_h) {  // ровно одна ось = h -- X уже занял её
+                    ImGui::Separator();
+                    if (ImGui::Selectable("dt (h)", c.sweep_over_h_2)) {
+                        c.sweep_over_h_2 = true;
+                        c.sweep_over_var_2 = false;
                     }
                 }
                 ImGui::EndCombo();
             }
         }
-        InputNumStr("Param2 lo", c.param_lo_2_text, 120);
-        InputNumStr("Param2 hi", c.param_hi_2_text, 120);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, 120);
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, 120);
+        ImGui::Checkbox("Log scale##lle_log2", &c.log_scale_2);
+        if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
         ImGui::Unindent();
     }
@@ -2652,14 +2716,17 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             }
 
             // Подписи осей по реальным selected-полям свипа.
-            auto axis_name_for = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+            auto axis_name_for = [&](bool sweep_h, bool sweep_var, int p_idx, int v_idx) -> std::string {
+                if (sweep_h) return "h";
                 if (sweep_var) {
                     return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
                 }
                 return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
             };
-            heatmap.x_axis.name = axis_name_for(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
-            heatmap.y_axis.name = axis_name_for(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+            heatmap.x_axis.name = axis_name_for(cact.sweep_over_h,   cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+            heatmap.y_axis.name = axis_name_for(cact.sweep_over_h_2, cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+            heatmap.x_axis.log_scale = cact.log_scale;
+            heatmap.y_axis.log_scale = cact.log_scale_2;
 
             bool fit = cact.fit_request_2d;
             if (fit) cact.fit_request_2d = false;
@@ -2718,16 +2785,19 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     int shared_idx  = -2;
     double x_fit_lo = 0.0, x_fit_hi = 0.0;
     bool   x_fit_any = false;
+    bool   shared_log = false, log_seen = false, log_mismatch = false;
     for (int idx : win.members) {
         if (idx < 0 || idx >= (int)s.curves.size()) continue;
         const auto& c = s.curves[idx];
         if (!c.last_run_ok) continue;
-        int kind = c.sweep_over_var ? 1 : 0;
-        int kidx = c.sweep_over_var ? c.var_sweep_index : c.param_index;
+        int kind = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
+        int kidx = c.sweep_over_h ? -1 : (c.sweep_over_var ? c.var_sweep_index : c.param_index);
         if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
         else if (shared_kind != kind || shared_idx != kidx) {
             shared_kind = -1; shared_idx = -1;
         }
+        if (!log_seen) { shared_log = c.log_scale; log_seen = true; }
+        else if (shared_log != c.log_scale) { log_mismatch = true; }
         double lo = c.result.param_lo, hi = c.result.param_hi;
         if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
         double a = std::min(lo, hi), b = std::max(lo, hi);
@@ -2737,10 +2807,13 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     view.x_fit_use_explicit = x_fit_any;
     view.x_fit_min = x_fit_lo;
     view.x_fit_max = x_fit_hi;
+    view.x_axis.log_scale = shared_log && !log_mismatch;
     if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
         view.x_axis.name = s.params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
         view.x_axis.name = s.vars[shared_idx] + " (IC)";
+    else if (shared_kind == 2)
+        view.x_axis.name = "h";
     else
         view.x_axis.name = "parameter";
     view.y_axis.name = "lambda";
@@ -2881,7 +2954,9 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         if (c.var_sweep_index < 0 || c.var_sweep_index >= (int)s.vars.size())
             c.var_sweep_index = 0;
         std::string preview;
-        if (c.sweep_over_var && !s.vars.empty())
+        if (c.sweep_over_h)
+            preview = "dt (h)";
+        else if (c.sweep_over_var && !s.vars.empty())
             preview = s.vars[c.var_sweep_index] + " (IC)";
         else if (!s.params.empty())
             preview = s.params[c.param_index];
@@ -2890,20 +2965,28 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         ImGui::SetNextItemWidth(160);
         if (ImGui::BeginCombo("Sweep", preview.c_str())) {
             for (int i = 0; i < (int)s.params.size(); ++i) {
-                bool sel = !c.sweep_over_var && c.param_index == i;
+                bool sel = !c.sweep_over_var && !c.sweep_over_h && c.param_index == i;
                 if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                     c.sweep_over_var = false;
+                    c.sweep_over_h = false;
                     c.param_index = i;
                 }
             }
             if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
             for (int i = 0; i < (int)s.vars.size(); ++i) {
                 std::string lbl = s.vars[i] + " (IC)";
-                bool sel = c.sweep_over_var && c.var_sweep_index == i;
+                bool sel = c.sweep_over_var && !c.sweep_over_h && c.var_sweep_index == i;
                 if (ImGui::Selectable(lbl.c_str(), sel)) {
                     c.sweep_over_var = true;
+                    c.sweep_over_h = false;
                     c.var_sweep_index = i;
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("dt (h)", c.sweep_over_h)) {
+                c.sweep_over_h = true;
+                c.sweep_over_var = false;
+                if (c.mode_2d) c.sweep_over_h_2 = false;  // ровно одна ось = h
             }
             ImGui::EndCombo();
         }
@@ -2911,8 +2994,10 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     else {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
     }
-    InputNumStr("Param lo", c.param_lo_text, 120);
-    InputNumStr("Param hi", c.param_hi_text, 120);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, 120);
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, 120);
+    ImGui::Checkbox("Log scale##ls_log", &c.log_scale);
+    if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
 
     ImGui::Separator();
@@ -2926,7 +3011,9 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
             if (c.var_sweep_index_2 < 0 || c.var_sweep_index_2 >= (int)s.vars.size())
                 c.var_sweep_index_2 = 0;
             std::string preview2;
-            if (c.sweep_over_var_2 && !s.vars.empty())
+            if (c.sweep_over_h_2)
+                preview2 = "dt (h)";
+            else if (c.sweep_over_var_2 && !s.vars.empty())
                 preview2 = s.vars[c.var_sweep_index_2] + " (IC)";
             else if (!s.params.empty())
                 preview2 = s.params[c.param_index_2];
@@ -2935,26 +3022,37 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
             ImGui::SetNextItemWidth(160);
             if (ImGui::BeginCombo("Sweep Y", preview2.c_str())) {
                 for (int i = 0; i < (int)s.params.size(); ++i) {
-                    bool sel = !c.sweep_over_var_2 && c.param_index_2 == i;
+                    bool sel = !c.sweep_over_var_2 && !c.sweep_over_h_2 && c.param_index_2 == i;
                     if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                         c.sweep_over_var_2 = false;
+                        c.sweep_over_h_2 = false;
                         c.param_index_2 = i;
                     }
                 }
                 if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
                 for (int i = 0; i < (int)s.vars.size(); ++i) {
                     std::string lbl = s.vars[i] + " (IC)";
-                    bool sel = c.sweep_over_var_2 && c.var_sweep_index_2 == i;
+                    bool sel = c.sweep_over_var_2 && !c.sweep_over_h_2 && c.var_sweep_index_2 == i;
                     if (ImGui::Selectable(lbl.c_str(), sel)) {
                         c.sweep_over_var_2 = true;
+                        c.sweep_over_h_2 = false;
                         c.var_sweep_index_2 = i;
+                    }
+                }
+                if (!c.sweep_over_h) {  // ровно одна ось = h -- X уже занял её
+                    ImGui::Separator();
+                    if (ImGui::Selectable("dt (h)", c.sweep_over_h_2)) {
+                        c.sweep_over_h_2 = true;
+                        c.sweep_over_var_2 = false;
                     }
                 }
                 ImGui::EndCombo();
             }
         }
-        InputNumStr("Param2 lo", c.param_lo_2_text, 120);
-        InputNumStr("Param2 hi", c.param_hi_2_text, 120);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, 120);
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, 120);
+        ImGui::Checkbox("Log scale##ls_log2", &c.log_scale_2);
+        if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).\nAll N exponents computed; switch in plot window.");
         ImGui::Unindent();
     }
@@ -3197,13 +3295,16 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             }
 
             // Подписи осей по реальным selected-полям свипа.
-            auto ax_name = [&](bool sweep_var, int p_idx, int v_idx) -> std::string {
+            auto ax_name = [&](bool sweep_h, bool sweep_var, int p_idx, int v_idx) -> std::string {
+                if (sweep_h) return "h";
                 if (sweep_var)
                     return (v_idx >= 0 && v_idx < (int)s.vars.size()) ? (s.vars[v_idx] + " (IC)") : "x";
                 return (p_idx >= 0 && p_idx < (int)s.params.size()) ? s.params[p_idx] : "param";
             };
-            heatmap_ls.x_axis.name = ax_name(cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
-            heatmap_ls.y_axis.name = ax_name(cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+            heatmap_ls.x_axis.name = ax_name(cact.sweep_over_h,   cact.sweep_over_var,   cact.param_index,   cact.var_sweep_index);
+            heatmap_ls.y_axis.name = ax_name(cact.sweep_over_h_2, cact.sweep_over_var_2, cact.param_index_2, cact.var_sweep_index_2);
+            heatmap_ls.x_axis.log_scale = cact.log_scale;
+            heatmap_ls.y_axis.log_scale = cact.log_scale_2;
 
             bool fit = cact.fit_request_2d;
             if (fit) cact.fit_request_2d = false;
@@ -3308,16 +3409,19 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     int shared_idx  = -2;
     double x_fit_lo = 0.0, x_fit_hi = 0.0;
     bool   x_fit_any = false;
+    bool   shared_log = false, log_seen = false, log_mismatch = false;
     for (int idx : win.members) {
         if (idx < 0 || idx >= (int)s.curves.size()) continue;
         const auto& c = s.curves[idx];
         if (!c.last_run_ok) continue;
-        int kind = c.sweep_over_var ? 1 : 0;
-        int kidx = c.sweep_over_var ? c.var_sweep_index : c.param_index;
+        int kind = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
+        int kidx = c.sweep_over_h ? -1 : (c.sweep_over_var ? c.var_sweep_index : c.param_index);
         if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
         else if (shared_kind != kind || shared_idx != kidx) {
             shared_kind = -1; shared_idx = -1;
         }
+        if (!log_seen) { shared_log = c.log_scale; log_seen = true; }
+        else if (shared_log != c.log_scale) { log_mismatch = true; }
         double lo = c.result.param_lo, hi = c.result.param_hi;
         if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
         double a = std::min(lo, hi), b = std::max(lo, hi);
@@ -3327,10 +3431,13 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     view.x_fit_use_explicit = x_fit_any;
     view.x_fit_min = x_fit_lo;
     view.x_fit_max = x_fit_hi;
+    view.x_axis.log_scale = shared_log && !log_mismatch;
     if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
         view.x_axis.name = s.params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
         view.x_axis.name = s.vars[shared_idx] + " (IC)";
+    else if (shared_kind == 2)
+        view.x_axis.name = "h";
     else
         view.x_axis.name = "parameter";
 

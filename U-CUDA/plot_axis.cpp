@@ -106,6 +106,23 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
 
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
+
+    // Log-масштаб: нет настоящей лог-оси (см. AxisInfo::log_scale) -- вместо
+    // серии линейных "красивых" тиков (которые подписали бы значения, никогда
+    // не просимулированные на самом деле) рисуем только границы диапазона.
+    if (x.log_scale) {
+        auto draw_edge = [&](double xv) {
+            float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
+            dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
+            std::string lbl = fmt_tick(xv);
+            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+            dl->AddText(ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
+        };
+        draw_edge(lo);
+        draw_edge(hi);
+        return;
+    }
+
     double sx = nice_step(std::abs(vrx), 8);
     // Snap-to-node: округляем шаг тиков к целому кратному step_node и стартовую
     // позицию тоже кратно этому шагу. Каждый тик тогда — узел параметрической
@@ -184,6 +201,21 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
 
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
+
+    // См. draw_axis_x_grid -- log-масштаб рисует только границы диапазона.
+    if (y.log_scale) {
+        auto draw_edge = [&](double yv) {
+            float py = pos.y + (float)((emax - yv) / vry) * plot_h;
+            dl->AddLine(ImVec2(pos.x, py), ImVec2(pos.x + plot_w, py), col_grid, 1.0f);
+            std::string lbl = fmt_tick(yv);
+            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+            dl->AddText(ImVec2(pos.x - ts.x - 4, py - ts.y * 0.5f), col_text, lbl.c_str());
+        };
+        draw_edge(lo);
+        draw_edge(hi);
+        return;
+    }
+
     double sy = nice_step(std::abs(vry), 6);
     double ystart = std::ceil(lo / sy) * sy;
     // См. комментарий в draw_axis_x_grid про формулу и +1e-9 эпсилон.
