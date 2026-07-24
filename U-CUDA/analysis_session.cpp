@@ -1072,6 +1072,7 @@ static Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
     req.freq_lo = parse_d(c.freq_lo_text, 0.0);
     req.freq_hi = parse_d(c.freq_hi_text, 10.0);
     if (req.freq_hi < req.freq_lo) std::swap(req.freq_lo, req.freq_hi);
+    req.freq_log_scale = c.freq_log_scale;
     req.window_type = c.window_type;
 
     req.h              = parse_d(c.h_text, 0.01);

@@ -1696,7 +1696,8 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 
 
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
-	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h)
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
+	const int logFreqAxis)
 {
 	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1747,7 +1748,8 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	for (size_t k = 0; k < nFreq; k++) {
 		AkCOS[startIndexFreq + k] = 0;
 		BkSIN[startIndexFreq + k] = 0;
-		f_k = f_start + (numb)k * f_step;
+		f_k = logFreqAxis ? getValueByIdx_log((int)k, nFreq, freq_lo, freq_hi, 0)
+		                   : (f_start + (numb)k * f_step);
 		cos_theta = cos(2.0 * pi * h * f_k);
 		sin_theta = sin(2.0 * pi * h * f_k);
 		cos_n = 1.0;
