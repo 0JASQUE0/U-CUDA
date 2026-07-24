@@ -62,11 +62,18 @@ inline bool SnapCursorToGrid(double cursor_x, double cursor_y,
 
 // 1D-вариант — только X. Y-координата вызывающий трактует как непрерывную.
 // Тоже floor по пиксельной разбивке, отображаем позицию узла.
+// log_scale: узлы сетки движка распределены по getValueByIdx_log (лог-
+// равномерно), а не линейно -- см. cudaLibrary.cu::getValueByIdx_log. Индекс
+// узла (ix) считается по той же пиксельной разбивке (диапазон [x_min,x_max]
+// делится на `width` равных пикселей), а вот координата узла внутри пикселя
+// восстанавливается log-формулой, иначе tooltip показывает линейно
+// интерполированное значение, которого движок никогда не считал.
 inline bool SnapCursorToGrid1D(double cursor_x,
                                double x_min, double x_max,
                                int width,
                                int& out_idx_x,
-                               double& out_grid_x)
+                               double& out_grid_x,
+                               bool log_scale = false)
 {
     if (width < 1) return false;
     if (cursor_x < x_min || cursor_x > x_max) return false;
@@ -75,7 +82,17 @@ inline bool SnapCursorToGrid1D(double cursor_x,
     int ix = (int)std::floor((cursor_x - x_min) * (double)width / range);
     ix = std::clamp(ix, 0, width - 1);
     out_idx_x  = ix;
-    double step_node = range / (double)(width - 1);
-    out_grid_x = x_min + ix * step_node;
+    // log_scale валиден только для x_min>0 (log_scale-запрос это требует), но
+    // сюда может долететь live-чекбокс без соответствующего результата (напр.
+    // ещё не запускали Run, или снапшот от прошлого линейного прогона) --
+    // тогда x_min может быть 0/дефолтным. log10(0)=-inf -> NaN дальше по
+    // формуле. Деградируем на линейную ноду вместо NaN в tooltip'е.
+    if (log_scale && x_min > 0.0 && x_max > 0.0) {
+        out_grid_x = std::pow(10.0, std::log10(x_min)
+            + (double)ix * (std::log10(x_max) - std::log10(x_min)) / (double)(width - 1));
+    } else {
+        double step_node = range / (double)(width - 1);
+        out_grid_x = x_min + ix * step_node;
+    }
     return true;
 }

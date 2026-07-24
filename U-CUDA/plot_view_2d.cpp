@@ -400,7 +400,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             double lo = std::min(snap_x_min, snap_x_max);
             double hi = std::max(snap_x_min, snap_x_max);
             int ix; double sx;
-            if (SnapCursorToGrid1D(dx, lo, hi, snap_x_n, ix, sx)) dx = sx;
+            if (SnapCursorToGrid1D(dx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) dx = sx;
         }
         const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
