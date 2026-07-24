@@ -163,6 +163,9 @@ struct Dft1DRequest {
     int    n_freq  = 200;
     double freq_lo = 0.0;
     double freq_hi = 10.0;
+    // Лог-сетка по частоте (Y ось) — см. BifurcationDiagramConfig::log_scale.
+    // Требует freq_lo>0 и freq_hi>0 (валидатор отказывает иначе).
+    bool   freq_log_scale = false;
 
     // Оконная функция, применяемая к сэмплам перед DFT (см. build_window в
     // parametric_engine.cpp — те же 3 формулы, что закомментированы в

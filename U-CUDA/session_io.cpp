@@ -729,6 +729,7 @@ static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "\"n_freq_text\":";        jstr(o, c.n_freq_text);        o << ",";
     o << "\"freq_lo_text\":";       jstr(o, c.freq_lo_text);       o << ",";
     o << "\"freq_hi_text\":";       jstr(o, c.freq_hi_text);       o << ",";
+    o << "\"freq_log_scale\":"      << (c.freq_log_scale ? "true" : "false") << ",";
     o << "\"window_type\":"         << c.window_type              << ",";
     o << "\"h_text\":";             jstr(o, c.h_text);             o << ",";
     o << "\"t_max_text\":";         jstr(o, c.t_max_text);         o << ",";
@@ -762,6 +763,7 @@ static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "n_freq_text")         c.n_freq_text         = p.str();
     else if (key == "freq_lo_text")        c.freq_lo_text        = p.str();
     else if (key == "freq_hi_text")        c.freq_hi_text        = p.str();
+    else if (key == "freq_log_scale")      c.freq_log_scale      = p.boolean();
     else if (key == "window_type")         c.window_type         = std::stoi(p.str_or_num());
     else if (key == "h_text")              c.h_text              = p.str();
     else if (key == "t_max_text")          c.t_max_text          = p.str();

@@ -2891,6 +2891,8 @@ struct ParametricEngine::Impl {
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
         if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+        if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
+            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
         if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
@@ -3098,6 +3100,16 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = writableVar;
             double maxValue_arg              = maxValue;
             bool   par_or_var_arg            = !req.sweep_over_var;
+            // calculateDiscreteModelCUDA приобрёл эти 5 параметров в коммите
+            // "adding log sweep" — Dft1DRequest пока не выставляет h-свип/лог-ось,
+            // поэтому передаём "выключено". actualIterations допускает nullptr
+            // (см. проверку в cudaLibrary.cu) и DFT-путём не используется, в
+            // отличие от run_bif1d, где его читает peakFinderCUDA.
+            int    hSweepAxis_arg            = -1;
+            double transientTime_arg         = transientTime;
+            double tMax_arg                  = tMax;
+            int*   d_actualIterations        = nullptr;
+            int    logAxisMask_arg           = 0;
 
             void* args_traj[] = {
                 &nPts_int,
@@ -3119,7 +3131,12 @@ struct ParametricEngine::Impl {
                 &maxValue_arg,
                 &d_data,
                 &d_amountOfPeaks,
-                &par_or_var_arg
+                &par_or_var_arg,
+                &hSweepAxis_arg,
+                &transientTime_arg,
+                &tMax_arg,
+                &d_actualIterations,
+                &logAxisMask_arg
             };
 
             unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
@@ -3131,10 +3148,12 @@ struct ParametricEngine::Impl {
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
 
             // DFT_custom(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
-            // BkSIN, rangesFreq, window, nFreq, h) — h здесь ШАГ МЕЖДУ decimated
-            // сэмплами (h*preScaller), как и у peakFinderCUDA (см. run_bif1d).
-            int    nFreq_int    = nFreq;
-            double timeStep_arg = h * (double)preScaller;
+            // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
+            // МЕЖДУ decimated сэмплами (h*preScaller), как и у peakFinderCUDA
+            // (см. run_bif1d).
+            int    nFreq_int      = nFreq;
+            double timeStep_arg   = h * (double)preScaller;
+            int    logFreqAxis_arg = req.freq_log_scale ? 1 : 0;
             void* args_dft[] = {
                 &d_data,
                 &sizeOfBlock_i,
@@ -3145,7 +3164,8 @@ struct ParametricEngine::Impl {
                 &d_rangesFreq,
                 &d_window,
                 &nFreq_int,
-                &timeStep_arg
+                &timeStep_arg,
+                &logFreqAxis_arg
             };
             DFT_CHECK_CU(cuLaunchKernel(cached.kernel_dft,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -3214,6 +3234,8 @@ struct ParametricEngine::Impl {
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
         if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
         if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+        if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
+            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
         if (req.h <= 0.0)           return fail("h должно быть > 0");
         if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
         if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
@@ -3318,13 +3340,14 @@ struct ParametricEngine::Impl {
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // --- DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks ---
-        int    sizeOfBlock_i = amountOfPointsInBlock;  // int, не size_t — см. gotcha #3
-        int    nFreq_int     = nFreq;
-        double timeStep      = req.h * (double)req.pre_scaller;
+        int    sizeOfBlock_i   = amountOfPointsInBlock;  // int, не size_t — см. gotcha #3
+        int    nFreq_int       = nFreq;
+        double timeStep        = req.h * (double)req.pre_scaller;
+        int    logFreqAxis_arg = req.freq_log_scale ? 1 : 0;
         void* dft_args[] = {
             &d_data, &sizeOfBlock_i, &nPts_arg,
             &d_amountOfPeaks, &d_AkCOS, &d_BkSIN, &d_rangesFreq, &d_window,
-            &nFreq_int, &timeStep
+            &nFreq_int, &timeStep, &logFreqAxis_arg
         };
         int    dftBlock = 32;
         int    dftGrid  = (nPts + dftBlock - 1) / dftBlock;
@@ -4235,7 +4258,11 @@ struct ParametricEngine::Impl {
             if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
-            // calculateDiscreteModelCUDA — те же 20 args, что и у LLE-2D/BD-2D.
+            // calculateDiscreteModelCUDA — 25 args (см. run_bif1d / run_bif2d).
+            // Basins не выставляет h-свип/лог-ось в BasinsRequest, поэтому здесь
+            // они всегда "выключены" — как и в run_dft1d_classical. actualIterations
+            // допускает nullptr (см. проверку в cudaLibrary.cu) и avgPeakFinderCUDA
+            // ниже его не читает.
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_int           = (int)cur_limiter;
             size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
@@ -4250,6 +4277,11 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = req.writable_var;
             double maxValue_arg              = maxValue;
             bool   par_or_var_arg            = false;   // compile-time par_or_var=0 в шаблоне
+            int    hSweepAxis_arg            = -1;
+            double transientTime_arg         = transientTime;
+            double tMax_arg                  = tMax;
+            int*   d_actualIterations        = nullptr;
+            int    logAxisMask_arg           = 0;
 
             // Offset-указатель для helpfulArray (chunk пишет в свою часть глобального массива).
             int* d_helpful_chunk = d_helpfulArray + iter * originalNPtsLimiter;
@@ -4260,7 +4292,9 @@ struct ParametricEngine::Impl {
                 &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
                 &d_values, &amountOfValues_int, &amountOfIterations_arg,
                 &preScaller_int, &writableVar_int, &maxValue_arg,
-                &d_data, &d_helpful_chunk, &par_or_var_arg
+                &d_data, &d_helpful_chunk, &par_or_var_arg,
+                &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
+                &d_actualIterations, &logAxisMask_arg
             };
             unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
             BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_traj,

@@ -425,7 +425,8 @@ __device__ __host__ void MeanAndMedianFreq(const int idx, const int startDataInd
 __device__ __host__ void MeanAndVariance(const int idx, const int startDataIndex, int amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval);
 
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
-	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq = 0, numb h = 0);
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq = 0, numb h = 0,
+	const int logFreqAxis = 0);
 
 /**
  * ���������� ����� � "data" ������� � ������������� ������ 

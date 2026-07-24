@@ -3734,6 +3734,8 @@ static bool draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         InputNumStr("Resolution Y", c.n_freq_text, 120);
         InputNumStr("Freq lo", c.freq_lo_text, 120);
         InputNumStr("Freq hi", c.freq_hi_text, 120);
+        ImGui::Checkbox("Log scale (Y)##dft_freq_log", &c.freq_log_scale);
+        if (c.freq_log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         static const char* windows[] = { "None", "Hanning", "Hamming" };
         ImGui::SetNextItemWidth(160);
         ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
@@ -4082,6 +4084,7 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         hc.x_axis.name = auto_axis_name(s.params, s.vars, c.param_index,
                                         c.sweep_over_var, c.var_sweep_index);
         hc.y_axis.name = "Frequency";
+        hc.y_axis.log_scale = c.freq_log_scale;
 
         bool fit = c.fit_request;
         if (fit) c.fit_request = false;
