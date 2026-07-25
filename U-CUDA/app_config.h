@@ -33,6 +33,17 @@ struct AppConfig {
     // Переключается в Settings. apply_ui_scale в app_main.cpp перечитывает
     // это поле через model.dark_theme и пересоздаёт style на каждом изменении.
     bool dark_theme = true;
+
+    // Последний выбранный тип анализа (значение AppModel::AppMode как int).
+    // На старте app_main выставляет model.app_mode из этого поля (после
+    // клампа на валидный диапазон enum'а). Дефолт 1 = Analysis — сохраняет
+    // старое поведение "первый запуск открывается на Analysis".
+    int last_app_mode = 1;
+
+    // Имя последней загруженной системы. Пусто = ничего не грузим на старте
+    // (первый запуск / система удалена из library). Если непустое и имя
+    // существует в library — app_main вызовет apply_system_switch на bootstrap.
+    std::string last_system_name;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл

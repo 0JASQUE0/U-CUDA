@@ -866,7 +866,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     bool changed = false;
 
     ImGui::Text("Phase portrait analysis");
-    ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
+    // Analysis-tab passes a non-null on_reset_defaults; Custom-tab passes
+    // nullptr. Only Analysis is a true library-detached sandbox — in Custom,
+    // this panel is one stage of a pipeline driven by the shared config,
+    // so the sandbox disclaimer would be misleading.
+    if (on_reset_defaults)
+        ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
 
 
     // метод моделирования + пользовательские схемы из системы
@@ -5811,8 +5816,10 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
 // Global system switch — fired from the top-bar combo. Loads the record and
 // re-inits the CURRENT tab (mirrors what each per-tab combo used to do).
 // Other tabs re-init on entry via the block in draw_gui.
-static void apply_system_switch(AppModel& model, SystemLibrary& lib,
-                                const std::string& name)
+// Non-static: also called from app_main.cpp on startup to restore the
+// last-used system (see gui.h::apply_system_switch).
+void apply_system_switch(AppModel& model, SystemLibrary& lib,
+                         const std::string& name)
 {
     try {
         model.from_record(lib.load(name));
@@ -5866,6 +5873,13 @@ static void apply_system_switch(AppModel& model, SystemLibrary& lib,
         default:
             break;
         }
+        // Persist the choice so the next launch restores this system. Read-
+        // modify-write so we don't clobber unrelated fields (colormaps, UI
+        // scale, etc.). Silent on failure — best-effort UX polish.
+        AppConfig cfg;
+        load_app_config(get_exe_dir_with_sep(), cfg);
+        cfg.last_system_name = model.name;
+        save_app_config(get_exe_dir_with_sep(), cfg);
     } catch (...) {}
 }
 
@@ -5915,41 +5929,67 @@ double parse_num_default(const std::string& s, double def) {
 
 // ---- Shared config panel ----
 
-void draw_shared_config(CustomTabSharedConfig& c,
-                        const std::vector<std::string>& vars,
-                        const std::vector<std::string>& params,
+void draw_shared_config(CustomSession& cs,
                         const std::vector<CustomScheme>& custom_schemes) {
+    auto& c      = cs.shared;
+    const auto& vars   = cs.vars;
+    const auto& params = cs.params;
+    auto& phase  = cs.phase_session;
     ImGui::SeparatorText("Shared config");
 
     // Scheme combo — mirrors draw_diagram_controls / draw_lle_controls layout
     // so users get the same familiar picker with built-ins + custom schemes.
+    // On change, propagate to Phase (L3 shows the same picker; keep in sync)
+    // and rebuild its KRS body so the next Phase Run uses the new integrator.
+    // L1D/L2D pick up the new scheme via copy_integrator_and_state on Run.
     static const char* schemes[] = { "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD" };
     ImGui::SetNextItemWidth(160);
     if (ImGui::BeginCombo("Scheme", c.scheme.c_str())) {
+        auto pick_scheme = [&](const std::string& nm) {
+            c.scheme = nm;
+            phase.scheme = nm;
+            phase.regenerate_krs();
+        };
         for (auto m : schemes)
-            if (ImGui::Selectable(m, c.scheme == m)) c.scheme = m;
+            if (ImGui::Selectable(m, c.scheme == m)) pick_scheme(m);
         if (!custom_schemes.empty()) ImGui::Separator();
-        for (const auto& cs : custom_schemes)
-            if (ImGui::Selectable((cs.name + " (custom)").c_str(), c.scheme == cs.name))
-                c.scheme = cs.name;
+        for (const auto& scm : custom_schemes)
+            if (ImGui::Selectable((scm.name + " (custom)").c_str(), c.scheme == scm.name)) {
+                pick_scheme(scm.name);
+                phase.use_gpu = true;
+            }
         ImGui::EndCombo();
     }
 
     // Integration group — mirrors "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓).
+    // Each edited field is mirrored into L1D's own override (`l1d_h_text` for
+    // step) and into `phase_session`'s corresponding field, so the value the
+    // user typed here shows up in the L1D and L3 panels without waiting for
+    // Run. L1D still keeps independent transient/computing-time overrides —
+    // step is intentionally the ONLY per-L1D field kept in sync with shared.
     if (ImGui::CollapsingHeader("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("h",              c.h_text,           120);
+        if (InputNumStr("h",              c.h_text,           120)) {
+            c.l1d_h_text  = c.h_text;
+            phase.step_h  = c.h_text;
+        }
         if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, custom_schemes))
-            InputNumStr("symmetry s", c.symmetry_s,       120);
+            if (InputNumStr("symmetry s", c.symmetry_s,       120))
+                phase.symmetry_s = c.symmetry_s;
         // TT before CT: transient runs first, computing-time is what's
         // actually sampled after — order matches conceptual flow.
-        InputNumStr("transient time", c.transient_text,   120);
-        InputNumStr("computing time", c.t_max_text,       120);
-        InputNumStr("decimator",      c.pre_scaller_text, 120);
-        InputNumStr("max value",      c.max_value_text,   120);
+        if (InputNumStr("transient time", c.transient_text,   120))
+            phase.skip_time = c.transient_text;
+        if (InputNumStr("computing time", c.t_max_text,       120))
+            phase.sim_time  = c.t_max_text;
+        if (InputNumStr("decimator",      c.pre_scaller_text, 120))
+            phase.decimation = c.pre_scaller_text;
+        InputNumStr("max value",      c.max_value_text,   120); // Phase has no analogue
     }
 
     // Initial conditions — one InputNumStr per line, matching draw_diagram_controls.
+    // Not propagated to Phase: phase.ic_sets is multi-IC (mulistability) and
+    // is edited in the L3 Phase panel; the shared IC block drives BD/LLE/LS/Basins.
     if (ImGui::CollapsingHeader("Initial conditions##custom_ic", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& v : vars) {
             ImGui::PushID(v.c_str());
@@ -5960,6 +6000,8 @@ void draw_shared_config(CustomTabSharedConfig& c,
 
     // Parameters — same per-line layout; skip disable for params that are
     // swept on any enabled level (they get their values from the sweep).
+    // Non-swept params are also mirrored to phase.param_values so the L3
+    // Phase panel Parameters section shows the same live values.
     if (ImGui::CollapsingHeader("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
         std::vector<bool> is_swept(params.size(), false);
         if (c.level_2d_enabled) {
@@ -5978,7 +6020,9 @@ void draw_shared_config(CustomTabSharedConfig& c,
             const auto& p = params[i];
             ImGui::PushID(p.c_str());
             if (is_swept[i]) ImGui::BeginDisabled();
-            InputNumStr(p.c_str(), c.param_values[p], 120);
+            if (InputNumStr(p.c_str(), c.param_values[p], 120)) {
+                if (!is_swept[i]) phase.param_values[p] = c.param_values[p];
+            }
             if (is_swept[i]) {
                 ImGui::SameLine(); ImGui::TextDisabled("(swept)");
                 ImGui::EndDisabled();
@@ -6006,14 +6050,16 @@ void draw_level2d_detail(CustomSession& cs) {
                             c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index);
     InputNumStr("lo##ax", c.axis_x_lo_text, 120);
     InputNumStr("hi##ax", c.axis_x_hi_text, 120);
-    InputNumStr("N##ax",  c.n_x_text,        120);
 
     ImGui::TextUnformatted("Axis Y:"); ImGui::SameLine();
     draw_sweep_target_combo("##ay", cs.params, cs.vars,
                             c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index);
     InputNumStr("lo##ay", c.axis_y_lo_text, 120);
     InputNumStr("hi##ay", c.axis_y_hi_text, 120);
-    InputNumStr("N##ay",  c.n_y_text,        120);
+
+    // Shared N×N grid resolution — kernel `getValueByIdx` requires a square
+    // grid, so one field drives both axes (matches Analysis tab).
+    InputNumStr("Resolution##a", c.resolution_text, 120);
 
     // Per-type options edited directly on the sub-session's slot [0] (2D config).
     ImGui::Separator();
@@ -6083,12 +6129,14 @@ void draw_level1d_detail(CustomSession& cs) {
     InputNumStr("computing time##l1d", c.l1d_t_max_text,      120);
 
     ImGui::Separator();
-    // Slice sliders — clamped to the current effective ranges. Values are
-    // snapped to the 2D grid nodes (same coordinates the heatmap draws
-    // pixels at), so dragging the slider walks exactly through the pixels
-    // a Y-slice cross-hair would land on. Snap uses the L2D resolution
-    // (`n_x_text` / `n_y_text`) — the grid the 2D compute actually ran on
-    // — so an L1D own-sweep with a different N doesn't drift the snap.
+    // Slice sliders — clamped to the current effective ranges. Values snap
+    // to the FINER of the two grids per axis: L2D `resolution_text` (N×N
+    // pixels of the heatmap) and L1D `n_{x,y}_1d_text` (samples of the
+    // corresponding slice). When the user cranks 1D resolution up (typical
+    // — L1D is cheap, 2D is expensive), the slider gets finer too, so the
+    // crosshair on the X-slice plot lands on X-slice data points instead
+    // of drifting between them; on the heatmap the crosshair may then sit
+    // between pixel columns, an acceptable trade-off.
     // SliderScalar<Double> stays in double throughout (SliderFloat would
     // downcast to float and land 0.2 as 0.20000000298023224). Drag only
     // moves the crosshair; recompute fires on IsItemDeactivatedAfterEdit.
@@ -6105,8 +6153,11 @@ void draw_level1d_detail(CustomSession& cs) {
     // from the CURRENT idx before SliderScalar runs — during drag it
     // shows the previous frame's snapped world value (1-frame lag on the
     // text only, but the thumb itself always sits on a grid node).
-    int n_snap_x = std::atoi(c.n_x_text.c_str()); if (n_snap_x < 2) n_snap_x = 64;
-    int n_snap_y = std::atoi(c.n_y_text.c_str()); if (n_snap_y < 2) n_snap_y = 64;
+    int n_2d = std::atoi(c.resolution_text.c_str()); if (n_2d < 2) n_2d = 64;
+    int n_1d_x = std::atoi(c.n_x_1d_text.c_str());   if (n_1d_x < 2) n_1d_x = 64;
+    int n_1d_y = std::atoi(c.n_y_1d_text.c_str());   if (n_1d_y < 2) n_1d_y = 64;
+    int n_snap_x = (n_1d_x > n_2d) ? n_1d_x : n_2d;
+    int n_snap_y = (n_1d_y > n_2d) ? n_1d_y : n_2d;
     auto idx_from_world = [](double v, double lo, double hi, int n) {
         if (n < 2 || hi <= lo) return 0;
         double step = (hi - lo) / (double)(n - 1);
@@ -6126,6 +6177,7 @@ void draw_level1d_detail(CustomSession& cs) {
                          int& idx, int idx_min, int idx_max,
                          double lo, double hi, int n_snap,
                          double& fix_value,
+                         double& timer_to_bump,
                          const char* slider_label) {
         ImGui::PushID(id);
         ImGui::PushButtonRepeat(true);
@@ -6145,21 +6197,31 @@ void draw_level1d_detail(CustomSession& cs) {
         ImGui::SetNextItemWidth(240.0f);
         ImGui::SliderScalar(slider_label, ImGuiDataType_S32, &idx,
                             &idx_min, &idx_max, fmt);
-        bool released = ImGui::IsItemDeactivatedAfterEdit();
-        fix_value = world_from_idx(idx, lo, hi, n_snap);
+        bool released     = ImGui::IsItemDeactivatedAfterEdit();
+        bool slider_edit  = ImGui::IsItemActive() || released;
+        // Only overwrite fix_value on real user interaction. Otherwise the
+        // idx_from_world → world_from_idx round-trip would re-snap a
+        // fix_value that arrived from the heatmap (on the coarser 2D grid)
+        // to the nearest slider-grid node (max(2D, 1D) — potentially the
+        // finer 1D grid), silently drifting it off the 2D pixel the user
+        // just clicked.
+        if (slider_edit || step_changed)
+            fix_value = world_from_idx(idx, lo, hi, n_snap);
         // Arrow clicks fire the same debounce path as slider release —
         // step-changed → immediate commit, no need to wait for release.
+        // Bump only the caller-supplied timer so the settled branch can
+        // enqueue just the slices that actually depend on this axis.
         if (released || step_changed)
-            c.last_slider_change_time = ImGui::GetTime();
+            timer_to_bump = ImGui::GetTime();
     };
 
     int idx_x = idx_from_world(c.fix_x_value, fx_lo, fx_hi, n_snap_x);
     arrow_row("##fix_x_arr", idx_x, 0, n_snap_x - 1,
-              fx_lo, fx_hi, n_snap_x, c.fix_x_value, "fix X");
+              fx_lo, fx_hi, n_snap_x, c.fix_x_value, c.last_fix_x_change_time, "fix X");
 
     int idx_y = idx_from_world(c.fix_y_value, fy_lo, fy_hi, n_snap_y);
     arrow_row("##fix_y_arr", idx_y, 0, n_snap_y - 1,
-              fy_lo, fy_hi, n_snap_y, c.fix_y_value, "fix Y");
+              fy_lo, fy_hi, n_snap_y, c.fix_y_value, c.last_fix_y_change_time, "fix Y");
 
     ImGui::Separator();
     ImGui::TextUnformatted("Enable slices:");
@@ -6350,21 +6412,29 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     // Auto-recompute 1D on slider settle, plus Phase (if L3=Phase and
     // autorun_on_drilldown is on) so drag-releasing the crosshair or the
     // slider gives immediate feedback. Debounce 200 ms + no in-flight.
-    // Also picks up the LMB-release from HeatmapView::on_left_drag —
-    // wire_2d_heatmap_interaction bumps last_slider_change_time on every
-    // drag tick, and on_left_click enqueues Phase explicitly, so this path
-    // handles the slider case symmetrically.
+    // Per-axis timers (last_fix_{x,y}_change_time) let us enqueue ONLY the
+    // slices that actually depend on the moved axis — fix_x drag re-runs
+    // Y-slices (they pin X at fix_x), fix_y drag re-runs X-slices. Without
+    // the split the untouched slice would re-run with identical data and
+    // trigger an autofit that resets the user's manual zoom. Heatmap drag
+    // bumps BOTH timers, so it still recomputes both sides.
     if (c.level_1d_enabled && !cs.any_in_flight()) {
         double now = ImGui::GetTime();
-        bool settled = c.last_slider_change_time > 0.0
-                    && now - c.last_slider_change_time > 0.2
-                    && model.custom_queue.empty();
-        if (settled) {
-            if (c.auto_recompute_1d)
-                cs.enqueue_level_1d(model.custom_queue);
+        bool x_settled = c.last_fix_x_change_time > 0.0
+                      && now - c.last_fix_x_change_time > 0.2;
+        bool y_settled = c.last_fix_y_change_time > 0.0
+                      && now - c.last_fix_y_change_time > 0.2;
+        bool queue_free = model.custom_queue.empty();
+        if ((x_settled || y_settled) && queue_free) {
+            if (c.auto_recompute_1d) {
+                // fix_x moved → Y-slices depend on fix_x. fix_y → X-slices.
+                cs.enqueue_level_1d_partial(model.custom_queue,
+                    /*x_slices*/ y_settled,
+                    /*y_slices*/ x_settled);
+            }
             if (c.autorun_on_drilldown && c.level_phase_enabled) {
-                // Sync param_values with the current fix_x/y so Phase reads
-                // the drilled-down parameter set (mirror of on_left_click).
+                // Phase pins BOTH axes, so it must re-run whenever either
+                // moved. Enqueue exactly once even if both timers settled.
                 auto pin_param = [&](int par_i, bool over_var, double v) {
                     if (over_var) return;
                     if (par_i < 0 || par_i >= (int)cs.params.size()) return;
@@ -6377,12 +6447,13 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                     ? CustomQueueItem::Kind::Phase
                     : CustomQueueItem::Kind::Basins });
             }
-            c.last_slider_change_time = 0.0;
+            if (x_settled) c.last_fix_x_change_time = 0.0;
+            if (y_settled) c.last_fix_y_change_time = 0.0;
         }
     }
 
     // Shared config panel — always visible at the top.
-    draw_shared_config(c, cs.vars, cs.params, cs.custom_schemes);
+    draw_shared_config(cs, cs.custom_schemes);
 
     ImGui::Separator();
 
@@ -6391,7 +6462,35 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     // uses FirstUseEver, so the first-ever appearance opens L2D and closes
     // the others; later, the ImGui-managed state wins). Multiple headers
     // can be open at once — no forced current-level.
-    auto level_header = [&](const char* enable_id,
+    // Level colour ladder: base = theme's Header colour, HUE rotated by
+    // +45°/level so the three markers land on visually distinct points of
+    // the colour wheel (default dark theme's blue → violet → magenta).
+    // Saturation was previously index-tied — the three shades read as "the
+    // same colour, just fading", so telling levels apart at a glance was
+    // hard. Rotating hue keeps the theme-derived feel but each level is a
+    // recognisably different colour. Both saturation and value are pinned
+    // at the base's values so all three stay on the theme's "brightness".
+    // When a user-picked primary colour lands later, swap `base` and the
+    // rotation cascades automatically.
+    auto level_marker_color = [](int level_idx) {
+        const ImVec4 base = ImGui::GetStyleColorVec4(ImGuiCol_Header);
+        float h, s, v;
+        ImGui::ColorConvertRGBtoHSV(base.x, base.y, base.z, h, s, v);
+        const int   idx      = (level_idx >= 0 && level_idx < 3) ? level_idx : 0;
+        const float hue_step = 45.0f / 360.0f;   // ImGui uses 0..1 for hue.
+        float nh = h + hue_step * (float)idx;
+        nh -= std::floor(nh);                    // wrap into [0, 1).
+        // Lift saturation to full so the markers pop against ambient body
+        // background (base Header colour is quite pale in default themes).
+        const float ns = std::max(0.75f, s);
+        const float nv = std::max(0.85f, v);
+        ImVec4 col(0, 0, 0, 1.0f);
+        ImGui::ColorConvertHSVtoRGB(nh, ns, nv, col.x, col.y, col.z);
+        return col;
+    };
+
+    auto level_header = [&](int level_idx,
+                            const char* enable_id,
                             bool& enabled,
                             const char* title,
                             bool running, bool has_result,
@@ -6417,7 +6516,30 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
         // header so it sits inline).
         ImGui::SameLine();
         ImGui::TextColored(status_col, "[%s]", status);
-        if (open) body();
+        if (open) {
+            // Colored left-side bar spanning the body — always in peripheral
+            // vision, so whichever setting you're looking at, the coloured
+            // stripe on the left tells you which level it belongs to. Bar
+            // is drawn AFTER the body so its height matches actual content.
+            const float bar_w   = 2.5f;         // 1.5× thinner than before.
+            const float bar_gap = 8.0f;         // px between bar and content.
+            const float indent  = bar_w + bar_gap;
+            const ImVec2 top_screen = ImGui::GetCursorScreenPos();
+            ImGui::Indent(indent);
+            body();
+            ImGui::Unindent(indent);
+            const ImVec2 bot_screen = ImGui::GetCursorScreenPos();
+            // Pull bar bottom up by ItemSpacing so it doesn't run into the
+            // next level's checkbox row (cursor after body sits at the row
+            // start of what comes next).
+            const float  bar_bot_y  = bot_screen.y - ImGui::GetStyle().ItemSpacing.y;
+            const ImU32  col        = ImGui::ColorConvertFloat4ToU32(
+                                          level_marker_color(level_idx));
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(top_screen.x,          top_screen.y),
+                ImVec2(top_screen.x + bar_w,  bar_bot_y),
+                col, 1.5f);
+        }
     };
 
     // Derive status flags (same logic that used to live in draw_pipeline_column).
@@ -6445,13 +6567,13 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                           (!cs.basins_session.configs.empty() && cs.basins_session.configs[0].last_run_ok);
     const char* l3_title = c.level3_kind == 0 ? "Level 3 - Phase / Time-domain" : "Level 3 - Basins";
 
-    level_header("##en_l2d", c.level_2d_enabled, "Level 2D - Bif / LLE / LS",
+    level_header(0, "##en_l2d", c.level_2d_enabled, "Level 2D - Bif / LLE / LS",
                  level2_running, level2_hasres, /*default_open=*/true,
                  [&](){ draw_level2d_detail(cs); });
-    level_header("##en_l1d", c.level_1d_enabled, "Level 1D - slices",
+    level_header(1, "##en_l1d", c.level_1d_enabled, "Level 1D - slices",
                  level1_running, level1_hasres, /*default_open=*/false,
                  [&](){ draw_level1d_detail(cs); });
-    level_header("##en_l3", c.level_phase_enabled, l3_title,
+    level_header(2, "##en_l3", c.level_phase_enabled, l3_title,
                  level3_running, level3_hasres, /*default_open=*/false,
                  [&](){ draw_level3_detail(cs); });
 }
@@ -6480,14 +6602,20 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
     hv.on_left_drag = [&cs](int, int, double snap_x, double snap_y) {
         cs.shared.fix_x_value = snap_x;
         cs.shared.fix_y_value = snap_y;
-        cs.shared.last_slider_change_time = ImGui::GetTime();
+        // Heatmap drag moves BOTH axes → bump both timers so the settled
+        // branch re-runs X-slices AND Y-slices.
+        double t = ImGui::GetTime();
+        cs.shared.last_fix_x_change_time = t;
+        cs.shared.last_fix_y_change_time = t;
     };
     hv.on_left_click = [&cs, &q](int, int, double snap_x, double snap_y) {
         auto& s = cs.shared;
         // Update fix_x/fix_y (also drives crosshair on other 2D windows).
         s.fix_x_value = snap_x;
         s.fix_y_value = snap_y;
-        s.last_slider_change_time = ImGui::GetTime();
+        double t = ImGui::GetTime();
+        s.last_fix_x_change_time = t;
+        s.last_fix_y_change_time = t;
         // Update shared.param_values so any subsequent Phase/Basins run reads
         // the drilled-down location. Only pins param-sweeps (var-sweeps stay
         // as IC edits — pipeline drainer handles that path).
@@ -6949,21 +7077,49 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         // Wire crosshair drag: MMB or Shift+LMB inside the plot moves the
         // corresponding fix_* value along the sweep axis of this slice.
         // Release triggers the shared auto-recompute (Level 1D + Phase)
-        // via last_slider_change_time — same debounce path the L2D
+        // via last_fix_{x,y}_change_time — same debounce path the L2D
         // heatmap drag and the fix sliders already go through, so all
         // three sources produce identical downstream behaviour.
         //  cfg_idx == 1 → X-slice sweeps X → drag updates fix_x
         //  cfg_idx == 2 → Y-slice sweeps Y → drag updates fix_y
         const bool slice_is_x = (lslots[i].cfg_idx == 1);
-        view.on_left_drag = [&cs, slice_is_x](double world_x) {
-            if (slice_is_x) cs.shared.fix_x_value = world_x;
-            else            cs.shared.fix_y_value = world_x;
-            cs.shared.last_slider_change_time = ImGui::GetTime();
+        // Snap crosshair drag to this slice's OWN grid nodes — the sampled
+        // points the 1D compute actually produced — so the crosshair always
+        // lands on a data point rather than drifting between them.
+        // Captured by value (fresh lambda per frame, so no lifetime hazard).
+        int   snap_n = std::atoi((slice_is_x ? cs.shared.n_x_1d_text
+                                             : cs.shared.n_y_1d_text).c_str());
+        if (snap_n < 2) snap_n = 2;
+        const double snap_lo   = std::min(param_lo, param_hi);
+        const double snap_hi   = std::max(param_lo, param_hi);
+        const double snap_step = (snap_hi - snap_lo) / (double)(snap_n - 1);
+        auto snap_to_grid = [snap_lo, snap_hi, snap_step, snap_n](double w) {
+            if (snap_step <= 0.0) return w;
+            int i = (int)std::round((w - snap_lo) / snap_step);
+            if (i < 0) i = 0; if (i > snap_n - 1) i = snap_n - 1;
+            double s = snap_lo + (double)i * snap_step;
+            if (s < snap_lo) s = snap_lo; if (s > snap_hi) s = snap_hi;
+            return s;
         };
-        view.on_left_click = [&cs, slice_is_x](double world_x) {
-            if (slice_is_x) cs.shared.fix_x_value = world_x;
-            else            cs.shared.fix_y_value = world_x;
-            cs.shared.last_slider_change_time = ImGui::GetTime();
+        view.on_left_drag = [&cs, slice_is_x, snap_to_grid](double world_x) {
+            double w = snap_to_grid(world_x);
+            if (slice_is_x) {
+                cs.shared.fix_x_value = w;
+                cs.shared.last_fix_x_change_time = ImGui::GetTime();
+            } else {
+                cs.shared.fix_y_value = w;
+                cs.shared.last_fix_y_change_time = ImGui::GetTime();
+            }
+        };
+        view.on_left_click = [&cs, slice_is_x, snap_to_grid](double world_x) {
+            double w = snap_to_grid(world_x);
+            if (slice_is_x) {
+                cs.shared.fix_x_value = w;
+                cs.shared.last_fix_x_change_time = ImGui::GetTime();
+            } else {
+                cs.shared.fix_y_value = w;
+                cs.shared.last_fix_y_change_time = ImGui::GetTime();
+            }
         };
 
         // Build series. Bif = one scatter series with all peak samples;
@@ -7691,6 +7847,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
             if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
         }
+    }
+    // Persist AppMode change so the next launch restores this tab. Compare
+    // BEFORE overwriting so we only write on real transitions (not on every
+    // frame while sitting in the same tab).
+    if ((AppModel::AppMode)mode != model.app_mode) {
+        AppConfig cfg;
+        load_app_config(get_exe_dir_with_sep(), cfg);
+        cfg.last_app_mode = mode;
+        save_app_config(get_exe_dir_with_sep(), cfg);
     }
     model.app_mode = (AppModel::AppMode)mode;
     ImGui::Separator();

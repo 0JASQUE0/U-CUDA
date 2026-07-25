@@ -100,7 +100,7 @@ void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramCon
     c.var_sweep_index   = s.axis_x_var_index;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
-    c.n_pts_text        = s.n_x_text;
+    c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
@@ -157,7 +157,7 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
     c.var_sweep_index   = s.axis_x_var_index;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
-    c.n_pts_text        = s.n_x_text;
+    c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
@@ -189,7 +189,7 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
     c.var_sweep_index   = s.axis_x_var_index;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
-    c.n_pts_text        = s.n_x_text;
+    c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
@@ -331,6 +331,21 @@ void CustomSession::enqueue_level_1d(std::deque<CustomQueueItem>& q) const {
     if (shared.ls1d_y_enabled)  q.push_back({ CustomQueueItem::Kind::LS1D_Y  });
 }
 
+void CustomSession::enqueue_level_1d_partial(std::deque<CustomQueueItem>& q,
+                                             bool x_slices, bool y_slices) const {
+    if (!shared.level_1d_enabled) return;
+    if (x_slices) {
+        if (shared.bif1d_x_enabled) q.push_back({ CustomQueueItem::Kind::Bif1D_X });
+        if (shared.lle1d_x_enabled) q.push_back({ CustomQueueItem::Kind::LLE1D_X });
+        if (shared.ls1d_x_enabled)  q.push_back({ CustomQueueItem::Kind::LS1D_X  });
+    }
+    if (y_slices) {
+        if (shared.bif1d_y_enabled) q.push_back({ CustomQueueItem::Kind::Bif1D_Y });
+        if (shared.lle1d_y_enabled) q.push_back({ CustomQueueItem::Kind::LLE1D_Y });
+        if (shared.ls1d_y_enabled)  q.push_back({ CustomQueueItem::Kind::LS1D_Y  });
+    }
+}
+
 void CustomSession::enqueue_level_3(std::deque<CustomQueueItem>& q) const {
     if (!shared.level_phase_enabled) return;
     q.push_back({ shared.level3_kind == 0 ? CustomQueueItem::Kind::Phase
@@ -413,13 +428,12 @@ std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_int (o, "axvi", s.axis_x_var_index);
     sig_append_str (o, "axlo", s.axis_x_lo_text);
     sig_append_str (o, "axhi", s.axis_x_hi_text);
-    sig_append_str (o, "nx",   s.n_x_text);
     sig_append_int (o, "ayp",  s.axis_y_par_index);
     sig_append_bool(o, "ayv",  s.axis_y_over_var);
     sig_append_int (o, "ayvi", s.axis_y_var_index);
     sig_append_str (o, "aylo", s.axis_y_lo_text);
     sig_append_str (o, "ayhi", s.axis_y_hi_text);
-    sig_append_str (o, "ny",   s.n_y_text);
+    sig_append_str (o, "res",  s.resolution_text);
     sig_append_bool(o, "b2",   s.bif2d_enabled);
     sig_append_bool(o, "l2",   s.lle2d_enabled);
     sig_append_bool(o, "s2",   s.ls2d_enabled);
