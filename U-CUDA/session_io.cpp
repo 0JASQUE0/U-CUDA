@@ -1343,13 +1343,12 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     I("axis_x_var_index",    c.axis_x_var_index);
     S("axis_x_lo_text",      c.axis_x_lo_text);
     S("axis_x_hi_text",      c.axis_x_hi_text);
-    S("n_x_text",            c.n_x_text);
     I("axis_y_par_index",    c.axis_y_par_index);
     B("axis_y_over_var",     c.axis_y_over_var);
     I("axis_y_var_index",    c.axis_y_var_index);
     S("axis_y_lo_text",      c.axis_y_lo_text);
     S("axis_y_hi_text",      c.axis_y_hi_text);
-    S("n_y_text",            c.n_y_text);
+    S("resolution_text",     c.resolution_text);
     B("bif2d_enabled",       c.bif2d_enabled);
     B("lle2d_enabled",       c.lle2d_enabled);
     B("ls2d_enabled",        c.ls2d_enabled);
@@ -1435,13 +1434,18 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "axis_x_var_index")        c.axis_x_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_x_lo_text")          c.axis_x_lo_text = q.str();
                         else if (k == "axis_x_hi_text")          c.axis_x_hi_text = q.str();
-                        else if (k == "n_x_text")                c.n_x_text = q.str();
                         else if (k == "axis_y_par_index")        c.axis_y_par_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_over_var")         c.axis_y_over_var = q.boolean();
                         else if (k == "axis_y_var_index")        c.axis_y_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_lo_text")          c.axis_y_lo_text = q.str();
                         else if (k == "axis_y_hi_text")          c.axis_y_hi_text = q.str();
-                        else if (k == "n_y_text")                c.n_y_text = q.str();
+                        else if (k == "resolution_text")         c.resolution_text = q.str();
+                        // Backwards-compat: sessions saved before N_x/N_y were
+                        // merged into a single Resolution field. Keep n_x_text's
+                        // value (it was the drive-both-axes source anyway);
+                        // silently discard n_y_text.
+                        else if (k == "n_x_text")                c.resolution_text = q.str();
+                        else if (k == "n_y_text")                (void)q.str();
                         else if (k == "bif2d_enabled")           c.bif2d_enabled = q.boolean();
                         else if (k == "lle2d_enabled")           c.lle2d_enabled = q.boolean();
                         else if (k == "ls2d_enabled")            c.ls2d_enabled = q.boolean();

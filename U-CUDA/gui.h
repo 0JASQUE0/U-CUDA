@@ -14,3 +14,8 @@ struct GuiCallbacks {
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb);
+
+// Global system switch: loads the record from `lib` into `model` and re-inits
+// the CURRENT tab's session (mirroring the top-bar combo). Exposed so
+// app_main can restore the last-used system on startup.
+void apply_system_switch(AppModel& model, SystemLibrary& lib, const std::string& name);

@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <future>
 #include <filesystem>
+#include <algorithm>
 
 
 
@@ -297,6 +298,23 @@ int main() {
         if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
             model.tick_precision = app_cfg.tick_precision;
         model.dark_theme = app_cfg.dark_theme;
+
+        // Restore last-used AppMode. Clamp to the valid enum range so a
+        // future rename/reorder of AppMode doesn't crash the app on an old
+        // config file. Kept in sync with app_model.h::AppMode (8 entries).
+        constexpr int kAppModeCount = 8;
+        if (app_cfg.last_app_mode >= 0 && app_cfg.last_app_mode < kAppModeCount)
+            model.app_mode = (AppModel::AppMode)app_cfg.last_app_mode;
+
+        // Restore last-loaded system: if the name still exists in the library,
+        // apply the switch (loads record + inits the current tab's session,
+        // matching what the top-bar combo does). Silently skip if the file
+        // was renamed/deleted between sessions — user picks manually.
+        if (!app_cfg.last_system_name.empty()) {
+            auto names = library.list();
+            if (std::find(names.begin(), names.end(), app_cfg.last_system_name) != names.end())
+                apply_system_switch(model, library, app_cfg.last_system_name);
+        }
     }
     set_tick_precision(model.tick_precision);
 

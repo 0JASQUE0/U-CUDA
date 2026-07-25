@@ -54,13 +54,15 @@ struct CustomTabSharedConfig {
     int         axis_x_var_index    = 0;
     std::string axis_x_lo_text      = "0";
     std::string axis_x_hi_text      = "1";
-    std::string n_x_text            = "64";
     int         axis_y_par_index    = 1;
     bool        axis_y_over_var     = false;
     int         axis_y_var_index    = 0;
     std::string axis_y_lo_text      = "0";
     std::string axis_y_hi_text      = "1";
-    std::string n_y_text            = "64";
+    // Shared 2D grid resolution — the underlying NVRTC kernels
+    // (`getValueByIdx` etc.) require a square N×N grid, so one field drives
+    // both axes. Matches Analysis-tab's single "Resolution" field.
+    std::string resolution_text     = "64";
     bool        bif2d_enabled       = true;
     bool        lle2d_enabled       = true;
     bool        ls2d_enabled        = true;
@@ -117,8 +119,15 @@ struct CustomTabSharedConfig {
     bool auto_recompute_1d = true;
 
     // Debounce state for slider drags: (re)start 1D recompute only after the
-    // slider settles for ~200 ms. Written when sliders change value.
-    double last_slider_change_time = 0.0;
+    // slider settles for ~200 ms. Split per axis so we can re-run ONLY the
+    // slice whose data actually depends on the moved axis:
+    //   - X-slice sweeps X, pins Y at fix_y → depends on fix_y  (fix_y change).
+    //   - Y-slice sweeps Y, pins X at fix_x → depends on fix_x  (fix_x change).
+    // Without the split, a fix_x drag re-ran both slices and the X-slice
+    // recompute — data-identical to the previous run — fired an autofit
+    // that clobbered the user's manual zoom. Heatmap drags bump BOTH.
+    double last_fix_x_change_time = 0.0;
+    double last_fix_y_change_time = 0.0;
 
     // ---- Level 3: Phase / Basins selector + drill-down policy ----
     int  level3_kind             = 0;      // 0 = Phase, 1 = Basins
@@ -202,6 +211,14 @@ struct CustomSession {
     void enqueue_level_2d(std::deque<CustomQueueItem>& q) const;
     void enqueue_level_1d(std::deque<CustomQueueItem>& q) const;
     void enqueue_level_3 (std::deque<CustomQueueItem>& q) const;
+
+    // Enqueue only the L1D slices affected by an axis change. `x_slices`
+    // pushes Bif1D_X/LLE1D_X/LS1D_X (X-slices — depend on fix_y). `y_slices`
+    // pushes Bif1D_Y/LLE1D_Y/LS1D_Y (Y-slices — depend on fix_x). Used by
+    // the slider auto-recompute so an isolated fix_x drag doesn't re-run
+    // (and re-autofit) the fix_x-independent X-slice.
+    void enqueue_level_1d_partial(std::deque<CustomQueueItem>& q,
+                                  bool x_slices, bool y_slices) const;
 
     // Aggregate in-flight status — true if ANY sub-session is currently
     // computing. Used to gate the queue drainer.
