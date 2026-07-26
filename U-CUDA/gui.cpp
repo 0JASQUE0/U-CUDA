@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "imgui.h"
+#include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
 #include "implot.h"
 #include "implot3d.h"
 #include "plot_renderer.h"
@@ -1144,7 +1145,15 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 }
 
 // Рисует окна проекций (каждая — отдельное docking-окно с графиком).
-static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb) {
+// Optional `before_begin` runs immediately before each projection window's
+// ImGui::Begin (Custom mode uses it to assign initial dock target); optional
+// `after_begin` runs right after Begin returns true (Custom mode uses it to
+// attach the Move-to-Tab context menu). Both empty (default) preserve the
+// Analysis-mode behaviour.
+using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
+static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
+                                    const ProjHookFn& before_begin = {},
+                                    const ProjHookFn& after_begin  = {}) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every Phase2D / TimeDomain view that has data —
     // right-click "Export data..." writes the full double-precision
@@ -1184,7 +1193,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
         float oy = 80.0f + (i % 5) * 35.0f;
         ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
+        if (before_begin) before_begin(i, title);
         if (ImGui::Begin(title.c_str(), &open)) {
+            if (after_begin) after_begin(i, title);
             ImGui::PushID(i);   // разделить ID внутренних виджетов между окнами проекций
             if (!res.ok || res.trajectories.empty()) {
                 ImGui::TextDisabled("No data. Press Recompute.");
@@ -6638,16 +6649,417 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
 
 } // namespace
 
+// ============================================================================
+// Custom Workspace — split-region layout for Custom AppMode.
+//
+// Structure per frame:
+//   +---------------------------------------------------------------+
+//   |                       AppMode radios                          |  (MainHost)
+//   +---------+---+-------------------------------------------------+
+//   |         | s |  [ Tab 1 | Tab 2 | + ]                          |
+//   | Custom  | p |  +--------------------------------------------+ |
+//   | Controls| l |  |                                            | |
+//   |  panel  | i |  |   Per-tab DockSpace (plot windows here)    | |
+//   |         | t |  |                                            | |
+//   +---------+---+--+--------------------------------------------+-+
+//
+// Docking model:
+//   - Each tab owns one DockSpace with a STABLE id derived from tab.id
+//     via ws_dock_id() — deliberately NOT ImGui::GetID(str), because
+//     GetID hashes with the current window-ID stack (different id inside
+//     BeginTabItem vs outside), and we submit the same dockspace both in
+//     KeepAliveOnly form (before BeginTabBar) and in real form (inside
+//     BeginTabItem of the active tab).
+//   - Every frame, we submit ALL per-tab dockspaces with the flag
+//     ImGuiDockNodeFlags_KeepAliveOnly. This tells ImGui "these nodes
+//     still exist" so windows docked inside inactive tabs don't get
+//     orphaned to a floating state.
+//   - The active tab additionally re-submits its dockspace with normal
+//     flags inside BeginTabItem so it renders.
+//   - Plot windows are docked into their tab's dockspace via
+//     DockBuilderDockWindow on first appearance; imgui.ini persists the
+//     internal split layout across sessions.
+//   - Cross-tab drag&drop: BeginDragDropSource on each plot's title bar
+//     + BeginDragDropTarget on each tab item → drop calls
+//     DockBuilderDockWindow(name, target_ds) and switches to that tab.
+// ============================================================================
+
+// Stable dockspace ID for a workspace tab. Independent of ImGui's ID-stack
+// scope (so the same id is produced whether we compute it inside a window
+// or outside), and unlikely to collide with other IDs in the app.
+static inline ImGuiID ws_dock_id(int tab_id) {
+    return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id;
+}
+
+// Drag&drop payload key — passed via ImGui's built-in drag-drop channel.
+// Payload data: `const char* name` of the docked window title.
+static const char* WS_DRAG_PAYLOAD = "CUSTOM_WS_WIN";
+
+// Forward decls — the layout function calls these; they live further down.
+static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb);
+
+static void draw_custom_controls_panel(AppModel& model, SystemLibrary& lib,
+                                       ImVec2 pos, ImVec2 size) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    // No NoBringToFrontOnFocus / NoNavFocus here — clicks on Controls/Workspace
+    // widgets were being swallowed with those on; keeping the panels pinned via
+    // NoMove/NoResize + SetNextWindowPos/Size is enough to make them "regions".
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar
+                           | ImGuiWindowFlags_NoResize
+                           | ImGuiWindowFlags_NoMove
+                           | ImGuiWindowFlags_NoCollapse
+                           | ImGuiWindowFlags_NoDocking;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    if (ImGui::Begin("Custom Controls##panel", nullptr, flags)) {
+        draw_custom_controls(model, lib);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+// Runtime rename state — Custom mode is the only place we rename tabs, so
+// keeping it as a file-scope static (not persisted) is fine.
+struct WsRenameState {
+    int  target_id = 0;              // 0 = no rename in progress.
+    char buf[128]  = {};
+};
+static WsRenameState g_ws_rename;
+
+static void draw_custom_workspace_panel(CustomSession& cs,
+                                        ImVec2 pos, ImVec2 size) {
+    auto& ws = cs.workspace;
+    ws.ensure_default();
+
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    // No NoBringToFrontOnFocus / NoNavFocus here — clicks on Controls/Workspace
+    // widgets were being swallowed with those on; keeping the panels pinned via
+    // NoMove/NoResize + SetNextWindowPos/Size is enough to make them "regions".
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar
+                           | ImGuiWindowFlags_NoResize
+                           | ImGuiWindowFlags_NoMove
+                           | ImGuiWindowFlags_NoCollapse
+                           | ImGuiWindowFlags_NoDocking;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    if (!ImGui::Begin("Custom Workspace##panel", nullptr, flags)) {
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+
+    // Tab bar with +, close, rename, and cross-tab drop targets.
+    // NOTE ON DOCKING: the real DockSpace for the active tab is submitted
+    // AFTER EndTabBar (not inside BeginTabItem body). Reason: submitting
+    // DockSpace(id) inside BeginTabItem pushes an ID-stack entry (the tab
+    // item), so ImGui creates an auto-child host window "…/DockSpace_XXX"
+    // whose host context differs from the KeepAliveOnly submit outside
+    // BeginTabItem. That mismatch caused docked windows to orphan on tab
+    // switch (plots vanishing when returning to a previously-active tab).
+    // Submitting real + keep-alive from the same context (workspace panel
+    // window, outside BeginTabItem) keeps the host consistent.
+    int close_id = 0;
+    int switch_to_id = 0;
+    ImGuiTabBarFlags tb_flags = ImGuiTabBarFlags_Reorderable
+                              | ImGuiTabBarFlags_TabListPopupButton
+                              | ImGuiTabBarFlags_AutoSelectNewTabs
+                              | ImGuiTabBarFlags_FittingPolicyScroll;
+    if (ImGui::BeginTabBar("##custom_ws_tabs", tb_flags)) {
+        const bool allow_close = (int)ws.tabs.size() > 1;
+        for (size_t i = 0; i < ws.tabs.size(); ++i) {
+            WorkspaceTab& tab = ws.tabs[i];
+            // Stable tab ID via "##ws_tab_<id>" suffix so rename changes
+            // only the visible label, not the internal ImGui key.
+            std::string label = tab.name + "##ws_tab_" + std::to_string(tab.id);
+            bool keep = true;
+            bool item_open = ImGui::BeginTabItem(label.c_str(),
+                                                 allow_close ? &keep : nullptr,
+                                                 ImGuiTabItemFlags_None);
+            // Drop-target for cross-tab window move. Accepts:
+            //   - Our custom payload (WS_DRAG_PAYLOAD, `const char*` name):
+            //     used if we ever add an explicit drag handle.
+            //   - ImGui's native window docking payload (IMGUI_PAYLOAD_TYPE_WINDOW,
+            //     `ImGuiWindow*`): fired when the user drags a docked plot's
+            //     tab out of its dockspace and hovers over ours. This is what
+            //     enables the requested "native drag&drop between tabs" UX.
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(WS_DRAG_PAYLOAD)) {
+                    const char* win_name = (const char*)p->Data;
+                    if (win_name && *win_name) {
+                        ImGui::DockBuilderDockWindow(win_name, ws_dock_id(tab.id));
+                        switch_to_id = tab.id;
+                        ws.dirty = true;
+                    }
+                }
+                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(IMGUI_PAYLOAD_TYPE_WINDOW)) {
+                    ImGuiWindow* dragged = *(ImGuiWindow**)p->Data;
+                    if (dragged && dragged->Name) {
+                        ImGui::DockBuilderDockWindow(dragged->Name, ws_dock_id(tab.id));
+                        switch_to_id = tab.id;
+                        ws.dirty = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            // Right-click menu (rename / close).
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Rename")) {
+                    g_ws_rename.target_id = tab.id;
+                    std::snprintf(g_ws_rename.buf, sizeof(g_ws_rename.buf),
+                                  "%s", tab.name.c_str());
+                }
+                if (allow_close && ImGui::MenuItem("Close tab")) {
+                    close_id = tab.id;
+                }
+                ImGui::EndPopup();
+            }
+            if (item_open) {
+                if (ws.active_tab_id != tab.id) {
+                    ws.active_tab_id = tab.id;
+                    ws.dirty = true;
+                }
+                // Empty body — real DockSpace is submitted AFTER EndTabBar
+                // (see NOTE ON DOCKING above).
+                ImGui::EndTabItem();
+            }
+            if (!keep) close_id = tab.id;
+        }
+        if (ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing
+                                    | ImGuiTabItemFlags_NoTooltip)) {
+            WorkspaceTab nt;
+            // id keeps monotonically incrementing — it seeds the DockSpace
+            // node id, so reusing an id could collide with imgui.ini state
+            // of a previously-closed tab. Display name, though, picks the
+            // lowest unused "Tab N" number so the user doesn't watch the
+            // counter grow to 20+ after a few open/close cycles.
+            nt.id = ws.next_tab_id++;
+            int label_num = 1;
+            auto name_taken = [&](int n){
+                std::string s = "Tab " + std::to_string(n);
+                return std::any_of(ws.tabs.begin(), ws.tabs.end(),
+                                   [&](const WorkspaceTab& t){ return t.name == s; });
+            };
+            while (name_taken(label_num)) ++label_num;
+            nt.name = "Tab " + std::to_string(label_num);
+            ws.tabs.push_back(nt);
+            ws.active_tab_id = nt.id;
+            ws.dirty = true;
+        }
+        ImGui::EndTabBar();
+    }
+
+    // Submit all workspace dockspaces from the SAME host context (workspace
+    // panel, outside BeginTabItem). Active tab gets a real submit that
+    // renders + hosts its docked windows; inactive tabs get KeepAliveOnly
+    // so their docked windows remain docked (invisible until user switches
+    // to that tab) instead of orphaning to floating state.
+    for (const auto& tab : ws.tabs) {
+        if (tab.id != ws.active_tab_id) {
+            ImGui::DockSpace(ws_dock_id(tab.id), ImVec2(0, 0),
+                             ImGuiDockNodeFlags_KeepAliveOnly);
+        }
+    }
+    if (std::any_of(ws.tabs.begin(), ws.tabs.end(),
+                    [&](const WorkspaceTab& t){ return t.id == ws.active_tab_id; })) {
+        ImGui::DockSpace(ws_dock_id(ws.active_tab_id), ImVec2(0, 0),
+                         ImGuiDockNodeFlags_None);
+    }
+
+    // Deferred tab close — move every window still docked in the closing
+    // tab's dockspace into the fallback tab (front). DockBuilderRemoveNode
+    // moves them off first, so we manually re-dock instead.
+    if (close_id != 0) {
+        auto it = std::find_if(ws.tabs.begin(), ws.tabs.end(),
+                               [close_id](const WorkspaceTab& t){ return t.id == close_id; });
+        if (it != ws.tabs.end() && ws.tabs.size() > 1) {
+            ws.tabs.erase(it);
+            ws.dirty = true;
+            int fallback = ws.tabs.front().id;
+            // Find all windows docked in the closing node and re-dock them
+            // into the fallback. Iterate a copy of the node's windows list
+            // because DockBuilderDockWindow mutates it under us.
+            ImGuiDockNode* node = ImGui::DockBuilderGetNode(ws_dock_id(close_id));
+            if (node) {
+                // Walk the whole subtree (splits) and re-dock every window
+                // encountered. Simple recursive lambda.
+                std::vector<std::string> to_move;
+                std::function<void(ImGuiDockNode*)> walk = [&](ImGuiDockNode* n){
+                    if (!n) return;
+                    for (int wi = 0; wi < n->Windows.Size; ++wi) {
+                        if (n->Windows[wi] && n->Windows[wi]->Name)
+                            to_move.emplace_back(n->Windows[wi]->Name);
+                    }
+                    walk(n->ChildNodes[0]);
+                    walk(n->ChildNodes[1]);
+                };
+                walk(node);
+                for (const auto& name : to_move)
+                    ImGui::DockBuilderDockWindow(name.c_str(), ws_dock_id(fallback));
+                // Now discard the closed node's split hierarchy.
+                ImGui::DockBuilderRemoveNode(ws_dock_id(close_id));
+            }
+            if (ws.active_tab_id == close_id) ws.active_tab_id = fallback;
+        }
+    }
+    if (switch_to_id != 0) ws.active_tab_id = switch_to_id;
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+
+    // Rename modal — centered on viewport, Esc = Cancel, auto-reset if the
+    // user clicks outside. IMPORTANT: SetNextWindowPos must be INSIDE the
+    // "opening" branch — an unconditional call left the "next-window-pos"
+    // flag dangling and got applied to the first plot window created that
+    // frame (which appeared floating at viewport center and looked like a
+    // dark overlay covering the workspace).
+    if (g_ws_rename.target_id != 0) {
+        ImGui::OpenPopup("Rename tab##custom_ws");
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    }
+    if (ImGui::BeginPopupModal("Rename tab##custom_ws", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetKeyboardFocusHere();
+        bool commit = ImGui::InputText("##ws_rename",
+                                       g_ws_rename.buf, sizeof(g_ws_rename.buf),
+                                       ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::Button("OK") || commit) {
+            for (auto& t : ws.tabs) {
+                if (t.id == g_ws_rename.target_id) {
+                    std::string s = g_ws_rename.buf;
+                    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+                    if (!s.empty() && s != t.name) {
+                        t.name = s;
+                        ws.dirty = true;
+                    }
+                    break;
+                }
+            }
+            g_ws_rename.target_id = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            g_ws_rename.target_id = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    } else if (g_ws_rename.target_id != 0) {
+        // Popup was closed by ImGui itself (clicked outside etc.). Clear the
+        // trigger flag so we don't immediately re-open.
+        g_ws_rename.target_id = 0;
+    }
+}
+
+static void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
+                                    const GuiCallbacks& cb,
+                                    ImVec2 area_pos, ImVec2 area_size) {
+    auto& ws = model.custom_session.workspace;
+    ws.ensure_default();
+
+    if (area_size.x < 100.0f || area_size.y < 40.0f) return;
+
+    // Clamp splitter to sane bounds for the current viewport.
+    const float min_ctrl   = 200.0f;
+    const float min_ws     = 300.0f;
+    const float splitter_w = 6.0f;
+    float max_ctrl = std::max(min_ctrl, area_size.x - min_ws - splitter_w);
+    if (ws.controls_width < min_ctrl) ws.controls_width = min_ctrl;
+    if (ws.controls_width > max_ctrl) ws.controls_width = max_ctrl;
+
+    ImVec2 ctrl_pos  = area_pos;
+    ImVec2 ctrl_size(ws.controls_width, area_size.y);
+    ImVec2 split_pos(area_pos.x + ws.controls_width, area_pos.y);
+    ImVec2 split_size(splitter_w, area_size.y);
+    ImVec2 ws_pos  (split_pos.x + splitter_w, area_pos.y);
+    ImVec2 ws_size (area_size.x - ws.controls_width - splitter_w, area_size.y);
+
+    // Splitter (invisible button + drawn rect).
+    ImGui::SetNextWindowPos(split_pos);
+    ImGui::SetNextWindowSize(split_size);
+    // NoBackground — splitter draws its own filled rect manually, so ImGui's
+    // window background (which showed as the "dark strip" artefact on click)
+    // is redundant. NoBringToFrontOnFocus swallows the drag input entirely,
+    // so we can't use it here (unlike on Controls/Workspace panels).
+    ImGuiWindowFlags split_flags = ImGuiWindowFlags_NoTitleBar
+                                 | ImGuiWindowFlags_NoResize
+                                 | ImGuiWindowFlags_NoMove
+                                 | ImGuiWindowFlags_NoScrollbar
+                                 | ImGuiWindowFlags_NoScrollWithMouse
+                                 | ImGuiWindowFlags_NoCollapse
+                                 | ImGuiWindowFlags_NoNavFocus
+                                 | ImGuiWindowFlags_NoBackground
+                                 | ImGuiWindowFlags_NoDocking;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##CustomSplitter", nullptr, split_flags);
+    ImGui::InvisibleButton("##split_btn", split_size);
+    if (ImGui::IsItemActive()) {
+        float dx = ImGui::GetIO().MouseDelta.x;
+        if (dx != 0.0f) {
+            ws.controls_width += dx;
+            if (ws.controls_width < min_ctrl) ws.controls_width = min_ctrl;
+            if (ws.controls_width > max_ctrl) ws.controls_width = max_ctrl;
+            ws.dirty = true;
+        }
+    }
+    ImU32 col = ImGui::IsItemActive()  ? ImGui::GetColorU32(ImGuiCol_SeparatorActive)
+              : ImGui::IsItemHovered() ? ImGui::GetColorU32(ImGuiCol_SeparatorHovered)
+                                       : ImGui::GetColorU32(ImGuiCol_Separator);
+    ImGui::GetWindowDrawList()->AddRectFilled(split_pos,
+        ImVec2(split_pos.x + split_size.x, split_pos.y + split_size.y), col);
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+
+    draw_custom_controls_panel(model, lib, ctrl_pos, ctrl_size);
+    draw_custom_workspace_panel(model.custom_session, ws_pos, ws_size);
+    draw_custom_plot_windows(model, lib, cb);
+}
+
 static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     (void)lib; (void)cb;
     auto& cs = model.custom_session;
     auto& q  = model.custom_queue;
+    auto& ws = cs.workspace;
 
     // Persistent per-window renderers + views. Indexed by fixed slots so their
     // ImGui-IDs stay stable across frames.
     static std::array<std::unique_ptr<PlotRenderer>, 3> renderers_2d;
     static std::array<HeatmapView, 3>                   heatmaps;
     for (auto& r : renderers_2d) if (!r) r = std::make_unique<PlotRenderer>();
+
+    // Dock a plot window into the active tab ONLY when there is no dock
+    // memory for it — neither at runtime (`window->DockId`) NOR in
+    // imgui.ini (`ImGuiWindowSettings::DockId`). This lets a reloaded
+    // session restore its per-tab layout from ini on the very first frame
+    // (when the window hasn't been Begun yet, so FindWindowByName returns
+    // null but ImGui has the settings ready to apply). Overriding a
+    // persisted DockId here caused "plots all get dumped into the active
+    // tab on startup".
+    //
+    // Skipped while the mouse is held down so we don't yank a window out
+    // of an in-flight drag.
+    auto ensure_docked = [&](const char* name) {
+        if (ImGui::GetIO().MouseDown[0]) return;
+        ImGuiID persisted_dock = 0;
+        if (ImGuiWindow* w = ImGui::FindWindowByName(name)) {
+            persisted_dock = w->DockId;
+        } else if (ImGuiWindowSettings* s =
+                       ImGui::FindWindowSettingsByID(ImHashStr(name))) {
+            persisted_dock = s->DockId;   // will be applied on window's next Begin
+        }
+        if (persisted_dock != 0) return;
+        ImGui::DockBuilderDockWindow(name, ws_dock_id(ws.active_tab_id));
+    };
+
+    // Cross-tab window move is handled entirely via native ImGui drag&drop:
+    // drop a plot's tab onto a target tab in the workspace tab bar (see
+    // BeginDragDropTarget in draw_custom_workspace_panel, which accepts
+    // IMGUI_PAYLOAD_TYPE_WINDOW). No MMB menu here — MMB is claimed by
+    // heatmap/1D-plot views for crosshair-drag / slice movement.
 
     auto axis_name = [&](bool over_var, int par_i, int var_i) -> std::string {
         if (over_var) return (var_i >= 0 && var_i < (int)cs.vars.size())
@@ -6746,6 +7158,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
 
     for (int i = 0; i < 3; ++i) {
         if (!slots[i].show) continue;
+        ensure_docked(slots[i].title);
         if (ImGui::Begin(slots[i].title)) {
             HeatmapView& hv = heatmaps[i];
 
@@ -6958,6 +7371,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         Plot2DView&  view = *l1_views[i];
         PlotRenderer& rnd = *l1_renderers[i];
 
+        ensure_docked(lslots[i].title);
         if (!ImGui::Begin(lslots[i].title)) { ImGui::End(); continue; }
         ImGui::PushID(i);
 
@@ -7233,10 +7647,13 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // draw_level3_detail). Here we only spawn the projection windows so
     // 2D / 3D / TimeDomain plots dock alongside the other custom plots.
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 0) {
-        draw_projection_windows(cs.phase_session, cb);
+        // Auto-place phase projections into the active tab on first appearance.
+        draw_projection_windows(cs.phase_session, cb,
+            [&](int /*idx*/, const std::string& title) { ensure_docked(title.c_str()); });
     }
     // --- Level 3 Basins window (unchanged HeatmapView minimal renderer) ---
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
+        ensure_docked("Custom Basins");
         if (ImGui::Begin("Custom Basins")) {
                 // Basins — HeatmapView of basin_idx (cluster id) — simpler
                 // than draw_basins_plot's toolbar (feature switch stays in
@@ -7398,7 +7815,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on
     // any completion so we don't rewrite _last_custom.json five times.
-    if (model.custom_session.poll_all()) {
+    // Also save on any workspace mutation (add/close/rename tab, splitter
+    // drag, cross-tab window move) — the compute-completion save alone
+    // meant a closed tab could resurrect after a plain app restart.
+    bool custom_dirty = model.custom_session.poll_all();
+    if (model.custom_session.workspace.dirty) {
+        custom_dirty = true;
+        model.custom_session.workspace.dirty = false;
+    }
+    if (custom_dirty) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_custom",
                              session_to_json_custom(model.custom_session));
@@ -7860,9 +8285,18 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.app_mode = (AppModel::AppMode)mode;
     ImGui::Separator();
 
-    // dockspace для содержимого
-    ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
-    ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+    // Custom mode has its own two-pane layout (Controls | Workspace, split by
+    // a draggable splitter) instead of the shared MainDockspace. Capture the
+    // region below the AppMode radios so that layout can occupy exactly it.
+    ImVec2 custom_area_pos{}, custom_area_size{};
+    if (model.app_mode == AppModel::AppMode::Custom) {
+        custom_area_pos  = ImGui::GetCursorScreenPos();
+        custom_area_size = ImGui::GetContentRegionAvail();
+    } else {
+        // dockspace для содержимого — используется всеми режимами, кроме Custom.
+        ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
+        ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+    }
 
     ImGui::End(); // MainHost
 
@@ -7935,13 +8369,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
-        // Custom hierarchical pipeline: master-detail controls window + up
-        // to 3 heatmap windows + 6 line-slice windows + Phase/Basins window.
-        if (ImGui::Begin("Custom Controls")) {
-            draw_custom_controls(model, lib);
-        }
-        ImGui::End();
-        draw_custom_plot_windows(model, lib, cb);
+        // Custom mode: split-region layout (Controls | Workspace) drawn into
+        // the area captured above. Plot windows live in per-tab dockspaces
+        // inside the Workspace panel and are moved between tabs via native
+        // ImGui drag&drop (see draw_custom_mode_layout).
+        draw_custom_mode_layout(model, lib, cb, custom_area_pos, custom_area_size);
     }
     else { // AppMode::Settings
         if (ImGui::Begin("Settings")) {

@@ -147,6 +147,44 @@ struct CustomQueueItem {
     Kind kind = Kind::Bif2D;
 };
 
+// ---- Workspace tabs (Custom-mode UI layout container) ----
+//
+// Each tab hosts its own DockSpace. Plot windows dock into per-tab spaces
+// via ImGui's DockBuilder API (see draw_custom_mode_layout in gui.cpp);
+// switching between tabs shows/hides the corresponding set of docked
+// windows, without orphaning them (KeepAliveOnly submit for inactive tabs).
+//
+// Only metadata lives here — the actual dock layout inside each tab is
+// owned by ImGui and persisted in imgui.ini keyed off the tab's stable id.
+struct WorkspaceTab {
+    int         id   = 0;   // Stable per session — used to derive DockSpace ID.
+    std::string name;       // User-editable label shown in the tab bar.
+};
+
+struct CustomWorkspace {
+    std::vector<WorkspaceTab> tabs;                // Always non-empty (ensure_default).
+    int                       active_tab_id = 1;   // Currently visible tab.
+    int                       next_tab_id   = 2;   // Monotonic id allocator.
+    float                     controls_width = 380.0f; // Splitter position (px).
+
+    // Transient (not serialised) — set by the workspace UI when any
+    // persistable field changes (add/close/rename tab, splitter drag,
+    // cross-tab window move, active tab switch). Consumed once per frame
+    // by draw_gui to write _last_custom.json; without this the workspace
+    // metadata was only saved on a sub-session compute completion, which
+    // meant e.g. closing a tab wouldn't survive a plain app restart.
+    bool                      dirty = false;
+
+    void ensure_default() {
+        if (tabs.empty()) {
+            tabs.push_back({1, "Tab 1"});
+            active_tab_id = 1;
+            next_tab_id   = 2;
+            dirty         = true;
+        }
+    }
+};
+
 // Coordinator that owns per-type sub-sessions + the shared config. Kept in
 // AppModel as a value member. Non-copyable (sub-sessions hold std::future).
 struct CustomSession {
@@ -171,6 +209,9 @@ struct CustomSession {
     // plot windows include this into their ImGui-ID so docking treats them
     // as new after a reset). Mirrors PhaseAnalysisSession::layout_generation.
     int layout_generation = 0;
+
+    // Workspace tabs — visible only in Custom mode.
+    CustomWorkspace workspace;
 
     // Cached last-error string for GUI status; sub-session errors are still
     // rendered from their own last_error fields.
