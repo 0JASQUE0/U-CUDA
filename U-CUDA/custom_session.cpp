@@ -253,6 +253,18 @@ void CustomSession::load_from_record(const SystemRecord& r,
     params = params_;
     custom_schemes = r.custom_schemes;
 
+    // Hard-reset shared to struct defaults BEFORE seeding from the record.
+    // Previously we only overrode a subset of fields (scheme, symmetry, h,
+    // ICs, param_values, default sweep indices) — everything else (fix_x/y,
+    // sweep ranges, resolution, level/sub-type enables, inherit flag, log
+    // scales, level3_kind, etc.) leaked from the PREVIOUS system when the
+    // new system had no saved _last_custom.json. That fed the wrong
+    // fix_x/fix_y and axis targets straight into the kernel via
+    // apply_shared_to_bif2d/pin_param and made the second-system Run look
+    // "similar but wrong". Now defaults come from the struct itself and the
+    // explicit assignments below override just what the record specifies.
+    shared = CustomTabSharedConfig{};
+
     // Seed shared config from the record's defaults.
     shared.scheme         = "Euler";
     shared.symmetry_s     = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
@@ -278,6 +290,23 @@ void CustomSession::load_from_record(const SystemRecord& r,
     if (params.size() >= 2) shared.axis_y_par_index = 1;
     shared.sweep_x_par_index = shared.axis_x_par_index;
     shared.sweep_y_par_index = shared.axis_y_par_index;
+
+    // Default fix_x/y to the MIDPOINT of the effective sweep range instead
+    // of leaving them at struct-default 0.0. On a fresh (never-visited)
+    // system, 0.0 on the pinned axis pushed many systems into degenerate
+    // trajectories, and 1D-Run appeared to "produce nothing" until the user
+    // dragged the fix slider off zero. Midpoint of default 0..1 is 0.5 —
+    // a much better neutral starting point.
+    auto safe_parse = [](const std::string& s, double def) -> double {
+        if (s.empty()) return def;
+        try { return std::stod(s); } catch (...) { return def; }
+    };
+    {
+        EffectiveSweep esx = effective_sweep_x(shared);
+        EffectiveSweep esy = effective_sweep_y(shared);
+        shared.fix_x_value = (safe_parse(esx.lo_text, 0.0) + safe_parse(esx.hi_text, 1.0)) * 0.5;
+        shared.fix_y_value = (safe_parse(esy.lo_text, 0.0) + safe_parse(esy.hi_text, 1.0)) * 0.5;
+    }
 
     // Seed sub-sessions. Each Bif/LLE/LS gets 3 slots: [0]=2D, [1]=1D-X, [2]=1D-Y.
     bif_session.load_from_record(r, vars, params);

@@ -1151,9 +1151,18 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 // attach the Move-to-Tab context menu). Both empty (default) preserve the
 // Analysis-mode behaviour.
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
+// `title_suffix` is appended to every projection window's title (e.g.
+// "##sys_<name>") so imgui.ini stores dock state per system in Custom mode.
+// `owner_id_delta` is XOR'd into the per-projection owner_id passed to
+// Plot2D/3D so the SHARED PlotRenderer cache (static in this function) is
+// keyed per system — without it, Chen and Rossler both used owner_id=0
+// for their first projection and Rossler saw Chen's cached FBO texture.
+// Analysis mode passes zero and gets the previous behaviour.
 static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     const ProjHookFn& before_begin = {},
-                                    const ProjHookFn& after_begin  = {}) {
+                                    const ProjHookFn& after_begin  = {},
+                                    const std::string& title_suffix = {},
+                                    int owner_id_delta = 0) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every Phase2D / TimeDomain view that has data —
     // right-click "Export data..." writes the full double-precision
@@ -1184,7 +1193,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
-        std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation);
+        std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation) + title_suffix;
         bool open = true; // крестик закрытия
         // Начальные позиция и размер (только при первом появлении).
         // Каскад слева-сверху: каждое следующее окно чуть смещено.
@@ -1276,7 +1285,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
                     pr.view2d->popup_extras = phase_popup_extras;
-                    pr.view2d->render(renderer, origin, avail, i, data_gen,
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
             }
@@ -1370,7 +1379,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
                     pr.view2d->popup_extras = phase_popup_extras;
-                    pr.view2d->render(renderer, origin, avail, i, data_gen,
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
             }
@@ -1443,7 +1452,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
-                    pr.view3d->render(renderer, origin, avail, i, data_gen,
+                    pr.view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
             }
@@ -5874,6 +5883,12 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             break;
         }
         case AppModel::AppMode::Custom: {
+            // Hard reset + engine wipe. Sub-session buffers, signature caches,
+            // AND the CUDA-side PTX cache in parametric_engine all need to
+            // clear on system switch — otherwise the second-system Run either
+            // produced a stale-looking result or zeroed out the first one.
+            model.custom_session = CustomSession{};
+            model.parametric_engine.reset();
             model.start_custom_analysis();
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
             if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
@@ -6014,29 +6029,61 @@ void draw_shared_config(CustomSession& cs,
     // Non-swept params are also mirrored to phase.param_values so the L3
     // Phase panel Parameters section shows the same live values.
     if (ImGui::CollapsingHeader("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // All params are always editable — sweep will overwrite swept-axis
+        // values at run time anyway, but the manual value is useful for
+        // initial-frame edits and for non-sweeping levels (e.g. L3 Phase).
+        // We still MARK swept params with a "(swept)" tag so the user can
+        // tell at a glance which values will be replaced by the sweep.
         std::vector<bool> is_swept(params.size(), false);
-        if (c.level_2d_enabled) {
-            if (!c.axis_x_over_var && c.axis_x_par_index >= 0 && c.axis_x_par_index < (int)params.size())
-                is_swept[c.axis_x_par_index] = true;
-            if (!c.axis_y_over_var && c.axis_y_par_index >= 0 && c.axis_y_par_index < (int)params.size())
-                is_swept[c.axis_y_par_index] = true;
+        const bool any_2d   = c.bif2d_enabled || c.lle2d_enabled || c.ls2d_enabled;
+        const bool any_1d_x = c.bif1d_x_enabled || c.lle1d_x_enabled || c.ls1d_x_enabled;
+        const bool any_1d_y = c.bif1d_y_enabled || c.lle1d_y_enabled || c.ls1d_y_enabled;
+        auto mark = [&](int par_i, bool over_var) {
+            if (over_var) return;
+            if (par_i < 0 || par_i >= (int)params.size()) return;
+            is_swept[par_i] = true;
+        };
+        if (c.level_2d_enabled && any_2d) {
+            mark(c.axis_x_par_index, c.axis_x_over_var);
+            mark(c.axis_y_par_index, c.axis_y_over_var);
         }
-        if (c.level_1d_enabled && !(c.inherit_sweep_from_2d && c.level_2d_enabled)) {
-            if (!c.sweep_x_over_var && c.sweep_x_par_index >= 0 && c.sweep_x_par_index < (int)params.size())
-                is_swept[c.sweep_x_par_index] = true;
-            if (!c.sweep_y_over_var && c.sweep_y_par_index >= 0 && c.sweep_y_par_index < (int)params.size())
-                is_swept[c.sweep_y_par_index] = true;
+        if (c.level_1d_enabled) {
+            if (any_1d_x) {
+                EffectiveSweep esx = effective_sweep_x(c);
+                mark(esx.par_index, esx.over_var);
+            }
+            if (any_1d_y) {
+                EffectiveSweep esy = effective_sweep_y(c);
+                mark(esy.par_index, esy.over_var);
+            }
         }
+        // Effective sweep axes cached once — used by both the (swept) label
+        // logic below AND the crosshair sync when the user edits the value
+        // of a sweep-axis param manually.
+        EffectiveSweep esx = effective_sweep_x(c);
+        EffectiveSweep esy = effective_sweep_y(c);
         for (int i = 0; i < (int)params.size(); ++i) {
             const auto& p = params[i];
             ImGui::PushID(p.c_str());
-            if (is_swept[i]) ImGui::BeginDisabled();
             if (InputNumStr(p.c_str(), c.param_values[p], 120)) {
-                if (!is_swept[i]) phase.param_values[p] = c.param_values[p];
+                phase.param_values[p] = c.param_values[p];
+                // Bump debounce timers so the auto-recompute path (L1D
+                // partial + Phase, gated by auto_recompute_1d /
+                // autorun_on_drilldown) picks up the manual edit — same
+                // path a slider drag settle goes through, no Run needed.
+                double t = ImGui::GetTime();
+                c.last_fix_x_change_time = t;
+                c.last_fix_y_change_time = t;
+                // If this param IS the effective sweep axis, move the
+                // crosshair to the new pinned value so 1D slice plots and
+                // 2D heatmaps show it there immediately.
+                double new_val = parse_num_default(c.param_values[p], 0.0);
+                if (!esx.over_var && esx.par_index == i) c.fix_x_value = new_val;
+                if (!esy.over_var && esy.par_index == i) c.fix_y_value = new_val;
             }
             if (is_swept[i]) {
-                ImGui::SameLine(); ImGui::TextDisabled("(swept)");
-                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextDisabled("(swept)");
             }
             ImGui::PopID();
         }
@@ -6431,10 +6478,14 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     // bumps BOTH timers, so it still recomputes both sides.
     if (c.level_1d_enabled && !cs.any_in_flight()) {
         double now = ImGui::GetTime();
+        // 500 ms debounce: long enough that stepping a numeric field with
+        // the arrow buttons (multiple ticks in quick succession) coalesces
+        // into a single recompute instead of firing on every click.
+        const double debounce_s = 0.5;
         bool x_settled = c.last_fix_x_change_time > 0.0
-                      && now - c.last_fix_x_change_time > 0.2;
+                      && now - c.last_fix_x_change_time > debounce_s;
         bool y_settled = c.last_fix_y_change_time > 0.0
-                      && now - c.last_fix_y_change_time > 0.2;
+                      && now - c.last_fix_y_change_time > debounce_s;
         bool queue_free = model.custom_queue.empty();
         if ((x_settled || y_settled) && queue_free) {
             if (c.auto_recompute_1d) {
@@ -6443,17 +6494,24 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                     /*x_slices*/ y_settled,
                     /*y_slices*/ x_settled);
             }
+            // Pin the shared param_values from the EFFECTIVE sweep axes.
+            // Previously this was inside `if (autorun_on_drilldown && ...)`
+            // AND always used the L2D axes — so a 1D-standalone sweep
+            // (inherit off) never propagated a slider drag back to the
+            // shared Parameters section. Now we pin unconditionally on
+            // settle, using effective_sweep_x/y so L2D-inherit and L1D-
+            // standalone both update the correct param.
+            auto pin_param = [&](int par_i, bool over_var, double v) {
+                if (over_var) return;
+                if (par_i < 0 || par_i >= (int)cs.params.size()) return;
+                char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
+                c.param_values[cs.params[par_i]] = buf;
+            };
+            EffectiveSweep esx = effective_sweep_x(c);
+            EffectiveSweep esy = effective_sweep_y(c);
+            if (x_settled) pin_param(esx.par_index, esx.over_var, c.fix_x_value);
+            if (y_settled) pin_param(esy.par_index, esy.over_var, c.fix_y_value);
             if (c.autorun_on_drilldown && c.level_phase_enabled) {
-                // Phase pins BOTH axes, so it must re-run whenever either
-                // moved. Enqueue exactly once even if both timers settled.
-                auto pin_param = [&](int par_i, bool over_var, double v) {
-                    if (over_var) return;
-                    if (par_i < 0 || par_i >= (int)cs.params.size()) return;
-                    char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
-                    c.param_values[cs.params[par_i]] = buf;
-                };
-                pin_param(c.axis_x_par_index, c.axis_x_over_var, c.fix_x_value);
-                pin_param(c.axis_y_par_index, c.axis_y_over_var, c.fix_y_value);
                 model.custom_queue.push_back({ c.level3_kind == 0
                     ? CustomQueueItem::Kind::Phase
                     : CustomQueueItem::Kind::Basins });
@@ -6687,8 +6745,20 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
 // Stable dockspace ID for a workspace tab. Independent of ImGui's ID-stack
 // scope (so the same id is produced whether we compute it inside a window
 // or outside), and unlikely to collide with other IDs in the app.
-static inline ImGuiID ws_dock_id(int tab_id) {
-    return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id;
+// Includes a hash of the currently-loaded system name so imgui.ini stores a
+// completely separate dock layout per system — otherwise switching systems
+// leaked one system's plot placement into another's tabs.
+static inline ImGuiID ws_dock_id(int tab_id, const std::string& sys) {
+    ImGuiID sys_hash = sys.empty() ? 0u : ImHashStr(sys.c_str());
+    return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id ^ sys_hash;
+}
+
+// Suffix appended to every Custom-mode plot window title so imgui.ini keys
+// its dock state per system. Empty when no system is loaded (edge case;
+// windows behave as before). "##sys_<name>" — the "##" makes ImGui strip
+// the suffix from the visible title while including it in the hashed ID.
+static inline std::string custom_win_suffix(const std::string& sys) {
+    return sys.empty() ? std::string{} : ("##sys_" + sys);
 }
 
 // Drag&drop payload key — passed via ImGui's built-in drag-drop channel.
@@ -6727,6 +6797,7 @@ struct WsRenameState {
 static WsRenameState g_ws_rename;
 
 static void draw_custom_workspace_panel(CustomSession& cs,
+                                        const std::string& sys,
                                         ImVec2 pos, ImVec2 size) {
     auto& ws = cs.workspace;
     ws.ensure_default();
@@ -6786,7 +6857,7 @@ static void draw_custom_workspace_panel(CustomSession& cs,
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(WS_DRAG_PAYLOAD)) {
                     const char* win_name = (const char*)p->Data;
                     if (win_name && *win_name) {
-                        ImGui::DockBuilderDockWindow(win_name, ws_dock_id(tab.id));
+                        ImGui::DockBuilderDockWindow(win_name, ws_dock_id(tab.id, sys));
                         switch_to_id = tab.id;
                         ws.dirty = true;
                     }
@@ -6794,7 +6865,7 @@ static void draw_custom_workspace_panel(CustomSession& cs,
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(IMGUI_PAYLOAD_TYPE_WINDOW)) {
                     ImGuiWindow* dragged = *(ImGuiWindow**)p->Data;
                     if (dragged && dragged->Name) {
-                        ImGui::DockBuilderDockWindow(dragged->Name, ws_dock_id(tab.id));
+                        ImGui::DockBuilderDockWindow(dragged->Name, ws_dock_id(tab.id, sys));
                         switch_to_id = tab.id;
                         ws.dirty = true;
                     }
@@ -6845,6 +6916,42 @@ static void draw_custom_workspace_panel(CustomSession& cs,
             ws.active_tab_id = nt.id;
             ws.dirty = true;
         }
+        // Sync ws.tabs order with ImGui's internal reordered order — user
+        // can drag tabs (Reorderable flag) but ImGui only shuffles its own
+        // Tabs array; without this our vector stays in the original order,
+        // so plots that a user docked into "the third tab visually" end up
+        // in whichever tab id happens to be third in ws.tabs on restart.
+        // Sync fixes both "tab order not remembered" AND "plots appear in
+        // the wrong tab after restart" symptoms.
+        if (ImGuiTabBar* tb = ImGui::GetCurrentTabBar()) {
+            if (tb->Tabs.Size >= 2 && (int)ws.tabs.size() == tb->Tabs.Size) {
+                std::vector<WorkspaceTab> reordered;
+                reordered.reserve(ws.tabs.size());
+                bool all_matched = true;
+                for (int i = 0; i < tb->Tabs.Size; ++i) {
+                    ImGuiID tid = tb->Tabs[i].ID;
+                    auto it = std::find_if(ws.tabs.begin(), ws.tabs.end(),
+                        [&](const WorkspaceTab& t){
+                            std::string label = t.name + "##ws_tab_" + std::to_string(t.id);
+                            return ImHashStr(label.c_str()) == tid;
+                        });
+                    if (it == ws.tabs.end()) { all_matched = false; break; }
+                    reordered.push_back(*it);
+                }
+                if (all_matched) {
+                    // Only mark dirty when actual order changed, to avoid a
+                    // needless _last_custom.json rewrite every frame.
+                    bool changed = false;
+                    for (size_t i = 0; i < ws.tabs.size(); ++i) {
+                        if (ws.tabs[i].id != reordered[i].id) { changed = true; break; }
+                    }
+                    if (changed) {
+                        ws.tabs = std::move(reordered);
+                        ws.dirty = true;
+                    }
+                }
+            }
+        }
         ImGui::EndTabBar();
     }
 
@@ -6855,13 +6962,13 @@ static void draw_custom_workspace_panel(CustomSession& cs,
     // to that tab) instead of orphaning to floating state.
     for (const auto& tab : ws.tabs) {
         if (tab.id != ws.active_tab_id) {
-            ImGui::DockSpace(ws_dock_id(tab.id), ImVec2(0, 0),
+            ImGui::DockSpace(ws_dock_id(tab.id, sys), ImVec2(0, 0),
                              ImGuiDockNodeFlags_KeepAliveOnly);
         }
     }
     if (std::any_of(ws.tabs.begin(), ws.tabs.end(),
                     [&](const WorkspaceTab& t){ return t.id == ws.active_tab_id; })) {
-        ImGui::DockSpace(ws_dock_id(ws.active_tab_id), ImVec2(0, 0),
+        ImGui::DockSpace(ws_dock_id(ws.active_tab_id, sys), ImVec2(0, 0),
                          ImGuiDockNodeFlags_None);
     }
 
@@ -6878,7 +6985,7 @@ static void draw_custom_workspace_panel(CustomSession& cs,
             // Find all windows docked in the closing node and re-dock them
             // into the fallback. Iterate a copy of the node's windows list
             // because DockBuilderDockWindow mutates it under us.
-            ImGuiDockNode* node = ImGui::DockBuilderGetNode(ws_dock_id(close_id));
+            ImGuiDockNode* node = ImGui::DockBuilderGetNode(ws_dock_id(close_id, sys));
             if (node) {
                 // Walk the whole subtree (splits) and re-dock every window
                 // encountered. Simple recursive lambda.
@@ -6894,9 +7001,9 @@ static void draw_custom_workspace_panel(CustomSession& cs,
                 };
                 walk(node);
                 for (const auto& name : to_move)
-                    ImGui::DockBuilderDockWindow(name.c_str(), ws_dock_id(fallback));
+                    ImGui::DockBuilderDockWindow(name.c_str(), ws_dock_id(fallback, sys));
                 // Now discard the closed node's split hierarchy.
-                ImGui::DockBuilderRemoveNode(ws_dock_id(close_id));
+                ImGui::DockBuilderRemoveNode(ws_dock_id(close_id, sys));
             }
             if (ws.active_tab_id == close_id) ws.active_tab_id = fallback;
         }
@@ -7015,7 +7122,7 @@ static void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
     ImGui::PopStyleVar(3);
 
     draw_custom_controls_panel(model, lib, ctrl_pos, ctrl_size);
-    draw_custom_workspace_panel(model.custom_session, ws_pos, ws_size);
+    draw_custom_workspace_panel(model.custom_session, model.loaded_name, ws_pos, ws_size);
     draw_custom_plot_windows(model, lib, cb);
 }
 
@@ -7024,12 +7131,90 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     auto& cs = model.custom_session;
     auto& q  = model.custom_queue;
     auto& ws = cs.workspace;
+    // Per-system suffix appended to every plot window title. imgui.ini keys
+    // dock state per window name, so without a per-system suffix the same
+    // plot titles (e.g. "Custom Bif 2D") would share layout across systems.
+    // Empty when no system is loaded — safe (title unchanged from before).
+    const std::string& sys    = model.loaded_name;
+    const std::string  suffix = custom_win_suffix(sys);
+    // Per-system delta XOR'd into every plot's owner_id — HeatmapView /
+    // PlotRenderer cache their GPU texture per owner_id, so without this
+    // both systems shared one texture and the FIRST system's rendered pixels
+    // stayed on screen while the SECOND system's data sat unrendered
+    // underneath. Low bits of the system-name hash — enough entropy without
+    // colliding with the hand-picked owner_id constants below.
+    const int sys_owner_delta = sys.empty() ? 0
+                              : (int)(ImHashStr(sys.c_str()) & 0x00FFFFFF);
 
     // Persistent per-window renderers + views. Indexed by fixed slots so their
-    // ImGui-IDs stay stable across frames.
+    // ImGui-IDs stay stable across frames. Hoisted to the top of the function
+    // (together with the L1D-side statics and the init-seen sentinels) so a
+    // single system-change block below can reset the whole cache tier.
     static std::array<std::unique_ptr<PlotRenderer>, 3> renderers_2d;
     static std::array<HeatmapView, 3>                   heatmaps;
+    static std::array<int, 3>                           hm_init_cmap_seen = { -2, -2, -2 };
+    static int                                          ls_init_exp_seen  = -999;
+    static std::array<std::unique_ptr<Plot2DView>,  6>  l1_views;
+    static std::array<std::unique_ptr<PlotRenderer>, 6> l1_renderers;
+    static std::array<std::vector<std::vector<float>>, 6> l1_bufs;
+    // Custom Basins (Level-3 kind=1) HeatmapView + renderer — hoisted so the
+    // system-change block below can reset them alongside the other statics.
+    static HeatmapView                                  bsn_hv;
+    static PlotRenderer                                 bsn_renderer;
     for (auto& r : renderers_2d) if (!r) r = std::make_unique<PlotRenderer>();
+
+    // System-change detection. Slot-indexed static caches (HeatmapView state
+    // — view_valid, autofit ranges, seen colormap; Plot2DView state — view
+    // limits, cached VBO series_generation) leaked across systems because
+    // slot 0 for both Chen and Rossler used the same HeatmapView instance.
+    // On rename of the loaded system, wipe the per-slot view / seen state so
+    // the new system starts with fresh autofit + fresh colormap seeding.
+    // renderers_* (PlotRenderer/GPU textures + FBOs) are reused: owner_id
+    // XOR'd with sys_owner_delta already forces PlotRenderer to treat the
+    // slot as a new cache entry, and destroying them here would leak GPU
+    // memory tied to the GL context.
+    static std::string last_system_for_plots;
+    if (last_system_for_plots != sys) {
+        last_system_for_plots = sys;
+        // HeatmapView / Plot2DView are non-copyable — reset only the fields
+        // that gate rendering (view_valid / data_gen_cached / series_generation),
+        // which are the actual source of the leak. Plot2DView caches its VBO
+        // by (owner_id, series_generation); the owner_id XOR alone wasn't
+        // enough — series_generation also had to be invalidated, else the
+        // second system's data_generation=1 matched the first's cached
+        // series_generation=1 and Plot2DView kept rendering the FIRST
+        // system's VBO with its coordinates. Colormap / autoscale / manual
+        // v-limits stay so user prefs aren't wiped mid-session.
+        for (auto& hv : heatmaps) { hv.view_valid = false; hv.data_gen_cached = -1; }
+        for (auto& v  : l1_views) if (v) { v->view_valid = false; v->series_generation = -1; }
+        for (auto& b  : l1_bufs)  b.clear();
+        bsn_hv.view_valid = false; bsn_hv.data_gen_cached = -1;
+        hm_init_cmap_seen = { -2, -2, -2 };
+        ls_init_exp_seen  = -999;
+    }
+
+    // Clamp fix_x/fix_y to the current effective sweep range every frame.
+    // custom_session.h documents this ("clamped to current effective sweep
+    // ranges") but it was never actually implemented — a stale fix outside
+    // the sweep range fed the kernel via apply_shared_to_bif1d/pin_param and
+    // produced degenerate 1D results (all-zero or empty on Run) until the
+    // user dragged the slider back inside the range.
+    {
+        auto parse_dbl = [](const std::string& s, double def) -> double {
+            if (s.empty()) return def;
+            try { return std::stod(s); } catch (...) { return def; }
+        };
+        EffectiveSweep esx = effective_sweep_x(cs.shared);
+        EffectiveSweep esy = effective_sweep_y(cs.shared);
+        double x_lo = parse_dbl(esx.lo_text, 0.0), x_hi = parse_dbl(esx.hi_text, 1.0);
+        double y_lo = parse_dbl(esy.lo_text, 0.0), y_hi = parse_dbl(esy.hi_text, 1.0);
+        if (x_hi < x_lo) std::swap(x_lo, x_hi);
+        if (y_hi < y_lo) std::swap(y_lo, y_hi);
+        if (cs.shared.fix_x_value < x_lo) cs.shared.fix_x_value = x_lo;
+        if (cs.shared.fix_x_value > x_hi) cs.shared.fix_x_value = x_hi;
+        if (cs.shared.fix_y_value < y_lo) cs.shared.fix_y_value = y_lo;
+        if (cs.shared.fix_y_value > y_hi) cs.shared.fix_y_value = y_hi;
+    }
 
     // Dock a plot window into the active tab ONLY when there is no dock
     // memory for it — neither at runtime (`window->DockId`) NOR in
@@ -7042,17 +7227,17 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     //
     // Skipped while the mouse is held down so we don't yank a window out
     // of an in-flight drag.
-    auto ensure_docked = [&](const char* name) {
+    auto ensure_docked = [&](const std::string& name) {
         if (ImGui::GetIO().MouseDown[0]) return;
         ImGuiID persisted_dock = 0;
-        if (ImGuiWindow* w = ImGui::FindWindowByName(name)) {
+        if (ImGuiWindow* w = ImGui::FindWindowByName(name.c_str())) {
             persisted_dock = w->DockId;
         } else if (ImGuiWindowSettings* s =
-                       ImGui::FindWindowSettingsByID(ImHashStr(name))) {
+                       ImGui::FindWindowSettingsByID(ImHashStr(name.c_str()))) {
             persisted_dock = s->DockId;   // will be applied on window's next Begin
         }
         if (persisted_dock != 0) return;
-        ImGui::DockBuilderDockWindow(name, ws_dock_id(ws.active_tab_id));
+        ImGui::DockBuilderDockWindow(name.c_str(), ws_dock_id(ws.active_tab_id, sys));
     };
 
     // Cross-tab window move is handled entirely via native ImGui drag&drop:
@@ -7075,7 +7260,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
 
     // --- Level 2D heatmaps ---
     struct L2Slot {
-        const char* title;
+        std::string title;   // includes per-system suffix so imgui.ini isolates layout per system
         bool        show;
         bool        has_data;
         int         n_pts;
@@ -7089,21 +7274,21 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     if (cs.shared.level_2d_enabled) {
         if (cs.shared.bif2d_enabled && !cs.bif_session.diagrams.empty()) {
             auto& d = cs.bif_session.diagrams[0];
-            slots[0] = { "Custom Bif 2D", true, d.last_run_2d_ok && !d.result_2d.values.empty(),
+            slots[0] = { "Custom Bif 2D" + suffix, true, d.last_run_2d_ok && !d.result_2d.values.empty(),
                          d.result_2d.n_pts, d.result_2d.values.data(),
                          d.result_2d.param_lo, d.result_2d.param_hi,
                          d.result_2d.param_lo_2, d.result_2d.param_hi_2,
                          d.result_2d.min_val, d.result_2d.max_val,
-                         d.data_generation_2d, 0xCB1F2D };
+                         d.data_generation_2d, 0xCB1F2D ^ sys_owner_delta };
         }
         if (cs.shared.lle2d_enabled && !cs.lle_session.curves.empty()) {
             auto& c = cs.lle_session.curves[0];
-            slots[1] = { "Custom LLE 2D", true, c.last_run_2d_ok && !c.result_2d.values.empty(),
+            slots[1] = { "Custom LLE 2D" + suffix, true, c.last_run_2d_ok && !c.result_2d.values.empty(),
                          c.result_2d.n_pts, c.result_2d.values.data(),
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
                          c.result_2d.min_val, c.result_2d.max_val,
-                         c.data_generation_2d, 0xCE1E2D };
+                         c.data_generation_2d, 0xCE1E2D ^ sys_owner_delta };
         }
         if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
             auto& c = cs.ls_session.curves[0];
@@ -7116,18 +7301,19 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 ? nullptr : c.result_2d.values.data();
             double vmin = c.result_2d.min_val.empty() ? 0.0 : c.result_2d.min_val[0];
             double vmax = c.result_2d.max_val.empty() ? 1.0 : c.result_2d.max_val[0];
-            slots[2] = { "Custom LS 2D", true, c.last_run_2d_ok && !c.result_2d.values.empty(),
+            slots[2] = { "Custom LS 2D" + suffix, true, c.last_run_2d_ok && !c.result_2d.values.empty(),
                          c.result_2d.n_pts, values_default,
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
-                         vmin, vmax, c.data_generation_2d, 0xC152D0 };
+                         vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta };
         }
     }
     // One-time init of per-slot HeatmapView colormap from the sub-session
     // config (or app default). Runs whenever the sub-session-level slot's
     // colormap changes, so first appearance of a slot picks up the persisted
     // choice; subsequent user picks from the toolbar update both places.
-    static std::array<int, 3> hm_init_cmap_seen = { -2, -2, -2 };
+    // (hm_init_cmap_seen is hoisted to the top of this function so the
+    // system-change reset can wipe it.)
     auto init_cmap_from_config = [&](int i, int cfg_cmap) {
         if (hm_init_cmap_seen[i] == cfg_cmap) return;
         hm_init_cmap_seen[i] = cfg_cmap;
@@ -7140,8 +7326,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // otherwise session_from_json_custom loads the pref but the HeatmapView
     // silently starts at 0 (L1) until the user re-picks. Uses the same
     // "seen" pattern as the colormap sync so subsequent user picks aren't
-    // clobbered.
-    static int ls_init_exp_seen = -999;
+    // clobbered. (ls_init_exp_seen hoisted to the top of the function.)
     if (!cs.ls_session.curves.empty()) {
         int cfg_exp = cs.ls_session.curves[0].display_exponent_idx;
         if (ls_init_exp_seen != cfg_exp) {
@@ -7159,7 +7344,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     for (int i = 0; i < 3; ++i) {
         if (!slots[i].show) continue;
         ensure_docked(slots[i].title);
-        if (ImGui::Begin(slots[i].title)) {
+        if (ImGui::Begin(slots[i].title.c_str())) {
             HeatmapView& hv = heatmaps[i];
 
             // Toolbar — mirrors draw_bifurcation_plot / draw_ls_plot layout
@@ -7335,7 +7520,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // owning sub-session's slot [1] (X-slice) or [2] (Y-slice).
     enum class L1Kind { Bif, LLE, LS };
     struct L1Slot {
-        const char* title = nullptr;
+        std::string title;   // includes per-system suffix
         bool        show = false;
         L1Kind      kind = L1Kind::Bif;
         int         cfg_idx = -1;   // 1 = X-slice, 2 = Y-slice inside sub-session
@@ -7345,24 +7530,16 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     if (cs.shared.level_1d_enabled) {
         double fx = cs.shared.fix_x_value;
         double fy = cs.shared.fix_y_value;
-        if (cs.shared.bif1d_x_enabled) lslots[0] = { "Custom Bif 1D (X-slice)", true, L1Kind::Bif, 1, fx };
-        if (cs.shared.bif1d_y_enabled) lslots[1] = { "Custom Bif 1D (Y-slice)", true, L1Kind::Bif, 2, fy };
-        if (cs.shared.lle1d_x_enabled) lslots[2] = { "Custom LLE 1D (X-slice)", true, L1Kind::LLE, 1, fx };
-        if (cs.shared.lle1d_y_enabled) lslots[3] = { "Custom LLE 1D (Y-slice)", true, L1Kind::LLE, 2, fy };
-        if (cs.shared.ls1d_x_enabled)  lslots[4] = { "Custom LS 1D (X-slice)",  true, L1Kind::LS,  1, fx };
-        if (cs.shared.ls1d_y_enabled)  lslots[5] = { "Custom LS 1D (Y-slice)",  true, L1Kind::LS,  2, fy };
+        if (cs.shared.bif1d_x_enabled) lslots[0] = { "Custom Bif 1D (X-slice)" + suffix, true, L1Kind::Bif, 1, fx };
+        if (cs.shared.bif1d_y_enabled) lslots[1] = { "Custom Bif 1D (Y-slice)" + suffix, true, L1Kind::Bif, 2, fy };
+        if (cs.shared.lle1d_x_enabled) lslots[2] = { "Custom LLE 1D (X-slice)" + suffix, true, L1Kind::LLE, 1, fx };
+        if (cs.shared.lle1d_y_enabled) lslots[3] = { "Custom LLE 1D (Y-slice)" + suffix, true, L1Kind::LLE, 2, fy };
+        if (cs.shared.ls1d_x_enabled)  lslots[4] = { "Custom LS 1D (X-slice)"  + suffix, true, L1Kind::LS,  1, fx };
+        if (cs.shared.ls1d_y_enabled)  lslots[5] = { "Custom LS 1D (Y-slice)"  + suffix, true, L1Kind::LS,  2, fy };
     }
 
-    // Persistent per-slot Plot2DView + renderer. Fixed 6-slot layout keeps
-    // ImGui IDs and gpu-buffer identity stable across frames (mirrors the
-    // heatmap slot pattern above).
-    static std::array<std::unique_ptr<Plot2DView>,  6> l1_views;
-    static std::array<std::unique_ptr<PlotRenderer>, 6> l1_renderers;
-    // Per-slot buffer scratch — kept static so pointers passed into
-    // PlotSeriesInput stay valid until render() returns. Per-slot vector of
-    // series-buffers (one buffer per series) so LS 1D can show N exponents
-    // as N coloured lines, matching draw_ls_plot in Parametric.
-    static std::array<std::vector<std::vector<float>>, 6> l1_bufs;
+    // (l1_views / l1_renderers / l1_bufs statics hoisted to the top of the
+    // function so the system-change reset can wipe them uniformly.)
 
     for (int i = 0; i < 6; ++i) {
         if (!lslots[i].show) continue;
@@ -7372,7 +7549,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         PlotRenderer& rnd = *l1_renderers[i];
 
         ensure_docked(lslots[i].title);
-        if (!ImGui::Begin(lslots[i].title)) { ImGui::End(); continue; }
+        if (!ImGui::Begin(lslots[i].title.c_str())) { ImGui::End(); continue; }
         ImGui::PushID(i);
 
         // Resolve owning config + result + real sweep-range from *_text
@@ -7636,7 +7813,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         ImVec2 avail  = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         view.render(rnd, origin, avail,
-                    /*owner_id*/ 0xC10000 + i,
+                    /*owner_id*/ (0xC10000 + i) ^ sys_owner_delta,
                     series_gen,
                     series_in, init_vis, glob_vis, fit);
         ImGui::PopID();
@@ -7648,13 +7825,18 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // 2D / 3D / TimeDomain plots dock alongside the other custom plots.
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 0) {
         // Auto-place phase projections into the active tab on first appearance.
+        // Suffix + owner_id delta both keep per-system isolation: suffix for
+        // imgui.ini dock state, delta for the SHARED PlotRenderer cache
+        // (otherwise Rossler's projection 0 saw Chen's cached FBO texture).
         draw_projection_windows(cs.phase_session, cb,
-            [&](int /*idx*/, const std::string& title) { ensure_docked(title.c_str()); });
+            [&](int /*idx*/, const std::string& title) { ensure_docked(title); },
+            {}, suffix, sys_owner_delta);
     }
     // --- Level 3 Basins window (unchanged HeatmapView minimal renderer) ---
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
-        ensure_docked("Custom Basins");
-        if (ImGui::Begin("Custom Basins")) {
+        std::string basins_title = "Custom Basins" + suffix;
+        ensure_docked(basins_title);
+        if (ImGui::Begin(basins_title.c_str())) {
                 // Basins — HeatmapView of basin_idx (cluster id) — simpler
                 // than draw_basins_plot's toolbar (feature switch stays in
                 // detail panel), matches user request for a visible result.
@@ -7664,8 +7846,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 } else if (bsn.configs.empty() || !bsn.configs[0].last_run_ok) {
                     ImGui::TextDisabled("No basins result yet.");
                 } else {
-                    static HeatmapView  bsn_hv;
-                    static PlotRenderer bsn_renderer;
+                    // bsn_hv / bsn_renderer hoisted to top of function for
+                    // system-change reset (see the reset block above).
                     const auto& bc = bsn.configs[0];
                     const auto& r  = bc.result;
                     if (r.n_pts <= 0 || r.basin_idx.empty()) {
@@ -7695,7 +7877,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         ImVec2 avail  = ImGui::GetContentRegionAvail();
                         ImVec2 origin = ImGui::GetCursorScreenPos();
                         bsn_hv.render(bsn_renderer, origin, avail,
-                                      /*owner_id*/ 0xCBA51E5,
+                                      /*owner_id*/ 0xCBA51E5 ^ sys_owner_delta,
                                       bc.data_generation,
                                       r.n_pts, r.n_pts,
                                       bsn_values.data(),
@@ -8267,6 +8449,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                          || model.custom_session.vars   != model.known_vars
                          || model.custom_session.params != model.known_params;
     if (entering_custom && custom_need_init) {
+        // Hard reset — mirrors the reset in apply_system_switch for the
+        // Custom case. Prevents stale sub-session results / signature cache
+        // from a previously-loaded system leaking into the fresh init.
+        model.custom_session = CustomSession{};
         model.start_custom_analysis();
         if (!model.loaded_name.empty()) {
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
