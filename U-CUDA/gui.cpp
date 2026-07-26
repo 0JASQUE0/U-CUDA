@@ -300,6 +300,345 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
     return changed;
 }
 
+// ============================================================================
+// Общие хелперы диаграмм — единый источник истины для настроек view'ов и для
+// тулбаров. До этого каждая вкладка собирала всё заново, поэтому ОДНА И ТА ЖЕ
+// диаграмма отличалась между вкладками: Bif-1D в Parametric рисовал линии
+// x=0/y=0, а в Custom — нет; у Basins-хитмапы не было autoscale/vmin/vmax,
+// хотя у Bif-2D было; у Custom Basins не было даже Swap axes. Всё, что
+// относится к «как выглядит и что умеет диаграмма типа X», живёт здесь.
+// ============================================================================
+
+// Парсер числа с поддержкой дроби "a/b" (пользователь пишет "pi/4", "1/3" в
+// полях диапазонов). Раньше — пять идентичных локальных лямбд safe_stod в
+// draw_bifurcation_plot / draw_lle_plot / draw_ls_plot / draw_custom_plot_
+// windows. В отличие от parse_num_or (выше) понимает слэш.
+static double parse_ratio_or(const std::string& v, double def) {
+    if (v.empty()) return def;
+    size_t slash = v.find('/');
+    if (slash != std::string::npos) {
+        double num = std::atof(v.substr(0, slash).c_str());
+        double den = std::atof(v.substr(slash + 1).c_str());
+        if (den != 0) return num / den;
+    }
+    return std::atof(v.c_str());
+}
+
+// Тип 1D-диаграммы параметрического семейства. Нейтрален к вкладке — им
+// пользуются и Parametric (ParametricPlotWindow::Kind), и Custom (L1Kind),
+// чтобы конфигурация Plot2DView шла из ОДНОГО места.
+enum class ParamPlotKind { Bifurcation, LLE, LS };
+
+// Единая конфигурация Plot2DView под параметрический 1D-график.
+// Вызывается и из Parametric, и из Custom — иначе одинаковые диаграммы
+// расходятся по отрисовке.
+//
+// ВАЖНО: здесь задаются ТОЛЬКО свойства типа диаграммы и НИКОГДА —
+// пользовательское состояние. Custom вызывает эту функцию каждый кадр, поэтому
+// всё, что пользователь может переключить сам (show_legend, lock/invert осей),
+// затиралось бы на следующем же кадре. Именно так ломалась галка «Show legend»
+// на 1D-графиках Custom: show_legend стоял здесь. Дефолты пользовательских
+// полей живут в самом Plot2DView (show_legend = true) — дублировать их тут не
+// нужно и нельзя.
+//
+// Про show_zero_*: по X это всегда ось параметра, ноль на ней произволен →
+// линии нет. По Y ноль осмыслен ТОЛЬКО у LLE/LS: λ=0 — граница хаос/порядок,
+// стандартный референс в литературе, поэтому её оставляем. У Bif по Y идёт
+// переменная состояния — ноль произволен, линии нет.
+static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
+    view.pad_x       = false;   // данные вплотную к боковым рамкам
+    view.show_zero_x = false;
+    switch (kind) {
+    case ParamPlotKind::Bifurcation:
+        view.points_mode       = true;
+        view.point_size_px     = 2.0f;
+        view.imdraw_lines      = false;
+        view.show_zero_y       = false;
+        view.x_axis.name       = "parameter";
+        view.y_axis.name       = "X";
+        break;
+    case ParamPlotKind::LLE:
+    case ParamPlotKind::LS:
+        view.points_mode       = false;   // непрерывная линия
+        view.line_thickness_px = 1.5f;
+        // glLineWidth в core-profile клампится драйвером до 1px, поэтому
+        // линии идут через ImDrawList (см. Plot2DView::imdraw_lines).
+        view.imdraw_lines      = true;
+        view.show_zero_y       = true;    // λ=0 — граница хаос/порядок
+        view.x_axis.name       = "parameter";
+        view.y_axis.name       = "lambda";
+        break;
+    }
+}
+
+// Snap X к узлам параметрической сетки: тики осей и hover-readout попадают
+// ровно на посчитанные точки. Раньше — три идентичных блока в Bif/LLE/LS и
+// полное отсутствие в Custom (из-за чего tooltip там врал между узлами).
+// n < 2 отключает snap (readout остаётся непрерывным).
+static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
+    view.snap_x_to_grid = true;
+    if (n > 1) {
+        view.snap_x_min = lo;
+        view.snap_x_max = hi;
+        view.snap_x_n   = n;
+    } else {
+        view.snap_x_n = 0;
+    }
+}
+
+// Описание свипа одного члена окна — всё, что нужно для общей X-оси.
+struct SweepAxisMember {
+    int    kind      = 0;      // 0 = параметр, 1 = переменная (IC), 2 = шаг h
+    int    index     = -1;     // индекс в params/vars (для kind==2 не нужен)
+    bool   log_scale = false;
+    double lo = 0.0, hi = 1.0; // диапазон, с которым РЕАЛЬНО шёл Run
+};
+
+// Общая настройка X-оси 1D-графика по членам окна:
+//   - подпись = общий sweep-таргет; если члены свипают разное — "parameter";
+//   - fit-диапазон = union(lo, hi) ВСЕХ членов: ось обязана охватывать весь
+//     свип, даже если часть точек разошлась и на графике их нет;
+//   - log_scale только если он одинаков у всех членов.
+// Раньше — три почти идентичных блока по ~35 строк в Bif/LLE/LS.
+static void configure_sweep_x_axis(Plot2DView& view,
+                                   const std::vector<SweepAxisMember>& members,
+                                   const std::vector<std::string>& params,
+                                   const std::vector<std::string>& vars) {
+    int  shared_kind = -2;   // -2 = ещё не видели, -1 = смешанные
+    int  shared_idx  = -2;
+    bool shared_log = false, log_seen = false, log_mismatch = false;
+    double x_fit_lo = 0.0, x_fit_hi = 0.0;
+    bool   x_fit_any = false;
+
+    for (const auto& m : members) {
+        const int kidx = (m.kind == 2) ? -1 : m.index;
+        if (shared_kind == -2) { shared_kind = m.kind; shared_idx = kidx; }
+        else if (shared_kind != m.kind || shared_idx != kidx) { shared_kind = -1; shared_idx = -1; }
+
+        if (!log_seen) { shared_log = m.log_scale; log_seen = true; }
+        else if (shared_log != m.log_scale) { log_mismatch = true; }
+
+        const double a = std::min(m.lo, m.hi), b = std::max(m.lo, m.hi);
+        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
+        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
+    }
+
+    view.x_fit_use_explicit = x_fit_any;
+    view.x_fit_min = x_fit_lo;
+    view.x_fit_max = x_fit_hi;
+    view.x_axis.log_scale = shared_log && !log_mismatch;
+
+    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)params.size())
+        view.x_axis.name = params[shared_idx];
+    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)vars.size())
+        view.x_axis.name = vars[shared_idx] + " (IC)";
+    else if (shared_kind == 2)
+        view.x_axis.name = "h";
+    else
+        view.x_axis.name = "parameter";
+}
+
+// Snap-диапазон по ПЕРВОМУ члену окна: берём сетку успешного прогона, иначе
+// парсим текстовые поля конфига (до первого Run их всё равно больше нечем
+// заполнить). Раньше — три идентичных блока в Bif/LLE/LS.
+static void apply_snap_x_from_config(Plot2DView& view,
+                                     bool have_result, double res_lo, double res_hi, int res_n,
+                                     const std::string& lo_text,
+                                     const std::string& hi_text,
+                                     const std::string& n_text) {
+    if (have_result && res_n > 1) {
+        apply_snap_x(view, res_lo, res_hi, res_n);
+        return;
+    }
+    const int n = std::atoi(n_text.c_str());
+    apply_snap_x(view, parse_ratio_or(lo_text, 0.0), parse_ratio_or(hi_text, 1.0), n);
+}
+
+// Right-click «Export data...» подменю: перечисляет ВСЕ конфиги сессии с
+// готовым прогоном (не только members этого окна — экспорт не привязан к
+// окну). Раньше — три идентичные копии в Bif/LLE/LS.
+//   ready(i) — есть ли законченный прогон, busy(i) — считается ли сейчас,
+//   do_export(i, path) — собственно запись.
+static void draw_export_submenu(const char* id_tag, int n,
+                                const std::function<std::string(int)>& label,
+                                const std::function<bool(int)>& ready,
+                                const std::function<bool(int)>& busy,
+                                const std::function<void(int, const std::string&)>& do_export,
+                                const GuiCallbacks& cb) {
+    if (!ImGui::BeginMenu("Export data...")) return;
+    bool any = false;
+    for (int i = 0; i < n; ++i) {
+        if (!ready(i)) continue;
+        any = true;
+        char item[192];
+        std::snprintf(item, sizeof(item), "%s##exp_%s_%d", label(i).c_str(), id_tag, i);
+        if (ImGui::MenuItem(item, nullptr, false, !busy(i))) {
+            if (cb.pick_save_file_csv) {
+                std::string path = cb.pick_save_file_csv();
+                if (!path.empty()) do_export(i, path);
+            }
+        }
+    }
+    if (!any) ImGui::TextDisabled("(no completed runs)");
+    ImGui::EndMenu();
+}
+
+// Ленивое создание per-config HeatmapView в map'е окна (map уже per-window,
+// поэтому пересечений между окнами нет). При первом создании подхватывает
+// colormap: приоритет у выбора, сохранённого в конфиге (cfg_colormap, -1 =
+// не задан), иначе общий app-дефолт. cfg_exponent_idx применяется только если
+// != kNoExponent (актуально лишь для LS).
+// Раньше — четыре копии лямбды get_*_heatmap (Bif / LLE / LS / DFT1D).
+static constexpr int kNoExponent = -999;
+static HeatmapView& get_or_create_heatmap(
+        std::map<int, std::unique_ptr<HeatmapView>>& map, int idx,
+        int cfg_colormap, int app_default_colormap,
+        int cfg_exponent_idx = kNoExponent) {
+    auto& slot = map[idx];
+    if (!slot) {
+        slot = std::make_unique<HeatmapView>();
+        const int cm = (cfg_colormap >= 0) ? cfg_colormap : app_default_colormap;
+        if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
+        if (cfg_exponent_idx != kNoExponent) slot->display_exponent_idx = cfg_exponent_idx;
+    }
+    return *slot;
+}
+
+// Опции тулбара цветовой шкалы над хитмапой.
+struct HeatmapToolbarOpts {
+    // Куда сохранить выбор colormap'а (per-config + save_session). Пусто —
+    // выбор живёт только в самом view (Custom Basins).
+    std::function<void(int)> persist_colormap;
+    // Доп. элементы сразу после combo Colormap: LS exponent picker,
+    // Basins "Renumber (spiral)".
+    std::function<void()>    extras;
+    // Доп. элементы в самом конце строки (FastSync Line width / Alpha).
+    std::function<void()>    extras_tail;
+    // Swap axes осмыслен только там, где оси взаимозаменяемы (2D-свип).
+    bool show_swap = true;
+};
+
+// ЕДИНСТВЕННАЯ реализация тулбара «Colormap / Autoscale / vmin / vmax /
+// Swap axes» — раньше он был скопирован в 7 мест с разным составом
+// элементов. Всё состояние живёт в самом HeatmapView, поэтому вызывающему
+// достаточно передать, куда персистить colormap.
+// Возвращает true, если пользователь что-то изменил.
+static bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = {}) {
+    bool changed = false;
+
+    int cmap_idx = (int)hv.colormap;
+    ImGui::SetNextItemWidth(140);
+    if (ImGui::Combo("Colormap", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
+        hv.colormap = (HeatmapColormap)cmap_idx;
+        if (o.persist_colormap) o.persist_colormap(cmap_idx);
+        changed = true;
+    }
+
+    if (o.extras) o.extras();
+
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Autoscale color", &hv.autoscale)) changed = true;
+    if (!hv.autoscale) {
+        ImGui::SameLine();
+        if (InputNumStr("vmin", hv.manual_vmin_text, 80)) changed = true;
+        hv.manual_vmin = (float)parse_num_or(hv.manual_vmin_text, hv.manual_vmin);
+        ImGui::SameLine();
+        if (InputNumStr("vmax", hv.manual_vmax_text, 80)) changed = true;
+        hv.manual_vmax = (float)parse_num_or(hv.manual_vmax_text, hv.manual_vmax);
+    }
+
+    if (o.show_swap) {
+        ImGui::SameLine();
+        if (ImGui::Button(hv.swap_axes ? "Swap axes (on)" : "Swap axes")) {
+            hv.swap_axes = !hv.swap_axes;
+            changed = true;
+        }
+    }
+
+    if (o.extras_tail) o.extras_tail();
+    return changed;
+}
+
+// LS exponent picker: λ1..λN + "sum L_i" (sentinel -1, а не N — чтобы выбор не
+// «съезжал», если N поменяется на следующем Run). Выбор живёт в HeatmapView, а
+// не в конфиге: два окна с одной и той же кривой не должны дёргать друг у
+// друга индекс. on_pick — персистентность на стороне вызывающего.
+// Раньше — две почти идентичные копии (draw_ls_plot и Custom-слот 2).
+static void draw_ls_exponent_picker(HeatmapView& hv, int n_exponents,
+                                    const std::function<void(int)>& on_pick) {
+    if (n_exponents <= 0) return;
+    const int N = n_exponents;
+    if (hv.display_exponent_idx != -1 &&
+        (hv.display_exponent_idx < 0 || hv.display_exponent_idx >= N))
+        hv.display_exponent_idx = 0;
+
+    const std::string preview = (hv.display_exponent_idx == -1)
+        ? "sum L_i" : ("L" + std::to_string(hv.display_exponent_idx + 1));
+    auto pick = [&](int j) {
+        hv.display_exponent_idx = j;
+        if (on_pick) on_pick(j);
+    };
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    if (ImGui::BeginCombo("Exponent", preview.c_str())) {
+        for (int j = 0; j < N; ++j) {
+            std::string lbl = "L" + std::to_string(j + 1);
+            if (ImGui::Selectable(lbl.c_str(), hv.display_exponent_idx == j)) pick(j);
+        }
+        ImGui::Separator();
+        if (ImGui::Selectable("sum L_i", hv.display_exponent_idx == -1)) pick(-1);
+        ImGui::EndCombo();
+    }
+}
+
+// Выбор отображаемой плоскости LS-2D по индексу экспоненты `k`.
+//   k >= 0  — готовая плоскость из result_2d.values (без копирования),
+//   k == -1 — "sum L_i": поэлементная сумма всех N плоскостей, считается ОДИН
+//             раз на data_generation_2d и кэшируется в самом конфиге (кэш общий
+//             для всех окон с этой кривой). Diverged-ячейки (flags<0) получают
+//             sentinel 999.0 — тот же, что engine пишет в одиночные плоскости,
+//             чтобы HeatmapView закрасил их тем же серым.
+// gen мешает поколение чанка с индексом экспоненты, иначе переключение
+// экспоненты не перезалило бы текстуру.
+// Раньше — две копии по ~40 строк (draw_ls_plot и draw_custom_plot_windows).
+static void ls_resolve_plane(LSCurveConfig& cact, int k,
+                             const double*& plane, double& vmin, double& vmax, int& gen) {
+    const size_t plane_size = (size_t)cact.result_2d.n_pts * (size_t)cact.result_2d.n_pts;
+    const int    N          = cact.result_2d.n_exponents;
+
+    if (k == -1) {
+        if (cact.sum_cache_gen != cact.data_generation_2d) {
+            cact.sum_cache.assign(plane_size, 0.0);
+            double smin =  std::numeric_limits<double>::infinity();
+            double smax = -std::numeric_limits<double>::infinity();
+            for (size_t c2 = 0; c2 < plane_size; ++c2) {
+                if (c2 < cact.result_2d.flags.size() && cact.result_2d.flags[c2] < 0) {
+                    cact.sum_cache[c2] = 999.0;
+                    continue;
+                }
+                double sum = 0.0;
+                for (int j = 0; j < N; ++j)
+                    sum += cact.result_2d.values[(size_t)j * plane_size + c2];
+                cact.sum_cache[c2] = sum;
+                if (sum < smin) smin = sum;
+                if (sum > smax) smax = sum;
+            }
+            cact.sum_cache_min = std::isfinite(smin) ? smin : 0.0;
+            cact.sum_cache_max = std::isfinite(smax) ? smax : 0.0;
+            cact.sum_cache_gen = cact.data_generation_2d;
+        }
+        plane = cact.sum_cache.data();
+        vmin  = cact.sum_cache_min;
+        vmax  = cact.sum_cache_max;
+        gen   = cact.data_generation_2d * 64 + N;
+    } else {
+        plane = cact.result_2d.values.data() + (size_t)k * plane_size;
+        vmin  = (k >= 0 && k < (int)cact.result_2d.min_val.size()) ? cact.result_2d.min_val[k] : 0.0;
+        vmax  = (k >= 0 && k < (int)cact.result_2d.max_val.size()) ? cact.result_2d.max_val[k] : 0.0;
+        gen   = cact.data_generation_2d * 64 + k;
+    }
+}
+
 // ============================================================
 // Вкладка System: ввод системы, методы, генерация кода
 // ============================================================
@@ -1155,10 +1494,11 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                     const ProjHookFn& before_begin = {},
                                     const ProjHookFn& after_begin  = {}) {
     const AnalysisResult& res = s.result;
-    // Lambda installed on every Phase2D / TimeDomain view that has data —
-    // right-click "Export data..." writes the full double-precision
-    // trajectory set (all coords for all ICs) + a _config.csv sidecar.
-    // Phase3D uses Plot3DView which has no popup_extras hook.
+    // Lambda installed on every projection view that has data — right-click
+    // "Export data..." writes the full double-precision trajectory set (all
+    // coords for all ICs) + a _config.csv sidecar. Ставится и на Phase3D:
+    // Plot3DView теперь тоже поддерживает popup_extras, поэтому экспорт
+    // доступен во всех трёх типах проекций одинаково.
     const bool phase_busy = s.in_flight;
     auto phase_popup_extras = [&res, &cb, phase_busy]() {
         const bool has_data = res.ok && !res.trajectories.empty();
@@ -1443,6 +1783,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
 
+                    pr.view3d->popup_extras = phase_popup_extras;
                     pr.view3d->render(renderer, origin, avail, i, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
@@ -1836,37 +2177,24 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
     }
 }
 
+// Маппинг window-kind → нейтральный ParamPlotKind. Сама конфигурация живёт в
+// configure_param_plot_view (см. блок общих хелперов вверху файла), чтобы
+// Parametric и Custom настраивали одинаковые 1D-графики одним и тем же кодом.
+static ParamPlotKind to_param_plot_kind(ParametricPlotWindow::Kind kind) {
+    switch (kind) {
+    case ParametricPlotWindow::Kind::LLE: return ParamPlotKind::LLE;
+    case ParametricPlotWindow::Kind::LS:  return ParamPlotKind::LS;
+    case ParametricPlotWindow::Kind::Bifurcation:
+    default:                              return ParamPlotKind::Bifurcation;
+    }
+}
+
 // One-time Plot2DView setup per kind — called by draw_parametric_plot_windows
 // when it lazily constructs a fresh Plot2DView for a newly opened window
 // (Plot2DView is now owned per-window there, not a function-static shared by
 // every window of a kind, so this replaces the old `if (!view) {...}` inits).
 static void configure_plot_view(Plot2DView& view, ParametricPlotWindow::Kind kind) {
-    view.pad_x = false;   // data flush to the plot's side borders, all kinds
-    switch (kind) {
-    case ParametricPlotWindow::Kind::Bifurcation:
-        view.points_mode   = true;
-        view.show_legend   = true;
-        view.point_size_px = 2.0f;
-        view.x_axis.name   = "parameter";
-        view.y_axis.name   = "X";
-        break;
-    case ParametricPlotWindow::Kind::LLE:
-        view.points_mode     = false;   // continuous line
-        view.show_legend     = true;
-        view.line_thickness_px = 1.5f;
-        view.imdraw_lines    = true;
-        view.x_axis.name     = "parameter";
-        view.y_axis.name     = "lambda";
-        break;
-    case ParametricPlotWindow::Kind::LS:
-        view.points_mode     = false;
-        view.show_legend     = true;
-        view.line_thickness_px = 1.5f;
-        view.imdraw_lines    = true;
-        view.x_axis.name     = "parameter";
-        view.y_axis.name     = "lambda";
-        break;
-    }
+    configure_param_plot_view(view, to_param_plot_kind(kind));
 }
 
 // Plots one Parametric plot window of kind Bifurcation. `win` supplies
@@ -1880,18 +2208,13 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     BifurcationAnalysisSession& s = model.bifurcation_session;
     // Per-diagram HeatmapView, keyed by diagram index within THIS window's
     // own map (map is already per-window, so no cross-window bleed).
+    // Per-diagram persisted choice takes priority; falls back to the shared
+    // "last touched anywhere" default for a diagram that's never had its own
+    // colormap set (см. get_or_create_heatmap).
     auto get_bd_heatmap = [&](int idx) -> HeatmapView& {
-        auto& slot = heatmap_map[idx];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-            // Per-diagram persisted choice takes priority; falls back to the
-            // shared "last touched anywhere" default for a diagram that's
-            // never had its own colormap set.
-            int cm = (idx >= 0 && idx < (int)s.diagrams.size() && s.diagrams[idx].colormap_idx >= 0)
-                     ? s.diagrams[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
-        }
-        return *slot;
+        const int cfg_cm = (idx >= 0 && idx < (int)s.diagrams.size())
+                           ? s.diagrams[idx].colormap_idx : -1;
+        return get_or_create_heatmap(heatmap_map, idx, cfg_cm, model.heatmap_colormap);
     };
 
     if (win.members.empty()) {
@@ -1935,29 +2258,17 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             const unsigned bd_oid = 0xBD2D0000u + (unsigned)idx;
             HeatmapView& hb = get_bd_heatmap(idx);
 
-            // Colormap combo + autoscale над плотом.
-            int cmap_idx = (int)hb.colormap;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##bdhm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-                hb.colormap = (HeatmapColormap)cmap_idx;
-                bdact.colormap_idx = cmap_idx;   // persist per-diagram only
-                if (!model.loaded_name.empty())
-                    lib.save_session(model.loaded_name, "_last_parametric",
-                                     session_to_json_parametric(model.bifurcation_session));
+            // Тулбар цветовой шкалы — общая реализация (см. draw_heatmap_toolbar).
+            {
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    bdact.colormap_idx = cm;   // persist per-diagram only
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_parametric",
+                                         session_to_json_parametric(model.bifurcation_session));
+                };
+                draw_heatmap_toolbar(hb, topts);
             }
-            ImGui::SameLine();
-            ImGui::Checkbox("Autoscale color##bdhm", &hb.autoscale);
-            if (!hb.autoscale) {
-                ImGui::SameLine();
-                InputNumStr("vmin##bdhm", hb.manual_vmin_text, 80);
-                hb.manual_vmin = (float)parse_num_or(hb.manual_vmin_text, hb.manual_vmin);
-                ImGui::SameLine();
-                InputNumStr("vmax##bdhm", hb.manual_vmax_text, 80);
-                hb.manual_vmax = (float)parse_num_or(hb.manual_vmax_text, hb.manual_vmax);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(hb.swap_axes ? "Swap axes (on)##bdhm" : "Swap axes##bdhm"))
-                hb.swap_axes = !hb.swap_axes;
 
             if (!bdact.last_run_2d_ok || bdact.result_2d.values.empty()) {
                 ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -2006,16 +2317,6 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     }
 
     if (win.colored_1d) {
-        auto safe_stod = [](const std::string& v, double def) -> double {
-            if (v.empty()) return def;
-            size_t slash = v.find('/');
-            if (slash != std::string::npos) {
-                double num = std::atof(v.substr(0, slash).c_str());
-                double den = std::atof(v.substr(slash + 1).c_str());
-                if (den != 0) return num / den;
-            }
-            return std::atof(v.c_str());
-        };
         for (size_t mi = 0; mi < win.members.size(); ++mi) {
             int idx = win.members[mi];
             if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
@@ -2026,28 +2327,16 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             const unsigned c1d_oid = 0xBD1D0000u + (unsigned)idx;
             HeatmapView& hc = get_bd_heatmap(idx);
 
-            int cmap_idx = (int)hc.colormap;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##bdc1d", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-                hc.colormap = (HeatmapColormap)cmap_idx;
-                bdact.colormap_idx = cmap_idx;   // persist per-diagram only (shared with mode_2d)
-                if (!model.loaded_name.empty())
-                    lib.save_session(model.loaded_name, "_last_parametric",
-                                     session_to_json_parametric(model.bifurcation_session));
+            {
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    bdact.colormap_idx = cm;   // per-diagram (shared with mode_2d)
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_parametric",
+                                         session_to_json_parametric(model.bifurcation_session));
+                };
+                draw_heatmap_toolbar(hc, topts);
             }
-            ImGui::SameLine();
-            ImGui::Checkbox("Autoscale color##bdc1d", &hc.autoscale);
-            if (!hc.autoscale) {
-                ImGui::SameLine();
-                InputNumStr("vmin##bdc1d", hc.manual_vmin_text, 80);
-                hc.manual_vmin = (float)parse_num_or(hc.manual_vmin_text, hc.manual_vmin);
-                ImGui::SameLine();
-                InputNumStr("vmax##bdc1d", hc.manual_vmax_text, 80);
-                hc.manual_vmax = (float)parse_num_or(hc.manual_vmax_text, hc.manual_vmax);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(hc.swap_axes ? "Swap axes (on)##bdc1d" : "Swap axes##bdc1d"))
-                hc.swap_axes = !hc.swap_axes;
 
             if (!bdact.last_run_ok || bdact.result.bifurcation_points.empty()) {
                 ImGui::TextDisabled("No 1D data yet. Press Run.");
@@ -2065,8 +2354,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             // либо ручной (точки за пределами отбрасываются при биннинге).
             double ylo, yhi;
             if (bdact.colored_1d_custom_y) {
-                ylo = safe_stod(bdact.colored_1d_ymin_text, 0.0);
-                yhi = safe_stod(bdact.colored_1d_ymax_text, 1.0);
+                ylo = parse_ratio_or(bdact.colored_1d_ymin_text, 0.0);
+                yhi = parse_ratio_or(bdact.colored_1d_ymax_text, 1.0);
                 if (yhi < ylo) std::swap(ylo, yhi);
                 if (yhi - ylo < 1e-12) yhi = ylo + 1.0;
             } else {
@@ -2168,9 +2457,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             // Тот же lo/hi/reverse-разбор, что и у классического scatter'а
             // ниже (continuation хранит снапшот в result, иначе — из текстов).
             double lo = (bdact.continuation && bdact.result.param_hi != bdact.result.param_lo)
-                        ? bdact.result.param_lo : safe_stod(bdact.param_lo_text, 0.0);
+                        ? bdact.result.param_lo : parse_ratio_or(bdact.param_lo_text, 0.0);
             double hi = (bdact.continuation && bdact.result.param_hi != bdact.result.param_lo)
-                        ? bdact.result.param_hi : safe_stod(bdact.param_hi_text, 1.0);
+                        ? bdact.result.param_hi : parse_ratio_or(bdact.param_hi_text, 1.0);
             bool rev = bdact.result.continuation_reverse;
             double x0 = rev ? hi : lo;
             double x1 = rev ? lo : hi;
@@ -2202,62 +2491,31 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         return;
     }
 
-    auto safe_stod = [](const std::string& v, double def) -> double {
-        if (v.empty()) return def;
-        size_t slash = v.find('/');
-        if (slash != std::string::npos) {
-            double num = std::atof(v.substr(0, slash).c_str());
-            double den = std::atof(v.substr(slash + 1).c_str());
-            if (den != 0) return num / den;
-        }
-        return std::atof(v.c_str());
-    };
-
-    // Подписи осей + X-fit диапазон: пробегаем по БД этого окна, собираем
-    // общий sweep-таргет и union (lo, hi) sweep-диапазонов. X-ось должна
-    // охватывать ВСЁ что свипалось — даже если часть параметров не дала точек.
-    int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
-    int shared_idx  = -2;
+    // Подписи осей + X-fit диапазон (см. configure_sweep_x_axis). Заодно
+    // собираем writable_var по членам — он нужен для Y-подписи ниже.
     int shared_var_idx = -2;   // -2 init, -1 combination, [0,N) — single var
     bool var_idx_mixed = false;  // отдельный флаг — нельзя реюзать -1 (теперь это combination)
-    double x_fit_lo = 0.0, x_fit_hi = 0.0;
-    bool   x_fit_any = false;
-    bool   shared_log = false, log_seen = false, log_mismatch = false;
-    for (int idx : win.members) {
-        if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
-        const auto& bd = s.diagrams[idx];
-        if (!bd.last_run_ok) continue;
-        int kind = bd.sweep_over_h ? 2 : (bd.sweep_over_var ? 1 : 0);
-        int kidx = bd.sweep_over_h ? -1 : (bd.sweep_over_var ? bd.var_sweep_index : bd.param_index);
-        if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
-        else if (shared_kind != kind || shared_idx != kidx) {
-            shared_kind = -1; shared_idx = -1;
+    {
+        std::vector<SweepAxisMember> sweep_members;
+        for (int idx : win.members) {
+            if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
+            const auto& bd = s.diagrams[idx];
+            if (!bd.last_run_ok) continue;
+            if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
+            else if (shared_var_idx != bd.writable_var) var_idx_mixed = true;
+
+            SweepAxisMember m;
+            m.kind      = bd.sweep_over_h ? 2 : (bd.sweep_over_var ? 1 : 0);
+            m.index     = bd.sweep_over_var ? bd.var_sweep_index : bd.param_index;
+            m.log_scale = bd.log_scale;
+            // continuation сохраняет реальные lo/hi в result, иначе — из текстов.
+            const bool from_result = bd.continuation && bd.result.param_hi != bd.result.param_lo;
+            m.lo = from_result ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
+            m.hi = from_result ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
+            sweep_members.push_back(m);
         }
-        if (!log_seen) { shared_log = bd.log_scale; log_seen = true; }
-        else if (shared_log != bd.log_scale) { log_mismatch = true; }
-        if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
-        else if (shared_var_idx != bd.writable_var) var_idx_mixed = true;
-        // X-range: continuation сохраняет lo/hi в result, иначе берём из текстов.
-        double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                    ? bd.result.param_lo : safe_stod(bd.param_lo_text, 0.0);
-        double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                    ? bd.result.param_hi : safe_stod(bd.param_hi_text, 1.0);
-        double a = std::min(lo, hi), b = std::max(lo, hi);
-        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
-        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
+        configure_sweep_x_axis(view, sweep_members, s.params, s.vars);
     }
-    view.x_fit_use_explicit = x_fit_any;
-    view.x_fit_min = x_fit_lo;
-    view.x_fit_max = x_fit_hi;
-    view.x_axis.log_scale = shared_log && !log_mismatch;
-    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
-        view.x_axis.name = s.params[shared_idx];
-    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
-        view.x_axis.name = s.vars[shared_idx] + " (IC)";
-    else if (shared_kind == 2)
-        view.x_axis.name = "h";
-    else
-        view.x_axis.name = "parameter";
     // Y-label: combination (-1) -> "x0+pi*x1+e*x2"; single var -> имя переменной;
     // mixed / нет данных -> generic "X".
     if (var_idx_mixed || shared_var_idx == -2) {
@@ -2306,9 +2564,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             // Continuation result хранит param_lo/hi-снапшот. Classical путь
             // его не заполняет — fallback на текущие текстовые поля.
             double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_lo : safe_stod(bd.param_lo_text, 0.0);
+                        ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
             double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_hi : safe_stod(bd.param_hi_text, 1.0);
+                        ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
             for (int k = 0; k < npts; ++k) {
@@ -2346,50 +2604,24 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     // submenu lists every diagram in the session that has a finished run
     // (not just this window's members — export isn't scoped to a window).
     view.popup_extras = [&s, &cb]() {
-        if (ImGui::BeginMenu("Export data...")) {
-            bool any = false;
-            for (int i = 0; i < (int)s.diagrams.size(); ++i) {
-                const auto& bd = s.diagrams[i];
-                if (!bd.last_run_ok) continue;
-                any = true;
-                const bool busy = s.in_flight && i == s.running_diagram_index;
-                char item[192];
-                std::snprintf(item, sizeof(item), "%s##exp_bd_%d",
-                              bd.label.c_str(), i);
-                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
-                    if (cb.pick_save_file_csv) {
-                        std::string path = cb.pick_save_file_csv();
-                        if (!path.empty())
-                            data_export::export_bif1d(bd.result, path);
-                    }
-                }
-            }
-            if (!any) ImGui::TextDisabled("(no completed runs)");
-            ImGui::EndMenu();
-        }
+        draw_export_submenu("bd", (int)s.diagrams.size(),
+            [&s](int i) { return s.diagrams[i].label; },
+            [&s](int i) { return s.diagrams[i].last_run_ok; },
+            [&s](int i) { return s.in_flight && i == s.running_diagram_index; },
+            [&s](int i, const std::string& p) { data_export::export_bif1d(s.diagrams[i].result, p); },
+            cb);
     };
 
-    // Snap X к узлам первой БД этого окна. Если у неё нет успешного result —
-    // fallback на её param_lo/hi text + n_pts_text. Если и это не парсится —
-    // snap_x_n остаётся 0 и readout идёт непрерывный.
+    // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_config).
     view.snap_x_to_grid = true;
     view.snap_x_n       = 0;
     if (!win.members.empty()) {
         int aidx = win.members[0];
         if (aidx >= 0 && aidx < (int)s.diagrams.size()) {
             const auto& abd = s.diagrams[aidx];
-            if (abd.last_run_ok && abd.result.n_pts > 1) {
-                view.snap_x_min = abd.result.param_lo;
-                view.snap_x_max = abd.result.param_hi;
-                view.snap_x_n   = abd.result.n_pts;
-            } else {
-                int n = std::atoi(abd.n_pts_text.c_str());
-                if (n > 1) {
-                    view.snap_x_min = safe_stod(abd.param_lo_text, 0.0);
-                    view.snap_x_max = safe_stod(abd.param_hi_text, 1.0);
-                    view.snap_x_n   = n;
-                }
-            }
+            apply_snap_x_from_config(view, abd.last_run_ok,
+                                     abd.result.param_lo, abd.result.param_hi, abd.result.n_pts,
+                                     abd.param_lo_text, abd.param_hi_text, abd.n_pts_text);
         }
     }
 
@@ -2682,14 +2914,9 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
                           std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
     LLEAnalysisSession& s = model.lle_session;
     auto get_lle_heatmap = [&](int idx) -> HeatmapView& {
-        auto& slot = heatmap_map[idx];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-            int cm = (idx >= 0 && idx < (int)s.curves.size() && s.curves[idx].colormap_idx >= 0)
-                     ? s.curves[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
-        }
-        return *slot;
+        const int cfg_cm = (idx >= 0 && idx < (int)s.curves.size())
+                           ? s.curves[idx].colormap_idx : -1;
+        return get_or_create_heatmap(heatmap_map, idx, cfg_cm, model.heatmap_colormap);
     };
 
     if (win.members.empty()) {
@@ -2708,29 +2935,16 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             const unsigned lle_oid = 0xBE110000u + (unsigned)idx;
             HeatmapView& heatmap = get_lle_heatmap(idx);
 
-            // Combo для выбора colormap'а — над плотом.
-            int cmap_idx = (int)heatmap.colormap;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-                heatmap.colormap = (HeatmapColormap)cmap_idx;
-                cact.colormap_idx = cmap_idx;   // persist per-curve only
-                if (!model.loaded_name.empty())
-                    lib.save_session(model.loaded_name, "_last_lle",
-                                     session_to_json_lle(model.lle_session));
+            {
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    cact.colormap_idx = cm;   // persist per-curve only
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_lle",
+                                         session_to_json_lle(model.lle_session));
+                };
+                draw_heatmap_toolbar(heatmap, topts);
             }
-            ImGui::SameLine();
-            ImGui::Checkbox("Autoscale color", &heatmap.autoscale);
-            if (!heatmap.autoscale) {
-                ImGui::SameLine();
-                InputNumStr("vmin##llehm", heatmap.manual_vmin_text, 80);
-                heatmap.manual_vmin = (float)parse_num_or(heatmap.manual_vmin_text, heatmap.manual_vmin);
-                ImGui::SameLine();
-                InputNumStr("vmax##llehm", heatmap.manual_vmax_text, 80);
-                heatmap.manual_vmax = (float)parse_num_or(heatmap.manual_vmax_text, heatmap.manual_vmax);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(heatmap.swap_axes ? "Swap axes (on)##llehm" : "Swap axes##llehm"))
-                heatmap.swap_axes = !heatmap.swap_axes;
 
             if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
                 ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -2791,54 +3005,29 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
         return;
     }
 
-    auto safe_stod = [](const std::string& v, double def) -> double {
-        if (v.empty()) return def;
-        size_t slash = v.find('/');
-        if (slash != std::string::npos) {
-            double num = std::atof(v.substr(0, slash).c_str());
-            double den = std::atof(v.substr(slash + 1).c_str());
-            if (den != 0) return num / den;
-        }
-        return std::atof(v.c_str());
-    };
 
-    // Подпись X + X-fit диапазон. См. BD: ось охватывает union(lo, hi)
-    // кривых этого окна, не зависит от того, где есть/нет точек.
-    int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
-    int shared_idx  = -2;
-    double x_fit_lo = 0.0, x_fit_hi = 0.0;
-    bool   x_fit_any = false;
-    bool   shared_log = false, log_seen = false, log_mismatch = false;
-    for (int idx : win.members) {
-        if (idx < 0 || idx >= (int)s.curves.size()) continue;
-        const auto& c = s.curves[idx];
-        if (!c.last_run_ok) continue;
-        int kind = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
-        int kidx = c.sweep_over_h ? -1 : (c.sweep_over_var ? c.var_sweep_index : c.param_index);
-        if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
-        else if (shared_kind != kind || shared_idx != kidx) {
-            shared_kind = -1; shared_idx = -1;
+    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis.
+    {
+        std::vector<SweepAxisMember> sweep_members;
+        for (int idx : win.members) {
+            if (idx < 0 || idx >= (int)s.curves.size()) continue;
+            const auto& c = s.curves[idx];
+            if (!c.last_run_ok) continue;
+            SweepAxisMember m;
+            m.kind      = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
+            m.index     = c.sweep_over_var ? c.var_sweep_index : c.param_index;
+            m.log_scale = c.log_scale;
+            m.lo = c.result.param_lo;
+            m.hi = c.result.param_hi;
+            // Движок ещё не заполнил снапшот диапазона — берём текстовые поля.
+            if (m.hi == m.lo) {
+                m.lo = parse_ratio_or(c.param_lo_text, 0.0);
+                m.hi = parse_ratio_or(c.param_hi_text, 1.0);
+            }
+            sweep_members.push_back(m);
         }
-        if (!log_seen) { shared_log = c.log_scale; log_seen = true; }
-        else if (shared_log != c.log_scale) { log_mismatch = true; }
-        double lo = c.result.param_lo, hi = c.result.param_hi;
-        if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
-        double a = std::min(lo, hi), b = std::max(lo, hi);
-        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
-        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
+        configure_sweep_x_axis(view, sweep_members, s.params, s.vars);
     }
-    view.x_fit_use_explicit = x_fit_any;
-    view.x_fit_min = x_fit_lo;
-    view.x_fit_max = x_fit_hi;
-    view.x_axis.log_scale = shared_log && !log_mismatch;
-    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
-        view.x_axis.name = s.params[shared_idx];
-    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
-        view.x_axis.name = s.vars[shared_idx] + " (IC)";
-    else if (shared_kind == 2)
-        view.x_axis.name = "h";
-    else
-        view.x_axis.name = "parameter";
     view.y_axis.name = "lambda";
 
     static std::vector<std::vector<float>> bufs;
@@ -2893,48 +3082,24 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     }
 
     view.popup_extras = [&s, &cb]() {
-        if (ImGui::BeginMenu("Export data...")) {
-            bool any = false;
-            for (int i = 0; i < (int)s.curves.size(); ++i) {
-                const auto& c = s.curves[i];
-                if (!c.last_run_ok) continue;
-                any = true;
-                const bool busy = s.in_flight && !s.is_2d_run && i == s.running_curve_index;
-                char item[192];
-                std::snprintf(item, sizeof(item), "%s##exp_lle_%d",
-                              c.label.c_str(), i);
-                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
-                    if (cb.pick_save_file_csv) {
-                        std::string path = cb.pick_save_file_csv();
-                        if (!path.empty())
-                            data_export::export_lle1d(c.result, path);
-                    }
-                }
-            }
-            if (!any) ImGui::TextDisabled("(no completed runs)");
-            ImGui::EndMenu();
-        }
+        draw_export_submenu("lle", (int)s.curves.size(),
+            [&s](int i) { return s.curves[i].label; },
+            [&s](int i) { return s.curves[i].last_run_ok; },
+            [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
+            [&s](int i, const std::string& p) { data_export::export_lle1d(s.curves[i].result, p); },
+            cb);
     };
 
-    // Snap X к узлам первой кривой этого окна (см. Bif выше — та же логика).
+    // Snap X к узлам первой кривой этого окна (см. apply_snap_x_from_config).
     view.snap_x_to_grid = true;
     view.snap_x_n       = 0;
     if (!win.members.empty()) {
         int aidx = win.members[0];
         if (aidx >= 0 && aidx < (int)s.curves.size()) {
             const auto& ac = s.curves[aidx];
-            if (ac.last_run_ok && ac.result.n_pts > 1) {
-                view.snap_x_min = ac.result.param_lo;
-                view.snap_x_max = ac.result.param_hi;
-                view.snap_x_n   = ac.result.n_pts;
-            } else {
-                int n = std::atoi(ac.n_pts_text.c_str());
-                if (n > 1) {
-                    view.snap_x_min = safe_stod(ac.param_lo_text, 0.0);
-                    view.snap_x_max = safe_stod(ac.param_hi_text, 1.0);
-                    view.snap_x_n   = n;
-                }
-            }
+            apply_snap_x_from_config(view, ac.last_run_ok,
+                                     ac.result.param_lo, ac.result.param_hi, ac.result.n_pts,
+                                     ac.param_lo_text, ac.param_hi_text, ac.n_pts_text);
         }
     }
 
@@ -3223,16 +3388,10 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                          std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
     LyapunovSpectrumAnalysisSession& s = model.ls_session;
     auto get_ls_heatmap = [&](int idx) -> HeatmapView& {
-        auto& slot = heatmap_map[idx];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-            int cm = (idx >= 0 && idx < (int)s.curves.size() && s.curves[idx].colormap_idx >= 0)
-                     ? s.curves[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
-            if (idx >= 0 && idx < (int)s.curves.size())
-                slot->display_exponent_idx = s.curves[idx].display_exponent_idx;
-        }
-        return *slot;
+        const bool in_range = (idx >= 0 && idx < (int)s.curves.size());
+        const int  cfg_cm   = in_range ? s.curves[idx].colormap_idx : -1;
+        const int  cfg_exp  = in_range ? s.curves[idx].display_exponent_idx : kNoExponent;
+        return get_or_create_heatmap(heatmap_map, idx, cfg_cm, model.heatmap_colormap, cfg_exp);
     };
 
     if (win.members.empty()) {
@@ -3251,65 +3410,27 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             const unsigned ls_oid = 0x15A20000u + (unsigned)idx;
             HeatmapView& heatmap_ls = get_ls_heatmap(idx);
 
-            // Combo colormap (persisted в _app_config.json, как у LLE/BD).
-            int cmap_idx = (int)heatmap_ls.colormap;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap##lshm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-                heatmap_ls.colormap = (HeatmapColormap)cmap_idx;
-                cact.colormap_idx = cmap_idx;   // persist per-curve only
-                if (!model.loaded_name.empty())
-                    lib.save_session(model.loaded_name, "_last_ls",
-                                     session_to_json_ls(model.ls_session));
-            }
-
-            // Combo exponent: λ₁..λ_N + "sum L_i", разделены Separator'ом —
-            // та же схема, что у параметров/переменных в комбо "Sweep".
-            // Живёт в heatmap_ls (per-window), а не в cact — иначе два окна с
-            // одной и той же кривой дёргают один и тот же индекс друг у друга.
-            // Sentinel -1 = "sum L_i" (не N, чтобы не путаться, если N
-            // поменяется на новом Run).
-            if (cact.last_run_2d_ok && cact.result_2d.n_exponents > 0) {
-                int N = cact.result_2d.n_exponents;
-                if (heatmap_ls.display_exponent_idx != -1 &&
-                    (heatmap_ls.display_exponent_idx < 0 || heatmap_ls.display_exponent_idx >= N))
-                    heatmap_ls.display_exponent_idx = 0;
-                std::string preview = (heatmap_ls.display_exponent_idx == -1)
-                    ? "sum L_i" : ("L" + std::to_string(heatmap_ls.display_exponent_idx + 1));
-                auto pick_exponent = [&](int j) {
-                    heatmap_ls.display_exponent_idx = j;
-                    cact.display_exponent_idx = j;   // persist per-curve only
+            {
+                auto save_ls = [&]() {
                     if (!model.loaded_name.empty())
                         lib.save_session(model.loaded_name, "_last_ls",
                                          session_to_json_ls(model.ls_session));
                 };
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(100);
-                if (ImGui::BeginCombo("Exponent##lshm", preview.c_str())) {
-                    for (int j = 0; j < N; ++j) {
-                        std::string lbl = "L" + std::to_string(j + 1);
-                        if (ImGui::Selectable(lbl.c_str(), heatmap_ls.display_exponent_idx == j))
-                            pick_exponent(j);
-                    }
-                    ImGui::Separator();
-                    if (ImGui::Selectable("sum L_i", heatmap_ls.display_exponent_idx == -1))
-                        pick_exponent(-1);
-                    ImGui::EndCombo();
-                }
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    cact.colormap_idx = cm;   // persist per-curve only
+                    save_ls();
+                };
+                topts.extras = [&]() {
+                    if (!cact.last_run_2d_ok) return;
+                    draw_ls_exponent_picker(heatmap_ls, cact.result_2d.n_exponents,
+                                            [&](int j) {
+                                                cact.display_exponent_idx = j;
+                                                save_ls();
+                                            });
+                };
+                draw_heatmap_toolbar(heatmap_ls, topts);
             }
-
-            ImGui::SameLine();
-            ImGui::Checkbox("Autoscale color##lshm", &heatmap_ls.autoscale);
-            if (!heatmap_ls.autoscale) {
-                ImGui::SameLine();
-                InputNumStr("vmin##lshm", heatmap_ls.manual_vmin_text, 80);
-                heatmap_ls.manual_vmin = (float)parse_num_or(heatmap_ls.manual_vmin_text, heatmap_ls.manual_vmin);
-                ImGui::SameLine();
-                InputNumStr("vmax##lshm", heatmap_ls.manual_vmax_text, 80);
-                heatmap_ls.manual_vmax = (float)parse_num_or(heatmap_ls.manual_vmax_text, heatmap_ls.manual_vmax);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(heatmap_ls.swap_axes ? "Swap axes (on)##lshm" : "Swap axes##lshm"))
-                heatmap_ls.swap_axes = !heatmap_ls.swap_axes;
 
             if (!cact.last_run_2d_ok || cact.result_2d.values.empty()) {
                 ImGui::TextDisabled("No 2D data yet. Press Run.");
@@ -3332,51 +3453,12 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             bool fit = cact.fit_request_2d;
             if (fit) cact.fit_request_2d = false;
 
-            // Указатель на нужную плоскость + её per-plane min/max. k==-1 —
-            // "sum L_i": считаем поэлементную сумму всех N плоскостей один раз
-            // на data_generation_2d (не каждый кадр), кэш в cact — общий для
-            // всех окон с этой кривой. Diverged-ячейки (flags<0) получают
-            // sentinel 999.0 — тот же, что engine пишет в одиночные плоскости,
-            // чтобы HeatmapView закрасил их тем же серым.
-            int k = heatmap_ls.display_exponent_idx;
-            size_t plane_size = (size_t)cact.result_2d.n_pts * (size_t)cact.result_2d.n_pts;
-            const double* plane_ptr;
-            double vmin, vmax;
-            int gen;
-            if (k == -1) {
-                if (cact.sum_cache_gen != cact.data_generation_2d) {
-                    int N = cact.result_2d.n_exponents;
-                    cact.sum_cache.assign(plane_size, 0.0);
-                    double smin =  std::numeric_limits<double>::infinity();
-                    double smax = -std::numeric_limits<double>::infinity();
-                    for (size_t c2 = 0; c2 < plane_size; ++c2) {
-                        if (c2 < cact.result_2d.flags.size() && cact.result_2d.flags[c2] < 0) {
-                            cact.sum_cache[c2] = 999.0;
-                            continue;
-                        }
-                        double sum = 0.0;
-                        for (int j = 0; j < N; ++j)
-                            sum += cact.result_2d.values[(size_t)j * plane_size + c2];
-                        cact.sum_cache[c2] = sum;
-                        if (sum < smin) smin = sum;
-                        if (sum > smax) smax = sum;
-                    }
-                    cact.sum_cache_min = std::isfinite(smin) ? smin : 0.0;
-                    cact.sum_cache_max = std::isfinite(smax) ? smax : 0.0;
-                    cact.sum_cache_gen = cact.data_generation_2d;
-                }
-                plane_ptr = cact.sum_cache.data();
-                vmin = cact.sum_cache_min;
-                vmax = cact.sum_cache_max;
-                gen  = cact.data_generation_2d * 64 + cact.result_2d.n_exponents;
-            } else {
-                plane_ptr = cact.result_2d.values.data() + (size_t)k * plane_size;
-                vmin = (k >= 0 && k < (int)cact.result_2d.min_val.size()) ? cact.result_2d.min_val[k] : 0.0;
-                vmax = (k >= 0 && k < (int)cact.result_2d.max_val.size()) ? cact.result_2d.max_val[k] : 0.0;
-                // data_generation для VBO-кэша: смешиваем поколение чанка +
-                // индекс экспоненты, чтобы переключение перезалило текстуру.
-                gen = cact.data_generation_2d * 64 + k;
-            }
+            // Плоскость по выбранной экспоненте (см. ls_resolve_plane).
+            const double* plane_ptr = nullptr;
+            double vmin = 0.0, vmax = 0.0;
+            int    gen  = 0;
+            ls_resolve_plane(cact, heatmap_ls.display_exponent_idx,
+                             plane_ptr, vmin, vmax, gen);
 
             const bool busy = s.in_flight && s.is_2d_run && idx == s.running_curve_index;
             heatmap_ls.popup_extras = [&cact, &cb, busy]() {
@@ -3415,54 +3497,28 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         return;
     }
 
-    auto safe_stod = [](const std::string& v, double def) -> double {
-        if (v.empty()) return def;
-        size_t slash = v.find('/');
-        if (slash != std::string::npos) {
-            double num = std::atof(v.substr(0, slash).c_str());
-            double den = std::atof(v.substr(slash + 1).c_str());
-            if (den != 0) return num / den;
-        }
-        return std::atof(v.c_str());
-    };
 
-    // Подпись X + X-fit диапазон. См. BD/LLE: ось охватывает union(lo, hi)
-    // спектров этого окна, не зависит от наличия точек.
-    int shared_kind = -2;   // -2 init, -1 mixed, 0 param, 1 var
-    int shared_idx  = -2;
-    double x_fit_lo = 0.0, x_fit_hi = 0.0;
-    bool   x_fit_any = false;
-    bool   shared_log = false, log_seen = false, log_mismatch = false;
-    for (int idx : win.members) {
-        if (idx < 0 || idx >= (int)s.curves.size()) continue;
-        const auto& c = s.curves[idx];
-        if (!c.last_run_ok) continue;
-        int kind = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
-        int kidx = c.sweep_over_h ? -1 : (c.sweep_over_var ? c.var_sweep_index : c.param_index);
-        if (shared_kind == -2) { shared_kind = kind; shared_idx = kidx; }
-        else if (shared_kind != kind || shared_idx != kidx) {
-            shared_kind = -1; shared_idx = -1;
+    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis.
+    {
+        std::vector<SweepAxisMember> sweep_members;
+        for (int idx : win.members) {
+            if (idx < 0 || idx >= (int)s.curves.size()) continue;
+            const auto& c = s.curves[idx];
+            if (!c.last_run_ok) continue;
+            SweepAxisMember m;
+            m.kind      = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
+            m.index     = c.sweep_over_var ? c.var_sweep_index : c.param_index;
+            m.log_scale = c.log_scale;
+            m.lo = c.result.param_lo;
+            m.hi = c.result.param_hi;
+            if (m.hi == m.lo) {
+                m.lo = parse_ratio_or(c.param_lo_text, 0.0);
+                m.hi = parse_ratio_or(c.param_hi_text, 1.0);
+            }
+            sweep_members.push_back(m);
         }
-        if (!log_seen) { shared_log = c.log_scale; log_seen = true; }
-        else if (shared_log != c.log_scale) { log_mismatch = true; }
-        double lo = c.result.param_lo, hi = c.result.param_hi;
-        if (hi == lo) { lo = safe_stod(c.param_lo_text, 0.0); hi = safe_stod(c.param_hi_text, 1.0); }
-        double a = std::min(lo, hi), b = std::max(lo, hi);
-        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
-        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
+        configure_sweep_x_axis(view, sweep_members, s.params, s.vars);
     }
-    view.x_fit_use_explicit = x_fit_any;
-    view.x_fit_min = x_fit_lo;
-    view.x_fit_max = x_fit_hi;
-    view.x_axis.log_scale = shared_log && !log_mismatch;
-    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)s.params.size())
-        view.x_axis.name = s.params[shared_idx];
-    else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)s.vars.size())
-        view.x_axis.name = s.vars[shared_idx] + " (IC)";
-    else if (shared_kind == 2)
-        view.x_axis.name = "h";
-    else
-        view.x_axis.name = "parameter";
 
     // Подсчитываем общее число серий этого окна — sum(n_exponents per member).
     size_t total_series = 0;
@@ -3535,48 +3591,24 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     }
 
     view.popup_extras = [&s, &cb]() {
-        if (ImGui::BeginMenu("Export data...")) {
-            bool any = false;
-            for (int i = 0; i < (int)s.curves.size(); ++i) {
-                const auto& c = s.curves[i];
-                if (!c.last_run_ok) continue;
-                any = true;
-                const bool busy = s.in_flight && !s.is_2d_run && i == s.running_curve_index;
-                char item[192];
-                std::snprintf(item, sizeof(item), "%s##exp_ls_%d",
-                              c.label.c_str(), i);
-                if (ImGui::MenuItem(item, nullptr, false, !busy)) {
-                    if (cb.pick_save_file_csv) {
-                        std::string path = cb.pick_save_file_csv();
-                        if (!path.empty())
-                            data_export::export_ls1d(c.result, path);
-                    }
-                }
-            }
-            if (!any) ImGui::TextDisabled("(no completed runs)");
-            ImGui::EndMenu();
-        }
+        draw_export_submenu("ls", (int)s.curves.size(),
+            [&s](int i) { return s.curves[i].label; },
+            [&s](int i) { return s.curves[i].last_run_ok; },
+            [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
+            [&s](int i, const std::string& p) { data_export::export_ls1d(s.curves[i].result, p); },
+            cb);
     };
 
-    // Snap X к узлам первой LS-кривой этого окна (см. Bif/LLE выше).
+    // Snap X к узлам первой LS-кривой этого окна (см. apply_snap_x_from_config).
     view.snap_x_to_grid = true;
     view.snap_x_n       = 0;
     if (!win.members.empty()) {
         int aidx = win.members[0];
         if (aidx >= 0 && aidx < (int)s.curves.size()) {
             const auto& ac = s.curves[aidx];
-            if (ac.last_run_ok && ac.result.n_pts > 1) {
-                view.snap_x_min = ac.result.param_lo;
-                view.snap_x_max = ac.result.param_hi;
-                view.snap_x_n   = ac.result.n_pts;
-            } else {
-                int n = std::atoi(ac.n_pts_text.c_str());
-                if (n > 1) {
-                    view.snap_x_min = safe_stod(ac.param_lo_text, 0.0);
-                    view.snap_x_max = safe_stod(ac.param_hi_text, 1.0);
-                    view.snap_x_n   = n;
-                }
-            }
+            apply_snap_x_from_config(view, ac.last_run_ok,
+                                     ac.result.param_lo, ac.result.param_hi, ac.result.n_pts,
+                                     ac.param_lo_text, ac.param_hi_text, ac.n_pts_text);
         }
     }
 
@@ -3997,14 +4029,9 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
                            std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
     Dft1DAnalysisSession& s = model.dft1d_session;
     auto get_hm = [&](int idx) -> HeatmapView& {
-        auto& slot = heatmap_map[idx];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-            int cm = (idx >= 0 && idx < (int)s.configs.size() && s.configs[idx].colormap_idx >= 0)
-                     ? s.configs[idx].colormap_idx : model.heatmap_colormap;
-            if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
-        }
-        return *slot;
+        const int cfg_cm = (idx >= 0 && idx < (int)s.configs.size())
+                           ? s.configs[idx].colormap_idx : -1;
+        return get_or_create_heatmap(heatmap_map, idx, cfg_cm, model.heatmap_colormap);
     };
 
     if (win.members.empty()) {
@@ -4022,28 +4049,16 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         const unsigned oid = 0xD1FD0000u + (unsigned)idx;
         HeatmapView& hc = get_hm(idx);
 
-        int cmap_idx = (int)hc.colormap;
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::Combo("Colormap##dfthm", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-            hc.colormap = (HeatmapColormap)cmap_idx;
-            c.colormap_idx = cmap_idx;   // persist per-config
-            if (!model.loaded_name.empty())
-                lib.save_session(model.loaded_name, "_last_dft1d",
-                                 session_to_json_dft1d(model.dft1d_session));
+        {
+            HeatmapToolbarOpts topts;
+            topts.persist_colormap = [&](int cm) {
+                c.colormap_idx = cm;   // persist per-config
+                if (!model.loaded_name.empty())
+                    lib.save_session(model.loaded_name, "_last_dft1d",
+                                     session_to_json_dft1d(model.dft1d_session));
+            };
+            draw_heatmap_toolbar(hc, topts);
         }
-        ImGui::SameLine();
-        ImGui::Checkbox("Autoscale color##dfthm", &hc.autoscale);
-        if (!hc.autoscale) {
-            ImGui::SameLine();
-            InputNumStr("vmin##dfthm", hc.manual_vmin_text, 80);
-            hc.manual_vmin = (float)parse_num_or(hc.manual_vmin_text, hc.manual_vmin);
-            ImGui::SameLine();
-            InputNumStr("vmax##dfthm", hc.manual_vmax_text, 80);
-            hc.manual_vmax = (float)parse_num_or(hc.manual_vmax_text, hc.manual_vmax);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(hc.swap_axes ? "Swap axes (on)##dfthm" : "Swap axes##dfthm"))
-            hc.swap_axes = !hc.swap_axes;
 
         if (!c.last_run_ok || c.result.ak_cos.empty()) {
             ImGui::TextDisabled("No data yet. Press Run.");
@@ -4548,7 +4563,7 @@ static void ensure_basins_spiral_cache(BasinsConfig& c) {
     c.basin_idx_spiral_gen   = c.data_generation;
 }
 
-static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
+static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
     if (s.configs.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -4653,50 +4668,51 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
     // затрагивает, и наоборот. Scatter-таб использует Plot2DView, без
     // colormap.
     {
-        int* field = nullptr;
-        const char* combo_id = nullptr;
+        // Per-tab colormap: приоритет — выбор, сохранённый в ЭТОМ config'е
+        // (уходит в _last_basins.json); -1 = не задан → app-дефолт из Settings.
+        // Так два basins-config'а могут иметь разные колормапы — как у
+        // Bif/LLE/LS/DFT1D. Раньше выбор был только глобальный.
+        int* cfg_field  = nullptr;
+        int  app_default = 2;   // Turbo
         HeatmapView* active_hm = nullptr;
         switch (c.active_plot_tab) {
-            case 0: field = &model.basins_colormap;        combo_id = "Colormap##bas";     active_hm = &hm_basins_v; break;
-            case 1: field = &model.basins_avgpk_colormap;  combo_id = "Colormap##bas_pk";  active_hm = &hm_avgpk_v;  break;
-            case 2: field = &model.basins_avgint_colormap; combo_id = "Colormap##bas_int"; active_hm = &hm_avgint_v; break;
-            case 3: field = &model.basins_states_colormap; combo_id = "Colormap##bas_st";  active_hm = &hm_states_v; break;
-            default: break;  // Scatter (4) — без combo
-        }
-        if (field) {
-            int cmap_idx = *field;
-            if (cmap_idx < 0 || cmap_idx >= kHeatmapColormapCount) cmap_idx = 2;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo(combo_id, &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
-                *field = cmap_idx;
-                AppConfig cfg;
-                cfg.ui_scale_override      = model.ui_scale_override;
-                cfg.use_builtin_font       = model.use_builtin_font;
-                cfg.heatmap_colormap       = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = model.tick_precision;
-                save_app_config(get_exe_dir_with_sep(), cfg);
-            }
-            // Swap axes — per-tab. Сессионный toggle (не персистится),
-            // повторный клик возвращает исходную ориентацию.
-            if (active_hm) {
-                ImGui::SameLine();
-                if (ImGui::Button(active_hm->swap_axes ? "Swap axes (on)##bas_sw" : "Swap axes##bas_sw"))
-                    active_hm->swap_axes = !active_hm->swap_axes;
-            }
+            case 0: cfg_field = &c.colormap_idx[0]; app_default = model.basins_colormap;        active_hm = &hm_basins_v; break;
+            case 1: cfg_field = &c.colormap_idx[1]; app_default = model.basins_avgpk_colormap;  active_hm = &hm_avgpk_v;  break;
+            case 2: cfg_field = &c.colormap_idx[2]; app_default = model.basins_avgint_colormap; active_hm = &hm_avgint_v; break;
+            case 3: cfg_field = &c.colormap_idx[3]; app_default = model.basins_states_colormap; active_hm = &hm_states_v; break;
+            default: break;  // Scatter (4) — Plot2DView, без colormap
         }
         // Renumber (spiral) — общий для табов 0 (Basins) и 4 (Scatter).
-        // На остальных табах не показываем — для них cluster id'ы не отрисовываются.
-        if (c.active_plot_tab == 0 || c.active_plot_tab == 4) {
-            ImGui::SameLine();
-            if (ImGui::Checkbox("Renumber (spiral)##bas_renum", &c.renumber_spiral)) {
+        // На остальных табах не показываем — там cluster id'ы не отрисовываются.
+        auto draw_renumber = [&](bool same_line) {
+            if (c.active_plot_tab != 0 && c.active_plot_tab != 4) return;
+            if (same_line) ImGui::SameLine();
+            if (ImGui::Checkbox("Renumber (spiral)", &c.renumber_spiral)) {
                 // Заставляем cache пересчитаться при следующем доступе,
                 // даже если data_generation тот же (после toggle off→on).
                 c.basin_idx_spiral_gen = -1;
             }
+        };
+
+        if (cfg_field && active_hm) {
+            // Синхронизируем выбор в сам view ДО тулбара: тулбар читает
+            // hv.colormap как источник истины. Без этого на первом кадре combo
+            // показал бы дефолт view'а вместо сохранённого значения.
+            int cm = (*cfg_field >= 0) ? *cfg_field : app_default;
+            if (cm < 0 || cm >= kHeatmapColormapCount) cm = 2;
+            active_hm->colormap = (HeatmapColormap)cm;
+
+            HeatmapToolbarOpts topts;
+            topts.persist_colormap = [&](int picked) {
+                *cfg_field = picked;   // per-config, уходит в сессию
+                if (!model.loaded_name.empty())
+                    lib.save_session(model.loaded_name, "_last_basins",
+                                     session_to_json_basins(model.basins_session));
+            };
+            topts.extras = [&]() { draw_renumber(/*same_line*/ true); };
+            draw_heatmap_toolbar(*active_hm, topts);
+        } else {
+            draw_renumber(/*same_line*/ false);   // Scatter-таб: только Renumber
         }
     }
     if (c.renumber_spiral) ensure_basins_spiral_cache(c);
@@ -4752,10 +4768,7 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         else                                     vmin = 1.0;
         double vmax = (double)src_n_clusters;
         if (vmax < vmin) vmax = vmin;
-        {
-            int cm = model.basins_colormap;
-            hm_basins_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
-        }
+        // colormap уже засинхронен из model.basins_colormap перед тулбаром.
         hm_basins_v.x_axis.name = ax_x;
         hm_basins_v.y_axis.name = ax_y;
         // gen-token включает renumber_spiral, иначе HeatmapView::data_gen_cached
@@ -4769,10 +4782,6 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
                           vmin, vmax, fit);
     }
     else if (c.active_plot_tab == 1) {
-        {
-            int cm = model.basins_avgpk_colormap;
-            hm_avgpk_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
-        }
         hm_avgpk_v.x_axis.name = ax_x;
         hm_avgpk_v.y_axis.name = ax_y;
         hm_avgpk_v.render(*renderer, origin, avail,
@@ -4782,10 +4791,6 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
     }
     else if (c.active_plot_tab == 2) {
-        {
-            int cm = model.basins_avgint_colormap;
-            hm_avgint_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
-        }
         hm_avgint_v.x_axis.name = ax_x;
         hm_avgint_v.y_axis.name = ax_y;
         hm_avgint_v.render(*renderer, origin, avail,
@@ -4806,10 +4811,6 @@ static void draw_basins_plot(AppModel& model, const GuiCallbacks& cb) {
         for (size_t k = 0; k < total; ++k) {
             int v = c.result.helpful_array[k];
             buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
-        }
-        {
-            int cm = model.basins_states_colormap;
-            hm_states_v.colormap = (HeatmapColormap)((cm >= 0 && cm < kHeatmapColormapCount) ? cm : 2);
         }
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
@@ -5254,43 +5255,53 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         s.active_config_index = 0;
     FastSyncConfig& c = s.configs[s.active_config_index];
 
-    // ---- Visualization toolbar (как у basins / Bif-2D / LLE-2D) ----
-    {
-        if (c.colormap_idx < 0 || c.colormap_idx >= kHeatmapColormapCount) c.colormap_idx = 2;
-        ImGui::SetNextItemWidth(140);
-        ImGui::Combo("Colormap##fs", &c.colormap_idx, kHeatmapColormapNames, kHeatmapColormapCount);
-        ImGui::SameLine();
-        ImGui::Checkbox("Autoscale color##fs", &c.autoscale_color);
-        if (!c.autoscale_color) {
-            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            InputNumStr("vmin##fs", c.c_min_text, 80);
-            ImGui::SameLine(); ImGui::SetNextItemWidth(80);
-            InputNumStr("vmax##fs", c.c_max_text, 80);
-        }
-        if (c.mode == 0) {
-            ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-            ImGui::SliderFloat("Line width##fs", &c.line_width, 0.1f, 5.0f, "%.2f");
-            ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-            ImGui::SliderFloat("Alpha##fs",      &c.alpha,      0.0f, 1.0f, "%.2f");
-            // Выбор Display X/Y живёт в Controls-панели (рядом с другими compute-
-            // параметрами) — дублировать здесь не нужно.
-        } else {
-            ImGui::SameLine();
-            if (ImGui::Button(c.swap_axes ? "Swap axes (on)##fs" : "Swap axes##fs"))
-                c.swap_axes = !c.swap_axes;
-        }
-    }
-
-    if (!c.last_run_ok) {
-        ImGui::TextDisabled("No data yet. Press Run.");
-        return;
-    }
-
     const unsigned base_oid = 0x5F50000u + (unsigned)s.active_config_index;
     static std::unique_ptr<PlotRenderer> renderer;
     static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_map;
     static std::map<unsigned, std::unique_ptr<Plot2DView>>  traj_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
+
+    // ---- Visualization toolbar — общая реализация (draw_heatmap_toolbar) ----
+    // Цветовая шкала FastSync держится в HeatmapView даже в mode 0 (colored
+    // trajectory, где хитмапы нет): так тулбар совпадает с остальными
+    // вкладками до последнего виджета. Персистентность при этом остаётся в
+    // config'е (он уходит в сессию), поэтому синхронизируем в обе стороны.
+    auto& hv_slot = hm_map[base_oid];
+    if (!hv_slot) hv_slot = std::make_unique<HeatmapView>();
+    HeatmapView& hv = *hv_slot;
+
+    if (c.colormap_idx < 0 || c.colormap_idx >= kHeatmapColormapCount) c.colormap_idx = 2;
+    hv.colormap         = (HeatmapColormap)c.colormap_idx;   // config → view
+    hv.autoscale        = c.autoscale_color;
+    hv.manual_vmin_text = c.c_min_text;
+    hv.manual_vmax_text = c.c_max_text;
+    hv.swap_axes        = c.swap_axes;
+    {
+        HeatmapToolbarOpts topts;
+        topts.persist_colormap = [&](int cm) { c.colormap_idx = cm; };
+        // Swap axes осмыслен только в grid-режиме (там оси — две IC).
+        topts.show_swap = (c.mode != 0);
+        if (c.mode == 0) {
+            // Толщина/α для colored trajectory. Выбор Display X/Y живёт в
+            // Controls-панели рядом с прочими compute-параметрами.
+            topts.extras_tail = [&]() {
+                ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                ImGui::SliderFloat("Line width", &c.line_width, 0.1f, 5.0f, "%.2f");
+                ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                ImGui::SliderFloat("Alpha", &c.alpha, 0.0f, 1.0f, "%.2f");
+            };
+        }
+        draw_heatmap_toolbar(hv, topts);
+    }
+    c.autoscale_color = hv.autoscale;              // view → config
+    c.c_min_text      = hv.manual_vmin_text;
+    c.c_max_text      = hv.manual_vmax_text;
+    c.swap_axes       = hv.swap_axes;
+
+    if (!c.last_run_ok) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
 
     bool fit = c.fit_request;
     if (fit) c.fit_request = false;
@@ -5337,18 +5348,12 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         int vx = (c.axis_x_var >= 0 && c.axis_x_var < nX) ? c.axis_x_var : 0;
         int vy = (c.axis_y_var >= 0 && c.axis_y_var < nX) ? c.axis_y_var : (nX > 1 ? 1 : 0);
 
-        // Резервируем место справа под colorbar (mirror HeatmapView layout).
-        const float colorbar_w   = 18.0f;
-        const float colorbar_gap = 12.0f;
-        const float tick_len     = 4.0f;
-        const float tick_text_gap = 2.0f;
-
-        // Прикинем максимальную ширину tick-подписей colorbar'а.
-        std::string lbl_lo = fmt_tick(cmin);
-        std::string lbl_hi = fmt_tick(cmax);
-        float max_tick_w = std::max(ImGui::CalcTextSize(lbl_lo.c_str()).x,
-                                    ImGui::CalcTextSize(lbl_hi.c_str()).x);
-        float cb_total = colorbar_w + colorbar_gap + tick_len + tick_text_gap + max_tick_w + 6.0f;
+        // Резервируем место справа под colorbar. Тики и ширина считаются теми
+        // же общими хелперами, что у HeatmapView — раньше здесь была своя
+        // копия с 5 равноотстоящими тиками и продублированными константами.
+        const std::vector<ColorbarTick> cb_ticks =
+            colorbar_ticks((float)cmin, (float)cmax, /*n_discrete*/ 0);
+        const float cb_total = colorbar_total_width(cb_ticks);
 
         ImVec2 plot_avail(std::max(64.0f, avail.x - cb_total), avail.y);
 
@@ -5359,6 +5364,12 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             slot->show_legend  = false;
             slot->imdraw_lines = true;
             slot->pad_x = true; slot->pad_y = true;
+            // Это фазовый портрет (оси — переменные состояния), поэтому линий
+            // x=0 / y=0 быть не должно — как в Phase 2D. Раньше здесь стоял
+            // дефолт Plot2DView (true), и одна и та же по смыслу диаграмма
+            // рисовалась в двух вкладках по-разному.
+            slot->show_zero_x = false;
+            slot->show_zero_y = false;
         }
         Plot2DView& v = *slot;
         v.x_axis.name = var_name(vx);
@@ -5465,58 +5476,28 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
                  series_in, vis, vis, fit);
         v.popup_extras = nullptr; // не утечь callback в другой кадр
 
-        // ---- Manual colorbar справа ----
-        // Зеркалит HeatmapView::render section 9. Plot2DView использует
-        // те же margin_left/top/bottom (78/20/46) — берём отсюда.
-        const float margin_left   = 78.0f;
-        const float margin_top    = 20.0f;
-        const float margin_bottom = 46.0f;
-        float plot_w = std::max(64.0f, plot_avail.x - margin_left - 20.0f);
-        float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
-        float cb_x = origin.x + margin_left + plot_w + colorbar_gap;
-        float cb_y = origin.y + margin_top;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const int n_strips = 256;
-        for (int k = 0; k < n_strips; ++k) {
-            float t0 = (float)k / n_strips;
-            float t1 = (float)(k + 1) / n_strips;
-            float y0 = cb_y + plot_h * (1.0f - t1);
-            float y1 = cb_y + plot_h * (1.0f - t0);
-            float t_center = (t0 + t1) * 0.5f;
-            if (invert_cmap) t_center = 1.0f - t_center;
-            ImU32 col = cmap_sample(t_center, cmap);
-            dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + colorbar_w, y1), col);
-        }
-        dl->AddRect(ImVec2(cb_x, cb_y), ImVec2(cb_x + colorbar_w, cb_y + plot_h),
-                    plot_col_border());
-        ImU32 col_text = plot_col_text();
-        float font_h = ImGui::GetFontSize();
-        // Метки на 5 равномерно распределённых уровнях.
-        const int n_ticks = 5;
-        for (int k = 0; k < n_ticks; ++k) {
-            float t = (float)k / (n_ticks - 1);
-            double v = cmin + t * (cmax - cmin);
-            float y = cb_y + plot_h * (1.0f - t);
-            dl->AddLine(ImVec2(cb_x + colorbar_w, y),
-                        ImVec2(cb_x + colorbar_w + tick_len, y),
-                        plot_col_border());
-            std::string s = fmt_tick(v);
-            dl->AddText(ImVec2(cb_x + colorbar_w + tick_len + tick_text_gap,
-                               y - font_h * 0.5f),
-                        col_text, s.c_str());
-        }
-
+        // ---- Colorbar справа — общая реализация (draw_colorbar) ----
+        // Марджины плота обязаны совпадать с Plot2DView (он рисует внутри
+        // plot_avail): раньше они были продублированы здесь тремя числами и
+        // разъезжались при любой правке лэйаута. Теперь берутся из
+        // plot_2d_margins(), т.е. один источник истины.
+        float margin_left, margin_top, margin_right, margin_bottom;
+        plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+        const float plot_w = std::max(64.0f, plot_avail.x - margin_left - margin_right);
+        const float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
+        draw_colorbar(ImGui::GetWindowDrawList(),
+                      ImVec2(origin.x + margin_left + plot_w + kColorbarGap,
+                             origin.y + margin_top),
+                      plot_h, (float)cmin, (float)cmax, cmap,
+                      /*reverse*/ invert_cmap, /*n_discrete*/ 0, cb_ticks);
     }
     else {
-        // Heatmap.
-        auto& slot = hm_map[base_oid];
-        if (!slot) slot = std::make_unique<HeatmapView>();
-        HeatmapView& h = *slot;
-        h.colormap = cmap;
-        h.autoscale = c.autoscale_color;
+        // Heatmap. `hv` — тот же view, на котором выше стоял тулбар; здесь
+        // только доопределяем численный диапазон (cmin/cmax уже отсортированы
+        // выше, HeatmapView обратный диапазон не ждёт) и подписи осей.
+        HeatmapView& h = hv;
         h.manual_vmin = (float)cmin;
         h.manual_vmax = (float)cmax;
-        h.swap_axes = c.swap_axes;
         h.x_axis.name = var_name(c.result.axis_x_var) + "(0)";
         h.y_axis.name = var_name(c.result.axis_y_var) + "(0)";
         const bool fs_busy = s.in_flight &&
@@ -7166,112 +7147,38 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             // (colormap combo + autoscale + vmin/vmax + swap axes + LS
             // exponent picker for slot 2).
             ImGui::PushID(i);
-            int cmap_idx = (int)hv.colormap;
-            ImGui::SetNextItemWidth(140);
-            if (ImGui::Combo("Colormap", &cmap_idx,
-                             kHeatmapColormapNames, kHeatmapColormapCount)) {
-                hv.colormap = (HeatmapColormap)cmap_idx;
-                // Persist per-slot in the owning sub-session config, so a
-                // saved _last_custom.json restores the choice.
-                if      (i == 0 && !cs.bif_session.diagrams.empty())
-                    cs.bif_session.diagrams[0].colormap_idx = cmap_idx;
-                else if (i == 1 && !cs.lle_session.curves.empty())
-                    cs.lle_session.curves[0].colormap_idx = cmap_idx;
-                else if (i == 2 && !cs.ls_session.curves.empty())
-                    cs.ls_session.curves[0].colormap_idx = cmap_idx;
-                hm_init_cmap_seen[i] = cmap_idx;
-            }
 
-            // LS exponent picker (only for slot 2). Same schema as
-            // draw_ls_plot: λ₁..λ_N + "sum L_i" (sentinel -1). Recomputes
-            // the plane pointer/vmin/vmax below if the user picks a new
-            // exponent — falls back to the current frame's chosen index.
-            int ls_k = -999;   // sentinel: not LS slot
+            // LS-плоскость по выбранной экспоненте. Заполняется внутри
+            // extras-колбэка тулбара (там же, где рисуется picker), а
+            // используется ниже при render — поэтому объявлено до тулбара.
             const double* ls_plane = nullptr;
             double        ls_vmin = 0.0, ls_vmax = 1.0;
             int           ls_gen  = slots[i].data_gen;
-            if (i == 2 && !cs.ls_session.curves.empty()) {
-                auto& cact = cs.ls_session.curves[0];
-                if (cact.last_run_2d_ok && cact.result_2d.n_exponents > 0) {
-                    int N = cact.result_2d.n_exponents;
-                    if (hv.display_exponent_idx != -1 &&
-                        (hv.display_exponent_idx < 0 || hv.display_exponent_idx >= N))
-                        hv.display_exponent_idx = 0;
-                    std::string preview = (hv.display_exponent_idx == -1)
-                        ? "sum L_i" : ("L" + std::to_string(hv.display_exponent_idx + 1));
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(100);
-                    if (ImGui::BeginCombo("Exponent", preview.c_str())) {
-                        for (int j = 0; j < N; ++j) {
-                            std::string lbl = "L" + std::to_string(j + 1);
-                            if (ImGui::Selectable(lbl.c_str(), hv.display_exponent_idx == j)) {
-                                hv.display_exponent_idx = j;
-                                cact.display_exponent_idx = j;
-                            }
-                        }
-                        ImGui::Separator();
-                        if (ImGui::Selectable("sum L_i", hv.display_exponent_idx == -1)) {
-                            hv.display_exponent_idx = -1;
-                            cact.display_exponent_idx = -1;
-                        }
-                        ImGui::EndCombo();
-                    }
-                    ls_k = hv.display_exponent_idx;
-                    size_t plane_size = (size_t)cact.result_2d.n_pts *
-                                        (size_t)cact.result_2d.n_pts;
-                    if (ls_k == -1) {
-                        // "sum L_i" — reuse the per-curve sum_cache built by
-                        // draw_ls_plot when the user has ever opened Parametric,
-                        // OR compute lazily on data_generation change here.
-                        if (cact.sum_cache_gen != cact.data_generation_2d) {
-                            cact.sum_cache.assign(plane_size, 0.0);
-                            double smin =  std::numeric_limits<double>::infinity();
-                            double smax = -std::numeric_limits<double>::infinity();
-                            for (size_t c2 = 0; c2 < plane_size; ++c2) {
-                                if (c2 < cact.result_2d.flags.size() &&
-                                    cact.result_2d.flags[c2] < 0) {
-                                    cact.sum_cache[c2] = 999.0;
-                                    continue;
-                                }
-                                double sum = 0.0;
-                                for (int j = 0; j < N; ++j)
-                                    sum += cact.result_2d.values[(size_t)j * plane_size + c2];
-                                cact.sum_cache[c2] = sum;
-                                if (sum < smin) smin = sum;
-                                if (sum > smax) smax = sum;
-                            }
-                            cact.sum_cache_min = std::isfinite(smin) ? smin : 0.0;
-                            cact.sum_cache_max = std::isfinite(smax) ? smax : 0.0;
-                            cact.sum_cache_gen = cact.data_generation_2d;
-                        }
-                        ls_plane = cact.sum_cache.data();
-                        ls_vmin  = cact.sum_cache_min;
-                        ls_vmax  = cact.sum_cache_max;
-                        ls_gen   = cact.data_generation_2d * 64 + N;
-                    } else if (ls_k >= 0) {
-                        ls_plane = cact.result_2d.values.data() + (size_t)ls_k * plane_size;
-                        ls_vmin  = (ls_k < (int)cact.result_2d.min_val.size())
-                                    ? cact.result_2d.min_val[ls_k] : 0.0;
-                        ls_vmax  = (ls_k < (int)cact.result_2d.max_val.size())
-                                    ? cact.result_2d.max_val[ls_k] : 1.0;
-                        ls_gen   = cact.data_generation_2d * 64 + ls_k;
-                    }
-                }
-            }
 
-            ImGui::SameLine();
-            ImGui::Checkbox("Autoscale", &hv.autoscale);
-            if (!hv.autoscale) {
-                ImGui::SameLine();
-                InputNumStr("vmin", hv.manual_vmin_text, 80);
-                hv.manual_vmin = (float)parse_num_or(hv.manual_vmin_text, hv.manual_vmin);
-                ImGui::SameLine();
-                InputNumStr("vmax", hv.manual_vmax_text, 80);
-                hv.manual_vmax = (float)parse_num_or(hv.manual_vmax_text, hv.manual_vmax);
+            {
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    // Persist per-slot in the owning sub-session config, so a
+                    // saved _last_custom.json restores the choice.
+                    if      (i == 0 && !cs.bif_session.diagrams.empty())
+                        cs.bif_session.diagrams[0].colormap_idx = cm;
+                    else if (i == 1 && !cs.lle_session.curves.empty())
+                        cs.lle_session.curves[0].colormap_idx = cm;
+                    else if (i == 2 && !cs.ls_session.curves.empty())
+                        cs.ls_session.curves[0].colormap_idx = cm;
+                    hm_init_cmap_seen[i] = cm;
+                };
+                topts.extras = [&]() {
+                    if (i != 2 || cs.ls_session.curves.empty()) return;
+                    auto& cact = cs.ls_session.curves[0];
+                    if (!cact.last_run_2d_ok || cact.result_2d.n_exponents <= 0) return;
+                    draw_ls_exponent_picker(hv, cact.result_2d.n_exponents,
+                                            [&](int j) { cact.display_exponent_idx = j; });
+                    ls_resolve_plane(cact, hv.display_exponent_idx,
+                                     ls_plane, ls_vmin, ls_vmax, ls_gen);
+                };
+                draw_heatmap_toolbar(hv, topts);
             }
-            ImGui::SameLine();
-            if (ImGui::Button(hv.swap_axes ? "Swap axes (on)" : "Swap axes"))
-                hv.swap_axes = !hv.swap_axes;
 
             if (!slots[i].has_data) {
                 ImGui::TextDisabled("No data yet. Press Run / Run Level 2D.");
@@ -7379,29 +7286,26 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         // fields (result.param_lo/hi is often 0..1 default until engine
         // fills it — falling back to config text keeps the axis correct
         // when the user set 0.1..0.35 on the sweep).
-        const auto safe_stod = [](const std::string& s, double def) {
-            if (s.empty()) return def;
-            size_t sl = s.find('/');
-            if (sl != std::string::npos) {
-                double n = std::atof(s.substr(0, sl).c_str());
-                double d = std::atof(s.substr(sl + 1).c_str());
-                if (d != 0.0) return n / d;
-            }
-            return std::atof(s.c_str());
-        };
-        const auto axis_label_for_slot = [&](int cfg_idx, bool is_bif, bool is_lle, bool is_ls) -> std::string {
-            (void)is_lle; (void)is_ls;
+        const auto axis_label_for_slot = [&](int cfg_idx) -> std::string {
             // cfg_idx 1 = X-slice → sweep_x_par_index or axis_x if inherit;
             // cfg_idx 2 = Y-slice → sweep_y_*.
             EffectiveSweep e = (cfg_idx == 1) ? effective_sweep_x(cs.shared)
                                               : effective_sweep_y(cs.shared);
-            (void)is_bif;
             if (e.over_var)
                 return (e.var_index >= 0 && e.var_index < (int)cs.vars.size())
                         ? cs.vars[e.var_index] + " (IC)" : "x (IC)";
             return (e.par_index >= 0 && e.par_index < (int)cs.params.size())
                     ? cs.params[e.par_index] : "param";
         };
+
+        // ЕДИНАЯ конфигурация вида — та же функция, что применяет Parametric.
+        // Раньше здесь стоял свой набор присваиваний, из-за чего одинаковые
+        // диаграммы отличались между вкладками (см. configure_param_plot_view).
+        const ParamPlotKind pkind =
+            (lslots[i].kind == L1Kind::Bif) ? ParamPlotKind::Bifurcation
+          : (lslots[i].kind == L1Kind::LLE) ? ParamPlotKind::LLE
+                                            : ParamPlotKind::LS;
+        configure_param_plot_view(view, pkind);
 
         bool ok = false;
         int  data_gen = 0;
@@ -7415,53 +7319,39 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             auto& d = cs.bif_session.diagrams[idx];
             ok = d.last_run_ok;
             data_gen = d.data_generation;
-            param_lo = safe_stod(d.param_lo_text, 0.0);
-            param_hi = safe_stod(d.param_hi_text, 1.0);
+            param_lo = parse_ratio_or(d.param_lo_text, 0.0);
+            param_hi = parse_ratio_or(d.param_hi_text, 1.0);
             n_pts = d.result.n_pts;
-            view.x_axis.name = axis_label_for_slot(idx, true, false, false);
+            view.x_axis.name = axis_label_for_slot(idx);
             view.y_axis.name = (d.writable_var >= 0 && d.writable_var < (int)cs.vars.size())
                                ? cs.vars[d.writable_var] : "X";
-            view.points_mode = true;
-            view.point_size_px = 2.0f;
+            // Как в Parametric: при plot_inter_peaks по Y идут интервалы
+            // между пиками, а не сама переменная.
+            if (d.plot_inter_peaks) view.y_axis.name += " interval";
         } else if (lslots[i].kind == L1Kind::LLE) {
             int idx = lslots[i].cfg_idx;
             if (idx < 0 || idx >= (int)cs.lle_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
             auto& c = cs.lle_session.curves[idx];
             ok = c.last_run_ok;
             data_gen = c.data_generation;
-            param_lo = safe_stod(c.param_lo_text, 0.0);
-            param_hi = safe_stod(c.param_hi_text, 1.0);
+            param_lo = parse_ratio_or(c.param_lo_text, 0.0);
+            param_hi = parse_ratio_or(c.param_hi_text, 1.0);
             n_pts = (int)c.result.lyapunov.size();
-            view.x_axis.name = axis_label_for_slot(idx, false, true, false);
-            view.y_axis.name = "lambda";
-            view.points_mode = false;
-            view.imdraw_lines = true;
-            view.line_thickness_px = 1.5f;
+            view.x_axis.name = axis_label_for_slot(idx);
         } else { // LS
             int idx = lslots[i].cfg_idx;
             if (idx < 0 || idx >= (int)cs.ls_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
             auto& c = cs.ls_session.curves[idx];
             ok = c.last_run_ok;
             data_gen = c.data_generation;
-            param_lo = safe_stod(c.param_lo_text, 0.0);
-            param_hi = safe_stod(c.param_hi_text, 1.0);
+            param_lo = parse_ratio_or(c.param_lo_text, 0.0);
+            param_hi = parse_ratio_or(c.param_hi_text, 1.0);
             n_pts = c.result.n_pts;
-            view.x_axis.name = axis_label_for_slot(idx, false, false, true);
-            view.y_axis.name = "lambda";
-            view.points_mode = false;
-            view.imdraw_lines = true;
-            view.line_thickness_px = 1.5f;
+            view.x_axis.name = axis_label_for_slot(idx);
             // LS shows every exponent as its own coloured line (parity with
             // draw_ls_plot in Parametric) — no exponent picker here; series
             // are built in the render block below.
         }
-
-        // Common per-frame view knobs for all L1D kinds — data flush to the
-        // side borders and no zero-axis line (it's noise on a bifurcation
-        // diagram, LLE, and LS spectrum where y=0 has no special meaning).
-        view.pad_x        = false;
-        view.show_zero_x  = false;
-        view.show_zero_y  = false;
 
         if (!ok) {
             ImGui::TextDisabled("No data yet.");
@@ -7515,6 +7405,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             if (s < snap_lo) s = snap_lo; if (s > snap_hi) s = snap_hi;
             return s;
         };
+        // Тот же snap и для тиков осей / hover-readout, что и в Parametric —
+        // раньше в Custom он стоял только на crosshair-драге, поэтому tooltip
+        // здесь показывал промежуточные X, которых в данных нет.
+        apply_snap_x(view, snap_lo, snap_hi, snap_n);
         view.on_left_drag = [&cs, slice_is_x, snap_to_grid](double world_x) {
             double w = snap_to_grid(world_x);
             if (slice_is_x) {
@@ -7546,44 +7440,65 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
 
         int series_gen = data_gen;
         if (lslots[i].kind == L1Kind::Bif) {
-            const auto& r = cs.bif_session.diagrams[lslots[i].cfg_idx].result;
+            auto& d = cs.bif_session.diagrams[lslots[i].cfg_idx];
+            const auto& r = d.result;
+            // Как в Parametric: источник — peak_times при plot_inter_peaks,
+            // иначе сами точки бифуркации. Раньше Custom всегда брал
+            // bifurcation_points, из-за чего тоггл «inter-peaks» на него не влиял.
+            const auto& source = d.plot_inter_peaks ? r.peak_times
+                                                    : r.bifurcation_points;
             int n = r.n_pts > 0 ? r.n_pts : 1;
             bufs.emplace_back();
             auto& buf = bufs.back();
-            for (int p = 0; p < (int)r.bifurcation_points.size(); ++p) {
+            for (int p = 0; p < (int)source.size(); ++p) {
+                // Diverged-точки пропускаем (в Parametric так и было; здесь
+                // проверки не было, и разошедшиеся точки попадали на график).
+                if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
                 double px = param_lo + (param_hi - param_lo) * (double)p /
                             (double)(n - 1 > 0 ? n - 1 : 1);
-                for (double y : r.bifurcation_points[p]) {
+                for (double y : source[p]) {
+                    if (!std::isfinite(y)) continue;
                     buf.push_back((float)px);
                     buf.push_back((float)y);
                 }
             }
             PlotSeriesInput si;
-            si.points = buf.data();
+            si.points = buf.empty() ? nullptr : buf.data();
             si.n_points = (int)(buf.size() / 2);
             si.color = ic_base_color(0);
-            si.label = "bd";
+            si.label = d.label.empty() ? "bd" : d.label;
             series_in.push_back(si);
+            series_gen = data_gen * 2 + (d.plot_inter_peaks ? 1 : 0);
         } else if (lslots[i].kind == L1Kind::LLE) {
-            const auto& r = cs.lle_session.curves[lslots[i].cfg_idx].result;
+            auto& c = cs.lle_session.curves[lslots[i].cfg_idx];
+            const auto& r = c.result;
             int n = (int)r.lyapunov.size();
             bufs.emplace_back();
             auto& buf = bufs.back();
             buf.reserve(n * 2);
+            int total_pts = 0;
             for (int p = 0; p < n; ++p) {
+                // Diverged / NaN пропускаем — как в Parametric. Раньше здесь
+                // проверок не было, поэтому sentinel-значения расхождения
+                // рисовались как выброс.
+                if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
+                double y = r.lyapunov[p];
+                if (!std::isfinite(y)) continue;
                 double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
                                        (double)(n - 1) : param_lo;
                 buf.push_back((float)px);
-                buf.push_back((float)r.lyapunov[p]);
+                buf.push_back((float)y);
+                ++total_pts;
             }
             PlotSeriesInput si;
-            si.points = buf.data();
-            si.n_points = n;
+            si.points = buf.empty() ? nullptr : buf.data();
+            si.n_points = total_pts;
             si.color = ic_base_color(0);
-            si.label = "LLE";
+            si.label = c.label.empty() ? "LLE" : c.label;
             series_in.push_back(si);
         } else { // LS — N series, one per exponent (parity with draw_ls_plot).
-            const auto& r = cs.ls_session.curves[lslots[i].cfg_idx].result;
+            auto& c = cs.ls_session.curves[lslots[i].cfg_idx];
+            const auto& r = c.result;
             int n = r.n_pts;
             int N = r.n_exponents;
             if (N > 0 && n > 0 && (int)r.spectrum.size() == n) {
@@ -7610,7 +7525,9 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                     si.points = buf.empty() ? nullptr : buf.data();
                     si.n_points = total_pts;
                     si.color = ic_base_color(j);
-                    si.label = "L" + std::to_string(j + 1);
+                    // Как в Parametric: "<label> Lj" при N>1, иначе <label>.
+                    const std::string base = c.label.empty() ? "LS" : c.label;
+                    si.label = (N > 1) ? (base + " L" + std::to_string(j + 1)) : base;
                     series_in.push_back(si);
                 }
                 series_gen = data_gen * 64 + N;  // rebuild VBO if N changes
@@ -7618,6 +7535,29 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         }
         init_vis.assign(series_in.size(), true);
         glob_vis.assign(series_in.size(), true);
+
+        // Right-click "Export data..." — паритет с Parametric, где он есть у
+        // всех 1D-графиков. В Custom его не было ни на одном из 6 слотов.
+        view.popup_extras = [i, &lslots, &cs, &cb]() {
+            const bool busy = (lslots[i].kind == L1Kind::Bif) ? cs.bif_session.in_flight
+                            : (lslots[i].kind == L1Kind::LLE) ? cs.lle_session.in_flight
+                                                              : cs.ls_session.in_flight;
+            if (!ImGui::MenuItem("Export data...", nullptr, false, !busy)) return;
+            if (!cb.pick_save_file_csv) return;
+            std::string path = cb.pick_save_file_csv();
+            if (path.empty()) return;
+            const int ci = lslots[i].cfg_idx;
+            if (lslots[i].kind == L1Kind::Bif) {
+                if (ci >= 0 && ci < (int)cs.bif_session.diagrams.size())
+                    data_export::export_bif1d(cs.bif_session.diagrams[ci].result, path);
+            } else if (lslots[i].kind == L1Kind::LLE) {
+                if (ci >= 0 && ci < (int)cs.lle_session.curves.size())
+                    data_export::export_lle1d(cs.lle_session.curves[ci].result, path);
+            } else {
+                if (ci >= 0 && ci < (int)cs.ls_session.curves.size())
+                    data_export::export_ls1d(cs.ls_session.curves[ci].result, path);
+            }
+        };
 
         // Autofit whenever the underlying result changed (bif/lle/ls each
         // set fit_request in apply_*_result on completion of run_async).
@@ -7683,11 +7623,24 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                             if (v > vmax) vmax = v;
                         }
                         if (!std::isfinite(vmin)) { vmin = 0.0; vmax = 1.0; }
-                        int cmap_idx = (int)bsn_hv.colormap;
-                        ImGui::SetNextItemWidth(140);
-                        if (ImGui::Combo("Colormap##bsn", &cmap_idx,
-                                         kHeatmapColormapNames, kHeatmapColormapCount))
-                            bsn_hv.colormap = (HeatmapColormap)cmap_idx;
+                        // Тот же тулбар, что и у остальных хитмап (раньше здесь
+                        // был только combo Colormap — без autoscale/vmin/vmax
+                        // и без Swap axes, хотя это ровно такая же диаграмма).
+                        // Выбор colormap'а теперь персистится в config (слот 0
+                        // = таб "Basins"); раньше он жил только в static-view
+                        // и терялся при перезапуске.
+                        {
+                            auto& bcfg = bsn.configs[0];
+                            int cm = (bcfg.colormap_idx[0] >= 0)
+                                     ? bcfg.colormap_idx[0] : model.basins_colormap;
+                            if (cm < 0 || cm >= kHeatmapColormapCount) cm = 2;
+                            bsn_hv.colormap = (HeatmapColormap)cm;
+
+                            HeatmapToolbarOpts topts;
+                            topts.persist_colormap =
+                                [&bcfg](int picked) { bcfg.colormap_idx[0] = picked; };
+                            draw_heatmap_toolbar(bsn_hv, topts);
+                        }
                         bsn_hv.x_axis.name = (bc.axis_x_var >= 0 && bc.axis_x_var < (int)cs.vars.size())
                                               ? cs.vars[bc.axis_x_var] : "x";
                         bsn_hv.y_axis.name = (bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size())
@@ -8354,7 +8307,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         if (ImGui::Begin("Basins of Attraction")) {
-            draw_basins_plot(model, cb);
+            draw_basins_plot(model, lib, cb);
         }
         ImGui::End();
     }

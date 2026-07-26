@@ -6,6 +6,7 @@
 #include "plot_camera_3d.h"
 #include <vector>
 #include <string>
+#include <functional>
 
 struct PlotSeriesInput3D {
     const float* points = nullptr;   // n_points * 3 float (x,y,z ������)
@@ -40,6 +41,14 @@ public:
 
     // ��������� ��������� ����� (������� ����� ������, �����������).
     std::vector<bool> visible;
+
+    // Опционально: callback для добавления custom-пунктов в right-click popup
+    // (после стандартных Auto fit / Show legend / Show axes / Copy image).
+    // Caller выставляет лямбду перед каждым render(); view вызывает её внутри
+    // своего BeginPopup/EndPopup. Зеркалит Plot2DView::popup_extras и
+    // HeatmapView::popup_extras — нужен, чтобы "Export data..." был доступен
+    // и на 3D-проекциях, а не только на 2D/TimeDomain.
+    std::function<void()> popup_extras;
 
     // ������ � � ���������. �������� ������� (��� ���� "reset view" � �.�.).
     PlotCamera3D camera;

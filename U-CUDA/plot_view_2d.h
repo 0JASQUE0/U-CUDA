@@ -8,6 +8,12 @@
 #include <functional>
 #include <limits>
 
+// Марджины блока Plot2DView (место под тики и подписи осей вокруг самой
+// картинки). Вынесены наружу, потому что FastSync mode-0 рисует colorbar
+// РЯДОМ с Plot2DView и обязан знать, где кончается плот: раньше он держал
+// свою копию этих чисел, и она молча разъезжалась при правке лэйаута.
+void plot_2d_margins(float& left, float& top, float& right, float& bottom);
+
 struct PlotSeriesInput {
     const float* points = nullptr;
     int          n_points = 0;

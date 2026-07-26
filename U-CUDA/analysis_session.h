@@ -701,6 +701,14 @@ struct BasinsConfig {
     // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
     int         active_plot_tab = 0;
 
+    // Persisted colormap на КАЖДЫЙ heatmap-таб (0..3 = Basins/Feature1/
+    // Feature2/States; Scatter — Plot2DView, без colormap). -1 = не задан,
+    // тогда падаем на app-дефолт из Settings (AppModel::basins_*_colormap) —
+    // та же схема «-1 → общий дефолт», что у BifurcationDiagramConfig и др.
+    // Раньше выбор жил ТОЛЬКО глобально в AppModel, поэтому два basins-config'а
+    // не могли иметь разные колормапы, в отличие от Bif/LLE/LS/DFT1D.
+    int         colormap_idx[4] = { -1, -1, -1, -1 };
+
     // Перенумерация cluster id'ов через spiral-from-center порядок (порт MATLAB
     // renumber_basins_spiral). Положительные id (Osc) -> 1,2,3... в порядке
     // первого появления при обходе спиралью из центра, отрицательные (FP)
