@@ -1382,6 +1382,28 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     o << "\"autorun_on_drilldown\":" << (c.autorun_on_drilldown ? "true" : "false");
     o << "}";
 }
+
+// Workspace metadata: tabs, active/next id, splitter width. imgui.ini owns
+// the per-window dock layout inside each tab (keyed off the tab-derived
+// dockspace id in ws_dock_id).
+void write_workspace(std::ostringstream& o, const CustomWorkspace& ws) {
+    o << "{";
+    o << "\"active_tab_id\":" << ws.active_tab_id << ",";
+    o << "\"next_tab_id\":"   << ws.next_tab_id   << ",";
+    {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.6g", (double)ws.controls_width);
+        o << "\"controls_width\":" << buf << ",";
+    }
+    o << "\"tabs\":[";
+    for (size_t i = 0; i < ws.tabs.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"id\":" << ws.tabs[i].id << ",\"name\":";
+        jstr(o, ws.tabs[i].name);
+        o << "}";
+    }
+    o << "]}";
+}
 } // namespace
 
 std::string session_to_json_custom(const CustomSession& s) {
@@ -1392,7 +1414,8 @@ std::string session_to_json_custom(const CustomSession& s) {
     o << "  \"lle\":";     o << session_to_json_lle(s.lle_session);        o << ",\n";
     o << "  \"ls\":";      o << session_to_json_ls(s.ls_session);          o << ",\n";
     o << "  \"phase\":";   o << session_to_json(s.phase_session);          o << ",\n";
-    o << "  \"basins\":";  o << session_to_json_basins(s.basins_session);
+    o << "  \"basins\":";  o << session_to_json_basins(s.basins_session);   o << ",\n";
+    o << "  \"workspace\":"; write_workspace(o, s.workspace);
     o << "\n}\n";
     return o.str();
 }
@@ -1488,6 +1511,48 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
             else if (key == "ls")     session_from_json_ls(raw, s.ls_session);
             else if (key == "phase")  session_from_json(raw, s.phase_session);
             else if (key == "basins") session_from_json_basins(raw, s.basins_session);
+            else if (key == "workspace") {
+                JP q(raw); auto& ws = s.workspace;
+                ws.tabs.clear();
+                q.expect('{');
+                if (!q.opt('}')) {
+                    while (true) {
+                        std::string k = q.str(); q.expect(':');
+                        if      (k == "active_tab_id") ws.active_tab_id = std::stoi(q.str_or_num());
+                        else if (k == "next_tab_id")   ws.next_tab_id   = std::stoi(q.str_or_num());
+                        else if (k == "controls_width") ws.controls_width = (float)std::stod(q.str_or_num());
+                        else if (k == "tabs") {
+                            q.expect('[');
+                            if (!q.opt(']')) {
+                                while (true) {
+                                    q.expect('{');
+                                    WorkspaceTab t;
+                                    while (true) {
+                                        std::string tk = q.str(); q.expect(':');
+                                        if      (tk == "id")   t.id   = std::stoi(q.str_or_num());
+                                        else if (tk == "name") t.name = q.str();
+                                        else q.skip_value();
+                                        if (q.opt(',')) continue;
+                                        q.expect('}'); break;
+                                    }
+                                    ws.tabs.push_back(std::move(t));
+                                    if (q.opt(',')) continue;
+                                    q.expect(']'); break;
+                                }
+                            }
+                        }
+                        else q.skip_value();
+                        if (q.opt(',')) continue;
+                        q.expect('}'); break;
+                    }
+                }
+                for (auto& t : ws.tabs) if (t.id >= ws.next_tab_id) ws.next_tab_id = t.id + 1;
+                if (ws.tabs.empty()) {
+                    ws.tabs.push_back({1, "Tab 1"});
+                    ws.active_tab_id = 1;
+                    if (ws.next_tab_id <= 1) ws.next_tab_id = 2;
+                }
+            }
 
             if (p.opt(',')) continue;
             p.expect('}'); break;
