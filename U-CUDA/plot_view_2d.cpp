@@ -4,6 +4,16 @@
 #include <cmath>
 #include <cstdio>
 
+// Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
+// margin_left/bottom увеличены, чтобы вместить тики + центрированное
+// название оси.
+void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
+    left   = 78.0f;
+    top    = 20.0f;
+    right  = 20.0f;
+    bottom = 46.0f;
+}
+
 void Plot2DView::do_autofit() {
     float xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
@@ -181,10 +191,8 @@ void Plot2DView::render(PlotRenderer& renderer,
     // 3. ������� � �������
     // margin_left/bottom увеличены, чтобы вместить тики + центрированное
     // название оси (X — под тиками, Y — повернутое вертикально слева).
-    const float margin_left = 78.0f;
-    const float margin_right = 20.0f;
-    const float margin_top = 20.0f;
-    const float margin_bottom = 46.0f;
+    float margin_left, margin_top, margin_right, margin_bottom;
+    plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));

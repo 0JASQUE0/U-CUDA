@@ -875,6 +875,12 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
     o << "\"mult_feature1_text\":"; jstr(o, c.mult_feature1_text); o << ",";
     o << "\"mult_feature2_text\":"; jstr(o, c.mult_feature2_text); o << ",";
     o << "\"renumber_spiral\":"   << (c.renumber_spiral ? "true" : "false") << ",";
+    // Per-tab colormap — четыре отдельных скаляра, а не массив: парсер JP
+    // читает скаляры, и добавлять ради этого чтение массивов излишне.
+    o << "\"colormap_basins\":"   << c.colormap_idx[0] << ",";
+    o << "\"colormap_feature1\":" << c.colormap_idx[1] << ",";
+    o << "\"colormap_feature2\":" << c.colormap_idx[2] << ",";
+    o << "\"colormap_states\":"   << c.colormap_idx[3] << ",";
     o << "\"active_plot_tab\":"   << c.active_plot_tab;
     o << "}";
 }
@@ -910,6 +916,10 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "mult_feature1_text") c.mult_feature1_text = p.str();
     else if (key == "mult_feature2_text") c.mult_feature2_text = p.str();
     else if (key == "renumber_spiral")    c.renumber_spiral    = p.boolean();
+    else if (key == "colormap_basins")    c.colormap_idx[0]    = std::stoi(p.str_or_num());
+    else if (key == "colormap_feature1")  c.colormap_idx[1]    = std::stoi(p.str_or_num());
+    else if (key == "colormap_feature2")  c.colormap_idx[2]    = std::stoi(p.str_or_num());
+    else if (key == "colormap_states")    c.colormap_idx[3]    = std::stoi(p.str_or_num());
     else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
     else return false;
     return true;
