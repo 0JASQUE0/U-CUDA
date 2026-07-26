@@ -1245,9 +1245,18 @@ struct ParametricEngine::Impl {
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 double v          = h_lleResult[k];
 
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось).
+                // Наружу отдаём NaN, а не сырой sentinel: 999 — легитимное
+                // значение λ по типу, поэтому любой потребитель, забывший
+                // сверить flags[], молча рисовал/экспортировал выброс на 999.
+                // NaN отсекается через !isfinite (и в GUI, и в min/max), т.е.
+                // безопасен по умолчанию. flags[] остаётся источником истины
+                // о ПРИЧИНЕ отсутствия точки.
+                const bool diverged = (v == 999.0 || v == -999.0);
+                if (diverged) v = std::numeric_limits<double>::quiet_NaN();
+
                 res.lyapunov[global_idx] = v;
-                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось)
-                res.flags[global_idx] = (v == 999.0 || v == -999.0) ? -1 : 1;
+                res.flags[global_idx] = diverged ? -1 : 1;
 
                 if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
             }

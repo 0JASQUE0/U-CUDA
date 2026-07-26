@@ -24,6 +24,44 @@
 // HeatmapColormap определён в plot_renderer.h (используется ещё и для
 // colored trajectory). plot_renderer.h уже included через #include выше.
 
+// ===========================================================================
+// Общий вертикальный colorbar. Потребители: HeatmapView (section 9 в render)
+// и FastSync mode-0 (colored trajectory — хитмапы там нет, а цветовая шкала
+// нужна). Раньше FastSync рисовал свою копию с марджинами плота,
+// скопированными из Plot2DView числами (78/20/46): любая правка лэйаута
+// молча разъезжала шкалу, и тики у него были 5 равноотстоящих вместо
+// «красивых» nice_step, т.е. одна и та же шкала выглядела по-разному в
+// разных вкладках.
+// ===========================================================================
+
+// Геометрия блока — одинакова у всех потребителей.
+constexpr float kColorbarWidth   = 18.0f;
+constexpr float kColorbarGap     = 12.0f;
+constexpr float kColorbarTickLen = 4.0f;
+constexpr float kColorbarTextGap = 2.0f;
+
+// `label` — что печатаем, `frac` — позиция 0..1 вдоль шкалы (0 = vmin/низ,
+// 1 = vmax/верх). Они разделены, потому что в discrete-режиме подпись — это
+// целый уровень (vmin + k), а позиция обязана быть ЦЕНТРОМ полосы
+// (k + 0.5)/n — иначе подписи стоят на границах, а не в середине цветного
+// прямоугольника (зеркалит MATLAB `cb.Ticks = idx + 0.5`).
+struct ColorbarTick { double label; float frac; };
+
+// Тики шкалы. n_discrete > 0 → по одной подписи на полосу; при целочисленном
+// диапазоне подписи — сами уровни. Иначе ~5 значений через nice_step.
+std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete);
+
+// Полная ширина блока (шкала + зазор + штрих + подписи) — чтобы вызывающий
+// зарезервировал место справа от плота.
+float colorbar_total_width(const std::vector<ColorbarTick>& ticks);
+
+// Градиент + рамка + штрихи с подписями. top_left — верхний-левый угол самой
+// цветной полосы, height — её высота (обычно = высоте плота).
+void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
+                   float vmin, float vmax, HeatmapColormap cmap,
+                   bool reverse, int n_discrete,
+                   const std::vector<ColorbarTick>& ticks);
+
 class HeatmapView {
 public:
     AxisInfo x_axis;

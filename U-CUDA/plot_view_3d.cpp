@@ -244,6 +244,13 @@ void Plot3DView::render(PlotRenderer& renderer,
             request_plot_screenshot(block_origin,
                 ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
         }
+        // Caller-injected пункты (например, "Export data..."). Зеркалит тот же
+        // хук у Plot2DView/HeatmapView — до его появления Phase 3D был
+        // единственной диаграммой без экспорта из контекстного меню.
+        if (popup_extras) {
+            ImGui::Separator();
+            popup_extras();
+        }
         ImGui::EndPopup();
     }
 }
