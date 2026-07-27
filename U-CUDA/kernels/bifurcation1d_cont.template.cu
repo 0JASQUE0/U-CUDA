@@ -60,24 +60,33 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 // Single-thread kernel. gridDim=blockDim=1.
 // d_data         — буфер [nPts * sizeOfBlock] для трактории (writable_var).
 // d_amountOfPeaks — [nPts]; ставим 1 / -1 для совместимости с peakFinderCUDA.
+// sweepIsH != 0 -- the swept quantity is the step h itself: a[] stays put and
+//   the per-point step counts are recomputed from h. sizeOfBlock is then the
+//   worst case (smallest h), and the real per-point length is reported through
+//   d_actualIterations so peakFinderCUDA only scans the valid prefix.
+// logScale != 0 -- points are distributed logarithmically over [lo, hi].
 extern "C" __global__ void bifurcation1dContinuationKernel(
     int nPts,
     numb lo,
     numb hi,
     bool reverse,
-    int mutParamIdx,                 // 1-based индекс в a[]
+    int logScale,
+    int sweepIsH,
+    int mutParamIdx,                 // 1-based индекс в a[]; ignored if sweepIsH
     const numb* baseValues,
     int amountOfValues,
     const numb* baseX,
     int amountOfX,
-    numb h,
-    int transient_steps,
-    int sizeOfBlock,
+    numb hBase,
+    numb tMax,
+    numb transientTime,
+    int sizeOfBlock,                 // worst-case allocation per point
     int preScaller,
     int writableVar,
     numb maxValue,
     numb* d_data,
-    int*  d_amountOfPeaks)
+    int*  d_amountOfPeaks,
+    int*  d_actualIterations)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -89,23 +98,38 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
     numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     for (int j = 0; j < nPts; ++j) {
-        // forward: p = lo + (hi-lo)*j/(n-1)
-        // reverse: p = hi - (hi-lo)*j/(n-1)
-        numb p = reverse
-            ? hi - (hi - lo) * (numb)j / denom
-            : lo + (hi - lo) * (numb)j / denom;
-        a[mutParamIdx] = p;
+        numb t = (numb)j / denom;
+        numb p;
+        if (logScale) {
+            numb l0 = log10(lo), l1 = log10(hi);
+            p = pow((numb)10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
+        } else {
+            // forward: p = lo + (hi-lo)*j/(n-1)
+            // reverse: p = hi - (hi-lo)*j/(n-1)
+            p = reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+        }
+
+        numb hLocal = hBase;
+        if (sweepIsH) hLocal = p;
+        else          a[mutParamIdx] = p;
+
+        int blockLen = (hLocal > 0) ? (int)(tMax / hLocal / (numb)preScaller) : 0;
+        if (blockLen > sizeOfBlock) blockLen = sizeOfBlock;
+        int transient_steps = (hLocal > 0) ? (int)(transientTime / hLocal) : 0;
+        if (d_actualIterations != nullptr) d_actualIterations[j] = blockLen;
+
+        if (hLocal <= 0 || blockLen <= 0) { d_amountOfPeaks[j] = -1; continue; }
 
         // Transient: x[] не сбрасываем — карри-овер с прошлой итерации.
         int flag = loopCalculateDiscreteModel_int(
-            x, a, h, transient_steps, amountOfX, 1, 0,
+            x, a, hLocal, transient_steps, amountOfX, 1, 0,
             maxValue, nullptr, (size_t)j * sizeOfBlock, 1);
         if (flag == 0) { d_amountOfPeaks[j] = -1; continue; }
 
         // Запись траектории: writableVar пишется в d_data на каждой
         // итерации loopCalculateDiscreteModel_int.
         flag = loopCalculateDiscreteModel_int(
-            x, a, h, sizeOfBlock, amountOfX, preScaller, writableVar,
+            x, a, hLocal, blockLen, amountOfX, preScaller, writableVar,
             maxValue, d_data, (size_t)j * sizeOfBlock, 1);
         d_amountOfPeaks[j] = (flag == -1) ? -1 : 1;
     }

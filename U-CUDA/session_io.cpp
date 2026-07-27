@@ -229,6 +229,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"var_sweep_index\":"  << bd.var_sweep_index;
     o << ",\"continuation\":"     << (bd.continuation ? "true" : "false");
     o << ",\"continuation_reverse\":" << (bd.continuation_reverse ? "true" : "false");
+    o << ",\"use_gpu\":"          << (bd.use_gpu ? "true" : "false");
     o << ",\"param_lo_text\":";   jstr(o, bd.param_lo_text);
     o << ",\"param_hi_text\":";   jstr(o, bd.param_hi_text);
     o << ",\"n_pts_text\":";      jstr(o, bd.n_pts_text);
@@ -282,6 +283,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "var_sweep_index")    bd.var_sweep_index   = std::stoi(p.str_or_num());
     else if (key == "continuation")       bd.continuation      = p.boolean();
     else if (key == "continuation_reverse") bd.continuation_reverse = p.boolean();
+    else if (key == "use_gpu")            bd.use_gpu           = p.boolean();
     else if (key == "param_lo_text")      bd.param_lo_text     = p.str();
     else if (key == "param_hi_text")      bd.param_hi_text     = p.str();
     else if (key == "n_pts_text")         bd.n_pts_text        = p.str();
@@ -421,6 +423,9 @@ namespace {
 void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);
+    o << ",\"continuation\":"         << (c.continuation ? "true" : "false");
+    o << ",\"continuation_reverse\":" << (c.continuation_reverse ? "true" : "false");
+    o << ",\"use_gpu\":"              << (c.use_gpu ? "true" : "false");
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
@@ -459,6 +464,9 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
 
 bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
+    else if (key == "continuation")       c.continuation      = p.boolean();
+    else if (key == "continuation_reverse") c.continuation_reverse = p.boolean();
+    else if (key == "use_gpu")            c.use_gpu           = p.boolean();
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
@@ -572,6 +580,9 @@ namespace {
 void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);
+    o << ",\"continuation\":"         << (c.continuation ? "true" : "false");
+    o << ",\"continuation_reverse\":" << (c.continuation_reverse ? "true" : "false");
+    o << ",\"use_gpu\":"              << (c.use_gpu ? "true" : "false");
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
@@ -609,6 +620,9 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
 
 bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
+    else if (key == "continuation")       c.continuation      = p.boolean();
+    else if (key == "continuation_reverse") c.continuation_reverse = p.boolean();
+    else if (key == "use_gpu")            c.use_gpu           = p.boolean();
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
@@ -1358,11 +1372,13 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     o << "\"param_values\":";       jmap(o, c.param_values);       o << ",";
     I("axis_x_par_index",    c.axis_x_par_index);
     B("axis_x_over_var",     c.axis_x_over_var);
+    B("axis_x_over_h",       c.axis_x_over_h);
     I("axis_x_var_index",    c.axis_x_var_index);
     S("axis_x_lo_text",      c.axis_x_lo_text);
     S("axis_x_hi_text",      c.axis_x_hi_text);
     I("axis_y_par_index",    c.axis_y_par_index);
     B("axis_y_over_var",     c.axis_y_over_var);
+    B("axis_y_over_h",       c.axis_y_over_h);
     I("axis_y_var_index",    c.axis_y_var_index);
     S("axis_y_lo_text",      c.axis_y_lo_text);
     S("axis_y_hi_text",      c.axis_y_hi_text);
@@ -1373,12 +1389,14 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     B("inherit_sweep_from_2d", c.inherit_sweep_from_2d);
     I("sweep_x_par_index",   c.sweep_x_par_index);
     B("sweep_x_over_var",    c.sweep_x_over_var);
+    B("sweep_x_over_h",      c.sweep_x_over_h);
     I("sweep_x_var_index",   c.sweep_x_var_index);
     S("sweep_x_lo_text",     c.sweep_x_lo_text);
     S("sweep_x_hi_text",     c.sweep_x_hi_text);
     S("n_x_1d_text",         c.n_x_1d_text);
     I("sweep_y_par_index",   c.sweep_y_par_index);
     B("sweep_y_over_var",    c.sweep_y_over_var);
+    B("sweep_y_over_h",      c.sweep_y_over_h);
     I("sweep_y_var_index",   c.sweep_y_var_index);
     S("sweep_y_lo_text",     c.sweep_y_lo_text);
     S("sweep_y_hi_text",     c.sweep_y_hi_text);
@@ -1472,11 +1490,13 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "param_values")            c.param_values = q.map_ss();
                         else if (k == "axis_x_par_index")        c.axis_x_par_index = std::stoi(q.str_or_num());
                         else if (k == "axis_x_over_var")         c.axis_x_over_var = q.boolean();
+                        else if (k == "axis_x_over_h")           c.axis_x_over_h   = q.boolean();
                         else if (k == "axis_x_var_index")        c.axis_x_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_x_lo_text")          c.axis_x_lo_text = q.str();
                         else if (k == "axis_x_hi_text")          c.axis_x_hi_text = q.str();
                         else if (k == "axis_y_par_index")        c.axis_y_par_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_over_var")         c.axis_y_over_var = q.boolean();
+                        else if (k == "axis_y_over_h")           c.axis_y_over_h   = q.boolean();
                         else if (k == "axis_y_var_index")        c.axis_y_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_lo_text")          c.axis_y_lo_text = q.str();
                         else if (k == "axis_y_hi_text")          c.axis_y_hi_text = q.str();
@@ -1493,12 +1513,14 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "inherit_sweep_from_2d")   c.inherit_sweep_from_2d = q.boolean();
                         else if (k == "sweep_x_par_index")       c.sweep_x_par_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_x_over_var")        c.sweep_x_over_var = q.boolean();
+                        else if (k == "sweep_x_over_h")          c.sweep_x_over_h  = q.boolean();
                         else if (k == "sweep_x_var_index")       c.sweep_x_var_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_x_lo_text")         c.sweep_x_lo_text = q.str();
                         else if (k == "sweep_x_hi_text")         c.sweep_x_hi_text = q.str();
                         else if (k == "n_x_1d_text")             c.n_x_1d_text = q.str();
                         else if (k == "sweep_y_par_index")       c.sweep_y_par_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_y_over_var")        c.sweep_y_over_var = q.boolean();
+                        else if (k == "sweep_y_over_h")          c.sweep_y_over_h  = q.boolean();
                         else if (k == "sweep_y_var_index")       c.sweep_y_var_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_y_lo_text")         c.sweep_y_lo_text = q.str();
                         else if (k == "sweep_y_hi_text")         c.sweep_y_hi_text = q.str();

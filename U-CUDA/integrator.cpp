@@ -128,6 +128,30 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
     }
 }
 
+// Общий прогон траектории: transient + запись total точек с проверкой на
+// nan/inf. do_step — любой callable, делающий один шаг по X. Шаблон, а не
+// std::function: встроенный путь не должен получить косвенный вызов на
+// каждом шаге.
+template <class StepOnce>
+bool run_trajectory(StepOnce do_step, const double* X, int n,
+                    int total, int skip,
+                    std::vector<std::vector<double>>& out) {
+    // transient
+    for (int s = 0; s < skip; ++s) do_step();
+
+    // основной цикл — без аллокаций на каждый шаг
+    out.assign(total, std::vector<double>(n));
+    for (int t = 0; t < total; ++t) {
+        for (int k = 0; k < n; ++k) {
+            double v = X[k];
+            if (std::isnan(v) || std::isinf(v)) { out.resize(t); return false; }
+            out[t][k] = v;
+        }
+        do_step();
+    }
+    return true;
+}
+
 } // namespace
 
 bool computePhasePortraitCPU(
@@ -158,18 +182,27 @@ bool computePhasePortraitCPU(
         }
     };
 
-    // transient
-    for (int s = 0; s < skip; ++s) do_step();
+    return run_trajectory(do_step, X.data(), n, total, skip, out);
+}
 
-    // основной цикл — без аллокаций на каждый шаг
-    out.assign(total, std::vector<double>(n));
-    for (int t = 0; t < total; ++t) {
-        for (int k = 0; k < n; ++k) {
-            double v = X[k];
-            if (std::isnan(v) || std::isinf(v)) { out.resize(t); return false; }
-            out[t][k] = v;
-        }
-        do_step();
-    }
-    return true;
+bool computePhasePortraitCPU_custom(
+    CustomStepFn step,
+    const double* ic, int dim,
+    const double* a, int amountOfValues,
+    double h, int total, int skip,
+    std::vector<std::vector<double>>& out)
+{
+    (void)amountOfValues;
+    if (!step) return false;
+    const int n = dim;
+    std::vector<double> X(n);
+    for (int i = 0; i < n; ++i) X[i] = ic[i];
+
+    // Никаких промежуточных буферов: стадии (если они есть) живут внутри тела
+    // КРС — ровно как на GPU, где calculateDiscreteModel держит их в локальных
+    // массивах.
+    double* Xp = X.data();
+    auto do_step = [&]() { step(Xp, a, h); };
+
+    return run_trajectory(do_step, Xp, n, total, skip, out);
 }

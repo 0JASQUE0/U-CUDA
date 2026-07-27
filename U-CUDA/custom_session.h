@@ -52,11 +52,16 @@ struct CustomTabSharedConfig {
     int         axis_x_par_index    = 0;
     bool        axis_x_over_var     = false;
     int         axis_x_var_index    = 0;
+    // Свип по шагу интегрирования вместо параметра/НУ. Взаимоисключающе с
+    // over_var, и ровно ОДНА из осей может быть h: 2D-ядра принимают один
+    // hSweepAxis (см. sweep_over_h_2 в analysis_session.h). UI это соблюдает.
+    bool        axis_x_over_h       = false;
     std::string axis_x_lo_text      = "0";
     std::string axis_x_hi_text      = "1";
     int         axis_y_par_index    = 1;
     bool        axis_y_over_var     = false;
     int         axis_y_var_index    = 0;
+    bool        axis_y_over_h       = false;
     std::string axis_y_lo_text      = "0";
     std::string axis_y_hi_text      = "1";
     // Shared 2D grid resolution — the underlying NVRTC kernels
@@ -78,6 +83,7 @@ struct CustomTabSharedConfig {
     int         sweep_x_par_index  = 0;
     bool        sweep_x_over_var   = false;
     int         sweep_x_var_index  = 0;
+    bool        sweep_x_over_h     = false;   // см. axis_x_over_h
     std::string sweep_x_lo_text    = "0";
     std::string sweep_x_hi_text    = "1";
     std::string n_x_1d_text        = "500";
@@ -85,6 +91,7 @@ struct CustomTabSharedConfig {
     int         sweep_y_par_index  = 1;
     bool        sweep_y_over_var   = false;
     int         sweep_y_var_index  = 0;
+    bool        sweep_y_over_h     = false;   // см. axis_x_over_h
     std::string sweep_y_lo_text    = "0";
     std::string sweep_y_hi_text    = "1";
     std::string n_y_1d_text        = "500";
@@ -303,6 +310,7 @@ struct EffectiveSweep {
     int         par_index;
     bool        over_var;
     int         var_index;
+    bool        over_h;      // свип по шагу; взаимоисключающе с over_var
     std::string lo_text;
     std::string hi_text;
     std::string n_pts_text;

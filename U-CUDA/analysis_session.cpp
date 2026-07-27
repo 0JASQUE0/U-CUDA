@@ -1,6 +1,7 @@
 #include "analysis_session.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
+#include "krs_cpu.h"
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -103,6 +104,9 @@ struct PhaseRunInputs {
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
+    // krs_code для custom схемы содержит тело дословно (см. regenerate_krs).
+    // Флаг нужен, чтобы CPU-ветка знала: это сырой C, а не codegen-вывод.
+    bool        krs_is_custom = false;
     std::map<std::string, std::string>  param_values;
     std::vector<InitialConditionSet>    ic_sets;
 };
@@ -161,6 +165,31 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         if (!calc_ok) {
             result.error = "GPU: " + calc_err;
             return result;
+        }
+    }
+    else if (in.krs_is_custom) {
+        // Custom КРС: тело — сырой C с объявлениями, циклами и локальными
+        // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
+        // частей, поэтому тело компилируется в нативную функцию шага
+        // (см. krs_cpu.h) и гоняется тем же циклом, что и встроенные схемы.
+        KrsCpuStep step;
+        std::vector<KrsCpuDiag> diags;
+        if (!step.compile(in.krs_code, dim, (int)a.size(), diags)) {
+            std::string msg = "CPU custom KRS:";
+            for (const auto& d : diags) {
+                msg += "\n";
+                if (d.line > 0) msg += "line " + std::to_string(d.line) + ": ";
+                msg += d.message;
+            }
+            result.error = msg;
+            return result;
+        }
+        raw.resize(N);
+        for (int k = 0; k < N; ++k) {
+            bool ok = computePhasePortraitCPU_custom(step.fn(),
+                &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
+                h, total, skip, raw[k]);
+            if (!ok) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[k].label + "' diverged (nan/inf)"; }
         }
     }
     else {
@@ -254,6 +283,9 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.use_gpu      = s.use_gpu;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
+    in.krs_is_custom = false;
+    for (const auto& cs : s.custom_schemes)
+        if (cs.name == s.scheme) { in.krs_is_custom = true; break; }
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
     return in;
@@ -469,6 +501,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
                           ? bd.var_sweep_index : 0;
     req.continuation = bd.continuation;
     req.continuation_reverse = bd.continuation_reverse;
+    req.use_cpu = !bd.use_gpu;
 
     req.param_lo       = parse_d(bd.param_lo_text, 0.0);
     req.param_hi       = parse_d(bd.param_hi_text, 1.0);
@@ -742,6 +775,9 @@ void LLEAnalysisSession::remove_curve(int i) {
 static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
                                         const LLECurveConfig& c) {
     LLE1DRequest req;
+    req.continuation         = c.continuation;
+    req.continuation_reverse = c.continuation_reverse;
+    req.use_cpu              = !c.use_gpu;
     req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
@@ -1757,6 +1793,9 @@ void LyapunovSpectrumAnalysisSession::remove_curve(int i) {
 static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
                                       const LSCurveConfig& c) {
     LS1DRequest req;
+    req.continuation         = c.continuation;
+    req.continuation_reverse = c.continuation_reverse;
+    req.use_cpu              = !c.use_gpu;
     req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
