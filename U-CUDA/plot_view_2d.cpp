@@ -219,7 +219,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImVec4 c = (k < (int)series_in.size()) ? series_in[k].color : ImVec4(1, 1, 1, 1);
         float color[4] = { c.x, c.y, c.z, c.w };
         if (points_mode)
-            renderer.draw_points(g.vbo, g.point_count, mvp, color, point_size_px);
+            renderer.draw_points(g.vbo, g.point_count, mvp, color, point_size_px, point_marker);
         else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
             renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
     }

@@ -68,6 +68,9 @@ public:
     // false (��-���������): GL_LINE_STRIP, ��� ��� ��� ��������� ����������.
     bool points_mode = false;
     float point_size_px = 2.0f;
+    // Форма маркера в points_mode (PointMarker). -1 (дефолт) — прежний
+    // сплошной квадратный GL-пойнт без alpha-блендинга.
+    int  point_marker = -1;
     // Толщина линий данных (когда points_mode=false). По умолчанию 1.5px —
     // совпадает со старым хардкодом, регрессии нет.
     float line_thickness_px = 1.5f;

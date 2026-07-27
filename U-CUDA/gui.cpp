@@ -371,6 +371,42 @@ static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
     }
 }
 
+// ---- Custom point style (Bifurcation 1D scatter) ----
+// ЕДИНСТВЕННАЯ реализация тулбара «Custom point style / Marker / Point size /
+// Alpha» — им пользуются и Parametric (draw_bifurcation_plot), и Custom
+// (Level-1D Bif-слоты), чтобы настройка вела себя одинаково во всех вкладках,
+// где есть Bifurcation 1D. Состояние живёт в самой БД
+// (BifurcationDiagramConfig) и персистится вместе с сессией.
+// Возвращает true, если пользователь что-то изменил (вызывающий решает, надо
+// ли сохранять сессию).
+static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
+    bool changed = false;
+    const std::string sfx = id_suffix;
+    if (ImGui::Checkbox(("Custom point style##" + sfx).c_str(), &bd.custom_point_style))
+        changed = true;
+    if (bd.custom_point_style) {
+        if (bd.point_marker < 0 || bd.point_marker >= kPointMarkerCount) bd.point_marker = 0;
+        ImGui::SameLine(); ImGui::SetNextItemWidth(110);
+        if (ImGui::Combo(("Marker##" + sfx).c_str(), &bd.point_marker,
+                         kPointMarkerNames, kPointMarkerCount)) changed = true;
+        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+        if (ImGui::SliderFloat(("Point size##" + sfx).c_str(), &bd.point_size,
+                               0.5f, 12.0f, "%.1f")) changed = true;
+        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+        if (ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &bd.point_alpha,
+                               0.0f, 1.0f, "%.2f")) changed = true;
+    }
+    return changed;
+}
+
+// Перенос настроек точек из конфига БД во вид. Звать ПОСЛЕ
+// configure_param_plot_view (та ставит дефолтные 2px). Выключенный режим
+// возвращает ровно прежний вид (marker = -1 → сплошной квадратный GL-пойнт).
+static void apply_point_style(Plot2DView& view, const BifurcationDiagramConfig& bd) {
+    view.point_marker  = bd.custom_point_style ? bd.point_marker : -1;
+    view.point_size_px = bd.custom_point_style ? bd.point_size   : 2.0f;
+}
+
 // Snap X к узлам параметрической сетки: тики осей и hover-readout попадают
 // ровно на посчитанные точки. Раньше — три идентичных блока в Bif/LLE/LS и
 // полное отсутствие в Custom (из-за чего tooltip там врал между узлами).
@@ -2253,6 +2289,33 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             }
             model.parametric_plot_windows_dirty = true;
         }
+        // Custom point style — справа от Colored 1D. В colored-режиме плот
+        // становится хитмапой, стиль точек к ней неприменим → disabled.
+        // Настройка живёт в самой БД, а окно может показывать несколько БД
+        // наложением: читаем состояние у фокусного члена (members[0]) и при
+        // изменении записываем во ВСЕ члены окна — иначе overlay разъехался бы
+        // по стилю (маркер/размер — свойства вида, они одни на окно).
+        ImGui::SameLine();
+        ImGui::BeginDisabled(win.colored_1d);
+        {
+            const int focus = win.members[0];
+            if (focus >= 0 && focus < (int)s.diagrams.size()) {
+                BifurcationDiagramConfig& fbd = s.diagrams[focus];
+                if (draw_point_style_toolbar(fbd, "bdtoolbar")) {
+                    for (int m : win.members) {
+                        if (m < 0 || m >= (int)s.diagrams.size() || m == focus) continue;
+                        s.diagrams[m].custom_point_style = fbd.custom_point_style;
+                        s.diagrams[m].point_marker       = fbd.point_marker;
+                        s.diagrams[m].point_size         = fbd.point_size;
+                        s.diagrams[m].point_alpha        = fbd.point_alpha;
+                    }
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_parametric",
+                                         session_to_json_parametric(model.bifurcation_session));
+                }
+            }
+        }
+        ImGui::EndDisabled();
         ImGui::Separator();
     }
 
@@ -2598,6 +2661,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         si.points   = buf.empty() ? nullptr : buf.data();
         si.n_points = total_pts;
         si.color    = ic_base_color((int)mi);
+        // α в custom-режиме — через альфу цвета серии (GL-путь её блендит),
+        // как в Custom line style у Phase2D/TimeDomain.
+        if (bd.custom_point_style) si.color.w = bd.point_alpha;
         si.label    = bd.label;
         series_in.push_back(si);
         init_vis.push_back(true);
@@ -2632,6 +2698,14 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                                      abd.result.param_lo, abd.result.param_hi, abd.result.n_pts,
                                      abd.param_lo_text, abd.param_hi_text, abd.n_pts_text);
         }
+    }
+
+    // Маркер/размер точек — свойства вида (одни на окно): берём у фокусного
+    // члена, тулбар выше держит остальных членов синхронно.
+    {
+        const int aidx = win.members.empty() ? -1 : win.members[0];
+        if (aidx >= 0 && aidx < (int)s.diagrams.size())
+            apply_point_style(view, s.diagrams[aidx]);
     }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -7505,6 +7579,13 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             // Как в Parametric: при plot_inter_peaks по Y идут интервалы
             // между пиками, а не сама переменная.
             if (d.plot_inter_peaks) view.y_axis.name += " interval";
+            // Custom point style — тот же тулбар и та же семантика, что в
+            // Parametric (состояние живёт в самой БД, поэтому вкладки не
+            // расходятся). Здесь член ровно один (X- или Y-срез),
+            // синхронизировать нечего.
+            if (draw_point_style_toolbar(d, "custombd"))
+                cs.workspace.dirty = true;   // → пересохранение _last_custom.json
+            apply_point_style(view, d);
         } else if (lslots[i].kind == L1Kind::LLE) {
             int idx = lslots[i].cfg_idx;
             if (idx < 0 || idx >= (int)cs.lle_session.curves.size()) { ImGui::PopID(); ImGui::End(); continue; }
@@ -7643,6 +7724,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             si.points = buf.empty() ? nullptr : buf.data();
             si.n_points = (int)(buf.size() / 2);
             si.color = ic_base_color(0);
+            if (d.custom_point_style) si.color.w = d.point_alpha;
             si.label = d.label.empty() ? "bd" : d.label;
             series_in.push_back(si);
             series_gen = data_gen * 2 + (d.plot_inter_peaks ? 1 : 0);
