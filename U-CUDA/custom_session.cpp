@@ -54,12 +54,14 @@ EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s) {
         e.par_index  = s.axis_x_par_index;
         e.over_var   = s.axis_x_over_var;
         e.var_index  = s.axis_x_var_index;
+        e.over_h     = s.axis_x_over_h;
         e.lo_text    = s.axis_x_lo_text;
         e.hi_text    = s.axis_x_hi_text;
     } else {
         e.par_index  = s.sweep_x_par_index;
         e.over_var   = s.sweep_x_over_var;
         e.var_index  = s.sweep_x_var_index;
+        e.over_h     = s.sweep_x_over_h;
         e.lo_text    = s.sweep_x_lo_text;
         e.hi_text    = s.sweep_x_hi_text;
     }
@@ -73,12 +75,14 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
         e.par_index  = s.axis_y_par_index;
         e.over_var   = s.axis_y_over_var;
         e.var_index  = s.axis_y_var_index;
+        e.over_h     = s.axis_y_over_h;
         e.lo_text    = s.axis_y_lo_text;
         e.hi_text    = s.axis_y_hi_text;
     } else {
         e.par_index  = s.sweep_y_par_index;
         e.over_var   = s.sweep_y_over_var;
         e.var_index  = s.sweep_y_var_index;
+        e.over_h     = s.sweep_y_over_h;
         e.lo_text    = s.sweep_y_lo_text;
         e.hi_text    = s.sweep_y_hi_text;
     }
@@ -98,12 +102,14 @@ void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramCon
     c.param_index       = s.axis_x_par_index;
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
+    c.sweep_over_h      = s.axis_x_over_h;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
+    c.sweep_over_h_2    = s.axis_y_over_h;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
     // eps_dbscan_text stays on the sub-config (edited in the L2D detail panel).
@@ -128,6 +134,7 @@ void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramCon
         c.param_index     = sweep_x.par_index;
         c.sweep_over_var  = sweep_x.over_var;
         c.var_sweep_index = sweep_x.var_index;
+        c.sweep_over_h    = sweep_x.over_h;
         c.param_lo_text   = sweep_x.lo_text;
         c.param_hi_text   = sweep_x.hi_text;
         c.n_pts_text      = sweep_x.n_pts_text;
@@ -143,6 +150,7 @@ void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramCon
         c.param_index     = sweep_y.par_index;
         c.sweep_over_var  = sweep_y.over_var;
         c.var_sweep_index = sweep_y.var_index;
+        c.sweep_over_h    = sweep_y.over_h;
         c.param_lo_text   = sweep_y.lo_text;
         c.param_hi_text   = sweep_y.hi_text;
         c.n_pts_text      = sweep_y.n_pts_text;
@@ -155,12 +163,14 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
     c.param_index       = s.axis_x_par_index;
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
+    c.sweep_over_h      = s.axis_x_over_h;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
+    c.sweep_over_h_2    = s.axis_y_over_h;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
     // eps_text / nt_text stay on the sub-config.
@@ -176,6 +186,7 @@ void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, in
     c.param_index     = sweep.par_index;
     c.sweep_over_var  = sweep.over_var;
     c.var_sweep_index = sweep.var_index;
+    c.sweep_over_h    = sweep.over_h;
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
@@ -187,12 +198,14 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
     c.param_index       = s.axis_x_par_index;
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
+    c.sweep_over_h      = s.axis_x_over_h;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
     c.param_index_2     = s.axis_y_par_index;
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
+    c.sweep_over_h_2    = s.axis_y_over_h;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
 }
@@ -207,6 +220,7 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int 
     c.param_index     = sweep.par_index;
     c.sweep_over_var  = sweep.over_var;
     c.var_sweep_index = sweep.var_index;
+    c.sweep_over_h    = sweep.over_h;
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
@@ -454,11 +468,13 @@ std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_shared_state(o, s);
     sig_append_int (o, "axp",  s.axis_x_par_index);
     sig_append_bool(o, "axv",  s.axis_x_over_var);
+    sig_append_bool(o, "axh",  s.axis_x_over_h);
     sig_append_int (o, "axvi", s.axis_x_var_index);
     sig_append_str (o, "axlo", s.axis_x_lo_text);
     sig_append_str (o, "axhi", s.axis_x_hi_text);
     sig_append_int (o, "ayp",  s.axis_y_par_index);
     sig_append_bool(o, "ayv",  s.axis_y_over_var);
+    sig_append_bool(o, "ayh",  s.axis_y_over_h);
     sig_append_int (o, "ayvi", s.axis_y_var_index);
     sig_append_str (o, "aylo", s.axis_y_lo_text);
     sig_append_str (o, "ayhi", s.axis_y_hi_text);
@@ -493,12 +509,14 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     EffectiveSweep sy = effective_sweep_y(s);
     sig_append_int (o, "sxp",  sx.par_index);
     sig_append_bool(o, "sxv",  sx.over_var);
+    sig_append_bool(o, "sxh",  sx.over_h);
     sig_append_int (o, "sxvi", sx.var_index);
     sig_append_str (o, "sxlo", sx.lo_text);
     sig_append_str (o, "sxhi", sx.hi_text);
     sig_append_str (o, "sxn",  sx.n_pts_text);
     sig_append_int (o, "syp",  sy.par_index);
     sig_append_bool(o, "syv",  sy.over_var);
+    sig_append_bool(o, "syh",  sy.over_h);
     sig_append_int (o, "syvi", sy.var_index);
     sig_append_str (o, "sylo", sy.lo_text);
     sig_append_str (o, "syhi", sy.hi_text);

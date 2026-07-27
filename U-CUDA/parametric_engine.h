@@ -55,6 +55,12 @@ struct Bifurcation1DRequest {
     //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
     bool continuation = false;
     bool continuation_reverse = false;
+    // Считать continuation на CPU вместо GPU. Осмысленно только вместе с
+    // continuation: GPU-ветка гоняет весь свип в ОДНОМ потоке (иначе нельзя —
+    // точки зависят друг от друга), и обычное CPU-ядро на такой зависимой
+    // цепочке кратно быстрее. Классический (не continuation) свип массово
+    // параллелен — там CPU-реализации нет и флаг игнорируется.
+    bool use_cpu = false;
     double param_lo = 0.0;
     double param_hi = 1.0;
     int n_pts = 1000;                        // разрешение по параметру
@@ -236,6 +242,21 @@ struct LLE1DRequest {
     bool sweep_over_h = false;
     bool log_scale = false;  // требует param_lo>0 и param_hi>0
     int param_index = 0;                     // индекс в base_values (1-based)
+    // Continuation: следующая точка параметра стартует с состояния предыдущей,
+    // а не со сброса на initial_conditions. В отличие от Bifurcation1D
+    // переносится НЕ ТОЛЬКО траектория x[], но и вектор возмущения («щуп»):
+    // он уже развёрнут вдоль направления максимального растяжения, поэтому
+    // кривая λ(param) получается глаже. Требует param-свипа (не IC и не dt).
+    //   continuation_reverse = false → forward (lo→hi)
+    //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
+    // Реализация только CPU: свип последователен по построению и на GPU шёл бы
+    // в одном потоке, поэтому GPU-ветки для continuation нет.
+    bool continuation = false;
+    bool continuation_reverse = false;
+    // Считать КЛАССИЧЕСКИЙ (не continuation) свип на CPU вместо GPU. GPU здесь
+    // массово параллелен и быстрее — флаг нужен для счёта без GPU и для сверки
+    // CPU-ядра с GPU. При continuation = true игнорируется (там всегда CPU).
+    bool use_cpu = false;
     double param_lo = 0.0;
     double param_hi = 1.0;
     int n_pts = 500;
@@ -274,6 +295,9 @@ struct LLE1DResult {
     // график «прыгает» до следующего Run.
     double param_lo = 0.0;
     double param_hi = 1.0;
+    // Снапшот направления continuation (см. Bifurcation1DResult): при backward
+    // точка k соответствует param_hi - (hi-lo)*k/(n-1), а не lo + ...
+    bool   continuation_reverse = false;
     // lyapunov[i] — оценка λ для i-го значения параметра. Единственное
     // спец-значение — NaN: точка не посчиталась (kernel-флаги 999/-999 «сошёл
     // с аттрактора» / «разошёлся за maxValue» конвертируются в NaN сразу при
@@ -305,6 +329,11 @@ struct LS1DRequest {
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
     bool sweep_over_h = false;  // см. LLE1DRequest::sweep_over_h
+    // Continuation + выбор устройства — семантика полностью как в LLE1DRequest
+    // (переносятся траектория и ВСЕ N векторов возмущения; только CPU).
+    bool continuation = false;
+    bool continuation_reverse = false;
+    bool use_cpu = false;
     bool log_scale = false;     // требует param_lo>0 и param_hi>0
     int param_index = 0;
     double param_lo = 0.0;
@@ -335,6 +364,8 @@ struct LS1DResult {
     // Снапшот диапазона свипа на момент Run (см. LLE1DResult).
     double param_lo = 0.0;
     double param_hi = 1.0;
+    // Снапшот направления continuation (см. LLE1DResult).
+    bool   continuation_reverse = false;
 
     // spectrum[i][k] — k-я экспонента для i-й точки параметра. Длина внутреннего
     // вектора == n_exponents. Спец-значения 999 / -999 — kernel-флаги ошибки.

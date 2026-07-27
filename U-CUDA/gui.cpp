@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "data_export.h"
 #include "digit_input.h"
+#include "krs_cpu.h"
 #include <map>
 #include <memory>
 #include <cstdio>
@@ -405,6 +406,68 @@ static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* i
 static void apply_point_style(Plot2DView& view, const BifurcationDiagramConfig& bd) {
     view.point_marker  = bd.custom_point_style ? bd.point_marker : -1;
     view.point_size_px = bd.custom_point_style ? bd.point_size   : 2.0f;
+}
+
+// ---- Continuation + выбор устройства: ЕДИНЫЙ блок для Bif / LLE / LS 1D ----
+// Раньше у Bif он был свой, а у LLE/LS свой — состав элементов и ограничения
+// расходились. Теперь одна реализация на все три:
+//   continuation — точки идут цепочкой (переносятся траектория и, у LLE/LS,
+//     векторы возмущения). Требует param-свипа: IC-свип с цепочкой
+//     несовместим. h-свип и log-сетка поддержаны. В 2D-режиме неприменим.
+//   use_gpu — где считать. Обе ветки существуют для всех трёх анализов;
+//     GPU-continuation — single-thread kernel, поэтому CPU там быстрее, и при
+//     включении continuation мы переключаемся на CPU по умолчанию.
+// Шаблон, а не общий базовый класс: конфиги независимы, связывать их
+// наследованием ради трёх полей было бы хуже.
+// has_mode_2d нужен потому, что у BifurcationDiagramConfig 2D-флаг есть, а
+// проверять его единообразно удобнее снаружи.
+template <class Cfg>
+static void draw_continuation_device_block(Cfg& c, const char* id,
+                                           bool blocked_extra = false) {
+    const std::string sfx = id;
+    const bool blocked = c.mode_2d || c.sweep_over_var || blocked_extra;
+    if (blocked) {
+        c.continuation = false;
+        c.continuation_reverse = false;
+    }
+
+    ImGui::BeginDisabled(blocked);
+    bool cont = c.continuation;
+    if (ImGui::Checkbox(("Continuation##" + sfx).c_str(), &cont)) {
+        c.continuation = cont;
+        // При включении continuation по умолчанию уходим на CPU: GPU-ветка
+        // там однопоточная и заметно медленнее. Пользователь может вернуть GPU
+        // вручную — радио ниже остаётся активным.
+        if (cont) c.use_gpu = false;
+    }
+    if (c.continuation) {
+        ImGui::SameLine();
+        int dir = c.continuation_reverse ? 1 : 0;
+        ImGui::RadioButton(("forward##"  + sfx).c_str(), &dir, 0); ImGui::SameLine();
+        ImGui::RadioButton(("backward##" + sfx).c_str(), &dir, 1);
+        c.continuation_reverse = (dir == 1);
+    }
+    ImGui::EndDisabled();
+    if (blocked)
+        ImGui::TextDisabled("(continuation: только param- или h-sweep, не IC, не 2D)");
+
+    int dev = c.use_gpu ? 0 : 1;
+    ImGui::BeginDisabled(c.mode_2d);
+    ImGui::RadioButton(("GPU##dev" + sfx).c_str(), &dev, 0); ImGui::SameLine();
+    ImGui::RadioButton(("CPU##dev" + sfx).c_str(), &dev, 1);
+    ImGui::EndDisabled();
+    if (!c.mode_2d) c.use_gpu = (dev == 0);
+    if (c.continuation && c.use_gpu) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(continuation на GPU однопоточный, CPU быстрее)");
+    }
+    if (!c.use_gpu) {
+        std::string why;
+        if (!krs_cpu_backend_available(&why)) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(no compiler: %s)", why.c_str());
+        }
+    }
 }
 
 // Snap X к узлам параметрической сетки: тики осей и hover-readout попадают
@@ -814,7 +877,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         ImGui::TextDisabled(
             "Raw C/CUDA in calculateDiscreteModel body. Available: X[0..N-1] (vars),\n"
             "a[0] (symmetry s, same slot as CD), a[1..M] (params), h (step), AMOUNTOFX.\n"
-            "if/for/while + math functions OK.");
+            "if/for/while + math functions OK.\n"
+            "Runs on GPU (NVRTC) and on CPU (compiled with cl.exe from Visual Studio).");
 
         // существующие схемы
         int to_delete = -1;
@@ -828,6 +892,20 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             if (ImGui::SmallButton("Delete")) to_delete = i;
             std::string body_label = "##cs_body_" + std::to_string(i);
             InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, 100));
+            // Проверка обращений X[k] / a[k] с константным индексом против
+            // размерности ТЕКУЩЕЙ системы. Статическая и живая — тела короткие,
+            // проход по строке стоит копейки. Пока система не распознана
+            // (known_vars пуст) молчим, иначе выдали бы ложные ошибки на всё.
+            if (!model.known_vars.empty()) {
+                std::vector<KrsCpuDiag> diags;
+                krs_cpu_check_indices(cs.body,
+                                      (int)model.known_vars.size(),
+                                      (int)model.known_params.size() + 1,
+                                      diags);
+                for (const auto& d : diags)
+                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "  line %d: %s",
+                                       d.line, d.message.c_str());
+            }
             ImGui::Spacing();
             ImGui::PopID();
         }
@@ -1263,18 +1341,22 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         for (const auto& cs : s.custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(), s.scheme == cs.name)) {
                 s.scheme = cs.name;
-                s.use_gpu = true;   // custom требует GPU — CPU-эвалуатор их не понимает
                 s.regenerate_krs();
                 changed = true;
             }
         ImGui::EndCombo();
     }
+    // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
+    // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
+    // компилятор на машине не найден.
     if (is_custom_scheme(s.scheme, s.custom_schemes) && !s.use_gpu) {
-        // Если юзер вручную выключил GPU при custom — это не сработает.
-        // Подсвечиваем и не даём так стрелять себе в ногу.
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU)");
-        s.use_gpu = true;
+        std::string why;
+        if (!krs_cpu_backend_available(&why)) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU: %s)",
+                               why.c_str());
+            s.use_gpu = true;
+        }
     }
 
     // время, шаг, децимация
@@ -1952,13 +2034,14 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                     bd.var_sweep_index = i;
                 }
             }
-            if (!bd.continuation) {  // continuation требует param-sweep; dt-sweep несовместим с ним (см. run_bif1d)
-                ImGui::Separator();
-                if (ImGui::Selectable("dt (h)", bd.sweep_over_h)) {
-                    bd.sweep_over_h = true;
-                    bd.sweep_over_var = false;
-                    if (bd.mode_2d) bd.sweep_over_h_2 = false;  // ровно одна ось = h
-                }
+            // dt (h) доступен и в continuation: шаг пересчитывается в каждой
+            // точке цепочки (см. run_bif1d_continuation / _cpu). Раньше пункт
+            // прятался, потому что h-свип с continuation отвергался движком.
+            ImGui::Separator();
+            if (ImGui::Selectable("dt (h)", bd.sweep_over_h)) {
+                bd.sweep_over_h = true;
+                bd.sweep_over_var = false;
+                if (bd.mode_2d) bd.sweep_over_h_2 = false;  // ровно одна ось = h
             }
             ImGui::EndCombo();
         }
@@ -1971,31 +2054,13 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
     if (bd.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
-    // Continuation: каждая следующая точка стартует с конечного x[] предыдущей
-    // (single-thread GPU-kernel; см. parametric_engine::run_bif1d_continuation).
-    // При активации справа появляются radio forward/backward — для гистерезиса.
-    // В 2D-режиме отключён: run_bif2d использует свой 3-kernel pipeline, флаг
-    // continuation им игнорируется — лочим UI и принудительно сбрасываем флаги,
-    // чтобы скрытое состояние не утекло в следующий 1D-Run.
-    if (bd.mode_2d) {
-        bd.continuation = false;
-        bd.continuation_reverse = false;
-    }
-    {
-        ImGui::BeginDisabled(bd.mode_2d);
-        bool cont = bd.continuation;
-        if (ImGui::Checkbox("Continuation", &cont)) bd.continuation = cont;
-        if (bd.continuation) {
-            ImGui::SameLine();
-            int dir = bd.continuation_reverse ? 1 : 0;
-            ImGui::RadioButton("forward",  &dir, 0); ImGui::SameLine();
-            ImGui::RadioButton("backward", &dir, 1);
-            bd.continuation_reverse = (dir == 1);
-        }
-        ImGui::EndDisabled();
-        if (bd.mode_2d)
-            ImGui::TextDisabled("(unavailable in 2D mode)");
-    }
+    // Continuation: каждая следующая точка стартует с конечного x[] предыдущей.
+    // Единый блок с LLE и LS 1D (см. draw_continuation_device_block) — он же
+    // гасит и сбрасывает флаги в 2D-режиме: run_bif2d идёт своим 3-kernel
+    // pipeline'ом и continuation игнорирует, скрытое состояние туда утекать не
+    // должно. Классический свип у БД CPU-реализации не имеет, поэтому радио
+    // GPU/CPU влияет только на continuation.
+    draw_continuation_device_block(bd, "bd");
 
     ImGui::Separator();
 
@@ -2191,7 +2256,12 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
             std::string tab_id = bd.label + "###bd_tab_" + std::to_string(i);
             // Запрещаем закрывать таб, чей расчёт сейчас идёт.
             bool can_close = !(s.in_flight && s.running_diagram_index == i);
-            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr)) {
+            // Внешний запрос на выбор вкладки (тулбар Colored 1D над плотом —
+            // см. request_select_diagram). Без него галка могла включиться у
+            // одной БД, а настройки показывались для другой.
+            ImGuiTabItemFlags tab_flags = ImGuiTabItemFlags_None;
+            if (s.request_select_diagram == i) tab_flags |= ImGuiTabItemFlags_SetSelected;
+            if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr, tab_flags)) {
                 active_now = i;
                 if (draw_diagram_controls(s, i)) run_idx = i;
                 ImGui::EndTabItem();
@@ -2210,6 +2280,7 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
         }
         ImGui::EndTabBar();
     }
+    s.request_select_diagram = -1;   // запрос потреблён этим кадром
     if (active_now >= 0) s.active_diagram_index = active_now;
     if (to_remove >= 0) model.remove_bifurcation_diagram(to_remove);
 
@@ -2283,6 +2354,11 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             if (win.members.size() > 1) win.members.resize(1);
             if (focus >= 0 && focus < (int)s.diagrams.size()) {
                 s.diagrams[focus].colored_1d = c1d;
+                // Переключаем панель контролов на ЭТУ же БД: настройки
+                // Colored 1D показываются для диаграммы активной вкладки, и без
+                // этого галка включалась бы у одной БД, а блок настроек не
+                // появлялся бы (он относился к другой).
+                s.request_select_diagram = focus;
                 if (!model.loaded_name.empty())
                     lib.save_session(model.loaded_name, "_last_parametric",
                                      session_to_json_parametric(model.bifurcation_session));
@@ -2795,6 +2871,9 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
 
+    draw_continuation_device_block(c, "lle");
+
+
     ImGui::Separator();
     // 2D-режим. Сетка квадратная (см. analysis_session.h:LLECurveConfig коммент)
     // — Resolution выше применяется и к X, и к Y.
@@ -3140,9 +3219,13 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             double lo = c.result.param_lo;
             double hi = c.result.param_hi;
             int npts = c.result.n_pts;
+            // При backward-continuation точка k считалась для hi-(hi-lo)*k/(n-1)
+            // (см. run_lle1d_continuation_cpu) — иначе кривая была бы зеркальной.
+            const bool rev = c.result.continuation_reverse;
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
-                double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                double t = (npts > 1) ? (double)k / (double)(npts - 1) : 0.0;
+                double x = rev ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
                 double y = c.result.lyapunov[k];
                 if (!std::isfinite(y)) continue;
                 buf.push_back((float)x);
@@ -3270,6 +3353,8 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     ImGui::Checkbox("Log scale##ls_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
+
+    draw_continuation_device_block(c, "ls");
 
     ImGui::Separator();
     // 2D-режим. Сетка квадратная (см. LLE 2D — то же ограничение getValueByIdx).
@@ -3635,6 +3720,9 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         double lo = c.result.param_lo;
         double hi = c.result.param_hi;
         int npts = c.result.n_pts;
+        // При backward-continuation точка k считалась для hi-(hi-lo)*k/(n-1)
+        // (см. run_ls1d_cpu) — иначе кривая была бы зеркальной.
+        const bool rev = c.result.continuation_reverse;
         bool have = c.last_run_ok && !c.result.spectrum.empty();
 
         for (int j = 0; j < N; ++j) {
@@ -3648,7 +3736,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                     if (k >= (int)c.result.spectrum.size()) continue;
                     const auto& row = c.result.spectrum[k];
                     if (j >= (int)row.size()) continue;
-                    double x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                    double t = (npts > 1) ? (double)k / (double)(npts - 1) : 0.0;
+                    double x = rev ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
                     double y = row[j];
                     if (!std::isfinite(y)) continue;
                     buf.push_back((float)x);
@@ -5974,28 +6063,46 @@ namespace {
 // combo whose current preview is the selected name; on selection updates
 // (par_index, over_var, var_index) together — the same shape existing draw_*
 // blocks in this file use, just extracted here for reuse.
+// other_over_h — флаг ВТОРОЙ оси. Ровно одна ось может свипаться по h
+// (2D-ядра принимают один hSweepAxis), поэтому при выборе dt (h) здесь второй
+// флаг гасится, а если он уже занят — пункт показывается disabled с пояснением.
+// nullptr = второй оси нет (1D-контекст, ограничение неактуально).
 void draw_sweep_target_combo(const char* label,
                              const std::vector<std::string>& params,
                              const std::vector<std::string>& vars,
-                             int& par_index, bool& over_var, int& var_index) {
-    const std::string preview = over_var
-        ? (var_index >= 0 && var_index < (int)vars.size() ? vars[var_index] : std::string("var"))
-        : (par_index >= 0 && par_index < (int)params.size() ? params[par_index] : std::string("par"));
+                             int& par_index, bool& over_var, int& var_index,
+                             bool& over_h, bool* other_over_h = nullptr) {
+    const std::string preview =
+          over_h   ? std::string("dt (h)")
+        : over_var ? (var_index >= 0 && var_index < (int)vars.size() ? vars[var_index] : std::string("var"))
+                   : (par_index >= 0 && par_index < (int)params.size() ? params[par_index] : std::string("par"));
     ImGui::SetNextItemWidth(120.0f);
     if (ImGui::BeginCombo(label, preview.c_str())) {
         for (int i = 0; i < (int)params.size(); ++i) {
-            bool sel = !over_var && par_index == i;
+            bool sel = !over_var && !over_h && par_index == i;
             if (ImGui::Selectable(params[i].c_str(), sel)) {
-                par_index = i; over_var = false;
+                par_index = i; over_var = false; over_h = false;
             }
         }
         if (!vars.empty()) ImGui::Separator();
         for (int i = 0; i < (int)vars.size(); ++i) {
-            bool sel = over_var && var_index == i;
+            bool sel = over_var && !over_h && var_index == i;
             std::string lbl = std::string("IC ") + vars[i];
             if (ImGui::Selectable(lbl.c_str(), sel)) {
-                var_index = i; over_var = true;
+                var_index = i; over_var = true; over_h = false;
             }
+        }
+        ImGui::Separator();
+        const bool h_taken = (other_over_h != nullptr) && *other_over_h && !over_h;
+        ImGui::BeginDisabled(h_taken);
+        if (ImGui::Selectable("dt (h)", over_h)) {
+            over_h = true; over_var = false;
+            if (other_over_h) *other_over_h = false;   // ровно одна ось = h
+        }
+        ImGui::EndDisabled();
+        if (h_taken) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(занят другой осью)");
         }
         ImGui::EndCombo();
     }
@@ -6160,13 +6267,15 @@ void draw_level2d_detail(CustomSession& cs) {
     // don't when InputText's are packed onto one SameLine chain).
     ImGui::TextUnformatted("Axis X:"); ImGui::SameLine();
     draw_sweep_target_combo("##ax", cs.params, cs.vars,
-                            c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index);
+                            c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index,
+                            c.axis_x_over_h, &c.axis_y_over_h);
     InputNumStr("lo##ax", c.axis_x_lo_text, 120);
     InputNumStr("hi##ax", c.axis_x_hi_text, 120);
 
     ImGui::TextUnformatted("Axis Y:"); ImGui::SameLine();
     draw_sweep_target_combo("##ay", cs.params, cs.vars,
-                            c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index);
+                            c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index,
+                            c.axis_y_over_h, &c.axis_x_over_h);
     InputNumStr("lo##ay", c.axis_y_lo_text, 120);
     InputNumStr("hi##ay", c.axis_y_hi_text, 120);
 
@@ -6217,7 +6326,8 @@ void draw_level1d_detail(CustomSession& cs) {
     ImGui::TextUnformatted("X-sweep:"); ImGui::SameLine();
     if (inheriting) ImGui::BeginDisabled();
     draw_sweep_target_combo("##sxp", cs.params, cs.vars,
-                            c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index);
+                            c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index,
+                            c.sweep_x_over_h, &c.sweep_y_over_h);
     InputNumStr("lo##sx", c.sweep_x_lo_text, 120);
     InputNumStr("hi##sx", c.sweep_x_hi_text, 120);
     if (inheriting) ImGui::EndDisabled();
@@ -6226,7 +6336,8 @@ void draw_level1d_detail(CustomSession& cs) {
     ImGui::TextUnformatted("Y-sweep:"); ImGui::SameLine();
     if (inheriting) ImGui::BeginDisabled();
     draw_sweep_target_combo("##syp", cs.params, cs.vars,
-                            c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index);
+                            c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index,
+                            c.sweep_y_over_h, &c.sweep_x_over_h);
     InputNumStr("lo##sy", c.sweep_y_lo_text, 120);
     InputNumStr("hi##sy", c.sweep_y_hi_text, 120);
     if (inheriting) ImGui::EndDisabled();
@@ -6556,16 +6667,28 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             // shared Parameters section. Now we pin unconditionally on
             // settle, using effective_sweep_x/y so L2D-inherit and L1D-
             // standalone both update the correct param.
-            auto pin_param = [&](int par_i, bool over_var, double v) {
-                if (over_var) return;
-                if (par_i < 0 || par_i >= (int)cs.params.size()) return;
+            // Ось может свипаться по параметру, по НУ или по шагу h. Здесь
+            // отражаем в общие поля только param-случай (НУ и h подставляются
+            // в под-конфиги перед самим Run — см. pin_fixed_* в app_model.cpp);
+            // для h дополнительно обновляем общий h_text, чтобы панель
+            // показывала тот шаг, с которым реально пойдёт расчёт.
+            auto pin_axis = [&](const EffectiveSweep& e, double v) {
+                if (e.over_h) {
+                    if (v > 0.0) {
+                        char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
+                        c.l1d_h_text = buf;
+                    }
+                    return;
+                }
+                if (e.over_var) return;
+                if (e.par_index < 0 || e.par_index >= (int)cs.params.size()) return;
                 char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
-                c.param_values[cs.params[par_i]] = buf;
+                c.param_values[cs.params[e.par_index]] = buf;
             };
             EffectiveSweep esx = effective_sweep_x(c);
             EffectiveSweep esy = effective_sweep_y(c);
-            if (x_settled) pin_param(esx.par_index, esx.over_var, c.fix_x_value);
-            if (y_settled) pin_param(esy.par_index, esy.over_var, c.fix_y_value);
+            if (x_settled) pin_axis(esx, c.fix_x_value);
+            if (y_settled) pin_axis(esy, c.fix_y_value);
             if (c.autorun_on_drilldown && c.level_phase_enabled) {
                 model.custom_queue.push_back({ c.level3_kind == 0
                     ? CustomQueueItem::Kind::Phase
@@ -7301,17 +7424,20 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // IMGUI_PAYLOAD_TYPE_WINDOW). No MMB menu here — MMB is claimed by
     // heatmap/1D-plot views for crosshair-drag / slice movement.
 
-    auto axis_name = [&](bool over_var, int par_i, int var_i) -> std::string {
+    auto axis_name = [&](bool over_var, int par_i, int var_i, bool over_h) -> std::string {
+        if (over_h)   return "h";
         if (over_var) return (var_i >= 0 && var_i < (int)cs.vars.size())
                              ? cs.vars[var_i] + " (IC)" : "x";
         return (par_i >= 0 && par_i < (int)cs.params.size()) ? cs.params[par_i] : "param";
     };
     const std::string ax_x = axis_name(cs.shared.axis_x_over_var,
                                        cs.shared.axis_x_par_index,
-                                       cs.shared.axis_x_var_index);
+                                       cs.shared.axis_x_var_index,
+                                       cs.shared.axis_x_over_h);
     const std::string ax_y = axis_name(cs.shared.axis_y_over_var,
                                        cs.shared.axis_y_par_index,
-                                       cs.shared.axis_y_var_index);
+                                       cs.shared.axis_y_var_index,
+                                       cs.shared.axis_y_over_h);
 
     // --- Level 2D heatmaps ---
     struct L2Slot {
@@ -7542,6 +7668,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             // cfg_idx 2 = Y-slice → sweep_y_*.
             EffectiveSweep e = (cfg_idx == 1) ? effective_sweep_x(cs.shared)
                                               : effective_sweep_y(cs.shared);
+            if (e.over_h) return "h";
             if (e.over_var)
                 return (e.var_index >= 0 && e.var_index < (int)cs.vars.size())
                         ? cs.vars[e.var_index] + " (IC)" : "x (IC)";

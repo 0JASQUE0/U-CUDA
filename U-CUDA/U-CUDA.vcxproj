@@ -137,6 +137,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="gui.cpp" />
     <ClCompile Include="image_source.cpp" />
     <ClCompile Include="integrator.cpp" />
+    <ClCompile Include="krs_cpu.cpp" />
     <ClCompile Include="nvrtc_engine.cpp" />
     <ClCompile Include="ocr_client_win.cpp" />
     <ClCompile Include="parametric_engine.cpp" />

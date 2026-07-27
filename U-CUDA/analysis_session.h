@@ -218,6 +218,11 @@ struct BifurcationDiagramConfig {
     // visualisation of hysteresis (forward и reverse BD на одном плоте).
     bool        continuation = false;
     bool        continuation_reverse = false;
+    // Где считать continuation. true (дефолт) — GPU, как было. false — CPU:
+    // continuation последователен по построению, GPU гоняет его в одном потоке,
+    // и обычное ядро процессора на такой цепочке кратно быстрее. На классический
+    // (не continuation) свип не влияет — там всегда GPU.
+    bool        use_gpu = true;
     std::string param_lo_text  = "0";
     std::string param_hi_text  = "1";
     std::string n_pts_text     = "500";
@@ -328,6 +333,12 @@ struct BifurcationAnalysisSession {
 
     // Какая вкладка сейчас открыта — для Ctrl+R (последняя видимая).
     int active_diagram_index = 0;
+    // Запрос «переключить вкладку на эту БД», выставляется не самим таб-баром,
+    // а внешним кодом. Нужен тулбару над плотом: он переключает colored_1d у
+    // диаграммы win.members[0], а панель настроек показывает диаграмму АКТИВНОЙ
+    // вкладки. Когда это разные БД, галка включалась, а блок настроек Colored 1D
+    // не появлялся. Таб-бар потребляет запрос и сбрасывает в -1.
+    int request_select_diagram = -1;
     // Индекс БД, чей расчёт сейчас идёт в worker'е; -1 = ничего.
     int running_diagram_index = -1;
 
@@ -424,6 +435,17 @@ struct LLECurveConfig {
     // LLE-специфика.
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";       // NT (в единицах времени)
+
+    // Continuation: точка стартует с состояния предыдущей. В отличие от БД
+    // переносится не только траектория, но и вектор возмущения («щуп») —
+    // см. run_lle1d_cpu. Считается только на CPU: свип последователен,
+    // GPU-ветки для него нет. Требует param-свипа.
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    // Где считать КЛАССИЧЕСКИЙ свип. true (дефолт) — GPU, он там массово
+    // параллелен и быстрее. false — CPU: счёт без GPU и сверка CPU-ядра с
+    // GPU-веткой. При continuation игнорируется (там всегда CPU).
+    bool        use_gpu              = true;
 
     bool        csv_save_enabled = false;
     std::string csv_output_path;
@@ -960,6 +982,12 @@ struct LSCurveConfig {
 
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";
+
+    // Continuation + выбор устройства — семантика как в LLECurveConfig
+    // (переносятся траектория и ВСЕ N щупов; continuation только на CPU).
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    bool        use_gpu              = true;
 
     bool        csv_save_enabled = false;
     std::string csv_output_path;

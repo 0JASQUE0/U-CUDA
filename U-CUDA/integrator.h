@@ -10,6 +10,10 @@ enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD };
 
 IntScheme int_scheme_from_string(const std::string& s);
 
+// Шаг, скомпилированный из пользовательской КРС (см. krs_cpu.h). Сигнатура
+// совпадает с calculateDiscreteModel на GPU: тело само мутирует X[].
+using CustomStepFn = void (*)(double* X, const double* a, double h);
+
 // Считает одну траекторию на CPU через интерпретатор (быстро, смена системы на лету).
 //   ev        — интерпретатор системы (уже распарсенный)
 //   scheme    — схема интегрирования
@@ -23,6 +27,17 @@ IntScheme int_scheme_from_string(const std::string& s);
 bool computePhasePortraitCPU(
     const SystemEvaluator& ev,
     IntScheme scheme,
+    const double* ic, int dim,
+    const double* a, int amountOfValues,
+    double h, int total, int skip,
+    std::vector<std::vector<double>>& out);
+
+// То же самое, но шаг задаётся готовой нативной функцией, а не парой
+// (интерпретатор + встроенная схема). Используется для custom КРС: их тело —
+// сырой C, SystemEvaluator его не понимает. Transient, запись точек и
+// проверка на расходимость — тот же код, что и выше.
+bool computePhasePortraitCPU_custom(
+    CustomStepFn step,
     const double* ic, int dim,
     const double* a, int amountOfValues,
     double h, int total, int skip,

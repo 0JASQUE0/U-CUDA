@@ -421,6 +421,16 @@ void pin_fixed_param(std::map<std::string,std::string>& pv,
     pv[params[par_index]] = fmt_num_for_input(value);
 }
 
+// Третий вариант той же фиксации: закреплённая ось свипует ШАГ. Тогда «фиксация»
+// — это подстановка h, а не значения параметра или НУ. Зовётся вместе с
+// pin_fixed_param/pin_fixed_ic; ровно одна из трёх что-то делает, остальные
+// выходят по своему флагу.
+void pin_fixed_h(std::string& h_text, bool over_h, double value) {
+    if (!over_h) return;
+    if (value <= 0.0) return;             // шаг <= 0 бессмыслен, оставляем прежний
+    h_text = fmt_num_for_input(value);
+}
+
 void pin_fixed_ic(std::map<std::string,std::string>& ic,
                   const std::vector<std::string>& vars,
                   int var_index, bool over_var, double value) {
@@ -472,6 +482,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swy = effective_sweep_y(shared);
                 pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
                 ok = cs.bif_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -482,6 +493,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swx = effective_sweep_x(shared);
                 pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
                 ok = cs.bif_session.run_async(*parametric_engine, 2);
             }
             break;
@@ -492,6 +504,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swy = effective_sweep_y(shared);
                 pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
                 ok = cs.lle_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -502,6 +515,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swx = effective_sweep_x(shared);
                 pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
                 ok = cs.lle_session.run_async(*parametric_engine, 2);
             }
             break;
@@ -512,6 +526,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swy = effective_sweep_y(shared);
                 pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
                 ok = cs.ls_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -522,6 +537,7 @@ bool AppModel::start_next_in_custom_queue() {
                 EffectiveSweep swx = effective_sweep_x(shared);
                 pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
                 ok = cs.ls_session.run_async(*parametric_engine, 2);
             }
             break;
