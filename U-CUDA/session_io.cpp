@@ -260,6 +260,10 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"colored_1d_ymin_text\":"; jstr(o, bd.colored_1d_ymin_text);
     o << ",\"colored_1d_ymax_text\":"; jstr(o, bd.colored_1d_ymax_text);
     o << ",\"colored_1d_log\":"        << (bd.colored_1d_log ? "true" : "false");
+    o << ",\"custom_point_style\":"    << (bd.custom_point_style ? "true" : "false");
+    o << ",\"point_marker\":"          << bd.point_marker;
+    o << ",\"point_size\":"            << bd.point_size;
+    o << ",\"point_alpha\":"           << bd.point_alpha;
     o << "}";
 }
 
@@ -310,6 +314,10 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "colored_1d_ymin_text")  bd.colored_1d_ymin_text  = p.str();
     else if (key == "colored_1d_ymax_text")  bd.colored_1d_ymax_text  = p.str();
     else if (key == "colored_1d_log")        bd.colored_1d_log        = p.boolean();
+    else if (key == "custom_point_style")    bd.custom_point_style    = p.boolean();
+    else if (key == "point_marker")          bd.point_marker          = std::stoi(p.str_or_num());
+    else if (key == "point_size")            bd.point_size            = (float)std::stod(p.str_or_num());
+    else if (key == "point_alpha")           bd.point_alpha           = (float)std::stod(p.str_or_num());
     else return false;
     return true;
 }

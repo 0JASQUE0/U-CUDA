@@ -241,6 +241,16 @@ struct BifurcationDiagramConfig {
     // интервалы (peak_times). Колонка 3 vs 2 в CSV.
     bool        plot_inter_peaks = false;
 
+    // ---- Custom point style (аналог Projection::custom_line_style) ----
+    // Действует на классическую 1D-scatter БД; к 2D- и Colored-1D-хитмапам
+    // неприменим. false → прежний вид: сплошной квадратный GL-пойнт 2px, α=1.
+    // Живёт в конфиге БД (а не в окне), поэтому одинаково работает и в
+    // Parametric, и в Custom, и персистится вместе с сессией.
+    bool        custom_point_style = false;
+    int         point_marker       = 0;      // PointMarker (0 = Circle)
+    float       point_size         = 2.0f;   // px
+    float       point_alpha        = 1.0f;
+
     // Per-БД базовые значения параметров и НУ.
     std::map<std::string, std::string> initial_conditions;
     std::map<std::string, std::string> param_values;

@@ -66,6 +66,10 @@ const char* const kHeatmapColormapNames[9] = {
     "GistStern", "GnuPlot", "GistRainbow", "NipySpectral", "GistNcar",
 };
 
+const char* const kPointMarkerNames[7] = {
+    "Circle", "Square", "Diamond", "Triangle up", "Triangle down", "Cross", "Plus",
+};
+
 ImU32 cmap_sample(float t, HeatmapColormap m) {
     t = std::min(std::max(t, 0.0f), 1.0f);
     vec3f c;
@@ -144,6 +148,35 @@ static const char* FS = R"(
 uniform vec4 u_color;
 out vec4 frag_color;
 void main() {
+    frag_color = u_color;
+}
+)";
+
+// Фрагментный шейдер точек: вырезает форму маркера из квадратного спрайта
+// GL_POINTS. Дешевле любого CPU-пути — бифуркационная диаграмма легко даёт
+// сотни тысяч точек, ImDrawList на таком объёме встаёт колом.
+static const char* FS_POINT = R"(
+#version 330 core
+uniform vec4 u_color;
+uniform int  u_marker;
+out vec4 frag_color;
+void main() {
+    // gl_PointCoord: (0,0) — левый ВЕРХНИЙ угол спрайта. Переводим в [-1,1]
+    // с осью Y вверх, иначе «треугольник вверх» смотрел бы вниз.
+    vec2 p = vec2(gl_PointCoord.x * 2.0 - 1.0, 1.0 - gl_PointCoord.y * 2.0);
+    const float t = 0.32;            // полутолщина штриха для Cross/Plus
+    bool inside;
+    if      (u_marker == 0) inside = dot(p, p) <= 1.0;              // Circle
+    else if (u_marker == 2) inside = abs(p.x) + abs(p.y) <= 1.0;    // Diamond
+    else if (u_marker == 3) inside = p.y <= 1.0 - 2.0 * abs(p.x);   // Triangle up
+    else if (u_marker == 4) inside = p.y >= 2.0 * abs(p.x) - 1.0;   // Triangle down
+    else if (u_marker == 5) {                                       // Cross (x)
+        vec2 q = vec2(p.x + p.y, p.x - p.y) * 0.70710678;
+        inside = abs(q.x) <= t || abs(q.y) <= t;
+    }
+    else if (u_marker == 6) inside = abs(p.x) <= t || abs(p.y) <= t; // Plus
+    else                    inside = true;                           // Square
+    if (!inside) discard;
     frag_color = u_color;
 }
 )";
@@ -314,6 +347,7 @@ PlotRenderer::PlotRenderer() {
 PlotRenderer::~PlotRenderer() {
     destroy_fbo();
     if (program_2d_)       glDeleteProgram(program_2d_);
+    if (program_points_)   glDeleteProgram(program_points_);
     if (program_3d_)       glDeleteProgram(program_3d_);
     if (program_3d_thick_) glDeleteProgram(program_3d_thick_);
     if (program_heatmap_)  glDeleteProgram(program_heatmap_);
@@ -360,6 +394,19 @@ void PlotRenderer::compile_shaders() {
             loc_point_size_2d_ = glGetUniformLocation(program_2d_, "u_point_size");
         }
     }
+    // Отдельная программа для точек с формой маркера: тот же VS_2D (gl_PointSize),
+    // другой FS (маска по gl_PointCoord). Без неё draw_points остаётся на
+    // program_2d_ и рисует прежний сплошной квадрат.
+    GLuint fs_pt = compile(GL_FRAGMENT_SHADER, FS_POINT);
+    if (fs_pt && vs2) {
+        program_points_ = link_program(vs2, fs_pt);
+        if (program_points_) {
+            loc_mvp_points_        = glGetUniformLocation(program_points_, "u_mvp");
+            loc_color_points_      = glGetUniformLocation(program_points_, "u_color");
+            loc_point_size_points_ = glGetUniformLocation(program_points_, "u_point_size");
+            loc_marker_points_     = glGetUniformLocation(program_points_, "u_marker");
+        }
+    }
     if (fs && vs3) {
         program_3d_ = link_program(vs3, fs);
         if (program_3d_) {
@@ -397,6 +444,7 @@ void PlotRenderer::compile_shaders() {
     if (gs3t) glDeleteShader(gs3t);
     if (vs_h) glDeleteShader(vs_h);
     if (fs_h) glDeleteShader(fs_h);
+    if (fs_pt) glDeleteShader(fs_pt);
     if (fs)   glDeleteShader(fs);
 }
 
@@ -484,12 +532,35 @@ void PlotRenderer::draw_line(GLuint vbo, int point_count, const float mvp[16],
 }
 
 void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
-    const float color[4], float point_size) {
-    if (!program_2d_ || point_count < 1 || !vbo) return;
-    glUseProgram(program_2d_);
-    glUniformMatrix4fv(loc_mvp_2d_, 1, GL_FALSE, mvp);
-    glUniform4fv(loc_color_2d_, 1, color);
-    if (loc_point_size_2d_ >= 0) glUniform1f(loc_point_size_2d_, point_size);
+    const float color[4], float point_size, int marker) {
+    // Fallback на старый путь, если shaped-программа не собралась.
+    const bool shaped = (marker >= 0 && program_points_ != 0);
+    const GLuint prog = shaped ? program_points_ : program_2d_;
+    if (!prog || point_count < 1 || !vbo) return;
+    // Alpha-блендинг включаем ТОЛЬКО на shaped-пути, чтобы выключенный
+    // Custom point style не менял GL-состояние (как в draw_line_3d).
+    GLboolean was_blend = GL_FALSE;
+    if (shaped) {
+        was_blend = glIsEnabled(GL_BLEND);
+        glEnable(GL_BLEND);
+        // RGB — обычный src-over. Альфа-канал FBO держим на 1 (src factor ONE
+        // при dst = 1 даёт 1): иначе полупрозрачная точка «продырявливала» бы
+        // текстуру плота, и сквозь неё просвечивал бы фон окна ImGui поверх
+        // фона самого плота — α выглядела бы вдвое сильнее заданной.
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                            GL_ONE,       GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glUseProgram(prog);
+    if (shaped) {
+        glUniformMatrix4fv(loc_mvp_points_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_points_, 1, color);
+        if (loc_point_size_points_ >= 0) glUniform1f(loc_point_size_points_, point_size);
+        if (loc_marker_points_ >= 0)     glUniform1i(loc_marker_points_, marker);
+    } else {
+        glUniformMatrix4fv(loc_mvp_2d_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_2d_, 1, color);
+        if (loc_point_size_2d_ >= 0) glUniform1f(loc_point_size_2d_, point_size);
+    }
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glEnableVertexAttribArray(0);
@@ -503,6 +574,9 @@ void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
+    // Точный blend func не восстанавливаем — ImGui сам ставит свой перед
+    // отрисовкой ImDrawList (см. draw_line_3d).
+    if (shaped && !was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,

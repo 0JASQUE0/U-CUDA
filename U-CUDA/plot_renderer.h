@@ -29,6 +29,24 @@ enum class HeatmapColormap : int {
 extern const char* const kHeatmapColormapNames[9];
 constexpr int kHeatmapColormapCount = 9;
 
+// Форма маркера для точечного (points_mode) 2D-рендера. -1 в draw_points /
+// Plot2DView::point_marker = «без маски», т.е. дефолтный сплошной квадратный
+// GL-пойнт — старый путь остаётся пиксель-в-пиксель прежним.
+enum class PointMarker : int {
+    Circle       = 0,
+    Square       = 1,
+    Diamond      = 2,
+    TriangleUp   = 3,
+    TriangleDown = 4,
+    Cross        = 5,
+    Plus         = 6,
+};
+
+// Общий список имён для ImGui::Combo — единственный источник истины
+// (см. kHeatmapColormapNames выше).
+extern const char* const kPointMarkerNames[7];
+constexpr int kPointMarkerCount = 7;
+
 // CPU-side колормап. Полиномиальные (0-3) — точное зеркало GLSL из
 // draw_heatmap (см. plot_renderer.cpp::compile_shaders), цвета совпадают
 // bit-for-bit. LUT-based (4-8) — линейная интерполяция между соседними
@@ -54,8 +72,11 @@ public:
 
     // ������ 2D-����� (vbo � float[2] �� �������) ��� GL_POINTS.
     // ��� ������������ ��� ������� 1D-�����������.
+    // marker < 0 — старый путь: сплошной квадрат, GL-состояние не трогается.
+    // marker >= 0 (PointMarker) — шейдерная маска формы + alpha-блендинг
+    // (color[3] перестаёт игнорироваться).
     void draw_points(GLuint vbo, int point_count, const float mvp[16],
-        const float color[4], float point_size);
+        const float color[4], float point_size, int marker = -1);
 
     // Хитмапа: рендерит fullscreen-quad внутри текущего FBO (begin_frame),
     // сэмплит R32F-текстуру tex и применяет colormap.
@@ -107,10 +128,13 @@ private:
     int    fbo_h_ = 0;
 
     GLuint program_2d_ = 0;
+    GLuint program_points_ = 0;   // VS_2D + FS_POINT (маска формы маркера)
     GLuint program_3d_ = 0;
     GLuint program_3d_thick_ = 0;
     GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
+    GLint  loc_mvp_points_ = -1, loc_color_points_ = -1,
+           loc_point_size_points_ = -1, loc_marker_points_ = -1;
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;
     GLint  loc_mvp_3d_thick_ = -1, loc_color_3d_thick_ = -1,
            loc_viewport_3d_thick_ = -1, loc_thickness_3d_thick_ = -1;
