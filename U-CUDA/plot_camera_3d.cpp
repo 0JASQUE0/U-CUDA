@@ -1,4 +1,4 @@
-#include "plot_camera_3d.h"
+п»ї#include "plot_camera_3d.h"
 #include <cmath>
 #include <algorithm>
 #include "imgui.h"
@@ -22,7 +22,7 @@ static void mat_mul(const float a[16], const float b[16], float out[16]) {
 }
 
 void PlotCamera3D::build_mvp(float out[16]) const {
-    // Позиция камеры (orbit вокруг target по углам theta, phi).
+    // РџРѕР·РёС†РёСЏ РєР°РјРµСЂС‹ (orbit РІРѕРєСЂСѓРі target РїРѕ СѓРіР»Р°Рј theta, phi).
     float cx = target[0] + distance * std::cos(phi) * std::cos(theta);
     float cy = target[1] + distance * std::cos(phi) * std::sin(theta);
     float cz = target[2] + distance * std::sin(phi);
@@ -35,7 +35,7 @@ void PlotCamera3D::build_mvp(float out[16]) const {
     if (fl < 1e-6f) fl = 1.0f;
     fx /= fl; fy /= fl; fz /= fl;
 
-    // up = Z вверх; right = forward x up
+    // up = Z РІРІРµСЂС…; right = forward x up
     float ux_temp = 0.0f, uy_temp = 0.0f, uz_temp = 1.0f;
     float rx = fy * uz_temp - fz * uy_temp;
     float ry = fz * ux_temp - fx * uz_temp;
@@ -43,7 +43,7 @@ void PlotCamera3D::build_mvp(float out[16]) const {
     float rl = std::sqrt(rx * rx + ry * ry + rz * rz);
     if (rl < 1e-6f) { rx = 1; ry = 0; rz = 0; }
     else { rx /= rl; ry /= rl; rz /= rl; }
-    // up = right x forward (ортонормируем)
+    // up = right x forward (РѕСЂС‚РѕРЅРѕСЂРјРёСЂСѓРµРј)
     float upx = ry * fz - rz * fy;
     float upy = rz * fx - rx * fz;
     float upz = rx * fy - ry * fx;
@@ -58,8 +58,8 @@ void PlotCamera3D::build_mvp(float out[16]) const {
     V[14] = (fx * cx + fy * cy + fz * cz);
     V[15] = 1;
 
-    // Ортографическая проекция: размер окна пропорционален distance,
-    // aspect компенсирует ширину/высоту.
+    // РћСЂС‚РѕРіСЂР°С„РёС‡РµСЃРєР°СЏ РїСЂРѕРµРєС†РёСЏ: СЂР°Р·РјРµСЂ РѕРєРЅР° РїСЂРѕРїРѕСЂС†РёРѕРЅР°Р»РµРЅ distance,
+    // aspect РєРѕРјРїРµРЅСЃРёСЂСѓРµС‚ С€РёСЂРёРЅСѓ/РІС‹СЃРѕС‚Сѓ.
     float h = distance * 0.6f;
     float w = h * aspect;
     float n = -distance * 10.0f;
@@ -85,12 +85,12 @@ void PlotCamera3D::orbit(float dx_pixels, float dy_pixels) {
 }
 
 void PlotCamera3D::pan(float dx_pixels, float dy_pixels, int viewport_w, int viewport_h) {
-    // Считаем "размер мира на пиксель" исходя из ortho-окна.
+    // РЎС‡РёС‚Р°РµРј "СЂР°Р·РјРµСЂ РјРёСЂР° РЅР° РїРёРєСЃРµР»СЊ" РёСЃС…РѕРґСЏ РёР· ortho-РѕРєРЅР°.
     float h = distance * 0.6f;
     float world_per_px_y = (2.0f * h) / std::max(1, viewport_h);
     float world_per_px_x = world_per_px_y * (float)viewport_w / std::max(1, viewport_h);
 
-    // right и up в мировых координатах (повторяем расчёт из build_mvp).
+    // right Рё up РІ РјРёСЂРѕРІС‹С… РєРѕРѕСЂРґРёРЅР°С‚Р°С… (РїРѕРІС‚РѕСЂСЏРµРј СЂР°СЃС‡С‘С‚ РёР· build_mvp).
     float cx = std::cos(phi) * std::cos(theta);
     float cy = std::cos(phi) * std::sin(theta);
     float cz = std::sin(phi);
@@ -146,7 +146,7 @@ ImVec2 project_to_screen(const float mvp[16], float x, float y, float z,
     float ny = cy / cw;
     float nz = cz / cw;
     if (out_z_clip) *out_z_clip = nz;
-    // в пиксели: NDC (-1..1) X?(plot_x .. plot_x+plot_w), Y перевернут
+    // РІ РїРёРєСЃРµР»Рё: NDC (-1..1) X?(plot_x .. plot_x+plot_w), Y РїРµСЂРµРІРµСЂРЅСѓС‚
     float sx = plot_pos.x + (nx * 0.5f + 0.5f) * plot_w;
     float sy = plot_pos.y + (1.0f - (ny * 0.5f + 0.5f)) * plot_h;
     return ImVec2(sx, sy);

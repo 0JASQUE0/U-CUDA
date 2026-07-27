@@ -1,4 +1,4 @@
-#include "plot_renderer.h"
+﻿#include "plot_renderer.h"
 #include <vector>
 #include <cmath>
 #include "gpu_line_series_3d.h"

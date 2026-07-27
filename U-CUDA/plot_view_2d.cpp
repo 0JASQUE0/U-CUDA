@@ -1,4 +1,4 @@
-#include "plot_view_2d.h"
+﻿#include "plot_view_2d.h"
 #include "grid_snap.h"
 #include <algorithm>
 #include <cmath>

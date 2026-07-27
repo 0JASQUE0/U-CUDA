@@ -1,4 +1,4 @@
-// fastsync_attr.template.cu
+﻿// fastsync_attr.template.cu
 //
 // NVRTC-шаблон для Fast Synchro в режиме "On Attractor".
 // Pipeline (host-оркестрация в parametric_engine::run_fastsync, mode=0):

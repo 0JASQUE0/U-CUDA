@@ -1,0 +1,20 @@
+# Кодировки исходников U-CUDA.
+#
+# Зачем: исходники содержат русские комментарии. Файл без BOM Visual Studio
+# определяет по системной ANSI-кодовой странице (CP1251), показывает кириллицу
+# крякозябрами и закрепляет их при сохранении. BOM снимает угадывание.
+#
+# NVRTC это не задевает: kernels/*.template.cu и virtual headers проходят через
+# read_text_file() в parametric_engine.cpp, который срезает BOM и заменяет
+# не-ASCII байты пробелами перед компиляцией.
+
+root = true
+
+[*]
+charset = utf-8-bom
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+# BOM ломает парсеры JSON и часть тулинга — этим только UTF-8.
+[*.{json,md,yml,yaml,py,txt}]
+charset = utf-8

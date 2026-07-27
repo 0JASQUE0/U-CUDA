@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "cudaMacros.cuh"
 #include "configCUDA.h"

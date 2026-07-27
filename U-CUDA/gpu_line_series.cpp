@@ -1,4 +1,4 @@
-#include "gpu_line_series.h"
+﻿#include "gpu_line_series.h"
 #include <limits>
 #include <algorithm>
 

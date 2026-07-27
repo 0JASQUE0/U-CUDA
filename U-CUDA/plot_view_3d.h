@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "plot_axis.h"
 #include "plot_legend.h"
 #include "gpu_line_series_3d.h"

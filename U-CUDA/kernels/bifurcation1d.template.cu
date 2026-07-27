@@ -1,4 +1,4 @@
-// bifurcation1d.template.cu
+﻿// bifurcation1d.template.cu
 //
 // NVRTC-шаблон для 1D-бифуркации. Подставляется ParametricEngine'ом, потом
 // компилируется через nvrtcCompileProgram. Плейсхолдеры:

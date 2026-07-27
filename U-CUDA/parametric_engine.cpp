@@ -1,4 +1,4 @@
-#include "parametric_engine.h"
+﻿#include "parametric_engine.h"
 //
 // Phase 2: реальная реализация. NVRTC компилит наш шаблон, который через #include
 // подтягивает cudaLibrary.cuh / cudaLibrary.cu из NonLinAnal. User's KRS определена
@@ -57,17 +57,17 @@ constexpr double kEuler = 2.7182818284590452353602874713527;
 // Проверка расходимости — раз в kCheckInterval итераций, как на GPU.
 // ---------------------------------------------------------------------------
 int cpu_loop_model(KrsCpuStep::StepFn step,
-                   double* x, const double* a, double h,
+                   numb* x, const numb* a, numb h,
                    int iterations, int amountOfX, int preScaller,
-                   int writableVar, double maxValue,
-                   double* data)
+                   int writableVar, numb maxValue,
+                   numb* data)
 {
     for (int i = 0; i < iterations; ++i) {
         if (data != nullptr) {
             // writableVar < 0 -> комбинация первых (до трёх) переменных.
             if (writableVar < 0) {
-                if      (amountOfX >= 3) data[i] = x[0] + kPi * x[1] + kEuler * x[2];
-                else if (amountOfX == 2) data[i] = x[0] + kPi * x[1];
+                if      (amountOfX >= 3) data[i] = x[0] + (numb)kPi * x[1] + (numb)kEuler * x[2];
+                else if (amountOfX == 2) data[i] = x[0] + (numb)kPi * x[1];
                 else                     data[i] = x[0];
             } else {
                 data[i] = x[writableVar];
@@ -79,10 +79,10 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
         }
 
         if (i % kCheckInterval == 0) {
-            double checker = 0.0;
+            numb checker = (numb)0;
             for (int j = 0; j < amountOfX; ++j) checker += std::fabs(x[j]);
             if (std::isnan(checker) || std::isinf(checker)) return 0;
-            if (maxValue != 0.0 && std::fabs(checker) > maxValue) return 0;
+            if (maxValue != (numb)0 && std::fabs(checker) > maxValue) return 0;
         }
     }
 
@@ -90,13 +90,13 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
     // проверки на неподвижную точку И заодно сдвигает x[], который в
     // continuation переносится в следующую точку параметра. Без него CPU-ветка
     // разошлась бы с GPU уже на второй точке свипа.
-    static thread_local std::vector<double> xPrev;
+    static thread_local std::vector<numb> xPrev;
     xPrev.assign(x, x + amountOfX);
     for (int j = 0; j < preScaller; ++j) step(x, a, h);
 
-    double tempResult = 0.0;
+    numb tempResult = (numb)0;
     for (int j = 0; j < amountOfX; ++j) tempResult += std::fabs(x[j] - xPrev[j]);
-    if (std::fabs(tempResult) < kEpsFixedPoint) return -1;
+    if (std::fabs(tempResult) < (numb)kEpsFixedPoint) return -1;
     return 1;
 }
 
@@ -108,13 +108,13 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
 // Логика — построчная копия, включая параболическую интерполяцию, сдвиг пиков
 // влево на один и пересчёт timeOfPeaks в межпиковые интервалы.
 // ---------------------------------------------------------------------------
-int cpu_peak_finder(const double* data, size_t amountOfPoints,
-                    double* outPeaks, double* timeOfPeaks, double h)
+int cpu_peak_finder(const numb* data, size_t amountOfPoints,
+                    numb* outPeaks, numb* timeOfPeaks, numb h)
 {
     if (!kDoCalculatePeaks) {
         int n = (int)amountOfPoints;
         if (n >= kMaxAmountOfPeaks) n = kMaxAmountOfPeaks;
-        for (int i = 0; i < n; ++i) { outPeaks[i] = data[i]; timeOfPeaks[i] = 0.0; }
+        for (int i = 0; i < n; ++i) { outPeaks[i] = data[i]; timeOfPeaks[i] = (numb)0; }
         return n - 1;
     }
     // Границы циклов на GPU считаются в size_t как amountOfPoints - 2; при
@@ -124,25 +124,25 @@ int cpu_peak_finder(const double* data, size_t amountOfPoints,
 
     int amountOfPeaks = 0;
     for (size_t i = 2; i + 2 < amountOfPoints; ++i) {
-        if (data[i] - data[i - 1] > kEpsPeakDelta &&
-            data[i] > kPeakThreshold &&
+        if (data[i] - data[i - 1] > (numb)kEpsPeakDelta &&
+            data[i] > (numb)kPeakThreshold &&
             data[i] >= data[i + 1])
         {
             for (size_t j = i; j + 2 < amountOfPoints; ++j) {
                 // Наткнулись на точку строго больше — это был не пик.
                 if (data[j] < data[j + 1]) { i = j + 1; break; }
-                if (data[j] - data[j + 1] > kEpsPeakDelta) {
+                if (data[j] - data[j + 1] > (numb)kEpsPeakDelta) {
                     if (kDoInterpolatePeaks) {
-                        const double denom = data[j - 1] - 2.0 * data[j] + data[j + 1];
-                        double delta = 0.0;
-                        if (std::fabs(denom) > 1e-12)
-                            delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
-                        outPeaks[amountOfPeaks]    = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
+                        const numb denom = data[j - 1] - (numb)2.0 * data[j] + data[j + 1];
+                        numb delta = (numb)0;
+                        if (std::fabs(denom) > (numb)1e-12)
+                            delta = (numb)0.5 * (data[j - 1] - data[j + 1]) / denom;
+                        outPeaks[amountOfPeaks]    = data[j] - (numb)0.25 * (data[j - 1] - data[j + 1]) * delta;
                         // Здесь индекс, а не время: на время умножаем ниже.
-                        timeOfPeaks[amountOfPeaks] = (double)(j - 1) + delta;
+                        timeOfPeaks[amountOfPeaks] = (numb)(j - 1) + delta;
                     } else {
                         outPeaks[amountOfPeaks]    = data[j];
-                        timeOfPeaks[amountOfPeaks] = (double)(j - 1);
+                        timeOfPeaks[amountOfPeaks] = (numb)(j - 1);
                     }
                     ++amountOfPeaks;
                     i = j + 1;   // два пика подряд невозможны
@@ -183,6 +183,14 @@ inline double cont_sweep_value(int j, int nPts, double lo, double hi,
         return std::pow(10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
     }
     return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+}
+
+// Request/Result — публичный интерфейс в double, а ядра работают в numb.
+// Конвертация живёт ровно на границе: перед H2D сужаем, после D2H расширяем.
+// Когда numb == double это no-op копия, поэтому обе конфигурации ведут себя
+// одинаково и без #ifdef.
+std::vector<numb> to_numb(const std::vector<double>& v) {
+    return std::vector<numb>(v.begin(), v.end());
 }
 
 struct CpuRandState { unsigned long long state; };
@@ -273,13 +281,13 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     res.bifurcation_points.assign(nPts, {});
     res.peak_times.assign(nPts, {});
 
-    std::vector<double> x(req.initial_conditions.begin(), req.initial_conditions.end());
-    std::vector<double> a(req.base_values.begin(), req.base_values.end());
-    std::vector<double> block((size_t)maxPointsInBlock);
-    std::vector<double> peaks((size_t)maxPointsInBlock);
-    std::vector<double> times((size_t)maxPointsInBlock);
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> block((size_t)maxPointsInBlock);
+    std::vector<numb> peaks((size_t)maxPointsInBlock);
+    std::vector<numb> times((size_t)maxPointsInBlock);
 
-    double h_local = req.h;
+    numb h_local = (numb)req.h;
 
     for (int j = 0; j < nPts; ++j) {
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
@@ -289,7 +297,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           req.continuation_reverse, req.log_scale);
-        if (req.sweep_over_h) h_local = p;
+        if (req.sweep_over_h) h_local = (numb)p;
         else                  a[(size_t)req.param_index] = p;
 
         // При h-свипе число записываемых точек своё в каждой точке; буфер
@@ -298,7 +306,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
             ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
         if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
         const int pointsForSkip = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
-        const double timeStep   = h_local * (double)req.pre_scaller;
+        const numb   timeStep   = h_local * (numb)req.pre_scaller;
 
         if (h_local <= 0.0 || pointsInBlock <= 0) {
             res.flags[j] = -1;
@@ -342,6 +350,172 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    res.ok = true;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// run_bif1d_cpu — CPU-порт КЛАССИЧЕСКОГО (без continuation) 1D-свипа, двойник
+// run_bif1d. Точки независимы: каждая стартует с одних и тех же НУ и базовых
+// параметров, поэтому цепочки, как в run_bif1d_continuation_cpu, здесь нет.
+//
+// Флаги повторяют связку calculateDiscreteModelCUDA + peakFinderCUDA:
+// kernel пишет checker = flag транзиента, а основной участок считает только
+// при flag 1 или -1 (см. cudaLibrary.cu:1065). peakFinderCUDA затем пропускает
+// точки с checker 0 и -1. Итого transient, схлопнувшийся в неподвижную точку
+// (flag 0), даёт флаг 0 и до поиска пиков не доходит. Это НЕ то же, что в
+// continuation-ветке, где такой transient помечается как -1 — там так делает
+// и GPU-двойник, здесь же образец другой.
+//
+// Свипуемая величина — параметр, НУ или сам шаг h, как на GPU. Сетка берётся
+// из cont_sweep_value (reverse только у continuation), как у CPU-веток
+// LLE/LS/DFT.
+// ---------------------------------------------------------------------------
+Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
+    Bifurcation1DResult res;
+    auto fail = [&](const std::string& msg) -> Bifurcation1DResult& {
+        res.error = msg; return res;
+    };
+
+    // Диспетчер уже провалидировал req целиком; здесь — только то, от чего
+    // зависит своя разметка буферов, плюс дешёвая страховка на прямой вызов.
+    if (req.krs_body.empty())                                 return fail("krs_body пуст");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                              return fail("writable_var вне диапазона");
+    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+    if (req.h <= 0.0)           return fail("h должно быть > 0");
+    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+
+    KrsCpuStep step;
+    std::vector<KrsCpuDiag> diags;
+    if (!step.compile(req.krs_body, req.amountOfX, (int)req.base_values.size(), diags)) {
+        std::string msg = "CPU KRS:";
+        for (const auto& d : diags) {
+            msg += "\n";
+            if (d.line > 0) msg += "line " + std::to_string(d.line) + ": ";
+            msg += d.message;
+        }
+        return fail(msg);
+    }
+
+    // При h-свипе шаг свой в каждой точке — буфер под худший случай
+    // (минимальный h => больше всего записей), как в continuation-ветке.
+    const double worstCaseH = req.sweep_over_h
+                            ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                            : req.h;
+    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+    if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+    const int nPts = req.n_pts;
+    res.n_pts        = nPts;
+    res.record_steps = maxPointsInBlock;
+    res.param_lo     = req.param_lo;
+    res.param_hi     = req.param_hi;
+    res.flags.assign(nPts, 0);
+    res.bifurcation_points.assign(nPts, {});
+    res.peak_times.assign(nPts, {});
+
+    // Снимок для right-click экспорта — те же поля, что заполняет run_bif1d.
+    res.snapshot.values.assign(req.base_values.begin(), req.base_values.end());
+    res.snapshot.initial_conditions.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+    res.snapshot.tMax          = req.t_max;
+    res.snapshot.transientTime = req.transient_time;
+    res.snapshot.h             = req.h;
+    res.snapshot.preScaller    = req.pre_scaller;
+    res.snapshot.writableVar   = req.writable_var;
+    res.snapshot.indexOfMutVar = req.sweep_over_var ? req.var_sweep_index : req.param_index;
+    res.snapshot.range_lo      = req.param_lo;
+    res.snapshot.range_hi      = req.param_hi;
+
+    const std::string& OUT_FILE_PATH = req.csv_output_path;
+    constexpr int set_precision = 15;
+    if (!OUT_FILE_PATH.empty()) {
+        std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+        data_export::write_bif1d_config(cfg, res.snapshot);
+        std::ofstream trunc(OUT_FILE_PATH);   // обнуляем основной файл данных
+        trunc.close();
+    }
+    std::ofstream out;
+    if (!OUT_FILE_PATH.empty()) {
+        out.open(OUT_FILE_PATH, std::ios::app);
+        if (out.is_open()) out << std::setprecision(set_precision);
+    }
+
+    std::vector<numb> x((size_t)req.amountOfX);
+    std::vector<numb> a(req.base_values.size());
+    std::vector<numb> block((size_t)maxPointsInBlock);
+    std::vector<numb> peaks((size_t)maxPointsInBlock);
+    std::vector<numb> times((size_t)maxPointsInBlock);
+
+    for (int j = 0; j < nPts; ++j) {
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true;
+            res.error = "Cancelled by user";
+            return res;
+        }
+        const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
+                                          /*reverse*/ false, req.log_scale);
+
+        // Каждая точка независима — состояние и параметры восстанавливаем.
+        x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+        a.assign(req.base_values.begin(), req.base_values.end());
+
+        numb h_local = (numb)req.h;
+        if (req.sweep_over_h)        h_local = (numb)p;
+        else if (req.sweep_over_var) x[(size_t)req.var_sweep_index] = (numb)p;
+        else                         a[(size_t)req.param_index]     = (numb)p;
+
+        int pointsInBlock = (h_local > (numb)0)
+            ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
+        if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
+        const int  pointsForSkip = (h_local > (numb)0) ? (int)(req.transient_time / h_local) : 0;
+        // Шаг между записанными сэмплами: h*preScaller. Передаём его в
+        // peak-finder напрямую, поэтому поправка time_scale из run_bif1d
+        // (там peakFinderCUDA получает один h на весь запуск) здесь не нужна.
+        const numb timeStep = h_local * (numb)req.pre_scaller;
+
+        auto finish_point = [&](int flag) {
+            res.flags[j] = flag;
+            if (out.is_open())
+                data_export::write_bif1d_rows(out, p, flag, nullptr, nullptr);
+            if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+        };
+
+        if (h_local <= (numb)0 || pointsInBlock <= 0) { finish_point(-1); continue; }
+
+        int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                                  pointsForSkip, req.amountOfX,
+                                  /*preScaller*/ 1, /*writableVar*/ 0,
+                                  req.max_value, nullptr);
+        // Ровно как в kernel'е: основной участок считается только при 1 и -1.
+        if (flag == 1 || flag == -1)
+            flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                                  pointsInBlock, req.amountOfX,
+                                  req.pre_scaller, req.writable_var,
+                                  req.max_value, block.data());
+        if (flag == -1 || flag == 0) { finish_point(flag); continue; }
+
+        const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
+                                      peaks.data(), times.data(), timeStep);
+        res.flags[j] = n;
+        if (n > 0) {
+            res.bifurcation_points[j].assign(peaks.begin(), peaks.begin() + n);
+            res.peak_times[j].assign        (times.begin(), times.begin() + n);
+        }
+        if (out.is_open())
+            data_export::write_bif1d_rows(out, p, n,
+                                          res.bifurcation_points[j].data(),
+                                          res.peak_times[j].data());
+        if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+    }
+
+    if (out.is_open()) out.close();
     res.ok = true;
     return res;
 }
@@ -488,9 +662,9 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     res.lyapunov.assign(nPts, std::numeric_limits<double>::quiet_NaN());
     res.flags.assign(nPts, 0);
 
-    std::vector<double> x(req.initial_conditions.begin(), req.initial_conditions.end());
-    std::vector<double> a(req.base_values.begin(), req.base_values.end());
-    std::vector<double> y((size_t)N, 0.0);
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> y((size_t)N, (numb)0);
 
     // Случайное единичное направление щупа. subsequence = индекс точки: в
     // kernel'е это idx потока, поэтому классический CPU-свип получает те же
@@ -507,11 +681,11 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     seed_probe_direction(0ULL);
 
     bool probe_attached = false;   // true => y[] уже в абсолютных координатах
-    double h_local = req.h;        // при h-свипе меняется от точки к точке
+    numb h_local = (numb)req.h;    // при h-свипе меняется от точки к точке
 
     // Один NT-блок: продвинуть x и щуп, вернуть log(|dX|/eps) и вернуть щуп на
     // расстояние eps. Точная копия тела цикла LLEKernelCUDA.
-    auto advance_block = [&](double& out_log) -> bool {
+    auto advance_block = [&](numb& out_log) -> bool {
         if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
                            1, 0, req.max_value, nullptr) == 0) return false;
         if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, ntSteps, N,
@@ -579,20 +753,20 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
                 probe_attached = true;
             }
         } else {
-            double dummy;
+            numb dummy;
             for (int b = 0; b < settleBlocks && alive; ++b)
                 if (!advance_block(dummy)) alive = false;
         }
 
-        double sum = 0.0;
+        numb sum = (numb)0;
         for (int b = 0; alive && b < nBlocks; ++b) {
-            double lg;
+            numb lg;
             if (!advance_block(lg)) alive = false;
             else                    sum += lg;
         }
 
         if (alive) {
-            res.lyapunov[j] = sum / req.t_max;
+            res.lyapunov[j] = (double)(sum / (numb)req.t_max);
             res.flags[j]    = 1;
         } else {
             res.flags[j] = -1;      // lyapunov[j] остаётся NaN
@@ -613,35 +787,99 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
 }
 
 // ---------------------------------------------------------------------------
+// Оконная функция для DFT — та же, что build_window в Impl (0=None,
+// 1=Hanning, 2=Hamming). Дублируется здесь, потому что при h-свипе длина блока
+// своя в каждой точке и окно приходится строить внутри цикла.
+// ---------------------------------------------------------------------------
+void cpu_build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
+    out.resize((size_t)sizeOfBlock);
+    if (window_type == 0) { std::fill(out.begin(), out.end(), (numb)1); return; }
+    const numb gamma = (numb)2.0 * (numb)kPi / (numb)(sizeOfBlock - 1);
+    if (window_type == 2)
+        for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] = (numb)0.53836 - (numb)0.46164 * std::cos(gamma * (numb)n);
+    else
+        for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] = (numb)0.5 * ((numb)1.0 - std::cos(gamma * (numb)n));
+}
+
+// ---------------------------------------------------------------------------
+// Порт DFT_custom (cudaLibrary.cu:1698) на один блок.
+//
+// Рекуррентный поворот вектора (cos_n, sin_n) вместо cos/sin на каждой
+// итерации, со сбросом на точное значение раз в RESET_INTERVAL — как на GPU,
+// включая float-точность в самом сбросе (там cosf/sinf).
+// ---------------------------------------------------------------------------
+void cpu_dft_block(const numb* data, int sizeOfBlock, const numb* window,
+                   int nFreq, numb freq_lo, numb freq_hi, bool logFreqAxis,
+                   numb h, numb* akcos, numb* bksin)
+{
+    constexpr int RESET_INTERVAL = 1000;
+    const numb f_step = (nFreq > 1) ? (freq_hi - freq_lo) / (numb)(nFreq - 1) : (numb)0;
+    const numb psi    = (numb)2.0 * (numb)kPi * h;
+
+    for (int k = 0; k < nFreq; ++k) {
+        numb ak = (numb)0, bk = (numb)0;
+        const numb f_k = logFreqAxis
+            ? std::pow((numb)10.0, std::log10(freq_lo) + (nFreq > 1
+                  ? (std::log10(freq_hi) - std::log10(freq_lo)) * (numb)k / (numb)(nFreq - 1) : (numb)0))
+            : (freq_lo + (numb)k * f_step);
+        const numb cos_theta = std::cos((numb)2.0 * (numb)kPi * h * f_k);
+        const numb sin_theta = std::sin((numb)2.0 * (numb)kPi * h * f_k);
+        numb cos_n = (numb)1, sin_n = (numb)0;
+        int reset_counter = RESET_INTERVAL;
+
+        for (int n = 0; n < sizeOfBlock; ++n) {
+            const numb wd = window[n] * data[n];
+            ak += wd * cos_n;
+            bk += wd * sin_n;
+            const numb new_cos = cos_n * cos_theta - sin_n * sin_theta;
+            const numb new_sin = sin_n * cos_theta + cos_n * sin_theta;
+            cos_n = new_cos;
+            sin_n = new_sin;
+            if (--reset_counter == 0) {
+                reset_counter = RESET_INTERVAL;
+                if (n + 1 < sizeOfBlock) {
+                    const numb exact = psi * f_k * (numb)(n + 1);
+                    // cosf/sinf, как в kernel'е: сброс идёт через float.
+                    cos_n = (numb)std::cos((float)exact);
+                    sin_n = (numb)std::sin((float)exact);
+                }
+            }
+        }
+        akcos[k] = ak / (numb)sizeOfBlock;
+        bksin[k] = bk / (numb)sizeOfBlock;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Порты projectionOperator и gramSchmidtProcess (cudaLibrary.cu:2832 и :2848).
 // Оригиналы объявлены __device__ __host__ и уже работают с runtime-размерностью,
 // но живут в .cu под nvcc — из обычного .cpp их не подключить, поэтому копия.
 // ---------------------------------------------------------------------------
-void cpu_projection_operator(const double* a, const double* b, double* minuend, int n) {
-    double numerator = 0.0, denominator = 0.0;
+void cpu_projection_operator(const numb* a, const numb* b, numb* minuend, int n) {
+    numb numerator = (numb)0, denominator = (numb)0;
     for (int i = 0; i < n; ++i) {
         numerator   += a[i] * b[i];
         denominator += b[i] * b[i];
     }
-    const double fraction = (denominator == 0.0) ? 0.0 : numerator / denominator;
+    const numb fraction = (denominator == (numb)0) ? (numb)0 : numerator / denominator;
     for (int i = 0; i < n; ++i) minuend[i] -= fraction * b[i];
 }
 
 // a — входные векторы (n штук по n компонент, row-major), b — ортонормированный
 // результат. denominators (опц.) получает длины ДО нормировки — из них LS и
 // собирает показатели.
-void cpu_gram_schmidt(const double* a, double* b, int n, double* denominators = nullptr) {
+void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullptr) {
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) b[j + i * n] = a[j + i * n];
         for (int j = 0; j < i; ++j)
             cpu_projection_operator(a + i * n, b + j * n, b + i * n, n);
     }
     for (int i = 0; i < n; ++i) {
-        double denominator = 0.0;
+        numb denominator = (numb)0;
         for (int j = 0; j < n; ++j) denominator += b[i * n + j] * b[i * n + j];
         denominator = std::sqrt(denominator);
         for (int j = 0; j < n; ++j)
-            b[i * n + j] = (denominator == 0.0) ? 0.0 : b[i * n + j] / denominator;
+            b[i * n + j] = (denominator == (numb)0) ? (numb)0 : b[i * n + j] / denominator;
         if (denominators != nullptr) denominators[i] = denominator;
     }
 }
@@ -708,12 +946,12 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                         std::numeric_limits<double>::quiet_NaN()));
     res.flags.assign(nPts, 0);
 
-    std::vector<double> x(req.initial_conditions.begin(), req.initial_conditions.end());
-    std::vector<double> a(req.base_values.begin(), req.base_values.end());
-    std::vector<double> y((size_t)N * N, 0.0);   // N щупов, абсолютные координаты
-    std::vector<double> z((size_t)N * N, 0.0);   // рабочий буфер Грама-Шмидта
-    std::vector<double> denominators((size_t)N, 0.0);
-    std::vector<double> sum((size_t)N, 0.0);
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> y((size_t)N * N, (numb)0);   // N щупов, абсолютные координаты
+    std::vector<numb> z((size_t)N * N, (numb)0);   // рабочий буфер Грама-Шмидта
+    std::vector<numb> denominators((size_t)N, (numb)0);
+    std::vector<numb> sum((size_t)N, (numb)0);
 
     CpuRandState rng;
     // Случайный базис из N векторов — та же процедура и тот же RNG, что в
@@ -734,12 +972,12 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     seed_probe_basis(0ULL);
 
     bool probes_attached = false;
-    double h_local = req.h;
+    numb h_local = (numb)req.h;
 
     // Один NT-блок: продвинуть траекторию и все щупы, ортогонализовать, вернуть
     // log(denominators[k]/eps) по каждому направлению и вернуть щупы на eps.
     // Точная копия тела цикла LSKernelCUDA.
-    auto advance_block = [&](double* out_logs) -> bool {
+    auto advance_block = [&](numb* out_logs) -> bool {
         if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
                            1, 0, req.max_value, nullptr) == 0) return false;
         for (int j = 0; j < N; ++j)
@@ -760,7 +998,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         return true;
     };
 
-    std::vector<double> logs((size_t)N, 0.0);
+    std::vector<numb> logs((size_t)N, (numb)0);
 
     for (int j = 0; j < nPts; ++j) {
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
@@ -818,7 +1056,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         if (alive) {
-            for (int k = 0; k < N; ++k) res.spectrum[j][k] = sum[k] / req.t_max;
+            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / (numb)req.t_max);
             res.flags[j] = 1;
         } else {
             res.flags[j] = -1;      // spectrum[j] остаётся NaN
@@ -828,6 +1066,155 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                 seed_probe_basis((unsigned long long)j + 1ULL);
             }
         }
+        if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+    }
+
+    res.ok = true;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// run_dft1d_cpu — 1D DFT на CPU, оба режима (см. run_lle1d_cpu).
+//
+// continuation = false: каждая точка независима, x сбрасывается на
+//   initial_conditions (при IC-свипе свипуемая координата подменяется).
+// continuation = true: x[] переносится с предыдущей точки — как в
+//   Bifurcation1D, тангенциальных векторов здесь нет.
+//
+// Внутри точки: transient, запись блока writable_var, окно, DFT
+// (см. cpu_dft_block — порт DFT_custom). При h-свипе число сэмплов и окно
+// пересчитываются под шаг точки; буфер выделен под худший случай.
+// ---------------------------------------------------------------------------
+Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
+    Dft1DResult res;
+    auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
+
+    if (req.krs_body.empty())                                 return fail("krs_body пуст");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if (!req.sweep_over_h && !req.sweep_over_var &&
+        (req.param_index <= 0 || req.param_index >= (int)req.base_values.size()))
+                                                              return fail("param_index вне диапазона");
+    if (req.sweep_over_var &&
+        (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
+                                                              return fail("var_sweep_index вне диапазона");
+    if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                              return fail("writable_var вне диапазона");
+    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+    if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
+    if (req.h <= 0.0)           return fail("h должно быть > 0");
+    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+    if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
+                                return fail("log-сетка по частоте требует freq lo/hi > 0");
+
+    KrsCpuStep step;
+    std::vector<KrsCpuDiag> diags;
+    if (!step.compile(req.krs_body, req.amountOfX, (int)req.base_values.size(), diags)) {
+        std::string msg = "CPU KRS:";
+        for (const auto& d : diags) {
+            msg += "\n";
+            if (d.line > 0) msg += "line " + std::to_string(d.line) + ": ";
+            msg += d.message;
+        }
+        return fail(msg);
+    }
+
+    const double worstCaseH = req.sweep_over_h
+                            ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                            : req.h;
+    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+    if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+    const int nPts  = req.n_pts;
+    const int nFreq = req.n_freq;
+    res.n_pts   = nPts;
+    res.n_freq  = nFreq;
+    res.param_lo = req.param_lo;
+    res.param_hi = req.param_hi;
+    res.freq_lo  = req.freq_lo;
+    res.freq_hi  = req.freq_hi;
+    res.continuation_reverse = continuation && req.continuation_reverse;
+    res.ak_cos.assign((size_t)nPts * nFreq, 0.0);
+    res.bk_sin.assign((size_t)nPts * nFreq, 0.0);
+    res.flags.assign(nPts, 0);
+
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> block((size_t)maxPointsInBlock);
+    std::vector<numb> window;
+    std::vector<numb> ak_tmp((size_t)nFreq), bk_tmp((size_t)nFreq);
+    int window_len = -1;                 // окно перестраиваем только при смене длины
+
+    numb h_local = (numb)req.h;
+
+    for (int j = 0; j < nPts; ++j) {
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true;
+            res.error = "Cancelled by user";
+            return res;
+        }
+        const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
+                                          continuation && req.continuation_reverse,
+                                          req.log_scale);
+
+        if (!continuation)
+            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+
+        if (req.sweep_over_h)        h_local = p;
+        else if (req.sweep_over_var) x[(size_t)req.var_sweep_index] = p;
+        else                         a[(size_t)req.param_index] = p;
+
+        int pointsInBlock = (h_local > 0.0) ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
+        if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
+        const int pointsForSkip = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
+
+        auto mark_dead = [&](int flag) {
+            res.flags[j] = flag;
+            // Как DFT_custom: checker == -1 -> -1.0, checker == 0 -> 0.0.
+            const double fill = (flag == -1) ? -1.0 : 0.0;
+            for (int k = 0; k < nFreq; ++k) {
+                res.ak_cos[(size_t)j * nFreq + k] = fill;
+                res.bk_sin[(size_t)j * nFreq + k] = fill;
+            }
+            if (continuation) x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+        };
+
+        if (h_local <= 0.0 || pointsInBlock <= 2) { mark_dead(-1); continue; }
+
+        int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                                  pointsForSkip, req.amountOfX,
+                                  /*preScaller*/ 1, /*writableVar*/ 0,
+                                  req.max_value, nullptr);
+        if (flag == 0) { mark_dead(-1); continue; }
+
+        flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                              pointsInBlock, req.amountOfX,
+                              req.pre_scaller, req.writable_var,
+                              req.max_value, block.data());
+        // Та же конвенция, что у continuation-ядра БД: -1 (сваливание в точку)
+        // помечает точку как непригодную, остальное считаем.
+        const int checker = continuation ? ((flag == -1) ? -1 : 1) : flag;
+        if (checker == -1 || checker == 0) { mark_dead(checker); continue; }
+
+        if (window_len != pointsInBlock) {
+            cpu_build_window(window, pointsInBlock, req.window_type);
+            window_len = pointsInBlock;
+        }
+        // Считаем в numb (как GPU), затем расширяем в double-хранилище результата.
+        cpu_dft_block(block.data(), pointsInBlock, window.data(),
+                      nFreq, (numb)req.freq_lo, (numb)req.freq_hi, req.freq_log_scale,
+                      h_local * (numb)req.pre_scaller,
+                      ak_tmp.data(), bk_tmp.data());
+        for (int k = 0; k < nFreq; ++k) {
+            res.ak_cos[(size_t)j * nFreq + k] = (double)ak_tmp[(size_t)k];
+            res.bk_sin[(size_t)j * nFreq + k] = (double)bk_tmp[(size_t)k];
+        }
+        res.flags[j] = 1;
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
@@ -858,6 +1245,8 @@ struct ParametricEngine::Impl {
     std::string src_template_cont;       // bifurcation1d_cont.template.cu
     std::string src_template_lle_cont;   // lle1d_cont.template.cu
     std::string src_template_ls_cont;    // ls1d_cont.template.cu
+    std::string src_template_dft_cont;   // dft1d_cont.template.cu
+    std::string src_template_dft_hsweep; // dft1d_hsweep.template.cu
     std::string src_template_lle;    // lle1d.template.cu
     std::string src_template_lle_2d; // lle2d.template.cu
     std::string src_template_ls;     // ls1d.template.cu
@@ -920,6 +1309,10 @@ struct ParametricEngine::Impl {
     };
     CachedSimpleContModule cached_lle_cont;   // lle1dContinuationKernel
     CachedSimpleContModule cached_ls_cont;    // ls1dContinuationKernel
+    CachedSimpleContModule cached_dft_cont;   // dft1dContinuationKernel
+    // Классический (без continuation) DFT-свип по h — тоже одноядерный модуль,
+    // но ядро параллельное: поток на точку (см. dft1d_hsweep.template.cu).
+    CachedSimpleContModule cached_dft_hsweep; // dft1dHSweepKernel
 
     // Bif-2D — отдельный шаблон (bifurcation2d.template.cu), три kernel'а:
     // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
@@ -1116,6 +1509,8 @@ struct ParametricEngine::Impl {
         src_template_cont     = read_text_file(root + "bifurcation1d_cont.template.cu", e); if (!e.empty()) { err = e; return false; }
         src_template_lle_cont = read_text_file(root + "lle1d_cont.template.cu",         e); if (!e.empty()) { err = e; return false; }
         src_template_ls_cont  = read_text_file(root + "ls1d_cont.template.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_template_dft_cont = read_text_file(root + "dft1d_cont.template.cu",         e); if (!e.empty()) { err = e; return false; }
+        src_template_dft_hsweep = read_text_file(root + "dft1d_hsweep.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_template_lle      = read_text_file(root + "lle1d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_lle_2d   = read_text_file(root + "lle2d.template.cu",              e); if (!e.empty()) { err = e; return false; }
         src_template_ls       = read_text_file(root + "ls1d.template.cu",               e); if (!e.empty()) { err = e; return false; }
@@ -1334,6 +1729,11 @@ struct ParametricEngine::Impl {
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return fail("log scale требует param lo/hi > 0");
 
+        // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU
+        // (то же место в конвейере, что у run_lle_1d / run_ls_1d). Стоит после
+        // общей валидации и до ensure_init: CUDA этой ветке не нужна вовсе.
+        if (req.use_cpu) return run_bif1d_cpu(req);
+
         // dt-sweep: t_max/transient_time фиксированы, число шагов на GPU
         // пересчитывается из h per-thread (см. hSweepAxis в
         // calculateDiscreteModelCUDA). hSweepAxis=0 -- в 1D всегда единственная
@@ -1360,8 +1760,9 @@ struct ParametricEngine::Impl {
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[2]                        = { req.param_lo, req.param_hi };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[2]                        = { (numb)req.param_lo, (numb)req.param_hi };
         // Sweep target:
         //   param-sweep → indicesOfMutVars[0] = 1-based индекс параметра (a[]),
         //                 par_or_var_arg = true  → kernel пишет в localValues.
@@ -1373,7 +1774,8 @@ struct ParametricEngine::Impl {
         const int    writableVar                = req.writable_var;
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const int    preScaller                 = req.pre_scaller;
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
@@ -1404,14 +1806,14 @@ struct ParametricEngine::Impl {
         freeMemory = (size_t)((double)freeMemory * 0.92);
 
         size_t memPerSystem =
-            3 * (size_t)amountOfPointsInBlock * sizeof(double) +  // d_data, d_outPeaks, d_timeOfPeaks
-            2 * sizeof(double) +                                  // d_meanFreq, d_medianFreq (зарезервировано)
+            3 * (size_t)amountOfPointsInBlock * sizeof(numb) +  // d_data, d_outPeaks, d_timeOfPeaks
+            2 * sizeof(numb) +                                  // d_meanFreq, d_medianFreq (зарезервировано)
             sizeof(int);                                          // d_amountOfPeaks
         size_t memConstants =
-            2 * sizeof(double) +
+            2 * sizeof(numb) +
             sizeof(int) +
-            (size_t)amountOfInitialConditions * sizeof(double) +
-            (size_t)amountOfValues * sizeof(double);
+            (size_t)amountOfInitialConditions * sizeof(numb) +
+            (size_t)amountOfValues * sizeof(numb);
         constexpr double SAFETY_FACTOR = 0.9;
         size_t safeFree = (size_t)((double)freeMemory * SAFETY_FACTOR);
         if (memConstants >= safeFree) return fail("not enough GPU memory for constants");
@@ -1420,27 +1822,31 @@ struct ParametricEngine::Impl {
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
-        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
-        if (nPtsLimiter == 0)
-            return fail("not enough GPU memory: per-system buffer too large");
+        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
+        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
+        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
+        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
+        // считался нормально. Зато при n_pts < 32 округление давало 0, и Run
+        // падал с сообщением про нехватку памяти, которая была ни при чём.
+        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // --- Host buffers (порт строк 257-264 NL) ---
         // h_data/h_meanFreq/h_medianFreq/h_localX/h_localValues нужны только для
         // continuation_bif1D и mean/median — мы их не используем.
-        std::vector<double> h_outPeaks   (nPtsLimiter * (size_t)amountOfPointsInBlock);
-        std::vector<double> h_timeOfPeaks(nPtsLimiter * (size_t)amountOfPointsInBlock);
+        std::vector<numb> h_outPeaks   (nPtsLimiter * (size_t)amountOfPointsInBlock);
+        std::vector<numb> h_timeOfPeaks(nPtsLimiter * (size_t)amountOfPointsInBlock);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
 
         // --- Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq) ---
-        double* d_data              = nullptr;
-        double* d_ranges            = nullptr;
+        numb* d_data              = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
-        double* d_outPeaks          = nullptr;
-        double* d_timeOfPeaks       = nullptr;
+        numb* d_outPeaks          = nullptr;
+        numb* d_timeOfPeaks       = nullptr;
         int*    d_actualIterations  = nullptr;
 
         auto cleanup = [&]() {
@@ -1479,21 +1885,21 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BIF_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
-        BIF_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                          "cudaMalloc d_ranges");
+        BIF_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
+        BIF_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(numb)),                                          "cudaMalloc d_ranges");
         BIF_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                             "cudaMalloc d_indicesOfMutVars");
-        BIF_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),          "cudaMalloc d_initialConditions");
-        BIF_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                     "cudaMalloc d_values");
-        BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_outPeaks");
-        BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_timeOfPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),          "cudaMalloc d_initialConditions");
+        BIF_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                     "cudaMalloc d_values");
+        BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_outPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_actualIterations");
 
         // --- H2D констант (порт строк 314-319 NL) ---
-        BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,   1 * sizeof(int),                                   cudaMemcpyHostToDevice), "memcpy d_indices");
-        BIF_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
-        BIF_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        BIF_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
+        BIF_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),            cudaMemcpyHostToDevice), "memcpy d_values");
         BIF_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
@@ -1549,17 +1955,17 @@ struct ParametricEngine::Impl {
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension                 = 1;
-            double h_arg                     = h;
+            numb h_arg                     = h;
             int    amountOfInitialConditions_int = amountOfInitialConditions;
             int    amountOfValues_int        = amountOfValues;
             size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
             int    preScaller_int            = preScaller;
             int    writableVar_int           = writableVar;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = !req.sweep_over_var; // true=param, false=IC
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
-            double tMax_arg                  = tMax;
+            numb transientTime_arg         = transientTime;
+            numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args_traj[] = {
@@ -1590,7 +1996,7 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg
             };
 
-            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
 
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -1599,7 +2005,7 @@ struct ParametricEngine::Impl {
             BIF_CHECK(cudaDeviceSynchronize(), "sync after traj");
 
             // peakFinderCUDA
-            double timeStep_arg = h * (double)preScaller;
+            numb timeStep_arg = h * (double)preScaller;
             void* args_peak[] = {
                 &d_data,
                 &sizeOfBlock_s,
@@ -1617,9 +2023,9 @@ struct ParametricEngine::Impl {
             BIF_CHECK(cudaDeviceSynchronize(), "sync after peak");
 
             // D2H (порт строк 538-540 NL)
-            BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
+            BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
             BIF_CHECK(cudaMemcpy(h_amountOfPeaks.data(),  d_amountOfPeaks,  nPtsLimiter * sizeof(int),                                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
-            BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+            BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
             BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
             // --- CSV + аккумуляция результата (порт строк 574-608 NL) ---
@@ -1644,26 +2050,29 @@ struct ParametricEngine::Impl {
 
                 int n = npeaks;
                 if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
-                const double* peakRow = h_outPeaks.data()    + k * (size_t)amountOfPointsInBlock;
-                const double* timeRow = h_timeOfPeaks.data() + k * (size_t)amountOfPointsInBlock;
+                const numb* peakRow = h_outPeaks.data()    + k * (size_t)amountOfPointsInBlock;
+                const numb* timeRow = h_timeOfPeaks.data() + k * (size_t)amountOfPointsInBlock;
 
-                std::vector<double> scaledTimes;
+                // Экспорт и результат работают в double — расширяем numb-ряды
+                // здесь, один раз, и переиспользуем для CSV и для памяти.
+                std::vector<double> widePeaks, scaledTimes;
                 if (n > 0) {
+                    widePeaks.assign(peakRow, peakRow + n);
                     scaledTimes.assign(timeRow, timeRow + n);
                     if (time_scale != 1.0)
                         for (double& v : scaledTimes) v *= time_scale;
                 }
 
                 if (out.is_open())
-                    data_export::write_bif1d_rows(out, param_val, npeaks, peakRow,
-                                                  scaledTimes.empty() ? timeRow : scaledTimes.data());
+                    data_export::write_bif1d_rows(out, param_val, npeaks,
+                                                  widePeaks.data(), scaledTimes.data());
 
                 // В память для GUI: значения пиков и межпиковые интервалы
                 res.flags[global_idx] = npeaks;
                 auto& dst_peaks = res.bifurcation_points[global_idx];
                 auto& dst_times = res.peak_times[global_idx];
                 if (n > 0) {
-                    dst_peaks.assign(peakRow, peakRow + n);
+                    dst_peaks = std::move(widePeaks);
                     dst_times = std::move(scaledTimes);
                 } else {
                     dst_peaks.clear();
@@ -1844,15 +2253,17 @@ struct ParametricEngine::Impl {
         const double h                          = req.h;
         const double eps                        = req.eps;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[2]                        = { req.param_lo, req.param_hi };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[2]                        = { (numb)req.param_lo, (numb)req.param_hi };
         // Sweep target: см. bif1d. При IC-свипе индекс — 0-based в localX.
         int    indicesOfMutVars[1]              = { req.sweep_over_var
                                                     ? req.var_sweep_index
                                                     : req.param_index };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
@@ -1872,18 +2283,18 @@ struct ParametricEngine::Impl {
             return fail("cudaMemGetInfo failed");
         freeMemory = (size_t)((double)freeMemory * 0.5);
 
-        size_t nPtsLimiter = freeMemory / (sizeof(double) * (size_t)amountOfPointsInBlock);
+        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)  nPtsLimiter = (size_t)nPts;
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        std::vector<double> h_lleResult(nPtsLimiter);
+        std::vector<numb> h_lleResult(nPtsLimiter);
 
-        double* d_ranges            = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
-        double* d_lleResult         = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
+        numb* d_lleResult         = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -1915,16 +2326,16 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        LLE_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                "cudaMalloc d_ranges");
+        LLE_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(numb)),                                "cudaMalloc d_ranges");
         LLE_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
-        LLE_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),"cudaMalloc d_initialConditions");
-        LLE_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),           "cudaMalloc d_values");
-        LLE_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(double)),                      "cudaMalloc d_lleResult");
+        LLE_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),"cudaMalloc d_initialConditions");
+        LLE_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
+        LLE_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(numb)),                      "cudaMalloc d_lleResult");
 
-        LLE_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(double),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LLE_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LLE_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  1 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
-        LLE_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
-        LLE_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        LLE_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
+        LLE_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),            cudaMemcpyHostToDevice), "memcpy d_values");
         LLE_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
@@ -1963,7 +2374,7 @@ struct ParametricEngine::Impl {
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
             // blockSize по формуле NonLinAnal (hostLibrary.cu:2419), cap=32
-            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(double)));
+            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
             if (blockSize < 1) blockSize = 1;
             if (blockSize > blockSize_setup) blockSize = blockSize_setup;
             int gridSize = (int)((nPtsLimiter + blockSize - 1) / blockSize);
@@ -1971,22 +2382,22 @@ struct ParametricEngine::Impl {
             // Аргументы LLEKernelCUDA (cudaLibrary.cu:2379)
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_arg           = (int)nPtsLimiter;
-            double NT_arg                    = NT;
-            double tMax_arg                  = tMax;
+            numb NT_arg                    = NT;
+            numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
             int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 1;
-            double h_arg                     = h;
-            double eps_arg                   = eps;
+            numb h_arg                     = h;
+            numb eps_arg                   = eps;
             int    amountOfIC_arg            = amountOfInitialConditions;
             int    amountOfValues_arg        = amountOfValues;
             int    amountOfIterations_arg    = (int)(tMax / NT);
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
+            numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
@@ -2016,9 +2427,9 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg
             };
 
-            // Shared = (3 * amountOfIC + amountOfValues) * sizeof(double) * blockSize
+            // Shared = (3 * amountOfIC + amountOfValues) * sizeof(numb) * blockSize
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
-                                                 * sizeof(double) * blockSize);
+                                                 * sizeof(numb) * blockSize);
 
             LLE_CHECK_CU(cuLaunchKernel(cached_lle.kernel_lle,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -2026,7 +2437,7 @@ struct ParametricEngine::Impl {
                          "cuLaunchKernel(lle)");
             LLE_CHECK(cudaDeviceSynchronize(), "sync after lle");
 
-            LLE_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, nPtsLimiter * sizeof(double), cudaMemcpyDeviceToHost),
+            LLE_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, nPtsLimiter * sizeof(numb), cudaMemcpyDeviceToHost),
                       "memcpy h_lleResult");
             LLE_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
@@ -2302,13 +2713,15 @@ struct ParametricEngine::Impl {
         const double h                          = req.h;
         const double eps                        = req.eps;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[4]                        = { ranges_lo_x, ranges_hi_x,
-                                                    ranges_lo_y, ranges_hi_y };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[4]                        = { (numb)ranges_lo_x, (numb)ranges_hi_x,
+                                                    (numb)ranges_lo_y, (numb)ranges_hi_y };
         int    indicesOfMutVars[2]              = { idx_axis_x, idx_axis_y };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
@@ -2329,18 +2742,18 @@ struct ParametricEngine::Impl {
             return fail("cudaMemGetInfo failed");
         freeMemory = (size_t)((double)freeMemory * 0.5);
 
-        size_t nPtsLimiter = freeMemory / (sizeof(double) * (size_t)amountOfPointsInBlock);
+        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
         if (nPtsLimiter == 0)                  nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)         nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        std::vector<double> h_lleResult(nPtsLimiter);
+        std::vector<numb> h_lleResult(nPtsLimiter);
 
-        double* d_ranges            = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
-        double* d_lleResult         = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
+        numb* d_lleResult         = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -2372,16 +2785,16 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        LLE2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                "cudaMalloc d_ranges");
+        LLE2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                "cudaMalloc d_ranges");
         LLE2_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
-        LLE2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),"cudaMalloc d_initialConditions");
-        LLE2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),           "cudaMalloc d_values");
-        LLE2_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(double)),                      "cudaMalloc d_lleResult");
+        LLE2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),"cudaMalloc d_initialConditions");
+        LLE2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
+        LLE2_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(numb)),                      "cudaMalloc d_lleResult");
 
-        LLE2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LLE2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LLE2_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
-        LLE2_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
-        LLE2_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        LLE2_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
+        LLE2_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),            cudaMemcpyHostToDevice), "memcpy d_values");
         LLE2_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
@@ -2430,7 +2843,7 @@ struct ParametricEngine::Impl {
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(double)));
+            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
             if (blockSize < 1) blockSize = 1;
             if (blockSize > blockSize_setup) blockSize = blockSize_setup;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
@@ -2439,22 +2852,22 @@ struct ParametricEngine::Impl {
             // но dimension=2 и амбулатура индекса nPts остаётся "сторона сетки".
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_arg           = (int)cur_limiter;
-            double NT_arg                    = NT;
-            double tMax_arg                  = tMax;
+            numb NT_arg                    = NT;
+            numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
             int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 2;
-            double h_arg                     = h;
-            double eps_arg                   = eps;
+            numb h_arg                     = h;
+            numb eps_arg                   = eps;
             int    amountOfIC_arg            = amountOfInitialConditions;
             int    amountOfValues_arg        = amountOfValues;
             int    amountOfIterations_arg    = (int)(tMax / NT);
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
+            numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
@@ -2485,7 +2898,7 @@ struct ParametricEngine::Impl {
             };
 
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
-                                                 * sizeof(double) * blockSize);
+                                                 * sizeof(numb) * blockSize);
 
             LLE2_CHECK_CU(cuLaunchKernel(cached_lle_2d.kernel_lle,
                                          gridSize, 1, 1, blockSize, 1, 1,
@@ -2493,7 +2906,7 @@ struct ParametricEngine::Impl {
                           "cuLaunchKernel(lle2d)");
             LLE2_CHECK(cudaDeviceSynchronize(), "sync after lle2d");
 
-            LLE2_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, cur_limiter * sizeof(double), cudaMemcpyDeviceToHost),
+            LLE2_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, cur_limiter * sizeof(numb), cudaMemcpyDeviceToHost),
                        "memcpy h_lleResult");
             LLE2_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
@@ -2647,7 +3060,7 @@ struct ParametricEngine::Impl {
     // длины amountOfX (один Ляпунов на каждую переменную).
     //
     // Memory budget per thread у LS значительно больше: shared = (3*N + 2*N^2
-    // + nValues) * sizeof(double) * blockSize. blockSize подбирается из 32K
+    // + nValues) * sizeof(numb) * blockSize. blockSize подбирается из 32K
     // shared-лимита (как делает NonLinAnal).
     // =========================================================================
     LS1DResult run_ls_1d(const LS1DRequest& req) {
@@ -2706,15 +3119,17 @@ struct ParametricEngine::Impl {
         const double h                          = req.h;
         const double eps                        = req.eps;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[2]                        = { req.param_lo, req.param_hi };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[2]                        = { (numb)req.param_lo, (numb)req.param_hi };
         // Sweep target: param-sweep → 1-based в localValues; IC-sweep → 0-based в localX.
         int    indicesOfMutVars[1]              = { req.sweep_over_var
                                                     ? req.var_sweep_index
                                                     : req.param_index };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
@@ -2733,21 +3148,21 @@ struct ParametricEngine::Impl {
             return fail("cudaMemGetInfo failed");
         freeMemory /= 16;
 
-        size_t perSystemBytes = sizeof(double) * (size_t)amountOfPointsInBlock * (size_t)amountOfInitialConditions;
-        if (perSystemBytes == 0) perSystemBytes = sizeof(double);
+        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)amountOfInitialConditions;
+        if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)  nPtsLimiter = (size_t)nPts;
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // h_lsResult хранит nPtsLimiter × N row-major.
-        std::vector<double> h_lsResult(nPtsLimiter * (size_t)amountOfInitialConditions);
+        std::vector<numb> h_lsResult(nPtsLimiter * (size_t)amountOfInitialConditions);
 
-        double* d_ranges            = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
-        double* d_lsResult          = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
+        numb* d_lsResult          = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -2779,16 +3194,16 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        LS_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                                          "cudaMalloc d_ranges");
+        LS_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(numb)),                                                          "cudaMalloc d_ranges");
         LS_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                                             "cudaMalloc d_indicesOfMutVars");
-        LS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),                          "cudaMalloc d_initialConditions");
-        LS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                                     "cudaMalloc d_values");
-        LS_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)amountOfInitialConditions * sizeof(double)),            "cudaMalloc d_lsResult");
+        LS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),                          "cudaMalloc d_initialConditions");
+        LS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                                     "cudaMalloc d_values");
+        LS_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)amountOfInitialConditions * sizeof(numb)),            "cudaMalloc d_lsResult");
 
-        LS_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(double),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LS_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LS_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  1 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
-        LS_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
-        LS_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
+        LS_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
+        LS_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),            cudaMemcpyHostToDevice), "memcpy d_values");
         LS_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
@@ -2828,7 +3243,7 @@ struct ParametricEngine::Impl {
             // blockSize: 32K shared / per-thread, cap=32 (порт LS1D:2821-2824)
             int blockSizeMax = (int)(32000 / ((double)(3 * amountOfInitialConditions
                                 + 2 * amountOfInitialConditions * amountOfInitialConditions
-                                + amountOfValues) * (double)sizeof(double)));
+                                + amountOfValues) * (double)sizeof(numb)));
             int blockSize = blockSizeMax;
             if (blockSize > blockSize_setup) blockSize = blockSize_setup;
             if (blockSize < 1)               blockSize = 1;
@@ -2836,22 +3251,22 @@ struct ParametricEngine::Impl {
 
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_arg           = (int)nPtsLimiter;
-            double NT_arg                    = NT;
-            double tMax_arg                  = tMax;
+            numb NT_arg                    = NT;
+            numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
             int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 1;
-            double h_arg                     = h;
-            double eps_arg                   = eps;
+            numb h_arg                     = h;
+            numb eps_arg                   = eps;
             int    amountOfIC_arg            = amountOfInitialConditions;
             int    amountOfValues_arg        = amountOfValues;
             int    amountOfIterations_arg    = (int)(tMax / NT);
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
+            numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
@@ -2863,11 +3278,11 @@ struct ParametricEngine::Impl {
                 &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg
             };
 
-            // Shared = (3N + 2N² + nValues) * sizeof(double) * blockSize
+            // Shared = (3N + 2N² + nValues) * sizeof(numb) * blockSize
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions
                                                  + 2 * amountOfInitialConditions * amountOfInitialConditions
                                                  + amountOfValues)
-                                                * sizeof(double) * blockSize);
+                                                * sizeof(numb) * blockSize);
 
             LS_CHECK_CU(cuLaunchKernel(cached_ls.kernel_ls,
                                        gridSize, 1, 1, blockSize, 1, 1,
@@ -2876,7 +3291,7 @@ struct ParametricEngine::Impl {
             LS_CHECK(cudaDeviceSynchronize(), "sync after ls");
 
             LS_CHECK(cudaMemcpy(h_lsResult.data(), d_lsResult,
-                                nPtsLimiter * (size_t)amountOfInitialConditions * sizeof(double),
+                                nPtsLimiter * (size_t)amountOfInitialConditions * sizeof(numb),
                                 cudaMemcpyDeviceToHost),
                      "memcpy h_lsResult");
             LS_CHECK(cudaDeviceSynchronize(), "sync after D2H");
@@ -3125,13 +3540,15 @@ struct ParametricEngine::Impl {
         const double h                          = req.h;
         const double eps                        = req.eps;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[4]                        = { ranges_lo_x, ranges_hi_x,
-                                                    ranges_lo_y, ranges_hi_y };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[4]                        = { (numb)ranges_lo_x, (numb)ranges_hi_x,
+                                                    (numb)ranges_lo_y, (numb)ranges_hi_y };
         int    indicesOfMutVars[2]              = { idx_axis_x, idx_axis_y };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
@@ -3154,21 +3571,21 @@ struct ParametricEngine::Impl {
             return fail("cudaMemGetInfo failed");
         freeMemory /= 16;
 
-        size_t perSystemBytes = sizeof(double) * (size_t)amountOfPointsInBlock * (size_t)N;
-        if (perSystemBytes == 0) perSystemBytes = sizeof(double);
+        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)N;
+        if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)             nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)    nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // h_lsResult — nPtsLimiter × N row-major (как в run_ls_1d).
-        std::vector<double> h_lsResult(nPtsLimiter * (size_t)N);
+        std::vector<numb> h_lsResult(nPtsLimiter * (size_t)N);
 
-        double* d_ranges            = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
-        double* d_lsResult          = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
+        numb* d_lsResult          = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -3200,16 +3617,16 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        LS2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                "cudaMalloc d_ranges");
+        LS2_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                "cudaMalloc d_ranges");
         LS2_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                   "cudaMalloc d_indicesOfMutVars");
-        LS2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)N * sizeof(double)),                        "cudaMalloc d_initialConditions");
-        LS2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),           "cudaMalloc d_values");
-        LS2_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)N * sizeof(double)),          "cudaMalloc d_lsResult");
+        LS2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)N * sizeof(numb)),                        "cudaMalloc d_initialConditions");
+        LS2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
+        LS2_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)N * sizeof(numb)),          "cudaMalloc d_lsResult");
 
-        LS2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                       cudaMemcpyHostToDevice), "memcpy d_ranges");
+        LS2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                       cudaMemcpyHostToDevice), "memcpy d_ranges");
         LS2_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                          cudaMemcpyHostToDevice), "memcpy d_indices");
-        LS2_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)N * sizeof(double),               cudaMemcpyHostToDevice), "memcpy d_ic");
-        LS2_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_values");
+        LS2_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)N * sizeof(numb),               cudaMemcpyHostToDevice), "memcpy d_ic");
+        LS2_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),  cudaMemcpyHostToDevice), "memcpy d_values");
         LS2_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
@@ -3256,7 +3673,7 @@ struct ParametricEngine::Impl {
 
             // blockSize: тот же расчёт что в run_ls_1d (32K shared / per-thread).
             int blockSizeMax = (int)(32000 / ((double)(3 * N + 2 * N * N + amountOfValues)
-                                              * (double)sizeof(double)));
+                                              * (double)sizeof(numb)));
             int blockSize = blockSizeMax;
             if (blockSize > blockSize_setup) blockSize = blockSize_setup;
             if (blockSize < 1)               blockSize = 1;
@@ -3264,22 +3681,22 @@ struct ParametricEngine::Impl {
 
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_arg           = (int)cur_limiter;
-            double NT_arg                    = NT;
-            double tMax_arg                  = tMax;
+            numb NT_arg                    = NT;
+            numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
             int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 2;
-            double h_arg                     = h;
-            double eps_arg                   = eps;
+            numb h_arg                     = h;
+            numb eps_arg                   = eps;
             int    amountOfIC_arg            = N;
             int    amountOfValues_arg        = amountOfValues;
             int    amountOfIterations_arg    = (int)(tMax / NT);
             int    preScaller_arg            = 1;
             int    writableVar_arg           = 0;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
+            numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args[] = {
@@ -3292,7 +3709,7 @@ struct ParametricEngine::Impl {
             };
 
             unsigned int shared = (unsigned int)((3 * N + 2 * N * N + amountOfValues)
-                                                 * sizeof(double) * blockSize);
+                                                 * sizeof(numb) * blockSize);
 
             LS2_CHECK_CU(cuLaunchKernel(cached_ls_2d.kernel_ls,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -3301,7 +3718,7 @@ struct ParametricEngine::Impl {
             LS2_CHECK(cudaDeviceSynchronize(), "sync after ls2d");
 
             LS2_CHECK(cudaMemcpy(h_lsResult.data(), d_lsResult,
-                                 cur_limiter * (size_t)N * sizeof(double),
+                                 cur_limiter * (size_t)N * sizeof(numb),
                                  cudaMemcpyDeviceToHost),
                       "memcpy h_lsResult");
             LS2_CHECK(cudaDeviceSynchronize(), "sync after D2H");
@@ -3576,9 +3993,9 @@ struct ParametricEngine::Impl {
             return fail(err);
 
         const int nPts = req.n_pts;
-        double* d_baseValues = nullptr;
-        double* d_baseX      = nullptr;
-        double* d_result     = nullptr;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_result     = nullptr;
         auto cleanup = [&]() {
             if (d_baseValues) cudaFree(d_baseValues);
             if (d_baseX)      cudaFree(d_baseX);
@@ -3589,21 +4006,24 @@ struct ParametricEngine::Impl {
         #define LC_CHECK_CU(call, where) do { CUresult _r = (call); \
             if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
 
-        LC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(double)), "cudaMalloc baseValues");
-        LC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(double)),  "cudaMalloc baseX");
-        LC_CHECK(cudaMalloc((void**)&d_result,     (size_t)nPts * sizeof(double)),           "cudaMalloc result");
-        LC_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
-                            req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy baseValues");
-        LC_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
-                            (size_t)req.amountOfX * sizeof(double), cudaMemcpyHostToDevice), "memcpy baseX");
+        LC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(numb)), "cudaMalloc baseValues");
+        LC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(numb)),  "cudaMalloc baseX");
+        LC_CHECK(cudaMalloc((void**)&d_result,     (size_t)nPts * sizeof(numb)),           "cudaMalloc result");
+        // Вход приходит из Request в double — сужаем до numb на границе.
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        LC_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                            req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues");
+        LC_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                            (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX");
 
         int    nPts_arg = nPts, reverse_arg = req.continuation_reverse ? 1 : 0;
         int    logScale_arg = req.log_scale ? 1 : 0, sweepIsH_arg = req.sweep_over_h ? 1 : 0;
         int    mutParamIdx_arg = req.param_index;
         int    amountOfValues_arg = (int)req.base_values.size(), amountOfX_arg = req.amountOfX;
-        double lo_arg = req.param_lo, hi_arg = req.param_hi;
-        double h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
-        double transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
+        numb lo_arg = req.param_lo, hi_arg = req.param_hi;
+        numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
+        numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
 
         void* args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
@@ -3619,8 +4039,8 @@ struct ParametricEngine::Impl {
                     "cuLaunchKernel(lle cont)");
         LC_CHECK(cudaDeviceSynchronize(), "sync after lle cont");
 
-        std::vector<double> host((size_t)nPts);
-        LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(double), cudaMemcpyDeviceToHost), "memcpy result");
+        std::vector<numb> host((size_t)nPts);
+        LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
         cleanup();
         #undef LC_CHECK
         #undef LC_CHECK_CU
@@ -3629,7 +4049,7 @@ struct ParametricEngine::Impl {
         res.param_lo = req.param_lo;
         res.param_hi = req.param_hi;
         res.continuation_reverse = req.continuation_reverse;
-        res.lyapunov = std::move(host);
+        res.lyapunov.assign(host.begin(), host.end());   // numb -> double
         res.flags.assign(nPts, 0);
         for (int j = 0; j < nPts; ++j) res.flags[j] = std::isfinite(res.lyapunov[j]) ? 1 : -1;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
@@ -3651,9 +4071,9 @@ struct ParametricEngine::Impl {
 
         const int nPts = req.n_pts;
         const int N    = req.amountOfX;
-        double* d_baseValues = nullptr;
-        double* d_baseX      = nullptr;
-        double* d_result     = nullptr;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_result     = nullptr;
         auto cleanup = [&]() {
             if (d_baseValues) cudaFree(d_baseValues);
             if (d_baseX)      cudaFree(d_baseX);
@@ -3664,21 +4084,24 @@ struct ParametricEngine::Impl {
         #define SC_CHECK_CU(call, where) do { CUresult _r = (call); \
             if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
 
-        SC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(double)), "cudaMalloc baseValues");
-        SC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)N * sizeof(double)),              "cudaMalloc baseX");
-        SC_CHECK(cudaMalloc((void**)&d_result,     (size_t)nPts * N * sizeof(double)),       "cudaMalloc result");
-        SC_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
-                            req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy baseValues");
-        SC_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
-                            (size_t)N * sizeof(double), cudaMemcpyHostToDevice), "memcpy baseX");
+        SC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(numb)), "cudaMalloc baseValues");
+        SC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)N * sizeof(numb)),              "cudaMalloc baseX");
+        SC_CHECK(cudaMalloc((void**)&d_result,     (size_t)nPts * N * sizeof(numb)),       "cudaMalloc result");
+        // Вход приходит из Request в double — сужаем до numb на границе.
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        SC_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                            req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues");
+        SC_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                            (size_t)N * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX");
 
         int    nPts_arg = nPts, reverse_arg = req.continuation_reverse ? 1 : 0;
         int    logScale_arg = req.log_scale ? 1 : 0, sweepIsH_arg = req.sweep_over_h ? 1 : 0;
         int    mutParamIdx_arg = req.param_index;
         int    amountOfValues_arg = (int)req.base_values.size(), amountOfX_arg = N;
-        double lo_arg = req.param_lo, hi_arg = req.param_hi;
-        double h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
-        double transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
+        numb lo_arg = req.param_lo, hi_arg = req.param_hi;
+        numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
+        numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
 
         void* args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
@@ -3694,8 +4117,8 @@ struct ParametricEngine::Impl {
                     "cuLaunchKernel(ls cont)");
         SC_CHECK(cudaDeviceSynchronize(), "sync after ls cont");
 
-        std::vector<double> host((size_t)nPts * N);
-        SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(double), cudaMemcpyDeviceToHost), "memcpy result");
+        std::vector<numb> host((size_t)nPts * N);
+        SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
         cleanup();
         #undef SC_CHECK
         #undef SC_CHECK_CU
@@ -3716,6 +4139,393 @@ struct ParametricEngine::Impl {
             }
             res.flags[j] = ok ? 1 : -1;
         }
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+    // run_dft1d_continuation_gpu — выделенное ядро (dft1d_cont.template.cu),
+    // а не связка bifurcation1dContinuationKernel + DFT_custom: под h-свипом у
+    // каждой точки своя длина блока, свой шаг и своё окно, чего DFT_custom
+    // выразить не может (у него один sizeOfBlock/h/window на запуск).
+    Dft1DResult run_dft1d_continuation_gpu(const Dft1DRequest& req) {
+        Dft1DResult res;
+        auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_simple_cont_if_needed(cached_dft_cont, src_template_dft_cont,
+                                           "dft1dContinuationKernel", "dft1d_cont.cu", ":dftcont",
+                                           req.krs_body, req.amountOfX, err))
+            return fail(err);
+
+        const double worstCaseH = req.sweep_over_h
+                                ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                                : req.h;
+        if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+        const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+        if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+        const int nPts  = req.n_pts;
+        const int nFreq = req.n_freq;
+
+        numb* d_baseValues = nullptr; numb* d_baseX = nullptr;
+        numb* d_data = nullptr; numb* d_ak = nullptr; numb* d_bk = nullptr;
+        int*    d_flags = nullptr;
+        auto cleanup = [&]() {
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_data)       cudaFree(d_data);
+            if (d_ak)         cudaFree(d_ak);
+            if (d_bk)         cudaFree(d_bk);
+            if (d_flags)      cudaFree(d_flags);
+        };
+        #define DC_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define DC_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        const size_t freqCells = (size_t)nPts * (size_t)nFreq;
+        DC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(numb)), "cudaMalloc baseValues");
+        DC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(numb)),  "cudaMalloc baseX");
+        // Один блок, а не nPts x block: kernel однопоточный, больше не нужно.
+        DC_CHECK(cudaMalloc((void**)&d_data,       (size_t)maxPointsInBlock * sizeof(numb)), "cudaMalloc data");
+        DC_CHECK(cudaMalloc((void**)&d_ak,         freqCells * sizeof(numb)),                "cudaMalloc AkCOS");
+        DC_CHECK(cudaMalloc((void**)&d_bk,         freqCells * sizeof(numb)),                "cudaMalloc BkSIN");
+        DC_CHECK(cudaMalloc((void**)&d_flags,      (size_t)nPts * sizeof(int)),                "cudaMalloc flags");
+        // Вход приходит из Request в double — сужаем до numb на границе.
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        DC_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                            req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues");
+        DC_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                            (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX");
+
+        int    nPts_arg = nPts, reverse_arg = req.continuation_reverse ? 1 : 0;
+        int    logScale_arg = req.log_scale ? 1 : 0, sweepIsH_arg = req.sweep_over_h ? 1 : 0;
+        int    mutParamIdx_arg = req.param_index;
+        int    amountOfValues_arg = (int)req.base_values.size(), amountOfX_arg = req.amountOfX;
+        numb lo_arg = req.param_lo, hi_arg = req.param_hi;
+        numb h_arg = req.h, tMax_arg = req.t_max, transientTime_arg = req.transient_time;
+        int    preScaller_arg = req.pre_scaller, writableVar_arg = req.writable_var;
+        numb maxValue_arg = req.max_value;
+        int    nFreq_arg = nFreq;
+        numb freqLo_arg = req.freq_lo, freqHi_arg = req.freq_hi;
+        int    logFreqAxis_arg = req.freq_log_scale ? 1 : 0;
+        int    windowType_arg = req.window_type;
+        int    maxBlock_arg = maxPointsInBlock;
+
+        void* args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
+            &mutParamIdx_arg, &d_baseValues, &amountOfValues_arg,
+            &d_baseX, &amountOfX_arg,
+            &h_arg, &tMax_arg, &transientTime_arg,
+            &preScaller_arg, &writableVar_arg, &maxValue_arg,
+            &nFreq_arg, &freqLo_arg, &freqHi_arg, &logFreqAxis_arg, &windowType_arg,
+            &maxBlock_arg, &d_data, &d_ak, &d_bk, &d_flags
+        };
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+        DC_CHECK_CU(cuLaunchKernel(cached_dft_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
+                    "cuLaunchKernel(dft cont)");
+        DC_CHECK(cudaDeviceSynchronize(), "sync after dft cont");
+
+        std::vector<numb> ak_host(freqCells), bk_host(freqCells);
+        res.flags.assign(nPts, 0);
+        DC_CHECK(cudaMemcpy(ak_host.data(), d_ak, freqCells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy AkCOS");
+        DC_CHECK(cudaMemcpy(bk_host.data(), d_bk, freqCells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy BkSIN");
+        res.ak_cos.assign(ak_host.begin(), ak_host.end());   // numb -> double
+        res.bk_sin.assign(bk_host.begin(), bk_host.end());
+        DC_CHECK(cudaMemcpy(res.flags.data(),  d_flags, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy flags");
+        cleanup();
+        #undef DC_CHECK
+        #undef DC_CHECK_CU
+
+        res.n_pts   = nPts;
+        res.n_freq  = nFreq;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.freq_lo  = req.freq_lo;
+        res.freq_hi  = req.freq_hi;
+        res.continuation_reverse = req.continuation_reverse;
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+    // -------------------------------------------------------------------------
+    // run_dft1d_hsweep_gpu — классический (без continuation) свип по шагу h.
+    //
+    // Отдельно от run_dft1d_classical, потому что связка calculateDiscreteModelCUDA
+    // + DFT_custom тут неприменима: DFT_custom берёт одну длину блока, одно
+    // готовое окно и один шаг дискретизации на весь запуск, а под h-свипом все
+    // три — per-point. Ядро dft1dHSweepKernel делает траекторию и DFT в одном
+    // месте, поток на точку (в отличие от однопоточного dft1dContinuationKernel:
+    // здесь точки независимы).
+    //
+    // Буферы считаются по worst case — наименьшему h диапазона, дающему больше
+    // всего сэмплов; так же поступают run_dft1d_cpu и run_dft1d_continuation_gpu.
+    // Chunking по nPtsLimiter — как в run_dft1d_classical / run_bif1d.
+    // -------------------------------------------------------------------------
+    Dft1DResult run_dft1d_hsweep_gpu(const Dft1DRequest& req) {
+        Dft1DResult res;
+        auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
+
+        // Валидация — как в run_dft1d_classical, минус param_index/var_sweep_index:
+        // свипуемая величина здесь h, индексы параметра/НУ не участвуют вовсе
+        // (именно поэтому старый путь ломался на системах без параметров).
+        if (req.krs_body.empty())                                   return fail("krs_body пуст");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                    return fail("writable_var вне диапазона");
+        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
+        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+        if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
+            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
+        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
+        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+        // param_lo/hi (= границы h) проверены на положительность в run_dft_1d.
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_simple_cont_if_needed(cached_dft_hsweep, src_template_dft_hsweep,
+                                           "dft1dHSweepKernel", "dft1d_hsweep.cu", ":dfthsweep",
+                                           req.krs_body, req.amountOfX, err))
+            return fail(err);
+
+        const int    nPts  = req.n_pts;
+        const int    nFreq = req.n_freq;
+        const double worstCaseH = (req.param_lo < req.param_hi) ? req.param_lo : req.param_hi;
+        if (worstCaseH <= 0.0) return fail("h lo/hi должны быть > 0 при свипе по dt (h)");
+
+        // Самый мелкий шаг диапазона задаёт длину буфера. Считаем в double и
+        // проверяем до сужения в int: t_max/h_lo легко перевалит за 2^31, и без
+        // этой проверки пользователь получил бы отрицательный размер вместо
+        // внятного сообщения.
+        const double maxBlockD = std::ceil(req.t_max / worstCaseH / (double)req.pre_scaller);
+        if (!(maxBlockD >= 1.0))
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+        if (maxBlockD > 2.0e9)
+            return fail("h lo слишком мал: блок > 2e9 сэмплов (подними h lo, t_max или pre_scaller)");
+        const int maxPointsInBlock = (int)maxBlockD;
+
+        // --- Memory budget: как в run_dft1d_classical, но на систему берётся
+        // worst-case длина блока. d_window тут нет вовсе — окно ядро считает
+        // на лету, его длина у каждой точки своя.
+        size_t freeMemory = 0, totalMemory = 0;
+        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
+            return fail("cudaMemGetInfo failed");
+        freeMemory = (size_t)((double)freeMemory * 0.92);
+
+        const size_t memPerSystem =
+            (size_t)maxPointsInBlock * sizeof(numb) +   // d_data
+            2 * (size_t)nFreq * sizeof(numb) +           // d_AkCOS + d_BkSIN
+            sizeof(int);                                   // d_flags
+        const size_t memConstants =
+            (size_t)req.amountOfX * sizeof(numb) +
+            req.base_values.size() * sizeof(numb);
+        constexpr double SAFETY_FACTOR = 0.9;
+        const size_t safeFree = (size_t)((double)freeMemory * SAFETY_FACTOR);
+        if (memConstants >= safeFree) return fail("not enough GPU memory for constants");
+        const size_t availableMemory = safeFree - memConstants;
+
+        size_t nPtsLimiter = availableMemory / memPerSystem;
+        if (nPtsLimiter == 0)
+            return fail("не хватает памяти GPU даже на одну точку h-свипа "
+                        "(блок " + std::to_string(maxPointsInBlock) + " сэмплов)");
+        if (nPtsLimiter > (size_t)nPts) nPtsLimiter = (size_t)nPts;
+        const size_t originalNPtsLimiter = nPtsLimiter;
+
+        std::vector<numb> h_AkCOS(nPtsLimiter * (size_t)nFreq);
+        std::vector<numb> h_BkSIN(nPtsLimiter * (size_t)nFreq);
+        std::vector<int>  h_flags(nPtsLimiter);
+
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_data       = nullptr;
+        numb* d_AkCOS      = nullptr;
+        numb* d_BkSIN      = nullptr;
+        int*  d_flags      = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_data)       cudaFree(d_data);
+            if (d_AkCOS)      cudaFree(d_AkCOS);
+            if (d_BkSIN)      cudaFree(d_BkSIN);
+            if (d_flags)      cudaFree(d_flags);
+        };
+
+        #define DH_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define DH_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define DH_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        const int amountOfValues = (int)req.base_values.size();
+
+        DH_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(numb)),        "cudaMalloc baseValues");
+        DH_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(numb)),         "cudaMalloc baseX");
+        DH_CHECK(cudaMalloc((void**)&d_data,       nPtsLimiter * (size_t)maxPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
+        DH_CHECK(cudaMalloc((void**)&d_AkCOS,      nPtsLimiter * (size_t)nFreq * sizeof(numb)),   "cudaMalloc d_AkCOS");
+        DH_CHECK(cudaMalloc((void**)&d_BkSIN,      nPtsLimiter * (size_t)nFreq * sizeof(numb)),   "cudaMalloc d_BkSIN");
+        DH_CHECK(cudaMalloc((void**)&d_flags,      nPtsLimiter * sizeof(int)),                      "cudaMalloc d_flags");
+
+        DH_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                            req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues");
+        DH_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                            (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice),  "memcpy baseX");
+        DH_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        // Снимок — как у classical; indexOfMutVar = -1 помечает "свипуется h,
+        // а не элемент a[]/X[]" (data_export пишет его как есть).
+        res.snapshot.values.assign(req.base_values.begin(), req.base_values.end());
+        res.snapshot.initial_conditions.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+        res.snapshot.tMax          = req.t_max;
+        res.snapshot.transientTime = req.transient_time;
+        res.snapshot.h             = req.h;
+        res.snapshot.preScaller    = req.pre_scaller;
+        res.snapshot.writableVar   = req.writable_var;
+        res.snapshot.indexOfMutVar = -1;
+        res.snapshot.range_lo      = req.param_lo;
+        res.snapshot.range_hi      = req.param_hi;
+        res.snapshot.n_freq        = nFreq;
+        res.snapshot.freq_lo       = req.freq_lo;
+        res.snapshot.freq_hi       = req.freq_hi;
+        res.snapshot.window_type   = req.window_type;
+
+        const std::string& OUT_FILE_PATH = req.csv_output_path;
+        constexpr int set_precision = 15;
+        std::ofstream akFile, bkFile;
+        if (!OUT_FILE_PATH.empty()) {
+            std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
+            data_export::write_dft1d_config(cfg, res.snapshot);
+            akFile.open(OUT_FILE_PATH + "_AkCOS.csv");
+            bkFile.open(OUT_FILE_PATH + "_BkSIN.csv");
+            data_export::write_dft1d_header(akFile, res.snapshot);
+            data_export::write_dft1d_header(bkFile, res.snapshot);
+            akFile.close();
+            bkFile.close();
+        }
+
+        res.n_pts    = nPts;
+        res.n_freq   = nFreq;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.freq_lo  = req.freq_lo;
+        res.freq_hi  = req.freq_hi;
+        res.flags.assign(nPts, 0);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+
+        const size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
+
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            DH_CANCEL_CHECK();
+            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            if (iter == amountOfIteration - 1)
+                nPtsLimiter = nPts - (originalNPtsLimiter * iter);
+
+            const int blockSize = 32;
+            const int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
+
+            int    nPts_arg                 = nPts;
+            int    nPtsLimiter_arg          = (int)nPtsLimiter;
+            int    amountOfCalculatedPoints = (int)(iter * originalNPtsLimiter);
+            numb   lo_arg                   = (numb)req.param_lo;
+            numb   hi_arg                   = (numb)req.param_hi;
+            int    logScale_arg             = req.log_scale ? 1 : 0;
+            int    amountOfValues_arg       = amountOfValues;
+            int    amountOfX_arg            = req.amountOfX;
+            numb   tMax_arg                 = (numb)req.t_max;
+            numb   transientTime_arg        = (numb)req.transient_time;
+            int    preScaller_arg           = req.pre_scaller;
+            int    writableVar_arg          = req.writable_var;
+            numb   maxValue_arg             = (numb)req.max_value;
+            int    nFreq_arg                = nFreq;
+            numb   freqLo_arg               = (numb)req.freq_lo;
+            numb   freqHi_arg               = (numb)req.freq_hi;
+            int    logFreqAxis_arg          = req.freq_log_scale ? 1 : 0;
+            int    windowType_arg           = req.window_type;
+            int    maxBlock_arg             = maxPointsInBlock;
+
+            void* args[] = {
+                &nPts_arg, &nPtsLimiter_arg, &amountOfCalculatedPoints,
+                &lo_arg, &hi_arg, &logScale_arg,
+                &d_baseValues, &amountOfValues_arg,
+                &d_baseX, &amountOfX_arg,
+                &tMax_arg, &transientTime_arg,
+                &preScaller_arg, &writableVar_arg, &maxValue_arg,
+                &nFreq_arg, &freqLo_arg, &freqHi_arg, &logFreqAxis_arg, &windowType_arg,
+                &maxBlock_arg, &d_data, &d_AkCOS, &d_BkSIN, &d_flags
+            };
+
+            DH_CHECK_CU(cuLaunchKernel(cached_dft_hsweep.kernel,
+                                       gridSize, 1, 1, blockSize, 1, 1,
+                                       0, nullptr, args, nullptr),
+                        "cuLaunchKernel(dft h-sweep)");
+            DH_CHECK(cudaDeviceSynchronize(), "sync after dft h-sweep");
+
+            DH_CHECK(cudaMemcpy(h_AkCOS.data(), d_AkCOS, nPtsLimiter * (size_t)nFreq * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_AkCOS");
+            DH_CHECK(cudaMemcpy(h_BkSIN.data(), d_BkSIN, nPtsLimiter * (size_t)nFreq * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_BkSIN");
+            DH_CHECK(cudaMemcpy(h_flags.data(), d_flags, nPtsLimiter * sizeof(int),                    cudaMemcpyDeviceToHost), "memcpy h_flags");
+            DH_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+
+            if (!OUT_FILE_PATH.empty()) {
+                akFile.open(OUT_FILE_PATH + "_AkCOS.csv", std::ios::app);
+                bkFile.open(OUT_FILE_PATH + "_BkSIN.csv", std::ios::app);
+                if (akFile.is_open()) akFile << std::setprecision(set_precision);
+                if (bkFile.is_open()) bkFile << std::setprecision(set_precision);
+                const std::vector<double> akWide(h_AkCOS.begin(), h_AkCOS.end());
+                const std::vector<double> bkWide(h_BkSIN.begin(), h_BkSIN.end());
+                data_export::write_dft1d_matrix(akFile, akWide.data(), 0, (int)nPtsLimiter, nFreq);
+                data_export::write_dft1d_matrix(bkFile, bkWide.data(), 0, (int)nPtsLimiter, nFreq);
+                akFile.close();
+                bkFile.close();
+            }
+
+            const size_t global_offset = originalNPtsLimiter * iter;
+            for (size_t k = 0; k < nPtsLimiter; ++k) {
+                const size_t global_idx = global_offset + k;
+                res.flags[global_idx] = h_flags[k];
+                std::copy(h_AkCOS.begin() + (ptrdiff_t)(k * (size_t)nFreq),
+                          h_AkCOS.begin() + (ptrdiff_t)((k + 1) * (size_t)nFreq),
+                          res.ak_cos.begin() + (ptrdiff_t)(global_idx * (size_t)nFreq));
+                std::copy(h_BkSIN.begin() + (ptrdiff_t)(k * (size_t)nFreq),
+                          h_BkSIN.begin() + (ptrdiff_t)((k + 1) * (size_t)nFreq),
+                          res.bk_sin.begin() + (ptrdiff_t)(global_idx * (size_t)nFreq));
+            }
+        }
+
+        cleanup();
+        #undef DH_CHECK
+        #undef DH_CHECK_CU
+        #undef DH_CANCEL_CHECK
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
         return res;
@@ -3762,12 +4572,12 @@ struct ParametricEngine::Impl {
         if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
         const int nPts = req.n_pts;
-        double* d_data       = nullptr;
-        double* d_baseValues = nullptr;
-        double* d_baseX      = nullptr;
+        numb* d_data       = nullptr;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
         int*    d_amountOfPeaks = nullptr;
-        double* d_outPeaks   = nullptr;
-        double* d_timeOfPeaks= nullptr;
+        numb* d_outPeaks   = nullptr;
+        numb* d_timeOfPeaks= nullptr;
         int*    d_actualIterations = nullptr;
 
         auto cleanup = [&]() {
@@ -3794,38 +4604,41 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        const size_t dataBytes  = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(double);
+        const size_t dataBytes  = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(numb);
         C_CHECK(cudaMalloc((void**)&d_data,         dataBytes),                                       "cudaMalloc d_data");
-        C_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(double)), "cudaMalloc d_baseValues");
-        C_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(double)),          "cudaMalloc d_baseX");
+        C_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(numb)), "cudaMalloc d_baseValues");
+        C_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(numb)),          "cudaMalloc d_baseX");
         C_CHECK(cudaMalloc((void**)&d_amountOfPeaks,(size_t)nPts * sizeof(int)),                      "cudaMalloc d_amountOfPeaks");
         C_CHECK(cudaMalloc((void**)&d_outPeaks,     dataBytes),                                       "cudaMalloc d_outPeaks");
         C_CHECK(cudaMalloc((void**)&d_timeOfPeaks,  dataBytes),                                       "cudaMalloc d_timeOfPeaks");
         C_CHECK(cudaMalloc((void**)&d_actualIterations, (size_t)nPts * sizeof(int)),                  "cudaMalloc d_actualIterations");
 
-        C_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
-                           req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseValues");
-        C_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
-                           (size_t)req.amountOfX * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseX");
+        // Вход приходит из Request в double — сужаем до numb на границе.
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        C_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                           req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        C_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                           (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_baseX");
         C_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         // --- Launch continuation kernel ---
         int    nPts_arg              = nPts;
-        double lo_arg                = req.param_lo;
-        double hi_arg                = req.param_hi;
+        numb lo_arg                = req.param_lo;
+        numb hi_arg                = req.param_hi;
         bool   reverse_arg           = req.continuation_reverse;
         int    logScale_arg          = req.log_scale ? 1 : 0;
         int    sweepIsH_arg          = req.sweep_over_h ? 1 : 0;
         int    mutParamIdx_arg       = req.param_index;
         int    amountOfValues_arg    = (int)req.base_values.size();
         int    amountOfX_arg         = req.amountOfX;
-        double h_arg                 = req.h;
-        double tMax_arg              = req.t_max;
-        double transientTime_arg     = req.transient_time;
+        numb h_arg                 = req.h;
+        numb tMax_arg              = req.t_max;
+        numb transientTime_arg     = req.transient_time;
         int    sizeOfBlock_arg       = amountOfPointsInBlock;
         int    preScaller_arg        = req.pre_scaller;
         int    writableVar_arg       = req.writable_var;
-        double maxValue_arg          = req.max_value;
+        numb maxValue_arg          = req.max_value;
 
         void* cont_args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg,
@@ -3852,7 +4665,11 @@ struct ParametricEngine::Impl {
         //             int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
         size_t sizeOfBlock_s = (size_t)amountOfPointsInBlock;
         int    nBlocks       = nPts;
-        double timeStep      = req.h * (double)req.pre_scaller;
+        // numb, а не double: cuLaunchKernel копирует аргумент побайтово, а
+        // peakFinderCUDA ждёт numb h (см. сигнатуру выше). При numb=float из
+        // double уехали бы первые 4 байта, и межпиковые интервалы разъехались
+        // бы на порядки. В классическом пути тот же аргумент объявлен numb.
+        numb timeStep        = (numb)(req.h * (double)req.pre_scaller);
         // actualIterations — 8-й параметр peakFinderCUDA: реальная длина блока
         // каждой точки (при h-свипе она своя, буфер выделен под худший случай).
         // Раньше аргумент не передавался вовсе: cuLaunchKernel читал 8-й слот за
@@ -3872,8 +4689,8 @@ struct ParametricEngine::Impl {
         C_CHECK(cudaDeviceSynchronize(), "sync after peak");
 
         // --- D2H ---
-        std::vector<double> h_outPeaks   ((size_t)nPts * (size_t)amountOfPointsInBlock);
-        std::vector<double> h_timeOfPeaks((size_t)nPts * (size_t)amountOfPointsInBlock);
+        std::vector<numb> h_outPeaks   ((size_t)nPts * (size_t)amountOfPointsInBlock);
+        std::vector<numb> h_timeOfPeaks((size_t)nPts * (size_t)amountOfPointsInBlock);
         std::vector<int>    h_amountOfPeaks((size_t)nPts);
         C_CHECK(cudaMemcpy(h_outPeaks.data(),    d_outPeaks,    dataBytes,             cudaMemcpyDeviceToHost), "memcpy out h_outPeaks");
         C_CHECK(cudaMemcpy(h_timeOfPeaks.data(), d_timeOfPeaks, dataBytes,             cudaMemcpyDeviceToHost), "memcpy out h_timeOfPeaks");
@@ -3894,8 +4711,8 @@ struct ParametricEngine::Impl {
             res.flags[j] = n;
             if (n > 0) {
                 if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
-                const double* pr = h_outPeaks.data()    + (size_t)j * amountOfPointsInBlock;
-                const double* tr = h_timeOfPeaks.data() + (size_t)j * amountOfPointsInBlock;
+                const numb* pr = h_outPeaks.data()    + (size_t)j * amountOfPointsInBlock;
+                const numb* tr = h_timeOfPeaks.data() + (size_t)j * amountOfPointsInBlock;
                 res.bifurcation_points[j].assign(pr, pr + n);
                 res.peak_times[j].assign(tr, tr + n);
                 // h-свип: peakFinderCUDA умножал разности индексов на общий h,
@@ -3924,14 +4741,38 @@ struct ParametricEngine::Impl {
     // run_bif1d) — делегирует в run_dft1d_continuation, иначе classical.
     // =========================================================================
     Dft1DResult run_dft_1d(const Dft1DRequest& req) {
+        // Ограничения и порядок — как у Bif/LLE/LS 1D: continuation требует
+        // param- или h-свипа (цепочка по IC бессмысленна), log-сетка по
+        // параметру требует положительных границ. CPU-ветки не трогают CUDA,
+        // поэтому стоят до ensure_init внутри самих функций.
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
+            Dft1DResult r;
+            r.error = "log scale требует param lo/hi > 0";
+            return r;
+        }
+        // h-свип: границы — это сам шаг, нулевой/отрицательный шаг не считается
+        // ни на одном из путей. Проверка здесь, а не в каждой ветке, как у
+        // log_scale выше (см. те же проверки в run_bif1d / run_lle_1d).
+        if (req.sweep_over_h && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
+            Dft1DResult r;
+            r.error = "h lo/hi должны быть > 0 при свипе по dt (h)";
+            return r;
+        }
         if (req.continuation) {
             if (req.sweep_over_var) {
                 Dft1DResult r;
                 r.error = "continuation требует param-sweep, не IC-sweep";
                 return r;
             }
-            return run_dft1d_continuation(req);
+            return req.use_cpu ? run_dft1d_cpu(req, /*continuation*/ true)
+                               : run_dft1d_continuation_gpu(req);
         }
+        if (req.use_cpu) return run_dft1d_cpu(req, /*continuation*/ false);
+        // Классический GPU-свип по h идёт отдельным ядром: связка
+        // calculateDiscreteModelCUDA + DFT_custom тут не работает, потому что
+        // DFT_custom принимает одну длину блока, одно готовое окно и один шаг
+        // дискретизации на весь запуск, а под h-свипом все три — per-point.
+        if (req.sweep_over_h) return run_dft1d_hsweep_gpu(req);
         return run_dft1d_classical(req);
     }
 
@@ -3943,19 +4784,19 @@ struct ParametricEngine::Impl {
     //   0 = None (rectangular, "h_window[n] = 1.0")
     //   1 = Hanning (default — активная строка в hostLibrary.cu)
     //   2 = Hamming (закомментированная строка в hostLibrary.cu)
-    static void build_window(std::vector<double>& out, int sizeOfBlock, int window_type) {
+    static void build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
         out.resize((size_t)sizeOfBlock);
         if (window_type == 0) {
-            std::fill(out.begin(), out.end(), 1.0);
+            std::fill(out.begin(), out.end(), (numb)1);
             return;
         }
-        const double gamma = 2.0 * pi / (double)(sizeOfBlock - 1);
+        const numb gamma = (numb)2.0 * (numb)pi / (numb)(sizeOfBlock - 1);
         if (window_type == 2) {
             for (int n = 0; n < sizeOfBlock; ++n)
-                out[(size_t)n] = 0.53836 - 0.46164 * std::cos(gamma * (double)n);
+                out[(size_t)n] = (numb)0.53836 - (numb)0.46164 * std::cos(gamma * (numb)n);
         } else {
             for (int n = 0; n < sizeOfBlock; ++n)
-                out[(size_t)n] = 0.5 * (1.0 - std::cos(gamma * (double)n));
+                out[(size_t)n] = (numb)0.5 * ((numb)1.0 - std::cos(gamma * (numb)n));
         }
     }
 
@@ -4007,16 +4848,18 @@ struct ParametricEngine::Impl {
         const int    nFreq                      = req.n_freq;
         const double h                          = req.h;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[2]                        = { req.param_lo, req.param_hi };
-        double rangesFreq[2]                    = { req.freq_lo, req.freq_hi };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[2]                        = { (numb)req.param_lo, (numb)req.param_hi };
+        numb   rangesFreq[2]                    = { (numb)req.freq_lo, (numb)req.freq_hi };
         int    indicesOfMutVars[1]              = { req.sweep_over_var
                                                     ? req.var_sweep_index
                                                     : req.param_index };
         const int    writableVar                = req.writable_var;
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const int    preScaller                 = req.pre_scaller;
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
@@ -4040,16 +4883,16 @@ struct ParametricEngine::Impl {
         freeMemory = (size_t)((double)freeMemory * 0.92);
 
         size_t memPerSystem =
-            (size_t)amountOfPointsInBlock * sizeof(double) +      // d_data
-            2 * (size_t)nFreq * sizeof(double) +                   // d_AkCOS + d_BkSIN (per-point share)
+            (size_t)amountOfPointsInBlock * sizeof(numb) +      // d_data
+            2 * (size_t)nFreq * sizeof(numb) +                   // d_AkCOS + d_BkSIN (per-point share)
             sizeof(int);                                           // d_amountOfPeaks
         size_t memConstants =
-            2 * sizeof(double) +                                    // d_ranges
-            2 * sizeof(double) +                                    // d_rangesFreq
+            2 * sizeof(numb) +                                    // d_ranges
+            2 * sizeof(numb) +                                    // d_rangesFreq
             sizeof(int) +                                           // d_indicesOfMutVars
-            (size_t)amountOfInitialConditions * sizeof(double) +
-            (size_t)amountOfValues * sizeof(double) +
-            (size_t)amountOfPointsInBlock * sizeof(double);         // d_window
+            (size_t)amountOfInitialConditions * sizeof(numb) +
+            (size_t)amountOfValues * sizeof(numb) +
+            (size_t)amountOfPointsInBlock * sizeof(numb);         // d_window
         constexpr double SAFETY_FACTOR = 0.9;
         size_t safeFree = (size_t)((double)freeMemory * SAFETY_FACTOR);
         if (memConstants >= safeFree) return fail("not enough GPU memory for constants");
@@ -4058,27 +4901,31 @@ struct ParametricEngine::Impl {
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
-        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
-        if (nPtsLimiter == 0)
-            return fail("not enough GPU memory: per-system buffer too large");
+        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
+        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
+        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
+        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
+        // считался нормально. Зато при n_pts < 32 округление давало 0, и Run
+        // падал с сообщением про нехватку памяти, которая была ни при чём.
+        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        std::vector<double> h_AkCOS(nPtsLimiter * (size_t)nFreq);
-        std::vector<double> h_BkSIN(nPtsLimiter * (size_t)nFreq);
+        std::vector<numb> h_AkCOS(nPtsLimiter * (size_t)nFreq);
+        std::vector<numb> h_BkSIN(nPtsLimiter * (size_t)nFreq);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
-        std::vector<double> h_window;
+        std::vector<numb> h_window;
         build_window(h_window, amountOfPointsInBlock, req.window_type);
 
-        double* d_data              = nullptr;
-        double* d_ranges            = nullptr;
-        double* d_rangesFreq        = nullptr;
+        numb* d_data              = nullptr;
+        numb* d_ranges            = nullptr;
+        numb* d_rangesFreq        = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
-        double* d_AkCOS             = nullptr;
-        double* d_BkSIN             = nullptr;
-        double* d_window            = nullptr;
+        numb* d_AkCOS             = nullptr;
+        numb* d_BkSIN             = nullptr;
+        numb* d_window            = nullptr;
 
         auto cleanup = [&]() {
             if (d_data)              cudaFree(d_data);
@@ -4115,23 +4962,23 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        DFT_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
-        DFT_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(double)),                                          "cudaMalloc d_ranges");
-        DFT_CHECK(cudaMalloc((void**)&d_rangesFreq,        2 * sizeof(double)),                                          "cudaMalloc d_rangesFreq");
+        DFT_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
+        DFT_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(numb)),                                          "cudaMalloc d_ranges");
+        DFT_CHECK(cudaMalloc((void**)&d_rangesFreq,        2 * sizeof(numb)),                                          "cudaMalloc d_rangesFreq");
         DFT_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                             "cudaMalloc d_indicesOfMutVars");
-        DFT_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),          "cudaMalloc d_initialConditions");
-        DFT_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                     "cudaMalloc d_values");
+        DFT_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),          "cudaMalloc d_initialConditions");
+        DFT_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                     "cudaMalloc d_values");
         DFT_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
-        DFT_CHECK(cudaMalloc((void**)&d_AkCOS,             nPtsLimiter * (size_t)nFreq * sizeof(double)),                "cudaMalloc d_AkCOS");
-        DFT_CHECK(cudaMalloc((void**)&d_BkSIN,             nPtsLimiter * (size_t)nFreq * sizeof(double)),                "cudaMalloc d_BkSIN");
-        DFT_CHECK(cudaMalloc((void**)&d_window,            (size_t)amountOfPointsInBlock * sizeof(double)),             "cudaMalloc d_window");
+        DFT_CHECK(cudaMalloc((void**)&d_AkCOS,             nPtsLimiter * (size_t)nFreq * sizeof(numb)),                "cudaMalloc d_AkCOS");
+        DFT_CHECK(cudaMalloc((void**)&d_BkSIN,             nPtsLimiter * (size_t)nFreq * sizeof(numb)),                "cudaMalloc d_BkSIN");
+        DFT_CHECK(cudaMalloc((void**)&d_window,            (size_t)amountOfPointsInBlock * sizeof(numb)),             "cudaMalloc d_window");
 
-        DFT_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
-        DFT_CHECK(cudaMemcpy(d_rangesFreq,        rangesFreq,         2 * sizeof(double),                                cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
+        DFT_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
+        DFT_CHECK(cudaMemcpy(d_rangesFreq,        rangesFreq,         2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
         DFT_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,   1 * sizeof(int),                                   cudaMemcpyHostToDevice), "memcpy d_indices");
-        DFT_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_ic");
-        DFT_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),            cudaMemcpyHostToDevice), "memcpy d_values");
-        DFT_CHECK(cudaMemcpy(d_window,            h_window.data(),   (size_t)amountOfPointsInBlock * sizeof(double),     cudaMemcpyHostToDevice), "memcpy d_window");
+        DFT_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
+        DFT_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),            cudaMemcpyHostToDevice), "memcpy d_values");
+        DFT_CHECK(cudaMemcpy(d_window,            h_window.data(),   (size_t)amountOfPointsInBlock * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy d_window");
         DFT_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
@@ -4190,24 +5037,26 @@ struct ParametricEngine::Impl {
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension                 = 1;
-            double h_arg                     = h;
+            numb h_arg                     = h;
             int    amountOfInitialConditions_int = amountOfInitialConditions;
             int    amountOfValues_int        = amountOfValues;
             size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
             int    preScaller_int            = preScaller;
             int    writableVar_int           = writableVar;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = !req.sweep_over_var;
-            // calculateDiscreteModelCUDA приобрёл эти 5 параметров в коммите
-            // "adding log sweep" — Dft1DRequest пока не выставляет h-свип/лог-ось,
-            // поэтому передаём "выключено". actualIterations допускает nullptr
-            // (см. проверку в cudaLibrary.cu) и DFT-путём не используется, в
-            // отличие от run_bif1d, где его читает peakFinderCUDA.
+            // h-свип сюда не доходит: run_dft_1d уводит его в run_dft1d_hsweep_gpu
+            // (DFT_custom принимает одну длину блока, одно окно и один шаг на весь
+            // запуск — под per-point h этого не хватает). Здесь ось всегда param/IC,
+            // поэтому hSweepAxis выключен, а actualIterations не нужен: длина блока
+            // одна на весь запуск, в отличие от run_bif1d, где его читает
+            // peakFinderCUDA.
             int    hSweepAxis_arg            = -1;
-            double transientTime_arg         = transientTime;
-            double tMax_arg                  = tMax;
+            numb transientTime_arg         = transientTime;
+            numb tMax_arg                  = tMax;
             int*   d_actualIterations        = nullptr;
-            int    logAxisMask_arg           = 0;
+            // Лог-сетка по оси параметра — бит 0 (в 1D ось одна), как в run_bif1d.
+            int    logAxisMask_arg           = req.log_scale ? 1 : 0;
 
             void* args_traj[] = {
                 &nPts_int,
@@ -4237,7 +5086,7 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg
             };
 
-            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
 
             DFT_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -4250,7 +5099,7 @@ struct ParametricEngine::Impl {
             // МЕЖДУ decimated сэмплами (h*preScaller), как и у peakFinderCUDA
             // (см. run_bif1d).
             int    nFreq_int      = nFreq;
-            double timeStep_arg   = h * (double)preScaller;
+            numb timeStep_arg   = h * (double)preScaller;
             int    logFreqAxis_arg = req.freq_log_scale ? 1 : 0;
             void* args_dft[] = {
                 &d_data,
@@ -4271,8 +5120,8 @@ struct ParametricEngine::Impl {
                          "cuLaunchKernel(dft)");
             DFT_CHECK(cudaDeviceSynchronize(), "sync after dft");
 
-            DFT_CHECK(cudaMemcpy(h_AkCOS.data(),         d_AkCOS,          nPtsLimiter * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_AkCOS");
-            DFT_CHECK(cudaMemcpy(h_BkSIN.data(),         d_BkSIN,          nPtsLimiter * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy h_BkSIN");
+            DFT_CHECK(cudaMemcpy(h_AkCOS.data(),         d_AkCOS,          nPtsLimiter * (size_t)nFreq * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_AkCOS");
+            DFT_CHECK(cudaMemcpy(h_BkSIN.data(),         d_BkSIN,          nPtsLimiter * (size_t)nFreq * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_BkSIN");
             DFT_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks,  nPtsLimiter * sizeof(int),                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
             DFT_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
@@ -4281,8 +5130,11 @@ struct ParametricEngine::Impl {
                 bkFile.open(OUT_FILE_PATH + "_BkSIN.csv", std::ios::app);
                 if (akFile.is_open()) akFile << std::setprecision(set_precision);
                 if (bkFile.is_open()) bkFile << std::setprecision(set_precision);
-                data_export::write_dft1d_matrix(akFile, h_AkCOS.data(), 0, (int)nPtsLimiter, nFreq);
-                data_export::write_dft1d_matrix(bkFile, h_BkSIN.data(), 0, (int)nPtsLimiter, nFreq);
+                // Экспорт принимает double* — расширяем numb-буфер на месте.
+                const std::vector<double> akWide(h_AkCOS.begin(), h_AkCOS.end());
+                const std::vector<double> bkWide(h_BkSIN.begin(), h_BkSIN.end());
+                data_export::write_dft1d_matrix(akFile, akWide.data(), 0, (int)nPtsLimiter, nFreq);
+                data_export::write_dft1d_matrix(bkFile, bkWide.data(), 0, (int)nPtsLimiter, nFreq);
                 akFile.close();
                 bkFile.close();
             }
@@ -4351,19 +5203,19 @@ struct ParametricEngine::Impl {
 
         const int nPts  = req.n_pts;
         const int nFreq = req.n_freq;
-        double rangesFreq[2] = { req.freq_lo, req.freq_hi };
+        numb   rangesFreq[2] = { (numb)req.freq_lo, (numb)req.freq_hi };
 
-        std::vector<double> h_window;
+        std::vector<numb> h_window;
         build_window(h_window, amountOfPointsInBlock, req.window_type);
 
-        double* d_data       = nullptr;
-        double* d_baseValues = nullptr;
-        double* d_baseX      = nullptr;
+        numb* d_data       = nullptr;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
         int*    d_amountOfPeaks = nullptr;
-        double* d_AkCOS      = nullptr;
-        double* d_BkSIN      = nullptr;
-        double* d_rangesFreq = nullptr;
-        double* d_window     = nullptr;
+        numb* d_AkCOS      = nullptr;
+        numb* d_BkSIN      = nullptr;
+        numb* d_rangesFreq = nullptr;
+        numb* d_window     = nullptr;
 
         auto cleanup = [&]() {
             if (d_data)       cudaFree(d_data);
@@ -4387,23 +5239,26 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        const size_t dataBytes = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(double);
+        const size_t dataBytes = (size_t)nPts * (size_t)amountOfPointsInBlock * sizeof(numb);
         DFTC_CHECK(cudaMalloc((void**)&d_data,         dataBytes),                                       "cudaMalloc d_data");
-        DFTC_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(double)), "cudaMalloc d_baseValues");
-        DFTC_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(double)),          "cudaMalloc d_baseX");
+        DFTC_CHECK(cudaMalloc((void**)&d_baseValues,   (size_t)req.base_values.size() * sizeof(numb)), "cudaMalloc d_baseValues");
+        DFTC_CHECK(cudaMalloc((void**)&d_baseX,        (size_t)req.amountOfX * sizeof(numb)),          "cudaMalloc d_baseX");
         DFTC_CHECK(cudaMalloc((void**)&d_amountOfPeaks,(size_t)nPts * sizeof(int)),                      "cudaMalloc d_amountOfPeaks");
-        DFTC_CHECK(cudaMalloc((void**)&d_AkCOS,        (size_t)nPts * (size_t)nFreq * sizeof(double)),   "cudaMalloc d_AkCOS");
-        DFTC_CHECK(cudaMalloc((void**)&d_BkSIN,        (size_t)nPts * (size_t)nFreq * sizeof(double)),   "cudaMalloc d_BkSIN");
-        DFTC_CHECK(cudaMalloc((void**)&d_rangesFreq,   2 * sizeof(double)),                               "cudaMalloc d_rangesFreq");
-        DFTC_CHECK(cudaMalloc((void**)&d_window,       (size_t)amountOfPointsInBlock * sizeof(double)),  "cudaMalloc d_window");
+        DFTC_CHECK(cudaMalloc((void**)&d_AkCOS,        (size_t)nPts * (size_t)nFreq * sizeof(numb)),   "cudaMalloc d_AkCOS");
+        DFTC_CHECK(cudaMalloc((void**)&d_BkSIN,        (size_t)nPts * (size_t)nFreq * sizeof(numb)),   "cudaMalloc d_BkSIN");
+        DFTC_CHECK(cudaMalloc((void**)&d_rangesFreq,   2 * sizeof(numb)),                               "cudaMalloc d_rangesFreq");
+        DFTC_CHECK(cudaMalloc((void**)&d_window,       (size_t)amountOfPointsInBlock * sizeof(numb)),  "cudaMalloc d_window");
 
-        DFTC_CHECK(cudaMemcpy(d_baseValues, req.base_values.data(),
-                           req.base_values.size() * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseValues");
-        DFTC_CHECK(cudaMemcpy(d_baseX, req.initial_conditions.data(),
-                           (size_t)req.amountOfX * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_baseX");
-        DFTC_CHECK(cudaMemcpy(d_rangesFreq, rangesFreq, 2 * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
+        // Вход приходит из Request в double — сужаем до numb на границе.
+        const std::vector<numb> baseValues_staged_ = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged_      = to_numb(req.initial_conditions);
+        DFTC_CHECK(cudaMemcpy(d_baseValues, baseValues_staged_.data(),
+                           req.base_values.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        DFTC_CHECK(cudaMemcpy(d_baseX, baseX_staged_.data(),
+                           (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_baseX");
+        DFTC_CHECK(cudaMemcpy(d_rangesFreq, rangesFreq, 2 * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
         DFTC_CHECK(cudaMemcpy(d_window, h_window.data(),
-                           (size_t)amountOfPointsInBlock * sizeof(double), cudaMemcpyHostToDevice), "memcpy d_window");
+                           (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_window");
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         // --- Launch continuation kernel (тот же, что у run_bif1d_continuation) ---
@@ -4411,21 +5266,21 @@ struct ParametricEngine::Impl {
         // флаги ядра выключены, а actualIterations не нужен (длина блока одна
         // на все точки) — передаём nullptr, ядро это допускает.
         int    nPts_arg              = nPts;
-        double lo_arg                = req.param_lo;
-        double hi_arg                = req.param_hi;
+        numb lo_arg                = req.param_lo;
+        numb hi_arg                = req.param_hi;
         bool   reverse_arg           = req.continuation_reverse;
         int    logScale_arg          = 0;
         int    sweepIsH_arg          = 0;
         int    mutParamIdx_arg       = req.param_index;
         int    amountOfValues_arg    = (int)req.base_values.size();
         int    amountOfX_arg         = req.amountOfX;
-        double h_arg                 = req.h;
-        double tMax_arg              = req.t_max;
-        double transientTime_arg     = req.transient_time;
+        numb h_arg                 = req.h;
+        numb tMax_arg              = req.t_max;
+        numb transientTime_arg     = req.transient_time;
         int    sizeOfBlock_arg       = amountOfPointsInBlock;
         int    preScaller_arg        = req.pre_scaller;
         int    writableVar_arg       = req.writable_var;
-        double maxValue_arg          = req.max_value;
+        numb maxValue_arg          = req.max_value;
         int*   d_actualIterations    = nullptr;
 
         void* cont_args[] = {
@@ -4448,7 +5303,9 @@ struct ParametricEngine::Impl {
         // --- DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks ---
         int    sizeOfBlock_i   = amountOfPointsInBlock;  // int, не size_t — см. gotcha #3
         int    nFreq_int       = nFreq;
-        double timeStep        = req.h * (double)req.pre_scaller;
+        // numb, а не double — DFT_custom ждёт numb h; см. пояснение в
+        // run_bif1d_continuation.
+        numb timeStep          = (numb)(req.h * (double)req.pre_scaller);
         int    logFreqAxis_arg = req.freq_log_scale ? 1 : 0;
         void* dft_args[] = {
             &d_data, &sizeOfBlock_i, &nPts_arg,
@@ -4475,8 +5332,14 @@ struct ParametricEngine::Impl {
         res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
 
         std::vector<int> h_amountOfPeaks((size_t)nPts);
-        DFTC_CHECK(cudaMemcpy(res.ak_cos.data(), d_AkCOS, (size_t)nPts * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy out d_AkCOS");
-        DFTC_CHECK(cudaMemcpy(res.bk_sin.data(), d_BkSIN, (size_t)nPts * (size_t)nFreq * sizeof(double), cudaMemcpyDeviceToHost), "memcpy out d_BkSIN");
+        {   // Приёмник D2H — numb, наружу расширяем в double-хранилище Result.
+            const size_t cells_ = (size_t)nPts * (size_t)nFreq;
+            std::vector<numb> ak_(cells_), bk_(cells_);
+            DFTC_CHECK(cudaMemcpy(ak_.data(), d_AkCOS, cells_ * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy out d_AkCOS");
+            DFTC_CHECK(cudaMemcpy(bk_.data(), d_BkSIN, cells_ * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy out d_BkSIN");
+            res.ak_cos.assign(ak_.begin(), ak_.end());
+            res.bk_sin.assign(bk_.begin(), bk_.end());
+        }
         DFTC_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy out d_amountOfPeaks");
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after D2H");
         for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = h_amountOfPeaks[(size_t)j];
@@ -4737,13 +5600,15 @@ struct ParametricEngine::Impl {
         const double tMax                       = req.t_max;
         const double h                          = req.h;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[4]                        = { ranges_lo_x, ranges_hi_x, ranges_lo_y, ranges_hi_y };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[4]                        = { (numb)ranges_lo_x, (numb)ranges_hi_x, (numb)ranges_lo_y, (numb)ranges_hi_y };
         int    indicesOfMutVars[2]              = { idx_axis_x, idx_axis_y };
         const int    writableVar                = req.writable_var;
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const int    preScaller                 = req.pre_scaller;
         const double eps_dbscan                 = req.eps_dbscan;
@@ -4768,29 +5633,34 @@ struct ParametricEngine::Impl {
         if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
         freeMemory = (size_t)((double)freeMemory * 0.92);
 
-        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * 3 * sizeof(double) + 2 * sizeof(int);
-        size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(double) + 2 * sizeof(int);
+        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * 3 * sizeof(numb) + 2 * sizeof(int);
+        size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
         if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
 
         size_t nPtsLimiter = (freeMemory - memConstants) / baseMemPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)             nPtsLimiter = total_cells;
-        nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
-        if (nPtsLimiter == 0) return fail("not enough GPU memory: per-system buffer too large");
+        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
+        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
+        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
+        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
+        // считался нормально. Зато при число ячеек сетки < 32 округление давало 0, и Run
+        // падал с сообщением про нехватку памяти, которая была ни при чём.
+        if (nPtsLimiter == 0) return fail("сетка пуста (n_pts должно быть > 0)");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // ---- host buffers ----
         std::vector<int> h_dbscanResult(nPtsLimiter);
 
         // ---- device buffers ----
-        double* d_data              = nullptr;
-        double* d_ranges            = nullptr;
+        numb* d_data              = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
-        double* d_intervals         = nullptr;
-        double* d_helpfulArray      = nullptr;
+        numb* d_intervals         = nullptr;
+        numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
         int*    d_actualIterations  = nullptr;
 
@@ -4836,21 +5706,21 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BIF2D_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
-        BIF2D_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
+        BIF2D_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
+        BIF2D_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                           "cudaMalloc d_ranges");
         BIF2D_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
-        BIF2D_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),           "cudaMalloc d_initialConditions");
-        BIF2D_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                      "cudaMalloc d_values");
+        BIF2D_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),           "cudaMalloc d_initialConditions");
+        BIF2D_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                      "cudaMalloc d_values");
         BIF2D_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
-        BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_intervals");
-        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_helpfulArray");
+        BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_intervals");
+        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         BIF2D_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_actualIterations");
 
-        BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
-        BIF2D_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_ic");
-        BIF2D_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),             cudaMemcpyHostToDevice), "memcpy d_values");
+        BIF2D_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb),  cudaMemcpyHostToDevice), "memcpy d_ic");
+        BIF2D_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),             cudaMemcpyHostToDevice), "memcpy d_values");
         BIF2D_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         BIF2D_CHECK_CU(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
@@ -4907,17 +5777,17 @@ struct ParametricEngine::Impl {
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension_arg             = 2;
-            double h_arg                     = h;
+            numb h_arg                     = h;
             int    amountOfIC_int            = amountOfInitialConditions;
             int    amountOfValues_int        = amountOfValues;
             size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
             int    preScaller_int            = preScaller;
             int    writableVar_int           = writableVar;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = (par_or_var != 0);  // true=param, false=IC (runtime hint, kernel использует compile-time макрос)
             int    hSweepAxis_arg            = hSweepAxis;
-            double transientTime_arg         = transientTime;
-            double tMax_arg                  = tMax;
+            numb transientTime_arg         = transientTime;
+            numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
 
             void* args_traj[] = {
@@ -4947,7 +5817,7 @@ struct ParametricEngine::Impl {
                 &d_actualIterations,
                 &logAxisMask_arg
             };
-            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           shared_traj, stream, args_traj, nullptr),
@@ -4955,7 +5825,7 @@ struct ParametricEngine::Impl {
 
             // 2. peakFinderCUDA — d_data передаётся и как data, и как outPeaks (in-place).
             // Same stream as traj → automatic ordering, no explicit sync needed.
-            double timeStep_arg = h * (double)preScaller;
+            numb timeStep_arg = h * (double)preScaller;
             void* args_peak[] = {
                 &d_data,
                 &sizeOfBlock_s,
@@ -4972,7 +5842,7 @@ struct ParametricEngine::Impl {
                            "cuLaunchKernel(bif2d peak)");
 
             // 3. dbscanCUDA — same stream, ordered after peak.
-            double eps_arg = eps_dbscan;
+            numb eps_arg = eps_dbscan;
             void* args_dbscan[] = {
                 &d_data,
                 &sizeOfBlock_s,
@@ -5189,14 +6059,16 @@ struct ParametricEngine::Impl {
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
         const int    amountOfInitialConditions  = req.amountOfX;
-        const double* initialConditions         = req.initial_conditions.data();
-        double ranges[4]                        = { req.axis_x_lo, req.axis_x_hi,
-                                                    req.axis_y_lo, req.axis_y_hi };
+        const std::vector<numb> ic_staged_       = to_numb(req.initial_conditions);
+        const numb*   initialConditions         = ic_staged_.data();
+        numb   ranges[4]                        = { (numb)req.axis_x_lo, (numb)req.axis_x_hi,
+                                                    (numb)req.axis_y_lo, (numb)req.axis_y_hi };
         int    indicesOfMutVars[2]              = { req.axis_x_var, req.axis_y_var };
         const double maxValue                   = req.max_value;
         const double transientTime              = req.transient_time;
         const double tMax                       = req.t_max;
-        const double* values                    = req.base_values.data();
+        const std::vector<numb> values_staged_   = to_numb(req.base_values);
+        const numb*   values                    = values_staged_.data();
         const int    amountOfValues             = (int)req.base_values.size();
         const int    preScaller                 = req.pre_scaller;
         const double eps_dbscan                 = req.eps_dbscan;
@@ -5214,30 +6086,30 @@ struct ParametricEngine::Impl {
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
         // Memory budget — мирор hostLibrary.cu:3269. Per-cell траектория-buffer:
-        // 2 * amountOfPointsInBlock * sizeof(double) (d_data + d_intervals).
+        // 2 * amountOfPointsInBlock * sizeof(numb) (d_data + d_intervals).
         size_t freeMemory = 0, totalMemory = 0;
         if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
             return fail("cudaMemGetInfo failed");
         freeMemory = (size_t)((double)freeMemory * 0.9);
 
-        size_t perCellBytes = 2 * sizeof(double) * (size_t)amountOfPointsInBlock;
-        if (perCellBytes == 0) perCellBytes = sizeof(double);
+        size_t perCellBytes = 2 * sizeof(numb) * (size_t)amountOfPointsInBlock;
+        if (perCellBytes == 0) perCellBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perCellBytes;
         if (nPtsLimiter == 0)              nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)     nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        double* d_data              = nullptr;
-        double* d_ranges            = nullptr;
+        numb* d_data              = nullptr;
+        numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
-        double* d_initialConditions = nullptr;
-        double* d_values            = nullptr;
+        numb* d_initialConditions = nullptr;
+        numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
-        double* d_intervals         = nullptr;
+        numb* d_intervals         = nullptr;
         int*    d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
-        double* d_avgPeaks          = nullptr;
-        double* d_avgIntervals      = nullptr;
+        numb* d_avgPeaks          = nullptr;
+        numb* d_avgIntervals      = nullptr;
         int*    d_amountOfNeighbors = nullptr;
         int*    d_neighbors         = nullptr;
         int*    d_clearIdx          = nullptr;
@@ -5281,25 +6153,25 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BAS_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_data");
-        BAS_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(double)),                                           "cudaMalloc d_ranges");
+        BAS_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
+        BAS_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                           "cudaMalloc d_ranges");
         BAS_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
-        BAS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(double)),           "cudaMalloc d_initialConditions");
-        BAS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(double)),                      "cudaMalloc d_values");
+        BAS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),           "cudaMalloc d_initialConditions");
+        BAS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                      "cudaMalloc d_values");
         BAS_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
-        BAS_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(double)), "cudaMalloc d_intervals");
+        BAS_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_intervals");
         BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
         BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
-        BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(double)),                                 "cudaMalloc d_avgPeaks");
-        BAS_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(double)),                                 "cudaMalloc d_avgIntervals");
+        BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)),                                 "cudaMalloc d_avgPeaks");
+        BAS_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)),                                 "cudaMalloc d_avgIntervals");
         BAS_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                                                  "cudaMalloc d_amountOfNeighbors");
         BAS_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),                                    "cudaMalloc d_neighbors");
         BAS_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                                                  "cudaMalloc d_clearIdx");
 
-        BAS_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(double),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
+        BAS_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BAS_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
-        BAS_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(double),  cudaMemcpyHostToDevice), "memcpy d_ic");
-        BAS_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(double),             cudaMemcpyHostToDevice), "memcpy d_values");
+        BAS_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb),  cudaMemcpyHostToDevice), "memcpy d_ic");
+        BAS_CHECK(cudaMemcpy(d_values,            values,            (size_t)amountOfValues * sizeof(numb),             cudaMemcpyHostToDevice), "memcpy d_values");
         BAS_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)),  "memset d_dbscanResult");
         BAS_CHECK(cudaMemset(d_helpfulArray, 0, total_cells * sizeof(int)),  "memset d_helpfulArray");
         BAS_CHECK(cudaDeviceSynchronize(), "sync after H2D");
@@ -5359,7 +6231,7 @@ struct ParametricEngine::Impl {
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
             // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), clamp blockSize_setup
-            int blockSize = (int)std::ceil((1024.0 * 48.0) / ((double)(amountOfInitialConditions + amountOfValues) * (double)sizeof(double)));
+            int blockSize = (int)std::ceil((1024.0 * 48.0) / ((double)(amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
             if (blockSize < 1)                blockSize = 1;
             if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
@@ -5375,17 +6247,17 @@ struct ParametricEngine::Impl {
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension_arg             = 2;
-            double h_arg                     = h;
+            numb h_arg                     = h;
             int    amountOfIC_int            = amountOfInitialConditions;
             int    amountOfValues_int        = amountOfValues;
             size_t amountOfIterations_arg    = (size_t)amountOfPointsInBlock;
             int    preScaller_int            = preScaller;
             int    writableVar_int           = req.writable_var;
-            double maxValue_arg              = maxValue;
+            numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = false;   // compile-time par_or_var=0 в шаблоне
             int    hSweepAxis_arg            = -1;
-            double transientTime_arg         = transientTime;
-            double tMax_arg                  = tMax;
+            numb transientTime_arg         = transientTime;
+            numb tMax_arg                  = tMax;
             int*   d_actualIterations        = nullptr;
             int    logAxisMask_arg           = 0;
 
@@ -5402,7 +6274,7 @@ struct ParametricEngine::Impl {
                 &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
                 &d_actualIterations, &logAxisMask_arg
             };
-            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(double) * blockSize);
+            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
             BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared_traj, nullptr, args_traj, nullptr),
@@ -5412,9 +6284,16 @@ struct ParametricEngine::Impl {
             // avgPeakFinderCUDA. d_data → outPeaks (in-place); d_intervals → timeOfPeaks.
             int sizeOfBlock_int = amountOfPointsInBlock;
             int amountOfBlocks  = (int)cur_limiter;
-            double h_peak       = h * (double)preScaller;
-            double* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
-            double* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
+            // ОБЯЗАТЕЛЬНО numb, а не double: cuLaunchKernel копирует аргументы
+            // побайтово по void*, не сверяя типы с сигнатурой. Параметр `h` у
+            // avgPeakFinderCUDA объявлен как numb, поэтому при numb=float отсюда
+            // уехали бы первые 4 байта double-представления: h=0.01 приходил в
+            // ядро как 89128.96, и межпиковые интервалы (разность индексов * h)
+            // получались порядка 1e6. При numb=double размеры совпадали, и баг
+            // не проявлялся.
+            numb h_peak         = (numb)(h * (double)preScaller);
+            numb* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
+            numb* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
 
             // feature1/feature2 + mult1/mult2 — выбор пользователя (см.
             // BasinsConfig). Копируем req-поля в local non-const, чтобы
@@ -5508,7 +6387,7 @@ struct ParametricEngine::Impl {
             BAS_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
 
             // CUDA_dbscan_kernel — расширение cluster'а от clearIdx.
-            double eps_arg = eps_dbscan;
+            numb eps_arg = eps_dbscan;
             void* args_db[] = {
                 &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
                 &amountOfData_int, &eps_arg, &resultClusters,
@@ -5577,8 +6456,13 @@ struct ParametricEngine::Impl {
         res.helpful_array.assign(total_cells, 0);
 
         BAS_CHECK(cudaMemcpy(res.basin_idx.data(),     d_dbscanResult, total_cells * sizeof(int),    cudaMemcpyDeviceToHost), "memcpy basin_idx");
-        BAS_CHECK(cudaMemcpy(res.avg_peaks.data(),     d_avgPeaks,     total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy avg_peaks");
-        BAS_CHECK(cudaMemcpy(res.avg_intervals.data(), d_avgIntervals, total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy avg_intervals");
+        {   // numb на устройстве -> double в Result.
+            std::vector<numb> ap_(total_cells), ai_(total_cells);
+            BAS_CHECK(cudaMemcpy(ap_.data(), d_avgPeaks,     total_cells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy avg_peaks");
+            BAS_CHECK(cudaMemcpy(ai_.data(), d_avgIntervals, total_cells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy avg_intervals");
+            res.avg_peaks.assign(ap_.begin(), ap_.end());
+            res.avg_intervals.assign(ai_.begin(), ai_.end());
+        }
         BAS_CHECK(cudaMemcpy(res.helpful_array.data(), d_helpfulArray, total_cells * sizeof(int),    cudaMemcpyDeviceToHost), "memcpy helpful_array");
 
         // ---- 4. Сводки + CSV ----
@@ -5661,8 +6545,8 @@ struct ParametricEngine::Impl {
 
         int*    d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
-        double* d_avgPeaks          = nullptr;
-        double* d_avgIntervals      = nullptr;
+        numb* d_avgPeaks          = nullptr;
+        numb* d_avgIntervals      = nullptr;
         int*    d_amountOfNeighbors = nullptr;
         int*    d_neighbors         = nullptr;
         int*    d_clearIdx          = nullptr;
@@ -5701,14 +6585,14 @@ struct ParametricEngine::Impl {
 
         BRC_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),    "cudaMalloc d_helpfulArray");
         BRC_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),    "cudaMalloc d_dbscanResult");
-        BRC_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(double)), "cudaMalloc d_avgPeaks");
-        BRC_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(double)), "cudaMalloc d_avgIntervals");
+        BRC_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)), "cudaMalloc d_avgPeaks");
+        BRC_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)), "cudaMalloc d_avgIntervals");
         BRC_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                  "cudaMalloc d_amountOfNeighbors");
         BRC_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),    "cudaMalloc d_neighbors");
         BRC_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                  "cudaMalloc d_clearIdx");
 
-        BRC_CHECK(cudaMemcpy(d_avgPeaks,     req.avg_peaks.data(),     total_cells * sizeof(double), cudaMemcpyHostToDevice), "memcpy avg_peaks H2D");
-        BRC_CHECK(cudaMemcpy(d_avgIntervals, req.avg_intervals.data(), total_cells * sizeof(double), cudaMemcpyHostToDevice), "memcpy avg_intervals H2D");
+        BRC_CHECK(cudaMemcpy(d_avgPeaks,     to_numb(req.avg_peaks).data(),     total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_peaks H2D");
+        BRC_CHECK(cudaMemcpy(d_avgIntervals, to_numb(req.avg_intervals).data(), total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_intervals H2D");
         BRC_CHECK(cudaMemcpy(d_helpfulArray, req.helpful_array.data(), total_cells * sizeof(int),    cudaMemcpyHostToDevice), "memcpy helpful_array H2D");
         BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
         BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
@@ -5761,7 +6645,7 @@ struct ParametricEngine::Impl {
             h_amountOfNeighbors = 0;
             BRC_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
 
-            double eps_arg = eps_dbscan;
+            numb eps_arg = eps_dbscan;
             void* args_db[] = {
                 &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
                 (void*)&amountOfData_int, &eps_arg, &resultClusters,
@@ -6033,33 +6917,36 @@ struct ParametricEngine::Impl {
             int amountOfIC_int     = req.amountOfX;
             int amountOfValues_int = (int)req.values.size();
 
-            double* d_timeDomain = nullptr; double* d_output = nullptr;
-            double* d_Xs = nullptr;   double* d_X0 = nullptr;
-            double* d_values = nullptr;
-            double* d_kF = nullptr;   double* d_kB = nullptr;
+            numb* d_timeDomain = nullptr; numb* d_output = nullptr;
+            numb* d_Xs = nullptr;   numb* d_X0 = nullptr;
+            numb* d_values = nullptr;
+            numb* d_kF = nullptr;   numb* d_kB = nullptr;
             #define FS_CHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS0_FAIL; } } while(0)
 
-            size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(double);
-            size_t out_bytes  = (size_t)nPts * sizeof(double);
+            size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(numb);
+            size_t out_bytes  = (size_t)nPts * sizeof(numb);
             FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
             FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
-            FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(double)), "cudaMalloc d_Xs");
-            FS_CHECK(cudaMalloc((void**)&d_X0,         amountOfIC_int * sizeof(double)), "cudaMalloc d_X0");
-            FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(double)), "cudaMalloc d_values");
-            FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(double)), "cudaMalloc d_kF");
-            FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(double)), "cudaMalloc d_kB");
+            FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_Xs");
+            FS_CHECK(cudaMalloc((void**)&d_X0,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_X0");
+            FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(numb)), "cudaMalloc d_values");
+            FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kF");
+            FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kB");
 
-            FS_CHECK(cudaMemcpy(d_X0,     req.ic_master.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy X0");
-            FS_CHECK(cudaMemcpy(d_Xs,     req.ic_slave.data(),   amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy Xs");
-            FS_CHECK(cudaMemcpy(d_values, req.values.data(),     amountOfValues_int * sizeof(double), cudaMemcpyHostToDevice), "memcpy values");
-            FS_CHECK(cudaMemcpy(d_kF,     req.k_forward.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kF");
-            FS_CHECK(cudaMemcpy(d_kB,     req.k_backward.data(), amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kB");
+            // См. пояснение в grid-ветке: Request хранит их как vector<double>,
+            // а буферы — numb, поэтому конверсия обязательна для всех, не
+            // только для values.
+            FS_CHECK(cudaMemcpy(d_X0,     to_numb(req.ic_master).data(),  amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy X0");
+            FS_CHECK(cudaMemcpy(d_Xs,     to_numb(req.ic_slave).data(),   amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy Xs");
+            FS_CHECK(cudaMemcpy(d_values, to_numb(req.values).data(),     amountOfValues_int * sizeof(numb), cudaMemcpyHostToDevice), "memcpy values");
+            FS_CHECK(cudaMemcpy(d_kF,     to_numb(req.k_forward).data(),  amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kF");
+            FS_CHECK(cudaMemcpy(d_kB,     to_numb(req.k_backward).data(), amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kB");
 
             // Шаг 1: fillFSMasterTrajectory — single-thread, заливает d_timeDomain
             // полным X[] на каждом шаге (через FS device function с K=0).
             if (req.progress) req.progress->store(0.05f);
             {
-                double  h_arg     = req.h;
+                numb  h_arg     = req.h;
                 int     skip_arg  = amountOfPointsForSkip;
                 int     pts_arg   = traj_len_pts;
                 void* args_fill[] = {
@@ -6079,10 +6966,10 @@ struct ParametricEngine::Impl {
                 int    nPts_int           = nPts;
                 int    nPtsLimiter_int    = nPts;
                 int    amountOfNTPoints_i = amountOfNTPoints;
-                double h_arg              = req.h;
+                numb h_arg              = req.h;
                 int    iterOfSynchr_i     = req.iter_of_synchr;
                 int    preScaller_i       = req.pre_scaller;
-                double maxValue_arg       = req.max_value;
+                numb maxValue_arg       = req.max_value;
                 int    amountOfValues_i   = amountOfValues_int;
 
                 void* args_fs[] = {
@@ -6106,10 +6993,10 @@ struct ParametricEngine::Impl {
             // Шаг 3: D2H — trajectory + errors. timeDomain хранит RAW точки
             // (без decimator'а); для визуализации выбираем точки с шагом preScaller.
             {
-                std::vector<double> h_traj((size_t)traj_len_pts * (size_t)amountOfIC_int);
+                std::vector<numb> h_traj((size_t)traj_len_pts * (size_t)amountOfIC_int);
                 FS_CHECK(cudaMemcpy(h_traj.data(), d_timeDomain, traj_bytes, cudaMemcpyDeviceToHost), "memcpy traj D2H");
 
-                std::vector<double> h_out(nPts);
+                std::vector<numb> h_out(nPts);
                 FS_CHECK(cudaMemcpy(h_out.data(), d_output, out_bytes, cudaMemcpyDeviceToHost), "memcpy out D2H");
 
                 // Сохраняем полную (decimated) траекторию — все каналы. GUI
@@ -6123,7 +7010,7 @@ struct ParametricEngine::Impl {
                         res.traj_full[(size_t)i * amountOfIC_int + j]
                             = h_traj[row * (size_t)amountOfIC_int + j];
                 }
-                res.sync_error    = std::move(h_out);
+                res.sync_error.assign(h_out.begin(), h_out.end());   // numb -> double
                 res.n_pts_traj    = nPts;
                 res.amountOfX_traj = amountOfIC_int;
             }
@@ -6193,45 +7080,48 @@ struct ParametricEngine::Impl {
             int amountOfIC_int     = req.amountOfX;
             int amountOfValues_int = (int)req.values.size();
 
-            // Memory budget — per-cell trajectory buffer = sizeOfBlock * amountOfX * sizeof(double).
+            // Memory budget — per-cell trajectory buffer = sizeOfBlock * amountOfX * sizeof(numb).
             size_t freeMemory = 0, totalMemory = 0;
             if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
             freeMemory = (size_t)((double)freeMemory * 0.5);
-            size_t perCellBytes = (size_t)amountOfPointsInBlock * (size_t)amountOfIC_int * sizeof(double);
-            if (perCellBytes == 0) perCellBytes = sizeof(double);
+            size_t perCellBytes = (size_t)amountOfPointsInBlock * (size_t)amountOfIC_int * sizeof(numb);
+            if (perCellBytes == 0) perCellBytes = sizeof(numb);
             size_t nPtsLimiter = freeMemory / perCellBytes;
             if (nPtsLimiter == 0) nPtsLimiter = 32;
             if (nPtsLimiter > total_cells) nPtsLimiter = total_cells;
             const size_t originalNPtsLimiter = nPtsLimiter;
 
-            double* d_data    = nullptr; double* d_ranges = nullptr;
-            int*    d_idx_mv  = nullptr; double* d_ic_m   = nullptr; double* d_ic_s = nullptr;
-            double* d_values  = nullptr; double* d_kF     = nullptr; double* d_kB   = nullptr;
-            int*    d_helpful = nullptr; double* d_fs_err = nullptr;
+            numb* d_data    = nullptr; numb* d_ranges = nullptr;
+            int*    d_idx_mv  = nullptr; numb* d_ic_m   = nullptr; numb* d_ic_s = nullptr;
+            numb* d_values  = nullptr; numb* d_kF     = nullptr; numb* d_kB   = nullptr;
+            int*    d_helpful = nullptr; numb* d_fs_err = nullptr;
 
             #define FS_GCHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS1_FAIL; } } while(0)
 
             FS_GCHECK(cudaMalloc((void**)&d_data,    (size_t)nPtsLimiter * perCellBytes), "cudaMalloc d_data");
-            FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(double)),                  "cudaMalloc d_ranges");
+            FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(numb)),                  "cudaMalloc d_ranges");
             FS_GCHECK(cudaMalloc((void**)&d_idx_mv,  2 * sizeof(int)),                     "cudaMalloc d_idx_mv");
-            FS_GCHECK(cudaMalloc((void**)&d_ic_m,    amountOfIC_int * sizeof(double)),     "cudaMalloc d_ic_m");
-            FS_GCHECK(cudaMalloc((void**)&d_ic_s,    amountOfIC_int * sizeof(double)),     "cudaMalloc d_ic_s");
-            FS_GCHECK(cudaMalloc((void**)&d_values,  amountOfValues_int * sizeof(double)), "cudaMalloc d_values");
-            FS_GCHECK(cudaMalloc((void**)&d_kF,      amountOfIC_int * sizeof(double)),     "cudaMalloc d_kF");
-            FS_GCHECK(cudaMalloc((void**)&d_kB,      amountOfIC_int * sizeof(double)),     "cudaMalloc d_kB");
+            FS_GCHECK(cudaMalloc((void**)&d_ic_m,    amountOfIC_int * sizeof(numb)),     "cudaMalloc d_ic_m");
+            FS_GCHECK(cudaMalloc((void**)&d_ic_s,    amountOfIC_int * sizeof(numb)),     "cudaMalloc d_ic_s");
+            FS_GCHECK(cudaMalloc((void**)&d_values,  amountOfValues_int * sizeof(numb)), "cudaMalloc d_values");
+            FS_GCHECK(cudaMalloc((void**)&d_kF,      amountOfIC_int * sizeof(numb)),     "cudaMalloc d_kF");
+            FS_GCHECK(cudaMalloc((void**)&d_kB,      amountOfIC_int * sizeof(numb)),     "cudaMalloc d_kB");
             FS_GCHECK(cudaMalloc((void**)&d_helpful, nPtsLimiter * sizeof(int)),           "cudaMalloc d_helpful");
-            FS_GCHECK(cudaMalloc((void**)&d_fs_err,  total_cells * sizeof(double)),         "cudaMalloc d_fs_err");
+            FS_GCHECK(cudaMalloc((void**)&d_fs_err,  total_cells * sizeof(numb)),         "cudaMalloc d_fs_err");
 
             {
-                double ranges_arr[4] = { req.axis_x_lo, req.axis_x_hi, req.axis_y_lo, req.axis_y_hi };
+                numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
                 int    idx_mv_arr[2] = { req.axis_x_var, req.axis_y_var };
-                FS_GCHECK(cudaMemcpy(d_ranges, ranges_arr, 4 * sizeof(double),  cudaMemcpyHostToDevice), "memcpy ranges");
+                FS_GCHECK(cudaMemcpy(d_ranges, ranges_arr, 4 * sizeof(numb),  cudaMemcpyHostToDevice), "memcpy ranges");
                 FS_GCHECK(cudaMemcpy(d_idx_mv, idx_mv_arr, 2 * sizeof(int),     cudaMemcpyHostToDevice), "memcpy idx_mv");
-                FS_GCHECK(cudaMemcpy(d_ic_m,   req.ic_master.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy ic_m");
-                FS_GCHECK(cudaMemcpy(d_ic_s,   req.ic_slave.data(),   amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy ic_s");
-                FS_GCHECK(cudaMemcpy(d_values, req.values.data(),     amountOfValues_int * sizeof(double), cudaMemcpyHostToDevice), "memcpy values");
-                FS_GCHECK(cudaMemcpy(d_kF,     req.k_forward.data(),  amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kF");
-                FS_GCHECK(cudaMemcpy(d_kB,     req.k_backward.data(), amountOfIC_int * sizeof(double),     cudaMemcpyHostToDevice), "memcpy kB");
+                // Все четыре — vector<double> в Request, а буферы типа numb:
+                // без to_numb при numb=float копировались бы половинки double.
+                // values рядом уже конвертировался, остальные — нет.
+                FS_GCHECK(cudaMemcpy(d_ic_m,   to_numb(req.ic_master).data(),  amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy ic_m");
+                FS_GCHECK(cudaMemcpy(d_ic_s,   to_numb(req.ic_slave).data(),   amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy ic_s");
+                FS_GCHECK(cudaMemcpy(d_values, to_numb(req.values).data(),     amountOfValues_int * sizeof(numb), cudaMemcpyHostToDevice), "memcpy values");
+                FS_GCHECK(cudaMemcpy(d_kF,     to_numb(req.k_forward).data(),  amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kF");
+                FS_GCHECK(cudaMemcpy(d_kB,     to_numb(req.k_backward).data(), amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kB");
             }
 
             // Transient (TT): доводим до аттрактора ту IC, которую сетка НЕ
@@ -6242,8 +7132,8 @@ struct ParametricEngine::Impl {
             if (req.transient_time > 0.0) {
                 const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
                 if (amountOfPointsForSkip > 0) {
-                    double* d_fixed_ic = req.grid_swap_master_slave ? d_ic_m : d_ic_s;
-                    double  h_arg      = req.h;
+                    numb* d_fixed_ic = req.grid_swap_master_slave ? d_ic_m : d_ic_s;
+                    numb  h_arg      = req.h;
                     int     skip_arg   = amountOfPointsForSkip;
                     void* args_transient[] = { &d_values, &h_arg, &d_fixed_ic, &skip_arg };
                     CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_transient,
@@ -6268,12 +7158,12 @@ struct ParametricEngine::Impl {
                 int    sizeOfBlock_int           = amountOfPointsInBlock * amountOfIC_int;
                 int    amountOfCalculatedPoints  = (int)(i * originalNPtsLimiter);
                 int    dimension_arg             = 2;
-                double h_arg                     = req.h;
+                numb h_arg                     = req.h;
                 int    amountOfIterations_int    = amountOfPointsInBlock;
                 int    preScaller_int            = req.pre_scaller;
-                double maxValue_arg              = req.max_value;
+                numb maxValue_arg              = req.max_value;
                 int    iterOfSynchr_int          = req.iter_of_synchr;
-                double* d_fs_err_chunk           = d_fs_err + i * originalNPtsLimiter;
+                numb* d_fs_err_chunk           = d_fs_err + i * originalNPtsLimiter;
                 int    swap_role_int             = req.grid_swap_master_slave ? 1 : 0;
 
                 void* args_grid[] = {
@@ -6294,7 +7184,7 @@ struct ParametricEngine::Impl {
                 // правильного размера → OOB в shared → illegal memory access,
                 // корраптящий весь CUDA-контекст (sticky).
                 unsigned int shared_grid = (unsigned int)((amountOfIC_int + amountOfValues_int)
-                                                          * sizeof(double) * blockSize);
+                                                          * sizeof(numb) * blockSize);
                 CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_grid,
                                             gridSize, 1, 1, blockSize, 1, 1,
                                             shared_grid, nullptr, args_grid, nullptr);
@@ -6306,9 +7196,9 @@ struct ParametricEngine::Impl {
             }
 
             {
-                std::vector<double> h_out(total_cells);
-                FS_GCHECK(cudaMemcpy(h_out.data(), d_fs_err, total_cells * sizeof(double), cudaMemcpyDeviceToHost), "memcpy fs_err D2H");
-                res.heatmap = std::move(h_out);
+                std::vector<numb> h_out(total_cells);
+                FS_GCHECK(cudaMemcpy(h_out.data(), d_fs_err, total_cells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy fs_err D2H");
+                res.heatmap.assign(h_out.begin(), h_out.end());      // numb -> double
                 res.n_pts_grid = req.n_pts;
                 res.axis_x_lo = req.axis_x_lo; res.axis_x_hi = req.axis_x_hi;
                 res.axis_y_lo = req.axis_y_lo; res.axis_y_hi = req.axis_y_hi;

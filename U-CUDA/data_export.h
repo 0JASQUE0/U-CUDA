@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 //
 // data_export — shared CSV writer for plot results.
 //

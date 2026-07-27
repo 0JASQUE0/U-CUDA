@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "analysis_session.h"
 #include "system_record.h"
 #include "parametric_engine.h"

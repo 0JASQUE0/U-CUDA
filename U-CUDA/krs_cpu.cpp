@@ -1,4 +1,4 @@
-#include "krs_cpu.h"
+﻿#include "krs_cpu.h"
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -268,8 +268,16 @@ bool krs_cpu_backend_available(std::string* why_not) {
 namespace {
 
 // Версия пролога/командной строки. ВХОДИТ В КЛЮЧ КЭША: иначе после правки
-// пролога переиспользовалась бы DLL, собранная старым.
-constexpr int kPreludeVersion = 2;
+// пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
+// numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
+// подхватилась бы DLL, собранная в другой точности.
+constexpr int kPreludeVersion = 3;
+
+// Имя типа numb в тексте генерируемого исходника. Берётся из самого typedef,
+// поэтому configCUDA.h остаётся единственным источником истины.
+constexpr const char* numb_type_name() {
+    return sizeof(numb) == sizeof(float) ? "float" : "double";
+}
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
@@ -284,15 +292,19 @@ constexpr int kPreludeVersion = 2;
 // (см. схему "sine") их просто затеняет — ровно как на GPU.
 std::string make_source(const std::string& body, int amountOfX) {
     std::ostringstream o;
+    // numb берётся из configCUDA.h — тело схемы обязано считаться в той же
+    // точности, что на GPU. min/max/pi/euler объявлены тем же типом, иначе
+    // при numb=float выражение молча поднялось бы до double в середине.
+    const char* nt = numb_type_name();
     o << "#include <cmath>\n"
          "#include <cstdlib>\n"
          "using std::abs;\n"
-         "static inline double min(double x, double y) { return x < y ? x : y; }\n"
-         "static inline double max(double x, double y) { return x > y ? x : y; }\n"
-         "typedef double numb;\n"
+         "typedef " << nt << " numb;\n"
+         "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
          "#define AMOUNTOFX " << amountOfX << "\n"
-         "static const double pi    = 3.1415926535897932384626433832795;\n"
-         "static const double euler = 2.7182818284590452353602874713527;\n"
+         "static const numb pi    = (numb)3.1415926535897932384626433832795;\n"
+         "static const numb euler = (numb)2.7182818284590452353602874713527;\n"
          "extern \"C\" __declspec(dllexport)\n"
          "void krs_step(numb* X, const numb* a, numb h) {\n"
          // Дальше — код пользователя. #line переводит нумерацию компилятора
@@ -314,6 +326,8 @@ unsigned long long hash_key(const std::string& body, int nx, int nv) {
     mix(&nv, sizeof nv);
     const int ver = kPreludeVersion;
     mix(&ver, sizeof ver);
+    const int numb_bytes = (int)sizeof(numb);
+    mix(&numb_bytes, sizeof numb_bytes);
     return h;
 }
 

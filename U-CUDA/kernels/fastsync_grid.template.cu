@@ -1,4 +1,4 @@
-// fastsync_grid.template.cu
+﻿// fastsync_grid.template.cu
 //
 // NVRTC-шаблон для Fast Synchro в режиме "On Grid" (2D-карта по двум IC).
 // Host-оркестрация — parametric_engine::run_fastsync(req, mode=1):

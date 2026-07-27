@@ -1,4 +1,4 @@
-#include "gui.h"
+﻿#include "gui.h"
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
 #include "implot.h"
@@ -244,7 +244,8 @@ static std::string auto_label_window(const ParametricPlotWindow& w) {
 static std::string auto_label_dft1d(const Dft1DConfig& c,
                                     const std::vector<std::string>& params,
                                     const std::vector<std::string>& vars) {
-    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var, c.var_sweep_index);
+    std::string x = auto_axis_name(params, vars, c.param_index, c.sweep_over_var,
+                                   c.var_sweep_index, c.sweep_over_h);
     const std::string& lo = c.param_lo_text.empty() ? std::string("?") : c.param_lo_text;
     const std::string& hi = c.param_hi_text.empty() ? std::string("?") : c.param_hi_text;
     return x + " [" + lo + ".." + hi + "]";
@@ -419,13 +420,14 @@ static void apply_point_style(Plot2DView& view, const BifurcationDiagramConfig& 
 //     включении continuation мы переключаемся на CPU по умолчанию.
 // Шаблон, а не общий базовый класс: конфиги независимы, связывать их
 // наследованием ради трёх полей было бы хуже.
-// has_mode_2d нужен потому, что у BifurcationDiagramConfig 2D-флаг есть, а
-// проверять его единообразно удобнее снаружи.
+// blocked считает вызывающий: у Bif/LLE/LS это mode_2d || sweep_over_var, у
+// DFT1D 2D-режима нет вовсе. Передавать условие снаружи проще, чем требовать
+// от всех конфигов одинакового набора полей.
+// device_locked — выбор устройства недоступен (2D-режим: CPU-веток для 2D нет).
 template <class Cfg>
-static void draw_continuation_device_block(Cfg& c, const char* id,
-                                           bool blocked_extra = false) {
+static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
+                                           bool device_locked) {
     const std::string sfx = id;
-    const bool blocked = c.mode_2d || c.sweep_over_var || blocked_extra;
     if (blocked) {
         c.continuation = false;
         c.continuation_reverse = false;
@@ -436,9 +438,11 @@ static void draw_continuation_device_block(Cfg& c, const char* id,
     if (ImGui::Checkbox(("Continuation##" + sfx).c_str(), &cont)) {
         c.continuation = cont;
         // При включении continuation по умолчанию уходим на CPU: GPU-ветка
-        // там однопоточная и заметно медленнее. Пользователь может вернуть GPU
-        // вручную — радио ниже остаётся активным.
-        if (cont) c.use_gpu = false;
+        // там однопоточная и заметно медленнее. При выключении возвращаемся на
+        // GPU — в классическом свипе точки независимы и он там кратно быстрее.
+        // В обе стороны это только дефолт: радио ниже остаётся активным, и
+        // выбор пользователя держится, пока он снова не щёлкнет галку.
+        c.use_gpu = !cont;
     }
     if (c.continuation) {
         ImGui::SameLine();
@@ -452,11 +456,11 @@ static void draw_continuation_device_block(Cfg& c, const char* id,
         ImGui::TextDisabled("(continuation: только param- или h-sweep, не IC, не 2D)");
 
     int dev = c.use_gpu ? 0 : 1;
-    ImGui::BeginDisabled(c.mode_2d);
+    ImGui::BeginDisabled(device_locked);
     ImGui::RadioButton(("GPU##dev" + sfx).c_str(), &dev, 0); ImGui::SameLine();
     ImGui::RadioButton(("CPU##dev" + sfx).c_str(), &dev, 1);
     ImGui::EndDisabled();
-    if (!c.mode_2d) c.use_gpu = (dev == 0);
+    if (!device_locked) c.use_gpu = (dev == 0);
     if (c.continuation && c.use_gpu) {
         ImGui::SameLine();
         ImGui::TextDisabled("(continuation на GPU однопоточный, CPU быстрее)");
@@ -2060,7 +2064,7 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     // pipeline'ом и continuation игнорирует, скрытое состояние туда утекать не
     // должно. Классический свип у БД CPU-реализации не имеет, поэтому радио
     // GPU/CPU влияет только на continuation.
-    draw_continuation_device_block(bd, "bd");
+    draw_continuation_device_block(bd, "bd", bd.mode_2d || bd.sweep_over_var, bd.mode_2d);
 
     ImGui::Separator();
 
@@ -2871,7 +2875,7 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
 
-    draw_continuation_device_block(c, "lle");
+    draw_continuation_device_block(c, "lle", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
 
     ImGui::Separator();
@@ -3354,7 +3358,7 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
     InputNumStr("Resolution", c.n_pts_text, 120);
 
-    draw_continuation_device_block(c, "ls");
+    draw_continuation_device_block(c, "ls", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
     ImGui::Separator();
     // 2D-режим. Сетка квадратная (см. LLE 2D — то же ограничение getValueByIdx).
@@ -3900,7 +3904,9 @@ static bool draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
             c.var_sweep_index = 0;
 
         std::string preview;
-        if (c.sweep_over_var && !s.vars.empty())
+        if (c.sweep_over_h)
+            preview = "dt (h)";
+        else if (c.sweep_over_var && !s.vars.empty())
             preview = s.vars[c.var_sweep_index] + " (IC)";
         else if (!s.params.empty())
             preview = s.params[c.param_index];
@@ -3910,43 +3916,43 @@ static bool draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         ImGui::SetNextItemWidth(160);
         if (ImGui::BeginCombo("Sweep", preview.c_str())) {
             for (int i = 0; i < (int)s.params.size(); ++i) {
-                bool sel = !c.sweep_over_var && c.param_index == i;
+                bool sel = !c.sweep_over_var && !c.sweep_over_h && c.param_index == i;
                 if (ImGui::Selectable(s.params[i].c_str(), sel)) {
                     c.sweep_over_var = false;
+                    c.sweep_over_h = false;
                     c.param_index = i;
                 }
             }
             if (!s.params.empty() && !s.vars.empty()) ImGui::Separator();
             for (int i = 0; i < (int)s.vars.size(); ++i) {
                 std::string lbl = s.vars[i] + " (IC)";
-                bool sel = c.sweep_over_var && c.var_sweep_index == i;
+                bool sel = c.sweep_over_var && !c.sweep_over_h && c.var_sweep_index == i;
                 if (ImGui::Selectable(lbl.c_str(), sel)) {
                     c.sweep_over_var = true;
+                    c.sweep_over_h = false;
                     c.var_sweep_index = i;
                 }
+            }
+            // dt (h) — как у Bif/LLE/LS 1D: число сэмплов блока и окно
+            // пересчитываются под шаг каждой точки.
+            ImGui::Separator();
+            if (ImGui::Selectable("dt (h)", c.sweep_over_h)) {
+                c.sweep_over_h = true;
+                c.sweep_over_var = false;
             }
             ImGui::EndCombo();
         }
     } else {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
     }
-    InputNumStr("Param lo", c.param_lo_text, 120);
-    InputNumStr("Param hi", c.param_hi_text, 120);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, 120);
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, 120);
+    ImGui::Checkbox("Log scale##dft_log", &c.log_scale);
+    if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
-    // Continuation — требует param-sweep (см. run_dft1d_continuation); UI не
-    // блокирует sweep_over_var=true+continuation=true явно (как Bifurcation
-    // не блокирует до Run), engine вернёт понятную ошибку в last_error.
-    {
-        bool cont = c.continuation;
-        if (ImGui::Checkbox("Continuation", &cont)) c.continuation = cont;
-        if (c.continuation) {
-            ImGui::SameLine();
-            int dir = c.continuation_reverse ? 1 : 0;
-            ImGui::RadioButton("forward",  &dir, 0); ImGui::SameLine();
-            ImGui::RadioButton("backward", &dir, 1);
-            c.continuation_reverse = (dir == 1);
-        }
-    }
+    // Тот же блок Continuation + GPU/CPU, что у Bif / LLE / LS 1D.
+    // 2D-режима у DFT нет, поэтому блокирует только IC-свип.
+    draw_continuation_device_block(c, "dft", c.sweep_over_var, /*device_locked*/ false);
     ImGui::Separator();
 
     // ----- Variable + Resolution X -----
@@ -4292,7 +4298,8 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         }
 
         hc.x_axis.name = auto_axis_name(s.params, s.vars, c.param_index,
-                                        c.sweep_over_var, c.var_sweep_index);
+                                        c.sweep_over_var, c.var_sweep_index, c.sweep_over_h);
+        hc.x_axis.log_scale = c.log_scale;
         hc.y_axis.name = "Frequency";
         hc.y_axis.log_scale = c.freq_log_scale;
 

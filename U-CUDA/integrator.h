@@ -1,5 +1,6 @@
-#pragma once
+﻿#pragma once
 #include "codegen.hpp"
+#include "configCUDA.h"   // typedef numb — состояние считается в точности GPU
 #include <vector>
 #include <string>
 
@@ -11,8 +12,9 @@ enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD };
 IntScheme int_scheme_from_string(const std::string& s);
 
 // Шаг, скомпилированный из пользовательской КРС (см. krs_cpu.h). Сигнатура
-// совпадает с calculateDiscreteModel на GPU: тело само мутирует X[].
-using CustomStepFn = void (*)(double* X, const double* a, double h);
+// совпадает с calculateDiscreteModel на GPU — включая тип numb: тело мутирует
+// X[] в той же точности, в какой считал бы kernel.
+using CustomStepFn = void (*)(numb* X, const numb* a, numb h);
 
 // Считает одну траекторию на CPU через интерпретатор (быстро, смена системы на лету).
 //   ev        — интерпретатор системы (уже распарсенный)
@@ -36,6 +38,10 @@ bool computePhasePortraitCPU(
 // (интерпретатор + встроенная схема). Используется для custom КРС: их тело —
 // сырой C, SystemEvaluator его не понимает. Transient, запись точек и
 // проверка на расходимость — тот же код, что и выше.
+//
+// ic/a/out остаются double: это интерфейс и хранилище, общее с GPU-путём
+// (оттуда результат тоже приезжает расширенным до double). Само интегрирование
+// внутри идёт в numb.
 bool computePhasePortraitCPU_custom(
     CustomStepFn step,
     const double* ic, int dim,

@@ -1,4 +1,4 @@
-#include "data_export.h"
+﻿#include "data_export.h"
 #include "parametric_engine.h"
 #include "analysis_session.h"   // AnalysisResult for Phase export
 #include "configCUDA.h"         // set_precision

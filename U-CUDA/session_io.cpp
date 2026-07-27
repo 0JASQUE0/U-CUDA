@@ -1,4 +1,4 @@
-#include "session_io.h"
+﻿#include "session_io.h"
 #include <sstream>
 #include <cctype>
 #include <stdexcept>
@@ -744,6 +744,9 @@ static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "\"var_sweep_index\":"     << c.var_sweep_index          << ",";
     o << "\"continuation\":"        << (c.continuation ? "true" : "false") << ",";
     o << "\"continuation_reverse\":"<< (c.continuation_reverse ? "true" : "false") << ",";
+    o << "\"sweep_over_h\":"        << (c.sweep_over_h ? "true" : "false") << ",";
+    o << "\"log_scale\":"           << (c.log_scale ? "true" : "false") << ",";
+    o << "\"use_gpu\":"             << (c.use_gpu ? "true" : "false") << ",";
     o << "\"param_lo_text\":";      jstr(o, c.param_lo_text);      o << ",";
     o << "\"param_hi_text\":";      jstr(o, c.param_hi_text);      o << ",";
     o << "\"n_pts_text\":";         jstr(o, c.n_pts_text);         o << ",";
@@ -777,6 +780,9 @@ static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "sweep_over_var")      c.sweep_over_var      = p.boolean();
     else if (key == "var_sweep_index")     c.var_sweep_index     = std::stoi(p.str_or_num());
     else if (key == "continuation")        c.continuation        = p.boolean();
+    else if (key == "sweep_over_h")        c.sweep_over_h        = p.boolean();
+    else if (key == "log_scale")           c.log_scale           = p.boolean();
+    else if (key == "use_gpu")             c.use_gpu             = p.boolean();
     else if (key == "continuation_reverse")c.continuation_reverse= p.boolean();
     else if (key == "param_lo_text")       c.param_lo_text       = p.str();
     else if (key == "param_hi_text")       c.param_hi_text       = p.str();
