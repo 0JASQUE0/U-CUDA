@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 //
 // parametric_engine — фасад для параметрического анализа через NVRTC.
 //
@@ -148,10 +148,19 @@ struct Dft1DRequest {
     int  param_index    = 0;
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
+    // dt-свип: свипуется h вместо параметра/НУ (см. Bifurcation1DRequest).
+    // Число сэмплов блока и окно пересчитываются под шаг каждой точки.
+    bool sweep_over_h = false;
+    // Log-сетка по ОСИ ПАРАМЕТРА (не путать с freq_log_scale — та по частоте).
+    // Требует param_lo>0 и param_hi>0.
+    bool log_scale = false;
     // Continuation — см. Bifurcation1DRequest. Как и там, требует
     // sweep_over_var = false (валидатор отказывает иначе).
     bool continuation = false;
     bool continuation_reverse = false;
+    // Считать на CPU. Для continuation — реальный выбор устройства (GPU-ветка
+    // там однопоточная); для классического свипа — счёт без GPU и сверка ядер.
+    bool use_cpu = false;
     double param_lo = 0.0;
     double param_hi = 1.0;
     int n_pts = 1000;                        // разрешение по параметру (Resolution X)

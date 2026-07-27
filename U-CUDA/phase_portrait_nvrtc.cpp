@@ -1,4 +1,4 @@
-#include "phase_portrait_nvrtc.h"
+﻿#include "phase_portrait_nvrtc.h"
 #include "nvrtc_engine.h"
 
 // Глобальный движок (один CUDA-контекст на приложение). Кэш скомпилированных

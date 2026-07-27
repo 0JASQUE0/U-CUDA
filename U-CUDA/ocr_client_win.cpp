@@ -1,4 +1,4 @@
-#include "ocr_client_win.h"
+﻿#include "ocr_client_win.h"
 #include <stdexcept>
 #include <windows.h>
 

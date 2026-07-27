@@ -1,4 +1,4 @@
-#include "integrator.h"
+﻿#include "integrator.h"
 #include <cmath>
 
 IntScheme int_scheme_from_string(const std::string& s) {
@@ -132,8 +132,11 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
 // nan/inf. do_step — любой callable, делающий один шаг по X. Шаблон, а не
 // std::function: встроенный путь не должен получить косвенный вызов на
 // каждом шаге.
-template <class StepOnce>
-bool run_trajectory(StepOnce do_step, const double* X, int n,
+// State — шаблонный параметр: встроенные схемы идут через SystemEvaluator в
+// double, custom КРС — в numb (тип тела схемы). Запись наружу в обоих случаях
+// расширяется до double.
+template <class StepOnce, class State>
+bool run_trajectory(StepOnce do_step, const State* X, int n,
                     int total, int skip,
                     std::vector<std::vector<double>>& out) {
     // transient
@@ -192,17 +195,22 @@ bool computePhasePortraitCPU_custom(
     double h, int total, int skip,
     std::vector<std::vector<double>>& out)
 {
-    (void)amountOfValues;
     if (!step) return false;
     const int n = dim;
-    std::vector<double> X(n);
-    for (int i = 0; i < n; ++i) X[i] = ic[i];
+    // Состояние и параметры — в numb: тело КРС скомпилировано под этот тип, и
+    // считать вокруг него в double значило бы гонять GPU и CPU в разной
+    // точности. Наружу (out) значения расширяются обратно до double.
+    std::vector<numb> X((size_t)n);
+    for (int i = 0; i < n; ++i) X[(size_t)i] = (numb)ic[i];
+    std::vector<numb> A((size_t)(amountOfValues > 0 ? amountOfValues : 1), (numb)0);
+    for (int i = 0; i < amountOfValues; ++i) A[(size_t)i] = (numb)a[i];
 
     // Никаких промежуточных буферов: стадии (если они есть) живут внутри тела
     // КРС — ровно как на GPU, где calculateDiscreteModel держит их в локальных
     // массивах.
-    double* Xp = X.data();
-    auto do_step = [&]() { step(Xp, a, h); };
+    numb* Xp = X.data();
+    const numb hn = (numb)h;
+    auto do_step = [&]() { step(Xp, A.data(), hn); };
 
     return run_trajectory(do_step, Xp, n, total, skip, out);
 }

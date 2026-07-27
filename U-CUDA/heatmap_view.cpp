@@ -1,4 +1,4 @@
-#include "heatmap_view.h"
+﻿#include "heatmap_view.h"
 #include "grid_snap.h"
 #include <algorithm>
 #include <cmath>

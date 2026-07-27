@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
@@ -554,8 +554,13 @@ struct Dft1DConfig {
     int         param_index     = 0;
     bool        sweep_over_var  = false;
     int         var_sweep_index = 0;
+    bool        sweep_over_h    = false;  // свип по шагу; см. Bifurcation1DRequest
+    bool        log_scale       = false;  // log-сетка по оси параметра (не по частоте)
     bool        continuation         = false;
     bool        continuation_reverse = false;
+    // Где считать: true (дефолт) — GPU. Для continuation это реальный выбор,
+    // GPU-ветка там однопоточная и медленнее.
+    bool        use_gpu              = true;
     std::string param_lo_text = "0";
     std::string param_hi_text = "1";
     std::string n_pts_text    = "500";    // Resolution X

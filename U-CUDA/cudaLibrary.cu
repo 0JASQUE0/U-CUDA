@@ -1124,7 +1124,7 @@ __global__ void calculateDiscreteModelCUDA_H(
 	//	localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx,
 	//		nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 
-	numb h = (numb)pow(10.0, getValueByIdxLog(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0));
+	numb h = (numb)pow((numb)10.0, getValueByIdxLog(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0));
 
 	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
 	loopCalculateDiscreteModel(localX, localValues, h, transientTime / h,
@@ -1392,7 +1392,7 @@ __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber)
 {
-	return pow(10.0, getValueByIdxLog(idx, nPts, startRange, finishRange, valueNumber));
+	return pow((numb)10.0, getValueByIdxLog(idx, nPts, startRange, finishRange, valueNumber));
 }
 
 

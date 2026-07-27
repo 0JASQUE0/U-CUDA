@@ -1,4 +1,4 @@
-// bifurcation1d_cont.template.cu
+﻿// bifurcation1d_cont.template.cu
 //
 // NVRTC-шаблон для 1D-бифуркации в режиме continuation: одна точка параметра
 // стартует с КОНЕЧНОГО x[] предыдущей. Реализовано single-thread'ом на GPU —

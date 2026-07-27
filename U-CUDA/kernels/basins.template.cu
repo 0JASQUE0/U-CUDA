@@ -1,4 +1,4 @@
-// basins.template.cu
+﻿// basins.template.cu
 //
 // NVRTC-шаблон для расчёта бассейнов притяжения. Свип ВСЕГДА по двум
 // начальным условиям — par_or_var=0 жёстко. Сетка nPts × nPts.

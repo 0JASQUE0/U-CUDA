@@ -1,6 +1,7 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <vector>
+#include "configCUDA.h"   // typedef numb — CPU считает в той же точности, что GPU
 
 // ============================================================
 // CPU-исполнение пользовательских КРС (custom KRS).
@@ -47,8 +48,10 @@ bool krs_cpu_backend_available(std::string* why_not = nullptr);
 // валиден, пока жив объект.
 class KrsCpuStep {
 public:
-    // Сигнатура совпадает с calculateDiscreteModel на GPU: тело мутирует X[].
-    using StepFn = void (*)(double* X, const double* a, double h);
+    // Сигнатура совпадает с calculateDiscreteModel на GPU — включая тип numb:
+    // тело обязано считаться в той же точности, иначе CPU и GPU разъедутся уже
+    // на уровне типа, а не на уровне порядка операций.
+    using StepFn = void (*)(numb* X, const numb* a, numb h);
 
     KrsCpuStep() = default;
     ~KrsCpuStep();

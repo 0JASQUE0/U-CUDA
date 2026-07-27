@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <glad/glad.h>
 #include <cstdint>
 #include "imgui.h"   // ImU32 для cmap_sample

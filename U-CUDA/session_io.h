@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "analysis_session.h"
 #include "custom_session.h"
 #include "app_model.h"

@@ -1,4 +1,4 @@
-#include "image_source.h"
+﻿#include "image_source.h"
 #include <fstream>
 #include <stdexcept>
 #include <vector>

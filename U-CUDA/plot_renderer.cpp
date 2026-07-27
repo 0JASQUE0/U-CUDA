@@ -1,4 +1,4 @@
-#include "plot_renderer.h"
+﻿#include "plot_renderer.h"
 #include "colormap_lut_data.h"
 #include <cstdio>
 #include <cstring>

@@ -1,4 +1,4 @@
-#include "analysis_session.h"
+﻿#include "analysis_session.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
@@ -1074,6 +1074,9 @@ void Dft1DAnalysisSession::remove_config(int i) {
 static Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
                                         const Dft1DConfig& c) {
     Dft1DRequest req;
+    req.sweep_over_h = c.sweep_over_h;
+    req.log_scale    = c.log_scale;
+    req.use_cpu      = !c.use_gpu;
     req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 

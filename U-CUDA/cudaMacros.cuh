@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "configCUDA.h"
 
 // Под NVRTC (__CUDACC_RTC__ определён автоматически) host-only заголовки и

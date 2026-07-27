@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "plot_axis.h"
 #include "plot_renderer.h"
 #include "imgui.h"

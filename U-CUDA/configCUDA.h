@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 #include <math_constants.h>
 
-typedef double numb;
+typedef float numb;
 
 // AMOUNTOFX оборачивается в #ifndef, чтобы NVRTC-вызывающие проекты могли
 // переопределить размерность системы через #define AMOUNTOFX N перед include.

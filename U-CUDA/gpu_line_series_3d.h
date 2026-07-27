@@ -1,4 +1,4 @@
-#pragma once
+п»ї#pragma once
 #include <glad/glad.h>
 #include <vector>
 
@@ -15,14 +15,14 @@ public:
     GpuLineSeriesSet3D(const GpuLineSeriesSet3D&) = delete;
     GpuLineSeriesSet3D& operator=(const GpuLineSeriesSet3D&) = delete;
 
-    // points - указатель на n_points * 3 float (x, y, z подряд).
+    // points - СѓРєР°Р·Р°С‚РµР»СЊ РЅР° n_points * 3 float (x, y, z РїРѕРґСЂСЏРґ).
     int upload(const float* points, int n_points);
 
     const GpuLineSeries3D& get(int index) const;
     int size() const { return (int)series_.size(); }
     void clear();
 
-    // Общий bbox по всем сериям (xmin, xmax, ymin, ymax, zmin, zmax).
+    // РћР±С‰РёР№ bbox РїРѕ РІСЃРµРј СЃРµСЂРёСЏРј (xmin, xmax, ymin, ymax, zmin, zmax).
     bool bbox(float& xmin, float& xmax, float& ymin, float& ymax,
         float& zmin, float& zmax) const;
 
