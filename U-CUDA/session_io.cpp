@@ -875,7 +875,61 @@ bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisSession& s) {
 
 // Запись одного BasinsConfig в JSON (без внешних { } — пишет голый объект).
 // Используется внутри массива "configs".
-static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
+// Проекции фазовых портретов по бассейнам. Формат — тот же, что у
+// "projections" в session_to_json(PhaseAnalysisSession); дублируется, а не
+// шарится, чтобы не трогать рабочий сериализатор Phase-сессии.
+static void write_basins_phase_projections(std::ostringstream& o,
+                                           const std::vector<Projection>& projs) {
+    o << "[";
+    for (size_t k = 0; k < projs.size(); ++k) {
+        if (k) o << ",";
+        const Projection& p = projs[k];
+        o << "{\"label\":"; jstr(o, p.label);
+        o << ",\"type\":" << (int)p.type;
+        o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
+        o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
+        o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        o << ",\"show_var\":[";
+        for (size_t v = 0; v < p.show_var.size(); ++v) { if (v) o << ","; o << (p.show_var[v] ? "true" : "false"); }
+        o << "]}";
+    }
+    o << "]";
+}
+
+static void read_basins_phase_projections(JP& p, std::vector<Projection>& out) {
+    out.clear();
+    p.expect('[');
+    if (p.opt(']')) return;
+    while (true) {
+        p.expect('{');
+        Projection pr;
+        while (true) {
+            std::string k = p.str(); p.expect(':');
+            if      (k == "label") pr.label = p.str();
+            else if (k == "type")  pr.type = (ProjType)std::stoi(p.str_or_num());
+            else if (k == "ax")    pr.axis_x = std::stoi(p.str_or_num());
+            else if (k == "ay")    pr.axis_y = std::stoi(p.str_or_num());
+            else if (k == "az")    pr.axis_z = std::stoi(p.str_or_num());
+            else if (k == "cls")   pr.custom_line_style = p.boolean();
+            else if (k == "lw")    pr.line_width = (float)std::stod(p.str_or_num());
+            else if (k == "al")    pr.alpha      = (float)std::stod(p.str_or_num());
+            else if (k == "show_var") {
+                pr.show_var.clear();
+                p.expect('[');
+                if (!p.opt(']')) { while (true) { pr.show_var.push_back(p.boolean()); if (p.opt(','))continue; p.expect(']'); break; } }
+            }
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        out.push_back(std::move(pr));
+        if (p.opt(',')) continue;
+        p.expect(']'); break;
+    }
+}
+
+static void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
+                                const BasinsPhaseSlot* phase_slot) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
@@ -909,7 +963,19 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c) {
     o << "\"colormap_feature1\":" << c.colormap_idx[1] << ",";
     o << "\"colormap_feature2\":" << c.colormap_idx[2] << ",";
     o << "\"colormap_states\":"   << c.colormap_idx[3] << ",";
-    o << "\"active_plot_tab\":"   << c.active_plot_tab;
+    o << "\"active_plot_tab\":"   << c.active_plot_tab << ",";
+    // Фазовые портреты по бассейнам: настройки — в самом config'е, список окон
+    // берётся из parallel-слота (сам слот move-only и в config не помещается).
+    o << "\"pp_t_max_text\":";          jstr(o, c.pp_t_max_text);          o << ",";
+    o << "\"pp_transient_text\":";      jstr(o, c.pp_transient_text);      o << ",";
+    o << "\"pp_prescaller_text\":";     jstr(o, c.pp_prescaller_text);     o << ",";
+    o << "\"pp_max_attractors_text\":"; jstr(o, c.pp_max_attractors_text); o << ",";
+    o << "\"pp_use_gpu\":"     << (c.pp_use_gpu ? "true" : "false") << ",";
+    o << "\"pp_autorun\":"     << (c.pp_autorun ? "true" : "false") << ",";
+    o << "\"pp_marker_size\":" << c.pp_marker_size << ",";
+    o << "\"phase_projections\":";
+    if (phase_slot) write_basins_phase_projections(o, phase_slot->phase.projections);
+    else            o << "[]";
     o << "}";
 }
 
@@ -949,6 +1015,13 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "colormap_feature2")  c.colormap_idx[2]    = std::stoi(p.str_or_num());
     else if (key == "colormap_states")    c.colormap_idx[3]    = std::stoi(p.str_or_num());
     else if (key == "active_plot_tab")    c.active_plot_tab   = std::stoi(p.str_or_num());
+    else if (key == "pp_t_max_text")          c.pp_t_max_text          = p.str();
+    else if (key == "pp_transient_text")      c.pp_transient_text      = p.str();
+    else if (key == "pp_prescaller_text")     c.pp_prescaller_text     = p.str();
+    else if (key == "pp_max_attractors_text") c.pp_max_attractors_text = p.str();
+    else if (key == "pp_use_gpu")             c.pp_use_gpu             = p.boolean();
+    else if (key == "pp_autorun")             c.pp_autorun             = p.boolean();
+    else if (key == "pp_marker_size")         c.pp_marker_size         = (float)std::stod(p.str_or_num());
     else return false;
     return true;
 }
@@ -961,7 +1034,9 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     for (size_t i = 0; i < s.configs.size(); ++i) {
         if (i) o << ",";
         o << "\n    ";
-        write_basins_config(o, s.configs[i]);
+        const BasinsPhaseSlot* slot =
+            (i < s.phase_slots.size() && s.phase_slots[i]) ? s.phase_slots[i].get() : nullptr;
+        write_basins_config(o, s.configs[i], slot);
     }
     if (!s.configs.empty()) o << "\n  ";
     o << "]\n";
@@ -1130,6 +1205,10 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
         BasinsConfig legacy;
         bool legacy_has_fields = false;
         bool new_format = false;
+        // Проекции фазовых портретов читаются в отдельный буфер: они живут не
+        // в config'е, а в parallel-слоте, который существует только после
+        // ensure_phase_slots() (т.е. после того, как все configs разобраны).
+        std::vector<std::vector<Projection>> phase_projs;
 
         while (true) {
             std::string key = p.str();
@@ -1142,15 +1221,20 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
                     while (true) {
                         p.expect('{');
                         BasinsConfig bc;
+                        std::vector<Projection> bc_projs;
                         if (!p.opt('}')) {
                             while (true) {
                                 std::string k2 = p.str(); p.expect(':');
-                                if (!read_basins_field(p, bc, k2)) p.skip_value();
+                                if (k2 == "phase_projections")
+                                    read_basins_phase_projections(p, bc_projs);
+                                else if (!read_basins_field(p, bc, k2))
+                                    p.skip_value();
                                 if (p.opt(',')) continue;
                                 p.expect('}'); break;
                             }
                         }
                         s.configs.push_back(std::move(bc));
+                        phase_projs.push_back(std::move(bc_projs));
                         if (p.opt(',')) continue;
                         p.expect(']'); break;
                     }
@@ -1180,6 +1264,7 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
         if (s.configs.empty()) {
             // JSON был пустой или только non-config поля — оставим хотя бы
             // один config (load_from_record уже положил дефолт).
+            s.ensure_phase_slots();
             return true;
         }
         if (s.active_config_index < 0 ||
@@ -1187,6 +1272,17 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
             s.active_config_index = 0;
         }
         s.running_config_index = -1;
+
+        // Слоты портретов подгоняем под новый список configs и раскладываем
+        // сохранённые окна. Пустой список (старая сессия без ключа) оставляет
+        // дефолт из ensure_phase_slots — одно окно Phase 2D.
+        s.phase_slots.clear();
+        s.phase_queue.clear();
+        s.ensure_phase_slots();
+        for (size_t i = 0; i < phase_projs.size() && i < s.phase_slots.size(); ++i) {
+            if (phase_projs[i].empty()) continue;
+            s.phase_slots[i]->phase.projections = std::move(phase_projs[i]);
+        }
         return true;
     }
     catch (...) {

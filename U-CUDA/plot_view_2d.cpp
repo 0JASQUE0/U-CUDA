@@ -216,10 +216,22 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (!eff_visible(k)) continue;
         const GpuLineSeries& g = series_cache_.get(k);
         if (!g.valid()) continue;
-        ImVec4 c = (k < (int)series_in.size()) ? series_in[k].color : ImVec4(1, 1, 1, 1);
+        const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
+        ImVec4 c = si ? si->color : ImVec4(1, 1, 1, 1);
         float color[4] = { c.x, c.y, c.z, c.w };
-        if (points_mode)
-            renderer.draw_points(g.vbo, g.point_count, mvp, color, point_size_px, point_marker);
+        // Per-series override (см. PlotSeriesInput::points_override) имеет
+        // приоритет над флагом вью. Точечные серии рисуются здесь ВСЕГДА,
+        // даже при imdraw_lines — ImDrawList-проход ниже их пропускает.
+        bool  as_points = points_mode;
+        int   marker    = point_marker;
+        float psize     = point_size_px;
+        if (si && si->points_override >= 0) {
+            as_points = (si->points_override == 1);
+            marker    = si->point_marker;
+            if (si->point_size_px > 0.0f) psize = si->point_size_px;
+        }
+        if (as_points)
+            renderer.draw_points(g.vbo, g.point_count, mvp, color, psize, marker);
         else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
             renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
     }
@@ -306,6 +318,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             if (!eff_visible(k)) continue;
             const PlotSeriesInput& s = series_in[k];
             if (!s.points || s.n_points < 2) continue;
+            if (s.points_override == 1) continue;  // уже нарисована как GL-точки
             const bool   colored = (s.values != nullptr);
             const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
             const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(s.color);

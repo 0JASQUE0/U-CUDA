@@ -7,6 +7,7 @@
 #include <cmath>
 #include <memory>
 #include <chrono>
+#include <random>   // выбор представительной ячейки бассейна (mt19937)
 
 // Mirrors the top-bar indicator text to the console on completion so users
 // who keep stdout visible can see timings without watching the title bar.
@@ -1248,6 +1249,11 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     configs.push_back(std::move(c));
     active_config_index = 0;
     running_config_index = -1;
+    // Слоты фазовых портретов пересоздаются с нуля: старые ссылались на
+    // конфиги (и систему) предыдущей записи библиотеки.
+    phase_slots.clear();
+    phase_queue.clear();
+    ensure_phase_slots();
 }
 
 void BasinsAnalysisSession::add_config() {
@@ -1267,6 +1273,7 @@ void BasinsAnalysisSession::add_config() {
     c.label = "Basins " + std::to_string(configs.size() + 1);
     configs.push_back(std::move(c));
     active_config_index = (int)configs.size() - 1;
+    ensure_phase_slots();   // новому config'у — свой слот портретов
 }
 
 void BasinsAnalysisSession::remove_config(int i) {
@@ -1275,6 +1282,15 @@ void BasinsAnalysisSession::remove_config(int i) {
     // результат в несуществующий слот при poll().
     if (in_flight && running_config_index == i) return;
     configs.erase(configs.begin() + i);
+    // Слот портретов удаляем ПО ТОМУ ЖЕ индексу (а не хвостовой через
+    // ensure_phase_slots) — иначе позиционная привязка слотов к configs
+    // разъедется на всех элементах правее i.
+    if (i < (int)phase_slots.size()) phase_slots.erase(phase_slots.begin() + i);
+    for (auto it = phase_queue.begin(); it != phase_queue.end(); ) {
+        if (*it == i) it = phase_queue.erase(it);
+        else ++it;
+    }
+    for (auto& q : phase_queue) if (q > i) --q;
     if (in_flight && running_config_index > i) running_config_index--;
     if (active_config_index >= (int)configs.size())
         active_config_index = (int)configs.size() - 1;
@@ -1508,6 +1524,400 @@ bool BasinsAnalysisSession::poll() {
     progress_token.reset();
     progress_phase_token.reset();
     return true;
+}
+
+// ============================================================================
+// Basins → фазовые портреты.
+//
+// По одной случайной ячейке сетки на каждый найденный бассейн; из ячейки
+// восстанавливаются НУ двух осевых переменных (той же формулой, что и в
+// ядре — см. getValueByIdx в cudaLibrary.cu), остальные берутся из config'а.
+// Бассейны с id == 0 (расходящиеся) пропускаются.
+// ============================================================================
+
+// Seed фиксированный: один и тот же результат бассейнов всегда даёт одни и те
+// же представительные точки (в т.ч. после перезапуска приложения). Домешивание
+// id бассейна делает выбор независимым — появление/исчезновение одного
+// бассейна не сдвигает точки всех остальных.
+static const unsigned kBasinsPhaseSeed = 12345u;
+
+// Координаты обхода NxN-сетки по спирали из центра (порт MATLAB
+// spiral_coords_from_center). Стартовая клетка — округление к верху центра:
+// для N=5 это (2,2), для N=4 это (1,1) (0-based). Дальше — right→down→left→up
+// с увеличением шага на каждом цикле полу-оборотов. Точки за границей грид-а
+// пропускаются, поэтому в итоге набирается ровно N*N валидных индексов.
+// Возвращает row-major индексы row*N + col.
+static std::vector<int> spiral_coords_from_center(int N) {
+    std::vector<int> out;
+    if (N <= 0) return out;
+    const int total = N * N;
+    out.reserve((size_t)total);
+    int r = (N - 1) / 2;
+    int c = (N - 1) / 2;
+    out.push_back(r * N + c);
+    static const int dr[4] = { 0, 1, 0, -1 };
+    static const int dc[4] = { 1, 0, -1, 0 };
+    int dir = 0;
+    int step = 1;
+    while ((int)out.size() < total) {
+        for (int k = 0; k < 2; ++k) {
+            for (int t = 0; t < step; ++t) {
+                r += dr[dir];
+                c += dc[dir];
+                if (r >= 0 && r < N && c >= 0 && c < N) {
+                    out.push_back(r * N + c);
+                    if ((int)out.size() >= total) return out;
+                }
+            }
+            dir = (dir + 1) & 3;
+        }
+        ++step;
+    }
+    return out;
+}
+
+std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
+                                        int& out_n_pos, int& out_n_neg) {
+    out_n_pos = 0;
+    out_n_neg = 0;
+    std::vector<int> dst(src.size(), 0);
+    if ((int)src.size() != N * N || N <= 0) return dst;
+    const std::vector<int> order = spiral_coords_from_center(N);
+    std::map<int, int> pos_map, neg_map;
+    int pos_next = 1, neg_next = 1;
+    for (int idx : order) {
+        const int v = src[(size_t)idx];
+        if (v > 0) {
+            auto it = pos_map.find(v);
+            if (it == pos_map.end()) { it = pos_map.emplace(v, pos_next++).first; }
+            dst[(size_t)idx] = it->second;
+        } else if (v < 0) {
+            auto it = neg_map.find(v);
+            if (it == neg_map.end()) { it = neg_map.emplace(v, -(neg_next++)).first; }
+            dst[(size_t)idx] = it->second;
+        }
+        // v == 0 — diverged, dst остаётся 0.
+    }
+    out_n_pos = pos_next - 1;
+    out_n_neg = neg_next - 1;
+    return dst;
+}
+
+void ensure_basins_spiral_cache(BasinsConfig& c) {
+    if (c.basin_idx_spiral_gen == c.data_generation
+        && c.basin_idx_spiral.size() == c.result.basin_idx.size()) return;
+    int n_pos = 0, n_neg = 0;
+    c.basin_idx_spiral = renumber_basins_spiral(c.result.basin_idx, c.result.n_pts,
+                                                n_pos, n_neg);
+    c.n_clusters_spiral      = n_pos;
+    c.min_cluster_idx_spiral = -n_neg;
+    c.basin_idx_spiral_gen   = c.data_generation;
+}
+
+const int* basins_display_ids(BasinsConfig& c) {
+    if (c.result.basin_idx.empty()) return nullptr;
+    if (!c.renumber_spiral) return c.result.basin_idx.data();
+    ensure_basins_spiral_cache(c);
+    if (c.basin_idx_spiral.size() != c.result.basin_idx.size())
+        return c.result.basin_idx.data();
+    return c.basin_idx_spiral.data();
+}
+
+std::string build_basins_phase_run_signature(const BasinsConfig& c) {
+    std::string o;
+    o.reserve(256);
+    auto add = [&o](const std::string& v) { o += v; o += '|'; };
+    add(c.pp_t_max_text);
+    add(c.pp_transient_text);
+    add(c.pp_prescaller_text);
+    add(c.pp_use_gpu ? "1" : "0");
+    add(c.scheme);
+    add(c.symmetry_s);
+    add(c.h_text);
+    for (const auto& kv : c.param_values)       { o += kv.first; o += '='; o += kv.second; o += ';'; }
+    o += '|';
+    // НУ не-осевых переменных: ячейка та же, а стартовая точка другая.
+    for (const auto& kv : c.initial_conditions) { o += kv.first; o += '='; o += kv.second; o += ';'; }
+    return o;
+}
+
+std::string build_basins_phase_signature(const BasinsConfig& c) {
+    std::string o = build_basins_phase_run_signature(c);
+    o += '|';
+    o += std::to_string(c.data_generation);
+    o += '|';
+    o += (c.renumber_spiral ? "1" : "0");
+    o += '|';
+    o += c.pp_max_attractors_text;
+    return o;
+}
+
+// Значение узла сетки — зеркало getValueByIdx (cudaLibrary.cu): та же
+// lerp-форма и те же вырожденные случаи, иначе восстановленное НУ не совпадёт
+// с тем, что реально считало ядро для этой ячейки.
+static double basins_grid_value(int point_idx, int n_pts, double lo, double hi) {
+    if (n_pts <= 0) return lo;
+    if (n_pts == 1) return hi;
+    const double t = (double)point_idx / (double)(n_pts - 1);
+    return (1.0 - t) * lo + t * hi;
+}
+
+static std::string basins_fmt_num(double v) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.17g", v);
+    return std::string(buf);
+}
+
+void BasinsAnalysisSession::ensure_phase_slots() {
+    while (phase_slots.size() < configs.size()) {
+        auto slot = std::unique_ptr<BasinsPhaseSlot>(new BasinsPhaseSlot());
+        slot->phase.vars           = vars;
+        slot->phase.params         = params;
+        slot->phase.sys            = sys;
+        slot->phase.custom_schemes = custom_schemes;
+        // Одно окно Phase 2D по умолчанию — как у PhaseAnalysisSession после
+        // load_from_record. Time domain пользователь добавляет кнопкой.
+        slot->phase.add_projection();
+        phase_slots.push_back(std::move(slot));
+    }
+    if (phase_slots.size() > configs.size())
+        phase_slots.resize(configs.size());
+}
+
+BasinsPhaseSlot& BasinsAnalysisSession::phase_slot(int i) {
+    ensure_phase_slots();
+    // Страховка на случай вызова без единого config'а: отдаём общий пустой
+    // слот, а не висячую ссылку. Все реальные пути сюда с пустым списком не
+    // приходят (GUI проверяет configs.empty() раньше).
+    static BasinsPhaseSlot fallback;
+    if (phase_slots.empty()) return fallback;
+    if (i < 0) i = 0;
+    if (i >= (int)phase_slots.size()) i = (int)phase_slots.size() - 1;
+    return *phase_slots[(size_t)i];
+}
+
+bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
+    ensure_phase_slots();
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
+    BasinsConfig&    c  = configs[(size_t)config_idx];
+    BasinsPhaseSlot& sl = *phase_slots[(size_t)config_idx];
+
+    std::vector<int> new_cells;
+    std::vector<int> new_ids;
+
+    const int    n   = c.result.n_pts;
+    const size_t tot = (size_t)n * (size_t)n;
+    const int*   ids = (c.last_run_ok && n > 0 && c.result.basin_idx.size() == tot)
+                           ? basins_display_ids(c) : nullptr;
+    if (ids) {
+        // id -> ячейки. 0 (расходящиеся решения) не рисуем вообще.
+        std::map<int, std::vector<int>> by_id;
+        for (size_t k = 0; k < tot; ++k) {
+            const int id = ids[k];
+            if (id == 0) continue;
+            by_id[id].push_back((int)k);
+        }
+        // Порядок: положительные по возрастанию (1,2,3...), затем отрицательные
+        // по модулю (-1,-2,-3...). Ограничитель — предохранитель от «нашлась
+        // тысяча бассейнов», поэтому режем именно по этому порядку, без
+        // сортировки по площади.
+        std::vector<int> order;
+        order.reserve(by_id.size());
+        for (const auto& kv : by_id) if (kv.first > 0) order.push_back(kv.first);
+        for (auto it = by_id.rbegin(); it != by_id.rend(); ++it)
+            if (it->first < 0) order.push_back(it->first);
+
+        int limit = std::atoi(c.pp_max_attractors_text.c_str());
+        if (limit < 1) limit = 1;
+        if ((int)order.size() > limit) order.resize((size_t)limit);
+
+        for (int id : order) {
+            const std::vector<int>& cells = by_id[id];
+            if (cells.empty()) continue;
+            std::mt19937 rng(kBasinsPhaseSeed + (unsigned)id * 2654435761u);
+            std::uniform_int_distribution<size_t> dist(0, cells.size() - 1);
+            new_cells.push_back(cells[dist(rng)]);
+            new_ids.push_back(id);
+        }
+    }
+
+    // Тот же НАБОР ячеек, но, возможно, в другом порядке — типичный случай при
+    // toggle «Renumber (spiral)»: кластеры те же, изменились только их номера,
+    // а значит и порядок обхода «положительные по возрастанию, затем
+    // отрицательные». Считаем перестановку: perm[k] = индекс старой серии,
+    // которая должна встать на новое место k. O(n²), но n <= max attractors.
+    std::vector<int> perm;
+    bool same_set = (new_cells.size() == sl.cells.size());
+    if (same_set) {
+        perm.assign(new_cells.size(), -1);
+        std::vector<char> used(sl.cells.size(), 0);
+        for (size_t k = 0; k < new_cells.size(); ++k) {
+            int found = -1;
+            for (size_t j = 0; j < sl.cells.size(); ++j)
+                if (!used[j] && sl.cells[j] == new_cells[k]) { found = (int)j; break; }
+            if (found < 0) { same_set = false; break; }
+            used[(size_t)found] = 1;
+            perm[k] = found;
+        }
+    }
+    const bool cells_changed = !same_set;
+
+    // Видимость переживает перестройку. Ключ — ЯЧЕЙКА, а не подпись: при
+    // переномерации подписи меняются, а бассейн остаётся тем же, и снятая
+    // пользователем галка не должна возвращаться сама собой.
+    std::map<int, bool> prev_visible;
+    for (size_t k = 0; k < sl.cells.size() && k < sl.phase.ic_sets.size(); ++k)
+        prev_visible[sl.cells[k]] = sl.phase.ic_sets[k].visible;
+
+    sl.cells = new_cells;
+
+    std::vector<InitialConditionSet> ics;
+    ics.reserve(new_cells.size());
+    for (size_t k = 0; k < new_cells.size(); ++k) {
+        const int cell = new_cells[k];
+        const int id   = new_ids[k];
+        const int ix   = (n > 0) ? (cell % n) : 0;
+        const int iy   = (n > 0) ? (cell / n) : 0;
+
+        InitialConditionSet ic;
+        ic.label = "Basin " + std::to_string(id) + (id < 0 ? " (FP)" : " (Osc)");
+        for (const auto& v : vars) {
+            auto it = c.initial_conditions.find(v);
+            ic.values[v] = (it != c.initial_conditions.end()) ? it->second : std::string();
+        }
+        // Осевые переменные перекрываем координатами узла сетки.
+        if (c.result.axis_x_var >= 0 && c.result.axis_x_var < (int)vars.size())
+            ic.values[vars[(size_t)c.result.axis_x_var]] =
+                basins_fmt_num(basins_grid_value(ix, n, c.result.axis_x_lo, c.result.axis_x_hi));
+        if (c.result.axis_y_var >= 0 && c.result.axis_y_var < (int)vars.size())
+            ic.values[vars[(size_t)c.result.axis_y_var]] =
+                basins_fmt_num(basins_grid_value(iy, n, c.result.axis_y_lo, c.result.axis_y_hi));
+
+        auto pv = prev_visible.find(cell);
+        ic.visible = (pv != prev_visible.end()) ? pv->second : true;
+        ics.push_back(std::move(ic));
+    }
+    sl.phase.ic_sets = std::move(ics);
+
+    // Набор ячеек не изменился: траектории уже посчитаны — переставляем их под
+    // новый порядок и переподписываем на месте. Ни одного запуска GPU.
+    AnalysisResult& res = sl.phase.result;
+    const size_t n_new = sl.phase.ic_sets.size();
+    if (!cells_changed && sl.has_result && res.trajectories.size() == n_new) {
+        // Перестановка без глубокого копирования: траектории переезжают
+        // move'ом (их суммарный объём — десятки мегабайт).
+        auto permute = [&perm, n_new](auto& vec) {
+            if (vec.size() != n_new) return;
+            auto tmp = std::move(vec);
+            vec.clear();
+            vec.resize(n_new);
+            for (size_t k = 0; k < n_new; ++k) vec[k] = std::move(tmp[(size_t)perm[k]]);
+        };
+        permute(res.trajectories);
+        permute(res.visible);
+        permute(res.ic_text);
+        permute(res.snapshot.ic_flat);
+        permute(res.snapshot.ic_labels);
+        res.labels.resize(n_new);
+        for (size_t k = 0; k < n_new; ++k)
+            res.labels[k] = sl.phase.ic_sets[k].label;
+        // Перестановка серий обязана инвалидировать GPU-кэш Plot2DView, иначе
+        // точки останутся от прежнего порядка (кэш ключуется по data_generation).
+        sl.phase.data_generation++;
+    }
+    return cells_changed;
+}
+
+// Перенос настроек basins-config'а в фазовую подсессию. Зовётся ровно перед
+// запуском (не каждый кадр), как apply_shared_to_* в Custom-табе.
+static void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
+                                         const BasinsConfig& c,
+                                         PhaseAnalysisSession& ph) {
+    ph.vars           = s.vars;
+    ph.params         = s.params;
+    ph.sys            = s.sys;
+    ph.custom_schemes = s.custom_schemes;
+    // Схема и шаг ОБЯЗАНЫ совпадать с расчётом карты — иначе траектория не
+    // обязана прийти в тот же аттрактор, что и ячейка сетки.
+    ph.scheme       = c.scheme;
+    ph.symmetry_s   = c.symmetry_s;
+    ph.step_h       = c.h_text;
+    ph.param_values = c.param_values;
+    // Своё время — единственное, чем портрет отличается от карты.
+    ph.sim_time   = c.pp_t_max_text;
+    ph.skip_time  = c.pp_transient_text;
+    ph.decimation = c.pp_prescaller_text;
+    ph.use_gpu    = c.pp_use_gpu;
+    // Автозапуском рулит слой Basins (pp_autorun + очередь), собственный
+    // auto_recompute подсессии должен молчать.
+    ph.auto_recompute = false;
+}
+
+void BasinsAnalysisSession::request_phase_run(int config_idx) {
+    if (config_idx < 0 || config_idx >= (int)configs.size()) return;
+    for (int q : phase_queue) if (q == config_idx) return;   // уже в очереди
+    phase_queue.push_back(config_idx);
+}
+
+bool BasinsAnalysisSession::start_next_phase() {
+    ensure_phase_slots();
+    if (phase_queue.empty()) return false;
+    // Один расчёт портретов за раз на всю сессию.
+    for (const auto& sl : phase_slots)
+        if (sl && sl->phase.in_flight) return false;
+
+    while (!phase_queue.empty()) {
+        const int i = phase_queue.front();
+        if (i < 0 || i >= (int)configs.size()) { phase_queue.pop_front(); continue; }
+        // Карта этого config'а ещё считается — ждём: НУ пока не финальные
+        // (кластеры и их номера появятся только после DBSCAN).
+        if (in_flight && running_config_index == i) return false;
+
+        phase_queue.pop_front();
+        BasinsConfig&    c  = configs[(size_t)i];
+        BasinsPhaseSlot& sl = *phase_slots[(size_t)i];
+        const bool cells_changed = rebuild_phase_ics(i);
+        const std::string run_sig = build_basins_phase_run_signature(c);
+
+        if (sl.phase.ic_sets.empty()) {
+            // Бассейнов не найдено — рисовать нечего; помечаем как обработанное,
+            // чтобы autorun не долбился в пустоту каждый кадр.
+            sl.phase.result = AnalysisResult{};
+            sl.has_result   = false;
+            sl.cells.clear();
+            sl.run_signature        = build_basins_phase_signature(c);
+            sl.run_inputs_signature = run_sig;
+            continue;
+        }
+        // Ячейки те же и входы расчёта не менялись — траектории заведомо
+        // идентичны (типичный случай: toggle «Renumber (spiral)» без
+        // срабатывания ограничителя). rebuild_phase_ics уже переписал подписи
+        // на месте; GPU не трогаем.
+        if (!cells_changed && sl.has_result && sl.run_inputs_signature == run_sig) {
+            sl.run_signature = build_basins_phase_signature(c);
+            continue;
+        }
+        apply_basins_config_to_phase(*this, c, sl.phase);
+        if (sl.phase.recompute_async()) {
+            sl.run_signature        = build_basins_phase_signature(c);
+            sl.run_inputs_signature = run_sig;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BasinsAnalysisSession::poll_phase() {
+    ensure_phase_slots();
+    bool any = false;
+    for (auto& sl : phase_slots) {
+        if (!sl) continue;
+        if (sl->phase.poll()) {
+            sl->has_result = sl->phase.result.ok;
+            any = true;
+        }
+    }
+    return any;
 }
 
 // ============================================================================
