@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <deque>
 #include "plot_view_2d.h"
 #include "plot_view_3d.h"
 #include <memory>
@@ -761,7 +762,73 @@ struct BasinsConfig {
     int         basin_idx_spiral_gen      = -1;
     int         n_clusters_spiral          = 0;
     int         min_cluster_idx_spiral     = 0;
+
+    // ---- Фазовые портреты по найденным бассейнам (см. BasinsPhaseSlot) ----
+    // Свои transient / computing time / прореживание: карту бассейнов считают
+    // грубо и долго, а одну траекторию — подробно и быстро. Всё остальное
+    // (scheme, h, symmetry, параметры, НУ не-осевых переменных) берётся из
+    // ЭТОГО же config'а, иначе траектория не обязана попасть в тот же
+    // аттрактор, что и ячейка сетки.
+    std::string pp_t_max_text          = "100";
+    std::string pp_transient_text      = "100";
+    std::string pp_prescaller_text     = "1";
+    std::string pp_max_attractors_text = "20";
+    bool        pp_use_gpu     = true;
+    bool        pp_autorun     = false;
+    float       pp_marker_size = 6.0f;   // px, маркер бассейнов-равновесий
 };
+
+// Фазовые портреты по бассейнам — один слот на BasinsConfig, позиционно
+// синхронный с BasinsAnalysisSession::configs.
+//
+// Живёт ОТДЕЛЬНО от config'а, а не внутри него, потому что BasinsConfig обязан
+// оставаться копируемым (add_config делает `c = configs.back()`), а
+// PhaseAnalysisSession — move-only (держит std::future).
+struct BasinsPhaseSlot {
+    PhaseAnalysisSession phase;
+
+    // Ячейки сетки (row-major iy*n + ix), по одной на бассейн; параллельно
+    // phase.ic_sets. Номер и цвет бассейна выводятся из ячейки на лету, чтобы
+    // toggle «Renumber (spiral)» менял подписи/цвета без пересчёта траекторий.
+    std::vector<int> cells;
+
+    // Подпись входов, породивших ТЕКУЩИЙ результат (полная — для индикации
+    // «stale»), и подпись только тех входов, что реально влияют на форму
+    // траекторий (см. build_basins_phase_run_signature): если она не менялась,
+    // а набор ячеек тот же, пересчёт на GPU не нужен — хватит переподписать.
+    std::string run_signature;
+    std::string run_inputs_signature;
+    // Подпись входов на последний кадр — для debounce автозапуска.
+    std::string pending_signature;
+    double      pending_since = 0.0;   // ImGui::GetTime() смены pending_signature
+    bool        has_result = false;
+
+    BasinsPhaseSlot() = default;
+    BasinsPhaseSlot(BasinsPhaseSlot&&) = default;
+    BasinsPhaseSlot& operator=(BasinsPhaseSlot&&) = default;
+    BasinsPhaseSlot(const BasinsPhaseSlot&) = delete;
+    BasinsPhaseSlot& operator=(const BasinsPhaseSlot&) = delete;
+};
+
+// ---- Перенумерация бассейнов (spiral-from-center, порт MATLAB) ----
+// Положительные id → 1,2,3... в порядке первого появления при обходе спиралью
+// из центра, отрицательные → -1,-2,-3... Нули (diverged) не трогаются.
+std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
+                                        int& out_n_pos, int& out_n_neg);
+// Лениво (пере)заполнить c.basin_idx_spiral для текущего data_generation.
+// Безопасно звать каждый кадр — пересчёт только при смене поколения данных.
+void ensure_basins_spiral_cache(BasinsConfig& c);
+// Массив id'ов в ТЕКУЩЕЙ нумерации (учитывает renumber_spiral).
+// nullptr, если результата ещё нет.
+const int* basins_display_ids(BasinsConfig& c);
+// Подпись только тех входов, что влияют на ФОРМУ траекторий (интегратор,
+// время, параметры, НУ не-осевых переменных, устройство). Сюда намеренно НЕ
+// входят data_generation / renumber_spiral / max_attractors: они меняют лишь
+// НАБОР представительных ячеек, а он сравнивается напрямую.
+std::string build_basins_phase_run_signature(const BasinsConfig& c);
+// Полная подпись (run-подпись + то, что влияет на набор ячеек). Равные строки
+// ⇔ портреты актуальны.
+std::string build_basins_phase_signature(const BasinsConfig& c);
 
 struct BasinsAnalysisSession {
     std::vector<std::string> vars;
@@ -821,6 +888,34 @@ struct BasinsAnalysisSession {
     bool run_recluster_async(ParametricEngine& engine, int config_idx);
     void request_cancel();
     bool poll();
+
+    // ---- Фазовые портреты по бассейнам ----
+    // Слот на каждый config (позиционно). Не сериализуются целиком: в
+    // _last_basins.json уходят только настройки config'а и список проекций.
+    std::vector<std::unique_ptr<BasinsPhaseSlot>> phase_slots;
+    // Очередь пересчёта портретов (индексы configs). Драйнится ПО ОДНОМУ:
+    // фазовый NVRTC-движок и движок бассейнов делят одну видеокарту.
+    std::deque<int> phase_queue;
+    // Взводится при правке pp_*-полей; draw_gui раз в кадр пишет _last_basins.
+    bool phase_settings_dirty = false;
+
+    // Подогнать phase_slots под configs (ленивое создание). Безопасно звать
+    // каждый кадр.
+    void ensure_phase_slots();
+    BasinsPhaseSlot& phase_slot(int i);
+
+    // Пересобрать НУ слота из результата бассейнов: по одной случайной ячейке
+    // на бассейн (фиксированный seed), 0-бассейны отброшены, срез по
+    // pp_max_attractors_text. Возвращает true, если НАБОР ячеек изменился —
+    // только тогда нужен пересчёт траекторий; иначе обновились лишь подписи.
+    bool rebuild_phase_ics(int config_idx);
+
+    // Поставить портреты config'а в очередь пересчёта (дубликаты схлопываются).
+    void request_phase_run(int config_idx);
+    // Снять следующий элемент очереди и стартовать. Безопасно звать каждый кадр.
+    bool start_next_phase();
+    // Раз в кадр: забрать готовые результаты. true в кадр любого завершения.
+    bool poll_phase();
 };
 
 // ============================================================================

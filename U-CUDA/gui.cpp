@@ -38,8 +38,7 @@ static ImVec4 ic_base_color(int ic_index) {
 // Оттенок базового цвета по насыщенности: для переменной vi из nv внутри
 // одного НУ. vi=0 — самый насыщенный, дальше бледнее. Используется в time domain,
 // чтобы переменные одного НУ были видимо родственны (один тон), но различимы.
-static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
-    ImVec4 base = ic_base_color(ic_index);
+static ImVec4 shade_of(ImVec4 base, int vi, int nv) {
     float h, s, v;
     ImGui::ColorConvertRGBtoHSV(base.x, base.y, base.z, h, s, v);
     // распределяем насыщенность от 1.0 (vi=0) до ~0.35 (последняя переменная)
@@ -48,6 +47,9 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
     float r, g, b;
     ImGui::ColorConvertHSVtoRGB(h, new_s, v, r, g, b);
     return ImVec4(r, g, b, base.w);
+}
+static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
+    return shade_of(ic_base_color(ic_index), vi, nv);
 }
 #include <vector>
 #include <memory>
@@ -1612,6 +1614,38 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 // attach the Move-to-Tab context menu). Both empty (default) preserve the
 // Analysis-mode behaviour.
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
+
+// Per-IC стиль серии (используется фазовыми портретами по бассейнам): цвет
+// берётся из цвета бассейна на хитмапе, а бассейны-равновесия рисуются одним
+// маркером вместо линии. Возвращает false — серия рисуется как раньше
+// (ic_base_color + линия), поэтому Analysis/Custom ничего не замечают.
+struct PhaseSeriesStyle {
+    ImVec4 color      = ImVec4(1, 1, 1, 1);
+    bool   as_point   = false;   // только Phase2D; в time domain всегда линия
+    float  point_size = 6.0f;
+    int    marker     = (int)PointMarker::Circle;
+};
+using PhaseStyleFn = std::function<bool(int ic_index, PhaseSeriesStyle& out)>;
+
+// Подпись НУ для легенды (галка "Legend shows initial conditions").
+// Берём ЧИСЛА, которые реально ушли в расчёт (result.snapshot.ic_flat), и
+// форматируем через fmt_tick — то есть с Tick precision из Settings. Так
+// сгенерированные НУ (узлы сетки бассейнов пишутся с %.17g) не разносят
+// легенду на пол-экрана, а смена точности в Settings применяется сразу, без
+// пересчёта. Fallback на сохранённый result.ic_text — если снапшота нет.
+static std::string ic_legend_text(const AnalysisResult& res, size_t k) {
+    if (k < res.snapshot.ic_flat.size() && !res.snapshot.ic_flat[k].empty()) {
+        const std::vector<double>& v = res.snapshot.ic_flat[k];
+        std::string txt = "(";
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) txt += ",";
+            txt += fmt_tick(v[i]);
+        }
+        txt += ")";
+        return txt;
+    }
+    return (k < res.ic_text.size()) ? res.ic_text[k] : std::string();
+}
 // `title_suffix` is appended to every projection window's title (e.g.
 // "##sys_<name>") so imgui.ini stores dock state per system in Custom mode.
 // `owner_id_delta` is XOR'd into the per-projection owner_id passed to
@@ -1623,7 +1657,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                     const ProjHookFn& before_begin = {},
                                     const ProjHookFn& after_begin  = {},
                                     const std::string& title_suffix = {},
-                                    int owner_id_delta = 0) {
+                                    int owner_id_delta = 0,
+                                    const PhaseStyleFn& style_fn = {}) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every projection view that has data — right-click
     // "Export data..." writes the full double-precision trajectory set (all
@@ -1645,7 +1680,27 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
     // Свой offscreen-рендерер (FBO/текстура) на КАЖДУЮ проекцию: иначе все окна
     // показывали бы одну общую текстуру (геометрию последней отрисованной).
     // PlotRenderer некопируемый -> храним через unique_ptr, подгоняем под число проекций.
-    static std::vector<std::unique_ptr<PlotRenderer>> renderers;
+    // Кэш ключуется по owner_id_delta: у функции появился второй потребитель
+    // (Basins → фазовые портреты, свой delta на каждый config), и с общим
+    // вектором переключение между ними пересоздавало бы FBO каждый кадр.
+    // Analysis передаёт 0 и получает ровно прежнее поведение.
+    // Давно не рисовавшиеся владельцы вытесняются: каждый держит по FBO на
+    // проекцию (мегабайты видеопамяти), а число систем/config'ов не ограничено.
+    struct RendererBucket {
+        std::vector<std::unique_ptr<PlotRenderer>> v;
+        int last_frame = 0;
+    };
+    static std::map<int, RendererBucket> renderers_by_owner;
+    const int cur_frame = ImGui::GetFrameCount();
+    for (auto it = renderers_by_owner.begin(); it != renderers_by_owner.end(); ) {
+        if (it->first != owner_id_delta && cur_frame - it->second.last_frame > 600)
+            it = renderers_by_owner.erase(it);
+        else
+            ++it;
+    }
+    RendererBucket& bucket = renderers_by_owner[owner_id_delta];
+    bucket.last_frame = cur_frame;
+    std::vector<std::unique_ptr<PlotRenderer>>& renderers = bucket.v;
     if ((int)renderers.size() != (int)s.projections.size()) {
         renderers.clear();
         for (size_t k = 0; k < s.projections.size(); ++k)
@@ -1718,21 +1773,43 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     for (size_t k = 0; k < res.trajectories.size(); ++k) {
                         const auto& traj = res.trajectories[k];
                         auto& buf = series_data[k];
-                        buf.reserve(traj.size() * 2);
-                        for (const auto& pt : traj) {
-                            buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                            buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+
+                        // Per-IC стиль (Basins → фазовые портреты). as_point:
+                        // траектория бассейна-равновесия после транзиента стоит
+                        // в одной точке, поэтому кладём в буфер ТОЛЬКО последнюю
+                        // — один маркер вместо десятков тысяч совпадающих точек.
+                        PhaseSeriesStyle st;
+                        const bool has_style = style_fn && style_fn((int)k, st);
+                        const bool as_point  = has_style && st.as_point;
+
+                        if (as_point) {
+                            if (!traj.empty()) {
+                                const auto& pt = traj.back();
+                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                            }
+                        } else {
+                            buf.reserve(traj.size() * 2);
+                            for (const auto& pt : traj) {
+                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                            }
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
-                        if (s.legend_show_ic && k < res.ic_text.size()) lab = res.ic_text[k];
+                        if (s.legend_show_ic) lab = ic_legend_text(res, k);
 
                         PlotSeriesInput si;
                         si.points = buf.data();
                         si.n_points = (int)(buf.size() / 2);
-                        si.color = ic_base_color((int)k);
+                        si.color = has_style ? st.color : ic_base_color((int)k);
                         // В custom_line_style режиме применяем α к цвету IC
                         // (rendering: ImDrawList использует color.w как alpha).
                         if (pr.custom_line_style) si.color.w = pr.alpha;
+                        if (as_point) {
+                            si.points_override = 1;
+                            si.point_marker    = st.marker;
+                            si.point_size_px   = st.point_size;
+                        }
                         si.label = lab;
                         series_in.push_back(si);
 
@@ -1806,6 +1883,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         // видимость НУ — из живой галочки (без recompute)
                         bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
 
+                        // Per-IC цвет (Basins → фазовые портреты). as_point тут
+                        // намеренно игнорируется: во временной развёртке даже
+                        // равновесие — это линия (константа), маркер не нужен.
+                        PhaseSeriesStyle st;
+                        const bool has_style = style_fn && style_fn((int)k, st);
+
                         for (int vi = 0; vi < nvars; ++vi) {
                             if (vi < (int)pr.show_var.size() && !pr.show_var[vi]) continue;
 
@@ -1818,13 +1901,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             }
 
                             std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
-                            std::string who = (s.legend_show_ic && k < res.ic_text.size()) ? res.ic_text[k] : base;
+                            std::string who = s.legend_show_ic ? ic_legend_text(res, k) : base;
                             std::string lab = s.vars[vi] + " [" + who + "]";
 
                             PlotSeriesInput si;
                             si.points = buf.data();
                             si.n_points = n;
-                            si.color = ic_var_shade((int)k, vi, nvars);
+                            si.color = has_style ? shade_of(st.color, vi, nvars)
+                                                 : ic_var_shade((int)k, vi, nvars);
                             // В custom_line_style режиме применяем α к цвету
                             // (ImDrawList использует color.w как alpha).
                             if (pr.custom_line_style) si.color.w = pr.alpha;
@@ -1892,7 +1976,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             buf.push_back((float)pt[az < (int)pt.size() ? az : 0]);
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
-                        if (s.legend_show_ic && k < res.ic_text.size()) lab = res.ic_text[k];
+                        if (s.legend_show_ic) lab = ic_legend_text(res, k);
 
                         PlotSeriesInput3D si;
                         si.points = buf.data();
@@ -4374,6 +4458,266 @@ static void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const G
 // Basins of attraction: controls + 5-plot window (inner tab-bar).
 // ============================================================
 
+// ============================================================
+// Basins: общие хелперы карты + панель фазовых портретов по бассейнам.
+// ============================================================
+
+// Диапазон colorbar'а таба «Basins» — единственный источник истины и для самой
+// хитмапы, и для цвета траекторий в фазовых портретах (иначе цвет бассейна на
+// карте и цвет его траектории разъезжаются).
+//   min_cluster_id..-1 — FP-кластеры (если есть отрицательные)
+//   0                  — расходящиеся ячейки (helpful_array[i] == 0)
+//   1..n_clusters      — осциллирующие кластеры
+// Когда FP-кластеров нет и ничего не разошлось, «кластер 0» не существует —
+// сдвигаем vmin к 1, чтобы в colorbar'е не было фантомной полосы.
+static void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& vmax) {
+    const int n_clusters     = c.renumber_spiral ? c.n_clusters_spiral      : c.result.n_clusters;
+    const int min_cluster_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
+    bool has_diverged = false;
+    for (int f : c.result.helpful_array)
+        if (f == 0) { has_diverged = true; break; }
+    if (min_cluster_id < 0)  vmin = (double)min_cluster_id;
+    else if (has_diverged)   vmin = 0.0;
+    else                     vmin = 1.0;
+    vmax = (double)n_clusters;
+    if (vmax < vmin) vmax = vmin;
+}
+
+// HeatmapView таба «Basins» каждого config'а. Раньше жил function-local static
+// внутри draw_basins_plot; поднят на уровень файла, потому что цвет траекторий
+// в окнах фазовых портретов обязан читать ЖИВЫЕ discrete/reverse/colormap
+// именно этого вью — иначе цвета совпадали бы только при дефолтных настройках.
+static std::map<unsigned, std::unique_ptr<HeatmapView>> g_hm_basins;
+
+// owner_id блока плотов одного basins-config'а (5 внутренних табов на config).
+static unsigned basins_base_oid(int config_index) {
+    return 0x1BA50000u + (unsigned)config_index * 5u;
+}
+
+// Цвет бассейна `display_id` — ровно тот, которым его красит хитмапа.
+// Повторяет квантование из FS_HEATMAP (plot_renderer.cpp): t по [vmin,vmax],
+// дискретизация по полосам с edge-aligned сэмплированием, затем reverse.
+static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
+                              int config_index, int display_id) {
+    double vmin = 0.0, vmax = 0.0;
+    basins_colorbar_range(c, vmin, vmax);
+
+    int  cm      = (c.colormap_idx[0] >= 0) ? c.colormap_idx[0] : model.basins_colormap;
+    bool reverse = false;
+    // discrete_default для этого вью = true, поэтому дефолт (пока панель ни
+    // разу не рисовалась) — дискретный, по одной полосе на целый id.
+    int  n_disc  = std::max(1, (int)std::lround(vmax - vmin) + 1);
+
+    auto it = g_hm_basins.find(basins_base_oid(config_index) + 0u);
+    if (it != g_hm_basins.end() && it->second) {
+        const HeatmapView& hv = *it->second;
+        cm      = (int)hv.colormap;
+        reverse = hv.reverse_colormap;
+        n_disc  = hv.discrete ? (hv.discrete_levels > 0 ? hv.discrete_levels : n_disc) : 0;
+    }
+    if (cm < 0 || cm >= kHeatmapColormapCount) cm = 2;
+
+    const double range = vmax - vmin;
+    float t = (range > 1e-30) ? (float)(((double)display_id - vmin) / range) : 0.5f;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    if (n_disc > 0) {
+        const float nb = (float)n_disc;
+        float k = std::floor(t * nb);
+        if (k >= nb) k = nb - 1.0f;
+        t = (nb > 1.0f) ? (k / (nb - 1.0f)) : 0.5f;
+    }
+    if (reverse) t = 1.0f - t;
+    return ImGui::ColorConvertU32ToFloat4(cmap_sample(t, (HeatmapColormap)cm));
+}
+
+// Панель «Phase portraits» внутри Basins Controls. Интегратор и параметры —
+// из самого basins-config'а; своё тут только время моделирования, прореживание,
+// ограничитель числа аттракторов и выбор CPU/GPU.
+static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
+    BasinsAnalysisSession& s = model.basins_session;
+    if (cfg_idx < 0 || cfg_idx >= (int)s.configs.size()) return;
+    BasinsConfig&    c  = s.configs[(size_t)cfg_idx];
+    BasinsPhaseSlot& sl = s.phase_slot(cfg_idx);
+
+    ImGui::TextDisabled("One random grid cell per basin; scheme/h/params come from this config.");
+
+    bool changed = false;
+
+    // ---- Run / Autorun / устройство ----
+    const bool basins_busy = s.in_flight && s.running_config_index == cfg_idx;
+    const bool phase_busy  = sl.phase.in_flight;
+    const bool no_data     = !c.last_run_ok || c.result.basin_idx.empty();
+    {
+        const bool block = basins_busy || phase_busy || no_data;
+        if (block) ImGui::BeginDisabled();
+        if (ImGui::Button(phase_busy ? "Recomputing..." : "Run portraits", ImVec2(160, 0)))
+            s.request_phase_run(cfg_idx);
+        if (block) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Autorun", &c.pp_autorun)) changed = true;
+        ImGui::SameLine();
+        if (ImGui::Checkbox("GPU##pp", &c.pp_use_gpu)) changed = true;
+    }
+    // Custom КРС на CPU требует внешнего компилятора — та же проверка, что и в
+    // draw_phase_controls; без него молча возвращаем GPU.
+    if (is_custom_scheme(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
+        std::string why;
+        if (!krs_cpu_backend_available(&why)) {
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom scheme requires GPU: %s)", why.c_str());
+            c.pp_use_gpu = true;
+        }
+    }
+
+    // ---- Собственные параметры интегрирования ----
+    changed |= InputNumStr("computing time##pp", c.pp_t_max_text,     120);
+    changed |= InputNumStr("transient time##pp", c.pp_transient_text, 120);
+    changed |= InputNumStr("decimator##pp",      c.pp_prescaller_text, 120);
+    ImGui::TextDisabled("Decimator only thins the drawn points (applied after integration).");
+    changed |= InputNumStr("max attractors##pp", c.pp_max_attractors_text, 120);
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::SliderFloat("FP marker size##pp", &c.pp_marker_size, 2.0f, 12.0f, "%.0f px"))
+        changed = true;
+
+    // ---- Сводка: сколько бассейнов нашлось / сколько рисуем / сколько памяти ----
+    if (no_data) {
+        ImGui::TextDisabled("No basins data yet — run the map first.");
+    } else {
+        int n_basins = 0;
+        const int  n   = c.result.n_pts;
+        const int* ids = basins_display_ids(c);
+        if (ids && n > 0) {
+            std::unordered_set<int> seen;
+            const size_t tot = (size_t)n * (size_t)n;
+            for (size_t k = 0; k < tot; ++k) if (ids[k] != 0) seen.insert(ids[k]);
+            n_basins = (int)seen.size();
+        }
+        const int drawn = (int)sl.cells.size();
+        if (n_basins == 0) {
+            ImGui::TextDisabled("No basins found (every cell diverged) — nothing to draw.");
+        } else {
+            ImGui::Text("%d basin(s) found, %d drawn", n_basins, drawn);
+            int limit = std::atoi(c.pp_max_attractors_text.c_str());
+            if (limit < 1) limit = 1;
+            if (n_basins > limit) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(limited to %d)", limit);
+            }
+            // Оценка объёма: движок держит траектории целиком (децимация
+            // применяется уже после расчёта), поэтому память считаем по
+            // полному числу шагов.
+            const double h  = std::atof(c.h_text.c_str());
+            const double tt = std::atof(c.pp_t_max_text.c_str());
+            const int    kept = (drawn > 0) ? drawn : std::min(n_basins, limit);
+            if (h > 0 && tt > 0 && kept > 0) {
+                const double steps = tt / h;
+                const double mb = steps * (double)kept * (double)s.vars.size() * 8.0 / (1024.0 * 1024.0);
+                ImGui::TextDisabled("%d x %.0f points ~ %.1f MB on GPU (x4-5 on host)", kept, steps, mb);
+            }
+        }
+    }
+
+    // ---- Статус актуальности ----
+    const std::string sig = build_basins_phase_signature(c);
+    if (!no_data && sig != sl.run_signature && !phase_busy) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           c.pp_autorun ? "Rebuilding..." : "Stale - press Run portraits");
+    }
+    // compute_phase_portrait кладёт в error тайминг успешного прогона
+    // ("recompute: N ms") — это не ошибка, красить в оранжевый нечего.
+    if (!sl.phase.result.error.empty()) {
+        const bool is_timing = sl.phase.result.error.rfind("recompute:", 0) == 0;
+        if (is_timing) ImGui::TextDisabled("%s", sl.phase.result.error.c_str());
+        else ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", sl.phase.result.error.c_str());
+    }
+
+    // ---- Окна (проекции) ----
+    ImGui::SeparatorText("Windows");
+    int pr_to_remove = -1;
+    for (int i = 0; i < (int)sl.phase.projections.size(); ++i) {
+        Projection& pr = sl.phase.projections[i];
+        // 3D в этом режиме не поддерживается (нет точечного рендера в
+        // Plot3DView) — старые сессии с Phase3D мягко приводим к 2D.
+        if (pr.type == ProjType::Phase3D) pr.type = ProjType::Phase2D;
+        ImGui::PushID(2000 + i);
+        ImGui::SetNextItemWidth(90);
+        InputTextStr("##pplabel", pr.label); ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        const char* tnames[] = { "Phase 2D", "Time domain" };
+        int t = (pr.type == ProjType::TimeDomain) ? 1 : 0;
+        if (ImGui::Combo("##pptype", &t, tnames, 2)) {
+            pr.type = (t == 1) ? ProjType::TimeDomain : ProjType::Phase2D;
+            sl.phase.fit_request = true;
+        }
+        ImGui::SameLine();
+        if (pr.type == ProjType::Phase2D) {
+            const auto& vars = sl.phase.vars;
+            ImGui::Text("X:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(55);
+            if (ImGui::BeginCombo("##ppx", vars.empty() ? "-" : vars[pr.axis_x < (int)vars.size() ? pr.axis_x : 0].c_str())) {
+                for (int k = 0; k < (int)vars.size(); ++k)
+                    if (ImGui::Selectable(vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; sl.phase.fit_request = true; }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(55);
+            if (ImGui::BeginCombo("##ppy", vars.empty() ? "-" : vars[pr.axis_y < (int)vars.size() ? pr.axis_y : 0].c_str())) {
+                for (int k = 0; k < (int)vars.size(); ++k)
+                    if (ImGui::Selectable(vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; sl.phase.fit_request = true; }
+                ImGui::EndCombo();
+            }
+        } else {
+            if ((int)pr.show_var.size() != (int)sl.phase.vars.size())
+                pr.show_var.assign(sl.phase.vars.size(), true);
+            ImGui::Text("vars:"); ImGui::SameLine();
+            for (int k = 0; k < (int)sl.phase.vars.size(); ++k) {
+                bool v = pr.show_var[k];
+                if (ImGui::Checkbox(sl.phase.vars[k].c_str(), &v)) pr.show_var[k] = v;
+                ImGui::SameLine();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) pr_to_remove = i;
+        ImGui::PopID();
+    }
+    if (pr_to_remove >= 0) { sl.phase.remove_projection(pr_to_remove); changed = true; }
+    if (ImGui::Button("Add 2D plot")) {
+        sl.phase.add_projection();
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add time domain")) {
+        sl.phase.add_projection();
+        sl.phase.projections.back().type = ProjType::TimeDomain;
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset windows layout##pp")) sl.phase.layout_generation++;
+
+    // ---- Легенда/видимость бассейнов ----
+    if (!sl.phase.ic_sets.empty()) {
+        ImGui::SeparatorText("Basins drawn");
+        ImGui::Checkbox("Legend shows initial conditions##pp", &sl.phase.legend_show_ic);
+        const int* ids = basins_display_ids(c);
+        for (int k = 0; k < (int)sl.phase.ic_sets.size(); ++k) {
+            ImGui::PushID(3000 + k);
+            ImGui::Checkbox("##ppvis", &sl.phase.ic_sets[k].visible);
+            ImGui::SameLine();
+            if (ids && k < (int)sl.cells.size() &&
+                sl.cells[k] >= 0 && sl.cells[k] < (int)c.result.basin_idx.size()) {
+                const ImVec4 col = basins_id_color(c, model, cfg_idx, ids[sl.cells[k]]);
+                ImGui::ColorButton("##ppcol", col,
+                                   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                                   ImVec2(12, 12));
+                ImGui::SameLine();
+            }
+            ImGui::TextUnformatted(sl.phase.ic_sets[k].label.c_str());
+            ImGui::PopID();
+        }
+    }
+
+    if (changed) s.phase_settings_dirty = true;
+}
+
 static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
 
@@ -4628,6 +4972,13 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         }
     }
 
+    // ----- Phase portraits from basins (collapsible) -----
+    // Отдельные окна 2D / Time domain по одной представительной точке из
+    // каждого найденного бассейна (см. draw_basins_phase_controls).
+    if (ImGui::CollapsingHeader("Phase portraits")) {
+        draw_basins_phase_controls(model, s.active_config_index);
+    }
+
     // ----- CSV output (collapsible, moved to the bottom) -----
     if (ImGui::CollapsingHeader("CSV output")) {
         ImGui::Checkbox("Save to file", &c.csv_save_enabled);
@@ -4661,86 +5012,11 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 // data_generation=1 → cache не invalidate'тся и на чужой вкладке показывается
 // предыдущий buffer). Map с lazy-init решает это и сохраняет независимый
 // zoom/pan per (config, tab).
-// Координаты обхода NxN-сетки по спирали из центра (порт MATLAB
-// spiral_coords_from_center). Стартовая клетка — округление к верху центра:
-// для N=5 это (2,2), для N=4 это (1,1) (0-based). Дальше — right→down→left→up
-// с увеличением шага на каждом цикле полу-оборотов. Точки за границей грид-а
-// пропускаются, поэтому в итоге набирается ровно N*N валидных индексов.
-// Возвращает row-major индексы row*N + col.
-static std::vector<int> spiral_coords_from_center(int N) {
-    std::vector<int> out;
-    if (N <= 0) return out;
-    const int total = N * N;
-    out.reserve((size_t)total);
-    int r = (N - 1) / 2;
-    int c = (N - 1) / 2;
-    out.push_back(r * N + c);
-    static const int dr[4] = { 0, 1, 0, -1 };
-    static const int dc[4] = { 1, 0, -1, 0 };
-    int dir = 0;
-    int step = 1;
-    while ((int)out.size() < total) {
-        for (int k = 0; k < 2; ++k) {
-            for (int t = 0; t < step; ++t) {
-                r += dr[dir];
-                c += dc[dir];
-                if (r >= 0 && r < N && c >= 0 && c < N) {
-                    out.push_back(r * N + c);
-                    if ((int)out.size() >= total) return out;
-                }
-            }
-            dir = (dir + 1) & 3;
-        }
-        ++step;
-    }
-    return out;
-}
-
-// Перенумерация cluster id'ов по порядку первого появления при обходе spiral-
-// from-center. Положительные оригинальные id отображаются в 1, 2, 3, ...
-// отрицательные — в -1, -2, -3, ... Ноли (diverged) сохраняются как 0.
-// Также возвращает via out-params количество положительных / отрицательных
-// кластеров для обновления colorbar-диапазона.
-static std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
-                                               int& out_n_pos, int& out_n_neg) {
-    out_n_pos = 0;
-    out_n_neg = 0;
-    std::vector<int> dst(src.size(), 0);
-    if ((int)src.size() != N * N || N <= 0) return dst;
-    const std::vector<int> order = spiral_coords_from_center(N);
-    std::unordered_map<int, int> pos_map, neg_map;
-    int pos_next = 1, neg_next = 1;
-    for (int idx : order) {
-        const int v = src[(size_t)idx];
-        if (v > 0) {
-            auto it = pos_map.find(v);
-            if (it == pos_map.end()) { it = pos_map.emplace(v, pos_next++).first; }
-            dst[(size_t)idx] = it->second;
-        } else if (v < 0) {
-            auto it = neg_map.find(v);
-            if (it == neg_map.end()) { it = neg_map.emplace(v, -(neg_next++)).first; }
-            dst[(size_t)idx] = it->second;
-        }
-        // v == 0 — diverged, dst остаётся 0.
-    }
-    out_n_pos = pos_next - 1;
-    out_n_neg = neg_next - 1;
-    return dst;
-}
-
-// Лениво (пере)заполнить c.basin_idx_spiral / c.n_clusters_spiral /
-// c.min_cluster_idx_spiral для текущего поколения данных. Безопасно вызывать
-// каждый кадр — пересчёт случается только при смене data_generation.
-static void ensure_basins_spiral_cache(BasinsConfig& c) {
-    if (c.basin_idx_spiral_gen == c.data_generation
-        && c.basin_idx_spiral.size() == c.result.basin_idx.size()) return;
-    int n_pos = 0, n_neg = 0;
-    c.basin_idx_spiral = renumber_basins_spiral(c.result.basin_idx, c.result.n_pts,
-                                                n_pos, n_neg);
-    c.n_clusters_spiral      = n_pos;
-    c.min_cluster_idx_spiral = -n_neg;
-    c.basin_idx_spiral_gen   = c.data_generation;
-}
+// spiral_coords_from_center / renumber_basins_spiral / ensure_basins_spiral_cache
+// переехали в analysis_session.cpp: перенумерация нужна не только для
+// отрисовки, но и для выбора представительных ячеек в фазовых портретах по
+// бассейнам (BasinsAnalysisSession::rebuild_phase_ics), а тот слой про GUI
+// ничего не знает. Объявления — в analysis_session.h.
 
 static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
@@ -4753,9 +5029,10 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
     BasinsConfig& c = s.configs[s.active_config_index];
     // Owner IDs зависят от индекса config — каждый basin имеет независимый
     // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
-    const unsigned base_oid = 0x1BA50000u + (unsigned)s.active_config_index * 5u;
+    const unsigned base_oid = basins_base_oid(s.active_config_index);
     static std::unique_ptr<PlotRenderer> renderer;
-    static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_basins, hm_avgpk, hm_avgint, hm_states;
+    // hm_basins — на уровне файла (g_hm_basins), см. комментарий у объявления.
+    static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_avgpk, hm_avgint, hm_states;
     static std::map<unsigned, std::unique_ptr<Plot2DView>>  scatter_views;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
@@ -4781,7 +5058,7 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         }
         return *slot;
     };
-    HeatmapView& hm_basins_v = get_hm(hm_basins, base_oid + 0u, /*discrete*/ true);
+    HeatmapView& hm_basins_v = get_hm(g_hm_basins, base_oid + 0u, /*discrete*/ true);
     HeatmapView& hm_avgpk_v  = get_hm(hm_avgpk,  base_oid + 1u, false);
     HeatmapView& hm_avgint_v = get_hm(hm_avgint, base_oid + 2u, false);
     HeatmapView& hm_states_v = get_hm(hm_states, base_oid + 3u, false);
@@ -4930,23 +5207,11 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         static std::vector<double> buf;
         buf.resize(total);
         for (size_t k = 0; k < total; ++k) buf[k] = (double)src_idx[k];
-        // Cluster IDs:
-        //   min_cluster_id..-1 — FP-clusters (always present when negative)
-        //   0                  — diverged/unbound cells (helpful_array[i] == 0)
-        //   1..n_clusters      — oscillatory clusters
-        // When no FP-clusters exist (min_cluster_id == 0) and no cell
-        // diverged, "cluster 0" isn't a real ID; shift vmin to 1 so the
-        // colorbar doesn't show a phantom band. If diverged cells exist,
-        // keep vmin = 0 so they get their own color band.
-        bool has_diverged = false;
-        for (int f : c.result.helpful_array)
-            if (f == 0) { has_diverged = true; break; }
-        double vmin;
-        if (src_min_cluster_id < 0)              vmin = (double)src_min_cluster_id;
-        else if (has_diverged)                   vmin = 0.0;
-        else                                     vmin = 1.0;
-        double vmax = (double)src_n_clusters;
-        if (vmax < vmin) vmax = vmin;
+        (void)src_n_clusters; (void)src_min_cluster_id;
+        // Диапазон colorbar'а — общий хелпер (шарится с цветом траекторий в
+        // фазовых портретах по бассейнам), см. basins_colorbar_range.
+        double vmin = 0.0, vmax = 0.0;
+        basins_colorbar_range(c, vmin, vmax);
         // colormap уже засинхронен из model.basins_colormap перед тулбаром.
         hm_basins_v.x_axis.name = ax_x;
         hm_basins_v.y_axis.name = ax_y;
@@ -5079,6 +5344,78 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         scatter_v.render(*renderer, origin, avail,
                              /*owner_id*/ base_oid + 4u, scatter_gen,
                              series_in, init_vis, glob_vis, fit);
+    }
+}
+
+// Окна фазовых портретов по бассейнам — только для АКТИВНОГО config'а
+// (панель хитмапы показывает его же). Набор проекций и результат у каждого
+// config'а свои, поэтому переключение вкладки сразу показывает свои окна с
+// уже посчитанными данными.
+static void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
+    BasinsAnalysisSession& s = model.basins_session;
+    s.ensure_phase_slots();
+    if (s.configs.empty()) return;
+    int ci = s.active_config_index;
+    if (ci < 0 || ci >= (int)s.configs.size()) ci = 0;
+    BasinsConfig&    c  = s.configs[(size_t)ci];
+    BasinsPhaseSlot& sl = s.phase_slot(ci);
+
+    // 3D-проекций в этом режиме нет (Plot3DView не умеет точечные серии, а
+    // бассейны-равновесия рисуются маркером) — старые сессии мягко приводим.
+    for (auto& pr : sl.phase.projections)
+        if (pr.type == ProjType::Phase3D) pr.type = ProjType::Phase2D;
+
+    // display-id ячейки → цвет бассейна + признак «равновесие» (id < 0).
+    const int* ids = basins_display_ids(c);
+    const size_t n_cells = c.result.basin_idx.size();
+    PhaseStyleFn style_fn = [&c, &sl, &model, ci, ids, n_cells]
+                            (int k, PhaseSeriesStyle& out) -> bool {
+        if (!ids || k < 0 || k >= (int)sl.cells.size()) return false;
+        const int cell = sl.cells[(size_t)k];
+        if (cell < 0 || (size_t)cell >= n_cells) return false;
+        const int id = ids[(size_t)cell];
+        out.color      = basins_id_color(c, model, ci, id);
+        out.as_point   = (id < 0);         // FP-бассейн — одна точка
+        out.point_size = c.pp_marker_size;
+        out.marker     = (int)PointMarker::Circle;
+        return true;
+    };
+
+    // title_suffix / owner_id_delta — свои на config: docking-раскладка в
+    // imgui.ini и кэш рендереров не должны пересекаться ни между конфигами,
+    // ни с проекциями режима Phase analysis.
+    const size_t n_before = sl.phase.projections.size();
+    draw_projection_windows(sl.phase, cb, {}, {},
+                            "##bpp" + std::to_string(ci),
+                            0x1BA50000 + ci * 16,
+                            style_fn);
+    // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
+    if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
+}
+
+// Раз в кадр: пометить устаревшие портреты и, если включён Autorun, поставить
+// их в очередь. Дебаунс 300 мс — иначе каждое нажатие клавиши в текстовом поле
+// стартовало бы новый GPU-прогон. Проходим по ВСЕМ config'ам: после «Run all…»
+// автозапуск должен подхватить каждый пересчитанный конфиг, а не только
+// открытый в данный момент.
+static void basins_phase_tick(AppModel& model) {
+    BasinsAnalysisSession& s = model.basins_session;
+    s.ensure_phase_slots();
+    const double now = ImGui::GetTime();
+    for (int i = 0; i < (int)s.configs.size(); ++i) {
+        BasinsConfig&    c  = s.configs[(size_t)i];
+        BasinsPhaseSlot& sl = *s.phase_slots[(size_t)i];
+        const std::string sig = build_basins_phase_signature(c);
+        if (sig != sl.pending_signature) {
+            sl.pending_signature = sig;
+            sl.pending_since     = now;
+        }
+        if (sig == sl.run_signature) continue;         // актуально
+        if (!c.pp_autorun) continue;
+        if (!c.last_run_ok || c.result.basin_idx.empty()) continue;
+        if (sl.phase.in_flight) continue;
+        if (now - sl.pending_since < 0.3) continue;    // ещё печатают
+        s.request_phase_run(i);
     }
 }
 
@@ -8157,6 +8494,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last_basins",
                              session_to_json_basins(model.basins_session));
     }
+    // Фазовые портреты по бассейнам: свой poll + свой тик очереди. Идут
+    // независимо от текущего режима — вернувшись в Basins, пользователь сразу
+    // видит готовый результат (как и у всех остальных сессий).
+    if (model.basins_session.poll_phase()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_basins",
+                             session_to_json_basins(model.basins_session));
+    }
+    basins_phase_tick(model);
+    model.basins_session.start_next_phase();
+    if (model.basins_session.phase_settings_dirty) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_basins",
+                             session_to_json_basins(model.basins_session));
+        model.basins_session.phase_settings_dirty = false;
+    }
     // FastSync: poll worker future; on completion persist session JSON.
     // Без этого вызова in_flight никогда не сбрасывается → "Running" висит вечно.
     if (model.fastsync_session.poll()) {
@@ -8712,6 +9065,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             draw_basins_plot(model, lib, cb);
         }
         ImGui::End();
+        // Окна фазовых портретов активного config'а (2D / time domain).
+        draw_basins_phase_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::FastSync) {
         if (ImGui::Begin("FastSync Controls")) {
