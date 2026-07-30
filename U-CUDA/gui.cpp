@@ -1743,6 +1743,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // for a state-space trajectory.
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
+                    // Alpha slider fades the trajectory, not the legend swatch.
+                    pr.view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
@@ -1838,6 +1840,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // y=0 rarely coincides with a meaningful reference.
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
+                    // Alpha slider fades the trajectory, not the legend swatch.
+                    pr.view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
@@ -1936,6 +1940,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                 }
                 else {
                     if (!pr.view3d) pr.view3d = std::make_unique<Plot3DView>();
+                    // Alpha slider fades the trajectory, not the legend swatch.
+                    pr.view3d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (толщина + α).
                     // В 3D нет ImDrawList-fallback (потерялся бы depth-sorting),
@@ -3879,6 +3885,119 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
 }
 
 // ============================================================
+// Parametric plot windows — shared setup-row helper.
+//
+// The row (Label | Type | Members... | X) is rendered both in the Plot
+// windows manager on the settings panel (draw_parametric_controls) and
+// at the top of each per-window Begin() (draw_parametric_plot_windows),
+// so users can retype the chart without going back to the panel. The
+// helpers live at file scope so both callsites share one implementation.
+// ============================================================
+struct ParamPlotMatchItem { int index; std::string label; };
+
+static std::vector<ParamPlotMatchItem>
+parametric_matching_items(AppModel& model, ParametricPlotWindow::Kind kind, bool mode_2d) {
+    std::vector<ParamPlotMatchItem> out;
+    if (kind == ParametricPlotWindow::Kind::Bifurcation) {
+        auto& ds = model.bifurcation_session.diagrams;
+        for (int i = 0; i < (int)ds.size(); ++i)
+            if (ds[i].mode_2d == mode_2d) out.push_back({ i, ds[i].label });
+    } else if (kind == ParametricPlotWindow::Kind::LLE) {
+        auto& cs = model.lle_session.curves;
+        for (int i = 0; i < (int)cs.size(); ++i)
+            if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
+    } else {
+        auto& cs = model.ls_session.curves;
+        for (int i = 0; i < (int)cs.size(); ++i)
+            if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
+    }
+    return out;
+}
+
+// Colored 1D is not a distinct combo entry — it's a toggle inside the
+// plot body (see draw_bifurcation_plot). The Type combo only splits 1D/2D.
+static const char* kParametricTypeNames[] = {
+    "Bifurcation 1D", "Bifurcation 2D", "LLE 1D", "LLE 2D", "LS 1D", "LS 2D"
+};
+
+static int parametric_type_index_of(ParametricPlotWindow::Kind kind, bool mode_2d) {
+    int base = kind == ParametricPlotWindow::Kind::Bifurcation ? 0
+             : kind == ParametricPlotWindow::Kind::LLE ? 2 : 4;
+    return base + (mode_2d ? 1 : 0);
+}
+
+static void parametric_type_from_index(int t, ParametricPlotWindow::Kind& kind, bool& mode_2d) {
+    kind    = (t < 2) ? ParametricPlotWindow::Kind::Bifurcation
+            : (t < 4) ? ParametricPlotWindow::Kind::LLE : ParametricPlotWindow::Kind::LS;
+    mode_2d = (t % 2) == 1;
+}
+
+// Draws the Label | Type | Members... | X row for a Parametric plot window.
+// Returns true iff the user clicked the row's X — caller unmounts the window.
+// Assumes caller has already pushed a PushID(win.id) on the ID stack.
+static bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win) {
+    bool close_clicked = false;
+
+    ImGui::SetNextItemWidth(220);
+    if (InputTextStr("##wlabel", win.label)) {
+        win.label_is_manual = !win.label.empty();   // empty → back to auto
+        model.parametric_plot_windows_dirty = true;
+    }
+    ImGui::SameLine();
+
+    // Type combo: changing kind/dimension invalidates old member indices
+    // (they're only meaningful within the previous session+dimension),
+    // so switching type clears members.
+    int t = parametric_type_index_of(win.kind, win.mode_2d);
+    ImGui::SetNextItemWidth(130);
+    if (ImGui::Combo("##wtype", &t, kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames))) {
+        ParametricPlotWindow::Kind new_kind; bool new_2d;
+        parametric_type_from_index(t, new_kind, new_2d);
+        if (new_kind != win.kind || new_2d != win.mode_2d) {
+            win.kind = new_kind;
+            win.mode_2d = new_2d;
+            win.colored_1d = false;   // combo no longer selects Colored 1D — reset; toggled above the plot
+            win.members.clear();
+            model.parametric_plot_windows_dirty = true;
+        }
+    }
+    ImGui::SameLine();
+
+    if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_plot_window_members");
+    if (ImGui::BeginPopup("edit_plot_window_members")) {
+        auto items = parametric_matching_items(model, win.kind, win.mode_2d);
+        if (items.empty()) {
+            ImGui::TextDisabled("(none available)");
+        } else if (win.mode_2d || win.colored_1d) {
+            // 2D / Colored 1D show heatmaps — single-select (radio).
+            for (const auto& item : items) {
+                bool sel = !win.members.empty() && win.members[0] == item.index;
+                std::string lbl = item.label + "##mem" + std::to_string(item.index);
+                if (ImGui::RadioButton(lbl.c_str(), sel)) {
+                    win.members.assign(1, item.index);
+                    model.parametric_plot_windows_dirty = true;
+                }
+            }
+        } else {
+            for (const auto& item : items) {
+                bool has = std::find(win.members.begin(), win.members.end(), item.index) != win.members.end();
+                std::string lbl = item.label + "##mem" + std::to_string(item.index);
+                if (ImGui::Checkbox(lbl.c_str(), &has)) {
+                    if (has) win.members.push_back(item.index);
+                    else win.members.erase(std::remove(win.members.begin(), win.members.end(), item.index), win.members.end());
+                    model.parametric_plot_windows_dirty = true;
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("X")) close_clicked = true;
+
+    return close_clicked;
+}
+
+// ============================================================
 // Parametric mode: dynamic plot windows (mirrors draw_projection_windows
 // in Phase). One ImGui window per model.parametric_plot_windows entry,
 // each with its own PlotRenderer/Plot2DView/HeatmapView-map keyed by
@@ -3924,8 +4043,14 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
         float ox = 60.0f + (float)(i % 5) * 35.0f, oy = 80.0f + (float)(i % 5) * 35.0f;
         ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
+        bool row_close = false;
         if (ImGui::Begin(title.c_str(), &open)) {
             ImGui::PushID(win.id);
+            // Duplicate of the settings-panel row (draw_parametric_controls) so
+            // the chart type / members / label can be changed without leaving
+            // the window. Same helper, same PushID(win.id) scope.
+            row_close = draw_parametric_window_setup_row(model, win);
+            ImGui::Separator();
             switch (win.kind) {
             case ParametricPlotWindow::Kind::Bifurcation:
                 draw_bifurcation_plot(model, lib, cb, win, *renderer, *view, hm_map);
@@ -3940,7 +4065,7 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
             ImGui::PopID();
         }
         ImGui::End();
-        if (!open) to_remove = i;
+        if (!open || row_close) to_remove = i;
     }
     if (to_remove >= 0) {
         int id = model.parametric_plot_windows[to_remove].id;
@@ -6217,99 +6342,11 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
     ImGui::SeparatorText("Plot windows");
 
-    struct ParamMatchItem { int index; std::string label; };
-    auto matching_items = [&](ParametricPlotWindow::Kind kind, bool mode_2d) {
-        std::vector<ParamMatchItem> out;
-        if (kind == ParametricPlotWindow::Kind::Bifurcation) {
-            auto& ds = model.bifurcation_session.diagrams;
-            for (int i = 0; i < (int)ds.size(); ++i)
-                if (ds[i].mode_2d == mode_2d) out.push_back({ i, ds[i].label });
-        } else if (kind == ParametricPlotWindow::Kind::LLE) {
-            auto& cs = model.lle_session.curves;
-            for (int i = 0; i < (int)cs.size(); ++i)
-                if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
-        } else {
-            auto& cs = model.ls_session.curves;
-            for (int i = 0; i < (int)cs.size(); ++i)
-                if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
-        }
-        return out;
-    };
-    // Colored 1D — не отдельный "kind" в этом комбо, а тумблер поверх плота
-    // (draw_bifurcation_plot). Type combo снова различает только 1D/2D, как
-    // у LLE/LS.
-    static const char* type_names[] = { "Bifurcation 1D", "Bifurcation 2D", "LLE 1D", "LLE 2D", "LS 1D", "LS 2D" };
-    auto type_index_of = [](ParametricPlotWindow::Kind kind, bool mode_2d) -> int {
-        int base = kind == ParametricPlotWindow::Kind::Bifurcation ? 0
-                 : kind == ParametricPlotWindow::Kind::LLE ? 2 : 4;
-        return base + (mode_2d ? 1 : 0);
-    };
-    auto type_from_index = [](int t, ParametricPlotWindow::Kind& kind, bool& mode_2d) {
-        kind    = (t < 2) ? ParametricPlotWindow::Kind::Bifurcation
-                : (t < 4) ? ParametricPlotWindow::Kind::LLE : ParametricPlotWindow::Kind::LS;
-        mode_2d = (t % 2) == 1;
-    };
-
     int win_to_remove = -1;
     for (int i = 0; i < (int)model.parametric_plot_windows.size(); ++i) {
         ParametricPlotWindow& win = model.parametric_plot_windows[i];
         ImGui::PushID(win.id);
-        ImGui::SetNextItemWidth(220);
-        if (InputTextStr("##wlabel", win.label)) {
-            win.label_is_manual = !win.label.empty();   // empty → back to auto
-            model.parametric_plot_windows_dirty = true;
-        }
-        ImGui::SameLine();
-
-        // Type combo: changing kind/dimension invalidates old member indices
-        // (they're only meaningful within the previous session+dimension),
-        // so switching type clears members.
-        int t = type_index_of(win.kind, win.mode_2d);
-        ImGui::SetNextItemWidth(130);
-        if (ImGui::Combo("##wtype", &t, type_names, IM_ARRAYSIZE(type_names))) {
-            ParametricPlotWindow::Kind new_kind; bool new_2d;
-            type_from_index(t, new_kind, new_2d);
-            if (new_kind != win.kind || new_2d != win.mode_2d) {
-                win.kind = new_kind;
-                win.mode_2d = new_2d;
-                win.colored_1d = false;   // combo больше не умеет выбирать Colored 1D — сбрасываем; включается тумблером над плотом
-                win.members.clear();
-                model.parametric_plot_windows_dirty = true;
-            }
-        }
-        ImGui::SameLine();
-
-        if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_plot_window_members");
-        if (ImGui::BeginPopup("edit_plot_window_members")) {
-            auto items = matching_items(win.kind, win.mode_2d);
-            if (items.empty()) {
-                ImGui::TextDisabled("(none available)");
-            } else if (win.mode_2d || win.colored_1d) {
-                // 2D / Colored 1D (сейчас включён тумблером над плотом) show
-                // heatmaps — single-select (radio), not independent checkboxes.
-                for (const auto& item : items) {
-                    bool sel = !win.members.empty() && win.members[0] == item.index;
-                    std::string lbl = item.label + "##mem" + std::to_string(item.index);
-                    if (ImGui::RadioButton(lbl.c_str(), sel)) {
-                        win.members.assign(1, item.index);
-                        model.parametric_plot_windows_dirty = true;
-                    }
-                }
-            } else {
-                for (const auto& item : items) {
-                    bool has = std::find(win.members.begin(), win.members.end(), item.index) != win.members.end();
-                    std::string lbl = item.label + "##mem" + std::to_string(item.index);
-                    if (ImGui::Checkbox(lbl.c_str(), &has)) {
-                        if (has) win.members.push_back(item.index);
-                        else win.members.erase(std::remove(win.members.begin(), win.members.end(), item.index), win.members.end());
-                        model.parametric_plot_windows_dirty = true;
-                    }
-                }
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("X")) win_to_remove = i;
+        if (draw_parametric_window_setup_row(model, win)) win_to_remove = i;
         ImGui::PopID();
     }
     if (win_to_remove >= 0) model.remove_parametric_plot_window(win_to_remove);

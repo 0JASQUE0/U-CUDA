@@ -22,6 +22,10 @@ public:
 
     // ���������
     bool show_legend = true;
+    // If true, force the legend marker's alpha to 1.0 regardless of the
+    // per-series color.w — used by Phase 3D, where the "Alpha" slider is
+    // meant to fade the trajectory itself, not the swatch in the legend.
+    bool legend_ignore_series_alpha = false;
     bool show_axes = true;
     bool view_valid = false;
     int  series_generation = -1;

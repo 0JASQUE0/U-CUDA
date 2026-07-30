@@ -250,8 +250,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     std::vector<LegendEntry> legend_entries;
     if (show_legend) {
         legend_entries.reserve(series_in.size());
-        for (const auto& s : series_in)
-            legend_entries.push_back({ s.label, s.color });
+        for (const auto& s : series_in) {
+            LegendEntry e{ s.label, s.color };
+            if (legend_ignore_series_alpha) e.color.w = 1.0f;
+            legend_entries.push_back(e);
+        }
         draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
                     owner_id, LegendPass::Interact);
     }

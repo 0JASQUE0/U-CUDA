@@ -54,6 +54,11 @@ public:
     AxisInfo x_axis;
     AxisInfo y_axis;
     bool show_legend = true;
+    // If true, force the legend marker's alpha to 1.0 regardless of the
+    // per-series color.w — used by Phase / TimeDomain, where the "Alpha"
+    // slider is meant to fade the trajectory itself, not the swatch that
+    // identifies each IC in the legend.
+    bool legend_ignore_series_alpha = false;
     bool view_valid = false;
     int  series_generation = -1;
 

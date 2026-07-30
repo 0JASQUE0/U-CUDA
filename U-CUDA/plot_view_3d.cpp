@@ -165,7 +165,11 @@ void Plot3DView::render(PlotRenderer& renderer,
     if (show_legend) {
         std::vector<LegendEntry> entries;
         entries.reserve(series_in.size());
-        for (const auto& s : series_in) entries.push_back({ s.label, s.color });
+        for (const auto& s : series_in) {
+            LegendEntry e{ s.label, s.color };
+            if (legend_ignore_series_alpha) e.color.w = 1.0f;
+            entries.push_back(e);
+        }
         draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id);
     }
 
