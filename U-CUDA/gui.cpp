@@ -10,7 +10,6 @@
 #include "heatmap_view.h"
 #include "app_config.h"
 #include "data_export.h"
-#include "digit_input.h"
 #include "krs_cpu.h"
 #include <map>
 #include <memory>
@@ -57,6 +56,7 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
 #include <unordered_set>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 // ---- helpers: std::string <-> ImGui ----
 static bool InputTextMultilineStr(const char* label, std::string& str, const ImVec2& size) {
@@ -87,43 +87,9 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
-// Совмещённый callback: запятая→точка (CallbackCharFilter) + digit-step на
-// ↑/↓ (CallbackHistory). ImGui позволяет OR'ить флаги; здесь диспетчеризуем
-// по EventFlag. CallbackHistory — специальный event, который ImGui шлёт
-// когда в активном InputText нажали ↑/↓ (изначально сделан под REPL command
-// history). Ровно то, что нам нужно: клавиша уже отфильтрована и передана
-// нам через колбэк — не нужен ни IsKeyPressed, ни pending-cursor state.
-static int digit_step_callback(ImGuiInputTextCallbackData* data) {
-    if (data->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) {
-        if (data->EventChar == ',') data->EventChar = '.';
-        return 0;
-    }
-    if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
-        int dir = 0;
-        if (data->EventKey == ImGuiKey_UpArrow)   dir = +1;
-        if (data->EventKey == ImGuiKey_DownArrow) dir = -1;
-        if (dir == 0) return 0;
-
-        std::string text(data->Buf, data->Buf + data->BufTextLen);
-        std::string new_text;
-        int new_cursor = 0;
-        if (!DigitInput::ComputeStep(text, data->CursorPos, dir,
-                                     new_text, new_cursor)) {
-            return 0;  // Дробь / scientific / невалидный ввод — не трогаем.
-        }
-
-        // DeleteChars + InsertChars сами выставляют BufDirty=true, ImGui
-        // подхватит новую длину и вернёт changed=true из InputText.
-        data->DeleteChars(0, data->BufTextLen);
-        data->InsertChars(0, new_text.c_str());
-        if (new_cursor < 0) new_cursor = 0;
-        if (new_cursor > data->BufTextLen) new_cursor = data->BufTextLen;
-        data->CursorPos      = new_cursor;
-        data->SelectionStart = new_cursor;
-        data->SelectionEnd   = new_cursor;
-    }
-    return 0;
-}
+// Совмещённый callback (запятая→точка + digit-step на ↑/↓) переехал в
+// plot_axis.cpp::digit_step_input_callback — тем же вводом пользуется меню
+// цвета серии в plot_view_2d.cpp, и держать копию в gui.cpp было нельзя.
 
 // Проверка: парсится ли строка как число (или валидная дробь "a/b")?
 // Важно: std::stod НЕ кидает на "5asdfaxcv" — он парсит ведущее "5"
@@ -287,11 +253,11 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
     buf.resize(str.size() + 1024);
     buf[str.size()] = '\0';
     if (width > 0) ImGui::SetNextItemWidth(width);
-    // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_callback.
-    // CallbackCharFilter — прежняя замена запятой на точку, тоже в digit_step_callback.
+    // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_input_callback.
+    // CallbackCharFilter — прежняя замена запятой на точку, тоже в нём.
     bool changed = ImGui::InputText(label, buf.data(), buf.size(),
         ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
-        digit_step_callback);
+        digit_step_input_callback);
     if (changed) str = buf.data();
 
     // Inline-предупреждение, если содержимое не парсится как число.
@@ -326,6 +292,38 @@ static double parse_ratio_or(const std::string& v, double def) {
         if (den != 0) return num / den;
     }
     return std::atof(v.c_str());
+}
+
+// Как InputNumStr, но число живёт не в строке, а в структуре (Settings ->
+// PeakConfig): текст здесь только буфер ввода, поэтому значение снимаем на
+// commit'е — Enter или уход фокуса, а не на каждом нажатии клавиши. Иначе
+// промежуточное "1e-" по пути к "1e-14" ушло бы в set_peak_config и дёрнуло
+// перекомпиляцию ядер. Невалидный/пустой текст значение не трогает.
+// Возвращает true ровно на кадре коммита.
+static bool InputNumStrCommit(const char* label, std::string& text, double& value,
+                              float width = 0.0f) {
+    std::vector<char> buf(text.begin(), text.end());
+    buf.resize(text.size() + 1024);
+    buf[text.size()] = '\0';
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    if (ImGui::InputText(label, buf.data(), buf.size(),
+                         ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
+                         digit_step_input_callback))
+        text = buf.data();
+
+    // Снимаем ДО возможного TextColored: тот станет last item, и IsItem* уже
+    // спрашивал бы про него.
+    const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+    const bool valid     = !text.empty() && is_numeric_string(text);
+    if (!valid)
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+            "  invalid number, keeping previous value");
+
+    if (committed && valid) {
+        value = parse_ratio_or(text, value);
+        return true;
+    }
+    return false;
 }
 
 // Тип 1D-диаграммы параметрического семейства. Нейтрален к вкладке — им
@@ -717,7 +715,10 @@ static void ls_resolve_plane(LSCurveConfig& cact, int k,
             double smin =  std::numeric_limits<double>::infinity();
             double smax = -std::numeric_limits<double>::infinity();
             for (size_t c2 = 0; c2 < plane_size; ++c2) {
-                if (c2 < cact.result_2d.flags.size() && cact.result_2d.flags[c2] < 0) {
+                // Всё, что не колебательный режим (FP/unbound) — под sentinel:
+                // раньше проверялось flags < 0, но у LS unbound теперь 0.
+                if (c2 < cact.result_2d.flags.size() &&
+                    !regime_is_oscillation(cact.result_2d.flags[c2])) {
                     cact.sum_cache[c2] = 999.0;
                     continue;
                 }
@@ -1607,6 +1608,33 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
 }
 
+// ============================================================================
+// Единый счётчик режимов для статусных строк всех панелей.
+//
+// Раньше каждая панель считала "diverged" по flags[k] < 0, и одна и та же
+// подпись значила разное: для Bif1D/Bif2D отрицательный флаг — это fixed
+// point, а для LLE/LS — расходимость. Теперь коды канонические (REGIME_* в
+// configCUDA.h), и категории раскладываются одинаково везде.
+// ============================================================================
+static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) {
+    fp = unb = osc = 0;
+    for (int f : flags) {
+        if      (regime_is_fixed_point(f)) ++fp;
+        else if (regime_is_unbound(f))     ++unb;
+        else                               ++osc;
+    }
+}
+
+// Подпись под "OK: ..." — печатается только если есть что показать кроме
+// колебательного режима (иначе строка была бы шумом на каждом успешном run'е).
+static void draw_regime_summary(const std::vector<int>& flags) {
+    int fp = 0, unb = 0, osc = 0;
+    count_regimes(flags, fp, unb, osc);
+    if (fp == 0 && unb == 0) return;
+    ImGui::TextDisabled("regimes: %d fixed point / %d unbound / %d oscillation",
+                        fp, unb, osc);
+}
+
 // Рисует окна проекций (каждая — отдельное docking-окно с графиком).
 // Optional `before_begin` runs immediately before each projection window's
 // ImGui::Begin (Custom mode uses it to assign initial dock target); optional
@@ -2285,14 +2313,11 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
 
     if (bd.mode_2d) {
         if (bd.last_run_2d_ok) {
-            int total = (int)bd.result_2d.flags.size();
-            int diverged = 0;
-            for (int f : bd.result_2d.flags) if (f < 0) ++diverged;
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: %dx%d heatmap, period(min..max) = %.0f..%.0f",
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
-            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
+            draw_regime_summary(bd.result_2d.flags);
         }
         else if (!bd.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -2305,15 +2330,17 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         }
     } else {
         if (bd.last_run_ok) {
-            int diverged = 0, total_peaks = 0, max_peaks = 0;
-            for (int f : bd.result.flags) {
-                if (f < 0) ++diverged;
-                else { total_peaks += f; if (f > max_peaks) max_peaks = f; }
-            }
+            // flags[] здесь — сырой выход peakFinder: N > 0 = число пиков.
+            int total_peaks = 0, max_peaks = 0;
+            for (int f : bd.result.flags)
+                if (regime_is_oscillation(f)) {
+                    total_peaks += f;
+                    if (f > max_peaks) max_peaks = f;
+                }
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, peaks total=%d (max per param=%d)",
                 bd.result.n_pts, total_peaks, max_peaks);
-            if (diverged) ImGui::TextDisabled("(%d/%d trajectories diverged)", diverged, bd.result.n_pts);
+            draw_regime_summary(bd.result.flags);
         }
         else if (!bd.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -2604,7 +2631,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 double vmin =  std::numeric_limits<double>::infinity();
                 double vmax = -std::numeric_limits<double>::infinity();
                 for (int k = 0; k < npts && k < (int)source.size(); ++k) {
-                    if (k < (int)bdact.result.flags.size() && bdact.result.flags[k] < 0) continue;
+                    if (k < (int)bdact.result.flags.size() &&
+                        !regime_is_oscillation(bdact.result.flags[k])) continue;
                     for (double y : source[k]) {
                         if (y < vmin) vmin = y;
                         if (y > vmax) vmax = y;
@@ -2632,7 +2660,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 double vmax = -std::numeric_limits<double>::infinity();
                 double yrange = yhi - ylo;
                 for (int k = 0; k < npts; ++k) {
-                    bool diverged = k >= (int)bdact.result.flags.size() || bdact.result.flags[k] < 0;
+                    bool diverged = k >= (int)bdact.result.flags.size() ||
+                                    !regime_is_oscillation(bdact.result.flags[k]);
                     if (diverged) continue;   // остаётся 999 (тот же серый sentinel, что и mode_2d)
                     std::fill(counts.begin(), counts.end(), 0);
                     int colmax = 0;
@@ -2812,7 +2841,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
             for (int k = 0; k < npts; ++k) {
-                if (k < (int)bd.result.flags.size() && bd.result.flags[k] < 0) continue;
+                if (k < (int)bd.result.flags.size() &&
+                    !regime_is_oscillation(bd.result.flags[k])) continue;
                 double x;
                 if (rev)
                     x = (npts > 1) ? (hi - (hi - lo) * (double)k / (double)(npts - 1)) : hi;
@@ -3076,14 +3106,11 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
 
     if (c.mode_2d) {
         if (c.last_run_2d_ok) {
-            int total = (int)c.result_2d.flags.size();
-            int diverged = 0;
-            for (int f : c.result_2d.flags) if (f < 0) ++diverged;
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: %dx%d heatmap, lambda(min..max) = %.4g..%.4g",
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
-            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
+            draw_regime_summary(c.result_2d.flags);
         }
         else if (!c.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -3096,11 +3123,9 @@ static bool draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         }
     } else {
         if (c.last_run_ok) {
-            int diverged = 0;
-            for (int f : c.result.flags) if (f < 0) ++diverged;
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
-            if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+            draw_regime_summary(c.result.flags);
         }
         else if (!c.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -3317,7 +3342,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             // (см. run_lle1d_continuation_cpu) — иначе кривая была бы зеркальной.
             const bool rev = c.result.continuation_reverse;
             for (int k = 0; k < npts; ++k) {
-                if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
+                if (k < (int)c.result.flags.size() &&
+                    !regime_is_oscillation(c.result.flags[k])) continue;
                 double t = (npts > 1) ? (double)k / (double)(npts - 1) : 0.0;
                 double x = rev ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
                 double y = c.result.lyapunov[k];
@@ -3556,13 +3582,10 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
 
     if (c.mode_2d) {
         if (c.last_run_2d_ok) {
-            int total = (int)c.result_2d.flags.size();
-            int diverged = 0;
-            for (int f : c.result_2d.flags) if (f < 0) ++diverged;
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: %dx%d heatmap, %d exponents",
                 c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
-            if (diverged) ImGui::TextDisabled("(%d/%d cells diverged)", diverged, total);
+            draw_regime_summary(c.result_2d.flags);
         }
         else if (!c.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -3575,11 +3598,9 @@ static bool draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         }
     } else {
         if (c.last_run_ok) {
-            int diverged = 0;
-            for (int f : c.result.flags) if (f < 0) ++diverged;
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
-            if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+            draw_regime_summary(c.result.flags);
         }
         else if (!c.last_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
@@ -3826,7 +3847,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
 
             if (have) {
                 for (int k = 0; k < npts; ++k) {
-                    if (k < (int)c.result.flags.size() && c.result.flags[k] < 0) continue;
+                    if (k < (int)c.result.flags.size() &&
+                        !regime_is_oscillation(c.result.flags[k])) continue;
                     if (k >= (int)c.result.spectrum.size()) continue;
                     const auto& row = c.result.spectrum[k];
                     if (j >= (int)row.size()) continue;
@@ -4228,11 +4250,9 @@ static bool draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     }
 
     if (c.last_run_ok) {
-        int diverged = 0;
-        for (int f : c.result.flags) if (f <= 0) ++diverged;
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
             "OK: n_pts=%d, n_freq=%d", c.result.n_pts, c.result.n_freq);
-        if (diverged) ImGui::TextDisabled("(%d/%d points diverged)", diverged, c.result.n_pts);
+        draw_regime_summary(c.result.flags);
     } else if (!c.last_error.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
         ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
@@ -4472,7 +4492,8 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
             double vmax = -std::numeric_limits<double>::infinity();
             std::vector<double> col((size_t)nfreq);
             for (int pt = 0; pt < npts; ++pt) {
-                bool diverged = pt >= (int)c.result.flags.size() || c.result.flags[pt] <= 0;
+                bool diverged = pt >= (int)c.result.flags.size() ||
+                                !regime_is_oscillation(c.result.flags[pt]);
                 if (diverged) continue;   // остаётся 999 sentinel — DFT_custom не считал эту точку
 
                 double colmax = 0.0;
@@ -4600,7 +4621,7 @@ static void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& v
     const int min_cluster_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
     bool has_diverged = false;
     for (int f : c.result.helpful_array)
-        if (f == 0) { has_diverged = true; break; }
+        if (regime_is_unbound(f)) { has_diverged = true; break; }
     if (min_cluster_id < 0)  vmin = (double)min_cluster_id;
     else if (has_diverged)   vmin = 0.0;
     else                     vmin = 1.0;
@@ -5112,13 +5133,11 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     if (c.last_run_ok) {
-        int total = (int)c.result.basin_idx.size();
-        int diverged = 0;
-        for (int f : c.result.helpful_array) if (f == 0) ++diverged;
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: %dx%d, %d clusters (+ %d FP clusters); %d cells unbound",
+            "OK: %dx%d, %d clusters (+ %d FP clusters)",
             c.result.n_pts, c.result.n_pts,
-            c.result.n_clusters, -c.result.min_cluster_idx, diverged);
+            c.result.n_clusters, -c.result.min_cluster_idx);
+        draw_regime_summary(c.result.helpful_array);
     } else if (!c.last_error.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
         ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * 12);
@@ -5369,27 +5388,23 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
                           c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
     }
     else if (c.active_plot_tab == 3) {
-        // States: helpful_array → 3 категории. Маппим в дискретные значения
-        // и рендерим через HeatmapView в Turbo (3 равноотстоящие точки):
-        //   1 (Osc)     → 0   (синий конец turbo)
-        //   -1 (FP)     → 1   (зелёный середина)
-        //   0 (Unbound) → 2   (красный конец)
-        // Это не точные MATLAB-цвета, но 3 различимые категории.
+        // States: рисуем helpful_array КАК ЕСТЬ, в канонических REGIME_*
+        // (-1 = FP, 0 = Unbound, 1 = Oscillation). Раньше здесь была
+        // перенумерация в 0/1/2, из-за которой подпись под плотом, легенда и
+        // коды в экспортируемом _3.csv означали разные вещи.
         static std::vector<double> buf;
         buf.resize(total);
-        for (size_t k = 0; k < total; ++k) {
-            int v = c.result.helpful_array[k];
-            buf[k] = (v == 1) ? 0.0 : (v == -1 ? 1.0 : 2.0);
-        }
+        for (size_t k = 0; k < total; ++k)
+            buf[k] = (double)regime_code(c.result.helpful_array[k]);
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
         hm_states_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
-                          0.0, 2.0, fit);
+                          -1.0, 1.0, fit);
         // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
-        ImGui::TextDisabled("Levels: 0=Osc, 1=FixedPoint, 2=Unbound");
+        ImGui::TextDisabled("Levels: -1 = FixedPoint, 0 = Unbound, 1 = Oscillation");
     }
     else if (c.active_plot_tab == 4) {
         // Scatter (avgPeak, avgInterval), точки сгруппированы по basin_idx.
@@ -8219,7 +8234,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             for (int p = 0; p < (int)source.size(); ++p) {
                 // Diverged-точки пропускаем (в Parametric так и было; здесь
                 // проверки не было, и разошедшиеся точки попадали на график).
-                if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
+                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
                 double px = param_lo + (param_hi - param_lo) * (double)p /
                             (double)(n - 1 > 0 ? n - 1 : 1);
                 for (double y : source[p]) {
@@ -8248,7 +8263,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 // Diverged / NaN пропускаем — как в Parametric. Раньше здесь
                 // проверок не было, поэтому sentinel-значения расхождения
                 // рисовались как выброс.
-                if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
+                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
                 double y = r.lyapunov[p];
                 if (!std::isfinite(y)) continue;
                 double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
@@ -8276,7 +8291,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                     buf.reserve(n * 2);
                     int total_pts = 0;
                     for (int p = 0; p < n; ++p) {
-                        if (p < (int)r.flags.size() && r.flags[p] < 0) continue;
+                        if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
                         if (p >= (int)r.spectrum.size()) continue;
                         const auto& row = r.spectrum[p];
                         if (j >= (int)row.size()) continue;
@@ -9123,6 +9138,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         draw_custom_mode_layout(model, lib, cb, custom_area_pos, custom_area_size);
     }
     else { // AppMode::Settings
+        // Settings состоит из независимых виджетов, а save_app_config пишет
+        // файл целиком — поэтому read-modify-write, как в draw_top_bar. Раньше
+        // каждый обработчик собирал AppConfig с нуля и терял last_app_mode /
+        // last_system_name (а слайдер UI scale и чекбокс шрифта — ещё и
+        // dark_theme: тема сбрасывалась в Dark при правке масштаба).
+        auto persist_settings = [](const AppModel& m) {
+            AppConfig cfg;
+            load_app_config(get_exe_dir_with_sep(), cfg);
+            cfg.ui_scale_override      = m.ui_scale_override;
+            cfg.use_builtin_font       = m.use_builtin_font;
+            cfg.heatmap_colormap       = m.heatmap_colormap;
+            cfg.basins_colormap        = m.basins_colormap;
+            cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
+            cfg.basins_avgint_colormap = m.basins_avgint_colormap;
+            cfg.basins_states_colormap = m.basins_states_colormap;
+            cfg.tick_precision         = m.tick_precision;
+            cfg.dark_theme             = m.dark_theme;
+            cfg.peak                   = m.peak;
+            save_app_config(get_exe_dir_with_sep(), cfg);
+        };
+
         if (ImGui::Begin("Settings")) {
             ImGui::Text("Interface scale");
             ImGui::TextDisabled("Auto-detected at startup from glfwGetMonitorContentScale.");
@@ -9140,31 +9176,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::SliderFloat("##ui_scale", &ui_slider_value, 0.5f, 3.0f, "%.2fx");
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 model.ui_scale_override = ui_slider_value;
-                AppConfig cfg;
-                cfg.ui_scale_override = ui_slider_value;
-                cfg.use_builtin_font  = model.use_builtin_font;
-                cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = model.tick_precision;
-                save_app_config(get_exe_dir_with_sep(), cfg);
+                persist_settings(model);
             }
             ImGui::SameLine();
             if (ImGui::Button("Auto")) {
                 model.ui_scale_override = 0.0f;
                 ui_slider_value = model.ui_scale_auto;
-                AppConfig cfg;
-                cfg.ui_scale_override = 0.0f;
-                cfg.use_builtin_font  = model.use_builtin_font;
-                cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = model.tick_precision;
-                save_app_config(get_exe_dir_with_sep(), cfg);
+                persist_settings(model);
             }
             ImGui::TextDisabled("Auto detected: %.2fx   |   Override: %s",
                 model.ui_scale_auto,
@@ -9177,17 +9195,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             bool use_builtin = model.use_builtin_font;
             if (ImGui::Checkbox("Use built-in font (ProggyClean)", &use_builtin)) {
                 model.use_builtin_font = use_builtin;
-                // Сохраняем ОБА поля чтобы не сбросить override.
-                AppConfig cfg;
-                cfg.ui_scale_override = model.ui_scale_override;
-                cfg.use_builtin_font  = use_builtin;
-                cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = model.tick_precision;
-                save_app_config(get_exe_dir_with_sep(), cfg);
+                persist_settings(model);
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
@@ -9199,17 +9207,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::SliderInt("Tick precision (digits)", &tp, 2, 10)) {
                 model.tick_precision = tp;
                 set_tick_precision(tp);
-                AppConfig cfg;
-                cfg.ui_scale_override = model.ui_scale_override;
-                cfg.use_builtin_font  = model.use_builtin_font;
-                cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = tp;
-                cfg.dark_theme             = model.dark_theme;
-                save_app_config(get_exe_dir_with_sep(), cfg);
+                persist_settings(model);
             }
             ImGui::TextDisabled("Significant digits in axis tick and colorbar labels.");
 
@@ -9224,19 +9222,92 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::RadioButton("Light", &theme_idx, 1)) theme_changed = true;
             if (theme_changed) {
                 model.dark_theme = (theme_idx == 0);
-                AppConfig cfg;
-                cfg.ui_scale_override = model.ui_scale_override;
-                cfg.use_builtin_font  = model.use_builtin_font;
-                cfg.heatmap_colormap  = model.heatmap_colormap;
-                cfg.basins_colormap        = model.basins_colormap;
-                cfg.basins_avgpk_colormap  = model.basins_avgpk_colormap;
-                cfg.basins_avgint_colormap = model.basins_avgint_colormap;
-                cfg.basins_states_colormap = model.basins_states_colormap;
-                cfg.tick_precision         = model.tick_precision;
-                cfg.dark_theme             = model.dark_theme;
-                save_app_config(get_exe_dir_with_sep(), cfg);
+                persist_settings(model);
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
+
+            // ----------------------------------------------------------------
+            // Peak detection & regime thresholds — knobs configCUDA.h.
+            // Уходят в NVRTC как #define, поэтому правка = перекомпиляция ядер
+            // на следующем Run (set_peak_config бампает cache-epoch).
+            // ----------------------------------------------------------------
+            ImGui::Separator();
+            ImGui::Text("Peak detection & regime thresholds");
+            ImGui::TextDisabled("Applies to every GPU calculation: bifurcations, LLE/LS,");
+            ImGui::TextDisabled("basins, DFT. Changing a value recompiles the NVRTC");
+            ImGui::TextDisabled("kernels on the next Run.");
+
+            PeakConfig& pk = model.peak;
+            bool pk_changed = false;
+
+            pk_changed |= ImGui::Checkbox("Calculate peaks##do_calc_peaks", &pk.do_calculate_peaks);
+            ImGui::TextDisabled("Off: the raw trajectory is passed downstream instead of its peaks.");
+            pk_changed |= ImGui::Checkbox("Parabolic interpolation of peaks##do_interp_peaks", &pk.do_interpolate_peaks);
+            ImGui::TextDisabled("Sub-sample peak position/amplitude from the 3-point parabola.");
+
+            // Числовые поля — тем же виджетом, что и во вкладках анализа:
+            // текстовый ввод с ↑/↓ по разряду, запятой вместо точки и дробями
+            // "a/b", без навязанного "%.3e". Значение снимается на commit'е,
+            // см. InputNumStrCommit.
+            pk_changed |= InputNumStrCommit("eps fixed point##eps_fp",
+                                            model.peak_eps_fixed_point_text,
+                                            pk.eps_fixed_point, 220);
+            ImGui::TextDisabled("Max sum|x(n)-x(n-1)| still reported as regime -1 (fixed point).");
+
+            pk_changed |= InputNumStrCommit("eps peak delta##eps_pd",
+                                            model.peak_eps_peak_delta_text,
+                                            pk.eps_peak_delta, 220);
+            ImGui::TextDisabled("Min rise/fall against a neighbour to accept a sample as a peak.");
+
+            pk_changed |= InputNumStrCommit("eps inter-peak delta##eps_ipd",
+                                            model.peak_eps_interPeak_delta_text,
+                                            pk.eps_interPeak_delta, 220);
+            ImGui::TextDisabled("Min interspike interval; closer peaks are merged. 0 = filter off.");
+
+            pk_changed |= InputNumStrCommit("peak threshold##pk_thr",
+                                            model.peak_threshold_text,
+                                            pk.peak_threshold, 220);
+            ImGui::TextDisabled("Peaks below this value are ignored.");
+
+            // max peaks целочисленный, но поле — то же самое. Диапазон режем ДО
+            // приведения к int: пользователь может ввести 1e30, а это уже UB на
+            // касте. Ниже clamp_peak_config всё равно отработает — здесь только
+            // защита самого каста.
+            double max_peaks_val = (double)pk.max_amount_of_peaks;
+            if (InputNumStrCommit("max peaks##pk_max", model.peak_max_amount_text,
+                                  max_peaks_val, 220)) {
+                max_peaks_val = std::max((double)kPeakCountMin,
+                                std::min((double)kPeakCountMax, max_peaks_val));
+                pk.max_amount_of_peaks = (int)std::llround(max_peaks_val);
+                pk_changed = true;
+            }
+            ImGui::TextDisabled("Per-trajectory cap (%d..%d). Also sizes the per-thread DBSCAN",
+                                kPeakCountMin, kPeakCountMax);
+            ImGui::TextDisabled("arrays: every +1000 costs ~8 KB of local memory per thread.");
+            if (pk.max_amount_of_peaks > 5000)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "Large values hurt occupancy and may slow 2D bifurcation / basins down.");
+
+            if (ImGui::Button("Reset to configCUDA.h defaults")) {
+                pk = PeakConfig{};
+                model.sync_peak_text();
+                pk_changed = true;
+            }
+
+            if (pk_changed) {
+                const PeakConfig before = pk;
+                clamp_peak_config(pk);
+                // Кламп мог поправить введённое (отрицательный eps, потолок max
+                // peaks) — тогда текст в поле уже врёт про конфиг, пересеиваем
+                // буферы из значений.
+                if (before.eps_fixed_point     != pk.eps_fixed_point ||
+                    before.eps_peak_delta      != pk.eps_peak_delta ||
+                    before.eps_interPeak_delta != pk.eps_interPeak_delta ||
+                    before.max_amount_of_peaks != pk.max_amount_of_peaks)
+                    model.sync_peak_text();
+                set_peak_config(pk);       // бампает epoch -> PTX-кэши инвалидируются
+                persist_settings(model);
+            }
         }
         ImGui::End();
     }

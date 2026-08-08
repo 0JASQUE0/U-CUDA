@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include <math_constants.h>
 
-typedef float numb;
+typedef double numb;
 
 // AMOUNTOFX оборачивается в #ifndef, чтобы NVRTC-вызывающие проекты могли
 // переопределить размерность системы через #define AMOUNTOFX N перед include.
@@ -11,10 +11,30 @@ constexpr int AMOUNTOFX = 3;
 #endif
 constexpr int CHECK_INTERVAL = 100;
 
+// ---------------------------------------------------------------------------
+// --- REGIME CODES — единая индикация режима траектории для ВСЕХ расчётов ---
+//   -1 — fixed point (схлопнулась в неподвижную точку, |Δx| < eps_fixed_point)
+//    0 — unbound     (nan/inf или |x| > maxValue)
+//    1 — oscillation (нормальный колебательный режим)
+// Источник — loopCalculateDiscreteModel_int; коды живут в maxValueCheckerArray /
+// helpfulArray / *Result::flags. Там, где flags[] хранит СЫРОЙ выход
+// peakFinder / DBSCAN, N > 0 — это число пиков (период), т.е. OSCILLATION;
+// нормализация — regime_code() в parametric_engine.h.
+// ---------------------------------------------------------------------------
+constexpr int REGIME_FIXED_POINT = -1;
+constexpr int REGIME_UNBOUND     =  0;
+constexpr int REGIME_OSCILLATION =  1;
+
 // --- Calculate peaks ---
-// 1 -- Yes; 
+// 1 -- Yes;
 // 0 -- No
+// Здесь и ниже (все knobs, настраиваемые из GUI/Settings) — #ifndef, чтобы
+// NVRTC-сборка могла переопределить через #define перед include configCUDA.h.
+// Обычная nvcc-сборка (Debug / legacy main_NonLinAnal.cu) ничего не определяет
+// и получает прежние дефолты.
+#ifndef doCalculatePeaks
 constexpr bool doCalculatePeaks = 1;
+#endif
 
 // --- data[startDataIndex + i] = xDataMultiplier * (x[writableVar]); ---
 constexpr numb xDataMultiplier = 1.0;
@@ -22,7 +42,9 @@ constexpr numb xDataMultiplier = 1.0;
 // --- Parabolic interpolation of Peaks and InterPeaks
 // 1 -- Yes
 // 0 -- No
+#ifndef doInterpolatePeaks
 constexpr bool doInterpolatePeaks = 1;
+#endif
 
 // --- CHOOSE CLASSICAL OR CONTINUATION BIFURCATION DIAGRAM ---
 // 1 -- yes; 
@@ -81,11 +103,25 @@ constexpr bool calculate_mean_and_variance = 0;
 constexpr bool calculate_global_peak = 0;
 
 // --- THRESHOLDs FOR ESTIMATION ---
-constexpr numb eps_fixed_point = 1e-8;		// Minimal diffrence between two last points to mark it fixed point regime
+// Все пять настраиваются из GUI (Settings) — см. #ifndef-комментарий выше.
+#ifndef eps_fixed_point
+constexpr numb eps_fixed_point = 1e-6;		// Minimal diffrence between two last points to mark it fixed point regime
+#endif
+#ifndef eps_peak_delta
 constexpr numb eps_peak_delta = 1e-14;		// minimal differnece between two neibor points to mark it peak
-constexpr numb eps_interPeak_delta = 0.0;	// minimal interspike interval between two peak points
-constexpr numb peak_threshold = -1e25;	// threshold for peakfinder 
-constexpr int max_amount_of_peaks = 2500;	// max amount of peaks for estimation for peakfinder 
+#endif
+#ifndef eps_interPeak_delta
+constexpr numb eps_interPeak_delta = 0.0;	// minimal interspike interval between two peak points (0 = фильтр выключен)
+#endif
+#ifndef peak_threshold
+constexpr numb peak_threshold = -1e25;	// threshold for peakfinder
+#endif
+#ifndef max_amount_of_peaks
+// ВНИМАНИЕ: задаёт не только потолок числа пиков, но и размер локальных
+// (per-thread) массивов next[] / labels[] в dbscan_optimized — рост значения
+// линейно съедает local memory каждого потока.
+constexpr int max_amount_of_peaks = 2500;	// max amount of peaks for estimation for peakfinder
+#endif
 
 // --- MULTIPLIERS FOR DBSCAN (2D bifurcation diagrams) ---
 constexpr numb mult_peak  = 1.0; // multiplier for peak values for DBSCAN //1000

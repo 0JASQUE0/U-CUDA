@@ -84,3 +84,15 @@ void  plot_bg_color(float& r, float& g, float& b, float& a);
 // =====================================================================
 void set_screenshot_request_sink(std::function<void(ImVec2 min, ImVec2 max)> sink);
 void request_plot_screenshot(ImVec2 min, ImVec2 max);
+
+// =====================================================================
+// Числовой ввод в ImGui-полях: ↑/↓ шагают разряд под курсором
+// (DigitInput::ComputeStep), запятая заменяется точкой. Поле обязано быть
+// создано с флагами CallbackCharFilter | CallbackHistory.
+//
+// Живёт здесь, а не статиком в gui.cpp, потому что потребителей стало два:
+// поля параметров во вкладках анализа (InputNumStr / InputNumStrCommit) и
+// RGB-поля меню цвета серии в plot_view_2d.cpp. Иначе второму пришлось бы
+// копировать колбэк целиком.
+// =====================================================================
+int digit_step_input_callback(ImGuiInputTextCallbackData* data);

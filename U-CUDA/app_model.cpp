@@ -2,6 +2,7 @@
 #include "codegen.hpp"
 #include "session_io.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include "sysparse.hpp"
 #include <stdexcept>
@@ -356,6 +357,34 @@ void AppModel::propagate_to_sessions() {
     // Phase кеширует krs_code. Принудительно инвалидируем — snapshot_phase
     // на ближайшем Run пересчитает его от свежего sys / custom_schemes.
     phase_session.krs_code.clear();
+}
+
+// ============================================================================
+// Peak-knobs: число -> текст буфера ввода
+// ============================================================================
+
+namespace {
+// Печатает значение так, чтобы оно (а) читалось человеком и (б) парсилось
+// обратно ровно в то же double. %.6g даёт "1e-14" вместо "1.000e-14", но для
+// значений, которые в шесть значащих цифр не влезают, молча бы соврал — поэтому
+// повышаем точность, пока round-trip не совпадёт. %.17g — гарантированный
+// потолок для double.
+std::string fmt_peak_num(double v) {
+    char buf[64];
+    for (int prec : {6, 9, 17}) {
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
+        if (std::strtod(buf, nullptr) == v) break;
+    }
+    return std::string(buf);
+}
+} // namespace
+
+void AppModel::sync_peak_text() {
+    peak_eps_fixed_point_text     = fmt_peak_num(peak.eps_fixed_point);
+    peak_eps_peak_delta_text      = fmt_peak_num(peak.eps_peak_delta);
+    peak_eps_interPeak_delta_text = fmt_peak_num(peak.eps_interPeak_delta);
+    peak_threshold_text           = fmt_peak_num(peak.peak_threshold);
+    peak_max_amount_text          = std::to_string(peak.max_amount_of_peaks);
 }
 
 // ============================================================================

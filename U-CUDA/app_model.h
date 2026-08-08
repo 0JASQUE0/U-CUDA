@@ -268,6 +268,27 @@ public:
     // в Settings forced re-apply через сравнение applied_dark_theme.
     bool dark_theme = true;
 
+    // Knobs configCUDA.h (peak-finder + пороги режимов). Зеркалит
+    // AppConfig::peak; ImGui-состояние обязано жить здесь, а не в локальных
+    // переменных кадра. Settings после правки пушит его в set_peak_config(),
+    // который бампает epoch и инвалидирует PTX-кэши движка.
+    PeakConfig peak;
+
+    // Текстовые буферы полей peak-конфига в Settings. Ввод чисел там такой же,
+    // как во вкладках анализа (InputNumStr поверх InputText: ↑/↓ шаг по разряду,
+    // запятая→точка, дроби "a/b", inline-предупреждение), а не InputDouble с
+    // фиксированным "%.3e". Строка — только буфер ввода; источник истины —
+    // сам `peak`, поэтому буферы пересеиваются из него через sync_peak_text()
+    // при старте, после загрузки конфига и после клампа/сброса.
+    std::string peak_eps_fixed_point_text;
+    std::string peak_eps_peak_delta_text;
+    std::string peak_eps_interPeak_delta_text;
+    std::string peak_threshold_text;
+    std::string peak_max_amount_text;
+
+    // Перезаписывает буферы выше текущими значениями `peak`.
+    void sync_peak_text();
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 

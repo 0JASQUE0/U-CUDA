@@ -126,29 +126,34 @@ extern "C" __global__ void dft1dContinuationKernel(
         if (blockLen > maxPointsInBlock) blockLen = maxPointsInBlock;
         const int transientSteps = (hLocal > 0) ? (int)(transientTime / hLocal) : 0;
 
-        int dead = 0;
+        // REGIME_* (configCUDA.h) instead of a boolean `dead`: fixed point and
+        // unbound are now distinguishable in flags[] -- both used to be
+        // reported as -1 (fixed point).
+        int regime = REGIME_OSCILLATION;
         if (hLocal <= 0 || blockLen <= 2) {
-            dead = 1;
+            regime = REGIME_UNBOUND;
         } else {
             // Transient: x[] carried over from the previous point.
             int flag = loopCalculateDiscreteModel_int(
                 x, a, hLocal, transientSteps, amountOfX, 1, 0,
                 maxValue, nullptr, 0, 1);
-            if (flag == 0) {
-                dead = 1;
+            if (flag == REGIME_UNBOUND) {
+                regime = REGIME_UNBOUND;
             } else {
                 flag = loopCalculateDiscreteModel_int(
                     x, a, hLocal, blockLen, amountOfX, preScaller, writableVar,
                     maxValue, d_data, 0, 1);
-                if (flag == -1) dead = 1;
+                if (flag != REGIME_OSCILLATION) regime = flag;
             }
         }
 
         const size_t outBase = (size_t)j * (size_t)nFreq;
-        if (dead) {
-            // Same fill as DFT_custom for an unusable point.
-            for (int k = 0; k < nFreq; ++k) { AkCOS[outBase + k] = (numb)-1.0; BkSIN[outBase + k] = (numb)-1.0; }
-            flags[j] = -1;
+        if (regime != REGIME_OSCILLATION) {
+            // Same fill as DFT_custom: FIXED_POINT -> -1.0, UNBOUND -> 0.0
+            // (this used to be -1.0 for both cases).
+            const numb fill = (regime == REGIME_FIXED_POINT) ? (numb)-1.0 : (numb)0.0;
+            for (int k = 0; k < nFreq; ++k) { AkCOS[outBase + k] = fill; BkSIN[outBase + k] = fill; }
+            flags[j] = regime;
             // Break the chain: next point restarts from the initial conditions.
             for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
             continue;

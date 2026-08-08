@@ -118,19 +118,24 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
         int transient_steps = (hLocal > 0) ? (int)(transientTime / hLocal) : 0;
         if (d_actualIterations != nullptr) d_actualIterations[j] = blockLen;
 
-        if (hLocal <= 0 || blockLen <= 0) { d_amountOfPeaks[j] = -1; continue; }
+        // Вырожденный шаг — траектории нет. Это REGIME_UNBOUND, а не fixed
+        // point: -1 здесь помечал точку кодом «схлопнулась в точку».
+        if (hLocal <= 0 || blockLen <= 0) { d_amountOfPeaks[j] = REGIME_UNBOUND; continue; }
 
         // Transient: x[] не сбрасываем — карри-овер с прошлой итерации.
         int flag = loopCalculateDiscreteModel_int(
             x, a, hLocal, transient_steps, amountOfX, 1, 0,
             maxValue, nullptr, (size_t)j * sizeOfBlock, 1);
-        if (flag == 0) { d_amountOfPeaks[j] = -1; continue; }
+        if (flag == REGIME_UNBOUND) { d_amountOfPeaks[j] = REGIME_UNBOUND; continue; }
 
         // Запись траектории: writableVar пишется в d_data на каждой
         // итерации loopCalculateDiscreteModel_int.
         flag = loopCalculateDiscreteModel_int(
             x, a, hLocal, blockLen, amountOfX, preScaller, writableVar,
             maxValue, d_data, (size_t)j * sizeOfBlock, 1);
-        d_amountOfPeaks[j] = (flag == -1) ? -1 : 1;
+        // Сырой REGIME_* — как в классическом пути (calculateDiscreteModelCUDA
+        // пишет flag без правок). Раньше unbound на основном участке давал 1, и
+        // peakFinderCUDA искал пики в уже разошедшемся блоке.
+        d_amountOfPeaks[j] = flag;
     }
 }

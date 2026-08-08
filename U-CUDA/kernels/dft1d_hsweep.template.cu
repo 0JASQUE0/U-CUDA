@@ -144,9 +144,11 @@ extern "C" __global__ void dft1dHSweepKernel(
     // the same 1/0 the CPU path does.
     int flag = loopCalculateDiscreteModel_int(
         x, a, hLocal, transientSteps, amountOfX, 1, 0, maxValue, nullptr, 0, 1);
-    if (flag == 0) {
-        for (int k = 0; k < nFreq; ++k) { AkCOS[outBase + k] = (numb)-1.0; BkSIN[outBase + k] = (numb)-1.0; }
-        flags[idx] = -1;
+    if (flag == REGIME_UNBOUND) {
+        // Fill follows DFT_custom: UNBOUND -> 0.0 (FIXED_POINT -> -1.0 below).
+        // flags[] used to be -1 here, i.e. unbound was reported as fixed point.
+        for (int k = 0; k < nFreq; ++k) { AkCOS[outBase + k] = (numb)0.0; BkSIN[outBase + k] = (numb)0.0; }
+        flags[idx] = REGIME_UNBOUND;
         return;
     }
 

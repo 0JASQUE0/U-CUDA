@@ -9,7 +9,8 @@ void draw_legend(ImDrawList* dl,
     std::vector<bool>& visible,
     const std::vector<bool>& global_visible,
     int owner_id,
-    LegendPass pass)
+    LegendPass pass,
+    LegendRightClick* out_clicks)
 {
     const bool do_visual   = (pass != LegendPass::Interact);
     const bool do_interact = (pass != LegendPass::Draw);
@@ -75,6 +76,10 @@ void draw_legend(ImDrawList* dl,
         ImVec2 mmax = ImVec2(mmin.x + marker_w, row_y + row_h - 2);
         if (do_visual) {
             dl->AddRectFilled(mmin, mmax, cu);
+            // Рамка на наведении именно КВАДРАТА — подсказка, что ПКМ по нему
+            // (и только по нему, не по подписи) открывает выбор цвета.
+            if (out_clicks && ImGui::IsMouseHoveringRect(mmin, mmax, false))
+                dl->AddRect(mmin, mmax, plot_col_text(), 0.0f, 0, 1.5f);
             dl->AddText(ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
         }
         ImVec2 emin = ImVec2(leg_min.x + pad, row_y);
@@ -84,11 +89,25 @@ void draw_legend(ImDrawList* dl,
             ImGui::SetCursorScreenPos(emin);
             char btn_id[48];
             std::snprintf(btn_id, sizeof(btn_id), "##legend_%d_%d", owner_id, k);
-            ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y));
+            // ПКМ включаем явно: по умолчанию InvisibleButton слушает только ЛКМ.
+            // Меню плота от этого не страдает — его InvisibleButton подан ПОЗЖЕ и
+            // под легендой hover не получает (первый item в кадре выигрывает).
+            ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y),
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
             if (do_visual && ImGui::IsItemHovered())
                 dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                 if (k < (int)visible.size()) visible[k] = !visible[k];
+            }
+            // Меню цвета — только по цветному квадрату. Промах мимо него (по
+            // подписи или пустому месту строки) не должен пропадать втуне:
+            // сообщаем об этом отдельным флагом, и плот покажет своё обычное
+            // меню — как если бы легенды в этом месте не было.
+            if (out_clicks && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                if (ImGui::IsMouseHoveringRect(mmin, mmax, false))
+                    out_clicks->swatch_index = k;
+                else
+                    out_clicks->row_other = true;
             }
         } else if (do_visual) {
             // Draw-only pass: hover highlight без InvisibleButton (тот был

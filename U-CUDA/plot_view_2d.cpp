@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 // Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
 // margin_left/bottom увеличены, чтобы вместить тики + центрированное
@@ -12,6 +14,42 @@ void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
     top    = 20.0f;
     right  = 20.0f;
     bottom = 46.0f;
+}
+
+// Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после
+// возврата из InputText: пока поле активно, ImGui читает свою внутреннюю копию
+// текста и правки внешнего буфера игнорирует — граница бы «включалась» только
+// после ухода фокуса. Здесь data->Buf это как раз внутренний буфер.
+//
+// В CharFilter-событии Buf невалиден (там есть только EventChar), поэтому
+// клампим на Edit/History. History отдельно нужен потому, что ImGui выбирает
+// событие цепочкой else-if: в кадре со стрелкой ↑/↓ Edit уже не придёт, а
+// шагнуть за границу стрелка может.
+static void clamp_rgb_channel_buf(ImGuiInputTextCallbackData* data) {
+    if (data->Buf == nullptr || data->BufTextLen <= 0) return;
+    std::string text(data->Buf, data->Buf + data->BufTextLen);
+    char* end = nullptr;
+    float v = std::strtof(text.c_str(), &end);
+    if (end == text.c_str()) return;      // "-", "." — ещё не число, не мешаем
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return;             // мусор в хвосте — тоже не наше дело
+    if (v >= 0.0f && v <= 255.0f) return;
+
+    const char* clamped = (v < 0.0f) ? "0" : "255";
+    data->DeleteChars(0, data->BufTextLen);
+    data->InsertChars(0, clamped);
+    data->CursorPos      = data->BufTextLen;
+    data->SelectionStart = data->CursorPos;
+    data->SelectionEnd   = data->CursorPos;
+}
+
+static int rgb_channel_input_callback(ImGuiInputTextCallbackData* data) {
+    // Базовое поведение — общее с полями параметров: запятая→точка и ↑/↓ по
+    // разряду под курсором.
+    const int rc = digit_step_input_callback(data);
+    if (data->EventFlag != ImGuiInputTextFlags_CallbackCharFilter)
+        clamp_rgb_channel_buf(data);
+    return rc;
 }
 
 void Plot2DView::do_autofit() {
@@ -102,6 +140,15 @@ void Plot2DView::render(PlotRenderer& renderer,
         bool loc = (k < (int)visible.size()) ? visible[k] : true;
         bool glob = (k < (int)global_visible.size()) ? global_visible[k] : true;
         return loc && glob;
+        };
+
+    // Итоговый цвет серии: пользовательский override (ПКМ по строке легенды),
+    // если он задан для этой подписи, поверх цвета от caller'а. Alpha всегда
+    // caller'ская — за неё отвечают слайдеры Alpha в Phase/TimeDomain/Bif.
+    auto series_color = [&](const PlotSeriesInput& s) -> ImVec4 {
+        auto it = series_color_override.find(s.label);
+        if (it == series_color_override.end()) return s.color;
+        return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
         };
 
     // Кэшируем маску видимости — её используют do_autofit/fit_x/fit_y, чтобы
@@ -217,7 +264,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         const GpuLineSeries& g = series_cache_.get(k);
         if (!g.valid()) continue;
         const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
-        ImVec4 c = si ? si->color : ImVec4(1, 1, 1, 1);
+        ImVec4 c = si ? series_color(*si) : ImVec4(1, 1, 1, 1);
         float color[4] = { c.x, c.y, c.z, c.w };
         // Per-series override (см. PlotSeriesInput::points_override) имеет
         // приоритет над флагом вью. Точечные серии рисуются здесь ВСЕГДА,
@@ -248,15 +295,16 @@ void Plot2DView::render(PlotRenderer& renderer,
     // и раньше. Сам визуал легенды рисуем в самом конце — тогда линии данных
     // (imdraw_lines-путь ниже) не перекроют её.
     std::vector<LegendEntry> legend_entries;
+    LegendRightClick legend_rclick;   // ПКМ по легенде: квадрат -> цвет, мимо -> меню плота
     if (show_legend) {
         legend_entries.reserve(series_in.size());
         for (const auto& s : series_in) {
-            LegendEntry e{ s.label, s.color };
+            LegendEntry e{ s.label, series_color(s) };
             if (legend_ignore_series_alpha) e.color.w = 1.0f;
             legend_entries.push_back(e);
         }
         draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
-                    owner_id, LegendPass::Interact);
+                    owner_id, LegendPass::Interact, &legend_rclick);
     }
 
     // 7. ���� �����������
@@ -324,7 +372,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             if (s.points_override == 1) continue;  // уже нарисована как GL-точки
             const bool   colored = (s.values != nullptr);
             const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
-            const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(s.color);
+            const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(series_color(s));
             const int    n_seg = s.n_points - 1;
 
             // Если задан segment_order — painter's algorithm. Иначе линейный
@@ -384,8 +432,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     // выше — здесь только dl-> отрисовка. hover highlight через
     // IsMouseHoveringRect (в отличие от IsItemHovered из Interact-прохода).
     if (show_legend) {
+        // &legend_rclick и здесь: в Draw-проходе клики не ловятся, указатель
+        // служит признаком «меню цвета есть» — по нему рисуется рамка-подсказка
+        // на наведении цветного квадрата (см. plot_legend.h).
         draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
-                    owner_id, LegendPass::Draw);
+                    owner_id, LegendPass::Draw, &legend_rclick);
     }
 
     // Названия осей: X — горизонтально, под тиками по центру плота.
@@ -655,6 +706,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     // 13. ����������� ����
     char pop_id[48];
     std::snprintf(pop_id, sizeof(pop_id), "##plot_menu_%d", owner_id);
+    // ПКМ по подписи в легенде — то же меню, что по самому плоту. Через
+    // rect_zoom-ветку выше это не проходит: там условие plot_h_ov, а под
+    // легендой hover принадлежит её кнопке, не плоту. OpenPopup здесь заодно
+    // закрывает открытое меню цвета — popup'ы одного уровня взаимоисключающи.
+    if (legend_rclick.row_other) ImGui::OpenPopup(pop_id);
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit (both)")) view_valid = false;
         if (ImGui::MenuItem("Auto fit X"))      fit_x();
@@ -714,6 +770,100 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        ImGui::EndPopup();
+    }
+
+    // 13b. Цвет серии — меню по ПКМ на строке легенды. RGB задаётся float'ами
+    // 0..255. Серии с per-segment colormap (FastSync colored trajectory)
+    // пропускаем: их линия рисуется cmap_sample'ом, uniform-цвет не при делах,
+    // и меню меняло бы только квадратик в легенде — то есть врало бы.
+    std::snprintf(pop_id, sizeof(pop_id), "##legend_color_%d", owner_id);
+    auto fmt_channel = [](float v) -> std::string {
+        char b[32];
+        std::snprintf(b, sizeof(b), "%.1f", v);
+        return std::string(b);
+        };
+    // Канал из текста поля: 0..255, с проверкой что строка съедена целиком
+    // ("12x" / "abc" — не число, старое значение остаётся).
+    auto parse_channel = [](const std::string& s, float& out) -> bool {
+        if (s.empty()) return false;
+        char* end = nullptr;
+        float v = std::strtof(s.c_str(), &end);
+        if (end == s.c_str()) return false;
+        while (*end == ' ' || *end == '\t') ++end;
+        if (*end != '\0') return false;
+        out = std::min(255.0f, std::max(0.0f, v));
+        return true;
+        };
+
+    const int color_target = legend_rclick.swatch_index;
+    if (color_target >= 0 && color_target < (int)series_in.size() &&
+        series_in[color_target].values == nullptr) {
+        const PlotSeriesInput& s = series_in[color_target];
+        ImVec4 cur = series_color(s);
+        legend_color_target_  = s.label;
+        legend_color_text_[0] = fmt_channel(cur.x * 255.0f);
+        legend_color_text_[1] = fmt_channel(cur.y * 255.0f);
+        legend_color_text_[2] = fmt_channel(cur.z * 255.0f);
+        ImGui::OpenPopup(pop_id);
+    }
+    if (ImGui::BeginPopup(pop_id)) {
+        ImGui::TextUnformatted(legend_color_target_.empty() ? "(series)"
+                                                            : legend_color_target_.c_str());
+        ImGui::TextDisabled("RGB, 0..255");
+        ImGui::Separator();
+        static const char* kChannel[3] = { "R", "G", "B" };
+        bool edited = false;
+        bool renorm[3] = { false, false, false };
+        for (int c = 0; c < 3; ++c) {
+            std::string& t = legend_color_text_[c];
+            std::vector<char> buf(t.begin(), t.end());
+            buf.resize(t.size() + 64);
+            buf[t.size()] = '\0';
+            ImGui::SetNextItemWidth(90);
+            // Тот же ввод, что у полей параметров: ↑/↓ шагают разряд под
+            // курсором, запятая превращается в точку. Плюс CallbackEdit —
+            // через него канал зажимается в [0, 255] прямо в поле.
+            if (ImGui::InputText(kChannel[c], buf.data(), buf.size(),
+                                 ImGuiInputTextFlags_CallbackCharFilter |
+                                 ImGuiInputTextFlags_CallbackHistory |
+                                 ImGuiInputTextFlags_CallbackEdit,
+                                 rgb_channel_input_callback)) {
+                t = buf.data();
+                edited = true;
+            }
+            renorm[c] = ImGui::IsItemDeactivatedAfterEdit();
+        }
+
+        float ch[3] = { 0, 0, 0 };
+        bool parsed = parse_channel(legend_color_text_[0], ch[0])
+                   && parse_channel(legend_color_text_[1], ch[1])
+                   && parse_channel(legend_color_text_[2], ch[2]);
+        if (!parsed) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                "invalid number, keeping previous colour");
+        } else {
+            ImVec4 preview(ch[0] / 255.0f, ch[1] / 255.0f, ch[2] / 255.0f, 1.0f);
+            ImGui::ColorButton("##legend_color_preview", preview,
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(120, ImGui::GetTextLineHeight()));
+            // Override создаётся ТОЛЬКО после реальной правки: просто открыть
+            // меню и закрыть — цвет остаётся палитровым.
+            if (edited && !legend_color_target_.empty())
+                series_color_override[legend_color_target_] = preview;
+            // Пока печатают, "300" не трогаем (иначе ввод дерётся с клампом),
+            // но на уходе фокуса поле переписываем тем, что реально ушло в цвет.
+            for (int c = 0; c < 3; ++c)
+                if (renorm[c]) legend_color_text_[c] = fmt_channel(ch[c]);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset this colour")) {
+            series_color_override.erase(legend_color_target_);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Reset all colours", nullptr, false,
+                            !series_color_override.empty()))
+            series_color_override.clear();
         ImGui::EndPopup();
     }
 
