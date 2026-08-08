@@ -5,6 +5,7 @@
 #include "plot_renderer.h"
 #include <vector>
 #include <string>
+#include <map>
 #include <functional>
 #include <limits>
 
@@ -59,6 +60,15 @@ public:
     // slider is meant to fade the trajectory itself, not the swatch that
     // identifies each IC in the legend.
     bool legend_ignore_series_alpha = false;
+
+    // Пользовательские цвета серий: ПКМ по строке легенды -> RGB 0..255.
+    // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в
+    // time domain прячут переменную или в окно параметрики добавляют диаграмму,
+    // и цвет обязан остаться на СВОЕЙ кривой. Пустая карта = стандартный
+    // порядок палитры (ic_base_color), т.е. по умолчанию не меняется ничего.
+    // Alpha сюда не входит — ею рулят слайдеры Alpha у caller'а.
+    std::map<std::string, ImVec4> series_color_override;
+
     bool view_valid = false;
     int  series_generation = -1;
 
@@ -167,6 +177,13 @@ public:
 
 private:
     GpuLineSeriesSet series_cache_;
+    // Состояние меню цвета серии. ImGui immediate mode — жить между кадрами
+    // обязано здесь, а не в локальных переменных render(). Каналы держим
+    // ТЕКСТОМ, а не float'ами: поля построены на InputText с
+    // digit_step_input_callback (↑/↓ шагают разряд под курсором), как поля
+    // параметров во вкладках анализа.
+    std::string legend_color_target_;
+    std::string legend_color_text_[3];
     // Эффективная видимость серий на текущий кадр (visible[k] && global_visible[k]).
     // Обновляется в начале render(); do_autofit/fit_x/fit_y используют её,
     // чтобы НЕ включать скрытые серии в авто-диапазон.

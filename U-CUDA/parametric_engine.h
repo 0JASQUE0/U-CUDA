@@ -18,11 +18,79 @@
 //
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-#include "configCUDA.h"   // typedef numb, BF_* feature codes, mult_avg_* defaults
+#include "configCUDA.h"   // typedef numb, REGIME_*, BF_* feature codes, mult_avg_* defaults
 #include "data_export.h"  // snapshot structs embedded into *Result for right-click export
+
+// ============================================================================
+// PeakConfig — knobs configCUDA.h, настраиваемые из GUI (вкладка Settings).
+//
+// В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот
+// оборачивает свои дефолты в #ifndef), поэтому смена любого поля означает
+// другой PTX. Инвалидацию всех кэшей модулей обеспечивает peak_config_epoch(),
+// входящий в cache-key (см. hash_key в parametric_engine.cpp).
+//
+// Дефолты берутся из configCUDA.h с ::-квалификацией: без неё имя нашло бы
+// одноимённое поле этой же структуры.
+//
+// Debug/legacy сборка (main_NonLinAnal.cu) сюда не заглядывает и работает на
+// constexpr-дефолтах configCUDA.h — поведение прежнее.
+// ============================================================================
+struct PeakConfig {
+    bool   do_calculate_peaks   = ::doCalculatePeaks;
+    bool   do_interpolate_peaks = ::doInterpolatePeaks;
+    double eps_fixed_point      = (double)::eps_fixed_point;
+    double eps_peak_delta       = (double)::eps_peak_delta;
+    double eps_interPeak_delta  = (double)::eps_interPeak_delta;
+    double peak_threshold       = (double)::peak_threshold;
+    int    max_amount_of_peaks  = ::max_amount_of_peaks;
+};
+
+// Границы max_amount_of_peaks. Значение уходит в размер per-thread массивов
+// next[]/labels[] внутри dbscan_optimized (4 байта на элемент на каждый), т.е.
+// напрямую бьёт по local memory и occupancy — потолок нужен и в UI, и при
+// чтении конфига с диска.
+constexpr int kPeakCountMin = 16;
+constexpr int kPeakCountMax = 20000;
+
+// Приводит поля к допустимому диапазону. Вызывать после любого внешнего ввода
+// (виджеты Settings, _app_config.json).
+inline void clamp_peak_config(PeakConfig& c) {
+    if (c.max_amount_of_peaks < kPeakCountMin) c.max_amount_of_peaks = kPeakCountMin;
+    if (c.max_amount_of_peaks > kPeakCountMax) c.max_amount_of_peaks = kPeakCountMax;
+    if (c.eps_fixed_point     < 0.0) c.eps_fixed_point     = 0.0;
+    if (c.eps_peak_delta      < 0.0) c.eps_peak_delta      = 0.0;
+    if (c.eps_interPeak_delta < 0.0) c.eps_interPeak_delta = 0.0;
+}
+
+// Потокобезопасны: пишет UI-поток, читает worker во время компиляции/счёта.
+void       set_peak_config(const PeakConfig& c);   // бампает epoch
+PeakConfig get_peak_config();
+uint64_t   peak_config_epoch();
+
+// ============================================================================
+// Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point,
+// 0 = unbound, 1 = oscillation.
+//
+// Контракт flags[] по типам расчёта:
+//   Bif1D / Bif2D / DFT — СЫРОЙ выход peakFinder / DBSCAN:
+//                         -1 = FP, 0 = unbound, N > 0 = число пиков (период).
+//   LLE / LS            — -1 = FP (сейчас не производится: ветка детекта в
+//                         LLEKernelCUDA намеренно выключена, FP считается как
+//                         обычная точка), 0 = unbound, 1 = oscillation.
+//   Basins helpful_array— ровно -1 / 0 / 1.
+// regime_code() приводит любой из них к каноническим -1 / 0 / 1.
+// ============================================================================
+inline int regime_code(int flag) {
+    return flag < 0 ? REGIME_FIXED_POINT
+                    : (flag == 0 ? REGIME_UNBOUND : REGIME_OSCILLATION);
+}
+inline bool regime_is_oscillation(int flag) { return flag >  0; }
+inline bool regime_is_fixed_point(int flag) { return flag <  0; }
+inline bool regime_is_unbound    (int flag) { return flag == 0; }
 
 struct Bifurcation1DRequest {
     // КРС
@@ -116,7 +184,9 @@ struct Bifurcation1DResult {
     // Та же длина, что и bifurcation_points[i].
     std::vector<std::vector<double>> peak_times;
 
-    // flags[i]: 1 — расчёт прошёл, -1 — траектория разошлась за max_value.
+    // flags[i] — СЫРОЙ выход peakFinder: -1 = fixed point, 0 = unbound,
+    // N > 0 = число найденных пиков (режим — oscillation). Нормализация к
+    // -1/0/1 — regime_code(); экспорт читает N как есть (data_export.cpp).
     std::vector<int> flags;
 
     // Snapshot of the request fields needed to reproduce the _config.csv
@@ -217,8 +287,8 @@ struct Dft1DResult {
     std::vector<double> ak_cos;
     std::vector<double> bk_sin;
 
-    // flags[i]: 1 = ok, 0 = diverged, -1 = fixed point. Та же семантика, что
-    // checkerArray, который DFT_custom получает на входе (см. cudaLibrary.cu).
+    // flags[i] — REGIME_*: -1 = fixed point, 0 = unbound, 1 = oscillation.
+    // Та же семантика, что у checkerArray на входе DFT_custom (cudaLibrary.cu).
     std::vector<int> flags;
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
@@ -315,7 +385,9 @@ struct LLE1DResult {
     // flags[], рисовал выброс; NaN же отсекается штатным !isfinite.
     // Причину смотреть в flags[].
     std::vector<double> lyapunov;
-    // flags[i]: 1 (ok) / -1 (diverged) — для совместимости с UI-агрегацией.
+    // flags[i] — REGIME_*: 1 = oscillation, 0 = unbound. FP отдельно не
+    // детектируется (см. комментарий к regime_code выше), поэтому -1 здесь
+    // не появляется.
     std::vector<int>    flags;
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
@@ -379,7 +451,8 @@ struct LS1DResult {
     // spectrum[i][k] — k-я экспонента для i-й точки параметра. Длина внутреннего
     // вектора == n_exponents. Спец-значения 999 / -999 — kernel-флаги ошибки.
     std::vector<std::vector<double>> spectrum;
-    // flags[i]: 1 (ok) / -1 (diverged) — все экспоненты разом.
+    // flags[i] — REGIME_* (общий на все экспоненты): 1 = oscillation,
+    // 0 = unbound. FP отдельно не детектируется, см. regime_code.
     std::vector<int> flags;
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
@@ -470,7 +543,7 @@ struct LLE2DResult {
     // включая ячейки, где kernel вернул спец-значение (999 — нет аттрактора,
     // -999 — разошлось, NaN/inf — численная проблема). Render отфильтрует.
     std::vector<double> values;
-    std::vector<int>    flags;     // 1=ok, -1=diverged
+    std::vector<int>    flags;     // REGIME_*: 1=oscillation, 0=unbound (FP не детектируется)
 
     // Авто-нормализация для colormap'а: min/max по валидным значениям
     // (без 999/-999/nan/inf). Если валидных нет — обе 0.
@@ -557,9 +630,13 @@ struct Bifurcation2DResult {
     double param_hi_2 = 1.0;
 
     // values[iy*n_pts + ix] = (double)dbscan_result — период (число кластеров пиков).
-    // Спец-значения: -1.0 = расхождение (flag=-1), 0.0 = нет пиков (фикс. точка).
+    // Спец-значения совпадают с REGIME_*: -1.0 = fixed point, 0.0 = unbound.
+    // (Раньше комментарий приписывал -1 расхождению, а 0 — фикс. точке; коды
+    // были ровно наоборот, и host заодно помечал unbound как валидную ячейку.)
     std::vector<double> values;
-    std::vector<int>    flags;       // 1=ok, -1=diverged
+    // flags[] — СЫРОЙ выход dbscanCUDA: -1 = fixed point, 0 = unbound,
+    // N > 0 = период. Нормализация — regime_code().
+    std::vector<int>    flags;
 
     // Авто-нормализация для colormap (без -1/nan).
     double min_val = 0.0;
@@ -635,7 +712,7 @@ struct LS2DResult {
     // contiguous-плоскость на отрисовку HeatmapView: &values[k*n*n] передаётся
     // без копирования. Спец-значения 999/-999/NaN — как в LS1DResult.
     std::vector<double> values;
-    // flags[iy*n + ix] — общий per-cell (1=ok, -1=diverged для всех экспонент).
+    // flags[iy*n + ix] — общий per-cell REGIME_* (1=oscillation, 0=unbound).
     std::vector<int>    flags;
 
     // Авто-нормализация per-plane (по валидным значениям, без 999/-999/nan).

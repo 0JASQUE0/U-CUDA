@@ -21,8 +21,36 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// Глобальный PeakConfig — единственный источник истины для GUI-настраиваемых
+// knobs configCUDA.h. Пишет UI-поток (Settings), читают worker-потоки при
+// компиляции NVRTC и в CPU-ветках, поэтому под мьютексом. Epoch бампается на
+// каждую запись и входит в cache-key модулей (см. hash_key) — иначе после
+// смены настройки переиспользовался бы старый PTX.
+// ---------------------------------------------------------------------------
+namespace {
+std::mutex g_peak_mu;
+PeakConfig g_peak_cfg;
+uint64_t   g_peak_epoch = 1;
+}  // namespace
+
+void set_peak_config(const PeakConfig& c) {
+    std::lock_guard<std::mutex> lk(g_peak_mu);
+    g_peak_cfg = c;
+    ++g_peak_epoch;
+}
+PeakConfig get_peak_config() {
+    std::lock_guard<std::mutex> lk(g_peak_mu);
+    return g_peak_cfg;
+}
+uint64_t peak_config_epoch() {
+    std::lock_guard<std::mutex> lk(g_peak_mu);
+    return g_peak_epoch;
+}
 
 namespace {
 
@@ -35,14 +63,14 @@ constexpr int kMaxAmountOfValues = 64;
 // он читается как ТЕКСТ и уходит в NVRTC (см. src_configCUDA_h), поэтому
 // значения дублируются литералами, как уже сделано в run_bif1d (blockSize_setup
 // и др.). При правке configCUDA.h эти значения надо править вместе с ним.
+//
+// Peak-knobs (doCalculatePeaks / eps_* / peak_threshold / max_amount_of_peaks)
+// здесь больше НЕ дублируются: они настраиваются из GUI, и CPU-ветки читают их
+// через get_peak_config(). Заодно ушло расхождение — kEpsFixedPoint был 1e-8
+// против 1e-6 в configCUDA.h, из-за чего CPU-ветка ловила fixed point не там,
+// где GPU.
 // ---------------------------------------------------------------------------
 constexpr int    kCheckInterval      = 100;      // CHECK_INTERVAL
-constexpr bool   kDoCalculatePeaks   = true;     // doCalculatePeaks
-constexpr bool   kDoInterpolatePeaks = true;     // doInterpolatePeaks
-constexpr double kEpsFixedPoint      = 1e-8;     // eps_fixed_point
-constexpr double kEpsPeakDelta       = 1e-14;    // eps_peak_delta
-constexpr double kPeakThreshold      = -1e25;    // peak_threshold
-constexpr int    kMaxAmountOfPeaks   = 2500;     // max_amount_of_peaks
 constexpr double kPi    = 3.1415926535897932384626433832795;
 constexpr double kEuler = 2.7182818284590452353602874713527;
 
@@ -53,8 +81,8 @@ constexpr double kEuler = 2.7182818284590452353602874713527;
 // параметром (в NVRTC-сборке AMOUNTOFX как раз и раскрывается в amountOfX, так
 // что численно это одно и то же).
 //
-// Возврат: 1 — норма, -1 — сваливание в неподвижную точку, 0 — расходимость.
-// Проверка расходимости — раз в kCheckInterval итераций, как на GPU.
+// Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point,
+// 0 = unbound). Проверка расходимости — раз в kCheckInterval итераций, как на GPU.
 // ---------------------------------------------------------------------------
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
@@ -81,8 +109,8 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
         if (i % kCheckInterval == 0) {
             numb checker = (numb)0;
             for (int j = 0; j < amountOfX; ++j) checker += std::fabs(x[j]);
-            if (std::isnan(checker) || std::isinf(checker)) return 0;
-            if (maxValue != (numb)0 && std::fabs(checker) > maxValue) return 0;
+            if (std::isnan(checker) || std::isinf(checker)) return REGIME_UNBOUND;
+            if (maxValue != (numb)0 && std::fabs(checker) > maxValue) return REGIME_UNBOUND;
         }
     }
 
@@ -96,8 +124,9 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
 
     numb tempResult = (numb)0;
     for (int j = 0; j < amountOfX; ++j) tempResult += std::fabs(x[j] - xPrev[j]);
-    if (std::fabs(tempResult) < (numb)kEpsFixedPoint) return -1;
-    return 1;
+    if (std::fabs(tempResult) < (numb)get_peak_config().eps_fixed_point)
+        return REGIME_FIXED_POINT;
+    return REGIME_OSCILLATION;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +140,13 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
 int cpu_peak_finder(const numb* data, size_t amountOfPoints,
                     numb* outPeaks, numb* timeOfPeaks, numb h)
 {
-    if (!kDoCalculatePeaks) {
+    // Снимок knobs на весь вызов: GPU-двойник видит их как compile-time
+    // константы, поэтому в пределах одной точки свипа они меняться не должны.
+    const PeakConfig pc = get_peak_config();
+
+    if (!pc.do_calculate_peaks) {
         int n = (int)amountOfPoints;
-        if (n >= kMaxAmountOfPeaks) n = kMaxAmountOfPeaks;
+        if (n >= pc.max_amount_of_peaks) n = pc.max_amount_of_peaks;
         for (int i = 0; i < n; ++i) { outPeaks[i] = data[i]; timeOfPeaks[i] = (numb)0; }
         return n - 1;
     }
@@ -124,15 +157,15 @@ int cpu_peak_finder(const numb* data, size_t amountOfPoints,
 
     int amountOfPeaks = 0;
     for (size_t i = 2; i + 2 < amountOfPoints; ++i) {
-        if (data[i] - data[i - 1] > (numb)kEpsPeakDelta &&
-            data[i] > (numb)kPeakThreshold &&
+        if (data[i] - data[i - 1] > (numb)pc.eps_peak_delta &&
+            data[i] > (numb)pc.peak_threshold &&
             data[i] >= data[i + 1])
         {
             for (size_t j = i; j + 2 < amountOfPoints; ++j) {
                 // Наткнулись на точку строго больше — это был не пик.
                 if (data[j] < data[j + 1]) { i = j + 1; break; }
-                if (data[j] - data[j + 1] > (numb)kEpsPeakDelta) {
-                    if (kDoInterpolatePeaks) {
+                if (data[j] - data[j + 1] > (numb)pc.eps_peak_delta) {
+                    if (pc.do_interpolate_peaks) {
                         const numb denom = data[j - 1] - (numb)2.0 * data[j] + data[j + 1];
                         numb delta = (numb)0;
                         if (std::fabs(denom) > (numb)1e-12)
@@ -152,16 +185,26 @@ int cpu_peak_finder(const numb* data, size_t amountOfPoints,
         }
     }
 
+    // Anchor-фильтр по eps_interPeak_delta — построчная копия GPU-peakFinder.
+    // При eps_interPeak_delta == 0 (дефолт) вырождается в прежний сдвиг влево.
     if (amountOfPeaks > 1) {
-        for (int i = 0; i < amountOfPeaks - 1; ++i) {
-            outPeaks[i]    = outPeaks[i + 1];
-            timeOfPeaks[i] = (timeOfPeaks[i + 1] - timeOfPeaks[i]) * h;
+        int  writeIdx   = 0;
+        numb anchorTime = timeOfPeaks[0];
+        for (int i = 1; i < amountOfPeaks; ++i) {
+            const numb currentTime = timeOfPeaks[i];
+            const numb delta = (currentTime - anchorTime) * h;
+            if (delta >= (numb)pc.eps_interPeak_delta) {
+                outPeaks[writeIdx]    = outPeaks[i];
+                timeOfPeaks[writeIdx] = delta;
+                ++writeIdx;
+                anchorTime = currentTime;
+            }
         }
-        amountOfPeaks -= 1;
+        amountOfPeaks = writeIdx;
     } else {
         amountOfPeaks = 0;
     }
-    if (amountOfPeaks >= kMaxAmountOfPeaks) amountOfPeaks = kMaxAmountOfPeaks;
+    if (amountOfPeaks >= pc.max_amount_of_peaks) amountOfPeaks = pc.max_amount_of_peaks;
     return amountOfPeaks;
 }
 
@@ -308,8 +351,9 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         const int pointsForSkip = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
         const numb   timeStep   = h_local * (numb)req.pre_scaller;
 
+        // Вырожденный шаг — траектории нет: это unbound, а не fixed point.
         if (h_local <= 0.0 || pointsInBlock <= 0) {
-            res.flags[j] = -1;
+            res.flags[j] = REGIME_UNBOUND;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
         }
@@ -319,8 +363,8 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
                                   req.max_value, nullptr);
-        if (flag == 0) {
-            res.flags[j] = -1;
+        if (flag == REGIME_UNBOUND) {
+            res.flags[j] = REGIME_UNBOUND;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
         }
@@ -330,12 +374,12 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
                               req.pre_scaller, req.writable_var,
                               req.max_value, block.data());
 
-        // GPU пишет d_amountOfPeaks[j] = (flag == -1) ? -1 : 1, и peakFinderCUDA
-        // пропускает только -1. То есть при flag == 0 (расходимость на основном
-        // участке) пики всё равно ищутся — повторяем как есть, чтобы картинка
-        // совпадала с GPU-веткой.
-        if (flag == -1) {
-            res.flags[j] = -1;
+        // Зеркалит continuation-ядро (bifurcation1d_cont.template.cu): в
+        // d_amountOfPeaks уходит СЫРОЙ REGIME_*, и peakFinderCUDA пропускает и
+        // FP, и unbound. Раньше unbound на основном участке проходил дальше, и
+        // пики искались в уже разошедшемся блоке.
+        if (flag != REGIME_OSCILLATION) {
+            res.flags[j] = flag;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
         }
@@ -359,13 +403,11 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
 // run_bif1d. Точки независимы: каждая стартует с одних и тех же НУ и базовых
 // параметров, поэтому цепочки, как в run_bif1d_continuation_cpu, здесь нет.
 //
-// Флаги повторяют связку calculateDiscreteModelCUDA + peakFinderCUDA:
-// kernel пишет checker = flag транзиента, а основной участок считает только
-// при flag 1 или -1 (см. cudaLibrary.cu:1065). peakFinderCUDA затем пропускает
-// точки с checker 0 и -1. Итого transient, схлопнувшийся в неподвижную точку
-// (flag 0), даёт флаг 0 и до поиска пиков не доходит. Это НЕ то же, что в
-// continuation-ветке, где такой transient помечается как -1 — там так делает
-// и GPU-двойник, здесь же образец другой.
+// Флаги повторяют связку calculateDiscreteModelCUDA + peakFinderCUDA: kernel
+// пишет checker = REGIME_* транзиента, основной участок считается только при
+// OSCILLATION или FIXED_POINT (см. cudaLibrary.cu:1065), а peakFinderCUDA
+// пропускает FP и UNBOUND, оставляя их коды в массиве. Continuation-ветка
+// теперь ведёт себя так же (раньше она метила unbound как -1).
 //
 // Свипуемая величина — параметр, НУ или сам шаг h, как на GPU. Сетка берётся
 // из cont_sweep_value (reverse только у continuation), как у CPU-веток
@@ -487,19 +529,21 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
         };
 
-        if (h_local <= (numb)0 || pointsInBlock <= 0) { finish_point(-1); continue; }
+        // Вырожденный шаг — траектории нет: unbound, а не fixed point.
+        if (h_local <= (numb)0 || pointsInBlock <= 0) { finish_point(REGIME_UNBOUND); continue; }
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
                                   req.max_value, nullptr);
-        // Ровно как в kernel'е: основной участок считается только при 1 и -1.
-        if (flag == 1 || flag == -1)
+        // Ровно как в kernel'е: основной участок считается только при
+        // OSCILLATION и FIXED_POINT.
+        if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
             flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsInBlock, req.amountOfX,
                                   req.pre_scaller, req.writable_var,
                                   req.max_value, block.data());
-        if (flag == -1 || flag == 0) { finish_point(flag); continue; }
+        if (flag != REGIME_OSCILLATION) { finish_point(flag); continue; }
 
         const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
                                       peaks.data(), times.data(), timeStep);
@@ -562,7 +606,33 @@ std::string replace_all(std::string s, const std::string& from, const std::strin
 }
 
 std::string hash_key(const std::string& krs_body, int amountOfX) {
-    return std::to_string(std::hash<std::string>{}(krs_body)) + ":" + std::to_string(amountOfX);
+    // peak_config_epoch(): knobs configCUDA.h уходят в NVRTC как #define, т.е.
+    // при их смене тот же КРС даёт другой PTX. Без epoch в ключе все кэши
+    // модулей отдали бы старый модуль, и настройка не применилась бы до
+    // перезапуска приложения.
+    return std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
+           std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch());
+}
+
+// Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот
+// оборачивает свои дефолты в #ifndef). Один инжект покрывает все 14 шаблонов —
+// они тянут configCUDA.h транзитивно через cudaLibrary.cuh.
+//
+// Приведение к (numb) внутри макроса безопасно: разворачивается он только в
+// местах использования (cudaLibrary.cu), т.е. заведомо после typedef numb.
+std::string peak_config_defines() {
+    const PeakConfig c = get_peak_config();
+    std::ostringstream o;
+    o << std::setprecision(17);
+    o << "// --- injected by parametric_engine (GUI Settings) ---\n"
+      << "#define doCalculatePeaks "    << (c.do_calculate_peaks   ? 1 : 0) << "\n"
+      << "#define doInterpolatePeaks "  << (c.do_interpolate_peaks ? 1 : 0) << "\n"
+      << "#define eps_fixed_point ((numb)"     << c.eps_fixed_point     << ")\n"
+      << "#define eps_peak_delta ((numb)"      << c.eps_peak_delta      << ")\n"
+      << "#define eps_interPeak_delta ((numb)" << c.eps_interPeak_delta << ")\n"
+      << "#define peak_threshold ((numb)"      << c.peak_threshold      << ")\n"
+      << "#define max_amount_of_peaks "        << c.max_amount_of_peaks << "\n";
+    return o.str();
 }
 
 std::string cu_err(CUresult r) {
@@ -735,7 +805,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         }
 
         if (h_local <= 0.0 || ntSteps <= 0) {
-            res.flags[j] = -1;                 // вырожденный шаг — точки нет
+            res.flags[j] = REGIME_UNBOUND;     // вырожденный шаг — точки нет
             if (continuation) probe_attached = false;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
@@ -767,9 +837,11 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
 
         if (alive) {
             res.lyapunov[j] = (double)(sum / (numb)req.t_max);
-            res.flags[j]    = 1;
+            res.flags[j]    = REGIME_OSCILLATION;
         } else {
-            res.flags[j] = -1;      // lyapunov[j] остаётся NaN
+            // LLE не различает fixed point: единственная причина «не посчиталось»
+            // — расходимость. lyapunov[j] остаётся NaN.
+            res.flags[j] = REGIME_UNBOUND;
             // Continuation: цепочку рвём — сбрасываем траекторию на IC и берём
             // новое направление щупа, чтобы следующая точка стартовала с
             // чистого листа, а не с разошедшегося состояния.
@@ -1024,7 +1096,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         if (h_local <= 0.0 || ntSteps <= 0) {
-            res.flags[j] = -1;
+            res.flags[j] = REGIME_UNBOUND;     // вырожденный шаг — точки нет
             if (continuation) probes_attached = false;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
@@ -1057,9 +1129,10 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
 
         if (alive) {
             for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / (numb)req.t_max);
-            res.flags[j] = 1;
+            res.flags[j] = REGIME_OSCILLATION;
         } else {
-            res.flags[j] = -1;      // spectrum[j] остаётся NaN
+            // Как и LLE, LS не различает fixed point — только расходимость.
+            res.flags[j] = REGIME_UNBOUND;      // spectrum[j] остаётся NaN
             if (continuation) {
                 probes_attached = false;
                 x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
@@ -1174,8 +1247,8 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
 
         auto mark_dead = [&](int flag) {
             res.flags[j] = flag;
-            // Как DFT_custom: checker == -1 -> -1.0, checker == 0 -> 0.0.
-            const double fill = (flag == -1) ? -1.0 : 0.0;
+            // Как DFT_custom: FIXED_POINT -> -1.0, UNBOUND -> 0.0.
+            const double fill = (flag == REGIME_FIXED_POINT) ? -1.0 : 0.0;
             for (int k = 0; k < nFreq; ++k) {
                 res.ak_cos[(size_t)j * nFreq + k] = fill;
                 res.bk_sin[(size_t)j * nFreq + k] = fill;
@@ -1184,22 +1257,23 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
         };
 
-        if (h_local <= 0.0 || pointsInBlock <= 2) { mark_dead(-1); continue; }
+        // Вырожденный шаг — траектории нет: unbound, а не fixed point.
+        if (h_local <= 0.0 || pointsInBlock <= 2) { mark_dead(REGIME_UNBOUND); continue; }
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
                                   req.max_value, nullptr);
-        if (flag == 0) { mark_dead(-1); continue; }
+        if (flag == REGIME_UNBOUND) { mark_dead(REGIME_UNBOUND); continue; }
 
         flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                               pointsInBlock, req.amountOfX,
                               req.pre_scaller, req.writable_var,
                               req.max_value, block.data());
-        // Та же конвенция, что у continuation-ядра БД: -1 (сваливание в точку)
-        // помечает точку как непригодную, остальное считаем.
-        const int checker = continuation ? ((flag == -1) ? -1 : 1) : flag;
-        if (checker == -1 || checker == 0) { mark_dead(checker); continue; }
+        // Сырой REGIME_* и для continuation, и для классики: раньше в
+        // continuation unbound подменялся на 1 и спектр считался по
+        // разошедшемуся блоку (см. dft1d_cont.template.cu — там та же правка).
+        if (flag != REGIME_OSCILLATION) { mark_dead(flag); continue; }
 
         if (window_len != pointsInBlock) {
             cpu_build_window(window, pointsInBlock, req.window_type);
@@ -1214,7 +1288,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
             res.ak_cos[(size_t)j * nFreq + k] = (double)ak_tmp[(size_t)k];
             res.bk_sin[(size_t)j * nFreq + k] = (double)bk_tmp[(size_t)k];
         }
-        res.flags[j] = 1;
+        res.flags[j] = REGIME_OSCILLATION;
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
@@ -1240,6 +1314,9 @@ struct ParametricEngine::Impl {
     // curand_kernel.h перехвачен inline-stub'ом в каждом template'е (kernels/*.cu)
     // + `#define CURAND_KERNEL_H_` блокирует реальный header. Virtual header'а
     // здесь больше нет — иначе он повторно объявлял бы curandState_t.
+    // src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw. Сырой
+    // текст держим отдельно, чтобы пересборка при смене Settings не лезла на диск.
+    std::string src_configCUDA_h_raw;
     std::string src_configCUDA_h;
     std::string src_template;        // bifurcation1d.template.cu
     std::string src_template_cont;       // bifurcation1d_cont.template.cu
@@ -1255,7 +1332,8 @@ struct ParametricEngine::Impl {
     std::string src_template_basins; // basins.template.cu
     std::string src_template_fs_attr; // fastsync_attr.template.cu (mode 0)
     std::string src_template_fs_grid; // fastsync_grid.template.cu (mode 1)
-    bool srcs_loaded = false;
+    bool     srcs_loaded     = false;
+    uint64_t srcs_peak_epoch = 0;   // != peak_config_epoch() -> пересобрать configCUDA.h
 
     struct CachedModule {
         std::string key;
@@ -1502,7 +1580,15 @@ struct ParametricEngine::Impl {
     }
 
     bool load_sources(std::string& err) {
-        if (srcs_loaded) return true;
+        // Перечитывать файлы с диска надо один раз, а вот текст configCUDA.h
+        // пересобирать — на каждую смену peak-настроек (см. peak_config_defines).
+        const uint64_t ep = peak_config_epoch();
+        if (srcs_loaded && srcs_peak_epoch == ep) return true;
+        if (srcs_loaded) {
+            src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw;
+            srcs_peak_epoch  = ep;
+            return true;
+        }
         std::string root = exe_dir() + "\\kernels\\";
         std::string e;
         src_template          = read_text_file(root + "bifurcation1d.template.cu",      e); if (!e.empty()) { err = e; return false; }
@@ -1522,7 +1608,9 @@ struct ParametricEngine::Impl {
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
-        src_configCUDA_h      = read_text_file(root + "configCUDA.h",              e); if (!e.empty()) { err = e; return false; }
+        src_configCUDA_h_raw  = read_text_file(root + "configCUDA.h",              e); if (!e.empty()) { err = e; return false; }
+        src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw;
+        srcs_peak_epoch  = ep;
         srcs_loaded = true;
         return true;
     }
@@ -2464,7 +2552,9 @@ struct ParametricEngine::Impl {
                 if (diverged) v = std::numeric_limits<double>::quiet_NaN();
 
                 res.lyapunov[global_idx] = v;
-                res.flags[global_idx] = diverged ? -1 : 1;
+                // LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена),
+                // поэтому единственный «плохой» код — REGIME_UNBOUND.
+                res.flags[global_idx] = diverged ? REGIME_UNBOUND : REGIME_OSCILLATION;
 
                 if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
             }
@@ -2924,7 +3014,9 @@ struct ParametricEngine::Impl {
                     out_idx = kernel_idx;
                 }
                 res.values[out_idx] = v;
-                res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? -1 : 1;
+                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает.
+                res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? REGIME_UNBOUND
+                                                                  : REGIME_OSCILLATION;
             }
         }
 
@@ -2944,7 +3036,7 @@ struct ParametricEngine::Impl {
         for (size_t k = 0; k < total_cells; ++k) {
             int f = res.flags[k];
             double v = res.values[k];
-            if (f < 0) continue;
+            if (!regime_is_oscillation(f)) continue;   // FP и unbound вне шкалы
             if (!std::isfinite(v)) continue;
             if (v < vmin) vmin = v;
             if (v > vmax) vmax = v;
@@ -3308,7 +3400,9 @@ struct ParametricEngine::Impl {
 
                 // первая экспонента используется как ground-truth для флага
                 double first = h_lsResult[k * (size_t)amountOfInitialConditions + 0];
-                res.flags[global_idx] = (first == 999.0 || first == -999.0) ? -1 : 1;
+                // 999/-999 — kernel-sentinel расходимости; FP LS не различает.
+                res.flags[global_idx] = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
+                                                                            : REGIME_OSCILLATION;
 
                 auto& row = res.spectrum[global_idx];
                 for (int j = 0; j < amountOfInitialConditions; ++j) {
@@ -3737,7 +3831,8 @@ struct ParametricEngine::Impl {
                 }
                 // Первая экспонента — ground-truth для флага (как в run_ls_1d).
                 double first = h_lsResult[k * (size_t)N + 0];
-                int flag = (first == 999.0 || first == -999.0) ? -1 : 1;
+                int flag = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
+                                                               : REGIME_OSCILLATION;
                 res.flags[out_idx] = flag;
                 for (int j = 0; j < N; ++j) {
                     double v = h_lsResult[k * (size_t)N + j];
@@ -3765,7 +3860,7 @@ struct ParametricEngine::Impl {
             double vmin =  std::numeric_limits<double>::infinity();
             double vmax = -std::numeric_limits<double>::infinity();
             for (size_t c = 0; c < total_cells; ++c) {
-                if (res.flags[c] < 0) continue;
+                if (!regime_is_oscillation(res.flags[c])) continue;
                 double v = res.values[(size_t)j * total_cells + c];
                 if (!std::isfinite(v))         continue;
                 if (v == 999.0 || v == -999.0) continue;
@@ -4051,7 +4146,9 @@ struct ParametricEngine::Impl {
         res.continuation_reverse = req.continuation_reverse;
         res.lyapunov.assign(host.begin(), host.end());   // numb -> double
         res.flags.assign(nPts, 0);
-        for (int j = 0; j < nPts; ++j) res.flags[j] = std::isfinite(res.lyapunov[j]) ? 1 : -1;
+        // NaN у continuation-ядра означает расходимость (FP оно не различает).
+        for (int j = 0; j < nPts; ++j)
+            res.flags[j] = std::isfinite(res.lyapunov[j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
         return res;
@@ -4137,7 +4234,8 @@ struct ParametricEngine::Impl {
                 res.spectrum[j][k] = v;
                 if (!std::isfinite(v)) ok = false;
             }
-            res.flags[j] = ok ? 1 : -1;
+            // NaN у continuation-ядра = расходимость (FP оно не различает).
+            res.flags[j] = ok ? REGIME_OSCILLATION : REGIME_UNBOUND;
         }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
@@ -5878,9 +5976,12 @@ struct ParametricEngine::Impl {
                 } else {
                     out_idx = kernel_idx;
                 }
-                double v = (period < 0) ? -1.0 : (double)period;
-                res.values[out_idx] = v;
-                res.flags[out_idx]  = (period < 0) ? -1 : 1;
+                // period из dbscanCUDA — сырой REGIME_*/период: -1 = fixed
+                // point, 0 = unbound, N > 0 = число кластеров пиков. Раньше
+                // unbound (0) получал flag 1, т.е. считался валидной ячейкой и
+                // попадал в автошкалу colormap'а как «период 0».
+                res.values[out_idx] = (double)period;
+                res.flags[out_idx]  = period;
             }
         }
 
@@ -5898,9 +5999,9 @@ struct ParametricEngine::Impl {
         double vmin =  std::numeric_limits<double>::infinity();
         double vmax = -std::numeric_limits<double>::infinity();
         for (size_t k = 0; k < total_cells; ++k) {
-            if (res.flags[k] < 0) continue;
+            if (!regime_is_oscillation(res.flags[k])) continue;   // FP и unbound вне шкалы
             double v = res.values[k];
-            if (!std::isfinite(v) || v < 0.0) continue;
+            if (!std::isfinite(v)) continue;
             if (v < vmin) vmin = v;
             if (v > vmax) vmax = v;
         }

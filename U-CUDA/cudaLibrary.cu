@@ -533,7 +533,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 		else               localSlave[indicesOfMutVars[i]] = v;
 	}
 
-	// 1 - stability, 0 - fixed point, -1 - unbound solution
+	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
 	FastSynchroError[idx] = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
 		amountOfInitialConditions, preScaller, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock);
 
@@ -867,7 +867,10 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 
 
 
-	//// 1 - stability, -1 - fixed point, 0 - unbound solution
+	// Возврат — REGIME_* из configCUDA.h:
+	//    1 (REGIME_OSCILLATION) — норма
+	//   -1 (REGIME_FIXED_POINT) — сваливание в неподвижную точку
+	//    0 (REGIME_UNBOUND)     — расходимость (возвращается выше, по checker)
 	//// --- Проверка на сваливание в точку ---
 	numb tempResult = 0;
 
@@ -1057,7 +1060,8 @@ __global__ void calculateDiscreteModelCUDA(
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
-	// 1 - stability, 0 - fixed point, -1 - unbound solution
+	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
+	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1);
 
@@ -1223,11 +1227,11 @@ __global__ void calculateDiscreteModelICCUDA(
 	
 	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
 	
-	// 1 - stability, 0 - fixed point, -1 - unbound solution
+	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT, 0 = UNBOUND
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, 0, nullptr, idx * sizeOfBlock);
 
-	// --- Теперь уже по-взрослому моделируем систему --- 
-	if (flag == 1 || flag == -1)
+	// --- Теперь уже по-взрослому моделируем систему ---
+	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfIterations,amountOfInitialConditions, preScaller, writableVar, maxValue, data, idx * sizeOfBlock);
 
 	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
@@ -1297,11 +1301,11 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 
 	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
 
-	// 1 - stability, 0 - fixed point, -1 - unbound solution
+	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT, 0 = UNBOUND
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, 0, nullptr, idx * sizeOfBlock);
 
-	// --- Теперь уже по-взрослому моделируем систему --- 
-	if (flag == 1 || flag == -1)
+	// --- Теперь уже по-взрослому моделируем систему ---
+	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfIterations, amountOfInitialConditions, preScaller, writableVar, maxValue, data, idx * sizeOfBlock);
 
 	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
@@ -1556,52 +1560,34 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 			}
 		}
 
-		// --- Вычисляем межпиковые интервалы ---
+		// --- Межпиковые интервалы + фильтр по eps_interPeak_delta ---
+		// Опорный (anchor) пик, от него меряем интервал до следующего; всё, что
+		// ближе eps_interPeak_delta, отбрасывается, а опора не сдвигается.
+		// При eps_interPeak_delta == 0 (дефолт) условие delta >= 0 выполняется
+		// всегда и цикл вырождается ровно в прежнее поведение: сдвиг пиков на
+		// один индекс влево + Δt между соседями, amountOfPeaks -= 1.
 		if (amountOfPeaks > 1) {
-			////////////////// --- Пробегаемся по всем найденным пикам и их индексам ---
+			int  writeIdx   = 0;                             // индекс записи результата
+			numb anchorTime = timeOfPeaks[startDataIndex];   // время (в индексах) опорного пика
 
-			for (size_t i = 0; i < amountOfPeaks - 1; i++)
-			{
-				// --- Смещаем все пики на один индекс влево, а первый пик удаляем ---
-				if (outPeaks != nullptr)
-					outPeaks[startDataIndex + i] = outPeaks[startDataIndex + i + 1];
-				// --- Вычисляем межпиковый интервал. Это разница индекса следующего пика и предыдущего, умноженная на шаг ---
-				if (timeOfPeaks != nullptr)
-					timeOfPeaks[startDataIndex + i] = (numb)( timeOfPeaks[startDataIndex + i + 1] - timeOfPeaks[startDataIndex + i] ) * h;
+			for (size_t i = 1; i < amountOfPeaks; ++i) {
+				// Абсолютное время текущего пика читаем ДО любой записи —
+				// writeIdx всегда <= i, поэтому запись затирает уже прочитанное.
+				const numb currentTime = timeOfPeaks[startDataIndex + i];
+				const numb delta = (currentTime - anchorTime) * h;
 
+				if (delta >= eps_interPeak_delta) {
+					// Записываем ВТОРОЙ пик пары (текущий) и интервал до него.
+					if (outPeaks != nullptr)
+						outPeaks[startDataIndex + writeIdx] = outPeaks[startDataIndex + i];
+					if (timeOfPeaks != nullptr)
+						timeOfPeaks[startDataIndex + writeIdx] = delta;
+
+					++writeIdx;
+					anchorTime = currentTime;   // текущий пик — новая опора
+				}
 			}
-			// --- Так как один пик удалили - вычитаем единицу из результата ---
-			amountOfPeaks = amountOfPeaks - 1;
-
-			//int writeIdx = 0;                          // индекс записи результата
-			//int anchorIdx = 0;                         // индекс опорного пика (в исходных данных)
-			//numb anchorTime = timeOfPeaks[startDataIndex];  // абсолютное время опорного пика
-
-			//// Перебираем пики, начиная со второго (индекс 1)
-			//for (size_t i = 1; i < amountOfPeaks; i++) {
-			//	// Читаем абсолютное время текущего пика ДО любой записи
-			//	numb currentTime = timeOfPeaks[startDataIndex + i];
-
-			//	// Считаем интервал от опорного до текущего
-			//	numb delta = (currentTime - anchorTime) * h;
-
-			//	if (delta >= eps_interPeak_delta) {  // порог 
-			//		// Записываем ВТОРОЙ пик (текущий) и интервал до него
-			//		if (outPeaks != nullptr)
-			//			outPeaks[startDataIndex + writeIdx] = outPeaks[startDataIndex + i];
-			//		if (timeOfPeaks != nullptr)
-			//			timeOfPeaks[startDataIndex + writeIdx] = delta;  // интервал от опорного до текущего
-
-			//		writeIdx++;
-
-			//		// Текущий пик становится новым опорным для следующего поиска
-			//		anchorIdx = i;
-			//		anchorTime = currentTime;
-			//	}
-			//	// Если delta < 75.0 — просто идём дальше, не записываем
-			//}
-			//amountOfPeaks = writeIdx;  // обновляем количество пиков в результате
-
+			amountOfPeaks = writeIdx;
 		}
 		else {
 			amountOfPeaks = 0;
@@ -1646,16 +1632,19 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 	if ( idx >= amountOfBlocks )		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
-	if ( amountOfPeaks[idx] == -1 )
+	// На входе amountOfPeaks[] содержит REGIME_* от calculateDiscreteModelCUDA.
+	// FP и Unbound проносим сквозь этап без изменений: код режима остаётся в
+	// массиве и дальше читается DBSCAN'ом (см. dbscanCUDA / avgPeakFinderCUDA).
+	// Для REGIME_OSCILLATION значение перезаписывается числом найденных пиков.
+	if ( amountOfPeaks[idx] == REGIME_FIXED_POINT )
 	{
-		amountOfPeaks[idx] = -1;
+		amountOfPeaks[idx] = REGIME_FIXED_POINT;
 		return;
 	}
 
-	if (amountOfPeaks[idx] == 0)
+	if (amountOfPeaks[idx] == REGIME_UNBOUND)
 	{
-		amountOfPeaks[idx] = 0;
+		amountOfPeaks[idx] = REGIME_UNBOUND;
 		return;
 	}
 
@@ -2327,16 +2316,17 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
-	if (amountOfPeaks[idx] == -1 )
+	// Коды режима (REGIME_*) проносим в outData как есть: на 2D-карте -1
+	// означает fixed point, 0 — unbound, N > 0 — период (число кластеров).
+	if (amountOfPeaks[idx] == REGIME_FIXED_POINT)
 	{
-		outData[idx] = -1;
+		outData[idx] = REGIME_FIXED_POINT;
 		return;
 	}
 
-	if (amountOfPeaks[idx] == 0)
+	if (amountOfPeaks[idx] == REGIME_UNBOUND)
 	{
-		outData[idx] = 0;
+		outData[idx] = REGIME_UNBOUND;
 		return;
 	}
 
@@ -2461,8 +2451,9 @@ __global__ void dbscanCUDA_optimized(
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks) return;
 
-	if (amountOfPeaks[idx] == -1) { outData[idx] = -1; return; }
-	if (amountOfPeaks[idx] == 0) { outData[idx] = 0;  return; }
+	// См. dbscanCUDA: REGIME_* проносятся в outData без изменений.
+	if (amountOfPeaks[idx] == REGIME_FIXED_POINT) { outData[idx] = REGIME_FIXED_POINT; return; }
+	if (amountOfPeaks[idx] == REGIME_UNBOUND)     { outData[idx] = REGIME_UNBOUND;     return; }
 
 	// Локальный массив меток (выделяется на поток, размер берется из configCUDA.h)
 	int labels[max_amount_of_peaks];
@@ -3237,15 +3228,15 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// 1 - stability, -1 - fixed point, 0 - unbound solution
-	if (systemCheker[idx] == 0) // unbound solution
+	// systemCheker — REGIME_* из configCUDA.h (1 = Osc, -1 = FP, 0 = Unbound).
+	if (systemCheker[idx] == REGIME_UNBOUND)
 	{
 		outAvgPeaks[idx] = 999;
 		AvgTimeOfPeaks[idx] = 999;
 		return;
 	}
 
-	if (systemCheker[idx] == -1) //fixed point
+	if (systemCheker[idx] == REGIME_FIXED_POINT)
 	{
 		outAvgPeaks[idx] = data[idx * sizeOfBlock + sizeOfBlock-1];
 		AvgTimeOfPeaks[idx] = -1.0;
@@ -3357,14 +3348,15 @@ __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int a
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks) return;
 
-	// systemCheker: 1=Osc, -1=FP, 0=Unbound. FP/Unbound — sentinel values, чтобы
-	// downstream DBSCAN их распознал; не считаем фичи для них.
-	if (systemCheker[idx] == 0) {                           // unbound
+	// systemCheker — REGIME_* из configCUDA.h (1=Osc, -1=FP, 0=Unbound).
+	// FP/Unbound — sentinel values, чтобы downstream DBSCAN их распознал;
+	// фичи для них не считаем.
+	if (systemCheker[idx] == REGIME_UNBOUND) {
 		outAvgPeaks[idx]    = 999;
 		AvgTimeOfPeaks[idx] = 999;
 		return;
 	}
-	if (systemCheker[idx] == -1) {                          // fixed point
+	if (systemCheker[idx] == REGIME_FIXED_POINT) {
 		outAvgPeaks[idx]    = data[idx * sizeOfBlock + sizeOfBlock - 1];
 		AvgTimeOfPeaks[idx] = -1.0;
 		return;
@@ -3432,8 +3424,8 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// 1 - stability, -1 - fixed point, 0 - unbound solution
-	if (systemCheker[idx] == 0) // unbound solution
+	// systemCheker — REGIME_* из configCUDA.h (1 = Osc, -1 = FP, 0 = Unbound).
+	if (systemCheker[idx] == REGIME_UNBOUND)
 	{
 		outAvgPeaks[idx] = 999;
 		AvgTimeOfPeaks[idx] = 999;
@@ -3441,7 +3433,7 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 		return;
 	}
 
-	if (systemCheker[idx] == -1) //fixed point
+	if (systemCheker[idx] == REGIME_FIXED_POINT)
 	{
 		outAvgPeaks[idx] = data[idx * sizeOfBlock + sizeOfBlock - 1];
 		AvgTimeOfPeaks[idx] = -1.0;
@@ -3519,7 +3511,8 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 
 	// Если расстояние между рассматрвиаемой точкой idx и текущей точкой idxCurPoint <= eps - выдаём точке кластер
 
-	if (helpfulArray[idxCurPoint] == 0) {
+	// helpfulArray — REGIME_* (configCUDA.h). Unbound-точки кластера не образуют.
+	if (helpfulArray[idxCurPoint] == REGIME_UNBOUND) {
 		labels[idxCurPoint] = 0;
 		return;
 	}
@@ -3540,7 +3533,7 @@ __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* interva
 	if (idx >= amountOfData)								// Если индекс больше - выпиливаемся из потока
 		return;
 
-	if (labels[idx] == 0 && helpfulArray[idx] == 1)
+	if (labels[idx] == 0 && helpfulArray[idx] == REGIME_OSCILLATION)
 	{
 		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
@@ -3556,7 +3549,7 @@ __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* interva
 	if (idx >= amountOfData)								// Если индекс больше - выпиливаемся из потока
 		return;
 
-	if (helpfulArray[idx] == -1 && labels[idx] == 0)
+	if (helpfulArray[idx] == REGIME_FIXED_POINT && labels[idx] == 0)
 	{
 		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
@@ -3570,7 +3563,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 	if (idx >= amountOfData)								// Если индекс больше - выпиливаемся из потока
 		return;
 
-	if (helpfulArray[idx] == 0 && labels[idx] == 0)
+	if (helpfulArray[idx] == REGIME_UNBOUND && labels[idx] == 0)
 	{
 		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;

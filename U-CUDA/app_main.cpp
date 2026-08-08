@@ -315,7 +315,17 @@ int main() {
             if (std::find(names.begin(), names.end(), app_cfg.last_system_name) != names.end())
                 apply_system_switch(model, library, app_cfg.last_system_name);
         }
+
+        // Peak-knobs. Clamp — страховка от правленого вручную конфига:
+        // max_amount_of_peaks задаёт размер per-thread массивов в
+        // dbscan_optimized и способен уронить компиляцию ядра.
+        model.peak = app_cfg.peak;
+        clamp_peak_config(model.peak);
     }
+    // Пушим до первого Run: движок создаётся лениво, а конфиг глобальный и
+    // должен быть актуален уже на самой первой компиляции NVRTC.
+    set_peak_config(model.peak);
+    model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
 
     // applied = -1 / opposite → форсируем apply на первом кадре.

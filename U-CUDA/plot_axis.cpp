@@ -1,7 +1,9 @@
 ﻿#include "plot_axis.h"
+#include "digit_input.h"
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <string>
 
 double nice_step(double range, int target_count) {
     if (range <= 0) return 1.0;
@@ -41,6 +43,47 @@ void set_screenshot_request_sink(std::function<void(ImVec2, ImVec2)> sink) {
 }
 void request_plot_screenshot(ImVec2 min, ImVec2 max) {
     if (g_screenshot_sink) g_screenshot_sink(min, max);
+}
+
+// =====================================================================
+// Совмещённый callback числовых полей: запятая→точка (CallbackCharFilter) +
+// digit-step на ↑/↓ (CallbackHistory). ImGui позволяет OR'ить флаги; здесь
+// диспетчеризуем по EventFlag. CallbackHistory — специальный event, который
+// ImGui шлёт когда в активном InputText нажали ↑/↓ (изначально сделан под
+// REPL command history). Ровно то, что нам нужно: клавиша уже отфильтрована
+// и передана нам через колбэк — не нужен ни IsKeyPressed, ни pending-cursor
+// state. См. объявление в plot_axis.h.
+// =====================================================================
+int digit_step_input_callback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) {
+        if (data->EventChar == ',') data->EventChar = '.';
+        return 0;
+    }
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+        int dir = 0;
+        if (data->EventKey == ImGuiKey_UpArrow)   dir = +1;
+        if (data->EventKey == ImGuiKey_DownArrow) dir = -1;
+        if (dir == 0) return 0;
+
+        std::string text(data->Buf, data->Buf + data->BufTextLen);
+        std::string new_text;
+        int new_cursor = 0;
+        if (!DigitInput::ComputeStep(text, data->CursorPos, dir,
+                                     new_text, new_cursor)) {
+            return 0;  // Дробь / scientific / невалидный ввод — не трогаем.
+        }
+
+        // DeleteChars + InsertChars сами выставляют BufDirty=true, ImGui
+        // подхватит новую длину и вернёт changed=true из InputText.
+        data->DeleteChars(0, data->BufTextLen);
+        data->InsertChars(0, new_text.c_str());
+        if (new_cursor < 0) new_cursor = 0;
+        if (new_cursor > data->BufTextLen) new_cursor = data->BufTextLen;
+        data->CursorPos      = new_cursor;
+        data->SelectionStart = new_cursor;
+        data->SelectionEnd   = new_cursor;
+    }
+    return 0;
 }
 
 ImU32 plot_col_text() {

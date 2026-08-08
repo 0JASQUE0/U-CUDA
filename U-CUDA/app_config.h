@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <string>
+#include "parametric_engine.h"   // PeakConfig
 
 // Глобальные настройки приложения, не привязанные к конкретной системе или
 // сессии. Хранятся в файле `_app_config.json` рядом с exe. Сейчас единственное
@@ -44,6 +45,11 @@ struct AppConfig {
     // (первый запуск / система удалена из library). Если непустое и имя
     // существует в library — app_main вызовет apply_system_switch на bootstrap.
     std::string last_system_name;
+
+    // Knobs configCUDA.h, настраиваемые во вкладке Settings (peak-finder и
+    // пороги режимов). Дефолты структуры = значения из configCUDA.h, поэтому
+    // отсутствие полей в JSON воспроизводит поведение до появления настройки.
+    PeakConfig peak;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл
