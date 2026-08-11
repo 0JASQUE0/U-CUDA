@@ -14,6 +14,7 @@
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -51,6 +52,56 @@ uint64_t peak_config_epoch() {
     std::lock_guard<std::mutex> lk(g_peak_mu);
     return g_peak_epoch;
 }
+
+// ---------------------------------------------------------------------------
+// FMA-контракция для NVRTC (см. развёрнутый комментарий в parametric_engine.h).
+// Флаг всегда передаётся ЯВНО, даже когда совпадает с дефолтом NVRTC: молчаливое
+// «по умолчанию» уже один раз разъехалось между картами и портретами.
+// Хранится атомарно, а не под мьютексом: одно bool-поле, читателям нужен только
+// свежий снимок, а порядок относительно других настроек роли не играет.
+// ---------------------------------------------------------------------------
+namespace {
+std::atomic<bool> g_nvrtc_fmad{ true };
+}  // namespace
+
+void set_nvrtc_fmad(bool enabled) { g_nvrtc_fmad.store(enabled, std::memory_order_relaxed); }
+bool get_nvrtc_fmad()             { return g_nvrtc_fmad.load(std::memory_order_relaxed); }
+
+namespace {
+// Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
+// живёт дольше вызова.
+const char* nvrtc_fmad_opt() {
+    return get_nvrtc_fmad() ? "--fmad=true" : "--fmad=false";
+}
+
+// ---------------------------------------------------------------------------
+// gpu_free_budget — свободная память GPU с применённым запасом; общий первый
+// шаг всех расчётов чанкования. Возвращает false, если cudaMemGetInfo не
+// доступен (вызывающие превращают это в свой fail("cudaMemGetInfo failed")).
+//
+// `reserve` — доля свободной памяти, которую анализу разрешено занять. Единого
+// значения нет, и сведено оно намеренно НЕ было:
+//     0.92  — bifurcation 1D/2D, DFT и h-свипы. Сверху ещё SAFETY_FACTOR 0.9 и
+//             вычет memConstants у вызывающего, т.е. фактически ~0.83.
+//     0.9   — basins.
+//     0.5   — LLE 1D/2D и fastsync-сетка.
+//     1/16  — LS 1D/2D. Здесь per-system память ~N (буферы возмущённых
+//             траекторий), но 1/16 всё равно куда агрессивнее, чем следует
+//             из одной этой оценки.
+//
+// Происхождение 0.5 и 1/16 не восстановлено: это следы отладки проблем с
+// памятью, а не расчёт. Поэтому числа сохранены как есть — поднять их значит
+// рискнуть теми же проблемами. Менять только после замера на реальных сетках;
+// выигрыш при этом реальный (LS сейчас использует шестнадцатую часть памяти и
+// делает в разы больше чанков, чем мог бы).
+// ---------------------------------------------------------------------------
+bool gpu_free_budget(double reserve, size_t& out_bytes) {
+    size_t freeMemory = 0, totalMemory = 0;
+    if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return false;
+    out_bytes = (size_t)((double)freeMemory * reserve);
+    return true;
+}
+}  // namespace
 
 namespace {
 
@@ -469,6 +520,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     res.snapshot.tMax          = req.t_max;
     res.snapshot.transientTime = req.transient_time;
     res.snapshot.h             = req.h;
+    res.snapshot.gpu_fmad      = get_nvrtc_fmad();
     res.snapshot.preScaller    = req.pre_scaller;
     res.snapshot.writableVar   = req.writable_var;
     res.snapshot.indexOfMutVar = req.sweep_over_var ? req.var_sweep_index : req.param_index;
@@ -610,8 +662,13 @@ std::string hash_key(const std::string& krs_body, int amountOfX) {
     // при их смене тот же КРС даёт другой PTX. Без epoch в ключе все кэши
     // модулей отдали бы старый модуль, и настройка не применилась бы до
     // перезапуска приложения.
+    // fmad — то же самое, но через опцию компиляции, а не #define. Здесь в ключ
+    // идёт САМО значение, а не счётчик поколений: флаг бинарный, поэтому
+    // возврат к прежнему положению переиспользует уже собранный модуль вместо
+    // лишней перекомпиляции.
     return std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
-           std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch());
+           std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch()) +
+           ":fm" + (get_nvrtc_fmad() ? "1" : "0");
 }
 
 // Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот
@@ -1615,28 +1672,36 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    bool compile_if_needed(const std::string& krs_body, int amountOfX,
-                           int par_or_var, std::string& err) {
-        // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
-        // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
-        // выставляем наш перед NVRTC/CU-вызовами.
-        cuCtxSetCurrent(context);
-        // par_or_var в kernel'е cudaLibrary.cu — compile-time макрос. Поэтому
-        // включаем его в hash-key: param-sweep и IC-sweep кешируются отдельно.
-        std::string key = hash_key(krs_body, amountOfX) + ":pov" + std::to_string(par_or_var);
-        if (cached.module && cached.key == key) return true;  // cache hit
-        release_module();
+    // =========================================================================
+    // build_module — общая часть всех compile_*_if_needed: подстановка
+    // плейсхолдеров в шаблон, NVRTC-компиляция с едиными опциями, добыча
+    // mangled-имён и загрузка PTX. У вызывающих различаются только шаблон, имя
+    // исходника и набор символов; всё остальное живёт здесь в одном экземпляре.
+    //
+    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и
+    // когда --fmad стал настройкой, флаг проставили в nvrtc_engine.cpp, а копии
+    // здесь остались на дефолте NVRTC — карта и фазовый портрет считались
+    // разной арифметикой, и на фрактальной границе траектория уходила в другой
+    // аттрактор (см. nvrtc_fmad_opt).
+    //
+    // Требует выставленного контекста и уже загруженных источников
+    // (load_sources). При успехе out_module загружен, а lowered содержит по
+    // одному имени на каждый вход name_exprs в том же порядке. Символы,
+    // объявленные extern "C", в name_exprs передавать не нужно — их имена не
+    // мангаются и берутся из модуля напрямую.
+    // =========================================================================
+    bool build_module(const std::string& tmpl,
+                      const char* src_name,
+                      const std::vector<std::pair<std::string, std::string>>& subs,
+                      const std::vector<const char*>& name_exprs,
+                      CUmodule& out_module,
+                      std::vector<std::string>& lowered,
+                      std::string& err) {
+        std::string src = tmpl;
+        for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
 
-        if (!load_sources(err)) return false;
-
-        // Подстановка плейсхолдеров в шаблон
-        std::string src = src_template;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен здесь:
-        // inline-stub в template'е + `#define CURAND_KERNEL_H_` блокируют как
+        // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
+        // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
         // реальный header (по -I path), так и любой повторный inject.
         const char* header_sources[] = {
             src_cudaLibrary_cu.c_str(),
@@ -1653,31 +1718,29 @@ struct ParametricEngine::Impl {
         constexpr int n_headers = 4;
 
         nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d.cu",
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
                                             n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram: ") + nvrtcGetErrorString(nr); return false; }
+        if (nr != NVRTC_SUCCESS) {
+            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
+            return false;
+        }
 
         // Регистрируем kernel-имена ДО компиляции, чтобы потом через
         // nvrtcGetLoweredName достать их mangled-варианты для cuModuleGetFunction.
-        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
-        nvrtcAddNameExpression(prog, "peakFinderCUDA");
-        // DFT_custom уже присутствует в этом же модуле (шаблон #include'ит
-        // cudaLibrary.cu целиком) — регистрируем его тоже, чтобы run_dft_1d
-        // мог переиспользовать этот кэш без отдельной компиляции.
-        nvrtcAddNameExpression(prog, "DFT_custom");
+        for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
 
         char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
 
-        // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h и т.п.).
-        // Берём CUDA_PATH из окружения (его проставляет CUDA Toolkit installer).
+        // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h,
+        // curand_kernel.h и т.п.). Берём CUDA_PATH из окружения — его проставляет
+        // CUDA Toolkit installer.
         std::string cuda_include_opt;
         {
             char buf[MAX_PATH];
             DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH) {
+            if (nlen > 0 && nlen < MAX_PATH)
                 cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-            }
         }
         if (cuda_include_opt.empty()) {
             err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
@@ -1687,53 +1750,88 @@ struct ParametricEngine::Impl {
         }
 
         std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
+        const char* opts[] = { arch, std_opt.c_str(), "-default-device",
+                               cuda_include_opt.c_str(), nvrtc_fmad_opt() };
 
-        nr = nvrtcCompileProgram(prog, 4, opts);
+        nr = nvrtcCompileProgram(prog, (int)(sizeof(opts) / sizeof(opts[0])), opts);
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
             if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed:\n" + log;
+            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
             nvrtcDestroyProgram(&prog);
             return false;
         }
 
-        // Mangled-имена для всех kernel'ов. Нужно скопировать в свои строки
-        // ДО nvrtcDestroyProgram — после destroy указатели становятся невалидны.
-        const char* mangled_traj_ptr = nullptr;
-        const char* mangled_peak_ptr = nullptr;
-        const char* mangled_dft_ptr  = nullptr;
-        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA", &mangled_traj_ptr);
-        nvrtcGetLoweredName(prog, "peakFinderCUDA",             &mangled_peak_ptr);
-        nvrtcGetLoweredName(prog, "DFT_custom",                 &mangled_dft_ptr);
-        std::string mangled_traj = mangled_traj_ptr ? mangled_traj_ptr : "calculateDiscreteModelCUDA";
-        std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
-        std::string mangled_dft  = mangled_dft_ptr  ? mangled_dft_ptr  : "DFT_custom";
-
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
         nvrtcGetPTX(prog, &ptx[0]);
+
+        // Mangled-имена копируем в свои строки ДО nvrtcDestroyProgram — после
+        // destroy указатели становятся невалидны.
+        lowered.clear();
+        lowered.reserve(name_exprs.size());
+        for (const char* sym : name_exprs) {
+            const char* lo = nullptr;
+            nvrtcGetLoweredName(prog, sym, &lo);
+            lowered.push_back(lo ? lo : sym);
+        }
         nvrtcDestroyProgram(&prog);
 
-        CUresult r = cuModuleLoadDataEx(&cached.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx: " + cu_err(r); return false; }
+        // Грузим во временную переменную: при неудаче у вызывающего слот кэша
+        // остаётся нетронутым, и release_*_module() не получит мусорный handle.
+        CUmodule mod = nullptr;
+        CUresult r = cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) {
+            err = std::string("cuModuleLoadDataEx(") + src_name + "): " + cu_err(r);
+            return false;
+        }
+        out_module = mod;
+        return true;
+    }
 
-        r = cuModuleGetFunction(&cached.kernel_traj, cached.module, mangled_traj.c_str());
+    // Достаёт функцию из загруженного модуля. Отдельная обёртка — чтобы у
+    // вызывающих не размножалось одинаковое сообщение об ошибке.
+    bool module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) {
+        CUresult r = cuModuleGetFunction(&out, mod, name.c_str());
         if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_traj + "): " + cu_err(r);
-            release_module(); return false;
+            err = "cuModuleGetFunction(" + name + "): " + cu_err(r);
+            return false;
         }
-        r = cuModuleGetFunction(&cached.kernel_peak, cached.module, mangled_peak.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
-            release_module(); return false;
-        }
-        r = cuModuleGetFunction(&cached.kernel_dft, cached.module, mangled_dft.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_dft + "): " + cu_err(r);
-            release_module(); return false;
-        }
+        return true;
+    }
+
+    bool compile_if_needed(const std::string& krs_body, int amountOfX,
+                           int par_or_var, std::string& err) {
+        // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
+        // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
+        // выставляем наш перед NVRTC/CU-вызовами.
+        cuCtxSetCurrent(context);
+        // par_or_var в kernel'е cudaLibrary.cu — compile-time макрос. Поэтому
+        // включаем его в hash-key: param-sweep и IC-sweep кешируются отдельно.
+        std::string key = hash_key(krs_body, amountOfX) + ":pov" + std::to_string(par_or_var);
+        if (cached.module && cached.key == key) return true;  // cache hit
+        release_module();
+
+        if (!load_sources(err)) return false;
+
+        // DFT_custom уже присутствует в этом же модуле (шаблон #include'ит
+        // cudaLibrary.cu целиком) — регистрируем его тоже, чтобы run_dft_1d
+        // мог переиспользовать этот кэш без отдельной компиляции.
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template, "bifurcation1d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom" },
+                          mod, mg, err))
+            return false;
+
+        cached.module = mod;
+        if (!module_fn(mod, mg[0], cached.kernel_traj, err)) { release_module(); return false; }
+        if (!module_fn(mod, mg[1], cached.kernel_peak, err)) { release_module(); return false; }
+        if (!module_fn(mod, mg[2], cached.kernel_dft,  err)) { release_module(); return false; }
 
         cached.key = key;
         return true;
@@ -1888,10 +1986,8 @@ struct ParametricEngine::Impl {
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
         // --- Memory budget (порт строк 202-244 NL) ---
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.92);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t memPerSystem =
             3 * (size_t)amountOfPointsInBlock * sizeof(numb) +  // d_data, d_outPeaks, d_timeOfPeaks
@@ -2002,6 +2098,7 @@ struct ParametricEngine::Impl {
         res.snapshot.tMax          = tMax;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.preScaller    = preScaller;
         res.snapshot.writableVar   = writableVar;
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
@@ -2194,79 +2291,18 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_lle;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "lle1d.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(lle): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "LLEKernelCUDA");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH) {
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-            }
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_lle, "lle1d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "LLEKernelCUDA" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (lle):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* mangled_lle_ptr = nullptr;
-        nvrtcGetLoweredName(prog, "LLEKernelCUDA", &mangled_lle_ptr);
-        std::string mangled_lle = mangled_lle_ptr ? mangled_lle_ptr : "LLEKernelCUDA";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_lle.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(lle): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_lle.kernel_lle, cached_lle.module, mangled_lle.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_lle + "): " + cu_err(r);
-            release_lle_module(); return false;
-        }
+        cached_lle.module = mod;
+        if (!module_fn(mod, mg[0], cached_lle.kernel_lle, err)) { release_lle_module(); return false; }
 
         cached_lle.key = key;
         return true;
@@ -2366,10 +2402,8 @@ struct ParametricEngine::Impl {
             return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
 
         // Memory budget — мирор NonLinAnal LLE1D:2291-2299 (консервативно).
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.5);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.5, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
@@ -2436,6 +2470,7 @@ struct ParametricEngine::Impl {
         res.snapshot.NT            = NT;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.eps           = eps;
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
@@ -2583,79 +2618,18 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_lle_2d;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "lle2d.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(lle2d): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "LLEKernelCUDA");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH) {
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-            }
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_lle_2d, "lle2d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "LLEKernelCUDA" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (lle2d):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* mangled_ptr = nullptr;
-        nvrtcGetLoweredName(prog, "LLEKernelCUDA", &mangled_ptr);
-        std::string mangled = mangled_ptr ? mangled_ptr : "LLEKernelCUDA";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_lle_2d.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(lle2d): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_lle_2d.kernel_lle, cached_lle_2d.module, mangled.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled + "): " + cu_err(r);
-            release_lle_2d_module(); return false;
-        }
+        cached_lle_2d.module = mod;
+        if (!module_fn(mod, mg[0], cached_lle_2d.kernel_lle, err)) { release_lle_2d_module(); return false; }
 
         cached_lle_2d.key = key;
         return true;
@@ -2827,10 +2801,8 @@ struct ParametricEngine::Impl {
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
         // Memory budget — мирор NonLinAnal LLE2D (hostLibrary.cu:2535-2547).
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.5);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.5, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
         if (nPtsLimiter == 0)                  nPtsLimiter = (size_t)blockSize_setup;
@@ -2911,6 +2883,7 @@ struct ParametricEngine::Impl {
         res.snapshot.NT            = NT;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.eps           = eps;
         res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
                                                            : req.param_index;
@@ -3068,79 +3041,18 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_ls;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "ls1d.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(ls): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "LSKernelCUDA");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH) {
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-            }
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_ls, "ls1d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "LSKernelCUDA" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (ls):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* mangled_ptr = nullptr;
-        nvrtcGetLoweredName(prog, "LSKernelCUDA", &mangled_ptr);
-        std::string mangled = mangled_ptr ? mangled_ptr : "LSKernelCUDA";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_ls.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(ls): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_ls.kernel_ls, cached_ls.module, mangled.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled + "): " + cu_err(r);
-            release_ls_module(); return false;
-        }
+        cached_ls.module = mod;
+        if (!module_fn(mod, mg[0], cached_ls.kernel_ls, err)) { release_ls_module(); return false; }
 
         cached_ls.key = key;
         return true;
@@ -3235,10 +3147,8 @@ struct ParametricEngine::Impl {
 
         // Memory budget — мирор NonLinAnal LS1D:2719-2727 (агрессивно делит /16,
         // т.к. per-system memory ~ N).
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory /= 16;
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(1.0 / 16.0, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)amountOfInitialConditions;
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
@@ -3308,6 +3218,7 @@ struct ParametricEngine::Impl {
         res.snapshot.NT            = NT;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.eps           = eps;
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
@@ -3436,79 +3347,18 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_ls_2d;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "ls2d.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(ls2d): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "LSKernelCUDA");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH) {
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-            }
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан (нужен для curand_kernel.h)";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_ls_2d, "ls2d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "LSKernelCUDA" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (ls2d):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* mangled_ptr = nullptr;
-        nvrtcGetLoweredName(prog, "LSKernelCUDA", &mangled_ptr);
-        std::string mangled = mangled_ptr ? mangled_ptr : "LSKernelCUDA";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_ls_2d.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(ls2d): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_ls_2d.kernel_ls, cached_ls_2d.module, mangled.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled + "): " + cu_err(r);
-            release_ls_2d_module(); return false;
-        }
+        cached_ls_2d.module = mod;
+        if (!module_fn(mod, mg[0], cached_ls_2d.kernel_ls, err)) { release_ls_2d_module(); return false; }
 
         cached_ls_2d.key = key;
         return true;
@@ -3660,10 +3510,8 @@ struct ParametricEngine::Impl {
 
         // Memory budget — мирор run_ls_1d (агрессивно делит /16, т.к. per-system
         // память ~N). total_cells заменяет nPts.
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory /= 16;
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(1.0 / 16.0, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)N;
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
@@ -3742,6 +3590,7 @@ struct ParametricEngine::Impl {
         res.snapshot.NT            = NT;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.eps           = eps;
         res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
                                                            : req.param_index;
@@ -3893,90 +3742,25 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_cont;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu", "cudaLibrary.cuh", "cudaMacros.cuh", "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation1d_cont.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(cont): ") + nvrtcGetErrorString(nr); return false; }
-
-        // bifurcation1dContinuationKernel — extern "C" (имя не мангается).
-        // peakFinderCUDA — обычный C++ символ, регистрируем для mangled-имени.
-        nvrtcAddNameExpression(prog, "peakFinderCUDA");
+        // bifurcation1dContinuationKernel — extern "C" (имя не мангается),
+        // поэтому в name_exprs не идёт и берётся из модуля напрямую.
+        // peakFinderCUDA — обычный C++ символ, нужен mangled-вариант.
         // DFT_custom — тоже обычный C++ символ, уже в этом модуле (шаблон
         // #include'ит cudaLibrary.cu целиком); нужен run_dft_1d continuation-ветке.
-        nvrtcAddNameExpression(prog, "DFT_custom");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан";
-            nvrtcDestroyProgram(&prog); return false;
-        }
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (cont):\n" + log;
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_cont, "bifurcation1d_cont.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body } },
+                          { "peakFinderCUDA", "DFT_custom" },
+                          mod, mg, err))
             return false;
-        }
 
-        const char* mangled_peak_ptr = nullptr;
-        const char* mangled_dft_ptr  = nullptr;
-        nvrtcGetLoweredName(prog, "peakFinderCUDA", &mangled_peak_ptr);
-        nvrtcGetLoweredName(prog, "DFT_custom",     &mangled_dft_ptr);
-        std::string mangled_peak = mangled_peak_ptr ? mangled_peak_ptr : "peakFinderCUDA";
-        std::string mangled_dft  = mangled_dft_ptr  ? mangled_dft_ptr  : "DFT_custom";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_cont.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(cont): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_cont.kernel_cont, cached_cont.module,
-                                "bifurcation1dContinuationKernel");
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(bifurcation1dContinuationKernel): " + cu_err(r);
-            release_cont_module(); return false;
-        }
-        r = cuModuleGetFunction(&cached_cont.kernel_peak, cached_cont.module, mangled_peak.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r);
-            release_cont_module(); return false;
-        }
-        r = cuModuleGetFunction(&cached_cont.kernel_dft, cached_cont.module, mangled_dft.c_str());
-        if (r != CUDA_SUCCESS) {
-            err = "cuModuleGetFunction(" + mangled_dft + "): " + cu_err(r);
-            release_cont_module(); return false;
-        }
+        cached_cont.module = mod;
+        if (!module_fn(mod, "bifurcation1dContinuationKernel", cached_cont.kernel_cont, err))
+            { release_cont_module(); return false; }
+        if (!module_fn(mod, mg[0], cached_cont.kernel_peak, err)) { release_cont_module(); return false; }
+        if (!module_fn(mod, mg[1], cached_cont.kernel_dft,  err)) { release_cont_module(); return false; }
 
         cached_cont.key = key;
         return true;
@@ -4002,67 +3786,17 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = tmpl;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu", "cudaLibrary.cuh", "cudaMacros.cuh", "configCUDA.h",
-        };
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
-                                            4, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) {
-            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
+        if (!build_module(tmpl, src_name,
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body } },
+                          {},
+                          mod, mg, err))
             return false;
-        }
 
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан";
-            nvrtcDestroyProgram(&prog); return false;
-        }
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&slot.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) {
-            err = std::string("cuModuleLoadDataEx(") + src_name + "): " + cu_err(r);
-            return false;
-        }
-        r = cuModuleGetFunction(&slot.kernel, slot.module, kernel_name);
-        if (r != CUDA_SUCCESS) {
-            err = std::string("cuModuleGetFunction(") + kernel_name + "): " + cu_err(r);
+        slot.module = mod;
+        if (!module_fn(mod, kernel_name, slot.kernel, err)) {
             release_simple_cont_module(slot); return false;
         }
         slot.key = key;
@@ -4417,10 +4151,8 @@ struct ParametricEngine::Impl {
         // --- Memory budget: как в run_dft1d_classical, но на систему берётся
         // worst-case длина блока. d_window тут нет вовсе — окно ядро считает
         // на лету, его длина у каждой точки своя.
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.92);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
         const size_t memPerSystem =
             (size_t)maxPointsInBlock * sizeof(numb) +   // d_data
@@ -4507,6 +4239,7 @@ struct ParametricEngine::Impl {
         res.snapshot.tMax          = req.t_max;
         res.snapshot.transientTime = req.transient_time;
         res.snapshot.h             = req.h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.preScaller    = req.pre_scaller;
         res.snapshot.writableVar   = req.writable_var;
         res.snapshot.indexOfMutVar = -1;
@@ -4975,10 +4708,8 @@ struct ParametricEngine::Impl {
         // timeOfPeaks (nPtsLimiter*amountOfPointsInBlock каждый) — n_freq
         // почти всегда << amountOfPointsInBlock. d_window — константа,
         // не масштабируется с nPtsLimiter.
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.92);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t memPerSystem =
             (size_t)amountOfPointsInBlock * sizeof(numb) +      // d_data
@@ -5087,6 +4818,7 @@ struct ParametricEngine::Impl {
         res.snapshot.tMax          = tMax;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.preScaller    = preScaller;
         res.snapshot.writableVar   = writableVar;
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
@@ -5449,6 +5181,7 @@ struct ParametricEngine::Impl {
             res.snapshot.tMax          = req.t_max;
             res.snapshot.transientTime = req.transient_time;
             res.snapshot.h             = req.h;
+            res.snapshot.gpu_fmad      = get_nvrtc_fmad();
             res.snapshot.preScaller    = req.pre_scaller;
             res.snapshot.writableVar   = req.writable_var;
             res.snapshot.indexOfMutVar = req.param_index;
@@ -5493,84 +5226,20 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_bif2d;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-        src = replace_all(src, "{{PAR_OR_VAR}}",  std::to_string(par_or_var));
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "bifurcation2d.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(bif2d): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
-        nvrtcAddNameExpression(prog, "peakFinderCUDA");
-        nvrtcAddNameExpression(prog, "dbscanCUDA");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "переменная окружения CUDA_PATH не задана";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_bif2d, "bifurcation2d.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body },
+                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "dbscanCUDA" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile(bif2d) failed:\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* mp_traj = nullptr, *mp_peak = nullptr, *mp_dbscan = nullptr;
-        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA", &mp_traj);
-        nvrtcGetLoweredName(prog, "peakFinderCUDA",             &mp_peak);
-        nvrtcGetLoweredName(prog, "dbscanCUDA",                 &mp_dbscan);
-        std::string mangled_traj   = mp_traj   ? mp_traj   : "calculateDiscreteModelCUDA";
-        std::string mangled_peak   = mp_peak   ? mp_peak   : "peakFinderCUDA";
-        std::string mangled_dbscan = mp_dbscan ? mp_dbscan : "dbscanCUDA";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_bif2d.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(bif2d): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_bif2d.kernel_traj,   cached_bif2d.module, mangled_traj.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_traj + "): " + cu_err(r); release_bif2d_module(); return false; }
-        r = cuModuleGetFunction(&cached_bif2d.kernel_peak,   cached_bif2d.module, mangled_peak.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_peak + "): " + cu_err(r); release_bif2d_module(); return false; }
-        r = cuModuleGetFunction(&cached_bif2d.kernel_dbscan, cached_bif2d.module, mangled_dbscan.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mangled_dbscan + "): " + cu_err(r); release_bif2d_module(); return false; }
+        cached_bif2d.module = mod;
+        if (!module_fn(mod, mg[0], cached_bif2d.kernel_traj,   err)) { release_bif2d_module(); return false; }
+        if (!module_fn(mod, mg[1], cached_bif2d.kernel_peak,   err)) { release_bif2d_module(); return false; }
+        if (!module_fn(mod, mg[2], cached_bif2d.kernel_dbscan, err)) { release_bif2d_module(); return false; }
 
         cached_bif2d.key = key;
         return true;
@@ -5710,6 +5379,9 @@ struct ParametricEngine::Impl {
         const int    amountOfValues             = (int)req.base_values.size();
         const int    preScaller                 = req.pre_scaller;
         const double eps_dbscan                 = req.eps_dbscan;
+        // Множители осей DBSCAN (пик / межпиковый интервал) — per-diagram.
+        const double mult_peak_arg              = req.mult_peak;
+        const double mult_interval_arg          = req.mult_interval;
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
         constexpr int  blockSize_setup          = 32;
@@ -5727,9 +5399,8 @@ struct ParametricEngine::Impl {
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
         // Memory budget — порт hostLibrary.cu:930-950.
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.92);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * 3 * sizeof(numb) + 2 * sizeof(int);
         size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
@@ -5840,8 +5511,11 @@ struct ParametricEngine::Impl {
         res.snapshot.tMax          = tMax;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.preScaller    = preScaller;
         res.snapshot.eps_dbscan    = eps_dbscan;
+        res.snapshot.mult_peak     = mult_peak_arg;
+        res.snapshot.mult_interval = mult_interval_arg;
         res.snapshot.writableVar   = writableVar;
         res.snapshot.indexOfMutVar  = req.sweep_over_var   ? req.var_sweep_index
                                                            : req.param_index;
@@ -5940,7 +5614,11 @@ struct ParametricEngine::Impl {
                            "cuLaunchKernel(bif2d peak)");
 
             // 3. dbscanCUDA — same stream, ordered after peak.
-            numb eps_arg = eps_dbscan;
+            // Множители осей признаков передаём явно: при запуске через driver
+            // API дефолты из объявления не подставляются (см. cudaLibrary.cuh).
+            numb eps_arg      = eps_dbscan;
+            numb mult_pk_arg  = mult_peak_arg;
+            numb mult_int_arg = mult_interval_arg;
             void* args_dbscan[] = {
                 &d_data,
                 &sizeOfBlock_s,
@@ -5949,7 +5627,9 @@ struct ParametricEngine::Impl {
                 &d_intervals,
                 &d_helpfulArray,
                 &eps_arg,
-                &d_dbscanResult
+                &d_dbscanResult,
+                &mult_pk_arg,
+                &mult_int_arg
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5995,11 +5675,21 @@ struct ParametricEngine::Impl {
             }
         }
 
-        // Авто-нормализация colormap.
+        // Авто-нормализация colormap. Верх шкалы — по осцилляционным ячейкам
+        // (там значение = период), а низ опускаем до кода режима, если такие
+        // ячейки на карте есть: -1 (fixed point) и 0 (unbound) — это не
+        // "период -1/0", а отдельные состояния, и в res.values они лежат
+        // как есть. Раньше в шкалу шли только осцилляции, поэтому vmin был
+        // >= 1, и оба режима прижимались к самому дну — неотличимо от
+        // периода 1.
         double vmin =  std::numeric_limits<double>::infinity();
         double vmax = -std::numeric_limits<double>::infinity();
+        bool has_fp = false, has_unbound = false;
         for (size_t k = 0; k < total_cells; ++k) {
-            if (!regime_is_oscillation(res.flags[k])) continue;   // FP и unbound вне шкалы
+            const int f = res.flags[k];
+            if (f == REGIME_FIXED_POINT) { has_fp      = true; continue; }
+            if (f == REGIME_UNBOUND)     { has_unbound = true; continue; }
+            if (!regime_is_oscillation(f)) continue;
             double v = res.values[k];
             if (!std::isfinite(v)) continue;
             if (v < vmin) vmin = v;
@@ -6007,6 +5697,10 @@ struct ParametricEngine::Impl {
         }
         res.min_val = std::isfinite(vmin) ? vmin : 0.0;
         res.max_val = std::isfinite(vmax) ? vmax : 0.0;
+        // Приоритет у fixed point: он ниже unbound, и одной нижней границы
+        // хватает на оба режима сразу.
+        if      (has_fp)      res.min_val = -1.0;
+        else if (has_unbound) res.min_val =  0.0;
 
         cleanup();
         #undef BIF2D_CHECK
@@ -6031,94 +5725,25 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        std::string src = src_template_basins;
-        src = replace_all(src, "{{AMOUNT_OF_X}}", std::to_string(amountOfX));
-        src = replace_all(src, "{{KRS_BODY}}",    krs_body);
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "basins.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) { err = std::string("nvrtcCreateProgram(basins): ") + nvrtcGetErrorString(nr); return false; }
-
-        nvrtcAddNameExpression(prog, "calculateDiscreteModelCUDA");
-        nvrtcAddNameExpression(prog, "avgPeakFinderCUDA");
-        nvrtcAddNameExpression(prog, "CUDA_dbscan_kernel");
-        nvrtcAddNameExpression(prog, "CUDA_dbscan_search_fixed_points_kernel");
-        nvrtcAddNameExpression(prog, "CUDA_dbscan_search_clear_points_kernel");
-
-        char arch[64];
-        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "CUDA_PATH не задан";
-            nvrtcDestroyProgram(&prog);
+        CUmodule mod = nullptr;
+        std::vector<std::string> mg;
+        if (!build_module(src_template_basins, "basins.cu",
+                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                            { "{{KRS_BODY}}",    krs_body } },
+                          { "calculateDiscreteModelCUDA",
+                            "avgPeakFinderCUDA",
+                            "CUDA_dbscan_kernel",
+                            "CUDA_dbscan_search_fixed_points_kernel",
+                            "CUDA_dbscan_search_clear_points_kernel" },
+                          mod, mg, err))
             return false;
-        }
 
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (basins):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        const char* m_traj = nullptr, *m_avg = nullptr, *m_db = nullptr, *m_fix = nullptr, *m_clr = nullptr;
-        nvrtcGetLoweredName(prog, "calculateDiscreteModelCUDA",               &m_traj);
-        nvrtcGetLoweredName(prog, "avgPeakFinderCUDA",                        &m_avg);
-        nvrtcGetLoweredName(prog, "CUDA_dbscan_kernel",                       &m_db);
-        nvrtcGetLoweredName(prog, "CUDA_dbscan_search_fixed_points_kernel",   &m_fix);
-        nvrtcGetLoweredName(prog, "CUDA_dbscan_search_clear_points_kernel",   &m_clr);
-        std::string mt = m_traj ? m_traj : "calculateDiscreteModelCUDA";
-        std::string ma = m_avg  ? m_avg  : "avgPeakFinderCUDA";
-        std::string md = m_db   ? m_db   : "CUDA_dbscan_kernel";
-        std::string mf = m_fix  ? m_fix  : "CUDA_dbscan_search_fixed_points_kernel";
-        std::string mc = m_clr  ? m_clr  : "CUDA_dbscan_search_clear_points_kernel";
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-        nvrtcDestroyProgram(&prog);
-
-        CUresult r = cuModuleLoadDataEx(&cached_basins.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(basins): " + cu_err(r); return false; }
-
-        r = cuModuleGetFunction(&cached_basins.kernel_traj,         cached_basins.module, mt.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mt + "): " + cu_err(r); release_basins_module(); return false; }
-        r = cuModuleGetFunction(&cached_basins.kernel_avg_peak,     cached_basins.module, ma.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + ma + "): " + cu_err(r); release_basins_module(); return false; }
-        r = cuModuleGetFunction(&cached_basins.kernel_dbscan,       cached_basins.module, md.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + md + "): " + cu_err(r); release_basins_module(); return false; }
-        r = cuModuleGetFunction(&cached_basins.kernel_search_fixed, cached_basins.module, mf.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mf + "): " + cu_err(r); release_basins_module(); return false; }
-        r = cuModuleGetFunction(&cached_basins.kernel_search_clear, cached_basins.module, mc.c_str());
-        if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + mc + "): " + cu_err(r); release_basins_module(); return false; }
+        cached_basins.module = mod;
+        if (!module_fn(mod, mg[0], cached_basins.kernel_traj,         err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[1], cached_basins.kernel_avg_peak,     err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[2], cached_basins.kernel_dbscan,       err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[3], cached_basins.kernel_search_fixed, err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[4], cached_basins.kernel_search_clear, err)) { release_basins_module(); return false; }
 
         cached_basins.key = key;
         return true;
@@ -6188,10 +5813,8 @@ struct ParametricEngine::Impl {
 
         // Memory budget — мирор hostLibrary.cu:3269. Per-cell траектория-buffer:
         // 2 * amountOfPointsInBlock * sizeof(numb) (d_data + d_intervals).
-        size_t freeMemory = 0, totalMemory = 0;
-        if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess)
-            return fail("cudaMemGetInfo failed");
-        freeMemory = (size_t)((double)freeMemory * 0.9);
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t perCellBytes = 2 * sizeof(numb) * (size_t)amountOfPointsInBlock;
         if (perCellBytes == 0) perCellBytes = sizeof(numb);
@@ -6286,6 +5909,7 @@ struct ParametricEngine::Impl {
         res.snapshot.tMax          = tMax;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
+        res.snapshot.gpu_fmad      = get_nvrtc_fmad();
         res.snapshot.preScaller    = preScaller;
         res.snapshot.eps_dbscan    = eps_dbscan;
         res.snapshot.writableVar   = req.writable_var;
@@ -6845,81 +6469,26 @@ struct ParametricEngine::Impl {
         }
         if (!load_sources(err)) return false;
 
-        std::string src = src_template;
-        src = replace_all(src, "{{AMOUNT_OF_X}}",    std::to_string(amountOfX));
-        src = replace_all(src, "{{TYPE_OF_SYNCH}}", std::to_string(type_of_synch_v));
-        src = replace_all(src, "{{ERROR_ESTIM}}",    std::to_string(error_estim_v));
-        src = replace_all(src, "{{FS_ERROR_TRS}}",   std::string(trs_buf));
-        src = replace_all(src, "{{KRS_BODY}}",       krs_body);
-
-        const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
-        };
-        const char* header_names[] = {
-            "cudaLibrary.cu",
-            "cudaLibrary.cuh",
-            "cudaMacros.cuh",
-            "configCUDA.h",
-        };
-        constexpr int n_headers = 4;
-
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), "fastsync.cu",
-                                            n_headers, header_sources, header_names);
-        if (nr != NVRTC_SUCCESS) {
-            err = std::string("nvrtcCreateProgram(fastsync): ") + nvrtcGetErrorString(nr);
-            return false;
-        }
-        for (const char* sym : expr_kernels) nvrtcAddNameExpression(prog, sym);
-
-        char arch[64];
-        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) { err = "CUDA_PATH не задан"; nvrtcDestroyProgram(&prog); return false; }
-        std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device", cuda_include_opt.c_str() };
-        nr = nvrtcCompileProgram(prog, 4, opts);
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = "NVRTC compile failed (fastsync):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        std::string ptx(ptxsz, '\0');
-        nvrtcGetPTX(prog, &ptx[0]);
-
-        // Lowered names — берём ДО уничтожения program'ы.
+        CUmodule mod = nullptr;
         std::vector<std::string> lowered;
-        lowered.reserve(expr_kernels.size());
-        for (const char* sym : expr_kernels) {
-            const char* lo = nullptr;
-            nvrtcGetLoweredName(prog, sym, &lo);
-            lowered.push_back(lo ? lo : sym);
-        }
-        nvrtcDestroyProgram(&prog);
+        if (!build_module(src_template, "fastsync.cu",
+                          { { "{{AMOUNT_OF_X}}",   std::to_string(amountOfX) },
+                            { "{{TYPE_OF_SYNCH}}", std::to_string(type_of_synch_v) },
+                            { "{{ERROR_ESTIM}}",   std::to_string(error_estim_v) },
+                            { "{{FS_ERROR_TRS}}",  std::string(trs_buf) },
+                            { "{{KRS_BODY}}",      krs_body } },
+                          expr_kernels,
+                          mod, lowered, err))
+            return false;
 
-        CUresult r = cuModuleLoadDataEx(&slot.module, ptx.c_str(), 0, nullptr, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuModuleLoadDataEx(fastsync): " + cu_err(r); return false; }
+        slot.module = mod;
 
         // Связываем по expr_kernels индексу.
         for (size_t i = 0; i < expr_kernels.size(); ++i) {
-            const std::string& sym_raw = lowered[i];
             CUfunction f = nullptr;
-            r = cuModuleGetFunction(&f, slot.module, sym_raw.c_str());
-            if (r != CUDA_SUCCESS) { err = "cuModuleGetFunction(" + sym_raw + "): " + cu_err(r); release_fs_attr_module(); release_fs_grid_module(); return false; }
+            if (!module_fn(mod, lowered[i], f, err)) {
+                release_fs_attr_module(); release_fs_grid_module(); return false;
+            }
             const std::string sym_name = expr_kernels[i];
             if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
             else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
@@ -6957,6 +6526,7 @@ struct ParametricEngine::Impl {
         res.snapshot.k_forward      = req.k_forward;
         res.snapshot.k_backward     = req.k_backward;
         res.snapshot.h              = req.h;
+        res.snapshot.gpu_fmad       = get_nvrtc_fmad();
         res.snapshot.iter_of_synchr = req.iter_of_synchr;
         res.snapshot.preScaller     = req.pre_scaller;
         res.snapshot.window         = (double)req.window;
@@ -7182,9 +6752,8 @@ struct ParametricEngine::Impl {
             int amountOfValues_int = (int)req.values.size();
 
             // Memory budget — per-cell trajectory buffer = sizeOfBlock * amountOfX * sizeof(numb).
-            size_t freeMemory = 0, totalMemory = 0;
-            if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return fail("cudaMemGetInfo failed");
-            freeMemory = (size_t)((double)freeMemory * 0.5);
+            size_t freeMemory = 0;
+            if (!gpu_free_budget(0.5, freeMemory)) return fail("cudaMemGetInfo failed");
             size_t perCellBytes = (size_t)amountOfPointsInBlock * (size_t)amountOfIC_int * sizeof(numb);
             if (perCellBytes == 0) perCellBytes = sizeof(numb);
             size_t nPtsLimiter = freeMemory / perCellBytes;

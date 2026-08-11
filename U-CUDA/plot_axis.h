@@ -3,8 +3,8 @@
 #include <string>
 #include <functional>
 
-// AxisInfo - ��������� ����� ���.
-// �������� ������ Plot2DView, ��������� � render-������� �� ������.
+// AxisInfo - состояние одной оси.
+// Живёт внутри Plot2DView, в render-функции передаётся по ссылке.
 struct AxisInfo {
     std::string name;
     double view_min = 0;
@@ -12,33 +12,41 @@ struct AxisInfo {
     bool   lock = false;
     bool   invert = false;
     // Sweep-сетка по этой оси log-распределена (см. BifurcationDiagramConfig::
-    // log_scale и др.). Нет полноценной лог-оси (тики/данные остаются на
-    // линейном пиксельном маппинге) -- draw_axis_*_grid вместо серии
-    // "красивых" линейных тиков рисует только границы диапазона (lo/hi),
-    // чтобы не подписывать несуществующие линейные промежуточные значения.
+    // log_scale и др.).
+    //
+    // Для оси X Plot2DView делает НАСТОЯЩЕЕ логарифмическое отображение: на
+    // экран (VBO, MVP, курсор, крест) уходит log10(x), наружу всё остаётся
+    // мировым. Логарифм не аффинен, поэтому в make_ortho_mvp он не помещается
+    // — перенесена сама координата, см. XS/XW в Plot2DView::render.
+    // Активен только при положительных границах вида: чекбокс можно включить
+    // до Run, и log10(<=0) отравил бы NaN'ом весь кадр.
+    //
+    // draw_axis_*_grid при этом по-прежнему рисует только границы диапазона
+    // (lo/hi), без промежуточных отметок — решение по оформлению.
+    // У оси Y лог-отображения нет: сетка по Y логарифмической не бывает.
     bool   log_scale = false;
 };
 
-// ����������� ������� ��� (� ������ invert).
+// Эффективные границы оси (с учётом invert).
 inline void axis_effective(const AxisInfo& a, double& emin, double& emax) {
     if (a.invert) { emin = a.view_max; emax = a.view_min; }
     else { emin = a.view_min; emax = a.view_max; }
 }
 
-// "��������" ��� ����� (1, 2 ��� 5 * 10^n) ��� ~target_count �����.
+// «Красивый» шаг тиков (1, 2 или 5 * 10^n) под ~target_count делений.
 double nice_step(double range, int target_count);
 
-// �������������� ����� ����� (� �������-����������).
+// Форматирует подпись тика (с текущей точностью).
 std::string fmt_tick(double v);
 
-// ������ ���. ����� ������ ��� fmt_tick (���������� ����� � `%g`).
-// Clamp'�� � [2, 10]. �������� ��� ������ Settings � ��� ��������.
+// Точность тиков: число значащих цифр для fmt_tick (форматирует через %g).
+// Clamp'ится в [2, 10]. Дёргается при смене настройки в Settings.
 void set_tick_precision(int n);
 
-// MVP-������� 2D-���������� (column-major, GL).
+// MVP-матрица 2D-ортопроекции (column-major, GL).
 void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float out[16]);
 
-// ��������� ����� � �������� �� X (������������ ����� + ����� �����).
+// Рисует сетку и подписи по X (вертикальные линии + текст снизу).
 // Опциональный snap-to-node: если snap_n > 1 и snap_hi > snap_lo, шаг тиков
 // округляется к целому кратному step_node = (snap_hi - snap_lo)/(snap_n - 1),
 // стартовая позиция — тоже кратна этому шагу. Значит тики попадают ровно на
@@ -49,7 +57,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImU32 col_grid, ImU32 col_text,
     double snap_lo = 0.0, double snap_hi = 0.0, int snap_n = 0);
 
-// ��������� ����� � �������� �� Y (�������������� ����� + ����� �����).
+// Рисует сетку и подписи по Y (горизонтальные линии + текст слева).
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     ImVec2 plot_pos, float plot_w, float plot_h,
     ImU32 col_grid, ImU32 col_text);

@@ -289,6 +289,16 @@ public:
     // Перезаписывает буферы выше текущими значениями `peak`.
     void sync_peak_text();
 
+    // Непустая строка = последняя загрузка сохранённой сессии не прошла
+    // (битый / обрезанный _last_*.json). Показывается в шапке и держится до
+    // следующей успешной загрузки. Пишет apply_session_json в gui.cpp.
+    std::string session_load_warning;
+
+    // FMA-контракция во всех NVRTC-сборках. Зеркалит AppConfig::nvrtc_fmad;
+    // Settings после правки пушит значение в set_nvrtc_fmad(), которое меняет
+    // ключи кэшей модулей в обоих движках (см. parametric_engine.h).
+    bool nvrtc_fmad = true;
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 

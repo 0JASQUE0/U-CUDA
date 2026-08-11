@@ -293,6 +293,40 @@ void HeatmapView::render(PlotRenderer& renderer,
     double vis_param_lo_x = param_lo_x - step_x * 0.5;
     double vis_param_lo_y = param_lo_y - step_y * 0.5;
 
+    // Значение узла k по оси. При лог-сетке узлы движка лежат на
+    // 10^(l0 + k*(l1-l0)/(n-1)) (getValueByIdx_log), а НЕ на param_lo + k*step.
+    // Индекс пикселя ix от этого не зависит — ячейки на экране равномерны в
+    // обоих режимах, — а обратный перевод индекса в значение зависит.
+    // Guard >0: live-чекбокс лога мог быть включён до Run с неположительной
+    // границей, log10(0) = -inf дал бы NaN; там деградируем на линейный узел.
+    //
+    // Раньше формула стояла ТОЛЬКО в hover-tooltip, а crosshair-drag и
+    // drill-down собирали значение линейно. Поэтому подсказка показывала
+    // верное значение, а в параметры фазовых портретов и признаков уходило
+    // линейное: на оси 0.1..14 вместо 1.67222 записывалось 8.023.
+    // Обратное к node_value: положение мирового значения в ВИЗУАЛЬНОМ домене.
+    // Ячейки карты выкладываются равномерно по индексу узла, поэтому при
+    // лог-сетке значение сначала переводится в дробный индекс, а уже он — в
+    // линейную vis-координату. Без этого оверлеи (крест) ставились по прямому
+    // линейному маппингу и уезжали относительно своей же ячейки: на оси
+    // 0.1..14 значение 1.09868 попадало в 7% высоты вместо ~50%.
+    // Не-лог путь — тождество, поэтому линейные карты не меняются.
+    auto vis_pos = [](double v, int n, double lo, double hi, bool log_scale, double step) {
+        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && v > 0.0) {
+            const double l0 = std::log10(lo), l1 = std::log10(hi);
+            const double kf = (std::log10(v) - l0) / ((l1 - l0) / (double)(n - 1));
+            return lo + kf * step;
+        }
+        return v;
+    };
+
+    auto node_value = [](int k, int n, double lo, double hi, bool log_scale, double step) {
+        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1)
+            return std::pow(10.0, std::log10(lo)
+                   + (double)k * (std::log10(hi) - std::log10(lo)) / (double)(n - 1));
+        return lo + (double)k * step;
+    };
+
     // Эффективные визуальные границы с учётом AxisInfo::invert. evis_x0 —
     // значение у ЛЕВОГО края плота, evis_x1 — у правого; evis_y0 — у НИЖНЕГО,
     // evis_y1 — у верхнего. При invert границы меняются местами, span
@@ -542,8 +576,8 @@ void HeatmapView::render(PlotRenderer& renderer,
             int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
             int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-                double snap_x = param_lo_x + (double)ix * step_x;
-                double snap_y = param_lo_y + (double)iy * step_y;
+                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
+                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
                 on_left_drag(ix, iy, snap_x, snap_y);
             }
             // Consume any accumulated LMB drag delta so the pan branch below
@@ -820,18 +854,22 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImU32 col_halo = IM_COL32(0, 0, 0, 220);
         double range_x = evis_x1 - evis_x0;
         double range_y = evis_y1 - evis_y0;
-        if (std::isfinite(crosshair_x) && std::abs(range_x) > 1e-30
-            && crosshair_x >= std::min(evis_x0, evis_x1)
-            && crosshair_x <= std::max(evis_x0, evis_x1)) {
-            float px = img_pos.x + (float)((crosshair_x - evis_x0) / range_x) * plot_w;
+        // Мировое значение → vis-домен (при лог-сетке через дробный индекс),
+        // иначе крест уедет относительно ячейки, в которую он показывает.
+        const double cx_vis = vis_pos(crosshair_x, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
+        const double cy_vis = vis_pos(crosshair_y, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
+        if (std::isfinite(cx_vis) && std::abs(range_x) > 1e-30
+            && cx_vis >= std::min(evis_x0, evis_x1)
+            && cx_vis <= std::max(evis_x0, evis_x1)) {
+            float px = img_pos.x + (float)((cx_vis - evis_x0) / range_x) * plot_w;
             ImVec2 a(px, img_pos.y), b(px, img_pos.y + plot_h);
             dl->AddLine(a, b, col_halo, 3.0f);
             dl->AddLine(a, b, (ImU32)crosshair_x_color, 1.5f);
         }
-        if (std::isfinite(crosshair_y) && std::abs(range_y) > 1e-30
-            && crosshair_y >= std::min(evis_y0, evis_y1)
-            && crosshair_y <= std::max(evis_y0, evis_y1)) {
-            float py = img_pos.y + (float)((evis_y1 - crosshair_y) / range_y) * plot_h;
+        if (std::isfinite(cy_vis) && std::abs(range_y) > 1e-30
+            && cy_vis >= std::min(evis_y0, evis_y1)
+            && cy_vis <= std::max(evis_y0, evis_y1)) {
+            float py = img_pos.y + (float)((evis_y1 - cy_vis) / range_y) * plot_h;
             ImVec2 a(img_pos.x, py), b(img_pos.x + plot_w, py);
             dl->AddLine(a, b, col_halo, 3.0f);
             dl->AddLine(a, b, (ImU32)crosshair_y_color, 1.5f);
@@ -916,20 +954,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
         int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-            // log_scale: узлы движка лежат на лог-равномерной сетке
-            // (getValueByIdx_log), не на линейной param_lo + ix*step — см.
-            // draw_x_ticks/draw_y_ticks выше про ту же лог-специфику. Доп.
-            // guard >0 — live-чекбокс может быть включён при param_lo/hi<=0
-            // (ещё не запускали Run) — log10(0)=-inf даёт NaN дальше по
-            // формуле, деградируем на линейную ноду вместо NaN в tooltip'е.
-            double snap_x = (x_axis.log_scale && param_lo_x > 0.0 && param_hi_x > 0.0)
-                ? std::pow(10.0, std::log10(param_lo_x)
-                    + (double)ix * (std::log10(param_hi_x) - std::log10(param_lo_x)) / (double)(nx - 1))
-                : param_lo_x + (double)ix * step_x;
-            double snap_y = (y_axis.log_scale && param_lo_y > 0.0 && param_hi_y > 0.0)
-                ? std::pow(10.0, std::log10(param_lo_y)
-                    + (double)iy * (std::log10(param_hi_y) - std::log10(param_lo_y)) / (double)(ny - 1))
-                : param_lo_y + (double)iy * step_y;
+            // Тот же node_value, что у crosshair-drag и drill-down (см. его
+            // определение) — иначе подсказка и записанное значение расходятся.
+            double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
+            double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
             double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
@@ -963,8 +991,8 @@ void HeatmapView::render(PlotRenderer& renderer,
             int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
             int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-                double snap_x = param_lo_x + (double)ix * step_x;
-                double snap_y = param_lo_y + (double)iy * step_y;
+                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
+                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
                 on_left_click(ix, iy, snap_x, snap_y);
             }
         }

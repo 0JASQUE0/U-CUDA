@@ -317,14 +317,16 @@ int main() {
         }
 
         // Peak-knobs. Clamp — страховка от правленого вручную конфига:
-        // max_amount_of_peaks задаёт размер per-thread массивов в
-        // dbscan_optimized и способен уронить компиляцию ядра.
+        // max_amount_of_peaks задаёт размер device-буферов пиков и интервалов
+        // на точку свипа, поэтому абсурдное значение съедает всю память GPU.
         model.peak = app_cfg.peak;
         clamp_peak_config(model.peak);
+        model.nvrtc_fmad = app_cfg.nvrtc_fmad;
     }
     // Пушим до первого Run: движок создаётся лениво, а конфиг глобальный и
     // должен быть актуален уже на самой первой компиляции NVRTC.
     set_peak_config(model.peak);
+    set_nvrtc_fmad(model.nvrtc_fmad);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
 

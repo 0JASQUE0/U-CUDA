@@ -1,6 +1,11 @@
 ﻿// --- Заголовочный файл ---
 #include "hostLibrary.cuh"
 
+// Writer'ы _config.csv: формат легаси-файлов живёт в data_export::legacy, а не
+// здесь. Текст файлов от этого не изменился ни на байт — см. комментарий в
+// data_export.h о том, почему опечатки и пробелы в нём сохранены.
+#include "data_export.h"
+
 // --- Путь для сохранения результирующих файлов ---
 //#define OUT_FILE_PATH "C:\\Users\\KiShiVi\\Desktop\\mat.csv"
 //#define OUT_FILE_PATH "C:\\CUDA\\mat.csv"
@@ -331,42 +336,11 @@ __host__ void bifurcation1D(
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		if (continuation_bif1D == 1)
-			outFileStream << "1D continuation bifurcation \n";
-		if (continuation_bif1D == 0)
-			outFileStream << "1D classical bifurcation \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";;
-		}
-		outFileStream << "CT = " << tMax << "\n";
-		outFileStream << "TT = " << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-		outFileStream << "indexVar for peakfinder = " << writableVar << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << "\n";
-		outFileStream << "start vlaue = " << ranges[0] << ", stop vlaue = " << ranges[1] << "\n";
-	}
+	data_export::legacy::write_bif1d_config(
+		outFileStream, set_precision, continuation_bif1D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, transientTime, h, preScaller, writableVar, indicesOfMutVars[0],
+		ranges[0], ranges[1]);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -1064,43 +1038,11 @@ __host__ void bifurcation2D(
 	
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "2D bifurcation \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =  " << tMax << "\n";
-		outFileStream << "TT =" << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-		outFileStream << "eps_DBSCAN = " << eps << "\n";
-		outFileStream << "mult_peak_DBSCAN  = " << mult_peak << "\n";
-		outFileStream << "mult_interval_DBSCAN = " << mult_interval << "\n";
-		outFileStream << "indexVar for peakfinder = " << writableVar << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-		outFileStream << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
-	}
+	data_export::legacy::write_bif2d_config(
+		outFileStream, set_precision, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2354,39 +2296,10 @@ __host__ void LLE1D(
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "1D LLE \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =" << " " << tMax << "\n";
-		outFileStream << "NT =" << " " << NT << "\n";
-		outFileStream << "TT =" << " " << transientTime << "\n";
-		outFileStream << "h =" << " " << h << "\n";
-		outFileStream << "eps=" << " " << eps << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar =" << " " << indicesOfMutVars[0] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar =" << " " << indicesOfMutVars[0] << "\n";
-		outFileStream << "start vlaue = " << ranges[0] << ", stop vlaue = " << ranges[1] << "\n";
-	}
+	data_export::legacy::write_lyap_config(
+		outFileStream, set_precision, data_export::legacy::LyapKind::LLE1D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2574,40 +2487,10 @@ __host__ void LLE2D(
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "2D LLE \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =" << " " << tMax << "\n";
-		outFileStream << "NT =" << " " << NT << "\n";
-		outFileStream << "TT =" << " " << transientTime << "\n";
-		outFileStream << "h =" << " " << h << "\n";
-		outFileStream << "eps=" << " " << eps << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-		outFileStream << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
-	}
+	data_export::legacy::write_lyap_config(
+		outFileStream, set_precision, data_export::legacy::LyapKind::LLE2D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2756,39 +2639,10 @@ __host__ void LS1D(
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "1D LS \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =" << " " << tMax << "\n";
-		outFileStream << "NT =" << " " << NT << "\n";
-		outFileStream << "TT =" << " " << transientTime << "\n";
-		outFileStream << "h =" << " " << h << "\n";
-		outFileStream << "eps=" << " " << eps << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << "\n";
-		outFileStream << "start vlaue = " << ranges[0] << ", stop vlaue = " << ranges[1] << "\n";
-	}
+	data_export::legacy::write_lyap_config(
+		outFileStream, set_precision, data_export::legacy::LyapKind::LS1D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2928,40 +2782,10 @@ __host__ void LS2D(
 	
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "2D LS \n";
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =" << " " << tMax << "\n";
-		outFileStream << "NT =" << " " << NT << "\n";
-		outFileStream << "TT =" << " " << transientTime << "\n";
-		outFileStream << "h =" << " " << h << "\n";
-		outFileStream << "eps=" << " " << eps << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-		outFileStream << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
-	}
+	data_export::legacy::write_lyap_config(
+		outFileStream, set_precision, data_export::legacy::LyapKind::LS2D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
 	outFileStream.close();
 
 
@@ -3332,36 +3156,11 @@ __host__ void basinsOfAttraction(
 	std::ofstream outFileStream;
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "basins of attraction \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =  " << tMax << "\n";
-		outFileStream << "TT =" << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-		outFileStream << "eps_DBSCAN = " << eps << "\n";
-		outFileStream << "mult_MeanPeak_DBSCAN  = " << mult_peak << "\n";
-		outFileStream << "mult_MeanInterval_DBSCAN = " << mult_interval << "\n";
-		outFileStream << "indexVar for peakfinder = " << writableVar << "\n";
-		outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-		outFileStream << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
-	}
+	data_export::legacy::write_basins_config(
+		outFileStream, set_precision, /*log_axes=*/false,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
 	outFileStream.close();
 
 	// ------------------------------------------------------
@@ -3777,36 +3576,11 @@ __host__ void basinsOfAttraction_logAxes(
 	std::ofstream outFileStream;
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "basins of attraction log axes\n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =  " << tMax << "\n";
-		outFileStream << "TT =" << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-		outFileStream << "eps_DBSCAN = " << eps << "\n";
-		outFileStream << "mult_MeanPeak_DBSCAN  = " << mult_peak << "\n";
-		outFileStream << "mult_MeanInterval_DBSCAN = " << mult_interval << "\n";
-		outFileStream << "indexVar for peakfinder = " << writableVar << "\n";
-		outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-		outFileStream << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
-	}
+	data_export::legacy::write_basins_config(
+		outFileStream, set_precision, /*log_axes=*/true,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -4460,60 +4234,12 @@ __host__ void FastSynchro(
 	std::ofstream outFileStream;
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		outFileStream << "Symmetric synch, attractor \n";
-		if (type_of_synch == 0)
-			outFileStream << "Unidirectional synch \n";
-		if (type_of_synch == 1)
-			outFileStream << "Bidirectional synch \n";
-		if (error_estim == 0)
-			outFileStream << "RMS(error) on the last iteration \n";
-		if (error_estim == 1)
-			outFileStream << "number of iteration to achieve RMS(error) <= FS_error_trs \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0_master[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditionsMaster[kk] << ", ";
-			else
-				outFileStream << initialConditionsMaster[kk] << " }\n";;
-		}
-		outFileStream << "X0_slave[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditionsSlave[kk] << ", ";
-			else
-				outFileStream << initialConditionsSlave[kk] << " }\n";;
-		}
-		outFileStream << "K_forward[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << kForward[kk] << ", ";
-			else
-				outFileStream << kForward[kk] << " }\n";
-		}
-		outFileStream << "K_backward[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << kBackward[kk] << ", ";
-			else
-				outFileStream << kBackward[kk] << " }\n";
-		}
-		outFileStream << "iter of synch =  " << iterOfSynchr << "\n";
-		outFileStream << "CT = " << tMax << "\n";
-		outFileStream << "WT = " << NTime << "\n";
-		outFileStream << "TT = " << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-	}
+	data_export::legacy::write_fastsync_config(
+		outFileStream, set_precision, type_of_synch, error_estim,
+		values, amountOfValues,
+		initialConditionsMaster, initialConditionsSlave, kForward, kBackward,
+		amountOfInitialConditions,
+		iterOfSynchr, tMax, NTime, transientTime, h, preScaller);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -5042,43 +4768,11 @@ __host__ void bifurcation_DFT_1D(
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
-	if (outFileStream.is_open())
-	{
-		outFileStream << std::setprecision(set_precision);
-		if (continuation_bif1D == 1)
-			outFileStream << "1D continuation bifurcation DFT \n";
-		if (continuation_bif1D == 0)
-			outFileStream << "1D classical bifurcation DFT \n";
-
-		if (par_or_var == 1)
-			outFileStream << "Parameter esimation \n";
-		if (par_or_var == 0)
-			outFileStream << "Initial conditions esimation \n";
-		outFileStream << "a[" << amountOfValues << "] = { ";
-		for (int kk = 0; kk < amountOfValues; kk++) {
-			if (kk != amountOfValues - 1)
-				outFileStream << values[kk] << ", ";
-			else
-				outFileStream << values[kk] << " }\n";;
-		}
-		outFileStream << "X0[" << amountOfInitialConditions << "] = { ";
-		for (int kk = 0; kk < amountOfInitialConditions; kk++) {
-			if (kk != amountOfInitialConditions - 1)
-				outFileStream << initialConditions[kk] << ", ";
-			else
-				outFileStream << initialConditions[kk] << " }\n";
-		}
-		outFileStream << "CT =  " << tMax << "\n";
-		outFileStream << "TT =" << transientTime << "\n";
-		outFileStream << "h = " << h << "\n";
-		outFileStream << "decimator = " << preScaller << "\n";
-		outFileStream << "indexVar for peakfinder = " << writableVar << "\n";
-		if (par_or_var == 1)
-			outFileStream << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
-		if (par_or_var == 0)
-			outFileStream << "indexVar for estimation = " << indicesOfMutVars[0] << "\n";
-		outFileStream << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
-	}
+	data_export::legacy::write_dft1d_config(
+		outFileStream, set_precision, continuation_bif1D, par_or_var,
+		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		tMax, transientTime, h, preScaller, writableVar, indicesOfMutVars[0],
+		ranges[0], ranges[1]);
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "AkCOS.csv");

@@ -58,14 +58,26 @@ void Plot2DView::do_autofit() {
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
     if (ok) {
-        double padx = pad_x ? (xmax - xmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
+        // bbox снят с VBO, а там при лог-оси лежит log10(x) (см. заливку в
+        // render). Возвращаем X в мировые единицы, и запас берём в ЛОГ-домене:
+        // линейные 5% от диапазона 0.1..14 дали бы view_min = -0.595, ось
+        // ушла бы в минус и лог-режим молча выключился бы сам.
+        double wxmin = (double)xmin, wxmax = (double)xmax;
+        if (series_xlog_cached) {
+            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
+            wxmin = std::pow(10.0, wxmin - lpad);
+            wxmax = std::pow(10.0, wxmax + lpad);
+        } else {
+            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
+            wxmin -= padx; wxmax += padx;
+        }
         double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
         if (x_fit_use_explicit) {
             x_axis.view_min = x_fit_min;
             x_axis.view_max = x_fit_max;
         } else {
-            x_axis.view_min = xmin - padx;
-            x_axis.view_max = xmax + padx;
+            x_axis.view_min = wxmin;
+            x_axis.view_max = wxmax;
         }
         y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
         view_valid = true;
@@ -89,8 +101,17 @@ void Plot2DView::fit_x() {
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
     if (ok) {
-        double padx = pad_x ? (xmax - xmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
-        x_axis.view_min = xmin - padx; x_axis.view_max = xmax + padx;
+        // Тот же обратный перевод и лог-домен запаса, что в do_autofit.
+        double wxmin = (double)xmin, wxmax = (double)xmax;
+        if (series_xlog_cached) {
+            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
+            wxmin = std::pow(10.0, wxmin - lpad);
+            wxmax = std::pow(10.0, wxmax + lpad);
+        } else {
+            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
+            wxmin -= padx; wxmax += padx;
+        }
+        x_axis.view_min = wxmin; x_axis.view_max = wxmax;
     }
 }
 
@@ -114,28 +135,47 @@ void Plot2DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
-    // 1. ����������� ���� ���� ��������� ������ ����������
-    if (data_generation != series_generation) {
+    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим оси X.
+    // Лог-ось переносит саму координату: в VBO уходит log10(x), потому что
+    // GL рисует вершины аффинной make_ortho_mvp, а логарифм не аффинен
+    // (см. XS/XW ниже). Флаг обязан входить в условие перезаливки — иначе
+    // переключение Log scale не тронуло бы уже залитый буфер и график молча
+    // остался бы в прежних координатах.
+    const bool upload_xlog = x_axis.log_scale;
+    if (data_generation != series_generation || series_xlog_cached != upload_xlog) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
-        for (const auto& s : series_in)
-            series_cache_.upload(s.points, s.n_points);
+        std::vector<float> xlog_buf;
+        for (const auto& s : series_in) {
+            if (upload_xlog && s.points && s.n_points > 0) {
+                xlog_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
+                // Неположительный X на лог-оси невыразим: движок такой Run
+                // отклоняет, но чекбокс живой — уводим точку далеко влево
+                // вместо NaN, который испортил бы весь VBO.
+                for (size_t t = 0; t < xlog_buf.size(); t += 2)
+                    xlog_buf[t] = (xlog_buf[t] > 0.0f) ? std::log10(xlog_buf[t]) : -300.0f;
+                series_cache_.upload(xlog_buf.data(), s.n_points);
+            } else {
+                series_cache_.upload(s.points, s.n_points);
+            }
+        }
+        series_xlog_cached = upload_xlog;
         series_generation = data_generation;
-        // �� ���������� view_valid �����: ����� ������� ����� (���/���� ����������
-        // ����� show_var) �� ������ ������� ���. ������� � ������ �� fit_request
-        // ��� ��� ����� ������ ������ (view_valid �������� false).
-        // ���������: ���� ����� ����� ���������� � ���� �� ������ (init),
-        // ����� ��������� ������� (������� ��������� ����� �����������).
+        // Не сбрасываем view_valid здесь: смена набора серий (вкл/выкл переменной
+        // через show_var) не должна двигать вид. Автофит — только по fit_request
+        // или когда вида ещё не было (view_valid и так false).
+        // Исключение: если число серий изменилось, старые индексы не годятся,
+        // поэтому локальную видимость пересобираем из init_visible.
         if (count_changed) {
             visible.assign(series_in.size(), true);
             for (size_t k = 0; k < series_in.size() && k < init_visible.size(); ++k)
                 visible[k] = init_visible[k];
         }
     }
-    if (visible.size() != series_in.size()) // ��������� �������
+    if (visible.size() != series_in.size()) // страховка от рассинхрона
         visible.resize(series_in.size(), true);
 
-    // �������� ��������� �����: ���������� (������� ��) � ��������� (�������)
+    // Итоговая видимость серии: глобальная (галочка вкладки) и локальная (легенда)
     auto eff_visible = [&](int k) -> bool {
         bool loc = (k < (int)visible.size()) ? visible[k] : true;
         bool glob = (k < (int)global_visible.size()) ? global_visible[k] : true;
@@ -173,7 +213,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     }
     render_visible_mask_prev_ = render_visible_mask_;
 
-    // 2. ������� ��� ������ ������ ��� �� ������ ������� (fit_request)
+    // 2. Автофит при первом показе или по явному запросу (fit_request)
     if (!view_valid || fit_request || visibility_changed) do_autofit();
 
     // Bounds for view clamping — computed once per frame, applied by clamp_view
@@ -235,7 +275,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     };
 
-    // 3. ������� � �������
+    // 3. Отступы и размеры
     // margin_left/bottom увеличены, чтобы вместить тики + центрированное
     // название оси (X — под тиками, Y — повернутое вертикально слева).
     float margin_left, margin_top, margin_right, margin_bottom;
@@ -251,6 +291,33 @@ void Plot2DView::render(PlotRenderer& renderer,
     axis_effective(x_axis, ex0, ex1);
     axis_effective(y_axis, ey0, ey1);
 
+    // --- Логарифмическая ось X -------------------------------------------
+    // Реализована переносом координаты: на экран (VBO, MVP, тики, курсор,
+    // крест) уходит log10(x), наружу — view_min/max, snap_x, crosshair_x,
+    // колбэки, подписи — всё остаётся МИРОВЫМ. XS/XW — единственная пара
+    // переходов, через неё обязаны идти все X-формулы ниже.
+    //
+    // Активна только при положительных границах: чекбокс можно включить до
+    // Run, и log10(<=0) отравил бы NaN'ом весь кадр. Концы диапазона в обоих
+    // режимах совпадают, поэтому подписи границ на оси остаются на месте.
+    const bool xlog = x_axis.log_scale && std::min(ex0, ex1) > 0.0;
+    auto XS = [xlog](double w) { return xlog ? std::log10(w > 0.0 ? w : 1e-300) : w; };
+    auto XW = [xlog](double s) { return xlog ? std::pow(10.0, s) : s; };
+    const double sx0 = XS(ex0), sx1 = XS(ex1);
+
+    // Зум вокруг точки и сдвиг — в экранной координате: на лог-оси
+    // арифметика по мировым значениям увела бы вид от курсора.
+    auto zoom_x_about = [&](double center_w, double scale) {
+        const double c = XS(center_w);
+        x_axis.view_min = XW(c + (XS(x_axis.view_min) - c) * scale);
+        x_axis.view_max = XW(c + (XS(x_axis.view_max) - c) * scale);
+    };
+    auto pan_x_by_px = [&](double dpx) {
+        const double d = -dpx / (double)plot_w * (sx1 - sx0);
+        x_axis.view_min = XW(XS(x_axis.view_min) + d);
+        x_axis.view_max = XW(XS(x_axis.view_max) + d);
+    };
+
     // 4. FBO render
     {
         float br, bg, bb, ba;
@@ -258,7 +325,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
     }
     float mvp[16];
-    make_ortho_mvp(ex0, ex1, ey0, ey1, mvp);
+    // Границы — в экранной координате: VBO залит тем же преобразованием.
+    make_ortho_mvp(sx0, sx1, ey0, ey1, mvp);
     for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
         if (!eff_visible(k)) continue;
         const GpuLineSeries& g = series_cache_.get(k);
@@ -284,7 +352,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     }
     renderer.end_frame();
 
-    // 5. ����� FBO
+    // 5. Вывод FBO
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
         img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
@@ -307,7 +375,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                     owner_id, LegendPass::Interact, &legend_rclick);
     }
 
-    // 7. ���� �����������
+    // 7. Зоны взаимодействия
     ImGui::SetCursorScreenPos(ImVec2(img_pos.x, img_pos.y + plot_h));
     char id_buf[48];
     std::snprintf(id_buf, sizeof(id_buf), "##xaxis_%d", owner_id);
@@ -333,7 +401,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     bool plot_a = ImGui::IsItemActive();
     bool plot_dbl = plot_h_ov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
-    // 8. �����, ����
+    // 8. Сетка, оси
     ImU32 col_grid = plot_col_grid();
     ImU32 col_axis = plot_col_axis();
     ImU32 col_text = plot_col_text();
@@ -347,9 +415,9 @@ void Plot2DView::render(PlotRenderer& renderer,
                      snap_axis_lo, snap_axis_hi, snap_axis_n);
     draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
 
-    double vrx = ex1 - ex0;
+    double vrx = sx1 - sx0;
     double vry = ey1 - ey0;
-    auto X = [&](double x) { return img_pos.x + (float)((x - ex0) / vrx) * plot_w; };
+    auto X = [&](double x) { return img_pos.x + (float)((XS(x) - sx0) / vrx) * plot_w; };
     auto Y = [&](double y) { return img_pos.y + (float)((ey1 - y) / vry) * plot_h; };
 
     if (show_zero_x && std::min(ex0, ex1) <= 0 && std::max(ex0, ex1) >= 0)
@@ -504,7 +572,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     // (axis.name пуст) — используется 'x' / 'y'.
     if (plot_h_ov) {
         ImGuiIO& io = ImGui::GetIO();
-        double dx = ex0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (ex1 - ex0);
+        double dx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
         double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
         // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
         // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
@@ -533,13 +601,16 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (plot_h_ov && (on_left_drag || on_left_click)) {
         ImGuiIO& io = ImGui::GetIO();
         auto cursor_wx = [&]() -> double {
-            double wx = ex0 + (double)(io.MousePos.x - img_pos.x)
-                              / (double)plot_w * (ex1 - ex0);
+            double wx = XW(sx0 + (double)(io.MousePos.x - img_pos.x)
+                                 / (double)plot_w * (sx1 - sx0));
             if (snap_x_to_grid && snap_x_n > 1) {
                 double lo = std::min(snap_x_min, snap_x_max);
                 double hi = std::max(snap_x_min, snap_x_max);
                 int ix; double sx;
-                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx)) wx = sx;
+                // log_scale обязателен и здесь: без него drag крестика садился
+                // на линейный узел, которого при лог-свипе в данных нет
+                // (readout выше этот флаг уже передавал).
+                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) wx = sx;
             }
             return wx;
         };
@@ -553,25 +624,22 @@ void Plot2DView::render(PlotRenderer& renderer,
             on_left_click(cursor_wx());
     }
 
-    // 9. ������� �����
+    // 9. Двойные клики
     if (xax_dbl)   fit_x();
     if (yax_dbl)   fit_y();
     if (plot_dbl)  view_valid = false;
 
-    // 10. ���/��� ����-�������
+    // 10. Зум/пан внутри поля графика
     if (plot_h_ov || plot_a) {
         ImGuiIO& io = ImGui::GetIO();
         float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
         float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
-        double cx = ex0 + mx * (ex1 - ex0);
+        double cx = XW(sx0 + mx * (sx1 - sx0));
         double cy = ey0 + my * (ey1 - ey0);
 
         if (plot_h_ov && io.MouseWheel != 0.0f) {
             double scale = std::pow(0.85, io.MouseWheel);
-            if (!x_axis.lock) {
-                x_axis.view_min = cx + (x_axis.view_min - cx) * scale;
-                x_axis.view_max = cx + (x_axis.view_max - cx) * scale;
-            }
+            if (!x_axis.lock) zoom_x_about(cx, scale);
             if (!y_axis.lock) {
                 y_axis.view_min = cy + (y_axis.view_min - cy) * scale;
                 y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
@@ -581,10 +649,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (plot_a && !io.KeyShift
             && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
             ImVec2 d = io.MouseDelta;
-            if (!x_axis.lock) {
-                double dx_data = -(double)d.x / plot_w * (ex1 - ex0);
-                x_axis.view_min += dx_data; x_axis.view_max += dx_data;
-            }
+            if (!x_axis.lock) pan_x_by_px((double)d.x);
             if (!y_axis.lock) {
                 double dy_data = (double)d.y / plot_h * (ey1 - ey0);
                 y_axis.view_min += dy_data; y_axis.view_max += dy_data;
@@ -592,15 +657,14 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 11. ���/��� �� ����� ���
+    // 11. Зум/пан по линейкам осей
     {
         ImGuiIO& io = ImGui::GetIO();
         if (xax_h && io.MouseWheel != 0.0f && !x_axis.lock) {
             float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
-            double cx = ex0 + mx * (ex1 - ex0);
+            double cx = XW(sx0 + mx * (sx1 - sx0));
             double scale = std::pow(0.85, io.MouseWheel);
-            x_axis.view_min = cx + (x_axis.view_min - cx) * scale;
-            x_axis.view_max = cx + (x_axis.view_max - cx) * scale;
+            zoom_x_about(cx, scale);
         }
         if (yax_h && io.MouseWheel != 0.0f && !y_axis.lock) {
             float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
@@ -610,9 +674,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
         }
         if (xax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !x_axis.lock) {
-            ImVec2 d = io.MouseDelta;
-            double dx_data = -(double)d.x / plot_w * (ex1 - ex0);
-            x_axis.view_min += dx_data; x_axis.view_max += dx_data;
+            pan_x_by_px((double)io.MouseDelta.x);
         }
         if (yax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !y_axis.lock) {
             ImVec2 d = io.MouseDelta;
@@ -626,7 +688,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGuiIO& io = ImGui::GetIO();
         float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
         float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
-        double cx = ex0 + mx * (ex1 - ex0);
+        double cx = XW(sx0 + mx * (sx1 - sx0));
         double cy = ey0 + my * (ey1 - ey0);
 
         const float drag_threshold = 5.0f;
@@ -662,7 +724,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
         if (rect_zoom_active_) {
             auto d2s = [&](double x, double y) -> ImVec2 {
-                float sx = img_pos.x + (float)((x - ex0) / (ex1 - ex0)) * plot_w;
+                float sx = img_pos.x + (float)((XS(x) - sx0) / (sx1 - sx0)) * plot_w;
                 float sy = img_pos.y + (float)((ey1 - y) / (ey1 - ey0)) * plot_h;
                 return ImVec2(sx, sy);
                 };
@@ -703,7 +765,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 13. ����������� ����
+    // 13. Контекстное меню
     char pop_id[48];
     std::snprintf(pop_id, sizeof(pop_id), "##plot_menu_%d", owner_id);
     // ПКМ по подписи в легенде — то же меню, что по самому плоту. Через

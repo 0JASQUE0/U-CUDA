@@ -41,7 +41,21 @@ namespace data_export {
 // 1-to-1 mapping in writers is obvious.
 // =============================================================================
 
+// Провенанс расчёта: режим FMA-контракции NVRTC, действовавший на момент Run
+// (Settings -> GPU floating point, см. set_nvrtc_fmad). Пишется в _config.csv
+// каждым writer'ом строкой "NVRTC --fmad = on/off": результаты, посчитанные с
+// разным значением, не сравнимы побитово, а на фрактальных границах бассейнов
+// расходятся и визуально — без пометки в файле потом не установить, чем считалось.
+//
+// Снимается на старте прогона, а не при экспорте: настройку могли переключить
+// между расчётом и сохранением.
+//
+// Это настройка приложения, а не свойство устройства: две ветки считают на CPU
+// и через NVRTC не проходят вовсе (run_bif1d_cpu — continuation, и фазовый
+// портрет при снятом GPU). Там строка остаётся справочной — она говорит, как
+// был настроен компилятор ядер, а не как считался этот конкретный файл.
 struct Bif1DSnapshot {
+    bool   gpu_fmad = true;
     std::vector<double> values;              // a[1..N] (engine prints a[N])
     std::vector<double> initial_conditions;  // X0[]
     double tMax = 0.0;
@@ -57,6 +71,7 @@ struct Bif1DSnapshot {
 // 1D DFT — same sweep/integration fields as Bif1DSnapshot, plus the frequency
 // axis (n_freq/freq_lo/freq_hi). AkCOS/BkSIN files share this one snapshot.
 struct Dft1DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     double tMax = 0.0;
@@ -74,6 +89,7 @@ struct Dft1DSnapshot {
 };
 
 struct LLE1DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     double tMax = 0.0;
@@ -89,6 +105,7 @@ struct LLE1DSnapshot {
 // LS1D shares the same header layout as LLE1D (engine writes "1D LS" instead
 // of "1D LLE") — same fields. Kept as a distinct type for clarity at call site.
 struct LS1DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     double tMax = 0.0;
@@ -105,6 +122,7 @@ struct LS1DSnapshot {
 // LLE2D/LS2D (uses NT + eps fields). Each type has its own writer that pulls
 // only the fields relevant to its config block; absent fields stay at 0.
 struct Bif2DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     int    par_or_var = 1;                   // 1=param/param, 0=IC/IC, 2=mixed
@@ -113,6 +131,10 @@ struct Bif2DSnapshot {
     double h    = 0.0;
     int    preScaller = 0;
     double eps_dbscan = 0.0;
+    // Множители осей DBSCAN (пик / интервал) — см. Bifurcation2DRequest.
+    // Легаси-путь hostLibrary.cu печатает их в CSV, здесь то же самое.
+    double mult_peak     = 1.0;
+    double mult_interval = 0.0;
     int    writableVar = 0;
     int    indexOfMutVar  = 0;
     int    indexOfMutVar2 = 0;
@@ -122,6 +144,7 @@ struct Bif2DSnapshot {
 };
 
 struct LLE2DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     int    par_or_var = 1;
@@ -138,6 +161,7 @@ struct LLE2DSnapshot {
 };
 
 struct LS2DSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     int    par_or_var = 1;
@@ -155,6 +179,7 @@ struct LS2DSnapshot {
 };
 
 struct BasinsSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<double> values;
     std::vector<double> initial_conditions;
     double tMax = 0.0;
@@ -174,6 +199,7 @@ struct BasinsSnapshot {
 };
 
 struct PhaseSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     std::vector<std::string> vars;       // variable names (column headers)
     std::vector<std::string> params;     // param names (informational)
     std::vector<double> a;               // a[0..nparams] (a[0] = symmetry)
@@ -187,6 +213,7 @@ struct PhaseSnapshot {
 };
 
 struct FastSyncSnapshot {
+    bool   gpu_fmad = true;   // см. Bif1DSnapshot::gpu_fmad
     int    mode = 0;                     // 0 = On Attractor, 1 = On Grid
     std::vector<double> values;          // system parameters
     std::vector<double> ic_master;
@@ -332,5 +359,94 @@ bool export_fastsync(const FastSyncResult&   res, const std::string& path);
 // carries one row per step with columns "t, x0, x1, ..., xN-1".
 bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
                   const std::string& path);
+
+// =============================================================================
+// legacy — writer'ы `_config.csv` для hostLibrary.cu (Debug entry point).
+//
+// Формат ЭТИХ файлов не совпадает с writer'ами выше и намеренно оставлен как
+// есть: его читают внешние скрипты обработки. Отсюда сохранённые странности —
+// опечатки ("esimation", "vlaue"), пробел перед \n в заголовках, "CT =  " с
+// двумя пробелами в 2D против "CT = " в 1D, "TT =" вовсе без пробела, "eps="
+// без пробела перед знаком. Всё это воспроизведено дословно; «починка» любой
+// строки ломает чужой парсер. Функции перенесены сюда только затем, чтобы
+// CSV-форматирование проекта жило в одном модуле, а не двумя копиями.
+//
+// Сигнатуры берут double: numb сейчас = double, и при смене typedef'а на float
+// вызов перестанет компилироваться — это громкий отказ вместо тихой потери
+// точности в файле.
+// =============================================================================
+namespace legacy {
+
+// "<name>[N] = { v, v, ... }\n". При N == 0 легаси печатает только
+// "<name>[0] = { " — без закрывающей скобки и без перевода строки. Так и
+// оставлено: менять — значит менять формат.
+void write_array(std::ofstream& out, const char* name, const double* v, int n);
+
+// "Parameter esimation \n" / "Initial conditions esimation \n". При прочих
+// значениях par_or_var не печатает ничего — как и легаси.
+void write_estimation(std::ofstream& out, int par_or_var);
+
+// bifurcation1D.
+void write_bif1d_config(std::ofstream& out, int set_precision,
+                        int continuation_bif1D, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        int writableVar, int indexOfMutVar,
+                        double range_lo, double range_hi);
+
+// bifurcation2D.
+void write_bif2d_config(std::ofstream& out, int set_precision, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        double eps, double mult_peak, double mult_interval,
+                        int writableVar, int idx0, int idx1,
+                        const double* ranges);
+
+// LLE1D / LLE2D / LS1D / LS2D — один writer на четыре блока: тела совпадали
+// дословно, расходились только заголовок, стиль строки index и число
+// диапазонов. LLE1D — единственный, кто пишет короткое "indexPar =" вместо
+// "indexPar for estimation =".
+enum class LyapKind { LLE1D, LLE2D, LS1D, LS2D };
+void write_lyap_config(std::ofstream& out, int set_precision, LyapKind kind,
+                       int par_or_var,
+                       const double* values, int amountOfValues,
+                       const double* initialConditions, int amountOfInitialConditions,
+                       double tMax, double NT, double transientTime, double h,
+                       double eps, const int* indicesOfMutVars, const double* ranges);
+
+// basinsOfAttraction и basinsOfAttraction_logAxes: тела совпадали, расходился
+// только заголовок (и у log-варианта в нём нет хвостового пробела).
+void write_basins_config(std::ofstream& out, int set_precision, bool log_axes,
+                         const double* values, int amountOfValues,
+                         const double* initialConditions, int amountOfInitialConditions,
+                         double tMax, double transientTime, double h, int preScaller,
+                         double eps, double mult_peak, double mult_interval,
+                         int writableVar, int idx0, int idx1,
+                         const double* ranges);
+
+// FastSynchro (attractor).
+void write_fastsync_config(std::ofstream& out, int set_precision,
+                           int type_of_synch, int error_estim,
+                           const double* values, int amountOfValues,
+                           const double* icMaster, const double* icSlave,
+                           const double* kForward, const double* kBackward,
+                           int amountOfInitialConditions,
+                           int iterOfSynchr, double tMax, double NTime,
+                           double transientTime, double h, int preScaller);
+
+// bifurcation_DFT_1D. От write_bif1d_config отличается заголовком ("... DFT"),
+// строкой "CT =  " с двумя пробелами, "TT =" без пробела и тем, что диапазон
+// печатается как "vlaue_1" при единственной оси.
+void write_dft1d_config(std::ofstream& out, int set_precision,
+                        int continuation_bif1D, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        int writableVar, int indexOfMutVar,
+                        double range_lo, double range_hi);
+
+} // namespace legacy
 
 } // namespace data_export

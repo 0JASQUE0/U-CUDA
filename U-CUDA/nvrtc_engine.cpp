@@ -1,4 +1,5 @@
 ﻿#include "nvrtc_engine.h"
+#include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include <cuda.h>
 #include <nvrtc.h>
 #include <cstdio>
@@ -64,11 +65,18 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     // Жёстко выставляем НАШ контекст текущим перед любыми CU/NVRTC-вызовами.
     cuCtxSetCurrent((CUcontext)context_);
 
-    // Ключ кэша: КРС-текст + размерность. 0x1F — разделитель (не встречается
-    // в сгенерированном коде), иначе "foo"+"12" неотличимо от "foo1"+"2".
+    // Ключ кэша: КРС-текст + размерность + режим FMA. 0x1F — разделитель (не
+    // встречается в сгенерированном коде), иначе "foo"+"12" неотличимо от
+    // "foo1"+"2".
+    // fmad меняет не текст, а опцию компиляции, т.е. при том же КРС даёт другой
+    // PTX. Без него в ключе переключатель в Settings молча не применялся бы к
+    // портретам до перезапуска — модуль отдавался бы из кэша.
+    const bool fmad = get_nvrtc_fmad();
     std::string key = krs_body;
     key += '\x1f';
     key += std::to_string(amountOfX);
+    key += '\x1f';
+    key += (fmad ? '1' : '0');
 
     // Cache hit: систему/метод уже компилировали в этой сессии — переключаемся
     // на готовый модуль без обращения к NVRTC.
@@ -119,8 +127,13 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu", 0, nullptr, nullptr), "createProgram");
     char arch[32];
     snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
-    // --fmad=false: см. parametric_engine.cpp — выравниваем округление под CPU.
-    const char* opts[] = { arch, "--fmad=false" };
+    // FMA-контракция обязана совпадать с parametric_engine.cpp: фазовый портрет
+    // рисуется по ячейке уже посчитанной карты, и если карта считалась с
+    // контракцией, а портрет без — на фрактальной границе бассейнов траектория
+    // уходит в другой аттрактор. Раньше здесь стоял жёсткий --fmad=false с
+    // комментарием «см. parametric_engine.cpp», где этого флага не было вовсе.
+    // Теперь обе стороны читают одну настройку (Settings -> get_nvrtc_fmad).
+    const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false" };
     nvrtcResult comp = nvrtcCompileProgram(prog, 2, opts);
     // лог (при ошибке — в error_)
     size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);

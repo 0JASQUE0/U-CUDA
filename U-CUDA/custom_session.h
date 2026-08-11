@@ -58,12 +58,18 @@ struct CustomTabSharedConfig {
     bool        axis_x_over_h       = false;
     std::string axis_x_lo_text      = "0";
     std::string axis_x_hi_text      = "1";
+    // Лог-сетка по оси (любой sweep target — param/IC/h), см.
+    // BifurcationDiagramConfig::log_scale. Требует lo>0 и hi>0 — иначе
+    // движок отказывает на Run. Это свойство ОСИ, поэтому 1D-срез вдоль
+    // той же оси наследует его вместе с par/lo/hi (см. EffectiveSweep).
+    bool        axis_x_log          = false;
     int         axis_y_par_index    = 1;
     bool        axis_y_over_var     = false;
     int         axis_y_var_index    = 0;
     bool        axis_y_over_h       = false;
     std::string axis_y_lo_text      = "0";
     std::string axis_y_hi_text      = "1";
+    bool        axis_y_log          = false;   // см. axis_x_log
     // Shared 2D grid resolution — the underlying NVRTC kernels
     // (`getValueByIdx` etc.) require a square N×N grid, so one field drives
     // both axes. Matches Analysis-tab's single "Resolution" field.
@@ -71,6 +77,15 @@ struct CustomTabSharedConfig {
     bool        bif2d_enabled       = true;
     bool        lle2d_enabled       = true;
     bool        ls2d_enabled        = true;
+
+    // Переменная, по которой строится БД (BifurcationDiagramConfig::
+    // writable_var). Живёт в Level 2D и оттуда наследуется ОБОИМИ 1D-срезами:
+    // срез — это разрез той же карты, строить его по другой переменной
+    // бессмысленно. LLE/LS своей writable_var не имеют (λ — скаляр на точку).
+    //   -1 = комбинация x[0] + pi*x[1] + e*x[2] (см. draw_writable_var_combo).
+    // Работает и в 1D, и в 2D: обе ветки идут через один
+    // loopCalculateDiscreteModel_int, где сентинел обработан явно.
+    int         bif_writable_var    = 0;
 
     // Per-type options that don't fit into the sub-session config directly
     // (options that DO live in sub-session config, like DBSCAN eps, are left
@@ -86,6 +101,7 @@ struct CustomTabSharedConfig {
     bool        sweep_x_over_h     = false;   // см. axis_x_over_h
     std::string sweep_x_lo_text    = "0";
     std::string sweep_x_hi_text    = "1";
+    bool        sweep_x_log        = false;   // см. axis_x_log
     std::string n_x_1d_text        = "500";
     // Own Y-direction sweep.
     int         sweep_y_par_index  = 1;
@@ -94,6 +110,7 @@ struct CustomTabSharedConfig {
     bool        sweep_y_over_h     = false;   // см. axis_x_over_h
     std::string sweep_y_lo_text    = "0";
     std::string sweep_y_hi_text    = "1";
+    bool        sweep_y_log        = false;   // см. axis_x_log
     std::string n_y_1d_text        = "500";
 
     // Per-L1D integrator overrides. L1D is cheap and interactive, so users
@@ -115,6 +132,13 @@ struct CustomTabSharedConfig {
 
     // Continuation for all 1D slices (matches BifurcationDiagramConfig).
     bool continuation_1d_enabled = false;
+
+    // По Y на Bif-срезах: false — значения пиков, true — межпиковые интервалы
+    // (BifurcationDiagramConfig::plot_inter_peaks). Чисто отображение: оба
+    // массива приходят из ОДНОГО прогона, пересчёт не нужен — поэтому поле
+    // не входит в l1d-сигнатуру и пишется в слоты сразу при клике, а не на Run.
+    // В 2D аналога нет (там период через DBSCAN), поэтому живёт на Level 1D.
+    bool plot_inter_peaks_1d = false;
 
     // Slice position — clamped to current effective sweep ranges.
     double fix_x_value = 0.0;
@@ -210,6 +234,12 @@ struct CustomSession {
     LLEAnalysisSession                 lle_session;
     LyapunovSpectrumAnalysisSession    ls_session;
     PhaseAnalysisSession               phase_session;
+    // Фазовые портреты по бассейнам в Custom не предусмотрены — это решение, а
+    // не недоделка. Панель «Phase portraits» и её окна живут только во вкладке
+    // Basins (draw_basins_phase_controls / draw_basins_phase_windows /
+    // basins_phase_tick завязаны на AppModel::basins_session). Поэтому здесь
+    // basins_session.phase_slots всегда пуст — поле общее с типом, а не забытая
+    // инициализация; перестраивать и рисовать его тут некому и не нужно.
     BasinsAnalysisSession              basins_session;
 
     // Layout generation for the "Reset windows layout" button (Custom-tab
@@ -311,6 +341,7 @@ struct EffectiveSweep {
     bool        over_var;
     int         var_index;
     bool        over_h;      // свип по шагу; взаимоисключающе с over_var
+    bool        log_scale;   // лог-сетка по этой оси (см. axis_x_log)
     std::string lo_text;
     std::string hi_text;
     std::string n_pts_text;

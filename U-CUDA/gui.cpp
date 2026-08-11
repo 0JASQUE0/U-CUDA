@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "data_export.h"
 #include "krs_cpu.h"
+#include "num_parse.h"   // parse_num — единый разбор числовых полей
 #include <map>
 #include <memory>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <array>
 #include <deque>
+#include <cmath>
 
 // Возвращает директорию exe со слешем в конце. Реализована в app_main.cpp
 // (там же используется для resolve_python_exe / library_dir).
@@ -59,6 +61,27 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
 #include <cmath>
 
 // ---- helpers: std::string <-> ImGui ----
+// Подпись комбинации переменных: x0 + pi*x1 + e*x2 — тот ряд, что ядро строит
+// при writable_var == -1 (cudaLibrary.cu, loopCalculateDiscreteModel_int), с
+// той же деградацией при dim < 3. Одна на все места, где комбинация
+// предлагается пользователю: Feature diagram и Time domain.
+// (draw_writable_var_combo держит свою копию — она старше и в этот заход не
+// трогалась.)
+static std::string combo_var_label(const std::vector<std::string>& vars) {
+    if (vars.size() >= 3) return vars[0] + " + pi*" + vars[1] + " + e*" + vars[2];
+    if (vars.size() == 2) return vars[0] + " + pi*" + vars[1];
+    return vars.empty() ? std::string("x") : vars[0];
+}
+
+// Значение комбинации в точке траектории — зеркалит формулу ядра. Константы
+// pi/euler берутся из configCUDA.h, а не набираются заново.
+static double combo_var_value(const std::vector<double>& pt, int nvars) {
+    double v = !pt.empty() ? pt[0] : 0.0;
+    if (nvars >= 2 && pt.size() > 1) v += ::pi    * pt[1];
+    if (nvars >= 3 && pt.size() > 2) v += ::euler * pt[2];
+    return v;
+}
+
 static bool InputTextMultilineStr(const char* label, std::string& str, const ImVec2& size) {
     std::vector<char> buf(str.begin(), str.end());
     buf.resize(str.size() + 4096);
@@ -240,12 +263,12 @@ static void refresh_auto_labels(AppModel& model) {
             w.label = "DFT 1D";
 }
 
-// Общий парсер для полей вроде HeatmapView::manual_vmin_text — тот же
-// try/stod-с-дефолтом, что и локальный parse_d_local в FastSync-плоте, но
-// переиспользуемый (нужен в 4 местах: Bif2D/Colored1D/LLE2D/LS2D vmin/vmax).
-static double parse_num_or(const std::string& s, double def) {
-    if (s.empty()) return def;
-    try { return std::stod(s); } catch (...) { return def; }
+// Историческое имя парсера в этом файле. Тело переехало в num_parse.h —
+// теперь одна реализация на весь проект (см. комментарий там же о том, из-за
+// чего пять разных версий расходились). Имя сохранено: оно стоит примерно в
+// сорока местах и читается по месту лучше, чем голое parse_num.
+static inline double parse_ratio_or(const std::string& v, double def) {
+    return parse_num(v, def);
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
@@ -278,21 +301,6 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
 // хотя у Bif-2D было; у Custom Basins не было даже Swap axes. Всё, что
 // относится к «как выглядит и что умеет диаграмма типа X», живёт здесь.
 // ============================================================================
-
-// Парсер числа с поддержкой дроби "a/b" (пользователь пишет "pi/4", "1/3" в
-// полях диапазонов). Раньше — пять идентичных локальных лямбд safe_stod в
-// draw_bifurcation_plot / draw_lle_plot / draw_ls_plot / draw_custom_plot_
-// windows. В отличие от parse_num_or (выше) понимает слэш.
-static double parse_ratio_or(const std::string& v, double def) {
-    if (v.empty()) return def;
-    size_t slash = v.find('/');
-    if (slash != std::string::npos) {
-        double num = std::atof(v.substr(0, slash).c_str());
-        double den = std::atof(v.substr(slash + 1).c_str());
-        if (den != 0) return num / den;
-    }
-    return std::atof(v.c_str());
-}
 
 // Как InputNumStr, но число живёт не в строке, а в структуре (Settings ->
 // PeakConfig): текст здесь только буфер ввода, поэтому значение снимаем на
@@ -489,6 +497,25 @@ static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
     }
 }
 
+// Значение свипа в узле k из n — ТА ЖЕ формула, по которой движок считал эту
+// точку (cont_sweep_value / getValueByIdx_log в parametric_engine.cpp).
+// Раньше графики раскладывали точки линейно всегда, поэтому при log_scale
+// данные уезжали относительно лог-оси: узлы лежат на 10^(l0 + (l1-l0)*t), а
+// рисовались на lo + (hi-lo)*t.
+// lo/hi <= 0 при log_scale — сюда может долететь живой чекбокс без
+// соответствующего прогона; деградируем на линейную сетку вместо NaN
+// (тот же приём, что в SnapCursorToGrid1D).
+static double sweep_value_at(int k, int n, double lo, double hi,
+                             bool log_scale, bool reverse) {
+    if (n <= 1) return reverse ? hi : lo;
+    const double t = (double)k / (double)(n - 1);
+    if (log_scale && lo > 0.0 && hi > 0.0) {
+        const double l0 = std::log10(lo), l1 = std::log10(hi);
+        return std::pow(10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
+    }
+    return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+}
+
 // Описание свипа одного члена окна — всё, что нужно для общей X-оси.
 struct SweepAxisMember {
     int    kind      = 0;      // 0 = параметр, 1 = переменная (IC), 2 = шаг h
@@ -607,6 +634,26 @@ static HeatmapView& get_or_create_heatmap(
     return *slot;
 }
 
+// Скретч-буферы точек одного plot-окна (по одному на серию). Между кадрами
+// живут намеренно: buf.clear() у вызывающего сохраняет capacity, поэтому со
+// второго кадра push_back уже не аллоцирует — на диаграммах в миллионы точек
+// это заметно.
+//
+// Ключ — стабильный ParametricPlotWindow::id, как у кэшей HeatmapView выше.
+// Раньше на каждую из трёх функций был один static, общий ВСЕМ окнам: при двух
+// окнах с разным числом серий assign() передёргивал буферы каждый кадр, и
+// оптимизация не работала вовсе. Корректности это не нарушало (render()
+// забирает точки синхронно), но и пользы не приносило.
+//
+// Записи удалённых окон остаются в карте до перезапуска — как и у хитмап;
+// окон единицы, и создаёт их руками пользователь.
+static std::vector<std::vector<float>>& window_point_bufs(int window_id, size_t n_series) {
+    static std::map<int, std::vector<std::vector<float>>> cache;
+    auto& bufs = cache[window_id];
+    if (bufs.size() != n_series) bufs.assign(n_series, {});
+    return bufs;
+}
+
 // Опции тулбара цветовой шкалы над хитмапой.
 struct HeatmapToolbarOpts {
     // Куда сохранить выбор colormap'а (per-config + save_session). Пусто —
@@ -644,10 +691,10 @@ static bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = 
     if (!hv.autoscale) {
         ImGui::SameLine();
         if (InputNumStr("vmin", hv.manual_vmin_text, 80)) changed = true;
-        hv.manual_vmin = (float)parse_num_or(hv.manual_vmin_text, hv.manual_vmin);
+        hv.manual_vmin = (float)parse_ratio_or(hv.manual_vmin_text, hv.manual_vmin);
         ImGui::SameLine();
         if (InputNumStr("vmax", hv.manual_vmax_text, 80)) changed = true;
-        hv.manual_vmax = (float)parse_num_or(hv.manual_vmax_text, hv.manual_vmax);
+        hv.manual_vmax = (float)parse_ratio_or(hv.manual_vmax_text, hv.manual_vmax);
     }
 
     if (o.show_swap) {
@@ -1441,9 +1488,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         InputTextStr("##plabel", pr.label); ImGui::SameLine();
         // тип проекции
         ImGui::SetNextItemWidth(110);
-        const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D" };
+        // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
+        const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram" };
         int t = (int)pr.type;
-        if (ImGui::Combo("##ptype", &t, tnames, 3)) { pr.type = (ProjType)t; s.fit_request = true; }
+        if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
+            pr.type = (ProjType)t; s.fit_request = true;
+        }
         ImGui::SameLine();
 
         if (pr.type == ProjType::Phase2D) {
@@ -1461,6 +1511,38 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                     if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
                 ImGui::EndCombo();
             }
+        }
+        else if (pr.type == ProjType::FeatureDiagram) {
+            // Одна переменная: по ней ищутся пики. Оси фиксированы (значение
+            // пика / интервал), поэтому переиспользуем axis_x и не заводим
+            // отдельного поля в Projection.
+            // Индекс vars.size() — комбинация x0 + pi*x1 + e*x2: тот же ряд,
+            // что даёт writable_var == -1 в ядре (см. draw_writable_var_combo).
+            // Сентинелом взят именно size(), а НЕ -1, как у writable_var:
+            // соседние ветки берут s.vars[axis_x] по схеме
+            // `axis_x < size() ? axis_x : 0`, и -1 у них ушёл бы в
+            // отрицательный индекс при переключении типа проекции.
+            const int nv = (int)s.vars.size();
+            const bool feat_is_combo = (nv >= 2 && pr.axis_x == nv);
+            const std::string preview = s.vars.empty()
+                ? std::string("-")
+                : (feat_is_combo ? combo_var_label(s.vars)
+                                 : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
+
+            ImGui::Text("var:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(feat_is_combo ? 170.0f : 55.0f);
+            if (ImGui::BeginCombo("##pfv", preview.c_str())) {
+                for (int k = 0; k < nv; ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                if (nv >= 2) {
+                    ImGui::Separator();
+                    const std::string lbl = combo_var_label(s.vars);
+                    if (ImGui::Selectable(lbl.c_str(), feat_is_combo)) { pr.axis_x = nv; s.fit_request = true; }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(peak vs interval)");
         }
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
@@ -1486,13 +1568,29 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             }
         }
         else { // TimeDomain — галочки переменных
-            // синхронизируем размер show_var
-            if ((int)pr.show_var.size() != (int)s.vars.size())
-                pr.show_var.assign(s.vars.size(), true);
+            // Слотов на один больше числа переменных: последний — комбинация
+            // x0 + pi*x1 + e*x2. При смене размера старые галочки переносим, а
+            // комбинацию гасим — иначе у сохранённых сессий сама собой
+            // появилась бы новая кривая и перемасштабировала бы ось Y (её
+            // амплитуда заметно больше, чем у отдельных переменных).
+            const int nv_td = (int)s.vars.size();
+            if ((int)pr.show_var.size() != nv_td + 1) {
+                std::vector<bool> prev = pr.show_var;
+                pr.show_var.assign((size_t)nv_td + 1, true);
+                for (size_t j = 0; j < prev.size() && j < (size_t)nv_td; ++j)
+                    pr.show_var[j] = prev[j];
+                pr.show_var[(size_t)nv_td] = false;
+            }
             ImGui::Text("vars:"); ImGui::SameLine();
-            for (int k = 0; k < (int)s.vars.size(); ++k) {
+            for (int k = 0; k < nv_td; ++k) {
                 bool v = pr.show_var[k];
                 if (ImGui::Checkbox(s.vars[k].c_str(), &v)) { pr.show_var[k] = v; }
+                ImGui::SameLine();
+            }
+            if (nv_td >= 2) {
+                bool v = pr.show_var[(size_t)nv_td];
+                if (ImGui::Checkbox(combo_var_label(s.vars).c_str(), &v))
+                    pr.show_var[(size_t)nv_td] = v;
                 ImGui::SameLine();
             }
             ImGui::NewLine();
@@ -1551,16 +1649,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             ImGui::TextDisabled("(for CD: GPU uses analytic solve for linear vars; CPU always uses 4 iterations)");
 
         ImGui::SeparatorText("Parsed inputs (double, %.17g)");
-        auto parse = [](const std::string& v, double def) -> double {
-            if (v.empty()) return def;
-            size_t sl = v.find('/');
-            if (sl != std::string::npos) {
-                double n = std::atof(v.substr(0, sl).c_str());
-                double d = std::atof(v.substr(sl + 1).c_str());
-                if (d != 0) return n / d;
-            }
-            return std::atof(v.c_str());
-        };
+        // Панель показывает ИМЕННО то, что увидит движок, поэтому обязана
+        // разбирать поля тем же кодом — см. num_parse.h.
+        auto parse = [](const std::string& v, double def) { return parse_num(v, def); };
 
         ImGui::Text("h        = %.17g", parse(s.step_h, 0.01));
         ImGui::Text("a[0] (s) = %.17g", parse(s.symmetry_s, 0.5));
@@ -1681,12 +1772,29 @@ static std::string ic_legend_text(const AnalysisResult& res, size_t k) {
 // keyed per system — without it, Chen and Rossler both used owner_id=0
 // for their first projection and Rossler saw Chen's cached FBO texture.
 // Analysis mode passes zero and gets the previous behaviour.
+// Параметры кластеризации для диаграммы признаков — те же множители осей и eps,
+// с которыми работает dbscan (cudaLibrary.cu). Нужны, чтобы диаграмма показывала
+// ТО пространство, в котором реально считаются кластеры: множители применяются
+// только внутри ядра, и без них диаграмма рисовала сырые (пик; IPI). Из-за этого
+// по ней нельзя было предсказать результат — при mult interval = 0 ядро видит
+// одномерную задачу, а на картинке оставалось двумерное облако.
+//
+// valid=false — вызывающий не связан ни с каким DBSCAN-конфигом (вкладка Phase
+// analysis). Тогда рисуем сырые признаки и без окружности, как было.
+struct FeatureClusterParams {
+    bool   valid         = false;
+    double mult_peak     = 1.0;
+    double mult_interval = 1.0;
+    double eps           = 0.0;
+};
+
 static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     const ProjHookFn& before_begin = {},
                                     const ProjHookFn& after_begin  = {},
                                     const std::string& title_suffix = {},
                                     int owner_id_delta = 0,
-                                    const PhaseStyleFn& style_fn = {}) {
+                                    const PhaseStyleFn& style_fn = {},
+                                    const FeatureClusterParams& clust = {}) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every projection view that has data — right-click
     // "Export data..." writes the full double-precision trajectory set (all
@@ -1787,11 +1895,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->imdraw_lines      = pr.custom_line_style;
                     pr.view2d->line_thickness_px = pr.line_width;
 
-                    // подготовить серии: для каждой траектории выбираем координаты по (ax, ay)
-                    // храним float-массивы локально в статике, чтобы указатели жили до конца кадра
-                    static std::vector<std::vector<float>> series_data;
-                    series_data.clear();
-                    series_data.resize(res.trajectories.size());
+                    // подготовить серии: для каждой траектории выбираем координаты по (ax, ay).
+                    // Буфер локальный: render() ниже забирает точки синхронно, дольше вызова
+                    // указатели не нужны. static тут был и бесполезен (clear()+resize() всё
+                    // равно уничтожает capacity), и опасен — три вызова draw_projection_windows
+                    // делили бы один буфер на всех.
+                    std::vector<std::vector<float>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.trajectories.size());
@@ -1858,6 +1967,128 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
             }
+            // Диаграмма признаков: точечный график (значение пика; интервал до
+            // него) по переменной pr.axis_x. Пики уже посчитаны на worker'е
+            // (AnalysisResult::features) тем же алгоритмом, что и GPU-peakFinder,
+            // поэтому здесь только раскладка в буферы — пересчёта нет.
+            else if (pr.type == ProjType::FeatureDiagram) {
+                const int av = pr.axis_x;
+                if (!res.ok || res.features.empty()) {
+                    ImGui::TextDisabled("No data.");
+                }
+                else {
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+
+                    // Оси кластеризации: те же множители, что уходят в dbscan.
+                    // Без DBSCAN-конфига (clust.valid == false) остаются 1 и 1,
+                    // т.е. сырые признаки, как было.
+                    const double mp = clust.valid ? clust.mult_peak     : 1.0;
+                    const double mi = clust.valid ? clust.mult_interval : 1.0;
+                    auto mult_suffix = [](double m) -> std::string {
+                        if (m == 1.0) return std::string();
+                        char b[32]; std::snprintf(b, sizeof(b), " x %g", m);
+                        return std::string(b);
+                    };
+
+                    // av == vars.size() — комбинация (см. комбо-бокс выше).
+                    const int nv_ax = (int)s.vars.size();
+                    std::string ax_name;
+                    if (s.vars.empty())                     ax_name = "x";
+                    else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
+                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+
+                    pr.view2d->x_axis.name = "peak " + ax_name + mult_suffix(mp);
+                    pr.view2d->y_axis.name = "IPI" + mult_suffix(mi);   // interpeak interval
+                    // Интервал неотрицателен, а пики часто лежат вокруг нуля —
+                    // нулевая линия по Y тут осмысленна, по X нет.
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = true;
+                    pr.view2d->legend_ignore_series_alpha = true;
+
+                    ImGui::Checkbox("Custom point style##featdiag", &pr.custom_line_style);
+                    if (pr.custom_line_style) {
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Point size##featdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                        ImGui::SliderFloat("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                    }
+                    // Всегда точки, линий между пиками нет: соседние пики
+                    // соединять нечем — это облако признаков, а не траектория.
+                    pr.view2d->imdraw_lines = false;
+
+                    // Локальный буфер — см. series_data в ветке Phase2D выше.
+                    std::vector<std::vector<float>> feat_data(res.features.size());
+                    std::vector<PlotSeriesInput> series_in;
+                    series_in.reserve(res.features.size());
+                    std::vector<bool> init_vis(res.features.size(), true);
+                    std::vector<bool> glob_vis(res.features.size(), true);
+
+                    size_t total_pts = 0;
+                    for (size_t k = 0; k < res.features.size(); ++k) {
+                        auto& buf = feat_data[k];
+                        const auto& per_var = res.features[k];
+                        if (av >= 0 && av < (int)per_var.size()) {
+                            const FeaturePoints& fp = per_var[(size_t)av];
+                            const size_t n = fp.peaks.size() < fp.intervals.size()
+                                           ? fp.peaks.size() : fp.intervals.size();
+                            buf.reserve(n * 2);
+                            for (size_t p = 0; p < n; ++p) {
+                                if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
+                                    continue;
+                                buf.push_back((float)(fp.peaks[p]     * mp));
+                                buf.push_back((float)(fp.intervals[p] * mi));
+                            }
+                            total_pts += buf.size() / 2;
+                        }
+
+                        std::string lab = (k < res.labels.size()) ? res.labels[k]
+                                                                  : ("IC " + std::to_string(k + 1));
+                        if (s.legend_show_ic) lab = ic_legend_text(res, k);
+
+                        PhaseSeriesStyle st;
+                        const bool has_style = style_fn && style_fn((int)k, st);
+
+                        PlotSeriesInput si;
+                        si.points   = buf.empty() ? nullptr : buf.data();
+                        si.n_points = (int)(buf.size() / 2);
+                        si.color    = has_style ? st.color : ic_base_color((int)k);
+                        if (pr.custom_line_style) si.color.w = pr.alpha;
+                        si.points_override = 1;
+                        si.point_marker    = (int)PointMarker::Circle;
+                        si.point_size_px   = pr.custom_line_style ? pr.line_width : 3.0f;
+                        si.label = lab;
+                        series_in.push_back(si);
+
+                        glob_vis[k] = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        init_vis[k] = true;
+                    }
+
+                    if (total_pts == 0)
+                        ImGui::TextDisabled("No peaks found (check transient / peak thresholds in Settings).");
+
+                    // Множители и eps входят в gen-токен: иначе Plot2DView отдал бы
+                    // уже залитый VBO, и правка коэффициентов не меняла бы картинку —
+                    // ровно тот класс «настройка молча не применяется», что уже
+                    // случался с --fmad.
+                    int data_gen = s.data_generation * 100 + av;
+                    if (clust.valid) {
+                        auto mix = [](int acc, double v) {
+                            char b[32]; std::snprintf(b, sizeof(b), "%.9g", v);
+                            for (const char* p = b; *p; ++p)
+                                acc = acc * 131 + (int)(unsigned char)*p;
+                            return acc;
+                        };
+                        data_gen = mix(mix(mix(data_gen, clust.mult_peak),
+                                           clust.mult_interval), clust.eps);
+                    }
+
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    pr.view2d->popup_extras = phase_popup_extras;
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
             else if (pr.type == ProjType::TimeDomain) {
                 if (!res.ok || res.trajectories.empty()) {
                     ImGui::TextDisabled("No data.");
@@ -1889,9 +2120,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     double dt = h * dec;
                     int nvars = (int)s.vars.size();
 
-                    // синхронизируем show_var с числом переменных
-                    if ((int)pr.show_var.size() != nvars)
-                        pr.show_var.assign(nvars, true);
+                    // Слотов nvars + 1: последний — комбинация (см. блок галочек).
+                    if ((int)pr.show_var.size() != nvars + 1) {
+                        std::vector<bool> prev = pr.show_var;
+                        pr.show_var.assign((size_t)nvars + 1, true);
+                        for (size_t j = 0; j < prev.size() && j < (size_t)nvars; ++j)
+                            pr.show_var[j] = prev[j];
+                        pr.show_var[(size_t)nvars] = false;
+                    }
 
                     pr.view2d->x_axis.name = "t";
                     pr.view2d->y_axis.name = "value";
@@ -1899,10 +2135,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->pad_x = false;
                     pr.view2d->show_zero_x = false;
 
-                    // серии: одна на (траектория k, видимая переменная vi)
-                    // храним буферы в статике, чтобы указатели жили до render
-                    static std::vector<std::vector<float>> series_data;
-                    series_data.clear();
+                    // серии: одна на (траектория k, видимая переменная vi).
+                    // Локальный буфер — см. ветку Phase2D выше.
+                    std::vector<std::vector<float>> series_data;
 
                     std::vector<PlotSeriesInput> series_in;
                     std::vector<bool> init_vis;
@@ -1921,7 +2156,11 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         PhaseSeriesStyle st;
                         const bool has_style = style_fn && style_fn((int)k, st);
 
-                        for (int vi = 0; vi < nvars; ++vi) {
+                        // vi == nvars — слот комбинации; для dim < 2 он не
+                        // предлагается и пропускается.
+                        for (int vi = 0; vi <= nvars; ++vi) {
+                            const bool is_combo = (vi == nvars);
+                            if (is_combo && nvars < 2) continue;
                             if (vi < (int)pr.show_var.size() && !pr.show_var[vi]) continue;
 
                             series_data.emplace_back();
@@ -1929,18 +2168,25 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             buf.reserve(n * 2);
                             for (int t = 0; t < n; ++t) {
                                 buf.push_back((float)(t * dt));
-                                buf.push_back((float)traj[t][vi < (int)traj[t].size() ? vi : 0]);
+                                buf.push_back((float)(is_combo
+                                    ? combo_var_value(traj[t], nvars)
+                                    : traj[t][vi < (int)traj[t].size() ? vi : 0]));
                             }
 
                             std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
                             std::string who = s.legend_show_ic ? ic_legend_text(res, k) : base;
-                            std::string lab = s.vars[vi] + " [" + who + "]";
+                            std::string lab = (is_combo ? combo_var_label(s.vars) : s.vars[vi])
+                                            + " [" + who + "]";
 
+                            // Оттенок комбинации берём из расширенной палитры
+                            // (nvars + 1), чтобы цвета самих переменных остались
+                            // теми же, что были до появления слота.
+                            const int shade_den = is_combo ? nvars + 1 : nvars;
                             PlotSeriesInput si;
                             si.points = buf.data();
                             si.n_points = n;
-                            si.color = has_style ? shade_of(st.color, vi, nvars)
-                                                 : ic_var_shade((int)k, vi, nvars);
+                            si.color = has_style ? shade_of(st.color, vi, shade_den)
+                                                 : ic_var_shade((int)k, vi, shade_den);
                             // В custom_line_style режиме применяем α к цвету
                             // (ImDrawList использует color.w как alpha).
                             if (pr.custom_line_style) si.color.w = pr.alpha;
@@ -1990,9 +2236,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
                     pr.view3d->z_name = s.vars.empty() ? "z" : s.vars[az < (int)s.vars.size() ? az : 0];
 
-                    static std::vector<std::vector<float>> series_data;
-                    series_data.clear();
-                    series_data.resize(res.trajectories.size());
+                    // Локальный буфер — см. ветку Phase2D выше.
+                    std::vector<std::vector<float>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput3D> series_in;
                     series_in.reserve(res.trajectories.size());
@@ -2240,6 +2485,12 @@ static bool draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         ImGui::Checkbox("Log scale##bd_log2", &bd.log_scale_2);
         if (bd.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         InputNumStr("DBSCAN eps", bd.eps_dbscan_text, 120);
+        // Множители осей кластеризации. Дефолт mult interval = 0 схлопывает
+        // ось интервалов, т.е. период считается только по амплитуде пиков.
+        InputNumStr("mult peak##bd_mp",     bd.mult_peak_text,     120);
+        InputNumStr("mult interval##bd_mi", bd.mult_interval_text, 120);
+        ImGui::TextDisabled("Scale the (peak, interval) axes before clustering;");
+        ImGui::TextDisabled("0 disables an axis. See Feature diagram in Phase analysis.");
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
         ImGui::Unindent();
     }
@@ -2806,10 +3057,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         view.y_axis.name = "X";
     }
 
-    // Локальные буферы (по одному на серию). static, чтобы указатели жили
-    // до конца кадра (PlotSeriesInput хранит сырые указатели).
-    static std::vector<std::vector<float>> bufs;
-    if (bufs.size() != win.members.size()) bufs.assign(win.members.size(), {});
+    // Буферы точек (по одному на серию), свои у каждого окна — см.
+    // window_point_bufs: между кадрами они держат capacity.
+    auto& bufs = window_point_bufs(win.id, win.members.size());
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis;
@@ -2843,11 +3093,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
                     !regime_is_oscillation(bd.result.flags[k])) continue;
-                double x;
-                if (rev)
-                    x = (npts > 1) ? (hi - (hi - lo) * (double)k / (double)(npts - 1)) : hi;
-                else
-                    x = (npts > 1) ? (lo + (hi - lo) * (double)k / (double)(npts - 1)) : lo;
+                double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev);
                 if (k >= (int)source.size()) continue;
                 for (double y : source[k]) {
                     buf.push_back((float)x);
@@ -3311,8 +3557,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     }
     view.y_axis.name = "lambda";
 
-    static std::vector<std::vector<float>> bufs;
-    if (bufs.size() != win.members.size()) bufs.assign(win.members.size(), {});
+    auto& bufs = window_point_bufs(win.id, win.members.size());
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -3344,8 +3589,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() &&
                     !regime_is_oscillation(c.result.flags[k])) continue;
-                double t = (npts > 1) ? (double)k / (double)(npts - 1) : 0.0;
-                double x = rev ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+                double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev);
                 double y = c.result.lyapunov[k];
                 if (!std::isfinite(y)) continue;
                 buf.push_back((float)x);
@@ -3812,8 +4056,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         total_series += (size_t)N;
     }
 
-    static std::vector<std::vector<float>> bufs;
-    if (bufs.size() != total_series) bufs.assign(total_series, {});
+    auto& bufs = window_point_bufs(win.id, total_series);
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -3852,8 +4095,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                     if (k >= (int)c.result.spectrum.size()) continue;
                     const auto& row = c.result.spectrum[k];
                     if (j >= (int)row.size()) continue;
-                    double t = (npts > 1) ? (double)k / (double)(npts - 1) : 0.0;
-                    double x = rev ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+                    double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev);
                     double y = row[j];
                     if (!std::isfinite(y)) continue;
                     buf.push_back((float)x);
@@ -5437,11 +5679,11 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             return;
         }
 
-        // Static-буферы должны жить весь кадр (Plot2DView хранит сырые указатели).
-        static std::vector<std::vector<float>> series_buffers;
-        static std::vector<std::string>        series_labels;
-        series_buffers.clear();
-        series_labels.clear();
+        // Буферы локальные: render() ниже забирает точки синхронно, дольше
+        // вызова указатели не нужны (static здесь ещё и делил бы память между
+        // config'ами бассейнов).
+        std::vector<std::vector<float>> series_buffers;
+        std::vector<std::string>        series_labels;
         series_buffers.reserve(bufs.size());
         series_labels.reserve(bufs.size());
 
@@ -5969,10 +6211,6 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         return std::string("x");
     };
 
-    auto parse_d_local = [](const std::string& s, double def) -> double {
-        if (s.empty()) return def;
-        try { return std::stod(s); } catch (...) { return def; }
-    };
     // cmin/cmax: при autoscale берём диапазон актуальных значений из result.
     // Если пользователь ввёл vmin > vmax вручную — это сигнал «перевернуть
     // колормапу», а не ошибка. Сортируем диапазон и взводим invert_cmap, чтобы
@@ -5985,8 +6223,8 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         cmax_user = c.result.max_val;
         if (!(cmax_user > cmin_user)) cmax_user = cmin_user + 1.0;
     } else {
-        cmin_user = parse_d_local(c.c_min_text, -12.0);
-        cmax_user = parse_d_local(c.c_max_text,   0.0);
+        cmin_user = parse_ratio_or(c.c_min_text, -12.0);
+        cmax_user = parse_ratio_or(c.c_max_text,   0.0);
     }
     bool invert_cmap = (!c.autoscale_color) && (cmin_user > cmax_user);
     double cmin = std::min(cmin_user, cmax_user);
@@ -6373,6 +6611,49 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     if (ImGui::Button("Reset windows layout")) { model.parametric_layout_generation++; }
 }
 
+// ============================================================================
+// Атомарное применение сохранённой сессии.
+//
+// Парсеры session_from_json_* пишут поля ПО МЕРЕ чтения JSON и бросают на
+// первой же структурной ошибке. Поэтому на битом (обрезанном при падении,
+// правленом руками) _last_*.json сессия оставалась перезаписанной наполовину:
+// часть полей из файла, часть — сидированные из записи системы. Возвращаемый
+// bool при этом игнорировался во ВСЕХ точках вызова, так что пользователь
+// видел молча испорченные настройки.
+//
+// Здесь разбор идёт в два прохода: сначала в отдельный пустой объект — только
+// чтобы убедиться, что файл дочитывается целиком, — и лишь потом в настоящую
+// сессию. Второй проход не может упасть там, где прошёл первый: парсеры не
+// зависят от прежнего состояния приёмника. Файлы сессий небольшие, двойной
+// разбор незаметен на фоне загрузки системы.
+//
+// Пустой json — не ошибка: сессии просто нет (первый запуск / новая система).
+// ============================================================================
+template <class Session>
+static bool apply_session_json(AppModel& model,
+                               const std::string& json,
+                               Session& dst,
+                               bool (*parse)(const std::string&, Session&),
+                               const char* what)
+{
+    if (json.empty()) return true;
+    Session probe;
+    if (!parse(json, probe)) {
+        model.session_load_warning =
+            std::string("saved session '") + what + "' is corrupt - ignored";
+        std::printf("[session] %s: parse failed, keeping defaults from record\n", what);
+        std::fflush(stdout);
+        return false;
+    }
+    if (!parse(json, dst)) {                 // не должно случаться, см. выше
+        model.session_load_warning =
+            std::string("saved session '") + what + "' failed to apply";
+        return false;
+    }
+    model.session_load_warning.clear();
+    return true;
+}
+
 // Global system switch — fired from the top-bar combo. Loads the record and
 // re-inits the CURRENT tab (mirrors what each per-tab combo used to do).
 // Other tabs re-init on entry via the block in draw_gui.
@@ -6387,17 +6668,17 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
         case AppModel::AppMode::Analysis: {
             model.start_phase_analysis();
             std::string j = lib.load_session(model.loaded_name, "_last");
-            if (!j.empty()) session_from_json(j, model.phase_session);
+            apply_session_json(model, j, model.phase_session, session_from_json, "_last");
             break;
         }
         case AppModel::AppMode::Parametric: {
             model.start_parametric_analysis();
             std::string jb = lib.load_session(model.loaded_name, "_last_parametric");
-            if (!jb.empty()) session_from_json_parametric(jb, model.bifurcation_session);
+            apply_session_json(model, jb, model.bifurcation_session, session_from_json_parametric, "_last_parametric");
             std::string jl = lib.load_session(model.loaded_name, "_last_lle");
-            if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
+            apply_session_json(model, jl, model.lle_session, session_from_json_lle, "_last_lle");
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
-            if (!js.empty()) session_from_json_ls(js, model.ls_session);
+            apply_session_json(model, js, model.ls_session, session_from_json_ls, "_last_ls");
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
             break;
@@ -6405,7 +6686,7 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
         case AppModel::AppMode::Dft1D: {
             model.start_dft1d_analysis();
             std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
-            if (!jd.empty()) session_from_json_dft1d(jd, model.dft1d_session);
+            apply_session_json(model, jd, model.dft1d_session, session_from_json_dft1d, "_last_dft1d");
             std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
             model.load_or_init_dft1d_plot_windows(jw);
             break;
@@ -6413,13 +6694,13 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
         case AppModel::AppMode::Basins: {
             model.start_basins_analysis();
             std::string jb = lib.load_session(model.loaded_name, "_last_basins");
-            if (!jb.empty()) session_from_json_basins(jb, model.basins_session);
+            apply_session_json(model, jb, model.basins_session, session_from_json_basins, "_last_basins");
             break;
         }
         case AppModel::AppMode::FastSync: {
             model.start_fastsync_analysis();
             std::string jf = lib.load_session(model.loaded_name, "_last_fastsync");
-            if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
+            apply_session_json(model, jf, model.fastsync_session, session_from_json_fastsync, "_last_fastsync");
             break;
         }
         case AppModel::AppMode::Custom: {
@@ -6431,7 +6712,7 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             model.parametric_engine.reset();
             model.start_custom_analysis();
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
-            if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
+            apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
             break;
         }
         case AppModel::AppMode::Library:
@@ -6504,11 +6785,11 @@ void draw_sweep_target_combo(const char* label,
     }
 }
 
-// Parse a text-formatted numeric field. Empty / bad → default 0. Used only
-// to clamp sliders — the actual engine calls parse_d/parse_val on its own.
+// Тонкая обёртка над общим parse_ratio_or — сохранена ради читаемости вызовов
+// в Custom-панелях. Раньше здесь был свой std::stod БЕЗ поддержки дробей, из-за
+// чего "8/3" в границе свипа давал 8 для ползунка и клампа и 2.667 для ядра.
 double parse_num_default(const std::string& s, double def) {
-    if (s.empty()) return def;
-    try { return std::stod(s); } catch (...) { return def; }
+    return parse_ratio_or(s, def);
 }
 
 // ---- Shared config panel ----
@@ -6667,6 +6948,10 @@ void draw_level2d_detail(CustomSession& cs) {
                             c.axis_x_over_h, &c.axis_y_over_h);
     InputNumStr("lo##ax", c.axis_x_lo_text, 120);
     InputNumStr("hi##ax", c.axis_x_hi_text, 120);
+    // Log-сетка по оси. Свойство оси, поэтому X-срез Level 1D наследует его
+    // вместе с par/lo/hi (см. EffectiveSweep::log_scale).
+    ImGui::Checkbox("Log scale##ax_log", &c.axis_x_log);
+    if (c.axis_x_log) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
     ImGui::TextUnformatted("Axis Y:"); ImGui::SameLine();
     draw_sweep_target_combo("##ay", cs.params, cs.vars,
@@ -6674,15 +6959,28 @@ void draw_level2d_detail(CustomSession& cs) {
                             c.axis_y_over_h, &c.axis_x_over_h);
     InputNumStr("lo##ay", c.axis_y_lo_text, 120);
     InputNumStr("hi##ay", c.axis_y_hi_text, 120);
+    ImGui::Checkbox("Log scale##ay_log", &c.axis_y_log);
+    if (c.axis_y_log) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
     // Shared N×N grid resolution — kernel `getValueByIdx` requires a square
     // grid, so one field drives both axes (matches Analysis tab).
     InputNumStr("Resolution##a", c.resolution_text, 120);
 
+    // Переменная БД — задаётся здесь и наследуется обоими 1D-срезами (см.
+    // CustomTabSharedConfig::bif_writable_var). Рисуется независимо от
+    // bif2d_enabled: при выключенном Bif-2D её всё равно читает Level 1D.
+    // Комбинация (-1) работает и в 2D, и в 1D — одно и то же ядро.
+    ImGui::Separator();
+    draw_writable_var_combo(cs.vars, c.bif_writable_var, "Bif variable##custom_wv");
+
     // Per-type options edited directly on the sub-session's slot [0] (2D config).
     ImGui::Separator();
-    if (c.bif2d_enabled && !cs.bif_session.diagrams.empty())
+    if (c.bif2d_enabled && !cs.bif_session.diagrams.empty()) {
         InputNumStr("Bif DBSCAN eps", cs.bif_session.diagrams[0].eps_dbscan_text, 120);
+        // Множители осей кластеризации — см. draw_diagram_controls.
+        InputNumStr("Bif mult peak",     cs.bif_session.diagrams[0].mult_peak_text,     120);
+        InputNumStr("Bif mult interval", cs.bif_session.diagrams[0].mult_interval_text, 120);
+    }
     if (c.lle2d_enabled && !cs.lle_session.curves.empty()) {
         InputNumStr("LLE eps", cs.lle_session.curves[0].eps_text, 120);
         InputNumStr("LLE NT",  cs.lle_session.curves[0].nt_text,  120);
@@ -6715,29 +7013,70 @@ void draw_level1d_detail(CustomSession& cs) {
     EffectiveSweep sx = effective_sweep_x(c);
     EffectiveSweep sy = effective_sweep_y(c);
 
-    // Inherit disables ONLY the sweep axis (par target + lo/hi), leaving
+    // Inherit disables ONLY the sweep axis (par target + lo/hi + log), leaving
     // N and the L1D-specific integrator fields (h/TT/CT below) always
     // editable — L1D is cheap and interactive, so users may want a finer
     // grid or a longer transient than L2D even when sharing the same axis.
-    ImGui::TextUnformatted("X-sweep:"); ImGui::SameLine();
-    if (inheriting) ImGui::BeginDisabled();
-    draw_sweep_target_combo("##sxp", cs.params, cs.vars,
-                            c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index,
-                            c.sweep_x_over_h, &c.sweep_y_over_h);
-    InputNumStr("lo##sx", c.sweep_x_lo_text, 120);
-    InputNumStr("hi##sx", c.sweep_x_hi_text, 120);
-    if (inheriting) ImGui::EndDisabled();
-    InputNumStr("N##sx",  c.n_x_1d_text,      120);
+    //
+    // В inherit-режиме виджеты кормим КОПИЯМИ эффективного свипа: править их
+    // всё равно нельзя (BeginDisabled), зато в панели видно то, что реально
+    // пойдёт в расчёт. Раньше показывались собственные sweep_*, которые в этом
+    // режиме не используются, — то есть панель врала об осях среза.
+    auto sweep_row = [&](const char* label, const char* tag,
+                         const EffectiveSweep& eff,
+                         int& own_par, bool& own_ov, int& own_vi,
+                         bool& own_oh, bool& own_log,
+                         std::string& own_lo, std::string& own_hi,
+                         bool* other_oh, std::string& n_text) {
+        int         par = inheriting ? eff.par_index : own_par;
+        bool        ov  = inheriting ? eff.over_var  : own_ov;
+        int         vi  = inheriting ? eff.var_index : own_vi;
+        bool        oh  = inheriting ? eff.over_h    : own_oh;
+        bool        lg  = inheriting ? eff.log_scale : own_log;
+        std::string lo  = inheriting ? eff.lo_text   : own_lo;
+        std::string hi  = inheriting ? eff.hi_text   : own_hi;
+        bool        other_copy = other_oh ? *other_oh : false;
 
-    ImGui::TextUnformatted("Y-sweep:"); ImGui::SameLine();
-    if (inheriting) ImGui::BeginDisabled();
-    draw_sweep_target_combo("##syp", cs.params, cs.vars,
-                            c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index,
-                            c.sweep_y_over_h, &c.sweep_x_over_h);
-    InputNumStr("lo##sy", c.sweep_y_lo_text, 120);
-    InputNumStr("hi##sy", c.sweep_y_hi_text, 120);
-    if (inheriting) ImGui::EndDisabled();
-    InputNumStr("N##sy",  c.n_y_1d_text,      120);
+        ImGui::TextUnformatted(label); ImGui::SameLine();
+        if (inheriting) ImGui::BeginDisabled();
+        draw_sweep_target_combo((std::string("##") + tag + "p").c_str(),
+                                cs.params, cs.vars, par, ov, vi, oh,
+                                inheriting ? &other_copy : other_oh);
+        InputNumStr((std::string("lo##") + tag).c_str(), lo, 120);
+        InputNumStr((std::string("hi##") + tag).c_str(), hi, 120);
+        ImGui::Checkbox((std::string("Log scale##") + tag + "log").c_str(), &lg);
+        if (lg) {
+            ImGui::SameLine();
+            ImGui::TextDisabled(inheriting ? "(from Level 2D)" : "(lo/hi > 0)");
+        }
+        if (inheriting) ImGui::EndDisabled();
+        InputNumStr((std::string("N##") + tag).c_str(), n_text, 120);
+
+        // Обратная запись только в своём режиме — в inherit-режиме источник
+        // истины остаётся за осями Level 2D.
+        if (!inheriting) {
+            own_par = par; own_ov  = ov; own_vi = vi;
+            own_oh  = oh;  own_log = lg;
+            own_lo  = lo;  own_hi  = hi;
+        }
+    };
+
+    sweep_row("X-sweep:", "sx", sx,
+              c.sweep_x_par_index, c.sweep_x_over_var, c.sweep_x_var_index,
+              c.sweep_x_over_h, c.sweep_x_log,
+              c.sweep_x_lo_text, c.sweep_x_hi_text,
+              &c.sweep_y_over_h, c.n_x_1d_text);
+
+    sweep_row("Y-sweep:", "sy", sy,
+              c.sweep_y_par_index, c.sweep_y_over_var, c.sweep_y_var_index,
+              c.sweep_y_over_h, c.sweep_y_log,
+              c.sweep_y_lo_text, c.sweep_y_hi_text,
+              &c.sweep_x_over_h, c.n_y_1d_text);
+
+    // Строки выше могли поменять собственный свип L1D — перечитываем, чтобы
+    // ползунки ниже снапились по сетке ЭТОГО кадра, а не прошлого.
+    sx = effective_sweep_x(c);
+    sy = effective_sweep_y(c);
 
     // L1D-specific integrator overrides — order TT before CT (per user
     // convention: transient runs first, then computing time is what's
@@ -6778,16 +7117,32 @@ void draw_level1d_detail(CustomSession& cs) {
     int n_1d_y = std::atoi(c.n_y_1d_text.c_str());   if (n_1d_y < 2) n_1d_y = 64;
     int n_snap_x = (n_1d_x > n_2d) ? n_1d_x : n_2d;
     int n_snap_y = (n_1d_y > n_2d) ? n_1d_y : n_2d;
-    auto idx_from_world = [](double v, double lo, double hi, int n) {
+    // При log-свипе узлы сетки распределены лог-равномерно (см.
+    // sweep_value_at / getValueByIdx_log), поэтому и шаг ползунка обязан идти
+    // по логарифму — иначе thumb «прилипает» к линейным позициям, которых в
+    // данных нет, и крестик на графике уезжает с узла.
+    // log при lo<=0 невалиден (движок такой Run отклонит) — деградируем на
+    // линейную сетку, чтобы до Run ползунок не выдавал NaN.
+    auto log_ok = [](bool log_scale, double lo, double hi) {
+        return log_scale && lo > 0.0 && hi > 0.0;
+    };
+    auto idx_from_world = [&](double v, double lo, double hi, int n, bool log_scale) {
         if (n < 2 || hi <= lo) return 0;
-        double step = (hi - lo) / (double)(n - 1);
-        int i = (int)std::round((v - lo) / step);
+        double i_d;
+        if (log_ok(log_scale, lo, hi)) {
+            if (!(v > 0.0)) return 0;
+            const double l0 = std::log10(lo), l1 = std::log10(hi);
+            i_d = (std::log10(v) - l0) / ((l1 - l0) / (double)(n - 1));
+        } else {
+            i_d = (v - lo) / ((hi - lo) / (double)(n - 1));
+        }
+        int i = (int)std::round(i_d);
         if (i < 0) i = 0; if (i > n - 1) i = n - 1;
         return i;
     };
-    auto world_from_idx = [](int i, double lo, double hi, int n) {
+    auto world_from_idx = [&](int i, double lo, double hi, int n, bool log_scale) {
         if (n < 2 || hi <= lo) return lo;
-        return lo + (double)i * (hi - lo) / (double)(n - 1);
+        return sweep_value_at(i, n, lo, hi, log_ok(log_scale, lo, hi), /*reverse*/ false);
     };
 
     // Step-arrows + slider row. Arrows walk idx by ±1 (repeat on hold),
@@ -6795,7 +7150,7 @@ void draw_level1d_detail(CustomSession& cs) {
     // for X and Y — factored into a lambda.
     auto arrow_row = [&](const char* id,
                          int& idx, int idx_min, int idx_max,
-                         double lo, double hi, int n_snap,
+                         double lo, double hi, int n_snap, bool log_scale,
                          double& fix_value,
                          double& timer_to_bump,
                          const char* slider_label) {
@@ -6813,7 +7168,7 @@ void draw_level1d_detail(CustomSession& cs) {
         ImGui::PopID();
         ImGui::SameLine();
         char fmt[64];
-        std::snprintf(fmt, sizeof(fmt), "%.6g", world_from_idx(idx, lo, hi, n_snap));
+        std::snprintf(fmt, sizeof(fmt), "%.6g", world_from_idx(idx, lo, hi, n_snap, log_scale));
         ImGui::SetNextItemWidth(240.0f);
         ImGui::SliderScalar(slider_label, ImGuiDataType_S32, &idx,
                             &idx_min, &idx_max, fmt);
@@ -6826,7 +7181,7 @@ void draw_level1d_detail(CustomSession& cs) {
         // finer 1D grid), silently drifting it off the 2D pixel the user
         // just clicked.
         if (slider_edit || step_changed)
-            fix_value = world_from_idx(idx, lo, hi, n_snap);
+            fix_value = world_from_idx(idx, lo, hi, n_snap, log_scale);
         // Arrow clicks fire the same debounce path as slider release —
         // step-changed → immediate commit, no need to wait for release.
         // Bump only the caller-supplied timer so the settled branch can
@@ -6835,13 +7190,15 @@ void draw_level1d_detail(CustomSession& cs) {
             timer_to_bump = ImGui::GetTime();
     };
 
-    int idx_x = idx_from_world(c.fix_x_value, fx_lo, fx_hi, n_snap_x);
+    int idx_x = idx_from_world(c.fix_x_value, fx_lo, fx_hi, n_snap_x, sx.log_scale);
     arrow_row("##fix_x_arr", idx_x, 0, n_snap_x - 1,
-              fx_lo, fx_hi, n_snap_x, c.fix_x_value, c.last_fix_x_change_time, "fix X");
+              fx_lo, fx_hi, n_snap_x, sx.log_scale,
+              c.fix_x_value, c.last_fix_x_change_time, "fix X");
 
-    int idx_y = idx_from_world(c.fix_y_value, fy_lo, fy_hi, n_snap_y);
+    int idx_y = idx_from_world(c.fix_y_value, fy_lo, fy_hi, n_snap_y, sy.log_scale);
     arrow_row("##fix_y_arr", idx_y, 0, n_snap_y - 1,
-              fy_lo, fy_hi, n_snap_y, c.fix_y_value, c.last_fix_y_change_time, "fix Y");
+              fy_lo, fy_hi, n_snap_y, sy.log_scale,
+              c.fix_y_value, c.last_fix_y_change_time, "fix Y");
 
     ImGui::Separator();
     ImGui::TextUnformatted("Enable slices:");
@@ -6851,6 +7208,29 @@ void draw_level1d_detail(CustomSession& cs) {
     ImGui::Checkbox("LLE-Y", &c.lle1d_y_enabled); ImGui::SameLine();
     ImGui::Checkbox("LS-X",  &c.ls1d_x_enabled);  ImGui::SameLine();
     ImGui::Checkbox("LS-Y",  &c.ls1d_y_enabled);
+
+    ImGui::Separator();
+    // Переменная БД — read-only эхо настройки Level 2D (срез строится по той
+    // же переменной, что и карта). Меняется в панели Level 2D.
+    {
+        const char* wv_name =
+            (c.bif_writable_var == -1) ? "combination"
+          : (c.bif_writable_var >= 0 && c.bif_writable_var < (int)cs.vars.size())
+                ? cs.vars[c.bif_writable_var].c_str() : "?";
+        ImGui::TextDisabled("Bif variable: %s (from Level 2D)", wv_name);
+    }
+    // Отображение Y на Bif-срезах. Пересчёт не нужен — peak_times и
+    // bifurcation_points приходят из одного прогона, поэтому пишем флаг прямо
+    // в слоты [1]/[2] и просим автофит; Run не требуется.
+    if (ImGui::Checkbox("Plot inter-peaks instead of peak values",
+                        &c.plot_inter_peaks_1d)) {
+        for (int slot = 1; slot <= 2; ++slot) {
+            if ((int)cs.bif_session.diagrams.size() <= slot) break;
+            cs.bif_session.diagrams[slot].plot_inter_peaks = c.plot_inter_peaks_1d;
+            cs.bif_session.diagrams[slot].fit_request      = true;
+        }
+        cs.workspace.dirty = true;   // → пересохранение _last_custom.json
+    }
 
     ImGui::Separator();
     ImGui::Checkbox("Continuation (1D)", &c.continuation_1d_enabled);
@@ -6910,6 +7290,13 @@ void draw_level3_detail(CustomSession& cs) {
             InputNumStr("lo##by", bc.axis_y_lo_text, 120);
             InputNumStr("hi##by", bc.axis_y_hi_text, 120);
             InputNumStr("N##bxy", bc.n_pts_text,     120);
+
+            // Переменная, чью траекторию читает feature-экстрактор. Своя, а не
+            // от Level 2D: у Basins другая задача (оси — IC-пространство), и в
+            // отдельной вкладке Basins этот выбор тоже свой (см. gui.cpp
+            // draw_basins_controls). Без этого комбо в Custom всегда шла
+            // первая переменная.
+            draw_writable_var_combo(cs.vars, bc.writable_var, "Writable var##custom_bas_wv");
 
             ImGui::InputInt("feature1", &bc.feature1);
             ImGui::InputInt("feature2", &bc.feature2);
@@ -7774,14 +8161,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // produced degenerate 1D results (all-zero or empty on Run) until the
     // user dragged the slider back inside the range.
     {
-        auto parse_dbl = [](const std::string& s, double def) -> double {
-            if (s.empty()) return def;
-            try { return std::stod(s); } catch (...) { return def; }
-        };
         EffectiveSweep esx = effective_sweep_x(cs.shared);
         EffectiveSweep esy = effective_sweep_y(cs.shared);
-        double x_lo = parse_dbl(esx.lo_text, 0.0), x_hi = parse_dbl(esx.hi_text, 1.0);
-        double y_lo = parse_dbl(esy.lo_text, 0.0), y_hi = parse_dbl(esy.hi_text, 1.0);
+        double x_lo = parse_ratio_or(esx.lo_text, 0.0), x_hi = parse_ratio_or(esx.hi_text, 1.0);
+        double y_lo = parse_ratio_or(esy.lo_text, 0.0), y_hi = parse_ratio_or(esy.hi_text, 1.0);
         if (x_hi < x_lo) std::swap(x_lo, x_hi);
         if (y_hi < y_lo) std::swap(y_lo, y_hi);
         if (cs.shared.fix_x_value < x_lo) cs.shared.fix_x_value = x_lo;
@@ -7967,6 +8350,22 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             } else {
                 hv.x_axis.name = ax_x;
                 hv.y_axis.name = ax_y;
+                // Лог-оси — как в Parametric (hb.x_axis.log_scale = bd.log_scale):
+                // движок раскладывает узлы лог-равномерно, ось обязана это
+                // повторить, иначе тики и snap курсора врут. Флаг берём из
+                // конфига слота, а не из живого shared: конфиг получает log
+                // вместе с диапазоном на Run (apply_shared_to_*), поэтому ось
+                // и данные всегда описывают один и тот же прогон.
+                if (i == 0 && !cs.bif_session.diagrams.empty()) {
+                    hv.x_axis.log_scale = cs.bif_session.diagrams[0].log_scale;
+                    hv.y_axis.log_scale = cs.bif_session.diagrams[0].log_scale_2;
+                } else if (i == 1 && !cs.lle_session.curves.empty()) {
+                    hv.x_axis.log_scale = cs.lle_session.curves[0].log_scale;
+                    hv.y_axis.log_scale = cs.lle_session.curves[0].log_scale_2;
+                } else if (i == 2 && !cs.ls_session.curves.empty()) {
+                    hv.x_axis.log_scale = cs.ls_session.curves[0].log_scale;
+                    hv.y_axis.log_scale = cs.ls_session.curves[0].log_scale_2;
+                }
                 wire_2d_heatmap_interaction(hv, cs, q);
 
                 // Export menu on right-click (parity with Parametric).
@@ -8085,6 +8484,12 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         int  data_gen = 0;
         double param_lo = 0.0, param_hi = 1.0;
         int    n_pts = 0;
+        // Лог-масштаб оси среза. Берём из КОНФИГА слота, а не из shared:
+        // конфиг получает log вместе с param_lo/hi в apply_shared_to_bif1d на
+        // Run, поэтому ось и диапазон всегда описывают один и тот же прогон.
+        // Живой чекбокс в панели поменяет ось после Run (он входит в
+        // l1d-сигнатуру, так что Run пересчитает уровень).
+        bool   slice_log = false;
         // Y-axis label + series bookkeeping filled per-kind below.
 
         if (lslots[i].kind == L1Kind::Bif) {
@@ -8096,6 +8501,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             param_lo = parse_ratio_or(d.param_lo_text, 0.0);
             param_hi = parse_ratio_or(d.param_hi_text, 1.0);
             n_pts = d.result.n_pts;
+            slice_log = d.log_scale;
             view.x_axis.name = axis_label_for_slot(idx);
             view.y_axis.name = (d.writable_var >= 0 && d.writable_var < (int)cs.vars.size())
                                ? cs.vars[d.writable_var] : "X";
@@ -8118,6 +8524,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             param_lo = parse_ratio_or(c.param_lo_text, 0.0);
             param_hi = parse_ratio_or(c.param_hi_text, 1.0);
             n_pts = (int)c.result.lyapunov.size();
+            slice_log = c.log_scale;
             view.x_axis.name = axis_label_for_slot(idx);
         } else { // LS
             int idx = lslots[i].cfg_idx;
@@ -8128,6 +8535,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             param_lo = parse_ratio_or(c.param_lo_text, 0.0);
             param_hi = parse_ratio_or(c.param_hi_text, 1.0);
             n_pts = c.result.n_pts;
+            slice_log = c.log_scale;
             view.x_axis.name = axis_label_for_slot(idx);
             // LS shows every exponent as its own coloured line (parity with
             // draw_ls_plot in Parametric) — no exponent picker here; series
@@ -8143,6 +8551,11 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         view.x_fit_use_explicit = true;
         view.x_fit_min = std::min(param_lo, param_hi);
         view.x_fit_max = std::max(param_lo, param_hi);
+        // Лог-ось — как в Parametric; узлы движка лежат лог-равномерно, ось
+        // и snap обязаны это повторить. log при lo<=0 невозможен (движок
+        // такой Run отклоняет), но проверку держим здесь тоже — конфиг мог
+        // прийти из старой сессии.
+        view.x_axis.log_scale = slice_log && view.x_fit_min > 0.0;
 
         // Sweep-position crosshair — vertical line at fix_x (X-slice)
         // or fix_y (Y-slice), synced with the slider / drag on 2D heatmaps.
@@ -8178,11 +8591,22 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         const double snap_lo   = std::min(param_lo, param_hi);
         const double snap_hi   = std::max(param_lo, param_hi);
         const double snap_step = (snap_hi - snap_lo) / (double)(snap_n - 1);
-        auto snap_to_grid = [snap_lo, snap_hi, snap_step, snap_n](double w) {
+        // При log-сетке узлы не равноудалены — индекс и позицию считаем по
+        // логарифму (та же формула, что у движка), иначе крестик садится
+        // между реальными точками.
+        const bool snap_log = view.x_axis.log_scale && snap_lo > 0.0 && snap_hi > 0.0;
+        auto snap_to_grid = [snap_lo, snap_hi, snap_step, snap_n, snap_log](double w) {
             if (snap_step <= 0.0) return w;
-            int i = (int)std::round((w - snap_lo) / snap_step);
+            int i;
+            if (snap_log) {
+                if (!(w > 0.0)) return snap_lo;
+                const double l0 = std::log10(snap_lo), l1 = std::log10(snap_hi);
+                i = (int)std::round((std::log10(w) - l0) / ((l1 - l0) / (double)(snap_n - 1)));
+            } else {
+                i = (int)std::round((w - snap_lo) / snap_step);
+            }
             if (i < 0) i = 0; if (i > snap_n - 1) i = snap_n - 1;
-            double s = snap_lo + (double)i * snap_step;
+            double s = sweep_value_at(i, snap_n, snap_lo, snap_hi, snap_log, /*reverse*/ false);
             if (s < snap_lo) s = snap_lo; if (s > snap_hi) s = snap_hi;
             return s;
         };
@@ -8235,8 +8659,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 // Diverged-точки пропускаем (в Parametric так и было; здесь
                 // проверки не было, и разошедшиеся точки попадали на график).
                 if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-                double px = param_lo + (param_hi - param_lo) * (double)p /
-                            (double)(n - 1 > 0 ? n - 1 : 1);
+                double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
+                                           /*reverse*/ false);
                 for (double y : source[p]) {
                     if (!std::isfinite(y)) continue;
                     buf.push_back((float)px);
@@ -8266,8 +8690,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
                 double y = r.lyapunov[p];
                 if (!std::isfinite(y)) continue;
-                double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
-                                       (double)(n - 1) : param_lo;
+                double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
+                                           /*reverse*/ false);
                 buf.push_back((float)px);
                 buf.push_back((float)y);
                 ++total_pts;
@@ -8295,8 +8719,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         if (p >= (int)r.spectrum.size()) continue;
                         const auto& row = r.spectrum[p];
                         if (j >= (int)row.size()) continue;
-                        double px = (n > 1) ? param_lo + (param_hi - param_lo) * (double)p /
-                                               (double)(n - 1) : param_lo;
+                        double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
+                                                   /*reverse*/ false);
                         double y = row[j];
                         if (!std::isfinite(y)) continue;
                         buf.push_back((float)px);
@@ -8373,9 +8797,20 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         // Suffix + owner_id delta both keep per-system isolation: suffix for
         // imgui.ini dock state, delta for the SHARED PlotRenderer cache
         // (otherwise Rossler's projection 0 saw Chen's cached FBO texture).
+        // Диаграмма признаков рисуется в осях кластеризации того же 2D-конфига,
+        // чьи eps/множители стоят в Shared config — иначе по ней нельзя судить,
+        // что именно сольёт dbscan (см. FeatureClusterParams).
+        FeatureClusterParams clust;
+        if (!cs.bif_session.diagrams.empty()) {
+            const auto& bd = cs.bif_session.diagrams[0];
+            clust.valid         = true;
+            clust.mult_peak     = parse_ratio_or(bd.mult_peak_text,     (double)mult_peak);
+            clust.mult_interval = parse_ratio_or(bd.mult_interval_text, (double)mult_interval);
+            clust.eps           = parse_ratio_or(bd.eps_dbscan_text,    0.1);
+        }
         draw_projection_windows(cs.phase_session, cb,
             [&](int /*idx*/, const std::string& title) { ensure_docked(title); },
-            {}, suffix, sys_owner_delta);
+            {}, suffix, sys_owner_delta, {}, clust);
     }
     // --- Level 3 Basins window (unchanged HeatmapView minimal renderer) ---
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
@@ -8613,6 +9048,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
     ImGui::RadioButton("Custom", &mode, (int)AppModel::AppMode::Custom); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
+
+    // Битый файл сессии. Висит до следующей УСПЕШНОЙ загрузки, а не до конца
+    // кадра: иначе сообщение о том, что настройки не восстановились, мелькнуло
+    // бы один раз при старте и пропало. Раньше эта ошибка не показывалась
+    // вообще — результат разбора игнорировался во всех точках вызова.
+    if (!model.session_load_warning.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s",
+                           model.session_load_warning.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The saved session file could not be parsed and was ignored.\n"
+                              "Settings from the system record are in use instead.\n"
+                              "Running an analysis and switching systems will overwrite the file.");
+    }
 
     // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
     // Layout: [text] [progress bar] [Stop] for in-flight cancellable sessions;
@@ -8967,18 +9416,18 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_phase_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last");
-            if (!j.empty()) session_from_json(j, model.phase_session);
+            apply_session_json(model, j, model.phase_session, session_from_json, "_last");
         }
     }
     if (entering_par && par_need_init) {
         model.start_parametric_analysis();
         if (!model.loaded_name.empty()) {
             std::string j = lib.load_session(model.loaded_name, "_last_parametric");
-            if (!j.empty()) session_from_json_parametric(j, model.bifurcation_session);
+            apply_session_json(model, j, model.bifurcation_session, session_from_json_parametric, "_last_parametric");
             std::string jl = lib.load_session(model.loaded_name, "_last_lle");
-            if (!jl.empty()) session_from_json_lle(jl, model.lle_session);
+            apply_session_json(model, jl, model.lle_session, session_from_json_lle, "_last_lle");
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
-            if (!js.empty()) session_from_json_ls(js, model.ls_session);
+            apply_session_json(model, js, model.ls_session, session_from_json_ls, "_last_ls");
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
         }
@@ -8991,7 +9440,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_dft1d_analysis();
         if (!model.loaded_name.empty()) {
             std::string jd = lib.load_session(model.loaded_name, "_last_dft1d");
-            if (!jd.empty()) session_from_json_dft1d(jd, model.dft1d_session);
+            apply_session_json(model, jd, model.dft1d_session, session_from_json_dft1d, "_last_dft1d");
             std::string jw = lib.load_session(model.loaded_name, "_last_dft1d_windows");
             model.load_or_init_dft1d_plot_windows(jw);
         }
@@ -9004,7 +9453,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_basins_analysis();
         if (!model.loaded_name.empty()) {
             std::string jb = lib.load_session(model.loaded_name, "_last_basins");
-            if (!jb.empty()) session_from_json_basins(jb, model.basins_session);
+            apply_session_json(model, jb, model.basins_session, session_from_json_basins, "_last_basins");
         }
     }
     auto fastsync_need_init = model.fastsync_session.loaded_system_name != model.name
@@ -9015,7 +9464,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_fastsync_analysis();
         if (!model.loaded_name.empty()) {
             std::string jf = lib.load_session(model.loaded_name, "_last_fastsync");
-            if (!jf.empty()) session_from_json_fastsync(jf, model.fastsync_session);
+            apply_session_json(model, jf, model.fastsync_session, session_from_json_fastsync, "_last_fastsync");
         }
     }
     auto custom_need_init = model.custom_session.loaded_system_name != model.name
@@ -9030,7 +9479,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         model.start_custom_analysis();
         if (!model.loaded_name.empty()) {
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
-            if (!jc.empty()) session_from_json_custom(jc, model.custom_session);
+            apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
         }
     }
     // Persist AppMode change so the next launch restores this tab. Compare
@@ -9156,6 +9605,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.tick_precision         = m.tick_precision;
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
+            cfg.nvrtc_fmad             = m.nvrtc_fmad;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
 
@@ -9281,12 +9731,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 pk.max_amount_of_peaks = (int)std::llround(max_peaks_val);
                 pk_changed = true;
             }
-            ImGui::TextDisabled("Per-trajectory cap (%d..%d). Also sizes the per-thread DBSCAN",
+            ImGui::TextDisabled("Per-trajectory cap (%d..%d). Also sizes the device peak",
                                 kPeakCountMin, kPeakCountMax);
-            ImGui::TextDisabled("arrays: every +1000 costs ~8 KB of local memory per thread.");
+            ImGui::TextDisabled("and interval buffers allocated for every sweep point.");
             if (pk.max_amount_of_peaks > 5000)
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
-                    "Large values hurt occupancy and may slow 2D bifurcation / basins down.");
+                    "Large values raise GPU memory use for 2D bifurcation / basins.");
 
             if (ImGui::Button("Reset to configCUDA.h defaults")) {
                 pk = PeakConfig{};
@@ -9308,6 +9758,37 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 set_peak_config(pk);       // бампает epoch -> PTX-кэши инвалидируются
                 persist_settings(model);
             }
+
+            // ----------------------------------------------------------------
+            // GPU floating point — опция компиляции NVRTC, а не #define, но
+            // логика та же: смена значения = другой PTX, кэши модулей обоих
+            // движков инвалидируются ключом (см. parametric_engine.h).
+            // Настройка ОДНА на приложение сознательно: карта и фазовый портрет
+            // по её ячейке обязаны считать одинаково.
+            // ----------------------------------------------------------------
+            ImGui::Separator();
+            ImGui::Text("GPU floating point");
+            ImGui::TextDisabled("Applies to every NVRTC kernel: bifurcations, LLE/LS, basins,");
+            ImGui::TextDisabled("DFT, fast synchro AND phase portraits. Changing it recompiles");
+            ImGui::TextDisabled("the kernels on the next Run.");
+
+            if (ImGui::Checkbox("FMA contraction (--fmad)##nvrtc_fmad", &model.nvrtc_fmad)) {
+                set_nvrtc_fmad(model.nvrtc_fmad);
+                persist_settings(model);
+            }
+            if (model.nvrtc_fmad) {
+                ImGui::TextDisabled("On (NVRTC default): a*b+c is fused, one rounding instead");
+                ImGui::TextDisabled("of two. Faster and the usual choice.");
+            } else {
+                ImGui::TextDisabled("Off: multiply and add round separately. Closer to the CPU");
+                ImGui::TextDisabled("fallback and to external references (MATLAB), slightly slower.");
+            }
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                "Results computed with different settings are not bit-comparable;");
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                "on fractal basin boundaries they may differ visibly. The value in");
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                "effect at Run time is written into every exported _config.csv.");
         }
         ImGui::End();
     }

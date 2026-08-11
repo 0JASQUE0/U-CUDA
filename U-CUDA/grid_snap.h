@@ -79,7 +79,18 @@ inline bool SnapCursorToGrid1D(double cursor_x,
     if (cursor_x < x_min || cursor_x > x_max) return false;
     if (width == 1) { out_idx_x = 0; out_grid_x = x_min; return true; }
     double range = x_max - x_min;
-    int ix = (int)std::floor((cursor_x - x_min) * (double)width / range);
+    // Индекс узла обязан считаться в ТОЙ ЖЕ шкале, что и его значение ниже.
+    // Раньше он всегда брался линейно, а значение — по логарифму: на диапазоне
+    // 0.1..14 при 201 узле курсор на x=1.0 давал индекс 13 вместо ~93, и
+    // Shift-клик возвращал 0.1377. Условие то же, что у ветки значения, плюс
+    // cursor_x > 0 — иначе log10 даст -inf.
+    int ix;
+    if (log_scale && x_min > 0.0 && x_max > 0.0 && cursor_x > 0.0) {
+        const double l0 = std::log10(x_min), l1 = std::log10(x_max);
+        ix = (int)std::floor((std::log10(cursor_x) - l0) * (double)width / (l1 - l0));
+    } else {
+        ix = (int)std::floor((cursor_x - x_min) * (double)width / range);
+    }
     ix = std::clamp(ix, 0, width - 1);
     out_idx_x  = ix;
     // log_scale валиден только для x_min>0 (log_scale-запрос это требует), но
