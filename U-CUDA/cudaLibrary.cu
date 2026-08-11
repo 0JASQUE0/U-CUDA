@@ -2076,7 +2076,8 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 // ----------------------
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
-	const int idx, const numb eps, int* outData)
+	const int idx, const numb eps, int* outData,
+	const numb multPeak, const numb multInterval)
 {
 	// ------------------------------------------------------------
 	// --- Если пиков 0 или 1 - даже не обрабатываем эти случаи ---
@@ -2099,7 +2100,6 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 
 	int cluster = 0;
-	int NumNeibor = 0;
 
 	for (size_t i = startDataIndex; i < startDataIndex + sizeOfHelpfulArray; ++i) {
 		helpfulArray[i] = 0;
@@ -2112,45 +2112,62 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	// ------------------------------------------------------------
 
 
+	// Масштабирование осей признаков перед кластеризацией. Раньше здесь стояли
+	// constexpr mult_peak / mult_interval из configCUDA.h — теперь множители
+	// приходят аргументами, чтобы каждая 2D-диаграмма могла настроить их сама
+	// (дефолты в объявлении dbscanCUDA — те же константы, поэтому legacy-путь
+	// hostLibrary.cu ведёт себя как прежде).
 	for (size_t i = 0; i < amountOfPeaks; i++) {
-		data[startDataIndex + i] = data[startDataIndex + i] * mult_peak;
-		intervals[startDataIndex + i] = intervals[startDataIndex + i] * mult_interval;
+		data[startDataIndex + i] = data[startDataIndex + i] * multPeak;
+		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
 	}
 
 
-	for (size_t i = 0; i < amountOfPeaks; i++)
-		if (NumNeibor >= 1)
-		{
-			i = helpfulArray[startDataIndex + amountOfPeaks + NumNeibor - 1];
-			helpfulArray[startDataIndex + amountOfPeaks + NumNeibor - 1] = 0;
-			NumNeibor = NumNeibor - 1;
-			for (int k = 0; k < amountOfPeaks - 1; k++) {
-				if (i != k && helpfulArray[startDataIndex + k] == 0) {
-					if (distance(data[startDataIndex + i], intervals[startDataIndex + i], data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
-						helpfulArray[startDataIndex + k] = cluster;
-						helpfulArray[startDataIndex + amountOfPeaks + k] = k;
-						++NumNeibor;
-					}
-				}
-				
-			}
-		}
-		else if (helpfulArray[startDataIndex + i] == 0) {
-			NumNeibor = 0;
-			++cluster;
-			helpfulArray[startDataIndex + i] = cluster;
-			for (int k = 0; k < amountOfPeaks - 1; k++) {
-				if (i != k && helpfulArray[startDataIndex + k] == 0) {
-					if (distance(data[startDataIndex + i], intervals[startDataIndex + i], data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
-						helpfulArray[startDataIndex + k] = cluster;
-						helpfulArray[startDataIndex + amountOfPeaks + k] = k;
-						++NumNeibor;
-					}
-				}
-				
-			}
-		}
+	// Ёмкость стека обхода. Пока инвариант про две половины helpfulArray
+	// выполняется, sp < stackCap истинно всегда и проверка ничего не меняет;
+	// если инвариант когда-нибудь сломается, мы потеряем соседа вместо записи
+	// в ячейку соседней системы.
+	const int stackCap = sizeOfHelpfulArray - amountOfPeaks;
 
+	// Обход: каждая непосещённая точка заводит кластер и разворачивается до
+	// опустошения стека.
+	//
+	// Раньше здесь был ОДИН цикл на amountOfPeaks итераций, а стек писался по
+	// индексу точки (helpfulArray[... + amountOfPeaks + k] = k), но читался по
+	// глубине (... + amountOfPeaks + NumNeibor - 1): клали в одну ячейку, а
+	// доставали из другой. Совпадало это лишь случайно, обход обычно вычитывал
+	// ноль и топтался по точке 0, часть соседей не разворачивалась никогда, а
+	// точку k = 0 нельзя было поставить в очередь в принципе — её "0" в стеке
+	// неотличим от пустой ячейки. Пока пиков мало, расхождение маскировалось;
+	// на режимах с большим их числом количество кластеров выходило произвольным.
+	for (int i = 0; i < amountOfPeaks; i++) {
+		if (helpfulArray[startDataIndex + i] != 0) continue;   // уже в кластере
+
+		++cluster;
+		helpfulArray[startDataIndex + i] = cluster;
+
+		int sp  = 0;    // глубина стека
+		int cur = i;    // точка, соседей которой разворачиваем
+		for (;;) {
+			for (int k = 0; k < amountOfPeaks - 1; k++) {
+				if (cur == k || helpfulArray[startDataIndex + k] != 0) continue;
+				if (distance(data[startDataIndex + cur], intervals[startDataIndex + cur],
+					data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
+					helpfulArray[startDataIndex + k] = cluster;
+					if (sp < stackCap)
+						helpfulArray[startDataIndex + amountOfPeaks + sp++] = (numb)k;
+				}
+			}
+			if (sp == 0) break;
+			cur = (int)helpfulArray[startDataIndex + amountOfPeaks + --sp];
+		}
+	}
+
+	// Последний пик из внутренних циклов исключён (k < amountOfPeaks - 1), поэтому
+	// соседом он не становится никогда и на последней итерации всегда заводит
+	// собственный кластер — его и вычитает "- 1". Оставлено как было: это вопрос
+	// к самому алгоритму, а не к очереди. Зато теперь компенсация ТОЧНА: раньше
+	// она была верна лишь тогда, когда обход к этому моменту успевал опустеть.
 	return cluster - 1;
 }
 
@@ -2309,7 +2326,8 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
-	const numb eps, int* outData)
+	const numb eps, int* outData,
+	const numb multPeak, const numb multInterval)
 {
 	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -2331,141 +2349,16 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 	}
 
 	// --- Применяем алгоритм dbscan к каждой системе
-	outData[idx] = dbscan(data, intervals, helpfulArray, idx * sizeOfBlock, amountOfPeaks[idx], sizeOfBlock, idx, eps, outData);
+	outData[idx] = dbscan(data, intervals, helpfulArray, idx * sizeOfBlock, amountOfPeaks[idx], sizeOfBlock, idx, eps, outData, multPeak, multInterval);
 }
 
-// -------------------------------------------------------------------------------- -
-// --- Оптимизированная версия DBSCAN (Spatial Hashing + Stack DFS)
-// --- Размеры массивов жестко привязаны к max_amount_of_peaks из configCUDA.h
-// ---------------------------------------------------------------------------------
-__device__ int dbscan_optimized(
-	const numb * __restrict__ data,       // Амплитуды пиков (только чтение)
-	const numb * __restrict__ intervals,  // Межпиковые интервалы (только чтение)
-	const int amountOfPeaks,
-	const numb eps,
-	int* __restrict__ labels)            // Выход: 0=не посещен, >0=ID кластера
-{
-	if (amountOfPeaks <= 0) return 0;
-	if (amountOfPeaks == 1) { labels[0] = 1; return 1; }
-
-	// 1. Защита и инициализация
-	const int N = min(amountOfPeaks, max_amount_of_peaks);
-	const numb invEps = 1.0 / eps;
-	const numb eps2 = eps * eps;
-	for (int i = 0; i < N; ++i) labels[i] = 0;
-
-	// 2. Bounding Box (масштабирование на лету)
-	numb minX = data[0] * mult_peak, maxX = minX;
-	numb minY = intervals[0] * mult_interval, maxY = minY;
-	for (int i = 1; i < N; ++i) {
-		numb x = data[i] * mult_peak;
-		numb y = intervals[i] * mult_interval;
-		if (x < minX) minX = x; else if (x > maxX) maxX = x;
-		if (y < minY) minY = y; else if (y > maxY) maxY = y;
-	}
-
-	// 3. Сетка (Grid) 16x16 = 256 ячеек (1 КБ)
-	// Это оптимально для sm_75: не перегружает Local Memory
-	constexpr int G_DIM = 16;
-	int gCols = max(1, min(G_DIM, (int)((maxX - minX) * invEps) + 1));
-	int gRows = max(1, min(G_DIM, (int)((maxY - minY) * invEps) + 1));
-	int gCells = gCols * gRows;
-
-	int head[256];
-	for (int i = 0; i < gCells; ++i) head[i] = -1;
-
-	// 4. Связный список (4 КБ)
-	int next[max_amount_of_peaks];
-	for (int i = 0; i < N; ++i) {
-		numb x = data[i] * mult_peak;
-		numb y = intervals[i] * mult_interval;
-		int cx = min(gCols - 1, (int)((x - minX) * invEps));
-		int cy = min(gRows - 1, (int)((y - minY) * invEps));
-		int cell = cy * gCols + cx;
-		next[i] = head[cell];
-		head[cell] = i;
-	}
-
-	// 5. DFS Кластеризация
-	// Стек ограничен 128 элементами (0.5 КБ). 
-	// Это предотвращает переполнение Local Memory на старых архитектурах.
-	int stack[128];
-	int stackTop = 0;
-	int clusterCount = 0;
-
-	for (int i = 0; i < N; ++i) {
-		if (labels[i] != 0) continue;
-
-		++clusterCount;
-		labels[i] = clusterCount;
-		stackTop = 0;
-		stack[stackTop++] = i;
-
-		while (stackTop > 0) {
-			int curr = stack[--stackTop];
-			numb xc = data[curr] * mult_peak;
-			numb yc = intervals[curr] * mult_interval;
-
-			int cx = min(gCols - 1, (int)((xc - minX) * invEps));
-			int cy = min(gRows - 1, (int)((yc - minY) * invEps));
-
-			int sCx = max(0, cx - 1), eCx = min(gCols - 1, cx + 1);
-			int sCy = max(0, cy - 1), eCy = min(gRows - 1, cy + 1);
-
-			// Поиск в 9 соседних ячейках
-			for (int cy2 = sCy; cy2 <= eCy; ++cy2) {
-				for (int cx2 = sCx; cx2 <= eCx; ++cx2) {
-					int nb_idx = head[cy2 * gCols + cx2];
-					while (nb_idx != -1) {
-						if (labels[nb_idx] == 0) {
-							numb dx = data[nb_idx] * mult_peak - xc;
-							numb dy = intervals[nb_idx] * mult_interval - yc;
-							// Квадрат евклидова расстояния
-							if (dx * dx + dy * dy <= eps2) {
-								labels[nb_idx] = clusterCount;
-								// Добавляем в стек, только если есть место
-								if (stackTop < 128) stack[stackTop++] = nb_idx;
-							}
-						}
-						nb_idx = next[nb_idx];
-					}
-				}
-			}
-		}
-	}
-	return clusterCount;
-}
-
-// ---------------------------------------------------------------------------------
-// --- Оптимизированное ядро DBSCAN
-// ---------------------------------------------------------------------------------
-__global__ void dbscanCUDA_optimized(
-	const numb* __restrict__ data,
-	const size_t sizeOfBlock,
-	const int amountOfBlocks,
-	const int* __restrict__ amountOfPeaks,
-	const numb* __restrict__ intervals,
-	const numb eps,
-	int* __restrict__ outData)
-{
-	int idx = threadIdx.x + blockIdx.x * blockDim.x;
-	if (idx >= amountOfBlocks) return;
-
-	// См. dbscanCUDA: REGIME_* проносятся в outData без изменений.
-	if (amountOfPeaks[idx] == REGIME_FIXED_POINT) { outData[idx] = REGIME_FIXED_POINT; return; }
-	if (amountOfPeaks[idx] == REGIME_UNBOUND)     { outData[idx] = REGIME_UNBOUND;     return; }
-
-	// Локальный массив меток (выделяется на поток, размер берется из configCUDA.h)
-	int labels[max_amount_of_peaks];
-
-	outData[idx] = dbscan_optimized(
-		data + idx * sizeOfBlock,
-		intervals + idx * sizeOfBlock,
-		amountOfPeaks[idx],
-		eps,
-		labels
-	);
-}
+// ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
+// ядро dbscanCUDA_optimized. Удалены как мёртвый код: единственная ссылка на
+// них — закомментированный вызов в hostLibrary.cu, рабочий 2D-путь идёт через
+// dbscanCUDA -> dbscan. Именно они держали per-thread массивы
+// int next[max_amount_of_peaks] / labels[max_amount_of_peaks], поэтому после
+// удаления max_amount_of_peaks больше НЕ бьёт по local memory и occupancy —
+// он ограничивает только число пиков в peakFinder и размеры device-буферов.
 
 // --------------------
 // --- Ядро для LLE ---

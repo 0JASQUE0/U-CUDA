@@ -61,17 +61,17 @@ public:
     PlotRenderer(const PlotRenderer&) = delete;
     PlotRenderer& operator=(const PlotRenderer&) = delete;
 
-    // with_depth=true ������ depth-attachment � �������� GL_DEPTH_TEST.
-    // ������������ ��� 3D. ��� 2D ��������� false (�� ���������).
+    // with_depth=true заводит depth-attachment и включает GL_DEPTH_TEST.
+    // Нужен только 3D. Для 2D оставляем false (значение по умолчанию).
     void begin_frame(int w, int h, float clear_r, float clear_g, float clear_b, float clear_a,
         bool with_depth = false);
 
-    // ������ 2D-����� (vbo � float[2] �� �������).
+    // Рисует 2D-линию (vbo с float[2] на вершину).
     void draw_line(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
 
-    // ������ 2D-����� (vbo � float[2] �� �������) ��� GL_POINTS.
-    // ��� ������������ ��� ������� 1D-�����������.
+    // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS.
+    // Этим же путём рисуются точки 1D-бифуркационных диаграмм.
     // marker < 0 — старый путь: сплошной квадрат, GL-состояние не трогается.
     // marker >= 0 (PointMarker) — шейдерная маска формы + alpha-блендинг
     // (color[3] перестаёт игнорироваться).
@@ -96,7 +96,7 @@ public:
                       float uv_scale_x, float uv_scale_y,
                       int n_discrete = 0, bool reverse = false);
 
-    // ������ 3D-����� (vbo � float[3] �� �������).
+    // Рисует 3D-линию (vbo с float[3] на вершину).
     // thick_style=false — старый быстрый путь: program_3d_ + glLineWidth
     // (в core-profile драйвер обычно клампит до 1px, α не блендится).
     // thick_style=true — раскрываем сегменты в screen-aligned quads через

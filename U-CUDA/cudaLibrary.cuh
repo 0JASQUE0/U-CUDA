@@ -21,21 +21,8 @@
 
 __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1, numb* K, const numb* a, const numb h, const bool directionOfintegration = 1);
 
-__global__ void dbscanCUDA_optimized(
-	const numb* __restrict__ data,
-	const size_t sizeOfBlock,
-	const int amountOfBlocks,
-	const int* __restrict__ amountOfPeaks,
-	const numb* __restrict__ intervals,
-	const numb eps,
-	int* __restrict__ outData);
-
-__device__ int dbscan_optimized(
-	const numb* __restrict__ data,       // ��������� ����� (������ ������)
-	const numb* __restrict__ intervals,  // ���������� ��������� (������ ������)
-	const int amountOfPeaks,
-	const numb eps,
-	int* __restrict__ labels);
+// dbscanCUDA_optimized / dbscan_optimized удалены как мёртвый код — см.
+// примечание на их прежнем месте в cudaLibrary.cu.
 
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,
@@ -113,30 +100,30 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const int startDataIndex);
 
 /**  
- * ��������� ��������� �������� ���������� ������
- * � ���������� ��������� � x
+ * Считает один шаг дискретной модели системы
+ * и записывает новое состояние обратно в x
  * 
- * \param x			- ��������� ������� ��� �������� ���������� ���������� �����
- * \param values	- ���������
- * \param h			- ��� ��������������
+ * \param x			- состояние системы; на выходе — состояние после шага
+ * \param values	- параметры системы
+ * \param h			- шаг интегрирования
  */
 __device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);
 
 __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a, const numb h);
 /**
- * ��������� ���������� ��� ����� ������� � ���������� ��������� � "data" (���� data != nullptr)
+ * Прогоняет несколько шагов модели, попутно складывая траекторию в "data" (если data != nullptr)
  * 
- * \param x						- ��������� ������� ��� �������������
- * \param values				- ��������� �������
- * \param h						- ��� ��������������
- * \param amountOfIterations	- ���������� ��������
- * \param preScaller			- ��������� ���������. ������ 'preScaller' ����� ����� �������� � ���������
- * \param writableVar			- ����� �� ���������� � x[] ����� �������� � ���������
- * \param maxValue				- ������������ ��������. ���� ����� x[writableVar] > maxValue, ����� ������� ������ false
- * \param data					- ������ ��� ������ ������
- * \param startDataIndex		- ������, � �������� ������� �������� ������ � data
- * \param writeStep				- ��� ������ � ������� � ������� (��������, ���� ��� = 2, �� ������ ����� � �������: 0, 2, 4, ...)
- * \return						- ��������� true, ���� ������ �� ���������
+ * \param x						- состояние системы; на выходе — состояние после последнего шага
+ * \param values				- параметры системы
+ * \param h						- шаг интегрирования
+ * \param amountOfIterations	- сколько шагов сделать
+ * \param preScaller			- прореживание записи. В data попадает каждая 'preScaller'-я точка
+ * \param writableVar			- индекс переменной в x[], которую пишем в data
+ * \param maxValue				- порог расходимости. Если |x[writableVar]| > maxValue, функция вернёт false
+ * \param data					- буфер для записи траектории
+ * \param startDataIndex		- с какого индекса в data начинать запись
+ * \param writeStep				- шаг записи в буфер (например, при 2 пишутся индексы 0, 2, 4, ...)
+ * \return						- true, если решение не разошлось
  */
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
@@ -155,18 +142,18 @@ __device__ int loopCalculateDiscreteModel_int(
 
 
 /**
- * ���������� �������, ������� ������������� ��������� ���������� ����� ������
+ * Ядро: моделирует ансамбль систем, разнесённых по шагу интегрирования
  *
  * \param amountOfThreads			- 
- * \param h							- ��� ��������������
+ * \param h							- шаг интегрирования
  * \param hSpecial					- 
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� ( ����� ���������� ����� ��� ����� ������� )
- * \param writableVar				- ������ ���������, �� �������� ����� ������� ���������
- * \param data						- ������, ��� ����� �������� ���������� ������
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (сколько точек посчитает каждый поток)
+ * \param writableVar				- индекс переменной, по которой пишем результат
+ * \param data						- буфер, куда сложить посчитанные траектории
  * \return -
  */
 
@@ -186,28 +173,28 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 
 /**
- * ���������� �������, ������� ��������� ���������� ���������� ������
+ * Ядро: считает траектории ансамбля систем
  * 
- * \param nPts						- ����� ���������� ��������� - nPts
- * \param nPtsLimiter				- ���������� ���������, ������� �������������� �� ������ �������� - nPtsLimiter
- * \param sizeOfBlock				- ���������� ����� � ����� ������� ( tMax / h / preScaller ) 
- * \param amountOfCalculatedPoints	- ���������� ��� ����������� ����� ������
- * \param amountOfPointsForSkip		- ���������� ����� ��� �������� ( transientTime )
- * \param dimension					- ����������� ( ��������� ���������� )
- * \param ranges					- ������ � �����������
- * \param h							- ��� ��������������
- * \param indicesOfMutVars			- ������� ���������� ����������
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� ( ����� ���������� ����� ��� ����� ������� )
- * \param preScaller				- ���������, ������� ��������� ����� � ����� ��������
- * \param writableVar				- ������ ���������, �� �������� ����� ������� ���������
- * \param maxValue					- ������������ �������� (�� ������), ���� �������� ������� ��������� "�����������"
- * \param data						- ������, ��� ����� �������� ���������� ������
- * \param maxValueCheckerArray		- ��������������� ������, ���� ��� ������������� ������ ����� �������� '-1' � ��������������� �������
- * \param Par_or_Var				- 0 - ���������� ��������� �������, 1 - ���������� ���������
+ * \param nPts						- всего точек свипа - nPts
+ * \param nPtsLimiter				- сколько точек считаем за один запуск (размер чанка) - nPtsLimiter
+ * \param sizeOfBlock				- точек в одной траектории ( tMax / h / preScaller )
+ * \param amountOfCalculatedPoints	- сколько точек свипа уже посчитано (смещение чанка)
+ * \param amountOfPointsForSkip		- сколько точек пропустить как транзиент ( transientTime )
+ * \param dimension					- размерность свипа ( сколько параметров меняем )
+ * \param ranges					- границы свипа, по паре на измерение
+ * \param h							- шаг интегрирования
+ * \param indicesOfMutVars			- индексы варьируемых величин
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (сколько точек посчитает каждый поток)
+ * \param preScaller				- прореживание: сколько шагов приходится на одну записанную точку
+ * \param writableVar				- индекс переменной, по которой пишем результат
+ * \param maxValue					- порог расходимости (по модулю); превысив его, решение считается разошедшимся
+ * \param data						- буфер, куда сложить посчитанные траектории
+ * \param maxValueCheckerArray		- вспомогательный массив: разошедшимся системам пишется '-1'
+ * \param Par_or_Var				- 0 - варьируем начальные условия, 1 - варьируем параметры
  * \return -
  */
 __global__ void calculateDiscreteModelCUDA(
@@ -243,27 +230,27 @@ __global__ void calculateDiscreteModelCUDA(
 
 
 /**
- * ���������� �������, ������� ��������� ���������� ���������� ������ �� ����
+ * Ядро: считает траектории ансамбля систем при свипе по шагу интегрирования
  *
- * \param nPts						- ����� ���������� ��������� - nPts
- * \param nPtsLimiter				- ���������� ���������, ������� �������������� �� ������ �������� - nPtsLimiter
- * \param sizeOfBlock				- ���������� ����� � ����� ������� ( tMax / h / preScaller )
- * \param amountOfCalculatedPoints	- ���������� ��� ����������� ����� ������
- * \param transientTime				- ����� �������� ( transientTime )
- * \param dimension					- ����������� ( ��������� ���������� )
- * \param ranges					- ������ � �����������
- * \param h							- ��� ��������������
- * \param indicesOfMutVars			- ������� ���������� ����������
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� ( ����� ���������� ����� ��� ����� ������� )
- * \param preScaller				- ���������, ������� ��������� ����� � ����� ��������
- * \param writableVar				- ������ ���������, �� �������� ����� ������� ���������
- * \param maxValue					- ������������ �������� (�� ������), ���� �������� ������� ��������� "�����������"
- * \param data						- ������, ��� ����� �������� ���������� ������
- * \param maxValueCheckerArray		- ��������������� ������, ���� ��� ������������� ������ ����� �������� '-1' � ��������������� �������
+ * \param nPts						- всего точек свипа - nPts
+ * \param nPtsLimiter				- сколько точек считаем за один запуск (размер чанка) - nPtsLimiter
+ * \param sizeOfBlock				- точек в одной траектории ( tMax / h / preScaller )
+ * \param amountOfCalculatedPoints	- сколько точек свипа уже посчитано (смещение чанка)
+ * \param transientTime				- время транзиента ( transientTime )
+ * \param dimension					- размерность свипа ( сколько величин меняем )
+ * \param ranges					- границы свипа, по паре на измерение
+ * \param h							- шаг интегрирования
+ * \param indicesOfMutVars			- индексы варьируемых величин
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (сколько точек посчитает каждый поток)
+ * \param preScaller				- прореживание: сколько шагов приходится на одну записанную точку
+ * \param writableVar				- индекс переменной, по которой пишем результат
+ * \param maxValue					- порог расходимости (по модулю); превысив его, решение считается разошедшимся
+ * \param data						- буфер, куда сложить посчитанные траектории
+ * \param maxValueCheckerArray		- вспомогательный массив: разошедшимся системам пишется '-1'
  * \return -
  */
 __global__ void calculateDiscreteModelCUDA_H(
@@ -290,27 +277,27 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 
 /**
- * ���������� �������, ������� ��������� ���������� ���������� ������ (�� ��������� ��������)
+ * Ядро: считает траектории ансамбля систем при свипе по начальным условиям
  *
- * \param nPts						- ����� ���������� ��������� - nPts
- * \param nPtsLimiter				- ���������� ���������, ������� �������������� �� ������ �������� - nPtsLimiter
- * \param sizeOfBlock				- ���������� ����� � ����� ������� ( tMax / h / preScaller )
- * \param amountOfCalculatedPoints	- ���������� ��� ����������� ����� ������
- * \param amountOfPointsForSkip		- ���������� ����� ��� �������� ( transientTime )
- * \param dimension					- ����������� ( ��������� ���������� )
- * \param ranges					- ������ � �����������
- * \param h							- ��� ��������������
- * \param indicesOfMutVars			- ������� ���������� ����������
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� ( ����� ���������� ����� ��� ����� ������� )
- * \param preScaller				- ���������, ������� ��������� ����� � ����� ��������
- * \param writableVar				- ������ ���������, �� �������� ����� ������� ���������
- * \param maxValue					- ������������ �������� (�� ������), ���� �������� ������� ��������� "�����������"
- * \param data						- ������, ��� ����� �������� ���������� ������
- * \param maxValueCheckerArray		- ��������������� ������, ���� ��� ������������� ������ ����� �������� '-1' � ��������������� �������
+ * \param nPts						- всего точек свипа - nPts
+ * \param nPtsLimiter				- сколько точек считаем за один запуск (размер чанка) - nPtsLimiter
+ * \param sizeOfBlock				- точек в одной траектории ( tMax / h / preScaller )
+ * \param amountOfCalculatedPoints	- сколько точек свипа уже посчитано (смещение чанка)
+ * \param amountOfPointsForSkip		- сколько точек пропустить как транзиент ( transientTime )
+ * \param dimension					- размерность свипа ( сколько величин меняем )
+ * \param ranges					- границы свипа, по паре на измерение
+ * \param h							- шаг интегрирования
+ * \param indicesOfMutVars			- индексы варьируемых величин
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (сколько точек посчитает каждый поток)
+ * \param preScaller				- прореживание: сколько шагов приходится на одну записанную точку
+ * \param writableVar				- индекс переменной, по которой пишем результат
+ * \param maxValue					- порог расходимости (по модулю); превысив его, решение считается разошедшимся
+ * \param data						- буфер, куда сложить посчитанные траектории
+ * \param maxValueCheckerArray		- вспомогательный массив: разошедшимся системам пишется '-1'
  * \return -
  */
 __global__ void calculateDiscreteModelICCUDA(
@@ -356,9 +343,9 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	numb* data = nullptr,
 	int* maxValueCheckerArray = nullptr);
 /**
- * �������, ������� ������� ������ � ������������������ ��������
- * ������:
- * ������������������:
+ * Возвращает значение свипа по плоскому индексу idx
+ * Пример:
+ * Последовательность:
  * 1 2 3 4 5 1 2 3 4 5 1 2 3 4 5 1 2 3 4 5 1 2 3 4 5
  * 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5
  * 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
@@ -367,12 +354,12 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
  * getValueByIdx(7, 5, 1, 5, 1) = 2
  * getValueByIdx(7, 5, 1, 5, 2) = 1
  * 
- * \param idx			- ������� idx � ������
- * \param nPts			- ���������� ����� ��� ��������� ��������� (����������)
- * \param startRange	- ����� ������� ���������
- * \param finishRange	- ������ ������� ���������
- * \param valueNumber	- ����� ��������� ����������
- * \return Value		- ���������
+ * \param idx			- плоский индекс точки в сетке свипа
+ * \param nPts			- точек на одно измерение сетки
+ * \param startRange	- левая граница диапазона
+ * \param finishRange	- правая граница диапазона
+ * \param valueNumber	- номер варьируемой величины (какое измерение сетки)
+ * \return Value		- значение
  */
 __device__ __host__ numb getValueByIdx(const size_t idx, const int nPts, 
 	const numb startRange, const numb finishRange, const int valueNumber);
@@ -381,14 +368,14 @@ __device__ __host__ numb getValueByIdx_forLogBains(const int idx, const int nPts
 	const numb startRange, const numb finishRange, const int valueNumber);
 
 /**
- * �������, ������� ������� ������ � ������������������ �������� �� ��������������� �����
+ * То же, что getValueByIdx, но узлы распределены логарифмически
  *
- * \param idx			- ������� idx � ������
- * \param nPts			- ���������� ����� ��� ��������� ��������� (����������)
- * \param startRange	- ����� ������� ���������
- * \param finishRange	- ������ ������� ���������
- * \param valueNumber	- ����� ��������� ����������
- * \return Value		- ���������
+ * \param idx			- плоский индекс точки в сетке свипа
+ * \param nPts			- точек на одно измерение сетки
+ * \param startRange	- левая граница диапазона
+ * \param finishRange	- правая граница диапазона
+ * \param valueNumber	- номер варьируемой величины (какое измерение сетки)
+ * \return Value		- значение
  */
 __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber);
@@ -403,15 +390,15 @@ __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const 
 
 
 /**
- * ������� ���� � ��������� [startDataIndex; startDataIndex + amountOfPoints] � "data" �������
- * ��������� ������������ � outPeaks � timeOfPeaks ( ���� outPeaks != nullptr � timeOfPeaks != nullptr )
+ * Ищет пики в диапазоне [startDataIndex; startDataIndex + amountOfPoints] массива "data"
+ * Результат складывается в outPeaks и timeOfPeaks ( если outPeaks != nullptr и timeOfPeaks != nullptr )
  * 
- * \param data				- ������ � �������
- * \param startDataIndex	- ������, ������ �������� ������ ����
- * \param amountOfPoints	- ���������� ����� ��� ������ �����
- * \param outPeaks			- �������� ������ ��� ������ � ���� ��������� �����
- * \param timeOfPeaks		- �������� ������ ��� ������ � ���� �������� ��������� �����
- * \param h					- ��� �������������� (��� ���������� ����������� ���������)
+ * \param data				- массив с траекторией
+ * \param startDataIndex	- с какого индекса начинать поиск
+ * \param amountOfPoints	- сколько точек просмотреть
+ * \param outPeaks			- куда сложить значения пиков
+ * \param timeOfPeaks		- куда сложить моменты времени пиков
+ * \param h					- шаг интегрирования
  * \return - Amount of found peaks
  */
 __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataIndex,
@@ -429,16 +416,16 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	const int logFreqAxis = 0);
 
 /**
- * ���������� ����� � "data" ������� � ������������� ������ 
- * ��������� ������������ � "outPeaks", "timeOfPeaks" � "amountOfPeaks" ( ���� outPeaks != nullptr � timeOfPeaks != nullptr � amountOfPeaks != nullptr )
+ * Ищет пики в массиве "data" параллельно, блок на траекторию
+ * Результат складывается в "outPeaks", "timeOfPeaks" и "amountOfPeaks" ( если они != nullptr )
  * 
- * \param data				- ������
- * \param sizeOfBlock		- ���������� ����� ��� ����� ������� ( tmax / h / preScaller )
- * \param amountOfBlocks	- ���������� ������ ( ������ ) � ������� "data"
- * \param amountOfPeaks		- �������� ������, ���������� ���������� ����� ��� ������� ����� ( ������� )
- * \param outPeaks			- �������� ������, ���������� f��������� ��������� �����
- * \param timeOfPeaks		- �������� ������, ���������� ���������� ��������� ��������� �����
- * \param h					- ��� �������������� ( ��� ���������� ����������� ��������� )
+ * \param data				- массив с траекториями
+ * \param sizeOfBlock		- точек в одной траектории
+ * \param amountOfBlocks	- сколько траекторий обрабатываем
+ * \param amountOfPeaks		- куда сложить число найденных пиков
+ * \param outPeaks			- куда сложить значения пиков
+ * \param timeOfPeaks		- куда сложить моменты времени пиков
+ * \param h					- шаг интегрирования
  */
 
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
@@ -462,16 +449,16 @@ __device__ __host__ numb chua_inner(numb x, numb m, numb d, numb kslope, numb mu
 __device__ __host__ numb psi_two_scale(numb x, numb m, numb M, numb d, numb kslope);
 
 /**
- * ���������� ����� � "data" ������� � ������������� ������
- * ��������� ������������ � "outPeaks", "timeOfPeaks" � "amountOfPeaks" ( ���� outPeaks != nullptr � timeOfPeaks != nullptr � amountOfPeaks != nullptr )
+ * Ищет пики в массиве "data" параллельно, блок на траекторию (свип по шагу h)
+ * Результат складывается в "outPeaks", "timeOfPeaks" и "amountOfPeaks" ( если они != nullptr )
  *
- * \param data				- ������
- * \param sizeOfBlock		- ���������� ����� ��� ����� ������� ( tmax / h / preScaller )
- * \param amountOfBlocks	- ���������� ������ ( ������ ) � ������� "data"
- * \param amountOfPeaks		- �������� ������, ���������� ���������� ����� ��� ������� ����� ( ������� )
- * \param outPeaks			- �������� ������, ���������� f��������� ��������� �����
- * \param timeOfPeaks		- �������� ������, ���������� ���������� ��������� ��������� �����
- * \param h					- ��� �������������� ( ��� ���������� ����������� ��������� )
+ * \param data				- массив с траекториями
+ * \param sizeOfBlock		- точек в одной траектории
+ * \param amountOfBlocks	- сколько траекторий обрабатываем
+ * \param amountOfPeaks		- куда сложить число найденных пиков
+ * \param outPeaks			- куда сложить значения пиков
+ * \param timeOfPeaks		- куда сложить моменты времени пиков
+ * \param h					- шаг интегрирования
  */
 __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks = nullptr, numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h = 0);
@@ -479,78 +466,89 @@ __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int am
 
 
 /**
- * ��������� ���������� ����� ����� �������
+ * Евклидово расстояние между двумя точками
  * 
- * \param x1 - x ������ �����
- * \param y1 - y ������ �����
- * \param x2 - x ������ �����
- * \param y2 - y ������ �����
- * \return - ���������
+ * \param x1 - x первой точки
+ * \param y1 - y первой точки
+ * \param x2 - x второй точки
+ * \param y2 - y второй точки
+ * \return - расстояние
  */
 __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2);
 
 
 
 /**
- * ������� DBSCAN
+ * Кластеризация DBSCAN
  * 
- * \param data					- ������ (����)
- * \param intervals				- ���������� ���������
- * \param helpfulArray			- ��������������� ������
- * \param startDataIndex		- ������, � �������� ����� ������� ������ � outData
- * \param amountOfPeaks			- ������ � ����������� ����� � ������ �������
- * \param sizeOfHelpfulArray	- ������ ���������������� �������
- * \param idx					- ������� idx � ������
- * \param eps					- �������
- * \param outData				- �������������� ������
+ * \param data					- значения пиков одной траектории
+ * \param intervals				- интервалы между пиками
+ * \param helpfulArray			- вспомогательный буфер под промежуточные данные
+ * \param startDataIndex		- с какого индекса начинать
+ * \param amountOfPeaks			- сколько пиков на входе
+ * \param sizeOfHelpfulArray	- размер вспомогательного буфера
+ * \param idx					- индекс обрабатываемой системы
+ * \param eps					- радиус окрестности DBSCAN
+ * \param outData				- куда сложить число найденных кластеров
  */
+// multPeak / multInterval — множители осей признаков перед кластеризацией
+// (пик и межпиковый интервал). Задаются per-diagram из GUI; дефолты в
+// объявлении dbscanCUDA ниже совпадают с константами configCUDA.h, поэтому
+// вызовы без этих аргументов (hostLibrary.cu) считают как раньше.
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
-	const int idx, const numb eps, int* outData);
+	const int idx, const numb eps, int* outData,
+	const numb multPeak = mult_peak, const numb multInterval = mult_interval);
 
 
 
 /**
- * ���������� ������� DBSCAN
+ * Ядро DBSCAN
  * 
- * \param data				- ������ (����)
- * \param sizeOfBlock		- ���������� ����� � ����� �������
- * \param amountOfBlocks	- ���������� ������ (������) � data
- * \param amountOfPeaks		- ������, ���������� ���������� ����� ��� ������� ����� � data
- * \param intervals			- ���������� ���������
- * \param helpfulArray		- ��������������� ������
- * \param eps				- �������
- * \param outData			- �������������� ������
+ * \param data				- массив с траекториями
+ * \param sizeOfBlock		- точек в одной траектории
+ * \param amountOfBlocks	- сколько траекторий обрабатываем
+ * \param amountOfPeaks		- куда сложить число найденных пиков
+ * \param intervals			- интервалы между пиками
+ * \param helpfulArray		- вспомогательный буфер под промежуточные данные
+ * \param eps				- радиус окрестности DBSCAN
+ * \param outData			- куда сложить число найденных кластеров
  */
+// Дефолты множителей = константы configCUDA.h: <<<>>>-вызовы без этих
+// аргументов (hostLibrary.cu) сохраняют прежнее поведение. ВНИМАНИЕ: при
+// запуске через driver API (cuLaunchKernel в parametric_engine.cpp) значения
+// по умолчанию не подставляются — там массив аргументов обязан содержать все
+// 10 параметров.
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-	const int* amountOfPeaks, numb* intervals, numb* helpfulArray, const numb eps, int* outData);
+	const int* amountOfPeaks, numb* intervals, numb* helpfulArray, const numb eps, int* outData,
+	const numb multPeak = mult_peak, const numb multInterval = mult_interval);
 
 
 
 /**
- * ���� ��� LLE
+ * Ядро LLE
  * 
- * \param nPts						- ����� ����������
- * \param nPtsLimiter				- ���������� � ������� �������
- * \param NT						- ����� ������������
- * \param tMax						- ����� �������������
- * \param sizeOfBlock				- ���������� �����, ���������� ����� �������� � "data"
- * \param amountOfCalculatedPoints	- ���������� ��� ����������� �����
- * \param amountOfPointsForSkip		- ���������� �����, ������� ����� ���������������� �� ��������� ������� (transientTime)
- * \param dimension					- �����������
- * \param ranges					- ������, ���������� ��������� ������������� ���������
- * \param h							- ��� ��������������
- * \param eps						- �������
- * \param indicesOfMutVars			- ������� ���������� ����������
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� (����������� �� tMax)
- * \param preScaller				- ��������� ��� ��������� ��������
- * \param writableVar				- ������ ���������� � x[] �� �������� ������ ���������
- * \param maxValue					- ������������� �������� ���������� ��� �������������
- * \param resultArray				- �������������� ������
+ * \param nPts						- всего точек свипа
+ * \param nPtsLimiter				- сколько точек считаем за один запуск
+ * \param NT						- интервал нормировки
+ * \param tMax						- время моделирования
+ * \param sizeOfBlock				- точек в одной траектории
+ * \param amountOfCalculatedPoints	- сколько точек свипа уже посчитано
+ * \param amountOfPointsForSkip		- сколько точек пропустить как транзиент (transientTime)
+ * \param dimension					- размерность свипа
+ * \param ranges					- границы свипа, по паре на измерение
+ * \param h							- шаг интегрирования
+ * \param eps						- величина начального возмущения
+ * \param indicesOfMutVars			- индексы варьируемых величин
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (считается из tMax)
+ * \param preScaller				- прореживание записи
+ * \param writableVar				- индекс переменной в x[], по которой считаем
+ * \param maxValue					- порог расходимости
+ * \param resultArray				- куда сложить показатель Ляпунова
  * \return -
  */
 __global__ void LLEKernelCUDA(
@@ -582,29 +580,29 @@ __global__ void LLEKernelCUDA(
 
 
 /**
- * ���� ��� LLE (IC)
+ * Ядро LLE (свип по начальным условиям)
  *
- * \param nPts						- ����� ����������
- * \param nPtsLimiter				- ���������� � ������� �������
- * \param NT						- ����� ������������
- * \param tMax						- ����� �������������
- * \param sizeOfBlock				- ���������� �����, ���������� ����� �������� � "data"
- * \param amountOfCalculatedPoints	- ���������� ��� ����������� �����
- * \param amountOfPointsForSkip		- ���������� �����, ������� ����� ���������������� �� ��������� ������� (transientTime)
- * \param dimension					- �����������
- * \param ranges					- ������, ���������� ��������� ������������� ���������
- * \param h							- ��� ��������������
- * \param eps						- �������
- * \param indicesOfMutVars			- ������� ���������� ����������
- * \param initialConditions			- ��������� �������
- * \param amountOfInitialConditions - ���������� ��������� �������
- * \param values					- ���������
- * \param amountOfValues			- ���������� ����������
- * \param amountOfIterations		- ���������� �������� (����������� �� tMax)
- * \param preScaller				- ��������� ��� ��������� ��������
- * \param writableVar				- ������ ���������� � x[] �� �������� ������ ���������
- * \param maxValue					- ������������� �������� ���������� ��� �������������
- * \param resultArray				- �������������� ������
+ * \param nPts						- всего точек свипа
+ * \param nPtsLimiter				- сколько точек считаем за один запуск
+ * \param NT						- интервал нормировки
+ * \param tMax						- время моделирования
+ * \param sizeOfBlock				- точек в одной траектории
+ * \param amountOfCalculatedPoints	- сколько точек свипа уже посчитано
+ * \param amountOfPointsForSkip		- сколько точек пропустить как транзиент (transientTime)
+ * \param dimension					- размерность свипа
+ * \param ranges					- границы свипа, по паре на измерение
+ * \param h							- шаг интегрирования
+ * \param eps						- величина начального возмущения
+ * \param indicesOfMutVars			- индексы варьируемых величин
+ * \param initialConditions			- начальные условия
+ * \param amountOfInitialConditions - количество начальных условий
+ * \param values					- параметры системы
+ * \param amountOfValues			- количество параметров
+ * \param amountOfIterations		- количество итераций (считается из tMax)
+ * \param preScaller				- прореживание записи
+ * \param writableVar				- индекс переменной в x[], по которой считаем
+ * \param maxValue					- порог расходимости
+ * \param resultArray				- куда сложить показатель Ляпунова
  * \return -
  */
 __global__ void LLEKernelICCUDA(
@@ -708,15 +706,15 @@ __global__ void LSKernelICCUDA(
 	numb* resultArray = nullptr);
 
 /**
- * ���������� �������� �������� ����� � ���������� ���������� � "data" ������� � ������������� ������
- * ��������� ������������ � "outAvgPeaks", "AvgTimeOfPeaks" ( ���� outPeaks != nullptr � timeOfPeaks != nullptr )
+ * Считает средние пики и средние интервалы между ними в массиве "data", блок на траекторию
+ * Результат складывается в "outAvgPeaks" и "AvgTimeOfPeaks" ( если они != nullptr )
  *
- * \param data				- ������
- * \param sizeOfBlock		- ���������� ����� ��� ����� ������� ( tmax / h / preScaller )
- * \param amountOfBlocks	- ���������� ������ ( ������ ) � ������� "data"
- * \param outAvgPeaks		- �������� ������, ���������� f��������� ��������� �����
- * \param AvgTimeOfPeaks	- �������� ������, ���������� ���������� ��������� ��������� �����
- * \param h					- ��� �������������� ( ��� ���������� ����������� ��������� )
+ * \param data				- массив с траекториями
+ * \param sizeOfBlock		- точек в одной траектории
+ * \param amountOfBlocks	- сколько траекторий обрабатываем
+ * \param outAvgPeaks		- куда сложить средние значения пиков
+ * \param AvgTimeOfPeaks	- куда сложить средние интервалы между пиками
+ * \param h					- шаг интегрирования
  */
 
 

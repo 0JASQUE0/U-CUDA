@@ -24,7 +24,7 @@ void draw_legend(ImDrawList* dl,
     float marker_w = 14;
     float gap = 4;
 
-    // ������ � �� ����� ������� ������� ��������� ��������
+    // Ширина панели — по самой длинной подписи среди показываемых записей
     float max_text_w = 0;
     int visible_count = 0;
     for (int k = 0; k < (int)entries.size(); ++k) {
@@ -32,7 +32,7 @@ void draw_legend(ImDrawList* dl,
         max_text_w = std::max(max_text_w, ImGui::CalcTextSize(entries[k].label.c_str()).x);
         ++visible_count;
     }
-    if (visible_count == 0) return; // ������ ����������
+    if (visible_count == 0) return; // рисовать нечего
 
     float pad = 6;
     float entry_w = marker_w + gap + max_text_w;
@@ -56,7 +56,7 @@ void draw_legend(ImDrawList* dl,
 
     int row = 0;
     for (int k = 0; k < (int)entries.size(); ++k) {
-        if (!is_global_vis(k)) continue;   // ��������� ����������� �� ����������
+        if (!is_global_vis(k)) continue;   // скрытые глобально не показываем
         if (row >= 20) break;
         bool v = (k < (int)visible.size()) ? visible[k] : true;
         ImVec4 c = entries[k].color;

@@ -117,9 +117,12 @@ constexpr numb eps_interPeak_delta = 0.0;	// minimal interspike interval between
 constexpr numb peak_threshold = -1e25;	// threshold for peakfinder
 #endif
 #ifndef max_amount_of_peaks
-// ВНИМАНИЕ: задаёт не только потолок числа пиков, но и размер локальных
-// (per-thread) массивов next[] / labels[] в dbscan_optimized — рост значения
-// линейно съедает local memory каждого потока.
+// Потолок числа пиков, которые peakFinder оставляет на одну точку свипа.
+// Раньше здесь стояло предупреждение про local memory: значение задавало
+// размер per-thread массивов next[] / labels[] в dbscan_optimized. Те ядра
+// удалены как мёртвые, рабочий путь (dbscanCUDA -> dbscan) локальных массивов
+// не держит, так что occupancy это больше не задевает — влияние осталось
+// только на размер device-буферов пиков и интервалов.
 constexpr int max_amount_of_peaks = 2500;	// max amount of peaks for estimation for peakfinder
 #endif
 

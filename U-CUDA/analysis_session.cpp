@@ -2,6 +2,7 @@
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
+#include "num_parse.h"   // parse_num — единый разбор числовых полей
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -19,16 +20,90 @@ static void log_run_completed(const char* label, bool ok, double secs) {
     std::fflush(stdout);
 }
 
-// Парсит значение (число или дробь a/b) в double; пусто -> fallback.
-static double parse_val(const std::string& s, double fallback) {
-    if (s.empty()) return fallback;
-    size_t slash = s.find('/');
-    if (slash != std::string::npos) {
-        double num = std::atof(s.substr(0, slash).c_str());
-        double den = std::atof(s.substr(slash + 1).c_str());
-        if (den != 0) return num / den;
+// ============================================================================
+// Host-порт peakFinder из cudaLibrary.cu (строка 1507).
+//
+// Зачем копия, а не вызов оригинала: peakFinder объявлен как
+// __device__ __host__ в cudaLibrary.cuh, который парсит только nvcc, а этот
+// файл собирает MSVC. Тот же приём уже применён для getValueByIdx
+// (getValueByIdx_local в parametric_engine.cpp).
+//
+// Отличия от оригинала — только в способе доступа к настройкам: пороги берутся
+// из PeakConfig (GUI Settings), а не из constexpr-дефолтов configCUDA.h,
+// потому что на GPU те же значения инжектятся как #define перед компиляцией
+// (см. peak_config_defines). Логика поиска пиков, интерполяция вершины и
+// фильтр по eps_interPeak_delta повторены один в один — иначе Feature diagram
+// показывала бы не те точки, что реально уходят в DBSCAN 2D-бифуркации.
+//
+// dt — шаг ПО ВРЕМЕНИ между соседними отсчётами `data`. Вызывающий передаёт
+// h*decimator и сам ряд, прореженный тем же шагом: признаки должны считаться
+// по тому же сигналу, что уходит в peakFinderCUDA, иначе диаграмма показывает
+// не те пики, что кластеризует DBSCAN (см. место вызова).
+// Возвращает пары (значение пика; интервал от предыдущего удержанного пика).
+// ============================================================================
+static FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
+    FeaturePoints out;
+    const PeakConfig pc = get_peak_config();
+    if (!pc.do_calculate_peaks) return out;
+
+    const size_t n = data.size();
+    if (n < 5) return out;   // оригинал сканирует [2, n-2)
+
+    std::vector<double> peaks, times;   // times — в индексах, как в оригинале
+
+    for (size_t i = 2; i + 2 < n; ++i) {
+        if (!(data[i] - data[i - 1] > pc.eps_peak_delta
+              && data[i] > pc.peak_threshold
+              && data[i] >= data[i + 1])) continue;
+
+        for (size_t j = i; j + 2 < n; ++j) {
+            // Строго больше следующей — плато шло вверх, пика не было.
+            if (data[j] < data[j + 1]) { i = j + 1; break; }
+
+            if (data[j] - data[j + 1] > pc.eps_peak_delta) {
+                if (pc.do_interpolate_peaks) {
+                    const double denom = data[j - 1] - 2.0 * data[j] + data[j + 1];
+                    double delta = 0.0;
+                    if (std::fabs(denom) > 1e-12)
+                        delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
+                    peaks.push_back(data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta);
+                    times.push_back((double)(j - 1) + delta);
+                } else {
+                    peaks.push_back(data[j]);
+                    times.push_back((double)(j - 1));
+                }
+                i = j + 1;   // два пика подряд невозможны
+                break;
+            }
+        }
     }
-    return std::atof(s.c_str());
+
+    // Второй проход: пара (пик; интервал до него) + фильтр слишком близких.
+    // Опора не сдвигается на отброшенный пик — как в оригинале.
+    if (peaks.size() > 1) {
+        double anchor = times[0];
+        for (size_t i = 1; i < peaks.size(); ++i) {
+            const double cur   = times[i];
+            const double delta = (cur - anchor) * dt;
+            if (delta >= pc.eps_interPeak_delta) {
+                out.peaks.push_back(peaks[i]);
+                out.intervals.push_back(delta);
+                anchor = cur;
+            }
+        }
+    }
+
+    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+    if (out.peaks.size() > cap) {
+        out.peaks.resize(cap);
+        out.intervals.resize(cap);
+    }
+    return out;
+}
+
+// Парсит значение (число или дробь a/b) в double; пусто -> fallback.
+static inline double parse_val(const std::string& s, double fallback) {
+    return parse_num(s, fallback);   // тело — в num_parse.h, одно на проект
 }
 
 void PhaseAnalysisSession::add_ic() {
@@ -211,9 +286,54 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
     }
 
+    result.features.resize(N);
     for (int k = 0; k < N; ++k) {
         const auto& ic = in.ic_sets[k];
         std::vector<std::vector<double>>& traj = raw[k];
+
+        // Признаки (пики + интервалы) считаем по ПРОРЕЖЕННОМУ ряду и с шагом
+        // h*decimator — ровно тот сигнал и тот шаг, что получает peakFinderCUDA
+        // в 2D-бифуркации (см. timeStep = h * preScaller в parametric_engine).
+        //
+        // Раньше здесь брался полноразрешающий raw с шагом h, «чтобы decimator
+        // не прорядил сами пики». Точнее так действительно было, но диаграмма
+        // из-за этого переставала предсказывать карту: критерии пика
+        // (data[i]-data[i-1] > eps_peak_delta, data[i] >= data[i+1]) и
+        // интерполяция вершины по трём соседям чувствительны к шагу
+        // дискретизации, и на вчетверо более редкой сетке ядро находило другой
+        // набор пиков. Совпадение с DBSCAN важнее разрешения: диаграмма нужна,
+        // чтобы подбирать eps и множители, а не сама по себе.
+        //
+        // При decimator == 1 обе ветки эквивалентны, поведение не меняется.
+        // Слотов dim + 1: последний (индекс dim) — комбинация переменных, тот
+        // же ряд, что ядро строит при writable_var == -1
+        // (cudaLibrary.cu: x0 + pi*x1 + euler*x2, с деградацией при dim < 3).
+        // Константы берём из configCUDA.h, чтобы диаграмма и бифуркация шли по
+        // одному и тому же ряду, а не по двум похожим.
+        result.features[k].resize((size_t)dim + 1);
+        {
+            const size_t stride = (dec > 1) ? (size_t)dec : (size_t)1;
+            std::vector<double> series;
+            series.reserve(traj.size() / stride + 1);
+            for (int v = 0; v < dim; ++v) {
+                series.clear();
+                for (size_t t = 0; t < traj.size(); t += stride) {
+                    const auto& pt = traj[t];
+                    series.push_back(v < (int)pt.size() ? pt[v] : 0.0);
+                }
+                result.features[k][v] = find_peaks_host(series, h * (double)stride);
+            }
+
+            series.clear();
+            for (size_t t = 0; t < traj.size(); t += stride) {
+                const auto& pt = traj[t];
+                double c = pt.size() > 0 ? pt[0] : 0.0;
+                if (dim >= 2 && pt.size() > 1) c += ::pi    * pt[1];
+                if (dim >= 3 && pt.size() > 2) c += ::euler * pt[2];
+                series.push_back(c);
+            }
+            result.features[k][(size_t)dim] = find_peaks_host(series, h * (double)stride);
+        }
 
         std::vector<std::vector<double>> dtraj;
         if (dec <= 1) dtraj = std::move(traj);
@@ -245,6 +365,10 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     result.snapshot.a         = a;
     result.snapshot.scheme    = in.scheme;
     result.snapshot.h         = h;
+    // Настройка FMA на момент прогона — в CSV, см. Bif1DSnapshot::gpu_fmad.
+    // Пишется одинаково для GPU- и CPU-ветки: это состояние настройки, а не
+    // утверждение об устройстве (на CPU NVRTC не участвует вовсе).
+    result.snapshot.gpu_fmad  = get_nvrtc_fmad();
     result.snapshot.t_max     = tsim;
     result.snapshot.t_skip    = tskip;
     result.snapshot.decimator = dec;
@@ -455,15 +579,8 @@ void BifurcationAnalysisSession::remove_diagram(int i) {
 // Парсит double, понимая дробь "a/b" — поведение симметрично с parse_val
 // (см. строки 10–18 этого же файла, которой пользуется Phase). Иначе
 // Parametric получал бы "8/3" как 8, а Phase как 2.667.
-static double parse_d(const std::string& s, double def) {
-    if (s.empty()) return def;
-    size_t slash = s.find('/');
-    if (slash != std::string::npos) {
-        double num = std::atof(s.substr(0, slash).c_str());
-        double den = std::atof(s.substr(slash + 1).c_str());
-        if (den != 0) return num / den;
-    }
-    return std::atof(s.c_str());   // atof не кидает, "abc"→0
+static inline double parse_d(const std::string& s, double def) {
+    return parse_num(s, def);   // историческое имя, см. num_parse.h
 }
 static int parse_i(const std::string& s, int def) {
     if (s.empty()) return def;
@@ -568,13 +685,22 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     if (req.param_hi   < req.param_lo)   std::swap(req.param_lo,   req.param_hi);
     if (req.param_hi_2 < req.param_lo_2) std::swap(req.param_lo_2, req.param_hi_2);
     req.n_pts              = parse_i(bd.n_pts_text, 200);
-    req.writable_var       = (bd.writable_var >= 0 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
+    // -1 — combination, ровно как в build_bif1d_request. 2D-цепочка идёт через
+    // тот же calculateDiscreteModelCUDA -> loopCalculateDiscreteModel_int, где
+    // сентинел обработан явно (cudaLibrary.cu), а peakFinder/DBSCAN ниже видят
+    // просто скалярный ряд. Раньше здесь стоял кламп `>= 0`: он писался до
+    // появления сентинела, поэтому комбинация молча превращалась в первую
+    // переменную. Учтите, что eps_dbscan под комбинацию обычно нужен свой —
+    // сумма x + pi*y + e*z живёт в другом масштабе, чем одна переменная.
+    req.writable_var       = (bd.writable_var >= -1 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
     req.h                  = parse_d(bd.h_text, 0.01);
     req.t_max              = parse_d(bd.t_max_text, 100.0);
     req.transient_time     = parse_d(bd.transient_text, 100.0);
     req.pre_scaller        = std::max(1, parse_i(bd.pre_scaller_text, 1));
     req.max_value          = parse_d(bd.max_value_text, 1.0e6);
     req.eps_dbscan         = parse_d(bd.eps_dbscan_text, 0.1);
+    req.mult_peak          = parse_d(bd.mult_peak_text,     (double)::mult_peak);
+    req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     return req;
 }

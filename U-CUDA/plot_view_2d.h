@@ -72,10 +72,10 @@ public:
     bool view_valid = false;
     int  series_generation = -1;
 
-    // ��������� ��������� ��� ��� ������� (������� ����������):
-    //  pad_*       � ��������� 5% ������ �� ��� ��� ��������.
-    //  show_zero_* � �������� ����� ���� �� ��� (x=0 ������������, y=0 ��������������).
-    // 2D �������: �� true. Time domain: �� X ������� � ��� ��������� (pad_x/show_zero_x=false).
+    // Как автоподбор трактует оси (влияет на границы вида):
+    //  pad_*       — добавить 5% запаса по оси при автоподборе.
+    //  show_zero_* — рисовать линию нуля (x=0 вертикальная, y=0 горизонтальная).
+    // 2D-портрет: всё true. Time domain: по X ни запаса, ни нуля (pad_x/show_zero_x=false).
     bool pad_x = true;
     bool pad_y = true;
     bool show_zero_x = true;
@@ -89,8 +89,8 @@ public:
     double x_fit_min = 0.0;
     double x_fit_max = 1.0;
 
-    // true: ������ ��� GL_POINTS (��� 1D-�����������).
-    // false (��-���������): GL_LINE_STRIP, ��� ��� ��� ��������� ����������.
+    // true: рисуем через GL_POINTS (для 1D-диаграмм).
+    // false (по умолчанию): GL_LINE_STRIP, как для всех остальных графиков.
     bool points_mode = false;
     float point_size_px = 2.0f;
     // Форма маркера в points_mode (PointMarker). -1 (дефолт) — прежний
@@ -118,7 +118,13 @@ public:
     double snap_x_max = 1.0;
     int    snap_x_n   = 0;
 
-    // ��������� ����� � ���� � ������� ������ (������� ���������� ����� ����������).
+    // В каком виде X лежит в залитом VBO: при лог-оси там log10(x) (см.
+    // XS/XW в render). Входит в условие перезаливки наравне с
+    // data_generation — иначе переключение чекбокса Log scale не меняло бы
+    // уже залитый буфер, и график молча остался бы в старых координатах.
+    bool series_xlog_cached = false;
+
+    // Локальная видимость серий в этом плоте (переключается кликом по легенде).
     std::vector<bool> visible;
 
     // Опционально: callback для добавления custom-пунктов в right-click popup
@@ -161,11 +167,11 @@ public:
     unsigned crosshair_y_color = 0xFFFF9028u;  // orange   (Y sweep)
 
     // render:
-    //  global_visible � ��������� �� ������� �� (�������, ����� �� ��� ��������),
-    //                   ����������� ������ ����, recompute �� �����.
-    //  ��������� ��������� (������� ���� ��������) � ���� visible ����.
-    //  ����: ����� ����� = global_visible[k] && visible[k].
-    //  init_visible � ��������� �������� ��������� ��������� ��� ����� ����� �����.
+    //  global_visible — внешний фильтр (галочки вкладки: показывать серию вообще),
+    //                   строки с false в легенду не попадают совсем.
+    //  Локальное гашение (клик по легенде) живёт в поле visible.
+    //  Итог: серия видна = global_visible[k] && visible[k].
+    //  init_visible — с чего начать локальное состояние при смене числа серий.
     void render(PlotRenderer& renderer,
         ImVec2 avail_pos, ImVec2 avail_size,
         int owner_id,

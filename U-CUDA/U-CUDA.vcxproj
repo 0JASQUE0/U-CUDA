@@ -180,6 +180,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="hostLibrary.cuh" />
     <ClInclude Include="image_source.h" />
     <ClInclude Include="integrator.h" />
+    <ClInclude Include="num_parse.h" />
     <ClInclude Include="nvrtc_engine.h" />
     <ClInclude Include="ocr_client_win.h" />
     <ClInclude Include="parametric_engine.h" />

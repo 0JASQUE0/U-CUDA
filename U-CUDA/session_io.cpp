@@ -254,6 +254,8 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"param_lo_2_text\":";  jstr(o, bd.param_lo_2_text);
     o << ",\"param_hi_2_text\":";  jstr(o, bd.param_hi_2_text);
     o << ",\"eps_dbscan_text\":";  jstr(o, bd.eps_dbscan_text);
+    o << ",\"mult_peak_text\":";     jstr(o, bd.mult_peak_text);
+    o << ",\"mult_interval_text\":"; jstr(o, bd.mult_interval_text);
     o << ",\"colormap_idx\":"      << bd.colormap_idx;
     o << ",\"colored_1d\":"            << (bd.colored_1d ? "true" : "false");
     o << ",\"colored_1d_b_text\":";    jstr(o, bd.colored_1d_b_text);
@@ -309,6 +311,9 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "param_lo_2_text")    bd.param_lo_2_text   = p.str();
     else if (key == "param_hi_2_text")    bd.param_hi_2_text   = p.str();
     else if (key == "eps_dbscan_text")    bd.eps_dbscan_text   = p.str();
+    // Отсутствие ключей = дефолты конфига (константы configCUDA.h).
+    else if (key == "mult_peak_text")     bd.mult_peak_text     = p.str();
+    else if (key == "mult_interval_text") bd.mult_interval_text = p.str();
     else if (key == "colormap_idx")       bd.colormap_idx      = std::stoi(p.str_or_num());
     else if (key == "colored_1d")            bd.colored_1d            = p.boolean();
     else if (key == "colored_1d_b_text")     bd.colored_1d_b_text     = p.str();
@@ -1478,13 +1483,16 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     I("axis_x_var_index",    c.axis_x_var_index);
     S("axis_x_lo_text",      c.axis_x_lo_text);
     S("axis_x_hi_text",      c.axis_x_hi_text);
+    B("axis_x_log",          c.axis_x_log);
     I("axis_y_par_index",    c.axis_y_par_index);
     B("axis_y_over_var",     c.axis_y_over_var);
     B("axis_y_over_h",       c.axis_y_over_h);
     I("axis_y_var_index",    c.axis_y_var_index);
     S("axis_y_lo_text",      c.axis_y_lo_text);
     S("axis_y_hi_text",      c.axis_y_hi_text);
+    B("axis_y_log",          c.axis_y_log);
     S("resolution_text",     c.resolution_text);
+    I("bif_writable_var",    c.bif_writable_var);
     B("bif2d_enabled",       c.bif2d_enabled);
     B("lle2d_enabled",       c.lle2d_enabled);
     B("ls2d_enabled",        c.ls2d_enabled);
@@ -1495,6 +1503,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     I("sweep_x_var_index",   c.sweep_x_var_index);
     S("sweep_x_lo_text",     c.sweep_x_lo_text);
     S("sweep_x_hi_text",     c.sweep_x_hi_text);
+    B("sweep_x_log",         c.sweep_x_log);
     S("n_x_1d_text",         c.n_x_1d_text);
     I("sweep_y_par_index",   c.sweep_y_par_index);
     B("sweep_y_over_var",    c.sweep_y_over_var);
@@ -1502,6 +1511,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     I("sweep_y_var_index",   c.sweep_y_var_index);
     S("sweep_y_lo_text",     c.sweep_y_lo_text);
     S("sweep_y_hi_text",     c.sweep_y_hi_text);
+    B("sweep_y_log",         c.sweep_y_log);
     S("n_y_1d_text",         c.n_y_1d_text);
     S("l1d_h_text",          c.l1d_h_text);
     S("l1d_transient_text",  c.l1d_transient_text);
@@ -1513,6 +1523,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     B("ls1d_x_enabled",      c.ls1d_x_enabled);
     B("ls1d_y_enabled",      c.ls1d_y_enabled);
     B("continuation_1d_enabled", c.continuation_1d_enabled);
+    B("plot_inter_peaks_1d", c.plot_inter_peaks_1d);
     D("fix_x_value",         c.fix_x_value);
     D("fix_y_value",         c.fix_y_value);
     B("auto_recompute_1d",   c.auto_recompute_1d);
@@ -1596,12 +1607,15 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "axis_x_var_index")        c.axis_x_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_x_lo_text")          c.axis_x_lo_text = q.str();
                         else if (k == "axis_x_hi_text")          c.axis_x_hi_text = q.str();
+                        else if (k == "axis_x_log")              c.axis_x_log     = q.boolean();
                         else if (k == "axis_y_par_index")        c.axis_y_par_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_over_var")         c.axis_y_over_var = q.boolean();
                         else if (k == "axis_y_over_h")           c.axis_y_over_h   = q.boolean();
                         else if (k == "axis_y_var_index")        c.axis_y_var_index = std::stoi(q.str_or_num());
                         else if (k == "axis_y_lo_text")          c.axis_y_lo_text = q.str();
                         else if (k == "axis_y_hi_text")          c.axis_y_hi_text = q.str();
+                        else if (k == "axis_y_log")              c.axis_y_log     = q.boolean();
+                        else if (k == "bif_writable_var")        c.bif_writable_var = std::stoi(q.str_or_num());
                         else if (k == "resolution_text")         c.resolution_text = q.str();
                         // Backwards-compat: sessions saved before N_x/N_y were
                         // merged into a single Resolution field. Keep n_x_text's
@@ -1619,6 +1633,7 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "sweep_x_var_index")       c.sweep_x_var_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_x_lo_text")         c.sweep_x_lo_text = q.str();
                         else if (k == "sweep_x_hi_text")         c.sweep_x_hi_text = q.str();
+                        else if (k == "sweep_x_log")             c.sweep_x_log     = q.boolean();
                         else if (k == "n_x_1d_text")             c.n_x_1d_text = q.str();
                         else if (k == "sweep_y_par_index")       c.sweep_y_par_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_y_over_var")        c.sweep_y_over_var = q.boolean();
@@ -1626,6 +1641,7 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "sweep_y_var_index")       c.sweep_y_var_index = std::stoi(q.str_or_num());
                         else if (k == "sweep_y_lo_text")         c.sweep_y_lo_text = q.str();
                         else if (k == "sweep_y_hi_text")         c.sweep_y_hi_text = q.str();
+                        else if (k == "sweep_y_log")             c.sweep_y_log     = q.boolean();
                         else if (k == "n_y_1d_text")             c.n_y_1d_text = q.str();
                         else if (k == "l1d_h_text")              c.l1d_h_text = q.str();
                         else if (k == "l1d_transient_text")      c.l1d_transient_text = q.str();
@@ -1637,6 +1653,7 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "ls1d_x_enabled")          c.ls1d_x_enabled = q.boolean();
                         else if (k == "ls1d_y_enabled")          c.ls1d_y_enabled = q.boolean();
                         else if (k == "continuation_1d_enabled") c.continuation_1d_enabled = q.boolean();
+                        else if (k == "plot_inter_peaks_1d")     c.plot_inter_peaks_1d = q.boolean();
                         else if (k == "fix_x_value")             c.fix_x_value = std::stod(q.str_or_num());
                         else if (k == "fix_y_value")             c.fix_y_value = std::stod(q.str_or_num());
                         else if (k == "auto_recompute_1d")       c.auto_recompute_1d = q.boolean();

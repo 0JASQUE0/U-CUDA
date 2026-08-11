@@ -2,14 +2,14 @@
 #include <glad/glad.h>
 #include <vector>
 
-// ���� GPU-�����: VBO � �������� ����� float[2] (x, y).
+// Одна GPU-серия: VBO с вершинами вида float[2] (x, y).
 struct GpuLineSeries {
     GLuint vbo = 0;
     int    point_count = 0;
     bool valid() const { return vbo != 0 && point_count > 0; }
 };
 
-// ��� ������ GPU-����� � CPU-������ bbox ��� �������� autofit.
+// Набор GPU-серий с CPU-копией bbox — чтобы autofit не читал обратно из GL.
 class GpuLineSeriesSet {
 public:
     GpuLineSeriesSet() = default;
@@ -17,12 +17,12 @@ public:
     GpuLineSeriesSet(const GpuLineSeriesSet&) = delete;
     GpuLineSeriesSet& operator=(const GpuLineSeriesSet&) = delete;
 
-    // ������ ����� �� �������� ������� float[2] (x,y - x,y - ...).
-    // points - ��������� �� n_points * 2 float'��.
-    // ���������� ������ ��������� �����.
+    // Заливает серию из плоского массива float[2] (x,y - x,y - ...).
+    // points - указатель на n_points * 2 float'ов.
+    // Возвращает индекс созданной серии.
     int upload(const float* points, int n_points);
 
-    // ������� ���������� ��� std::vector<ImVec2>-��������� ���������.
+    // Перегрузка для уже собранного вектора пар.
     int upload(const std::vector<float>& xy_pairs) {
         return upload(xy_pairs.data(), (int)(xy_pairs.size() / 2));
     }
@@ -31,7 +31,7 @@ public:
     int size() const { return (int)series_.size(); }
     void clear();
 
-    // ����� bbox �� ���� ������. ���������� false ���� �����.
+    // Общий bbox по всем сериям. Возвращает false, если серий нет.
     bool bbox(float& xmin, float& xmax, float& ymin, float& ymax) const;
 
     // То же, но учитывает только серии, для которых is_visible(k) == true.

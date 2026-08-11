@@ -1,5 +1,7 @@
 ﻿#include "custom_session.h"
+#include "num_parse.h"   // parse_num — единый разбор числовых полей
 #include <algorithm>
+#include <cmath>       // std::sqrt — геометрическая середина лог-диапазона
 #include <cstdio>
 
 // ============================================================================
@@ -55,6 +57,7 @@ EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s) {
         e.over_var   = s.axis_x_over_var;
         e.var_index  = s.axis_x_var_index;
         e.over_h     = s.axis_x_over_h;
+        e.log_scale  = s.axis_x_log;
         e.lo_text    = s.axis_x_lo_text;
         e.hi_text    = s.axis_x_hi_text;
     } else {
@@ -62,6 +65,7 @@ EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s) {
         e.over_var   = s.sweep_x_over_var;
         e.var_index  = s.sweep_x_var_index;
         e.over_h     = s.sweep_x_over_h;
+        e.log_scale  = s.sweep_x_log;
         e.lo_text    = s.sweep_x_lo_text;
         e.hi_text    = s.sweep_x_hi_text;
     }
@@ -76,6 +80,7 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
         e.over_var   = s.axis_y_over_var;
         e.var_index  = s.axis_y_var_index;
         e.over_h     = s.axis_y_over_h;
+        e.log_scale  = s.axis_y_log;
         e.lo_text    = s.axis_y_lo_text;
         e.hi_text    = s.axis_y_hi_text;
     } else {
@@ -83,6 +88,7 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
         e.over_var   = s.sweep_y_over_var;
         e.var_index  = s.sweep_y_var_index;
         e.over_h     = s.sweep_y_over_h;
+        e.log_scale  = s.sweep_y_log;
         e.lo_text    = s.sweep_y_lo_text;
         e.hi_text    = s.sweep_y_hi_text;
     }
@@ -103,6 +109,7 @@ void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramCon
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
     c.sweep_over_h      = s.axis_x_over_h;
+    c.log_scale         = s.axis_x_log;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
@@ -110,8 +117,12 @@ void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramCon
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
     c.sweep_over_h_2    = s.axis_y_over_h;
+    c.log_scale_2       = s.axis_y_log;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
+    // Переменная БД — общая для 2D и обоих 1D-срезов (см. bif_writable_var).
+    // Комбинацию (-1) 2D-путь принимает наравне с 1D.
+    c.writable_var      = s.bif_writable_var;
     // eps_dbscan_text stays on the sub-config (edited in the L2D detail panel).
 }
 
@@ -125,9 +136,15 @@ void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramCon
     c.mode_2d      = false;
     c.colored_1d   = false;
     c.continuation = s.continuation_1d_enabled;
+    // Наследуется от Level 2D целиком (переменная БД + отображение Y).
+    c.writable_var     = s.bif_writable_var;
+    c.plot_inter_peaks = s.plot_inter_peaks_1d;
 
     EffectiveSweep sweep_x = effective_sweep_x(s);
     EffectiveSweep sweep_y = effective_sweep_y(s);
+    // Лог-масштаб — свойство оси, поэтому срез берёт его из СВОЕЙ оси свипа:
+    // X-срез идёт вдоль X → log от оси X, Y-срез → log от оси Y.
+    c.log_scale = (dir == 0) ? sweep_x.log_scale : sweep_y.log_scale;
 
     if (dir == 0) {
         // X-slice: sweep along X, fix Y at fix_y_value.
@@ -164,6 +181,7 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
     c.sweep_over_h      = s.axis_x_over_h;
+    c.log_scale         = s.axis_x_log;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
@@ -171,6 +189,7 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
     c.sweep_over_h_2    = s.axis_y_over_h;
+    c.log_scale_2       = s.axis_y_log;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
     // eps_text / nt_text stay on the sub-config.
@@ -187,6 +206,7 @@ void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, in
     c.sweep_over_var  = sweep.over_var;
     c.var_sweep_index = sweep.var_index;
     c.sweep_over_h    = sweep.over_h;
+    c.log_scale       = sweep.log_scale;   // от своей оси, см. apply_shared_to_bif1d
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
@@ -199,6 +219,7 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
     c.sweep_over_var    = s.axis_x_over_var;
     c.var_sweep_index   = s.axis_x_var_index;
     c.sweep_over_h      = s.axis_x_over_h;
+    c.log_scale         = s.axis_x_log;
     c.param_lo_text     = s.axis_x_lo_text;
     c.param_hi_text     = s.axis_x_hi_text;
     c.n_pts_text        = s.resolution_text;
@@ -206,6 +227,7 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
     c.sweep_over_var_2  = s.axis_y_over_var;
     c.var_sweep_index_2 = s.axis_y_var_index;
     c.sweep_over_h_2    = s.axis_y_over_h;
+    c.log_scale_2       = s.axis_y_log;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
 }
@@ -221,6 +243,7 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int 
     c.sweep_over_var  = sweep.over_var;
     c.var_sweep_index = sweep.var_index;
     c.sweep_over_h    = sweep.over_h;
+    c.log_scale       = sweep.log_scale;   // от своей оси, см. apply_shared_to_bif1d
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
@@ -311,15 +334,25 @@ void CustomSession::load_from_record(const SystemRecord& r,
     // trajectories, and 1D-Run appeared to "produce nothing" until the user
     // dragged the fix slider off zero. Midpoint of default 0..1 is 0.5 —
     // a much better neutral starting point.
-    auto safe_parse = [](const std::string& s, double def) -> double {
-        if (s.empty()) return def;
-        try { return std::stod(s); } catch (...) { return def; }
+    // parse_num (num_parse.h) — тот же разбор, что у движка, включая дробь
+    // "a/b": иначе середина диапазона "0..8/3" считалась бы от 8, а не от 2.667.
+    auto safe_parse = [](const std::string& s, double def) { return parse_num(s, def); };
+    // На лог-оси середина диапазона геометрическая, а не арифметическая: узлы
+    // свипа лежат на 10^(l0 + (l1-l0)*t), и «серединный» узел — sqrt(lo*hi).
+    // Раньше и здесь бралось (lo+hi)/2, поэтому на лог-свипе крест стартовал
+    // почти у правого края (для 0.001..10 это 5.0005 вместо 0.1) — и до первого
+    // движения ползунка выглядел привязанным к линейной шкале. Условие lo>0 &&
+    // hi>0 — тот же guard, что у log_ok/sweep_value_at: лог при неположительной
+    // границе невалиден, там деградируем на арифметическую середину.
+    auto sweep_mid = [&safe_parse](const EffectiveSweep& e) {
+        const double lo = safe_parse(e.lo_text, 0.0);
+        const double hi = safe_parse(e.hi_text, 1.0);
+        if (e.log_scale && lo > 0.0 && hi > 0.0) return std::sqrt(lo * hi);
+        return (lo + hi) * 0.5;
     };
     {
-        EffectiveSweep esx = effective_sweep_x(shared);
-        EffectiveSweep esy = effective_sweep_y(shared);
-        shared.fix_x_value = (safe_parse(esx.lo_text, 0.0) + safe_parse(esx.hi_text, 1.0)) * 0.5;
-        shared.fix_y_value = (safe_parse(esy.lo_text, 0.0) + safe_parse(esy.hi_text, 1.0)) * 0.5;
+        shared.fix_x_value = sweep_mid(effective_sweep_x(shared));
+        shared.fix_y_value = sweep_mid(effective_sweep_y(shared));
     }
 
     // Seed sub-sessions. Each Bif/LLE/LS gets 3 slots: [0]=2D, [1]=1D-X, [2]=1D-Y.
@@ -470,20 +503,28 @@ std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_bool(o, "axv",  s.axis_x_over_var);
     sig_append_bool(o, "axh",  s.axis_x_over_h);
     sig_append_int (o, "axvi", s.axis_x_var_index);
+    sig_append_bool(o, "axlg", s.axis_x_log);
     sig_append_str (o, "axlo", s.axis_x_lo_text);
     sig_append_str (o, "axhi", s.axis_x_hi_text);
     sig_append_int (o, "ayp",  s.axis_y_par_index);
     sig_append_bool(o, "ayv",  s.axis_y_over_var);
     sig_append_bool(o, "ayh",  s.axis_y_over_h);
     sig_append_int (o, "ayvi", s.axis_y_var_index);
+    sig_append_bool(o, "aylg", s.axis_y_log);
     sig_append_str (o, "aylo", s.axis_y_lo_text);
     sig_append_str (o, "ayhi", s.axis_y_hi_text);
     sig_append_str (o, "res",  s.resolution_text);
+    // Переменная БД задаётся здесь, а читают её и L2D, и L1D — поэтому она
+    // входит в ОБЕ сигнатуры (иначе Run пропустил бы «грязный» уровень).
+    sig_append_int (o, "wv",   s.bif_writable_var);
     sig_append_bool(o, "b2",   s.bif2d_enabled);
     sig_append_bool(o, "l2",   s.lle2d_enabled);
     sig_append_bool(o, "s2",   s.ls2d_enabled);
-    if (!cs.bif_session.diagrams.empty())
+    if (!cs.bif_session.diagrams.empty()) {
         sig_append_str(o, "beps", cs.bif_session.diagrams[0].eps_dbscan_text);
+        sig_append_str(o, "bmp",  cs.bif_session.diagrams[0].mult_peak_text);
+        sig_append_str(o, "bmi",  cs.bif_session.diagrams[0].mult_interval_text);
+    }
     if (!cs.lle_session.curves.empty()) {
         sig_append_str(o, "leps", cs.lle_session.curves[0].eps_text);
         sig_append_str(o, "lnt",  cs.lle_session.curves[0].nt_text);
@@ -511,6 +552,7 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_bool(o, "sxv",  sx.over_var);
     sig_append_bool(o, "sxh",  sx.over_h);
     sig_append_int (o, "sxvi", sx.var_index);
+    sig_append_bool(o, "sxlg", sx.log_scale);
     sig_append_str (o, "sxlo", sx.lo_text);
     sig_append_str (o, "sxhi", sx.hi_text);
     sig_append_str (o, "sxn",  sx.n_pts_text);
@@ -518,9 +560,13 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_bool(o, "syv",  sy.over_var);
     sig_append_bool(o, "syh",  sy.over_h);
     sig_append_int (o, "syvi", sy.var_index);
+    sig_append_bool(o, "sylg", sy.log_scale);
     sig_append_str (o, "sylo", sy.lo_text);
     sig_append_str (o, "syhi", sy.hi_text);
     sig_append_str (o, "syn",  sy.n_pts_text);
+    // Переменная БД (см. build_l2d_signature). plot_inter_peaks_1d сюда НЕ
+    // входит — оба массива приходят из одного прогона, это только отрисовка.
+    sig_append_int (o, "wv",   s.bif_writable_var);
     // Fix positions — X-slice pins Y at fix_y, Y-slice pins X at fix_x.
     sig_append_double(o, "fx", s.fix_x_value);
     sig_append_double(o, "fy", s.fix_y_value);
@@ -557,6 +603,7 @@ std::string build_l3_signature(const CustomTabSharedConfig& s, const CustomSessi
         sig_append_str(o, "bylo", bc.axis_y_lo_text);
         sig_append_str(o, "byhi", bc.axis_y_hi_text);
         sig_append_str(o, "bn",   bc.n_pts_text);
+        sig_append_int(o, "bwv",  bc.writable_var);
         sig_append_int(o, "f1",   bc.feature1);
         sig_append_int(o, "f2",   bc.feature2);
         sig_append_str(o, "beps", bc.eps_dbscan_text);

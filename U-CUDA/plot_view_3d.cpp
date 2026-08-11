@@ -15,24 +15,24 @@ void Plot3DView::rebuild_axis_cache() {
     float xmn, xmx, ymn, ymx, zmn, zmx;
     if (!series_cache_.bbox(xmn, xmx, ymn, ymx, zmn, zmx)) return;
 
-    // ���� bbox �� ������� - �� �������������
+    // если bbox не изменился - не пересобираем
     if (axis_cache_.size() == 3 &&
         axis_bbox_[0] == xmn && axis_bbox_[1] == xmx &&
         axis_bbox_[2] == ymn && axis_bbox_[3] == ymx &&
         axis_bbox_[4] == zmn && axis_bbox_[5] == zmx) return;
 
     axis_cache_.clear();
-    // ��� X: �� (xmn, ymn, zmn) �� (xmx, ymn, zmn)
+    // Ось X: от (xmn, ymn, zmn) до (xmx, ymn, zmn)
     {
         float pts[6] = { xmn, ymn, zmn, xmx, ymn, zmn };
         axis_cache_.upload(pts, 2);
     }
-    // ��� Y: �� (xmn, ymn, zmn) �� (xmn, ymx, zmn)
+    // Ось Y: от (xmn, ymn, zmn) до (xmn, ymx, zmn)
     {
         float pts[6] = { xmn, ymn, zmn, xmn, ymx, zmn };
         axis_cache_.upload(pts, 2);
     }
-    // ��� Z: �� (xmn, ymn, zmn) �� (xmn, ymn, zmx)
+    // Ось Z: от (xmn, ymn, zmn) до (xmn, ymn, zmx)
     {
         float pts[6] = { xmn, ymn, zmn, xmn, ymn, zmx };
         axis_cache_.upload(pts, 2);
@@ -51,7 +51,7 @@ void Plot3DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
-    // 1. ����������� ����
+    // 1. Пересобираем кэш
     if (data_generation != series_generation) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
@@ -74,11 +74,11 @@ void Plot3DView::render(PlotRenderer& renderer,
         return loc && glob;
         };
 
-    // 2. �������
+    // 2. Автофит
     if (!view_valid || fit_request) do_autofit();
 
-    // 3. ������� � ������� (3D �� ����� margin ��� ������� ����, ��� ����� ����� -
-    //    ���� ������� ��������� ������� �� �����, ����� ���� ImGui �� ��������� � ����)
+    // 3. Отступы и размеры (3D не нужен margin под подписи осей, они лежат внутри -
+    //    но небольшой зазор от краёв оставляем, чтобы рамка ImGui не сливалась с полем)
     const float margin = 4.0f;
     int plot_w = (std::max)(64, (int)(avail_size.x - margin * 2));
     int plot_h = (std::max)(64, (int)(avail_size.y - margin * 2));
@@ -86,7 +86,7 @@ void Plot3DView::render(PlotRenderer& renderer,
     ImGui::Dummy(avail_size);
     ImVec2 img_pos = ImVec2(block_origin.x + margin, block_origin.y + margin);
 
-    // 4. FBO render � depth
+    // 4. Рендер в FBO, с depth
     camera.aspect = (float)plot_w / (float)plot_h;
     {
         float br, bg, bb, ba;
@@ -108,7 +108,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
                               line_thickness_px, custom_line_style);
     }
-    // ������ ��� (X=�������, Y=������, Z=�����)
+    // Рисуем оси (X=красная, Y=зелёная, Z=синяя)
     if (show_axes) {
         rebuild_axis_cache();
         if (axis_cache_.size() == 3) {
@@ -125,13 +125,13 @@ void Plot3DView::render(PlotRenderer& renderer,
     }
     renderer.end_frame();
 
-    // 5. ����� FBO
+    // 5. Вывод FBO
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
         img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         ImVec2(0, 1), ImVec2(1, 0));
 
-    // ������� ���� (����� ����� � ������� �����-����)
+    // Подписи осей (текстом поверх картинки, через ImDrawList)
     {
         if (show_axes) {
             float xmn, xmx, ymn, ymx, zmn, zmx;
@@ -140,7 +140,7 @@ void Plot3DView::render(PlotRenderer& renderer,
                 ImU32 col_y = IM_COL32(120, 255, 120, 180);
                 ImU32 col_z = IM_COL32(140, 170, 255, 180);
 
-                // ������ �� ����� ��� (� �������� ������)
+                // Отступ от конца оси (в экранных пикселях)
                 const float text_offset = 6.0f;
 
                 auto draw_axis_label = [&](float ex, float ey, float ez,
@@ -149,7 +149,7 @@ void Plot3DView::render(PlotRenderer& renderer,
                         float zclip = 0;
                         ImVec2 p = project_to_screen(mvp, ex, ey, ez,
                             img_pos, (float)plot_w, (float)plot_h, &zclip);
-                        if (zclip > 1.0f) return; // ����� �� ������� ����������
+                        if (zclip > 1.0f) return; // точка за плоскостью отсечения
                         ImVec2 ts = ImGui::CalcTextSize(name);
                         dl->AddText(ImVec2(p.x + text_offset, p.y - ts.y * 0.5f), color, name);
                     };
@@ -161,7 +161,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 6. �������
+    // 6. Легенда
     if (show_legend) {
         std::vector<LegendEntry> entries;
         entries.reserve(series_in.size());
@@ -173,7 +173,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id);
     }
 
-    // 7. ���� ����������� (���� �������, �� ���� ����)
+    // 7. Зона взаимодействия (одна кнопка на всё поле)
     ImGui::SetCursorScreenPos(img_pos);
     char id_buf[48];
     std::snprintf(id_buf, sizeof(id_buf), "##plot3d_%d", owner_id);
@@ -183,17 +183,17 @@ void Plot3DView::render(PlotRenderer& renderer,
     bool plot_a = ImGui::IsItemActive();
     bool plot_dbl = plot_h_ov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 
-    // 8. �����
+    // 8. Рамка
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         plot_col_border(), 0.0f, 0, 1.0f);
 
-    // 9. ������� ���� - �������
+    // 9. Двойной клик - автофит
     if (plot_dbl) view_valid = false;
 
-    // 10. ����������: orbit ������, pan �����, zoom �������, popup-���� �� �������� ������ ����
-    static bool rzoom_pending[64] = { false }; // ���������� �����-�����, ����� �� ������� ����.
-    // (��� production ����� ������� pending � ���� ������, ��� � 2D)
-    // ���������� ���� ����� ��������� static � �������� owner_id - ����� ������ ��� ������ ����������.
+    // 10. Управление: orbit правой, pan левой, zoom колесом, popup-меню по короткому клику правой
+    static bool rzoom_pending[64] = { false }; // отличаем drag правой от короткого клика.
+    // (в production лучше вынести pending в поле класса, как в 2D)
+    // Индексируем этот static по owner_id - иначе плоты мешали бы друг другу.
     if (owner_id < 0 || owner_id >= 64) owner_id = 0;
 
     static float rzoom_start_x[64] = { 0 };
@@ -203,21 +203,21 @@ void Plot3DView::render(PlotRenderer& renderer,
     const float drag_threshold = 5.0f;
 
     if (plot_h_ov || plot_a) {
-        // Orbit ������
+        // Orbit правой
         if (plot_a && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
             camera.orbit(io.MouseDelta.x, io.MouseDelta.y);
         }
-        // Pan �����
+        // Pan левой
         if (plot_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
             camera.pan(io.MouseDelta.x, io.MouseDelta.y, plot_w, plot_h);
         }
-        // Zoom �������
+        // Zoom колесом
         if (plot_h_ov && io.MouseWheel != 0.0f) {
             camera.zoom(std::pow(0.85f, io.MouseWheel));
         }
     }
 
-    // �������� ������ ���� (��� drag) - popup-����
+    // Короткий клик правой (без drag) - popup-меню
     if (!rzoom_pending[owner_id] && plot_h_ov && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         rzoom_pending[owner_id] = true;
         rzoom_start_x[owner_id] = io.MousePos.x;
@@ -235,7 +235,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 11. ����������� ����
+    // 11. Контекстное меню
     char pop_id[48];
     std::snprintf(pop_id, sizeof(pop_id), "##plot3d_menu_%d", owner_id);
     if (ImGui::BeginPopup(pop_id)) {

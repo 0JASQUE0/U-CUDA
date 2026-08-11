@@ -28,7 +28,14 @@ struct InitialConditionSet {
 enum class ProjType {
     Phase2D,    // фазовая плоскость: ось X = var, ось Y = var
     TimeDomain, // временная развёртка: ось X = время, Y = выбранные переменные
-    Phase3D     // 3D фазовый портрет (нужен ImPlot3D)
+    Phase3D,    // 3D фазовый портрет (нужен ImPlot3D)
+    // Диаграмма признаков: scatter (значение пика; интервал до него) по
+    // переменной axis_x. Это ровно та пара, которую 2D-бифуркация отдаёт в
+    // DBSCAN (см. dbscan_optimized в cudaLibrary.cu), поэтому по ней видно,
+    // на что реально смотрит кластеризация периода. Порядок в enum = порядок
+    // в комбо-боксе и в сохранённых сессиях (пишется как int) — добавлять
+    // только в конец.
+    FeatureDiagram
 };
 
 struct Projection {
@@ -61,6 +68,15 @@ struct Projection {
     Projection& operator=(const Projection&) = delete;
 };
 
+// Пики одной переменной одной траектории: параллельные массивы «значение пика»
+// и «интервал от предыдущего удержанного пика». Ровно то, что GPU-peakFinder
+// оставляет в outPeaks/timeOfPeaks после фильтра eps_interPeak_delta, т.е. та
+// же пара, что уходит в DBSCAN 2D-бифуркации. Длины всегда равны.
+struct FeaturePoints {
+    std::vector<double> peaks;
+    std::vector<double> intervals;
+};
+
 // Результат расчёта: по одной траектории на каждое НУ.
 // trajectories[k] = траектория для k-го НУ (точки {x,y,z,...}).
 struct AnalysisResult {
@@ -68,6 +84,12 @@ struct AnalysisResult {
     std::vector<std::string> labels;   // подписи (из НУ)
     std::vector<bool> visible;         // видимость (из НУ)
     std::vector<std::string> ic_text;  // текстовое представление НУ (для легенды)
+    // Признаки для ProjType::FeatureDiagram: [ic][var]. Считаются на worker'е
+    // сразу после интегрирования по ПОЛНОЙ (непрореженной) траектории — иначе
+    // decimator прореживал бы и сами пики, и интервалы между ними. Сразу по
+    // всем переменным: объём мал (<= max_amount_of_peaks на переменную), зато
+    // переключение переменной в комбо не требует пересчёта.
+    std::vector<std::vector<FeaturePoints>> features;
     bool ok = false;
     std::string error;
     int generation = 0;
@@ -278,6 +300,10 @@ struct BifurcationDiagramConfig {
     std::string param_lo_2_text   = "0";
     std::string param_hi_2_text   = "1";
     std::string eps_dbscan_text   = "0.1";
+    // Множители осей DBSCAN (пик / межпиковый интервал), см.
+    // Bifurcation2DRequest::mult_peak. Дефолты — константы configCUDA.h.
+    std::string mult_peak_text     = "1";
+    std::string mult_interval_text = "0";
 
     Bifurcation2DResult result_2d;
     bool        last_run_2d_ok    = false;

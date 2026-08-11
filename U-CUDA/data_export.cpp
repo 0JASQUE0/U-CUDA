@@ -9,6 +9,15 @@
 
 namespace data_export {
 
+// Провенанс арифметики (см. Bif1DSnapshot::gpu_fmad). Одна строка в каждом
+// _config.csv: без неё нельзя отличить файл, посчитанный с FMA-контракцией, от
+// файла без неё, а на фрактальных границах бассейнов это разные картинки.
+// Объявлена до первого использования — writer'ы идут ниже по файлу.
+static void write_fmad_line(std::ofstream& out, bool gpu_fmad)
+{
+    out << "NVRTC --fmad = " << (gpu_fmad ? "on" : "off") << "\n";
+}
+
 // =============================================================================
 // Bif1D
 // =============================================================================
@@ -41,6 +50,7 @@ void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
     out << "indexVar for peakfinder = " << s.writableVar << "\n";
     out << "indexPar for estimation = " << s.indexOfMutVar << "\n";
     out << "start value = " << s.range_lo << ", stop value = " << s.range_hi << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_bif1d_rows(std::ofstream& out,
@@ -125,6 +135,7 @@ void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s)
     out << "freq_lo = " << s.freq_lo << ", freq_hi = " << s.freq_hi << "\n";
     const char* win_name = s.window_type == 0 ? "None" : s.window_type == 2 ? "Hamming" : "Hanning";
     out << "window = " << win_name << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_dft1d_header(std::ofstream& out, const Dft1DSnapshot& s)
@@ -212,6 +223,7 @@ void write_lle1d_config(std::ofstream& out, const LLE1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_lle1d_row(std::ofstream& out, double param, double lyapunov)
@@ -254,6 +266,7 @@ void write_ls1d_config(std::ofstream& out, const LS1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_ls1d_row(std::ofstream& out, double param,
@@ -351,11 +364,14 @@ void write_bif2d_config(std::ofstream& out, const Bif2DSnapshot& s)
     out << "CT = " << s.tMax << "\nTT = " << s.transientTime
         << "\nh = " << s.h << "\ndecimator = " << s.preScaller << "\n";
     out << "eps_DBSCAN = " << s.eps_dbscan << "\n";
+    out << "mult_peak_DBSCAN  = " << s.mult_peak << "\n";
+    out << "mult_interval_DBSCAN = " << s.mult_interval << "\n";
     out << "indexVar for peakfinder = " << s.writableVar << "\n";
     out << "indices = " << s.indexOfMutVar << ", " << s.indexOfMutVar2 << "\n";
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
     out << "n_pts = " << s.n_pts << "x" << s.n_pts << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_bif2d_grid(std::ofstream& out, int n_pts, const double* values)
@@ -394,6 +410,7 @@ void write_lle2d_config(std::ofstream& out, const LLE2DSnapshot& s)
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
     out << "n_pts = " << s.n_pts << "x" << s.n_pts << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_lle2d_grid(std::ofstream& out, int n_pts, const double* values)
@@ -433,6 +450,7 @@ void write_ls2d_config(std::ofstream& out, const LS2DSnapshot& s)
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
     out << "n_pts = " << s.n_pts << "x" << s.n_pts << "\n";
     out << "exponents = " << s.n_exponents << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_ls2d_cells(std::ofstream& out, int n_pts, int n_exponents,
@@ -483,6 +501,7 @@ void write_basins_config(std::ofstream& out, const BasinsSnapshot& s)
     out << "indexVar for estimation = " << s.axis_x_var << ", " << s.axis_y_var << "\n";
     out << "start value_1 = " << s.axis_x_lo << ", stop value_1 = " << s.axis_x_hi << "\n";
     out << "start value_2 = " << s.axis_y_lo << ", stop value_2 = " << s.axis_y_hi << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 void write_basins_ranges(std::ofstream& out, const BasinsSnapshot& s)
@@ -610,6 +629,7 @@ void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s)
         out << "grid_swap_master_slave = "
             << (s.grid_swap_master_slave ? 1 : 0) << "\n";
     }
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 // Mode 0 data: header "<var0>,<var1>,...,<varN-1>,sync_error\n" then one
@@ -694,6 +714,7 @@ static void write_phase_config(std::ofstream& out, const PhaseSnapshot& s)
     out << "TT = "       << s.t_skip    << "\n";
     out << "h = "        << s.h         << "\n";
     out << "decimator = " << s.decimator << "\n";
+    write_fmad_line(out, s.gpu_fmad);
 }
 
 static void write_phase_trajectory(std::ofstream& out,
@@ -778,5 +799,210 @@ bool export_fastsync(const FastSyncResult& res, const std::string& path)
     }
     return true;
 }
+
+// =============================================================================
+// legacy — построчные копии блоков _config.csv из hostLibrary.cu.
+//
+// Каждая строка перенесена дословно, включая опечатки и расстановку пробелов
+// (обоснование — в data_export.h). Сверять правки надо с форматом, а не с
+// «как правильно»: эти файлы читают внешние скрипты.
+// =============================================================================
+namespace legacy {
+
+void write_array(std::ofstream& out, const char* name, const double* v, int n)
+{
+    out << name << "[" << n << "] = { ";
+    for (int kk = 0; kk < n; kk++) {
+        if (kk != n - 1) out << v[kk] << ", ";
+        else             out << v[kk] << " }\n";
+    }
+}
+
+void write_estimation(std::ofstream& out, int par_or_var)
+{
+    if (par_or_var == 1) out << "Parameter esimation \n";
+    if (par_or_var == 0) out << "Initial conditions esimation \n";
+}
+
+void write_bif1d_config(std::ofstream& out, int set_precision,
+                        int continuation_bif1D, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        int writableVar, int indexOfMutVar,
+                        double range_lo, double range_hi)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    if (continuation_bif1D == 1) out << "1D continuation bifurcation \n";
+    if (continuation_bif1D == 0) out << "1D classical bifurcation \n";
+    write_estimation(out, par_or_var);
+    write_array(out, "a",  values,            amountOfValues);
+    write_array(out, "X0", initialConditions, amountOfInitialConditions);
+    out << "CT = " << tMax << "\n";
+    out << "TT = " << transientTime << "\n";
+    out << "h = " << h << "\n";
+    out << "decimator = " << preScaller << "\n";
+    out << "indexVar for peakfinder = " << writableVar << "\n";
+    if (par_or_var == 1) out << "indexPar for estimation = " << indexOfMutVar << "\n";
+    if (par_or_var == 0) out << "indexVar for estimation = " << indexOfMutVar << "\n";
+    out << "start vlaue = " << range_lo << ", stop vlaue = " << range_hi << "\n";
+}
+
+void write_bif2d_config(std::ofstream& out, int set_precision, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        double eps, double mult_peak, double mult_interval,
+                        int writableVar, int idx0, int idx1,
+                        const double* ranges)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    out << "2D bifurcation \n";
+    write_estimation(out, par_or_var);
+    write_array(out, "a",  values,            amountOfValues);
+    write_array(out, "X0", initialConditions, amountOfInitialConditions);
+    out << "CT =  " << tMax << "\n";           // два пробела — так в легаси
+    out << "TT =" << transientTime << "\n";    // и здесь ни одного
+    out << "h = " << h << "\n";
+    out << "decimator = " << preScaller << "\n";
+    out << "eps_DBSCAN = " << eps << "\n";
+    out << "mult_peak_DBSCAN  = " << mult_peak << "\n";
+    out << "mult_interval_DBSCAN = " << mult_interval << "\n";
+    out << "indexVar for peakfinder = " << writableVar << "\n";
+    if (par_or_var == 1) out << "indexPar for estimation = " << idx0 << ", " << idx1 << "\n";
+    if (par_or_var == 0) out << "indexVar for estimation = " << idx0 << ", " << idx1 << "\n";
+    out << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
+    out << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
+}
+
+void write_lyap_config(std::ofstream& out, int set_precision, LyapKind kind,
+                       int par_or_var,
+                       const double* values, int amountOfValues,
+                       const double* initialConditions, int amountOfInitialConditions,
+                       double tMax, double NT, double transientTime, double h,
+                       double eps, const int* indicesOfMutVars, const double* ranges)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    switch (kind) {
+        case LyapKind::LLE1D: out << "1D LLE \n"; break;
+        case LyapKind::LLE2D: out << "2D LLE \n"; break;
+        case LyapKind::LS1D:  out << "1D LS \n";  break;
+        case LyapKind::LS2D:  out << "2D LS \n";  break;
+    }
+    write_estimation(out, par_or_var);
+    write_array(out, "a",  values,            amountOfValues);
+    write_array(out, "X0", initialConditions, amountOfInitialConditions);
+    out << "CT =" << " " << tMax << "\n";
+    out << "NT =" << " " << NT << "\n";
+    out << "TT =" << " " << transientTime << "\n";
+    out << "h =" << " " << h << "\n";
+    out << "eps=" << " " << eps << "\n";
+
+    const bool two_axes = (kind == LyapKind::LLE2D || kind == LyapKind::LS2D);
+    if (kind == LyapKind::LLE1D) {
+        // Единственный из четырёх, кто пишет короткое "indexPar =".
+        if (par_or_var == 1) out << "indexPar =" << " " << indicesOfMutVars[0] << "\n";
+        if (par_or_var == 0) out << "indexVar =" << " " << indicesOfMutVars[0] << "\n";
+    } else if (two_axes) {
+        if (par_or_var == 1) out << "indexPar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
+        if (par_or_var == 0) out << "indexVar for estimation = " << indicesOfMutVars[0] << ", " << indicesOfMutVars[1] << "\n";
+    } else {  // LS1D
+        if (par_or_var == 1) out << "indexPar for estimation = " << indicesOfMutVars[0] << "\n";
+        if (par_or_var == 0) out << "indexVar for estimation = " << indicesOfMutVars[0] << "\n";
+    }
+
+    if (two_axes) {
+        out << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
+        out << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
+    } else {
+        out << "start vlaue = " << ranges[0] << ", stop vlaue = " << ranges[1] << "\n";
+    }
+}
+
+void write_basins_config(std::ofstream& out, int set_precision, bool log_axes,
+                         const double* values, int amountOfValues,
+                         const double* initialConditions, int amountOfInitialConditions,
+                         double tMax, double transientTime, double h, int preScaller,
+                         double eps, double mult_peak, double mult_interval,
+                         int writableVar, int idx0, int idx1,
+                         const double* ranges)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    // У log-варианта хвостового пробела в заголовке нет — так в легаси.
+    out << (log_axes ? "basins of attraction log axes\n" : "basins of attraction \n");
+    write_array(out, "a",  values,            amountOfValues);
+    write_array(out, "X0", initialConditions, amountOfInitialConditions);
+    out << "CT =  " << tMax << "\n";
+    out << "TT =" << transientTime << "\n";
+    out << "h = " << h << "\n";
+    out << "decimator = " << preScaller << "\n";
+    out << "eps_DBSCAN = " << eps << "\n";
+    out << "mult_MeanPeak_DBSCAN  = " << mult_peak << "\n";
+    out << "mult_MeanInterval_DBSCAN = " << mult_interval << "\n";
+    out << "indexVar for peakfinder = " << writableVar << "\n";
+    out << "indexVar for estimation = " << idx0 << ", " << idx1 << "\n";
+    out << "start vlaue_1 = " << ranges[0] << ", stop vlaue_1 = " << ranges[1] << "\n";
+    out << "start vlaue_2 = " << ranges[2] << ", stop vlaue_2 = " << ranges[3] << "\n";
+}
+
+void write_fastsync_config(std::ofstream& out, int set_precision,
+                           int type_of_synch, int error_estim,
+                           const double* values, int amountOfValues,
+                           const double* icMaster, const double* icSlave,
+                           const double* kForward, const double* kBackward,
+                           int amountOfInitialConditions,
+                           int iterOfSynchr, double tMax, double NTime,
+                           double transientTime, double h, int preScaller)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    out << "Symmetric synch, attractor \n";
+    if (type_of_synch == 0) out << "Unidirectional synch \n";
+    if (type_of_synch == 1) out << "Bidirectional synch \n";
+    if (error_estim == 0)   out << "RMS(error) on the last iteration \n";
+    if (error_estim == 1)   out << "number of iteration to achieve RMS(error) <= FS_error_trs \n";
+    write_array(out, "a",          values,    amountOfValues);
+    write_array(out, "X0_master",  icMaster,  amountOfInitialConditions);
+    write_array(out, "X0_slave",   icSlave,   amountOfInitialConditions);
+    write_array(out, "K_forward",  kForward,  amountOfInitialConditions);
+    write_array(out, "K_backward", kBackward, amountOfInitialConditions);
+    out << "iter of synch =  " << iterOfSynchr << "\n";
+    out << "CT = " << tMax << "\n";
+    out << "WT = " << NTime << "\n";
+    out << "TT = " << transientTime << "\n";
+    out << "h = " << h << "\n";
+    out << "decimator = " << preScaller << "\n";
+}
+
+void write_dft1d_config(std::ofstream& out, int set_precision,
+                        int continuation_bif1D, int par_or_var,
+                        const double* values, int amountOfValues,
+                        const double* initialConditions, int amountOfInitialConditions,
+                        double tMax, double transientTime, double h, int preScaller,
+                        int writableVar, int indexOfMutVar,
+                        double range_lo, double range_hi)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    if (continuation_bif1D == 1) out << "1D continuation bifurcation DFT \n";
+    if (continuation_bif1D == 0) out << "1D classical bifurcation DFT \n";
+    write_estimation(out, par_or_var);
+    write_array(out, "a",  values,            amountOfValues);
+    write_array(out, "X0", initialConditions, amountOfInitialConditions);
+    out << "CT =  " << tMax << "\n";
+    out << "TT =" << transientTime << "\n";
+    out << "h = " << h << "\n";
+    out << "decimator = " << preScaller << "\n";
+    out << "indexVar for peakfinder = " << writableVar << "\n";
+    if (par_or_var == 1) out << "indexPar for estimation = " << indexOfMutVar << "\n";
+    if (par_or_var == 0) out << "indexVar for estimation = " << indexOfMutVar << "\n";
+    out << "start vlaue_1 = " << range_lo << ", stop vlaue_1 = " << range_hi << "\n";
+}
+
+} // namespace legacy
 
 } // namespace data_export

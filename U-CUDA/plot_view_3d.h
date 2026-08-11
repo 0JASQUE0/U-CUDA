@@ -9,7 +9,7 @@
 #include <functional>
 
 struct PlotSeriesInput3D {
-    const float* points = nullptr;   // n_points * 3 float (x,y,z ������)
+    const float* points = nullptr;   // n_points * 3 float (x,y,z подряд)
     int          n_points = 0;
     ImVec4       color = ImVec4(1, 1, 1, 1);
     std::string  label;
@@ -17,10 +17,10 @@ struct PlotSeriesInput3D {
 
 class Plot3DView {
 public:
-    // ����� ���� (��� ����/������� ��������)
+    // Имена осей (идут в подписи на концах осей)
     std::string x_name = "x", y_name = "y", z_name = "z";
 
-    // ���������
+    // Легенда
     bool show_legend = true;
     // If true, force the legend marker's alpha to 1.0 regardless of the
     // per-series color.w — used by Phase 3D, where the "Alpha" slider is
@@ -43,7 +43,7 @@ public:
     // координат ВСЕГДА идут по старому пути, независимо от этого флага.
     bool custom_line_style = false;
 
-    // ��������� ��������� ����� (������� ����� ������, �����������).
+    // Локальная видимость серий (переключается кликом по легенде).
     std::vector<bool> visible;
 
     // Опционально: callback для добавления custom-пунктов в right-click popup
@@ -54,7 +54,7 @@ public:
     // и на 3D-проекциях, а не только на 2D/TimeDomain.
     std::function<void()> popup_extras;
 
-    // ������ � � ���������. �������� ������� (��� ���� "reset view" � �.�.).
+    // Камера — публичное поле: до неё дотягивается меню («reset view» и т.п.).
     PlotCamera3D camera;
 
     void render(PlotRenderer& renderer,
@@ -68,9 +68,9 @@ public:
 
 private:
     GpuLineSeriesSet3D series_cache_;
-    GpuLineSeriesSet3D axis_cache_; // 3 �����: X, Y, Z (�� 2 ����� ������)
-    float axis_bbox_[6] = { 0,0,0,0,0,0 }; // ��������� bbox, ��� �������� �������� axis_cache_
+    GpuLineSeriesSet3D axis_cache_; // 3 линии: X, Y, Z (по 2 точки каждая)
+    float axis_bbox_[6] = { 0,0,0,0,0,0 }; // bbox, по которому собран axis_cache_
 
     void do_autofit();
-    void rebuild_axis_cache(); // ������/������������� 3 �����-��� �� �������� bbox
+    void rebuild_axis_cache(); // строит/пересобирает 3 линии-оси по текущему bbox
 };

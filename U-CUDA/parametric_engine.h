@@ -49,10 +49,10 @@ struct PeakConfig {
     int    max_amount_of_peaks  = ::max_amount_of_peaks;
 };
 
-// Границы max_amount_of_peaks. Значение уходит в размер per-thread массивов
-// next[]/labels[] внутри dbscan_optimized (4 байта на элемент на каждый), т.е.
-// напрямую бьёт по local memory и occupancy — потолок нужен и в UI, и при
-// чтении конфига с диска.
+// Границы max_amount_of_peaks. Потолок нужен и в UI, и при чтении конфига с
+// диска: значение задаёт размер device-буферов пиков/интервалов на каждую
+// точку свипа. (Прежняя формулировка про per-thread массивы в dbscan_optimized
+// устарела — те ядра удалены как мёртвые, см. cudaLibrary.cu.)
 constexpr int kPeakCountMin = 16;
 constexpr int kPeakCountMax = 20000;
 
@@ -70,6 +70,27 @@ inline void clamp_peak_config(PeakConfig& c) {
 void       set_peak_config(const PeakConfig& c);   // бампает epoch
 PeakConfig get_peak_config();
 uint64_t   peak_config_epoch();
+
+// ============================================================================
+// FMA-контракция (--fmad) для NVRTC. ОДНА настройка на всё приложение — в этом
+// весь смысл: карта (bif/LLE/LS/basins, parametric_engine) и фазовый портрет,
+// который рисуется по её ячейке (nvrtc_engine), обязаны считать одинаковой
+// арифметикой. Разъехавшись, они на фрактальной границе бассейнов уводят
+// траекторию в другой аттрактор — ровно это и было, пока портрет компилировался
+// с --fmad=false, а карты с дефолтным true.
+//
+// true (дефолт) — a*b+c сворачивается в FMA: одно округление, быстрее, так
+//                 работает nvcc/NVRTC по умолчанию.
+// false          — умножение и сложение округляются раздельно; ближе к CPU-ветке
+//                 (MSVC сам не контрактит) и к сторонним референсам вроде MATLAB.
+//
+// Смена значения = другой PTX при том же КРС. Инвалидацию кэшей обеспечивают:
+//   - hash_key() в parametric_engine.cpp (подмешивает флаг в ключ модуля),
+//   - ключ кэша в NvrtcEngine::compile (nvrtc_engine.cpp).
+// Без этого настройка молча не применялась бы до перезапуска.
+// ============================================================================
+void set_nvrtc_fmad(bool enabled);
+bool get_nvrtc_fmad();
 
 // ============================================================================
 // Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point,
@@ -608,6 +629,17 @@ struct Bifurcation2DRequest {
     // DBSCAN-порог: радиус эпсилон для кластеризации пиков.
     // Тот же смысл, что eps в bifurcation2D NonLinAnal (hostLibrary.cu:912).
     double eps_dbscan = 0.1;
+
+    // Множители осей признаков перед кластеризацией: X = значение пика,
+    // Y = межпиковый интервал (см. dbscan в cudaLibrary.cu). Кластеризация
+    // идёт по евклидову расстоянию, поэтому множители задают, какая из осей
+    // вообще влияет на период: mult_interval = 0 (дефолт configCUDA.h)
+    // схлопывает Y и кластеризует ТОЛЬКО по амплитуде пиков.
+    // Дефолты совпадают с константами configCUDA.h — поведение по умолчанию
+    // не меняется. Увидеть само облако точек можно в Feature diagram
+    // (ProjType::FeatureDiagram) фазового анализа.
+    double mult_peak     = (double)::mult_peak;
+    double mult_interval = (double)::mult_interval;
 
     std::string csv_output_path;
 
