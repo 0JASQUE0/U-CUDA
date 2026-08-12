@@ -268,15 +268,13 @@ int cpu_peak_finder(const numb* data, size_t amountOfPoints,
 // Значение свипа в точке j continuation-цепочки. Одна формула на все три
 // анализа (Bif/LLE/LS) и на оба устройства — GPU-ядра считают её же.
 // reverse — идём от hi к lo (гистерезис), log_scale — логарифмическая сетка.
+// Тело — общая с ядрами реализация (ucuda_node_value_cont в configCUDA.h):
+// та же функция, которую после правки зовут kernels/*_cont.template.cu.
+// Раньше здесь стояла копия в double, а ядро считало в numb — в double-режиме
+// одно и то же, при numb = float расходились.
 inline double cont_sweep_value(int j, int nPts, double lo, double hi,
                                bool reverse, bool log_scale) {
-    const double denom = (double)(nPts > 1 ? nPts - 1 : 1);
-    const double t = (double)j / denom;
-    if (log_scale) {
-        const double l0 = std::log10(lo), l1 = std::log10(hi);
-        return std::pow(10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
-    }
-    return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+    return (double)ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, log_scale, reverse);
 }
 
 // Request/Result — публичный интерфейс в double, а ядра работают в numb.
@@ -702,8 +700,13 @@ std::string cu_err(CUresult r) {
 // Для 1D-бифуркации valueNumber всегда 0, поэтому просто линейная интерполяция.
 // Нужна для расчёта значения параметра в CSV (host-side).
 inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
-    if (nPts <= 1) return lo;
-    return lo + (hi - lo) * (double)idx / (double)(nPts - 1);
+    // Одна арифметика с ядром — ucuda_node_value (configCUDA.h). Раньше здесь
+    // стояло lo + (hi-lo)*idx/(n-1): при idx = nPts-1 это не давало РОВНО hi,
+    // и CSV сообщал параметр, в котором точка не считалась. Вырожденный
+    // nPts == 1 теперь тоже как в ядре (hi, а не lo).
+    // Касты явные: при numb = float сетка обязана считаться во float — ровно
+    // так, как её увидит ядро (ranges уходят туда через to_numb).
+    return (double)ucuda_node_value((int)idx, nPts, (numb)lo, (numb)hi);
 }
 
 // Host-копия getValueByIdx_log из cudaLibrary.cu -- та же формула, что кернел
@@ -711,9 +714,9 @@ inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
 // (см. getValueByIdx_local) сообщал то самое значение параметра, что было
 // просимулировано, а не линейную интерполяцию поверх log-распределённой сетки.
 inline double getValueByIdx_log_local(size_t idx, int nPts, double lo, double hi) {
-    if (nPts <= 1) return lo;
-    double log_lo = std::log10(lo), log_hi = std::log10(hi);
-    return std::pow(10.0, log_lo + (log_hi - log_lo) * (double)idx / (double)(nPts - 1));
+    // См. getValueByIdx_local: общая формула вместо копии. Здесь копия ещё и
+    // умножала до деления, а ядро (getValueByIdxLog) — наоборот.
+    return (double)ucuda_node_value_log((int)idx, nPts, (numb)lo, (numb)hi);
 }
 
 // ---------------------------------------------------------------------------

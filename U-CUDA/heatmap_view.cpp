@@ -198,6 +198,14 @@ void HeatmapView::render(PlotRenderer& renderer,
     // = data Y → берём y_axis.name. И симметрично для визуального Y.
     const std::string& vis_x_name = swap_axes ? y_axis.name : x_axis.name;
     const std::string& vis_y_name = swap_axes ? x_axis.name : y_axis.name;
+    // log_scale — свойство ДАННЫХ (как движок разложил узлы), поэтому свапается
+    // вместе с nx/ny и param-диапазонами. А view_min/view_max и invert — наоборот,
+    // свойства ВИЗУАЛЬНОЙ оси (её пан/зум/разворот), и остаются на месте.
+    // Раньше swap переставлял диапазоны, а флаги лога нет: на лог-оси после
+    // swap тики, tooltip, снап курсора и крест считались линейной формулой
+    // по лог-сетке, т.е. показывали узлы, которых движок не считал.
+    const bool vis_log_x = swap_axes ? y_axis.log_scale : x_axis.log_scale;
+    const bool vis_log_y = swap_axes ? x_axis.log_scale : y_axis.log_scale;
 
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
@@ -331,11 +339,17 @@ void HeatmapView::render(PlotRenderer& renderer,
         return v;
     };
 
+    // Значение узла — ОБЩАЯ с ядром реализация (ucuda_node_value* в
+    // configCUDA.h). Раньше здесь стояла своя пара формул: линейная через
+    // lo + k*step и лог с умножением до деления — и то, и другое расходилось
+    // с getValueByIdx в последних битах, а на правом конце оси — и заметнее.
+    // `step` больше не участвует: параметр оставлен, чтобы не трогать четыре
+    // места вызова (crosshair-drag, drill-down, tooltip).
     auto node_value = [](int k, int n, double lo, double hi, bool log_scale, double step) {
+        (void)step;
         if (log_scale && lo > 0.0 && hi > 0.0 && n > 1)
-            return std::pow(10.0, std::log10(lo)
-                   + (double)k * (std::log10(hi) - std::log10(lo)) / (double)(n - 1));
-        return lo + (double)k * step;
+            return (double)ucuda_node_value_log(k, n, (numb)lo, (numb)hi);
+        return (double)ucuda_node_value(k, n, (numb)lo, (numb)hi);
     };
 
     // Эффективные визуальные границы с учётом AxisInfo::invert. evis_x0 —
@@ -587,9 +601,15 @@ void HeatmapView::render(PlotRenderer& renderer,
             int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
             int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
-                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
-                on_left_drag(ix, iy, snap_x, snap_y);
+                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
+                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
+                // Наружу — В КООРДИНАТАХ ДАННЫХ, а не визуальных: caller про
+                // swap_axes ничего не знает и кладёт первый аргумент в fix_x.
+                // При swap визуальный X — это data Y, поэтому пары меняем
+                // обратно. Раньше при включённом swap drill-down уезжал в
+                // чужую точку: в fix_x попадало значение оси Y и наоборот.
+                if (swap_axes) on_left_drag(iy, ix, snap_y, snap_x);
+                else           on_left_drag(ix, iy, snap_x, snap_y);
             }
             // Consume any accumulated LMB drag delta so the pan branch below
             // (if it fires on Shift+LMB) stays a no-op.
@@ -766,9 +786,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         // берём точный view_min/max без этого паддинга.
         // invert: границы уже переставлены в evis_x0/x1, для log-оси делаем то
         // же вручную (там паддинг не применяется).
-        double emin = x_axis.log_scale
+        double emin = vis_log_x
                       ? (x_axis.invert ? x_axis.view_max : x_axis.view_min) : evis_x0;
-        double emax = x_axis.log_scale
+        double emax = vis_log_x
                       ? (x_axis.invert ? x_axis.view_min : x_axis.view_max) : evis_x1;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
@@ -777,7 +797,7 @@ void HeatmapView::render(PlotRenderer& renderer,
         // лог-оси, поэтому вместо "красивых" линейных тиков (которые
         // подписали бы значения, никогда не просимулированные) рисуем
         // только границы текущего view.
-        std::vector<double> ticks = x_axis.log_scale
+        std::vector<double> ticks = vis_log_x
             ? std::vector<double>{ lo, hi }
             : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x)
                             : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x));
@@ -794,15 +814,15 @@ void HeatmapView::render(PlotRenderer& renderer,
     auto draw_y_ticks = [&]() {
         // См. draw_x_ticks выше про vis_view-паддинг и log-масштаб.
         // См. draw_x_ticks про invert.
-        double emin = y_axis.log_scale
+        double emin = vis_log_y
                       ? (y_axis.invert ? y_axis.view_max : y_axis.view_min) : evis_y0;
-        double emax = y_axis.log_scale
+        double emax = vis_log_y
                       ? (y_axis.invert ? y_axis.view_min : y_axis.view_max) : evis_y1;
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
         // См. draw_x_ticks выше.
-        std::vector<double> ticks = y_axis.log_scale
+        std::vector<double> ticks = vis_log_y
             ? std::vector<double>{ lo, hi }
             : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
                             : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y));
@@ -865,17 +885,27 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImU32 col_halo = IM_COL32(0, 0, 0, 220);
         double range_x = evis_x1 - evis_x0;
         double range_y = evis_y1 - evis_y0;
+        // crosshair_x/_y приходят от caller'а в КООРДИНАТАХ ДАННЫХ (это
+        // fix_x/fix_y), поэтому при swap_axes вертикальную линию рисуем по
+        // data-Y, а горизонтальную — по data-X. Цвета переставляем вместе со
+        // значениями: они кодируют, к какой ОСИ СВИПА относится линия (см.
+        // crosshair_*_color), и должны совпадать с крестом на 1D-срезе той же
+        // оси. Без перестановки крест при swap показывал не на свою ячейку.
+        const double ch_src_x = swap_axes ? crosshair_y : crosshair_x;
+        const double ch_src_y = swap_axes ? crosshair_x : crosshair_y;
+        const unsigned ch_col_x = swap_axes ? crosshair_y_color : crosshair_x_color;
+        const unsigned ch_col_y = swap_axes ? crosshair_x_color : crosshair_y_color;
         // Мировое значение → vis-домен (при лог-сетке через дробный индекс),
         // иначе крест уедет относительно ячейки, в которую он показывает.
-        const double cx_vis = vis_pos(crosshair_x, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
-        const double cy_vis = vis_pos(crosshair_y, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
+        const double cx_vis = vis_pos(ch_src_x, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
+        const double cy_vis = vis_pos(ch_src_y, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
         if (std::isfinite(cx_vis) && std::abs(range_x) > 1e-30
             && cx_vis >= std::min(evis_x0, evis_x1)
             && cx_vis <= std::max(evis_x0, evis_x1)) {
             float px = img_pos.x + (float)((cx_vis - evis_x0) / range_x) * plot_w;
             ImVec2 a(px, img_pos.y), b(px, img_pos.y + plot_h);
             dl->AddLine(a, b, col_halo, 3.0f);
-            dl->AddLine(a, b, (ImU32)crosshair_x_color, 1.5f);
+            dl->AddLine(a, b, (ImU32)ch_col_x, 1.5f);
         }
         if (std::isfinite(cy_vis) && std::abs(range_y) > 1e-30
             && cy_vis >= std::min(evis_y0, evis_y1)
@@ -883,7 +913,7 @@ void HeatmapView::render(PlotRenderer& renderer,
             float py = img_pos.y + (float)((evis_y1 - cy_vis) / range_y) * plot_h;
             ImVec2 a(img_pos.x, py), b(img_pos.x + plot_w, py);
             dl->AddLine(a, b, col_halo, 3.0f);
-            dl->AddLine(a, b, (ImU32)crosshair_y_color, 1.5f);
+            dl->AddLine(a, b, (ImU32)ch_col_y, 1.5f);
         }
     }
 
@@ -967,8 +997,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
             // Тот же node_value, что у crosshair-drag и drill-down (см. его
             // определение) — иначе подсказка и записанное значение расходятся.
-            double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
-            double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
+            double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
+            double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
             double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
@@ -1002,9 +1032,11 @@ void HeatmapView::render(PlotRenderer& renderer,
             int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
             int iy = (int)std::floor((dy - vis_param_lo_y) / step_y);
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, x_axis.log_scale, step_x);
-                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, y_axis.log_scale, step_y);
-                on_left_click(ix, iy, snap_x, snap_y);
+                double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
+                double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
+                // Data-координаты, не визуальные — см. on_left_drag выше.
+                if (swap_axes) on_left_click(iy, ix, snap_y, snap_x);
+                else           on_left_click(ix, iy, snap_x, snap_y);
             }
         }
     }

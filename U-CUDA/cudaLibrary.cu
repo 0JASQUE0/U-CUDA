@@ -1357,11 +1357,11 @@ __device__ __host__ numb getValueByIdx(const size_t idx, const int nPts,
 	const int64_t divisor = (valueNumber == 0) ? 1 : nPts;
 	const int64_t pointIdx = (idx / divisor) % nPts;
 
-	// 3. Вычисление параметра t (от 0.0 до 1.0)
-	const numb t = static_cast<numb>(pointIdx) / static_cast<numb>(nPts - 1);
-
-	// 4. Формула линейной интерполяции (обеспечивает строгую симметрию)
-	return (static_cast<numb>(1.0) - t) * startRange + t * finishRange;
+	// 3. Значение узла — ЕДИНСТВЕННАЯ реализация формулы (configCUDA.h).
+	// Прежняя арифметика (lerp, «обеспечивает строгую симметрию») сохранена
+	// внутри ucuda_node_value без изменений; сюда её вынесли, чтобы UI и CSV
+	// считали узел ТОЙ ЖЕ формулой, а не одной из четырёх похожих.
+	return ucuda_node_value((int)pointIdx, nPts, startRange, finishRange);
 }
 
 __device__ __host__ numb getValueByIdx_forLogBains(const int idx, const int nPts,
@@ -1385,18 +1385,27 @@ __device__ __host__ numb getValueByIdx_forLogBains(const int idx, const int nPts
 __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber)
 {
-	return log10(startRange) + (((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts)
-		* ((numb)(log10(finishRange) - log10(startRange)) / (numb)(nPts - 1)));
+	// Извлечение индекса узла оставлено как было (pow-делитель по valueNumber);
+	// сама формула значения — общая, см. ucuda_node_value_log10 в configCUDA.h.
+	// Порядок операций там тот же, что стоял здесь: шаг делится до умножения.
+	const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);
+	return ucuda_node_value_log10(n, nPts, startRange, finishRange);
 }
 
 // getValueByIdx для log-равномерной сетки (drop-in замена getValueByIdx, тот
 // же calling convention) -- требует startRange, finishRange > 0 (проверяется
-// на host-стороне до запуска kernel'а). Оборачивает getValueByIdxLog, которая
-// возвращает log10(value); тут возводим обратно в исходный масштаб.
+// на host-стороне до запуска kernel'а).
+//
+// Композиция pow(10, log10-узел) раньше стояла здесь отдельной строкой, т.е.
+// была ещё одной копией формулы: UI считал её у себя, и в float-режиме обе
+// стороны выбирали разные перегрузки pow. Теперь и то, и другое — одна
+// ucuda_node_value_log (configCUDA.h). Извлечение индекса узла оставлено
+// как было (pow-делитель по valueNumber, см. getValueByIdxLog).
 __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber)
 {
-	return pow((numb)10.0, getValueByIdxLog(idx, nPts, startRange, finishRange, valueNumber));
+	const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);
+	return ucuda_node_value_log(n, nPts, startRange, finishRange);
 }
 
 

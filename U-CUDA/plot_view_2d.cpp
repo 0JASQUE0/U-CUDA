@@ -492,6 +492,44 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
+    // ε-окружность вокруг курсора (см. hover_circle_r в plot_view_2d.h) —
+    // визуальный подбор DBSCAN eps. Сэмплируем в МИРОВЫХ координатах и гоним
+    // каждую точку через X()/Y(): так сами собой выходят и разный масштаб осей
+    // (на экране эллипс), и лог-ось X. ImDrawList::AddEllipse не подошёл бы ни
+    // там, ни там — он рисует оси-параллельный эллипс в пикселях, а на лог-оси
+    // ε-окрестность вообще не эллипс (левый и правый края сжаты по-разному).
+    // Halo + ядро — как у crosshair выше, чтобы линия читалась и на светлой,
+    // и на тёмной подложке.
+    if (plot_h_ov && std::isfinite(hover_circle_r) && hover_circle_r > 0.0) {
+        ImGuiIO& io = ImGui::GetIO();
+        // Центр — курсор в мировых координатах (та же пара формул, что у
+        // читалки координат ниже).
+        const double cx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
+        const double cy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        const int kSeg = 72;
+        ImVec2 pts[kSeg];
+        // finite — гард на патологический радиус: eps приходит из текстового
+        // поля, и на 1e300 экранные координаты переполняются в inf, после чего
+        // в vertex buffer уезжают inf/NaN. Тогда просто не рисуем.
+        bool finite = true;
+        for (int k = 0; k < kSeg; ++k) {
+            const double a = 2.0 * 3.14159265358979323846 * (double)k / (double)kSeg;
+            // На лог-оси часть окружности может уехать в x <= 0 — XS() клампит
+            // такую точку к 1e-300, т.е. далеко за левый край (координата при
+            // этом остаётся конечной). Clip-rect ниже это срезает, кривая просто
+            // уходит из плота.
+            pts[k] = ImVec2(X(cx + hover_circle_r * std::cos(a)),
+                            Y(cy + hover_circle_r * std::sin(a)));
+            if (!std::isfinite(pts[k].x) || !std::isfinite(pts[k].y)) { finite = false; break; }
+        }
+        if (finite) {
+            dl->PushClipRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+            dl->AddPolyline(pts, kSeg, IM_COL32(0, 0, 0, 220), 3.0f, ImDrawFlags_Closed);
+            dl->AddPolyline(pts, kSeg, (ImU32)hover_circle_color, 1.5f, ImDrawFlags_Closed);
+            dl->PopClipRect();
+        }
+    }
+
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         plot_col_border(), 0.0f, 0, 1.0f);
 

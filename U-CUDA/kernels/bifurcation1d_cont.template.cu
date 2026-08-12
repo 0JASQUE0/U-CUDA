@@ -98,16 +98,11 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
     numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     for (int j = 0; j < nPts; ++j) {
-        numb t = (numb)j / denom;
-        numb p;
-        if (logScale) {
-            numb l0 = log10(lo), l1 = log10(hi);
-            p = pow((numb)10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
-        } else {
-            // forward: p = lo + (hi-lo)*j/(n-1)
-            // reverse: p = hi - (hi-lo)*j/(n-1)
-            p = reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
-        }
+        // Значение узла continuation-цепочки — общая с host'ом функция
+        // (ucuda_node_value_cont в configCUDA.h). Прежняя арифметика сохранена
+        // внутри неё дословно, значения не меняются; здесь была одна из трёх
+        // рукописных копий одной формулы.
+        numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
 
         numb hLocal = hBase;
         if (sweepIsH) hLocal = p;
