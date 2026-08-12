@@ -225,11 +225,17 @@ void HeatmapView::render(PlotRenderer& renderer,
     if (autoscale) {
         vmin = (float)engine_vmin;
         vmax = (float)engine_vmax;
-        if (vmax <= vmin) vmax = vmin + 1.0f;
     } else {
         vmin = manual_vmin;
-        vmax = (manual_vmax > manual_vmin) ? manual_vmax : (manual_vmin + 1.0f);
+        vmax = manual_vmax;
     }
+    // Вырожденный диапазон (все значения равны) нормировать нельзя — раздвигаем.
+    // Но число дискретных полос обязано считаться по ИСХОДНОМУ диапазону:
+    // раньше span брался уже после раздвижки, и единственный кластер бассейнов
+    // рисовался как два (span 1 -> 2), а цвет траектории в фазовом портрете
+    // (basins_id_color) при этом считался по исходному и не совпадал с картой.
+    const float vmin_raw = vmin, vmax_raw = vmax;
+    if (vmax <= vmin) vmax = vmin + 1.0f;
     shown_vmin = vmin;
     shown_vmax = vmax;
 
@@ -247,13 +253,18 @@ void HeatmapView::render(PlotRenderer& renderer,
     if (discrete) {
         if (discrete_levels > 0) n_disc = discrete_levels;
         else {
-            int span = (int)std::lround((double)((double)vmax - (double)vmin)) + 1;
+            // Именно raw: см. комментарий у vmin_raw/vmax_raw выше.
+            int span = (int)std::lround((double)vmax_raw - (double)vmin_raw) + 1;
             n_disc = std::max(1, span);
         }
     }
 
     // Тики и ширина блока colorbar'а — общие хелперы (см. heatmap_view.h).
-    const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin, vmax, n_disc);
+    // Диапазон — исходный, как и у n_disc: colorbar_ticks считает подписи
+    // «целочисленными» только если span совпадает с числом полос. С
+    // раздвинутым диапазоном единственная полоса не проходила эту проверку,
+    // уходила в непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
+    const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
     const float margin_right = colorbar_total_width(tick_vals);
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
