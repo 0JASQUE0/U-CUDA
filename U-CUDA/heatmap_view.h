@@ -133,7 +133,14 @@ public:
     // Optional left-click callback: fires on mouse release inside the plot.
     // Not called on double-click. Arguments: pixel indices (nx_idx, ny_idx)
     // and the snapped world coordinates of that pixel's node centre (same
-    // math the hover tooltip uses). Used by the Custom-tab for drill-down:
+    // math the hover tooltip uses).
+    //
+    // ВСЕГДА в координатах ДАННЫХ — то есть в том же порядке осей, в котором
+    // caller передал values / param_lo/hi_* в render(), независимо от
+    // swap_axes. Внутри вью после swap всё живёт в визуальных координатах, и
+    // перед вызовом коллбэка пары переставляются обратно (см. render()):
+    // caller про swap не знает и кладёт первый аргумент в fix_x.
+    // Used by the Custom-tab for drill-down:
     // release LMB after a click or drag → enqueue a Phase run at (snap_x,
     // snap_y). When `on_left_drag` is also set (see below), this fires on
     // release regardless of whether the gesture was a drag; when only
@@ -154,6 +161,9 @@ public:
     // axis (both NaN by default → nothing rendered, zero cost). Used by the
     // Custom-tab to visualise fix_x/fix_y slider positions across all three
     // 2D heatmaps.
+    // Как и у on_left_click, значения — в координатах ДАННЫХ: при swap_axes
+    // crosshair_x рисуется горизонтальной линией, а не вертикальной, и цвета
+    // едут вместе со значениями (они кодируют ось СВИПА, см. ниже).
     double crosshair_x = std::numeric_limits<double>::quiet_NaN();
     double crosshair_y = std::numeric_limits<double>::quiet_NaN();
     // ARGB (0xAA_RR_GG_BB) — matches IM_COL32 default layout. Two colours

@@ -1,5 +1,6 @@
 ﻿#include "app_model.h"
 #include "codegen.hpp"
+#include "num_parse.h"   // fmt_num_shortest — round-trip формат для пинов узлов
 #include "session_io.h"
 #include <algorithm>
 #include <cstdio>
@@ -427,15 +428,14 @@ bool AppModel::start_next_in_parametric_queue() {
 // ============================================================================
 
 namespace {
-// Format a double for insertion into a text-based numeric input field. Enough
-// precision to survive round-trip through parse_d (see analysis_session.cpp).
+// Format a double for insertion into a text-based numeric input field.
+// Все три вызывающих (pin_fixed_param / _h / _ic) пиннят ЗНАЧЕНИЕ УЗЛА сетки,
+// пришедшее из snap'а по карте или по 1D-графику, поэтому формат обязан быть
+// round-trip: значение уходит в ядро через parse_num, и шесть значащих цифр
+// (стояли здесь раньше) отрезали ~10 знаков — drill-down считался не в том
+// параметре, в котором посчитана ячейка. См. fmt_num_shortest в num_parse.h.
 std::string fmt_num_for_input(double v) {
-    char buf[64];
-    // %.6g strips float→double round-trip noise (0.20000000298 → "0.2")
-    // for values that came from a SliderFloat or heatmap-pixel snap. If a
-    // caller ever needs more precision, promote this helper's format.
-    std::snprintf(buf, sizeof(buf), "%.6g", v);
-    return buf;
+    return fmt_num_shortest(v);
 }
 
 // Pin the "other axis" parameter (the one held fixed while the swept axis

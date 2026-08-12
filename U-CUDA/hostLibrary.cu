@@ -5,6 +5,31 @@
 // здесь. Текст файлов от этого не изменился ни на байт — см. комментарий в
 // data_export.h о том, почему опечатки и пробелы в нём сохранены.
 #include "data_export.h"
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// numb[] -> double[] для legacy CSV-writer'ов.
+//
+// Они НАМЕРЕННО объявлены с const double* (см. комментарий над namespace legacy
+// в data_export.h): при смене typedef numb на float вызов обязан не собраться,
+// чтобы расширение типа было ВИДНО в коде, а не подменяло молча точность в
+// файле. Растяжка сработала — вот это самое видимое расширение. Сами writer'ы
+// и формат файлов не тронуты.
+//
+// Возвращает vector по значению; временный объект живёт до конца полного
+// выражения, т.е. в течение всего вызова writer'а — .data() валиден.
+// При numb == double это копия один-в-один (путь холодный: одна запись
+// _config.csv на прогон, единицы элементов).
+//
+// n — сколько элементов ЧИТАЕТ writer, а не размер массива у вызывающего:
+// у ranges это 4 для двухосевых диаграмм и 2 для однооосевых
+// (data_export.cpp: two_axes в write_lyap_config).
+// ---------------------------------------------------------------------------
+static std::vector<double> to_dbl(const numb* p, int n)
+{
+	if (p == nullptr || n <= 0) return std::vector<double>();
+	return std::vector<double>(p, p + n);
+}
 
 // --- Путь для сохранения результирующих файлов ---
 //#define OUT_FILE_PATH "C:\\Users\\KiShiVi\\Desktop\\mat.csv"
@@ -338,7 +363,8 @@ __host__ void bifurcation1D(
 
 	data_export::legacy::write_bif1d_config(
 		outFileStream, set_precision, continuation_bif1D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, transientTime, h, preScaller, writableVar, indicesOfMutVars[0],
 		ranges[0], ranges[1]);
 	outFileStream.close();
@@ -1040,9 +1066,10 @@ __host__ void bifurcation2D(
 
 	data_export::legacy::write_bif2d_config(
 		outFileStream, set_precision, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
-		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], to_dbl(ranges, 4).data());
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2298,8 +2325,9 @@ __host__ void LLE1D(
 
 	data_export::legacy::write_lyap_config(
 		outFileStream, set_precision, data_export::legacy::LyapKind::LLE1D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
-		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, to_dbl(ranges, 2).data());
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2489,8 +2517,9 @@ __host__ void LLE2D(
 
 	data_export::legacy::write_lyap_config(
 		outFileStream, set_precision, data_export::legacy::LyapKind::LLE2D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
-		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, to_dbl(ranges, 4).data());
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2641,8 +2670,9 @@ __host__ void LS1D(
 
 	data_export::legacy::write_lyap_config(
 		outFileStream, set_precision, data_export::legacy::LyapKind::LS1D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
-		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, to_dbl(ranges, 2).data());
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -2784,8 +2814,9 @@ __host__ void LS2D(
 
 	data_export::legacy::write_lyap_config(
 		outFileStream, set_precision, data_export::legacy::LyapKind::LS2D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
-		tMax, NT, transientTime, h, eps, indicesOfMutVars, ranges);
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
+		tMax, NT, transientTime, h, eps, indicesOfMutVars, to_dbl(ranges, 4).data());
 	outFileStream.close();
 
 
@@ -3158,9 +3189,10 @@ __host__ void basinsOfAttraction(
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 	data_export::legacy::write_basins_config(
 		outFileStream, set_precision, /*log_axes=*/false,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
-		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], to_dbl(ranges, 4).data());
 	outFileStream.close();
 
 	// ------------------------------------------------------
@@ -3578,9 +3610,10 @@ __host__ void basinsOfAttraction_logAxes(
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 	data_export::legacy::write_basins_config(
 		outFileStream, set_precision, /*log_axes=*/true,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, transientTime, h, preScaller, eps, mult_peak, mult_interval,
-		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], ranges);
+		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], to_dbl(ranges, 4).data());
 	outFileStream.close();
 
 	outFileStream.open(OUT_FILE_PATH);
@@ -4236,8 +4269,11 @@ __host__ void FastSynchro(
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 	data_export::legacy::write_fastsync_config(
 		outFileStream, set_precision, type_of_synch, error_estim,
-		values, amountOfValues,
-		initialConditionsMaster, initialConditionsSlave, kForward, kBackward,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditionsMaster, amountOfInitialConditions).data(),
+		to_dbl(initialConditionsSlave,  amountOfInitialConditions).data(),
+		to_dbl(kForward,  amountOfInitialConditions).data(),
+		to_dbl(kBackward, amountOfInitialConditions).data(),
 		amountOfInitialConditions,
 		iterOfSynchr, tMax, NTime, transientTime, h, preScaller);
 	outFileStream.close();
@@ -4770,7 +4806,8 @@ __host__ void bifurcation_DFT_1D(
 
 	data_export::legacy::write_dft1d_config(
 		outFileStream, set_precision, continuation_bif1D, par_or_var,
-		values, amountOfValues, initialConditions, amountOfInitialConditions,
+		to_dbl(values, amountOfValues).data(), amountOfValues,
+		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, transientTime, h, preScaller, writableVar, indicesOfMutVars[0],
 		ranges[0], ranges[1]);
 	outFileStream.close();

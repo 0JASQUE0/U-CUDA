@@ -108,14 +108,8 @@ extern "C" __global__ void lle1dContinuationKernel(
     const int nBlocks = (int)(tMax / NT);   // h-independent
 
     for (int j = 0; j < nPts; ++j) {
-        const numb t = (numb)j / denom;
-        numb p;
-        if (logScale) {
-            numb l0 = log10(lo), l1 = log10(hi);
-            p = pow((numb)10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
-        } else {
-            p = reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
-        }
+        // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
+        const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
 
         numb hLocal = hBase;
         if (sweepIsH) hLocal = p;

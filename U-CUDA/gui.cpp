@@ -533,15 +533,35 @@ static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
 // lo/hi <= 0 при log_scale — сюда может долететь живой чекбокс без
 // соответствующего прогона; деградируем на линейную сетку вместо NaN
 // (тот же приём, что в SnapCursorToGrid1D).
+// continuation — у него СВОЯ конвенция узлов (lo + (hi-lo)*t, плюс reverse):
+// она живёт в kernels/*_cont.template.cu и в cont_sweep_value
+// (parametric_engine.cpp), и здесь остаётся копией — те шаблоны configCUDA.h
+// не включают, свести их в одну функцию этой правкой нельзя.
+// Классический свип идёт через общую с ядром ucuda_node_value (configCUDA.h).
+// Раньше обе ветки считались cont-формулой, поэтому ось классической диаграммы
+// и значение fix-слайдера расходились с getValueByIdx в последних битах, а на
+// правом конце оси — сильнее (lerp даёт РОВНО hi, cont-форма — не обязательно).
+//
+// `reverse` тут авторитетнее флага: он приходит из РЕЗУЛЬТАТА
+// (result.continuation_reverse), а `continuation` — из конфига, и они разъезжаются,
+// если пользователь снял галочку continuation, не перезапустив расчёт. Данные в
+// этом случае по-прежнему backward, и классическая ветка (она reverse не знает)
+// нарисовала бы кривую зеркально. Поэтому reverse == true всегда идёт в
+// cont-ветку — для не-continuation данных он и не выставляется.
 static double sweep_value_at(int k, int n, double lo, double hi,
-                             bool log_scale, bool reverse) {
-    if (n <= 1) return reverse ? hi : lo;
-    const double t = (double)k / (double)(n - 1);
-    if (log_scale && lo > 0.0 && hi > 0.0) {
-        const double l0 = std::log10(lo), l1 = std::log10(hi);
-        return std::pow(10.0, reverse ? (l1 - (l1 - l0) * t) : (l0 + (l1 - l0) * t));
+                             bool log_scale, bool reverse, bool continuation) {
+    if (continuation || reverse) {
+        // Та же функция, что у cont-ядер и у cont_sweep_value — конвенция
+        // continuation живёт в ucuda_node_value_cont (configCUDA.h). Гард
+        // lo/hi > 0 на лог-ветке оставлен здесь: сюда может долететь живой
+        // чекбокс лога без соответствующего прогона, а log10(<=0) отравил бы
+        // ось NaN'ом (тот же приём, что в SnapCursorToGrid1D).
+        const bool log_ok_cont = log_scale && lo > 0.0 && hi > 0.0;
+        return (double)ucuda_node_value_cont(k, n, (numb)lo, (numb)hi, log_ok_cont, reverse);
     }
-    return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+    if (log_scale && lo > 0.0 && hi > 0.0)
+        return (double)ucuda_node_value_log(k, n, (numb)lo, (numb)hi);
+    return (double)ucuda_node_value(k, n, (numb)lo, (numb)hi);
 }
 
 // Описание свипа одного члена окна — всё, что нужно для общей X-оси.
@@ -1874,6 +1894,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
+        // ε-окружность включает ТОЛЬКО ветка FeatureDiagram ниже. Гасим её
+        // здесь каждый кадр: view2d переживает смену типа проекции (объект
+        // переиспользуется, см. `if (!pr.view2d)` в ветках), и без сброса
+        // кружок остался бы висеть на фазовом портрете после переключения
+        // комбо типа.
+        if (pr.view2d) pr.view2d->hover_circle_r = std::numeric_limits<double>::quiet_NaN();
         std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation) + title_suffix;
         bool open = true; // крестик закрытия
         // Начальные позиция и размер (только при первом появлении).
@@ -2034,6 +2060,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = true;
                     pr.view2d->legend_ignore_series_alpha = true;
+                    // ε-окружность под курсором: радиус eps в ТЕХ ЖЕ осях, в
+                    // которых уложены точки (множители уже применены ниже),
+                    // поэтому накрытые ею пики — то, что dbscan сольёт в один
+                    // кластер. Без DBSCAN-конфига радиуса нет → NaN, ничего не
+                    // рисуется. Ставится каждый кадр: immediate mode.
+                    pr.view2d->hover_circle_r = (clust.valid && clust.eps > 0.0)
+                        ? clust.eps
+                        : std::numeric_limits<double>::quiet_NaN();
 
                     draw_style_toolbar("Custom point style", "featdiag", pr.custom_line_style,
                         [&pr]() {
@@ -3129,7 +3163,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
                     !regime_is_oscillation(bd.result.flags[k])) continue;
-                double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev);
+                double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev, bd.continuation);
                 if (k >= (int)source.size()) continue;
                 for (double y : source[k]) {
                     buf.push_back((float)x);
@@ -3625,7 +3659,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() &&
                     !regime_is_oscillation(c.result.flags[k])) continue;
-                double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev);
+                double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
                 double y = c.result.lyapunov[k];
                 if (!std::isfinite(y)) continue;
                 buf.push_back((float)x);
@@ -4131,7 +4165,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                     if (k >= (int)c.result.spectrum.size()) continue;
                     const auto& row = c.result.spectrum[k];
                     if (j >= (int)row.size()) continue;
-                    double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev);
+                    double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
                     double y = row[j];
                     if (!std::isfinite(y)) continue;
                     buf.push_back((float)x);
@@ -5763,6 +5797,12 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         int f2 = (c.feature2 >= 0 && c.feature2 < BF_FEATURE_COUNT) ? c.feature2 : BF_FEATURE2_DEFAULT;
         scatter_v.x_axis.name = feat_names_plot[f1];
         scatter_v.y_axis.name = feat_names_plot[f2];
+        // ε-окружность под курсором. Здесь она точна по определению: точки
+        // scatter'а — это ровно те avg_peaks/avg_intervals-буферы, которые
+        // читает cell-level DBSCAN (CUDA_dbscan_kernel: sqrt(dx^2+dy^2) <= eps),
+        // и множители Feature 1/2 в них уже вписаны на GPU. Так что накрытые
+        // кружком ячейки — кандидаты попасть в один бассейн.
+        scatter_v.hover_circle_r = parse_ratio_or(c.eps_dbscan_text, 0.5);
         // gen-token включает renumber_spiral — иначе Plot2DView::series_cache_
         // не перезаливает GPU-буфер и подписи/цвета остаются от прошлой версии.
         int scatter_gen = c.data_generation * 2 + (c.renumber_spiral ? 1 : 0);
@@ -5806,6 +5846,27 @@ static void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
         return true;
     };
 
+    // Диаграмма признаков в этих окнах — облако (пик; IPI) по выбранным
+    // ячейкам, а cell-level DBSCAN бассейнов мерит eps в пространстве
+    // (Feature1 x mult1, Feature2 x mult2), по ОДНОЙ точке на ячейку. Единицы
+    // совпадают с осями диаграммы ровно тогда, когда выбраны средние: тогда
+    // точка ячейки — центроид этого самого облака, и eps-кружок на нём
+    // осмыслен. На RMS/StDev/log-фичах множители относятся к другой величине,
+    // и растягивать на них ось «пик» значило бы врать — там оставляем сырые
+    // оси и без кружка, как было. Клампы f1/f2 повторяют engine
+    // (analysis_session.cpp): вне диапазона он берёт дефолт, т.е. средние.
+    FeatureClusterParams clust;
+    {
+        const int f1 = (c.feature1 >= 0 && c.feature1 < BF_FEATURE_COUNT) ? c.feature1 : BF_FEATURE1_DEFAULT;
+        const int f2 = (c.feature2 >= 0 && c.feature2 < BF_FEATURE_COUNT) ? c.feature2 : BF_FEATURE2_DEFAULT;
+        if (f1 == BF_AVG_PEAKS && f2 == BF_AVG_INTERVALS) {
+            clust.valid         = true;
+            clust.mult_peak     = parse_ratio_or(c.mult_feature1_text, 1.0);
+            clust.mult_interval = parse_ratio_or(c.mult_feature2_text, 1.0);
+            clust.eps           = parse_ratio_or(c.eps_dbscan_text,    0.5);
+        }
+    }
+
     // title_suffix / owner_id_delta — свои на config: docking-раскладка в
     // imgui.ini и кэш рендереров не должны пересекаться ни между конфигами,
     // ни с проекциями режима Phase analysis.
@@ -5813,7 +5874,7 @@ static void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
     draw_projection_windows(sl.phase, cb, {}, {},
                             "##bpp" + std::to_string(ci),
                             0x1BA50000 + ci * 16,
-                            style_fn);
+                            style_fn, clust);
     // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
 }
@@ -7185,7 +7246,8 @@ void draw_level1d_detail(CustomSession& cs) {
     };
     auto world_from_idx = [&](int i, double lo, double hi, int n, bool log_scale) {
         if (n < 2 || hi <= lo) return lo;
-        return sweep_value_at(i, n, lo, hi, log_ok(log_scale, lo, hi), /*reverse*/ false);
+        return sweep_value_at(i, n, lo, hi, log_ok(log_scale, lo, hi),
+                              /*reverse*/ false, /*continuation*/ false);
     };
 
     // Step-arrows + slider row. Arrows walk idx by ±1 (repeat on hold),
@@ -7498,18 +7560,18 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             // в под-конфиги перед самим Run — см. pin_fixed_* в app_model.cpp);
             // для h дополнительно обновляем общий h_text, чтобы панель
             // показывала тот шаг, с которым реально пойдёт расчёт.
+            // Формат — round-trip (fmt_num_shortest), а НЕ %.6g: v это значение
+            // узла сетки, посчитанное ucuda_node_value, и оно уходит в ядро
+            // через parse_num. Шесть цифр отрезали ~10 знаков, и drill-down
+            // считался в параметре, в котором ячейка не считалась.
             auto pin_axis = [&](const EffectiveSweep& e, double v) {
                 if (e.over_h) {
-                    if (v > 0.0) {
-                        char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
-                        c.l1d_h_text = buf;
-                    }
+                    if (v > 0.0) c.l1d_h_text = fmt_num_shortest(v);
                     return;
                 }
                 if (e.over_var) return;
                 if (e.par_index < 0 || e.par_index >= (int)cs.params.size()) return;
-                char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", v);
-                c.param_values[cs.params[e.par_index]] = buf;
+                c.param_values[cs.params[e.par_index]] = fmt_num_shortest(v);
             };
             EffectiveSweep esx = effective_sweep_x(c);
             EffectiveSweep esy = effective_sweep_y(c);
@@ -7692,15 +7754,17 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         // Update shared.param_values so any subsequent Phase/Basins run reads
         // the drilled-down location. Only pins param-sweeps (var-sweeps stay
         // as IC edits — pipeline drainer handles that path).
+        // snap_x/snap_y — значения узлов от ucuda_node_value (та же функция, что
+        // у ядра), поэтому пишем их round-trip форматом: %.6g, стоявший здесь,
+        // ронял точность до 6 цифр, и портрет по клику считался рядом с
+        // пикселем, а не в нём.
         if (!s.axis_x_over_var && s.axis_x_par_index >= 0 &&
             s.axis_x_par_index < (int)cs.params.size()) {
-            char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", snap_x);
-            s.param_values[cs.params[s.axis_x_par_index]] = buf;
+            s.param_values[cs.params[s.axis_x_par_index]] = fmt_num_shortest(snap_x);
         }
         if (!s.axis_y_over_var && s.axis_y_par_index >= 0 &&
             s.axis_y_par_index < (int)cs.params.size()) {
-            char buf[64]; std::snprintf(buf, sizeof(buf), "%.6g", snap_y);
-            s.param_values[cs.params[s.axis_y_par_index]] = buf;
+            s.param_values[cs.params[s.axis_y_par_index]] = fmt_num_shortest(snap_y);
         }
         if (s.autorun_on_drilldown && s.level_phase_enabled) {
             q.push_back({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
@@ -8638,7 +8702,11 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         // логарифму (та же формула, что у движка), иначе крестик садится
         // между реальными точками.
         const bool snap_log = view.x_axis.log_scale && snap_lo > 0.0 && snap_hi > 0.0;
-        auto snap_to_grid = [snap_lo, snap_hi, snap_step, snap_n, snap_log](double w) {
+        // Конвенция узлов зависит от того, шёл ли срез continuation'ом: у него
+        // своя формула (см. sweep_value_at). Флаг берём общий по вкладке — им
+        // же apply_shared_to_bif1d проставляет continuation в под-конфиг.
+        const bool snap_cont = cs.shared.continuation_1d_enabled;
+        auto snap_to_grid = [snap_lo, snap_hi, snap_step, snap_n, snap_log, snap_cont](double w) {
             if (snap_step <= 0.0) return w;
             int i;
             if (snap_log) {
@@ -8649,7 +8717,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 i = (int)std::round((w - snap_lo) / snap_step);
             }
             if (i < 0) i = 0; if (i > snap_n - 1) i = snap_n - 1;
-            double s = sweep_value_at(i, snap_n, snap_lo, snap_hi, snap_log, /*reverse*/ false);
+            double s = sweep_value_at(i, snap_n, snap_lo, snap_hi, snap_log,
+                                      /*reverse*/ false, snap_cont);
             if (s < snap_lo) s = snap_lo; if (s > snap_hi) s = snap_hi;
             return s;
         };
@@ -8703,7 +8772,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 // проверки не было, и разошедшиеся точки попадали на график).
                 if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
                 double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                           /*reverse*/ false);
+                                           /*reverse*/ false, d.continuation);
                 for (double y : source[p]) {
                     if (!std::isfinite(y)) continue;
                     buf.push_back((float)px);
@@ -8734,7 +8803,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 double y = r.lyapunov[p];
                 if (!std::isfinite(y)) continue;
                 double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                           /*reverse*/ false);
+                                           /*reverse*/ false, c.continuation);
                 buf.push_back((float)px);
                 buf.push_back((float)y);
                 ++total_pts;
@@ -8763,7 +8832,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         const auto& row = r.spectrum[p];
                         if (j >= (int)row.size()) continue;
                         double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                                   /*reverse*/ false);
+                                                   /*reverse*/ false, c.continuation);
                         double y = row[j];
                         if (!std::isfinite(y)) continue;
                         buf.push_back((float)px);

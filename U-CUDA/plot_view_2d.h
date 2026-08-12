@@ -166,6 +166,18 @@ public:
     unsigned crosshair_x_color = 0xFF50A0FFu;  // blue-ish (X sweep)
     unsigned crosshair_y_color = 0xFFFF9028u;  // orange   (Y sweep)
 
+    // Окружность радиуса hover_circle_r (в ЕДИНИЦАХ ДАННЫХ, не в пикселях)
+    // вокруг курсора, пока он внутри плота. NaN (дефолт) или <= 0 — ничего не
+    // рисуется, нулевая цена. Нужна для подбора DBSCAN eps: диаграмма
+    // признаков и scatter бассейнов живут ровно в тех координатах, где ядро
+    // сравнивает sqrt(dx^2+dy^2) с eps (distance/dbscan и CUDA_dbscan_kernel
+    // в cudaLibrary.cu), поэтому накрытые кружком точки — это и есть
+    // ε-окрестность курсора, т.е. то, что кластеризатор сольёт в один кластер.
+    // На экране это ЭЛЛИПС, и это нормально: оси масштабируются независимо
+    // друг от друга, поэтому радиус в пикселях по каждой оси свой.
+    double   hover_circle_r     = std::numeric_limits<double>::quiet_NaN();
+    unsigned hover_circle_color = 0xFFE0E0E0u;  // ARGB, как crosshair_*_color
+
     // render:
     //  global_visible — внешний фильтр (галочки вкладки: показывать серию вообще),
     //                   строки с false в легенду не попадают совсем.
