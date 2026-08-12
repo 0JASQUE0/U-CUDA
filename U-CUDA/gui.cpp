@@ -389,24 +389,52 @@ static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
 // (BifurcationDiagramConfig) и персистится вместе с сессией.
 // Возвращает true, если пользователь что-то изменил (вызывающий решает, надо
 // ли сохранять сессию).
-static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
-    bool changed = false;
+// Галочка стиля + параметры в выпадающем меню. Раньше параметры выкладывались
+// в ту же строку через SameLine: в узком докированном окне они уезжали за
+// правый край, и добраться до них можно было только расширив окно. Теперь в
+// строке остаются только галочка и стрелка "▾", а параметры живут в popup'е.
+//
+// Popup рисуется ВСЕГДА, а не только при enabled: иначе, сняв галочку с
+// открытым меню, мы бы пропустили EndPopup для уже открытого ImGui-окна.
+// Возвращает true, если пользователь что-то изменил.
+static bool draw_style_toolbar(const char* label, const char* id_suffix,
+                               bool& enabled,
+                               const std::function<bool()>& body) {
     const std::string sfx = id_suffix;
-    if (ImGui::Checkbox(("Custom point style##" + sfx).c_str(), &bd.custom_point_style))
+    bool changed = false;
+    if (ImGui::Checkbox((std::string(label) + "##" + sfx).c_str(), &enabled))
         changed = true;
-    if (bd.custom_point_style) {
-        if (bd.point_marker < 0 || bd.point_marker >= kPointMarkerCount) bd.point_marker = 0;
-        ImGui::SameLine(); ImGui::SetNextItemWidth(110);
-        if (ImGui::Combo(("Marker##" + sfx).c_str(), &bd.point_marker,
-                         kPointMarkerNames, kPointMarkerCount)) changed = true;
-        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-        if (ImGui::SliderFloat(("Point size##" + sfx).c_str(), &bd.point_size,
-                               0.5f, 12.0f, "%.1f")) changed = true;
-        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-        if (ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &bd.point_alpha,
-                               0.0f, 1.0f, "%.2f")) changed = true;
+
+    const std::string pop_id = "##stylepop_" + sfx;
+    if (enabled) {
+        ImGui::SameLine(0.0f, 4.0f);
+        if (ImGui::ArrowButton(("##styleopen_" + sfx).c_str(), ImGuiDir_Down))
+            ImGui::OpenPopup(pop_id.c_str());
+    }
+    if (ImGui::BeginPopup(pop_id.c_str())) {
+        if (body) changed |= body();
+        ImGui::EndPopup();
     }
     return changed;
+}
+
+static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
+    const std::string sfx = id_suffix;
+    return draw_style_toolbar("Custom point style", id_suffix, bd.custom_point_style,
+        [&bd, &sfx]() {
+            if (bd.point_marker < 0 || bd.point_marker >= kPointMarkerCount) bd.point_marker = 0;
+            bool ch = false;
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &bd.point_marker,
+                               kPointMarkerNames, kPointMarkerCount);
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Point size##" + sfx).c_str(), &bd.point_size,
+                                     0.5f, 12.0f, "%.1f");
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &bd.point_alpha,
+                                     0.0f, 1.0f, "%.2f");
+            return ch;
+        });
 }
 
 // Перенос настроек точек из конфига БД во вид. Звать ПОСЛЕ
@@ -1885,13 +1913,15 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
                     // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
-                    ImGui::Checkbox("Custom line style##phase2d", &pr.custom_line_style);
-                    if (pr.custom_line_style) {
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                    }
+                    draw_style_toolbar("Custom line style", "phase2d", pr.custom_line_style,
+                        [&pr]() {
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            return ch;
+                        });
                     pr.view2d->imdraw_lines      = pr.custom_line_style;
                     pr.view2d->line_thickness_px = pr.line_width;
 
@@ -2005,13 +2035,15 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->show_zero_y = true;
                     pr.view2d->legend_ignore_series_alpha = true;
 
-                    ImGui::Checkbox("Custom point style##featdiag", &pr.custom_line_style);
-                    if (pr.custom_line_style) {
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Point size##featdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                    }
+                    draw_style_toolbar("Custom point style", "featdiag", pr.custom_line_style,
+                        [&pr]() {
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Point size##featdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            return ch;
+                        });
                     // Всегда точки, линий между пиками нет: соседние пики
                     // соединять нечем — это облако признаков, а не траектория.
                     pr.view2d->imdraw_lines = false;
@@ -2105,13 +2137,15 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
                     // путь (1px, α=1). Аналогично Phase2D.
-                    ImGui::Checkbox("Custom line style##timedomain", &pr.custom_line_style);
-                    if (pr.custom_line_style) {
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                    }
+                    draw_style_toolbar("Custom line style", "timedomain", pr.custom_line_style,
+                        [&pr]() {
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            return ch;
+                        });
                     pr.view2d->imdraw_lines      = pr.custom_line_style;
                     pr.view2d->line_thickness_px = pr.line_width;
 
@@ -2222,13 +2256,15 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // толщина идёт через glLineWidth — драйвер может клампить,
                     // α точно уходит в шейдер. При выключенной фиче — восстанавливаем
                     // старый хардкод 1.5f, чтобы поведение осталось прежним.
-                    ImGui::Checkbox("Custom line style##phase3d", &pr.custom_line_style);
-                    if (pr.custom_line_style) {
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Line width##phase3d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                        ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                    }
+                    draw_style_toolbar("Custom line style", "phase3d", pr.custom_line_style,
+                        [&pr]() {
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Line width##phase3d", &pr.line_width, 0.1f, 5.0f, "%.2f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            return ch;
+                        });
                     pr.view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     pr.view3d->custom_line_style = pr.custom_line_style;
 
@@ -4905,8 +4941,15 @@ static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
     }
     if (cm < 0 || cm >= kHeatmapColormapCount) cm = 2;
 
-    const double range = vmax - vmin;
-    float t = (range > 1e-30) ? (float)(((double)display_id - vmin) / range) : 0.5f;
+    // Нормировка — по РАЗДВИНУТОМУ диапазону, ровно как в HeatmapView::render
+    // (там vmax <= vmin даёт vmax = vmin + 1). Число полос при этом считается
+    // по исходному — тоже как там. Раньше здесь вырожденный диапазон давал
+    // t = 0.5, а карта для того же id — t = 0, и единственный бассейн
+    // получал на портрете другой цвет, чем на хитмапе.
+    double vmax_n = vmax;
+    if (vmax_n <= vmin) vmax_n = vmin + 1.0;
+    const double range = vmax_n - vmin;
+    float t = (float)(((double)display_id - vmin) / range);
     if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
     if (n_disc > 0) {
         const float nb = (float)n_disc;
