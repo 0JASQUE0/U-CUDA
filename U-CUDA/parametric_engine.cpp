@@ -5319,8 +5319,19 @@ struct ParametricEngine::Impl {
                 }
                 idx_axis_y = 0;
             }
-            if (req.param_lo <= 0.0 || req.param_hi <= 0.0 || req.param_lo_2 <= 0.0 || req.param_hi_2 <= 0.0)
-                return fail("h lo/hi должны быть > 0 при sweep_over_h/_2");
+            // Требование "> 0" относится ТОЛЬКО к оси, которая свипает h: это
+            // шаг интегрирования, на него ниже делит worstCaseH, и нулевой либо
+            // отрицательный шаг не считается. Вторая ось — параметр или НУ, и
+            // отрицательные значения там совершенно законны (свип sigma от -5
+            // до 5 к шагу отношения не имеет).
+            // Раньше условие требовало > 0 от ОБЕИХ осей и заворачивало такой
+            // прогон сообщением про h — то есть ограничение h-оси переносилось
+            // на соседнюю. У run_lle_2d / run_ls_2d этой проверки нет вовсе.
+            const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
+            const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
+            if (h_lo <= 0.0 || h_hi <= 0.0)
+                return fail(std::string("h lo/hi должны быть > 0 при свипе по dt (h) (ось ")
+                            + (req.sweep_over_h ? "X" : "Y") + ")");
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
