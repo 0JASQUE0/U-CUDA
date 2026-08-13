@@ -328,9 +328,16 @@ struct CustomSession {
 void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c);
 void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c, int dir);
 void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c);
-void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, int dir);
+// c2d — слот [0] (2D-конфиг) той же подсессии. Специфика LLE/LS (eps, NT) живёт
+// только там и редактируется в панели Level 2D, поэтому срез обязан забирать
+// её оттуда — ровно как bif_writable_var. Без этого слоты [1]/[2] считались с
+// тем, что им досталось от add_curve при загрузке системы, и правка «eps» /
+// «NT» на карту действовала, а на срез — нет.
+void apply_shared_to_lle1d(const CustomTabSharedConfig& s, const LLECurveConfig& c2d,
+                           LLECurveConfig& c, int dir);
 void apply_shared_to_ls2d (const CustomTabSharedConfig& s, LSCurveConfig&  c);
-void apply_shared_to_ls1d (const CustomTabSharedConfig& s, LSCurveConfig&  c, int dir);
+void apply_shared_to_ls1d (const CustomTabSharedConfig& s, const LSCurveConfig& c2d,
+                           LSCurveConfig&  c, int dir);   // c2d — см. apply_shared_to_lle1d
 void apply_shared_to_phase (const CustomTabSharedConfig& s, PhaseAnalysisSession& ph, const std::vector<std::string>& vars);
 void apply_shared_to_basins(const CustomTabSharedConfig& s, BasinsConfig& c);
 

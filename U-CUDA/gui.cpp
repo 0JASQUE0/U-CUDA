@@ -6494,11 +6494,16 @@ void draw_level2d_detail(CustomSession& cs) {
         InputNumStr("Bif mult peak",     cs.bif_session.diagrams[0].mult_peak_text, kFieldW);
         InputNumStr("Bif mult interval", cs.bif_session.diagrams[0].mult_interval_text, kFieldW);
     }
-    if (c.lle2d_enabled && !cs.lle_session.curves.empty()) {
+    // eps/NT у LLE и LS живут в слоте [0] и наследуются 1D-срезами (см.
+    // apply_shared_to_lle1d / _ls1d), поэтому поля показываем и когда сама
+    // карта выключена, но включён хотя бы один её срез — иначе их негде править.
+    if ((c.lle2d_enabled || c.lle1d_x_enabled || c.lle1d_y_enabled) &&
+        !cs.lle_session.curves.empty()) {
         InputNumStr("LLE eps", cs.lle_session.curves[0].eps_text, kFieldW);
         InputNumStr("LLE NT",  cs.lle_session.curves[0].nt_text, kFieldW);
     }
-    if (c.ls2d_enabled && !cs.ls_session.curves.empty()) {
+    if ((c.ls2d_enabled || c.ls1d_x_enabled || c.ls1d_y_enabled) &&
+        !cs.ls_session.curves.empty()) {
         InputNumStr("LS eps", cs.ls_session.curves[0].eps_text, kFieldW);
         InputNumStr("LS NT",  cs.ls_session.curves[0].nt_text, kFieldW);
     }
@@ -6731,6 +6736,18 @@ void draw_level1d_detail(CustomSession& cs) {
           : (c.bif_writable_var >= 0 && c.bif_writable_var < (int)cs.vars.size())
                 ? cs.vars[c.bif_writable_var].c_str() : "?";
         ImGui::TextDisabled("Bif variable: %s (from Level 2D)", wv_name);
+    }
+    // Так же и eps/NT для LLE/LS-срезов: read-only эхо слота 2D, правятся в
+    // панели Level 2D (см. apply_shared_to_lle1d — срез считается с ними же).
+    if ((c.lle1d_x_enabled || c.lle1d_y_enabled) && !cs.lle_session.curves.empty()) {
+        ImGui::TextDisabled("LLE eps / NT: %s / %s (from Level 2D)",
+                            cs.lle_session.curves[0].eps_text.c_str(),
+                            cs.lle_session.curves[0].nt_text.c_str());
+    }
+    if ((c.ls1d_x_enabled || c.ls1d_y_enabled) && !cs.ls_session.curves.empty()) {
+        ImGui::TextDisabled("LS eps / NT: %s / %s (from Level 2D)",
+                            cs.ls_session.curves[0].eps_text.c_str(),
+                            cs.ls_session.curves[0].nt_text.c_str());
     }
     // Отображение Y на Bif-срезах. Пересчёт не нужен — peak_times и
     // bifurcation_points приходят из одного прогона, поэтому пишем флаг прямо
