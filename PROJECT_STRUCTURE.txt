@@ -1,0 +1,740 @@
+================================================================================
+U-CUDA — СТРУКТУРА ПРОЕКТА
+Справочник для ИИ-агента, который формулирует промты по этому репозиторию.
+================================================================================
+
+Срез: 14.08.2026, ветка main, коммит 1ac7cce.
+Всё ниже проверено по исходникам, а не по документации проекта. Где сведения
+не проверялись — это помечено явно.
+
+--------------------------------------------------------------------------------
+0. КАК ПОЛЬЗОВАТЬСЯ ЭТИМ ФАЙЛОМ
+--------------------------------------------------------------------------------
+
+Задача агента-промптёра: превратить пожелание пользователя («в custom для LS1D
+срезов не подтягиваются NT и eps») в промт, который сразу называет файл и
+функцию. Исполнитель тогда идёт по адресу, а не тратит десяток поисков на
+разведку.
+
+Правило номер один: НАЗЫВАЙ ФАЙЛ И ФУНКЦИЮ. Разница на реальном примере —
+8 поисковых вызовов против одного чтения файла.
+
+Номера строк в этом документе — срез на дату выше и со временем разъезжаются.
+В промте указывай ИМЯ функции/структуры, номер строки — только как подсказку
+(«примерно gui.cpp:6445, проверь grep'ом по имени»).
+
+--------------------------------------------------------------------------------
+1. ЧТО ЭТО ЗА ПРИЛОЖЕНИЕ
+--------------------------------------------------------------------------------
+
+Десктопное GPU-приложение для анализа нелинейных динамических систем.
+
+Сценарий: пользователь вводит систему ОДУ (LaTeX / обычный текст / фото через
+OCR) → приложение генерирует исходник CUDA-ядра в рантайме → компилирует его
+через NVRTC под текущую видеокарту → считает на GPU → рисует результат в
+ImGui/ImPlot.
+
+Что умеет считать:
+  - фазовые портреты (2D/3D) и временные ряды;
+  - бифуркационные диаграммы 1D и 2D;
+  - старший показатель Ляпунова (LLE) 1D и 2D;
+  - полный спектр Ляпунова (LS) 1D и 2D;
+  - бассейны притяжения (basins of attraction);
+  - 1D-ДПФ по параметру (DFT1D);
+  - быструю синхронизацию (FastSync) по аттрактору и по сетке НУ.
+
+Ключевая архитектурная особенность: данные остаются в памяти GPU, OpenGL
+берёт их через interop без копирования на хост.
+
+Платформа: только Windows 10/11 x64. Ни Linux, ни macOS не поддерживаются и
+не планируются в коде.
+
+--------------------------------------------------------------------------------
+2. СБОРКА И ДВЕ ТОЧКИ ВХОДА
+--------------------------------------------------------------------------------
+
+Сборка: MSBuild по .vcxproj. CMake НЕ используется, CMakeLists.txt в проекте
+НЕТ (частая ложная догадка — не предлагай cmake).
+
+  Решение:  D:\U-CUDA\U-CUDA.sln
+  Проект:   D:\U-CUDA\U-CUDA\U-CUDA.vcxproj
+  Тулчейн:  Visual Studio 2022, toolset v143, C++17 (stdcpp17), x64
+  CUDA:     12.x / 13.x (в проекте прописан toolset "CUDA 13.0")
+  Пакеты:   vcpkg manifest mode (vcpkg.json): glfw3, imgui (docking-experimental
+            + glfw + opengl3), implot, implot3d
+  Линкуется: cudart_static.lib, nvrtc.lib, cuda.lib, opengl32.lib
+
+Команды сборки (собирать ИМЕННО решение):
+
+  MSBuild U-CUDA.sln /p:Configuration=Release /p:Platform=x64
+  MSBuild U-CUDA.sln /p:Configuration=Debug   /p:Platform=x64
+
+  ВАЖНО: сборка напрямую по U-CUDA\U-CUDA.vcxproj кладёт .obj в другой,
+  вложенный IntDir (U-CUDA\U-CUDA\x64\<Cfg>\) и в другой OutDir. Выглядит так,
+  будто ничего не пересобралось. Всегда собирай .sln.
+
+  Ещё: если приложение запущено, линковка Release падает с LNK1104 (exe занят).
+  Закрыть приложение перед сборкой.
+
+Выход:
+  D:\U-CUDA\x64\Release\U-CUDA.exe
+  D:\U-CUDA\x64\Debug\U-CUDA.exe
+
+ДВЕ ТОЧКИ ВХОДА — ОДИН .EXE, РАЗНЫЙ main() (это задано ExcludedFromBuild
+в .vcxproj):
+
+  Release|x64: включён app_main.cpp, ИСКЛЮЧЁН main_NonLinAnal.cu
+               → современный UI (ImGui/ImPlot, OCR, редактор ОДУ, NVRTC).
+               Основной путь для пользователя.
+
+  Debug|x64:   включён main_NonLinAnal.cu, ИСКЛЮЧЁН app_main.cpp
+               → легаси-скриптовая точка входа (~4000 строк) с
+               закомментированными шаблонами вызовов функций hostLibrary.cu.
+               Обычно раскомментирован один вызов: посчитать, сохранить CSV.
+               Используется для офлайн-исследований и пакетных прогонов.
+
+Следствие для промтов: ЛЮБОЕ изменение сигнатур в hostLibrary.cu/.cuh надо
+проверять сборкой ОБЕИХ конфигураций. Изменения только в UI-слое (gui.cpp,
+app_model, *_session, plot_*) на Debug не влияют, но Debug всё равно должен
+собираться.
+
+Post-Build Event (одинаков в обеих конфигурациях) копирует в $(OutDir):
+  ocr_server.py
+  kernels\        (вся папка)
+  cudaLibrary.cu, cudaLibrary.cuh, cudaMacros.cuh, configCUDA.h → в kernels\
+NVRTC подхватывает эти заголовки в рантайме. Если после правки заголовка
+рантайм-компиляция ядра ругается на пропавший символ — проверь, что файл
+скопировался в OutDir\kernels\.
+Внимание: library\ НЕ копируется — она резолвится от исходников в рантайме.
+
+КОДИРОВКА (жёсткое правило, задано .editorconfig):
+  *.c/*.cpp/*.h/*.cuh/*.cu и вообще всё, кроме списка ниже → UTF-8 С BOM
+  *.json, *.md, *.yml, *.yaml, *.py, *.txt                → UTF-8 БЕЗ BOM
+  ClCompile в обеих конфигурациях передаёт /utf-8.
+Нужны обе половины. Без BOM Visual Studio угадывает CP1251 и портит русские
+комментарии при сохранении; без /utf-8 MSVC перекодирует русские строковые
+литералы в CP1251, и ImGui (он рисует UTF-8) показывает квадраты. Сборка при
+этом успешна — поломка молчаливая.
+
+--------------------------------------------------------------------------------
+3. КАРТА КАТАЛОГОВ
+--------------------------------------------------------------------------------
+
+D:\U-CUDA\
+├── CLAUDE.md              правила для ИИ-агентов (частично устарел, см. §12)
+├── README.md              инструкция по установке для человека
+├── PROJECT_STRUCTURE.txt  этот файл
+├── U-CUDA.sln             решение VS
+├── vcpkg.json             манифест зависимостей
+├── requirements.txt       Python-зависимости для OCR-сервера
+├── setup.ps1              вспомогательный установочный скрипт
+├── .editorconfig          кодировки (см. §2)
+├── ucuda-dashboard\       отдельная веб-панель, в C++-сборку НЕ входит
+│                          (содержимое в этом обзоре не разбиралось)
+├── .venv\, vcpkg_installed\, x64\   окружение и артефакты сборки
+└── U-CUDA\                ИСХОДНИКИ C++/CUDA — весь код ниже живёт здесь
+    ├── kernels\           14 шаблонов *.template.cu для NVRTC
+    ├── library\           16 систем-пресетов (рабочая библиотека)
+    ├── library_template\  эталонная копия части пресетов; назначение в коде
+    │                      не документировано (похоже на seed для восстановления)
+    ├── include\           сторонние заголовки (glad, KHR)
+    ├── U-CUDA\            НЕ исходники: артефакт сборки .vcxproj напрямую
+    └── x64\               артефакты сборки
+
+--------------------------------------------------------------------------------
+4. СЛОИ И ПОТОК ДАННЫХ
+--------------------------------------------------------------------------------
+
+  [UI: gui.cpp]  — рисует кадр, читает/пишет состояние, кладёт задачи в очередь
+        │
+        v
+  [Состояние: AppModel + *AnalysisSession + CustomSession]
+        │  (сессия = «песочница» с копией системы, списком конфигов и результатов)
+        v
+  [Очередь: AppModel::*_queue + start_next_in_*_queue()]
+        │  движок один, поэтому задачи драйнятся строго по одной
+        v
+  [Сессия: run_async(engine, idx) → std::future, poll() каждый кадр]
+        │
+        v
+  [Кодоген: sysparse (парсинг ОДУ) → codegen (тело КРС на C/CUDA)]
+        │
+        v
+  [Шаблон: kernels\<задача>.template.cu, в него подставляется тело КРС]
+        │
+        v
+  [NVRTC: parametric_engine (все параметрические задачи) /
+          nvrtc_engine + phase_portrait_nvrtc (фазовые портреты)]
+        │  компиляция кэшируется по (тело КРС, размерность)
+        v
+  [Расчёт на GPU: ядра из шаблона + cudaLibrary.cu (интеграторы, DBSCAN, редукции)]
+        │
+        v
+  [Result-структуры (*1DResult / *2DResult) → обратно в конфиг сессии]
+        │
+        v
+  [Рендер: plot_renderer / plot_view_2d / plot_view_3d / heatmap_view,
+           GPU-резидентные буферы через gpu_line_series*]
+
+Отдельная ветка — легаси: main_NonLinAnal.cu вызывает hostLibrary.cu напрямую,
+минуя UI, очереди, NVRTC-кодоген (там ядра компилируются обычным nvcc на этапе
+сборки).
+
+--------------------------------------------------------------------------------
+5. ФАЙЛЫ ПО СЛОЯМ
+--------------------------------------------------------------------------------
+Формат: имя — строк — назначение — ключевые сущности.
+
+5.1 ТОЧКИ ВХОДА
+----------------
+app_main.cpp — 470 — точка входа Release. Окно GLFW, инициализация ImGui/ImPlot,
+    главный цикл, apply_ui_scale (DPI, шрифт, тема), разбор PendingScreenshot
+    (копирование графика в буфер обмена), восстановление последней системы через
+    apply_system_switch. UI-логики почти нет — всё в gui.cpp.
+main_NonLinAnal.cu — 4069 — точка входа Debug (легаси-скрипты). Набор
+    закомментированных вызовов hostLibrary. Правится только по явной просьбе.
+
+5.2 МОДЕЛЬ И ГЛОБАЛЬНОЕ СОСТОЯНИЕ
+----------------------------------
+app_model.h / .cpp — 666 / 854 — класс AppModel: ВСЁ состояние приложения,
+    про ImGui не знает.
+    Ключевое:
+      AppMode: Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom,
+               Settings  (8 режимов — верхние вкладки)
+      Поля ввода системы: latex_text, plain_text, vars_text, params_text,
+               alphabet_text (legacy), scheme_* флаги, symmetry_s, custom_schemes,
+               use_aux_funcs/func_defs_text, param_order
+      Сессии:  phase_session, bifurcation_session, lle_session, ls_session,
+               dft1d_session, basins_session, fastsync_session, custom_session
+      Очереди: parametric_queue, dft1d_queue, basins_queue, fastsync_queue,
+               custom_queue + start_next_in_*_queue()
+      Окна:    parametric_plot_windows, dft1d_plot_windows (+ add/remove/
+               load_or_init)
+      Настройки: heatmap_colormap, basins_*_colormap, tick_precision, dark_theme,
+               ui_scale_*, use_builtin_font, nvrtc_fmad, peak (PeakConfig)
+      OCR:     start_ocr / poll / ocr_state / format_latex (нормализация LaTeX)
+      Прочее:  refresh_symbols, to_record/from_record, generate,
+               propagate_to_sessions, library_edit_buffer (черновик редактора
+               библиотеки — редактор НИКОГДА не правит активную систему напрямую)
+    ВАЖНО: start_next_in_custom_queue() (app_model.cpp) — здесь пайплайн Custom
+    решает, какой слот сессии запускать; сюда же прикручены pin_fixed_param /
+    pin_fixed_ic / pin_fixed_h (фиксация «второй» оси у 1D-срезов).
+app_config.cpp / .h — настройки приложения (_app_config.json): тема, шрифт,
+    colormap'ы, tick_precision, nvrtc_fmad, PeakConfig.
+system_record.h — 61 — SystemRecord: запись системы для библиотеки (name, note,
+    mode, latex_text/plain_text, vars_text/params_text, alphabet_text,
+    scheme_* флаги, symmetry_s, custom_schemes, step_h, init_conditions,
+    param_values) и CustomScheme (именованная пользовательская КРС: name + body,
+    сырой C/CUDA-текст вместо вывода кодогена).
+
+5.3 СЕССИИ АНАЛИЗА
+-------------------
+analysis_session.h / .cpp — 1209 / 2566 — ЯДРО состояния расчётов. Здесь живут
+    и конфиги (что считать), и сессии (список конфигов + асинхронный запуск).
+    Пары «конфиг → сессия»:
+      BifurcationDiagramConfig      → BifurcationAnalysisSession   (.diagrams)
+      LLECurveConfig                → LLEAnalysisSession           (.curves)
+      LSCurveConfig                 → LyapunovSpectrumAnalysisSession (.curves)
+      Dft1DConfig                   → Dft1DAnalysisSession         (.configs)
+      BasinsConfig                  → BasinsAnalysisSession        (.configs)
+      FastSyncConfig                → FastSyncAnalysisSession      (.configs)
+      InitialConditionSet/Projection→ PhaseAnalysisSession         (.ic_sets/.projections)
+    Единый API у всех сессий:
+      load_from_record(r, vars, params)
+      add_diagram()/add_curve()/add_config()  — ВНИМАНИЕ: клонирует последний
+                                                элемент, а не создаёт дефолтный
+      remove_*(i)
+      run(engine, idx) / run_async(engine, idx) / request_cancel() / poll()
+    Плюс у Basins своя ветка фазовых портретов: ensure_phase_slots,
+    rebuild_phase_ics, request_phase_run, start_next_phase, poll_phase.
+    Типичные поля конфигов (важно для промтов о свипах):
+      param_index / sweep_over_var+var_sweep_index / sweep_over_h — по чему
+          свипуем: параметр, начальное условие или шаг h;
+      param_lo_text / param_hi_text / n_pts_text / log_scale;
+      *_2-версии тех же полей — вторая ось в 2D-режиме (mode_2d = true);
+      h_text / t_max_text / transient_text / max_value_text / pre_scaller_text;
+      eps_text / nt_text — только LLE и LS (возмущение и время ренормировки);
+      eps_dbscan_text / mult_peak_text / mult_interval_text — только Bif;
+      continuation / continuation_reverse / use_gpu;
+      initial_conditions / param_values (map имя→строка);
+      result / result_2d, last_run_ok / last_run_2d_ok, data_generation,
+          fit_request — результат и флаги для рендера.
+    Числа хранятся СТРОКАМИ (текст поля ввода), парсятся при сборке Request.
+
+5.4 CUSTOM-ПАЙПЛАЙН (отдельная вкладка, самая сложная)
+-------------------------------------------------------
+custom_session.h / .cpp — 328 / 673 — иерархический пайплайн из трёх уровней
+    поверх пяти собственных подсессий.
+      Level 2D:  Bif2D + LLE2D + LS2D на общей сетке axis_x/axis_y/resolution
+      Level 1D:  до 6 срезов (X и Y для каждого из Bif/LLE/LS) через точку
+                 fix_x_value / fix_y_value
+      Level 3:   фазовый портрет + временной ряд ЛИБО бассейны (радиокнопка)
+    Фиксированная раскладка слотов внутри каждой подсессии:
+      [0] = 2D-конфиг, [1] = 1D X-срез, [2] = 1D Y-срез
+    CustomTabSharedConfig — общая шапка (интегратор, НУ, параметры, оси, флаги
+    включения уровней и отдельных срезов, fix_x/fix_y, l1d_* переопределения
+    интегратора для срезов, inherit_sweep_from_2d).
+    Функции проброса shared → слот подсессии (зовутся РОВНО ОДИН РАЗ перед
+    run_async, не каждый кадр):
+      apply_shared_to_bif2d / _bif1d / _lle2d / _lle1d / _ls2d / _ls1d /
+      _phase / _basins
+      У _lle1d и _ls1d есть параметр c2d — слот [0]: специфика типа (eps, NT)
+      живёт там и наследуется срезом.
+    effective_sweep_x / effective_sweep_y — «какой свип действует у 1D»:
+      наследованный от Level 2D или собственный (inherit_sweep_from_2d).
+    build_l2d_signature / build_l1d_signature / build_l3_signature — строка из
+      ВСЕХ входов уровня. Run пропускает уровень, если сигнатура совпала с
+      закоммиченной. Следствие: если добавляешь новое поле, влияющее на данные
+      уровня, ОБЯЗАТЕЛЬНО добавь его в сигнатуру, иначе Run будет молча
+      пропускать пересчёт.
+    CustomWorkspace / WorkspaceTab — вкладки рабочего пространства, у каждой
+      свой DockSpace (ImGui DockBuilder).
+
+5.5 ПАРСИНГ, КОДОГЕН, NVRTC
+----------------------------
+sysparse.cpp / .hpp — 736 / 50 — разбор ОДУ из LaTeX и обычного текста, вывод
+    списков переменных/параметров, ParamOrder, FuncDef (вспомогательные функции),
+    DetectedAlphabet.
+codegen.cpp / .hpp — 999 / 75 — System {vars, params, rhs, latex};
+    Scheme {Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD};
+    codegen_scheme(sys, scheme) — тело шага схемы как C/CUDA-код (строки вида
+    "X[0] = X[0] + h * (...);"); codegen_scheme_cpu_equivalent — то же в форме,
+    которую реально считает CPU-интегратор (для сверки CPU/GPU в debug-панели);
+    scheme_from_name; normalize_value ("8/3" → "8.0/3.0");
+    SystemEvaluator — интерпретатор правых частей (байткод) для CPU-расчёта без
+    компиляции.
+    Соглашение об индексах: X[0..N-1] — переменные, a[1..M] — параметры,
+    a[0] зарезервирован под коэффициент схемы (симметрия s у CD).
+nvrtc_engine.cpp / .h — 192 / 73 — NvrtcEngine: init(), compile(krs_body,
+    amountOfX), run_phase_portraits(...). LRU-кэш на 8 скомпилированных
+    вариантов, потокобезопасен. Используется для ФАЗОВЫХ ПОРТРЕТОВ.
+phase_portrait_nvrtc.cpp / .h — 33 / 31 — тонкая обвязка над NvrtcEngine для
+    портретов (в т.ч. прогрев кэша при смене системы).
+parametric_engine.cpp / .h — 6987 / 998 — ГЛАВНЫЙ расчётный движок для всех
+    параметрических задач. Схема «Request → run_* → Result»:
+      run_bifurcation_1d / run_bifurcation_2d / run_dft_1d
+      run_lle_1d / run_lle_2d / run_ls_1d / run_ls_2d
+      run_basins / run_basins_recluster / run_fastsync
+    Соответствующие структуры: Bifurcation1DRequest/Result, Dft1DRequest/Result,
+    LLE1DRequest/Result, LS1DRequest/Result, LLE2D*, Bifurcation2D*, LS2D*,
+    BasinsRequest/Result, BasinsReclusterRequest/Result, FastSyncRequest/Result,
+    PeakConfig. Внутри — PTX-кэши по хэшу (тело КРС + размерность), чтение
+    шаблонов из kernels\, подстановка кода, запуск, сбор результата.
+    Здесь же read_text_file(), который срезает BOM и заменяет не-ASCII байты
+    пробелами перед подачей в NVRTC (поэтому русские комментарии в шаблонах
+    ядер безопасны).
+krs_cpu.cpp / .h — 479 / 69 — KrsCpuStep: компиляция тела пользовательской КРС
+    в нативный шаг на CPU (чтобы custom-схемы считались и без GPU) + KrsCpuDiag.
+integrator.cpp / .h — 195 / 45 — CPU-интеграторы (IntScheme: Euler,
+    EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD). Это ФОЛБЭК, не GPU-путь.
+
+5.6 РАСЧЁТНОЕ ЯДРО CUDA (легаси-слой, используется Debug-точкой входа)
+----------------------------------------------------------------------
+hostLibrary.cu / .cuh — 5047 / 398 — «верхнеуровневые» функции расчёта,
+    хостовая оркестровка. Полный список экспорта:
+      bifurcation1D, bifurcation2D, bifurcation1DForH, bifurcation_DFT_1D
+      LLE1D, LLE2D, LS1D, LS2D
+      basinsOfAttraction, basinsOfAttraction_logAxes
+      FastSynchro, FastSynchro_2
+      TimeDomainCalculation, distributedSystemSimulation
+      neuronClasterization2D
+      CUDA_dbscan
+cudaLibrary.cu / .cuh — 3697 / 756 — низкоуровневые примитивы: интеграторы
+    (Euler / Cromer / Midpoint / RK4), loopCalculateDiscreteModel_int, DBSCAN на
+    GPU, редукции, getValueByIdx / getValueByIdx_log (узлы свип-сетки — важно:
+    2D-ядра работают только по КВАДРАТНОЙ сетке N×N, отсюда единое поле
+    Resolution на обе оси).
+cudaMacros.cu / .cuh — макрос gpuErrchk и родственные.
+configCUDA.h — typedef numb (сейчас = double), AMOUNTOFX (размерность фазового
+    пространства, по умолчанию 3; переопределяется через #define перед
+    include в NVRTC-пайплайне), пороги режимов и настройки peak-finder.
+
+5.7 ШАБЛОНЫ ЯДЕР (kernels\, 14 файлов)
+---------------------------------------
+    bifurcation1d.template.cu        bifurcation1d_cont.template.cu
+    bifurcation2d.template.cu
+    lle1d.template.cu                lle1d_cont.template.cu
+    lle2d.template.cu
+    ls1d.template.cu                 ls1d_cont.template.cu
+    ls2d.template.cu
+    dft1d_cont.template.cu           dft1d_hsweep.template.cu
+    basins.template.cu
+    fastsync_attr.template.cu        fastsync_grid.template.cu
+    Суффикс _cont — вариант с continuation (точка стартует с состояния
+    предыдущей); _hsweep — свип по шагу интегрирования.
+
+5.8 UI
+-------
+gui.h — 21 — GuiCallbacks (платформенные колбэки: выбор файла, буфер обмена,
+    диалог сохранения CSV), draw_gui(model, lib, cb), apply_system_switch.
+gui.cpp — 9232 — ВЕСЬ интерфейс. Самый большой файл проекта; читать целиком
+    нельзя, только найденными диапазонами. Карта функций (строки — на дату
+    среза, ищи по имени):
+
+    Корень кадра
+      draw_gui                          8402   — точка входа кадра, драйнит
+                                                 очереди, вызывает всё ниже
+      apply_system_switch               6241   — смена активной системы
+      apply_session_json                6212   — применение сохранённой сессии
+
+    Общие виджеты (переиспользуются всеми вкладками)
+      draw_scheme_combo                  412   — выбор КРС (+ custom-схемы)
+      draw_sweep_target_combo            449   — по чему свипуем (param/IC/h)
+      draw_integration_block             508   — h / время / transient / max
+      draw_named_num_fields               526
+      draw_csv_output_block               540
+      draw_error_box                      552
+      draw_export_menu_item               563  — пункт «Export data...»
+      draw_label_rename                   573
+      draw_run_and_run_all                652  — кнопки Run / Run all
+      draw_style_toolbar                  792   draw_point_style_toolbar   813
+      draw_continuation_device_block      856  — continuation + CPU/GPU
+      draw_export_submenu                1089
+      draw_heatmap_toolbar               1173  — colormap/autoscale/vmin/vmax
+      draw_ls_exponent_picker            1214  — какую экспоненту показывать
+      draw_writable_var_combo            2856  — переменная построения БД
+                                                 (-1 = комбинация x+pi*y+e*z)
+
+    Вкладка Library / ввод системы
+      draw_system_tab                    1295  — ввод ОДУ, OCR, схемы,
+                                                 Custom KRS schemes
+      draw_parameters_tab                1526
+      draw_library_list                  1711   draw_library_editor   1853
+      library_editor_save                1653   invalidate_library_cache 1622
+
+    Analysis (фазовые портреты)
+      draw_phase_controls                1915
+      draw_projection_windows            2327
+      draw_regime_summary                2257   count_regimes         2246
+
+    Parametric (Bif / LLE / LS)
+      draw_diagram_controls              2893  — один конфиг БД
+      draw_bifurcation_controls          3037   draw_bifurcation_plot 3082
+      draw_lle_curve_controls            3532   draw_lle_controls     3631
+      draw_lle_plot                      3650
+      draw_ls_curve_controls             3826   draw_ls_controls      3920
+      draw_ls_plot                       3941
+      draw_parametric_controls           6077  — панель режима целиком
+      draw_parametric_plot_windows       4272   draw_parametric_window_setup_row 4200
+
+    DFT1D
+      draw_dft1d_diagram_controls        4348   draw_dft1d_controls   4432
+      draw_dft1d_plot                    4531   draw_dft1d_plot_windows 4663
+
+    Basins
+      draw_basins_controls               4981   draw_basins_plot      5157
+      draw_basins_phase_controls         4796  — фазовые портреты по бассейнам
+      draw_basins_phase_windows          5471   basins_phase_tick     5539
+      basins_colorbar_range              4726   basins_id_color       4753
+
+    FastSync
+      draw_fastsync_controls             5564   draw_fastsync_plot    5806
+
+    Custom (пайплайн)
+      draw_shared_config                 6325  — общая шапка (интегратор, НУ,
+                                                 параметры)
+      draw_level2d_detail                6445  — Level 2D + per-type опции
+                                                 (Bif DBSCAN eps, LLE eps/NT,
+                                                 LS eps/NT) — они лежат в слоте [0]
+      draw_level1d_detail                6518  — срезы, ползунки fix X/fix Y,
+                                                 l1d-интегратор, включение срезов
+      draw_level3_detail                 6773
+      draw_custom_controls               6847  — заголовки уровней (level_header)
+      wire_2d_heatmap_interaction        7087  — крестик/drill-down на хитмапе
+      draw_custom_controls_panel         7200   draw_custom_workspace_panel 7228
+      draw_custom_mode_layout            7490   draw_custom_plot_windows 7558
+
+    Полезно знать: числовой ввод везде идёт через InputNumStr (обёртка над
+    ImGui::InputText): шаг стрелками по разряду, запятая→точка, дроби «a/b».
+    Значения хранятся строками, не double.
+
+5.9 РЕНДЕР ГРАФИКОВ
+--------------------
+plot_renderer.cpp / .h — 653 / 136 — PlotRenderer, HeatmapColormap (Viridis /
+    Inferno / Turbo / Gray), PointMarker.
+plot_view_2d.cpp / .h — 974 / 201 — Plot2DView, PlotSeriesInput: 2D-портреты,
+    временные ряды, 1D-диаграммы; крестики, snap по сетке, колбэки
+    on_left_click / on_left_drag, popup_extras (пункты правого клика).
+plot_view_3d.cpp / .h — 234 / 65 — Plot3DView, PlotSeriesInput3D.
+plot_camera_3d.cpp / .h — PlotCamera3D.
+plot_axis.cpp / .h — AxisInfo, форматирование тиков (fmt_tick, set_tick_precision),
+    request_plot_screenshot.
+plot_legend.cpp / .h — LegendEntry, LegendPass, LegendRightClick.
+heatmap_view.cpp / .h — 1049 / 194 — HeatmapView: хитмапы бифуркаций/LLE/LS/
+    бассейнов, colorbar, ColorbarTick, крестик, drill-down.
+gpu_line_series.cpp / .h, gpu_line_series_3d.cpp / .h — GPU-резидентные серии
+    (zero-copy OpenGL interop), GpuLineSeriesSet / GpuLineSeriesSet3D.
+colormap_lut_data.h — таблицы цветовых карт.
+grid_snap.h — GridInfo, привязка координат к узлам свип-сетки.
+glad.c + include\glad, include\KHR — загрузчик OpenGL.
+
+5.10 ХРАНЕНИЕ, ЭКСПОРТ, БИБЛИОТЕКА
+-----------------------------------
+system_library.cpp / .h — 346 / 43 — класс SystemLibrary: чтение/запись
+    library\<Имя>\system.json, список систем, переименование.
+session_io.cpp / .h — 1724 / 75 — сериализация рабочего состояния в JSON.
+    Пары функций на каждый режим: session_to_json / session_from_json (Phase),
+    *_parametric (Bif), *_lle, *_ls, *_dft1d, *_basins, *_fastsync,
+    *_parametric_windows, *_dft1d_windows, *_custom.
+    Файлы кладутся в library\<Система>\sessions\:
+      _last.json, _last_lle.json, _last_ls.json, _last_dft1d.json,
+      _last_basins.json, _last_fastsync.json, _last_custom.json,
+      _last_parametric_windows.json, _last_dft1d_windows.json
+      плюс именованные пользовательские: Base.json, Base2.json, ...
+    Эталон системы (system.json) при этом не трогается — отсюда «сброс к базовым».
+data_export.cpp / .h — 1008 / 418 — экспорт результатов в CSV:
+    export_bif1d / export_dft1d / export_lle1d / export_ls1d / export_bif2d /
+    export_lle2d / export_ls2d / export_basins / export_fastsync / export_phase,
+    плюс *Snapshot-структуры (шапка CSV с параметрами прогона) и низкоуровневые
+    write_*_config / write_*_rows / write_*_grid.
+
+5.11 ПРОЧЕЕ
+------------
+ocr_server.py — 45 — Python-сервер распознавания (pix2text), общается с C++ по IPC.
+ocr_client_win.cpp / .h — OcrClient, клиент к нему (только Windows).
+image_source.cpp / .h — ImageSource / FileImageSource / ClipboardImageSource —
+    источник картинки для OCR.
+digit_input.cpp / .h — ввод чисел с шагом по разряду (основа InputNumStr).
+num_parse.h — parse_num: разбор чисел, включая дроби «a/b».
+stb_image_write.h — сторонняя библиотека записи PNG (скриншоты графиков).
+
+--------------------------------------------------------------------------------
+6. ГДЕ ЧТО ЛЕЖИТ: ПАМЯТКА ПО СОСТОЯНИЮ
+--------------------------------------------------------------------------------
+
+Вопрос «где хранится X» решается по этой лестнице:
+
+  Глобальная настройка приложения (тема, шрифт, colormap по умолчанию,
+      точность тиков, FMA)                    → AppModel + app_config
+  Описание системы (уравнения, алфавит, схемы, НУ/параметры по умолчанию)
+                                              → SystemRecord + library\*\system.json
+  Что и как считать в конкретной вкладке      → соответствующий *Config
+                                                 внутри *AnalysisSession
+  Список конфигов, асинхронный запуск, результаты
+                                              → *AnalysisSession
+  Общая шапка пайплайна Custom                → CustomTabSharedConfig
+  Раскладка окон, вкладки рабочего пространства
+                                              → CustomWorkspace / imgui.ini
+  Рабочее состояние между запусками приложения → sessions\_last*.json
+
+ImGui — immediate mode: НИКАКОЕ состояние UI не должно жить в локальных
+переменных между кадрами. Только AppModel / сессии / конфиги. Это правило
+надо повторять в промтах, где добавляется новый виджет.
+
+--------------------------------------------------------------------------------
+7. ЖИЗНЕННЫЙ ЦИКЛ ОДНОГО РАСЧЁТА
+--------------------------------------------------------------------------------
+
+ 1. Пользователь жмёт Run в панели вкладки (draw_*_controls в gui.cpp).
+ 2. В очередь AppModel::*_queue кладётся элемент (индекс конфига или Kind).
+ 3. draw_gui каждый кадр зовёт start_next_in_*_queue(); если движок свободен —
+    снимается один элемент.
+ 4. Для Custom: перед запуском вызывается apply_shared_to_*(shared, ..., слот)
+    и pin_fixed_* — только здесь общая шапка попадает в слот подсессии.
+ 5. session.run_async(engine, idx) — собирает Request из строковых полей
+    конфига (parse_d/parse_i), запускает std::async.
+ 6. ParametricEngine::run_*: берёт шаблон из kernels\, подставляет тело КРС от
+    codegen (или сырое тело custom-схемы), компилирует NVRTC (или берёт из
+    PTX-кэша), запускает ядро, собирает Result.
+ 7. session.poll() в кадре забирает future, кладёт результат в конфиг,
+    выставляет last_run_ok / data_generation / fit_request.
+ 8. Рендер видит новый data_generation, перестраивает VBO и рисует; fit_request
+    вызывает автомасштаб один раз.
+ 9. Custom дополнительно: commit_pending_signatures() продвигает pending →
+    committed, чтобы следующий Run пропустил неизменившиеся уровни.
+
+--------------------------------------------------------------------------------
+8. МАРШРУТИЗАТОР: «ХОЧУ СДЕЛАТЬ X — ИДТИ СЮДА»
+--------------------------------------------------------------------------------
+
+Поменять/добавить виджет в панели вкладки
+    → gui.cpp, draw_<режим>_controls (см. карту в §5.8). Состояние виджета —
+      в соответствующий *Config или в AppModel, не в локальную переменную.
+
+Добавить новое поле настройки расчёта
+    → 1) поле в *Config (analysis_session.h)
+      2) виджет в gui.cpp
+      3) перенос в Request (analysis_session.cpp, build_*_request)
+      4) использование в parametric_engine.cpp / шаблоне ядра
+      5) сериализация в session_io.cpp (обе стороны: to_json и from_json)
+      6) для Custom — ещё и в build_l*_signature, иначе Run будет пропускать
+         пересчёт
+
+Поменять поведение свипа (по параметру / по НУ / по шагу h, лог-сетка)
+    → поля param_index / sweep_over_var / sweep_over_h / log_scale в *Config;
+      UI — draw_sweep_target_combo; узлы сетки — getValueByIdx(_log) в
+      cudaLibrary.cu и sweep_value_at в gui.cpp (должны совпадать!)
+
+Что-то не так с 1D-срезами Custom (наследование, оси, ползунки fix X/Y)
+    → custom_session.cpp: apply_shared_to_*1d, effective_sweep_x/y;
+      app_model.cpp: start_next_in_custom_queue (pin_fixed_*);
+      gui.cpp: draw_level1d_detail
+
+Run пропускает уровень / не пересчитывает после правки поля (только Custom)
+    → build_l2d_signature / build_l1d_signature / build_l3_signature
+      в custom_session.cpp
+
+Поменять генерацию кода КРС (новая схема интегрирования, инлайн функций)
+    → codegen.cpp (codegen_scheme) + Scheme в codegen.hpp + чекбоксы схем в
+      AppModel/SystemRecord + draw_scheme_combo. Для CPU-эквивалента —
+      integrator.cpp и codegen_scheme_cpu_equivalent.
+
+Ошибка компиляции ядра в рантайме
+    → parametric_engine.cpp (сборка исходника и лог NVRTC), kernels\*.template.cu,
+      и проверить Post-Build копирование заголовков в OutDir\kernels\
+
+Поменять сам расчёт на GPU (интегратор, DBSCAN, редукция)
+    → cudaLibrary.cu (+ .cuh). Если меняется сигнатура функции из hostLibrary —
+      проверять ОБЕ конфигурации сборки.
+
+Поменять отрисовку графика (оси, легенда, маркеры, крестик, drill-down)
+    → plot_view_2d / plot_view_3d / heatmap_view / plot_axis / plot_legend;
+      настройка вида конкретного графика — в configure_*_view / draw_*_plot
+      в gui.cpp
+
+Экспорт в CSV
+    → data_export.cpp (export_*), шапка прогона — *Snapshot в data_export.h
+
+Сохранение/восстановление рабочего состояния
+    → session_io.cpp; ОБЕ функции пары (to_json И from_json), иначе поле
+      молча теряется при перезапуске
+
+Добавить систему в библиотеку
+    → новая папка library\<Имя>\system.json. Формат — см. library\Lorenz\system.json:
+      name, note, mode ("LaTeX"|"Plain"|"Image"), latex_text, plain_text,
+      alphabet_text (или vars_text+params_text), use_aux_funcs, func_defs_text,
+      param_order, scheme_* флаги, symmetry_s, custom_schemes, step_h,
+      init_conditions, param_values
+
+OCR (фото → LaTeX)
+    → ocr_server.py (Python), ocr_client_win.cpp (клиент), AppModel::start_ocr /
+      poll / format_latex, UI — draw_system_tab
+
+--------------------------------------------------------------------------------
+9. СЛОВАРЬ ПРОЕКТА
+--------------------------------------------------------------------------------
+
+КРС            — тело шага конечно-разностной схемы (то, что выдаёт кодоген и
+                 что подставляется в шаблон ядра). В коде — krs_body, krs_code.
+custom KRS     — пользовательская схема: сырой C/CUDA-текст вместо кодогена
+                 (CustomScheme). Считается на GPU и на CPU (krs_cpu.cpp).
+numb           — typedef в configCUDA.h, сейчас double. В CUDA-коде писать
+                 ТОЛЬКО numb, не double/float.
+AMOUNTOFX      — размерность фазового пространства (по умолчанию 3),
+                 переопределяется #define перед include configCUDA.h.
+a[0]           — коэффициент схемы (симметрия s у метода CD), НЕ параметр системы.
+                 Параметры — a[1..M].
+свип (sweep)   — прогон по диапазону: параметра, начального условия или шага h.
+срез (slice)   — 1D-разрез 2D-карты вдоль одной оси при фиксированной второй.
+                 В Custom: X-срез свипует X и пинит Y в fix_y, Y-срез наоборот.
+слот [0]/[1]/[2] — фиксированная раскладка конфигов в подсессиях Custom:
+                 2D / 1D-X / 1D-Y.
+уровень (level) — этаж пайплайна Custom: L2D, L1D, L3.
+сигнатура уровня — строка из всех входов уровня; равные сигнатуры = данные
+                 совпадут, Run пропустит пересчёт.
+continuation   — режим, где каждая точка свипа стартует с состояния предыдущей
+                 (у LLE/LS переносится ещё и вектор возмущения). Только CPU.
+NT / eps       — параметры LLE/LS: время между ренормировками и величина
+                 возмущения.
+writable_var   — переменная, по которой строится бифуркационная диаграмма;
+                 -1 = комбинация x[0] + pi*x[1] + e*x[2].
+pre_scaller    — прореживание (децимация) записи точек.
+transient      — время, отбрасываемое перед сбором данных.
+peak / interPeak — значения пиков и межпиковые интервалы; на БД можно рисовать
+                 и то, и другое из ОДНОГО прогона.
+DBSCAN         — кластеризация на GPU: определение периода в 2D-БД и разделение
+                 аттракторов в бассейнах. Настройка — eps_dbscan.
+mode_2d        — флаг в конфиге: считать карту (2D) вместо кривой (1D).
+data_generation — счётчик версии результата; рендер по нему понимает, что пора
+                 перестроить буферы.
+fit_request    — одноразовый запрос автомасштаба после нового расчёта.
+
+--------------------------------------------------------------------------------
+10. ПРАВИЛА, КОТОРЫЕ ПРОМТ ОБЯЗАН НЕСТИ
+--------------------------------------------------------------------------------
+
+Жёсткие запреты (нарушение ломает проект или требования владельца):
+  1. НЕ менять .vcxproj без явного разрешения.
+  2. НЕ создавать CMakeLists.txt — сборка не на CMake.
+  3. НЕ удалять и НЕ переименовывать файлы без явного разрешения.
+  4. НЕ трогать Python-файлы, если об этом не попросили явно.
+  5. НЕ снимать BOM с C/C++/CUDA-исходников и НЕ убирать /utf-8 из ClCompile.
+  6. НЕ подставлять «насыщенные» значения вместо неизмеримых величин в
+     расчётном ядре (floor-guard и т.п.) без разрешения: -inf/NaN честнее.
+
+Обязательные требования к результату:
+  7. После правки — собрать. Изменения в hostLibrary/cudaLibrary — ОБЕ
+     конфигурации (Release UI и Debug легаси). Правки только в UI-слое —
+     достаточно Release, но Debug должен продолжать собираться.
+  8. В CUDA-коде — тип numb, явные __host__ __device__, все вызовы CUDA API в
+     макросе проверки ошибок (gpuErrchk), предпочитать SoA вместо AoS.
+  9. ImGui immediate mode: состояние UI — только в AppModel/сессиях.
+ 10. Разделять логику UI и логику расчёта.
+ 11. LS требует numb = double: во float сжимающие показатели вырождаются в -inf.
+
+Практические подсказки исполнителю (снижают расход и число ошибок):
+ 12. gui.cpp — 9232 строки, parametric_engine.cpp — 6987. Читать только нужные
+     диапазоны, найденные grep'ом по имени функции.
+ 13. Суффиксы полей пересекаются: поиск «nt_text» ловит «transient_text»,
+     «eps_text» ловит «eps_dbscan_text». Просить границы слова.
+ 14. Собирать U-CUDA.sln, не .vcxproj (иначе другой IntDir и «ничего не
+     пересобралось»). Перед сборкой Release закрыть приложение.
+ 15. add_curve()/add_diagram()/add_config() КЛОНИРУЮТ последний элемент, а не
+     создают дефолтный — при добавлении поля учитывать это.
+ 16. Новое поле конфига обычно требует правок в 4–6 местах (см. §8, «Добавить
+     новое поле настройки расчёта»). Промт должен перечислять их все, иначе
+     поле молча не сохранится или не доедет до ядра.
+
+--------------------------------------------------------------------------------
+11. КАК ФОРМУЛИРОВАТЬ ПРОМТ (примеры)
+--------------------------------------------------------------------------------
+
+ПЛОХО: «в custom для LS1D срезов не подтягиваются NT и eps»
+    Исполнитель не знает, где это. Уйдёт ~8 поисков на разведку.
+
+ХОРОШО: «В Custom-вкладке 1D-срезы LS считаются не с теми eps/NT, что 2D-карта.
+    Смотри apply_shared_to_ls1d в custom_session.cpp — она не копирует
+    eps_text/nt_text из слота [0]. Проверь заодно, помечает ли правка этих
+    полей уровень L1D грязным (build_l1d_signature) и где поля рисуются
+    (draw_level2d_detail в gui.cpp). Собери Release и Debug.»
+
+Хороший промт содержит:
+  - режим/вкладку приложения (Release UI или Debug-скрипты; какая вкладка);
+  - файл и функцию — точку входа в задачу;
+  - смежные места, которые обычно надо править вместе (сериализация,
+    сигнатура уровня, вторая конфигурация);
+  - чем проверять результат (какую конфигурацию собрать; что посмотреть в UI);
+  - при работе с NVRTC — напоминание проверить копирование заголовков в
+    OutDir\kernels\.
+
+Шаблон:
+    [Вкладка/режим] + [что не так или что добавить] +
+    [файл: функция — точка входа] +
+    [смежные места: ...] +
+    [проверка: собрать Release/Debug, посмотреть ...]
+
+Отдельно про формулировку задачи: если нужен только диагноз без правок —
+сказать это прямо («только проверь, ничего не меняй»). Иначе исполнитель
+по умолчанию доводит до рабочей сборки.
+
+--------------------------------------------------------------------------------
+12. ЧЕГО В ПРОЕКТЕ НЕТ (частые ложные допущения)
+--------------------------------------------------------------------------------
+
+  - Нет CMake. Нет CMakeLists.txt.
+  - Нет автотестов, нет CI-конфигурации в репозитории.
+  - Нет поддержки Linux/macOS: Win32-зависимости (ocr_client_win, диалоги
+    файлов), MSVC-специфика, сборка только под VS2022.
+  - Нет пакетного менеджера Python внутри C++-сборки: OCR-сервер запускается
+    отдельно (requirements.txt, setup.ps1).
+  - CLAUDE.md в корне местами устарел относительно кода: там не упомянуты
+    режимы Dft1D и Custom, файлы custom_session.*, krs_cpu.*, digit_input.*,
+    num_parse.h, grid_snap.h, а список шаблонов ядер неполный (нет dft1d_*,
+    *_cont). Команда сборки там указана по .vcxproj — см. §2, почему лучше .sln.
+    При расхождении верить исходникам, а не CLAUDE.md.
+  - library\ не копируется post-build: она читается от исходников в рантайме.
+
+================================================================================
+Конец файла. При заметном изменении структуры проекта — обновить (и указать
+новую дату среза в шапке).
+================================================================================

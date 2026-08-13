@@ -192,10 +192,12 @@ void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c) {
     c.log_scale_2       = s.axis_y_log;
     c.param_lo_2_text   = s.axis_y_lo_text;
     c.param_hi_2_text   = s.axis_y_hi_text;
-    // eps_text / nt_text stay on the sub-config.
+    // eps_text / nt_text — собственные поля слота [0]; правятся в панели
+    // Level 2D и оттуда же наследуются срезами (см. apply_shared_to_lle1d).
 }
 
-void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, int dir) {
+void apply_shared_to_lle1d(const CustomTabSharedConfig& s, const LLECurveConfig& c2d,
+                           LLECurveConfig& c, int dir) {
     copy_integrator_and_state(s, c);
     c.h_text         = s.l1d_h_text;
     c.transient_text = s.l1d_transient_text;
@@ -210,6 +212,10 @@ void apply_shared_to_lle1d(const CustomTabSharedConfig& s, LLECurveConfig& c, in
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
+    // LLE-специфика — из слота 2D: срез разрезает ту же карту, считать его с
+    // другими eps/NT бессмысленно (см. объявление в custom_session.h).
+    c.eps_text = c2d.eps_text;
+    c.nt_text  = c2d.nt_text;
 }
 
 void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
@@ -232,7 +238,8 @@ void apply_shared_to_ls2d(const CustomTabSharedConfig& s, LSCurveConfig& c) {
     c.param_hi_2_text   = s.axis_y_hi_text;
 }
 
-void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int dir) {
+void apply_shared_to_ls1d(const CustomTabSharedConfig& s, const LSCurveConfig& c2d,
+                          LSCurveConfig& c, int dir) {
     copy_integrator_and_state(s, c);
     c.h_text         = s.l1d_h_text;
     c.transient_text = s.l1d_transient_text;
@@ -247,6 +254,9 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, LSCurveConfig& c, int 
     c.param_lo_text   = sweep.lo_text;
     c.param_hi_text   = sweep.hi_text;
     c.n_pts_text      = sweep.n_pts_text;
+    // LS-специфика — из слота 2D, как и в apply_shared_to_lle1d.
+    c.eps_text = c2d.eps_text;
+    c.nt_text  = c2d.nt_text;
 }
 
 void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession& ph,
@@ -537,7 +547,6 @@ std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSess
 }
 
 std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
-    (void)cs;
     std::string o; o.reserve(512);
     sig_append_bool(o, "en", s.level_1d_enabled);
     sig_append_shared_state(o, s);
@@ -577,6 +586,19 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_bool(o, "ly", s.lle1d_y_enabled);
     sig_append_bool(o, "sx", s.ls1d_x_enabled);
     sig_append_bool(o, "sy", s.ls1d_y_enabled);
+    // LLE/LS-срезы наследуют eps/NT из своего слота 2D (apply_shared_to_lle1d /
+    // _ls1d), значит правка этих полей в панели Level 2D обязана пометить L1D
+    // грязным — иначе Run посчитал бы только карту, а срез остался бы со старым
+    // eps. Каждый тип учитываем только когда включён хотя бы один его срез: на
+    // данные остальных эти поля не влияют, и лишний ре-ран им ни к чему.
+    if ((s.lle1d_x_enabled || s.lle1d_y_enabled) && !cs.lle_session.curves.empty()) {
+        sig_append_str(o, "leps", cs.lle_session.curves[0].eps_text);
+        sig_append_str(o, "lnt",  cs.lle_session.curves[0].nt_text);
+    }
+    if ((s.ls1d_x_enabled || s.ls1d_y_enabled) && !cs.ls_session.curves.empty()) {
+        sig_append_str(o, "seps", cs.ls_session.curves[0].eps_text);
+        sig_append_str(o, "snt",  cs.ls_session.curves[0].nt_text);
+    }
     return o;
 }
 

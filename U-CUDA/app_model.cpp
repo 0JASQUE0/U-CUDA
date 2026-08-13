@@ -529,7 +529,7 @@ bool AppModel::start_next_in_custom_queue() {
         case K::LLE1D_X:
             if (cs.lle_session.curves.size() > 1) {
                 auto& c = cs.lle_session.curves[1];
-                apply_shared_to_lle1d(shared, c, 0);
+                apply_shared_to_lle1d(shared, cs.lle_session.curves[0], c, 0);
                 EffectiveSweep swy = effective_sweep_y(shared);
                 pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
@@ -540,7 +540,7 @@ bool AppModel::start_next_in_custom_queue() {
         case K::LLE1D_Y:
             if (cs.lle_session.curves.size() > 2) {
                 auto& c = cs.lle_session.curves[2];
-                apply_shared_to_lle1d(shared, c, 1);
+                apply_shared_to_lle1d(shared, cs.lle_session.curves[0], c, 1);
                 EffectiveSweep swx = effective_sweep_x(shared);
                 pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
@@ -551,7 +551,7 @@ bool AppModel::start_next_in_custom_queue() {
         case K::LS1D_X:
             if (cs.ls_session.curves.size() > 1) {
                 auto& c = cs.ls_session.curves[1];
-                apply_shared_to_ls1d(shared, c, 0);
+                apply_shared_to_ls1d(shared, cs.ls_session.curves[0], c, 0);
                 EffectiveSweep swy = effective_sweep_y(shared);
                 pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
@@ -562,7 +562,7 @@ bool AppModel::start_next_in_custom_queue() {
         case K::LS1D_Y:
             if (cs.ls_session.curves.size() > 2) {
                 auto& c = cs.ls_session.curves[2];
-                apply_shared_to_ls1d(shared, c, 1);
+                apply_shared_to_ls1d(shared, cs.ls_session.curves[0], c, 1);
                 EffectiveSweep swx = effective_sweep_x(shared);
                 pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
                 pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
