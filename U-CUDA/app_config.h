@@ -15,15 +15,24 @@ struct AppConfig {
     bool use_builtin_font = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
-    // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
+    // 1001..1200 — карта slanCM; 0..8 — легаси, мигрируют при чтении (см.
+    // colormap_id_or в plot_renderer.h). Дефолт 0 читается как #1 viridis.
     int heatmap_colormap = 0;
 
-    // Colormap для табов панели бассейнов (независимо для каждого таба). 0..3.
-    // Дефолты — Turbo: хорошо разделяет дискретные / категориальные значения.
+    // Colormap для табов панели бассейнов (независимо для каждого таба).
+    // Дефолт 2 читается как #168 turbo: хорошо разделяет дискретные /
+    // категориальные значения.
     int basins_colormap        = 2;
     int basins_avgpk_colormap  = 2;
     int basins_avgint_colormap = 2;
     int basins_states_colormap = 2;
+
+    // Какие из 200 карт slanCM показывать в пикере Colormap: строка из
+    // kSlanCmCount символов '0'/'1', символ i — карта #(i+1). Пустая строка =
+    // ключа в JSON не было (конфиг от старой версии) → берётся
+    // default_enabled_slancm(), т.е. те же пять карт, что были доступны
+    // раньше. Правится галочками в Settings.
+    std::string slancm_enabled;
 
     // Кол-во значащих цифр в подписях тиков осей и colorbar'а. Минимум 2
     // (исключает пустые подписи), максимум 10 (предел double-precision в `%g`).

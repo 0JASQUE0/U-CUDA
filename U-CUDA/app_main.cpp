@@ -281,20 +281,25 @@ int main() {
         if (model.ui_scale_auto < 0.5f) model.ui_scale_auto = 1.0f;
     }
     AppConfig app_cfg;
-    if (load_app_config(dir, app_cfg)) {
+    const bool have_cfg = load_app_config(dir, app_cfg);
+    // Набор включённых карт применяем ДО чтения остального конфига: id ниже
+    // могут указывать на slanCM, и пикеру список нужен готовым к первому кадру.
+    // Вне ветки have_cfg — при первом запуске конфига ещё нет, а дефолтный
+    // набор нужен всё равно.
+    model.slancm_enabled = (have_cfg && !app_cfg.slancm_enabled.empty())
+                         ? app_cfg.slancm_enabled : default_enabled_slancm();
+    set_enabled_slancm(model.slancm_enabled);
+    if (have_cfg) {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
-        if (app_cfg.heatmap_colormap >= 0 && app_cfg.heatmap_colormap < kHeatmapColormapCount)
-            model.heatmap_colormap = app_cfg.heatmap_colormap;
-        if (app_cfg.basins_colormap >= 0 && app_cfg.basins_colormap < kHeatmapColormapCount)
-            model.basins_colormap = app_cfg.basins_colormap;
-        if (app_cfg.basins_avgpk_colormap >= 0 && app_cfg.basins_avgpk_colormap < kHeatmapColormapCount)
-            model.basins_avgpk_colormap = app_cfg.basins_avgpk_colormap;
-        if (app_cfg.basins_avgint_colormap >= 0 && app_cfg.basins_avgint_colormap < kHeatmapColormapCount)
-            model.basins_avgint_colormap = app_cfg.basins_avgint_colormap;
-        if (app_cfg.basins_states_colormap >= 0 && app_cfg.basins_states_colormap < kHeatmapColormapCount)
-            model.basins_states_colormap = app_cfg.basins_states_colormap;
+        // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
+        // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.
+        model.heatmap_colormap = colormap_id_or(app_cfg.heatmap_colormap, model.heatmap_colormap);
+        model.basins_colormap        = colormap_id_or(app_cfg.basins_colormap,        model.basins_colormap);
+        model.basins_avgpk_colormap  = colormap_id_or(app_cfg.basins_avgpk_colormap,  model.basins_avgpk_colormap);
+        model.basins_avgint_colormap = colormap_id_or(app_cfg.basins_avgint_colormap, model.basins_avgint_colormap);
+        model.basins_states_colormap = colormap_id_or(app_cfg.basins_states_colormap, model.basins_states_colormap);
         if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
             model.tick_precision = app_cfg.tick_precision;
         model.dark_theme = app_cfg.dark_theme;

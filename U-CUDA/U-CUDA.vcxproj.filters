@@ -105,6 +105,9 @@
     <ClInclude Include="codegen.hpp">
       <Filter>Parser</Filter>
     </ClInclude>
+    <ClInclude Include="colormap_slancm_data.h">
+      <Filter>Visualization</Filter>
+    </ClInclude>
     <ClInclude Include="configCUDA.h">
       <Filter>NonLinAnal</Filter>
     </ClInclude>

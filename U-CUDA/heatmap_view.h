@@ -71,7 +71,7 @@ public:
 
     // Видимый диапазон цвета. autoscale → vmin/vmax из render() пересчитываются
     // каждый кадр из values; иначе используются ручные значения.
-    HeatmapColormap colormap = HeatmapColormap::Viridis;
+    HeatmapColormap colormap = kDefaultColormap;
     bool   autoscale = true;
     float  manual_vmin = 0.0f;
     float  manual_vmax = 1.0f;

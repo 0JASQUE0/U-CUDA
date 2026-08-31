@@ -165,6 +165,7 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     if (parse_int_field(body, "basins_states_colormap", bcm))
         out.basins_states_colormap = bcm;
     int tp = 0;
+    parse_string_field(body, "slancm_enabled", out.slancm_enabled);
     if (parse_int_field(body, "tick_precision", tp))
         out.tick_precision = tp;
     bool dark = true;
@@ -207,6 +208,9 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"basins_avgpk_colormap\": "  << cfg.basins_avgpk_colormap << ",\n";
         f << "  \"basins_avgint_colormap\": " << cfg.basins_avgint_colormap << ",\n";
         f << "  \"basins_states_colormap\": " << cfg.basins_states_colormap << ",\n";
+        // Маска из '0'/'1' — экранировать нечего, но json_escape держит формат
+        // единообразным с last_system_name.
+        f << "  \"slancm_enabled\": \""       << json_escape(cfg.slancm_enabled) << "\",\n";
         f << "  \"tick_precision\": "         << cfg.tick_precision << ",\n";
         f << "  \"dark_theme\": "             << (cfg.dark_theme ? "true" : "false") << ",\n";
         f << "  \"last_app_mode\": "          << cfg.last_app_mode << ",\n";
