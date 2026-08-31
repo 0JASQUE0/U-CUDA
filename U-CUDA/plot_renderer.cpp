@@ -1,50 +1,20 @@
 ﻿#include "plot_renderer.h"
-#include "colormap_lut_data.h"
+// Таблица цветов slanCM (200 x 256 RGB8) + имена + категории. Файл большой
+// (~700 КБ), поэтому включается только здесь — наружу всё уходит через
+// объявленные в plot_renderer.h функции.
+#include "colormap_slancm_data.h"
 #include <cstdio>
-#include <cstring>
 #include <algorithm>
 
-// ---- CPU-side colormap (зеркало GLSL fragment-полиномов draw_heatmap) ----
+// ---- CPU-side colormap (то же сэмплирование, что в шейдере draw_heatmap) ----
 // Используется heatmap_view'ом для рисования colorbar'а и plot_view_2d'ом
 // для per-segment окраски trajectory. Раньше жил в heatmap_view.cpp::ns{}.
 namespace {
 struct vec3f { float r, g, b; };
 inline vec3f operator+(vec3f a, vec3f b) { return {a.r+b.r, a.g+b.g, a.b+b.b}; }
 inline vec3f operator*(vec3f a, float s) { return {a.r*s, a.g*s, a.b*s}; }
-inline vec3f operator*(float s, vec3f a) { return a*s; }
 
-vec3f cmap_viridis(float t) {
-    const vec3f c0 = {0.2777273272f, 0.0054872578f, 0.3340998020f};
-    const vec3f c1 = {0.1057220655f, 1.4046380960f, 1.3845030177f};
-    const vec3f c2 = {-0.330001533f, 0.214825727f, 0.092491715f};
-    const vec3f c3 = {-4.634230600f, -5.799101469f, -19.33244091f};
-    const vec3f c4 = {6.228269936f, 14.17993089f, 56.69055318f};
-    const vec3f c5 = {4.776384997f, -13.74514904f, -65.35303153f};
-    const vec3f c6 = {-5.435455319f, 4.645852612f, 26.31243947f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3f cmap_inferno(float t) {
-    const vec3f c0 = {0.0002189403691f, 0.001651742368f, -0.01948089833f};
-    const vec3f c1 = {0.1065134194f, 0.5639564368f, 3.932712388f};
-    const vec3f c2 = {11.60249308f, -3.972853966f, -15.94239411f};
-    const vec3f c3 = {-41.70399613f, 17.43639888f, 44.35414519f};
-    const vec3f c4 = {77.16289500f, -33.40998897f, -81.80741196f};
-    const vec3f c5 = {-71.31942380f, 32.62606027f, 73.20951466f};
-    const vec3f c6 = {25.13112622f, -12.24266895f, -23.07032500f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3f cmap_turbo(float t) {
-    const vec3f c0 = {0.13572138f, 0.09140261f, 0.10667330f};
-    const vec3f c1 = {4.61539260f, 2.19418839f, 12.64194608f};
-    const vec3f c2 = {-42.66032258f, 4.84296658f, -60.58204836f};
-    const vec3f c3 = {132.13108234f, -14.18503333f, 110.36276771f};
-    const vec3f c4 = {-152.94239396f, 4.27729857f, -89.90310912f};
-    const vec3f c5 = {59.28637943f, 2.82956604f, 27.34824973f};
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
-}
-vec3f cmap_gray(float t) { return {t, t, t}; }
-
-// LUT-based colormap (4-8): линейная интерполяция между соседними записями
+// LUT-based colormap (slanCM): линейная интерполяция между соседними записями
 // 256-элементной таблицы. Визуально соответствует GPU-пути (bilinear sample
 // текстуры на той же таблице), но не гарантированно bit-exact, в отличие от
 // полиномиальных 0-3.
@@ -61,35 +31,127 @@ vec3f cmap_lut_sample(float t, const unsigned char lut[256][3]) {
 }
 } // namespace
 
-const char* const kHeatmapColormapNames[9] = {
-    "Viridis", "Inferno", "Turbo", "Gray",
-    "GistStern", "GnuPlot", "GistRainbow", "NipySpectral", "GistNcar",
-};
+// ---------------------------------------------------------------------------
+// Реестр slanCM: имена/категории, миграция легаси-id, набор включённых карт.
+// ---------------------------------------------------------------------------
+
+const char* slancm_name(int n) {
+    return (n >= 1 && n <= kSlanCmCount) ? kSlanCmNames[n - 1] : "";
+}
+
+int slancm_category(int n) {
+    return (n >= 1 && n <= kSlanCmCount) ? (int)kSlanCmCategory[n - 1] : -1;
+}
+
+const char* slancm_category_name(int cat) {
+    return (cat >= 0 && cat < kSlanCmCategoryCount) ? kSlanCmCategoryNames[cat] : "";
+}
+
+const char* colormap_label(int id) {
+    // Подписи строятся один раз: ImGui хочет const char*, а собирать
+    // "151  gist_stern" каждый кадр на 200 строк — лишний мусор в аллокаторе.
+    static const std::vector<std::string> labels = [] {
+        std::vector<std::string> v((size_t)kSlanCmCount);
+        for (int n = 1; n <= kSlanCmCount; ++n)
+            v[n - 1] = std::to_string(n) + "  " + kSlanCmNames[n - 1];
+        return v;
+    }();
+    // Мигрируем на всякий случай: все живые пути уже прогоняют id через
+    // colormap_id_or, но подпись не должна превращаться в "?" даже если
+    // где-то просочится сырое значение из старой сессии.
+    const int v = colormap_id_or(id, slancm_id(1));
+    return labels[slancm_number(v) - 1].c_str();
+}
+
+int colormap_id_or(int id, int fallback) {
+    // Легаси 0..8 -> те же самые карты в нумерации slanCM (см. комментарий
+    // к HeatmapColormap): старые сессии открываются как раньше, просто под
+    // родными именами карт и без дублей в пикере.
+    auto migrate = [](int v) {
+        switch ((HeatmapColormap)v) {
+            case HeatmapColormap::LegacyViridis:      return slancm_id(1);
+            case HeatmapColormap::LegacyInferno:      return slancm_id(3);
+            case HeatmapColormap::LegacyTurbo:        return slancm_id(168);
+            case HeatmapColormap::LegacyGray:         return slancm_id(28);
+            case HeatmapColormap::LegacyGistStern:    return slancm_id(151);
+            case HeatmapColormap::LegacyGnuPlot:      return slancm_id(152);
+            case HeatmapColormap::LegacyGistRainbow:  return slancm_id(162);
+            case HeatmapColormap::LegacyNipySpectral: return slancm_id(170);
+            case HeatmapColormap::LegacyGistNcar:     return slancm_id(171);
+            default: break;
+        }
+        return v;
+    };
+    const int m = migrate(id);
+    if (is_slancm_id(m)) return m;
+    const int f = migrate(fallback);
+    if (is_slancm_id(f)) return f;
+    return slancm_id(1);   // #1 viridis — тот же цвет, что и прежний дефолт
+}
+
+namespace {
+// Маска включённых карт + производный от неё список для пикера. Глобальные,
+// как tick_precision у осей: пикер зовётся из десятка мест в gui.cpp, и тащить
+// туда AppModel ради одного набора — лишняя связность. Источник истины всё
+// равно AppModel/AppConfig, здесь только зеркало (см. set_enabled_slancm).
+std::string      g_slancm_mask;
+std::vector<int> g_picker_ids;
+
+void rebuild_picker_ids() {
+    g_picker_ids.clear();
+    g_picker_ids.reserve((size_t)kSlanCmCount);
+    for (int n = 1; n <= kSlanCmCount; ++n)
+        if (g_slancm_mask[n - 1] == '1') g_picker_ids.push_back(slancm_id(n));
+}
+} // namespace
+
+std::string default_enabled_slancm() {
+    std::string m((size_t)kSlanCmCount, '0');
+    // Ровно те девять, что были доступны до Settings: четыре бывшие встроенные
+    // (легаси-id 0..3) и пять бывших LUT-карт (легаси-id 4..8).
+    for (int n : {1, 3, 28, 151, 152, 162, 168, 170, 171}) m[n - 1] = '1';
+    return m;
+}
+
+void set_enabled_slancm(const std::string& mask) {
+    // Собираем в отдельной строке, а не правим g_slancm_mask на месте: mask
+    // вполне может БЫТЬ этой же строкой (вызов из picker_colormap_ids ниже
+    // раньше делал ровно это), и правка под чтением затирала бы источник.
+    // Короткая маска (конфиг от старой версии) дополняется нулями, длинная
+    // обрезается — так добавление карт в будущем не сломает чтение конфига.
+    std::string next((size_t)kSlanCmCount, '0');
+    const size_t n = std::min(mask.size(), (size_t)kSlanCmCount);
+    for (size_t i = 0; i < n; ++i) next[i] = (mask[i] == '1') ? '1' : '0';
+    g_slancm_mask = std::move(next);
+    rebuild_picker_ids();
+}
+
+const std::vector<int>& picker_colormap_ids() {
+    // Проверяем МАСКУ, а не готовый список: пустой список при заданной маске —
+    // законное состояние (пользователь снял все галочки), и перестраивать его
+    // каждый кадр незачем. Пустая же маска значит, что bootstrap не выполнялся
+    // — так бывает при первом запуске (конфига ещё нет) и в Debug-сборке, где
+    // main живёт в main_NonLinAnal.cu. Без этого пикер оказался бы пустым.
+    if (g_slancm_mask.size() != (size_t)kSlanCmCount)
+        set_enabled_slancm(default_enabled_slancm());
+    return g_picker_ids;
+}
 
 const char* const kPointMarkerNames[7] = {
     "Circle", "Square", "Diamond", "Triangle up", "Triangle down", "Cross", "Plus",
 };
 
-ImU32 cmap_sample(float t, HeatmapColormap m) {
+ImU32 cmap_sample_id(float t, int colormap_id) {
     t = std::min(std::max(t, 0.0f), 1.0f);
-    vec3f c;
-    switch (m) {
-        case HeatmapColormap::Inferno:      c = cmap_inferno(t); break;
-        case HeatmapColormap::Turbo:        c = cmap_turbo(t);   break;
-        case HeatmapColormap::Gray:         c = cmap_gray(t);    break;
-        case HeatmapColormap::GistStern:    c = cmap_lut_sample(t, kLutGistStern);    break;
-        case HeatmapColormap::GnuPlot:      c = cmap_lut_sample(t, kLutGnuPlot);      break;
-        case HeatmapColormap::GistRainbow:  c = cmap_lut_sample(t, kLutGistRainbow);  break;
-        case HeatmapColormap::NipySpectral: c = cmap_lut_sample(t, kLutNipySpectral); break;
-        case HeatmapColormap::GistNcar:     c = cmap_lut_sample(t, kLutGistNcar);     break;
-        case HeatmapColormap::Viridis:
-        default:                            c = cmap_viridis(t); break;
-    }
+    const int id = colormap_id_or(colormap_id, slancm_id(1));
+    const vec3f c = cmap_lut_sample(t, kSlanCmLut[slancm_number(id) - 1]);
     auto clamp01 = [](float v){ return std::min(std::max(v, 0.0f), 1.0f); };
     return IM_COL32((int)(clamp01(c.r) * 255.0f),
                     (int)(clamp01(c.g) * 255.0f),
                     (int)(clamp01(c.b) * 255.0f), 255);
 }
+
+ImU32 cmap_sample(float t, HeatmapColormap m) { return cmap_sample_id(t, (int)m); }
 
 static const char* VS_2D = R"(
 #version 330 core
@@ -193,15 +255,16 @@ void main() {
 }
 )";
 
-// Colormap'ы — полиномиальные приближения (известные fits matplotlib-таблиц,
-// 6-я степень). По времени работы — single fma-цепочка, цвета визуально
-// неотличимы от LUT-варианта на 256 цветах. Спец-значения (≥1e30, NaN, Inf)
+// Все colormap'ы сэмплятся из одной таблицы (u_cmap_lut) — полиномиальных
+// приближений viridis/inferno/turbo здесь больше нет: те же карты есть в
+// slanCM честными 256-цветными таблицами, а fit'ы от них заметно отставали
+// (turbo — до 32/255 в тёмном конце). Спец-значения (≥1e30, NaN, Inf)
 // рисуются тёмным фоном — engine помечает diverged ячейки этим маркером.
 static const char* FS_HEATMAP = R"(
 #version 330 core
 in vec2 v_uv;
 uniform sampler2D u_tex;
-uniform sampler2D u_cmap_lut;  // 256x5 RGB8, строки = GistStern/GnuPlot/GistRainbow/NipySpectral/GistNcar (colormap 4-8)
+uniform sampler2D u_cmap_lut;  // 256x200 RGB8, строка N-1 = карта slanCM #N
 uniform float u_vmin;
 uniform float u_vmax;
 uniform int   u_colormap;
@@ -211,39 +274,6 @@ uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
 out vec4 frag_color;
 
-vec3 viridis(float t) {
-    const vec3 c0 = vec3(0.2777273272, 0.0054872578, 0.3340998020);
-    const vec3 c1 = vec3(0.1057220655, 1.4046380960, 1.3845030177);
-    const vec3 c2 = vec3(-0.330001533, 0.214825727, 0.092491715);
-    const vec3 c3 = vec3(-4.634230600, -5.799101469, -19.33244091);
-    const vec3 c4 = vec3(6.228269936, 14.17993089, 56.69055318);
-    const vec3 c5 = vec3(4.776384997, -13.74514904, -65.35303153);
-    const vec3 c6 = vec3(-5.435455319, 4.645852612, 26.31243947);
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3 inferno(float t) {
-    const vec3 c0 = vec3(0.0002189403691, 0.001651742368, -0.01948089833);
-    const vec3 c1 = vec3(0.1065134194, 0.5639564368, 3.932712388);
-    const vec3 c2 = vec3(11.60249308, -3.972853966, -15.94239411);
-    const vec3 c3 = vec3(-41.70399613, 17.43639888, 44.35414519);
-    const vec3 c4 = vec3(77.16289500, -33.40998897, -81.80741196);
-    const vec3 c5 = vec3(-71.31942380, 32.62606027, 73.20951466);
-    const vec3 c6 = vec3(25.13112622, -12.24266895, -23.07032500);
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
-}
-vec3 turbo(float t) {
-    // Canonical Google Research / MATLAB Turbo, 5th-degree polynomial fit
-    // (matplotlib turbo). Previous 6th-degree approximation gave P(1) ~=
-    // (0.54, 0.83, -0.19) -> yellow-green after clamp; this one ends at
-    // ~ (0.74, 0.21, 0.18) which is the proper Turbo bright red.
-    const vec3 c0 = vec3(0.13572138, 0.09140261, 0.10667330);
-    const vec3 c1 = vec3(4.61539260, 2.19418839, 12.64194608);
-    const vec3 c2 = vec3(-42.66032258, 4.84296658, -60.58204836);
-    const vec3 c3 = vec3(132.13108234, -14.18503333, 110.36276771);
-    const vec3 c4 = vec3(-152.94239396, 4.27729857, -89.90310912);
-    const vec3 c5 = vec3(59.28637943, 2.82956604, 27.34824973);
-    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*c5))));
-}
 void main() {
     vec2 uv = v_uv * u_uv_scale + u_uv_off;
     // Если view вышел за пределы данных — рисуем фон, чтобы пользователю
@@ -271,18 +301,12 @@ void main() {
         t = (n > 1.0) ? (k / (n - 1.0)) : 0.5;
     }
     if (u_reverse != 0) t = 1.0 - t;
-    vec3 col;
-    if      (u_colormap == 0) col = viridis(t);
-    else if (u_colormap == 1) col = inferno(t);
-    else if (u_colormap == 2) col = turbo(t);
-    else if (u_colormap == 3) col = vec3(t);
-    else {
-        // LUT colormap (4-8, см. HeatmapColormap): строка row = colormap-4,
-        // сэмплим ровно в центре строки, чтобы vertical-bilinear не смешивал
-        // соседние colormap'ы между собой.
-        float row = float(u_colormap - 4) + 0.5;
-        col = texture(u_cmap_lut, vec2(t, row / 5.0)).rgb;
-    }
+    // slanCM: id = 1000 + N, строка текстуры = N-1. Сэмплим ровно в центре
+    // строки, чтобы vertical-bilinear не смешивал соседние colormap'ы между
+    // собой. Невалидный id сюда не доходит — draw_heatmap прогоняет его через
+    // colormap_id_or().
+    float row = float(u_colormap - 1001) + 0.5;
+    vec3 col = texture(u_cmap_lut, vec2(t, row / 200.0)).rgb;
     frag_color = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 )";
@@ -358,22 +382,17 @@ PlotRenderer::~PlotRenderer() {
 
 void PlotRenderer::ensure_lut_texture() {
     if (lut_tex_) return;
-    // 256 (t) x 5 (colormap index 4..8) RGB8. Строки в порядке
-    // GistStern/GnuPlot/GistRainbow/NipySpectral/GistNcar — см.
-    // colormap_lut_data.h и HeatmapColormap-enum offset (-4).
-    unsigned char pixels[5 * 256 * 3];
-    auto copy_row = [&](int row, const unsigned char src[256][3]) {
-        std::memcpy(pixels + (size_t)row * 256 * 3, src, 256 * 3);
-    };
-    copy_row(0, kLutGistStern);
-    copy_row(1, kLutGnuPlot);
-    copy_row(2, kLutGistRainbow);
-    copy_row(3, kLutNipySpectral);
-    copy_row(4, kLutGistNcar);
+    // 256 (t) x 200 (карты slanCM) RGB8: строка N-1 = карта #N. kSlanCmLut уже
+    // лежит ровно в этом layout'е (row-major, 3 байта на пиксель, шаг строки
+    // 768 байт кратен дефолтному GL_UNPACK_ALIGNMENT=4), поэтому заливаем
+    // прямо из него — без промежуточного буфера на 150 КБ.
+    static_assert(sizeof(kSlanCmLut) == (size_t)kSlanCmCount * 256 * 3,
+                  "kSlanCmLut layout must match the 256xN RGB8 upload below");
 
     glGenTextures(1, &lut_tex_);
     glBindTexture(GL_TEXTURE_2D, lut_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 256, 5, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 256, kSlanCmCount, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, kSlanCmLut);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -608,7 +627,10 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     glActiveTexture(GL_TEXTURE0);
     if (loc_heatmap_vmin_     >= 0) glUniform1f(loc_heatmap_vmin_, vmin);
     if (loc_heatmap_vmax_     >= 0) glUniform1f(loc_heatmap_vmax_, vmax);
-    if (loc_heatmap_cmap_     >= 0) glUniform1i(loc_heatmap_cmap_, colormap_id);
+    // Единственная точка, где id уходит в шейдер, — валидируем здесь, чтобы
+    // легаси 4..8 и мусор из старых сессий были безопасны для любого вызова.
+    if (loc_heatmap_cmap_     >= 0) glUniform1i(loc_heatmap_cmap_,
+                                                colormap_id_or(colormap_id, 0));
     if (loc_heatmap_uv_off_   >= 0) glUniform2f(loc_heatmap_uv_off_, uv_off_x, uv_off_y);
     if (loc_heatmap_uv_scale_ >= 0) glUniform2f(loc_heatmap_uv_scale_, uv_scale_x, uv_scale_y);
     if (loc_heatmap_discrete_n_ >= 0) glUniform1i(loc_heatmap_discrete_n_, n_discrete);

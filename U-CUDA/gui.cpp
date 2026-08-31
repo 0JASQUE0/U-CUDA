@@ -31,8 +31,11 @@
 // Значение, которым все хитмапы помечают «данных нет» (расходящаяся ячейка).
 // HeatmapView красит его в серый; одно и то же число в colored-1D, DFT и Basins.
 static constexpr double kSentinelNoData = 999.0;
-// Индекс colormap'а Turbo — дефолт, когда в конфиге ничего не выбрано.
-static constexpr int    kColormapTurbo  = 2;
+// Colormap по умолчанию для бассейнов и FastSync, когда в конфиге ничего не
+// выбрано: slanCM #168 turbo — хорошо разделяет дискретные значения. Раньше
+// здесь стоял id 2 (встроенный полиномиальный Turbo), который colormap_id_or
+// теперь и переводит в эту же карту.
+static constexpr int    kColormapTurbo  = slancm_id(168);
 // Высота бокса ошибки в строках текста.
 static constexpr int    kErrorBoxLines  = 12;
 // Через столько кадров простоя вытесняется кэш рендереров владельца.
@@ -1124,8 +1127,7 @@ static HeatmapView& get_or_create_heatmap(
     auto& slot = map[idx];
     if (!slot) {
         slot = std::make_unique<HeatmapView>();
-        const int cm = (cfg_colormap >= 0) ? cfg_colormap : app_default_colormap;
-        if (cm >= 0 && cm < kHeatmapColormapCount) slot->colormap = (HeatmapColormap)cm;
+        slot->colormap = (HeatmapColormap)colormap_id_or(cfg_colormap, app_default_colormap);
         if (cfg_exponent_idx != kNoExponent) slot->display_exponent_idx = cfg_exponent_idx;
     }
     return *slot;
@@ -1151,6 +1153,78 @@ static std::vector<std::vector<float>>& window_point_bufs(int window_id, size_t 
     return bufs;
 }
 
+// Полоска-превью колормапа как ImGui-виджет: kSeg сегментов с линейным
+// градиентом внутри каждого, плюс Dummy того же размера, чтобы полоска
+// занимала место в layout'е. 24 сегмента хватает, чтобы даже рваные
+// качественные карты (tab20, glasbey) читались, а рисуется это только для
+// видимых строк — и в попапе пикера, и под клиппером в Settings.
+static void colormap_strip_item(int id, float w, float h) {
+    constexpr int kSeg = 24;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    for (int i = 0; i < kSeg; ++i) {
+        const float t0 = (float)i / kSeg, t1 = (float)(i + 1) / kSeg;
+        const ImU32 c0 = cmap_sample_id(t0, id);
+        const ImU32 c1 = cmap_sample_id(t1, id);
+        // +0.5 к правой границе — иначе между сегментами проступают щели
+        // на дробном UI-скейле.
+        dl->AddRectFilledMultiColor(ImVec2(p.x + w * t0, p.y),
+                                    ImVec2(p.x + w * t1 + 0.5f, p.y + h),
+                                    c0, c1, c1, c0);
+    }
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), ImGui::GetColorU32(ImGuiCol_Border));
+    ImGui::Dummy(ImVec2(w, h));
+}
+
+// Пикер колормапа: BeginCombo вместо ImGui::Combo, потому что список теперь
+// разреженный (только отмеченные пользователем карты slanCM) и в каждой
+// строке рисуется градиент. Текущий id показывается всегда, даже если карта
+// снята галочкой в Settings — иначе открытая сессия молча переехала бы на
+// другую карту. Возвращает true, если выбор изменился.
+static bool colormap_combo(const char* label, int* id, float width) {
+    bool changed = false;
+    const float h = ImGui::GetTextLineHeight();
+    const float strip_w = h * 4.0f;
+
+    ImGui::SetNextItemWidth(width);
+    // HeightLarge = 20 строк вместо дефолтных 8: набор карт пользователь
+    // набирает сам, но и десяток в попапе размером с восемь строк листать
+    // неудобно.
+    if (!ImGui::BeginCombo(label, colormap_label(*id), ImGuiComboFlags_HeightLarge))
+        return false;
+
+    const std::vector<int>& ids = picker_colormap_ids();
+    // Показываем текущую карту первой, если её нет во включённом наборе.
+    const bool orphan = std::find(ids.begin(), ids.end(), *id) == ids.end();
+    auto row = [&](int cid) {
+        ImGui::PushID(cid);
+        const bool sel = (cid == *id);
+        // Selectable без явной ширины растягивается на всю строку — он служит
+        // подложкой-хитбоксом, а градиент и подпись рисуются поверх. SameLine()
+        // после него встал бы у ПРАВОГО края (offset_from_start_x==0 = «после
+        // предыдущего элемента»), поэтому возвращаем курсор в начало строки.
+        const ImVec2 p0 = ImGui::GetCursorPos();
+        if (ImGui::Selectable("##pick", sel, 0, ImVec2(0, h))) {
+            if (!sel) { *id = cid; changed = true; }
+        }
+        if (sel) ImGui::SetItemDefaultFocus();
+        ImGui::SetCursorPos(p0);
+        colormap_strip_item(cid, strip_w, h);
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x);
+        ImGui::TextUnformatted(colormap_label(cid));
+        ImGui::PopID();
+    };
+    if (orphan) { row(*id); ImGui::Separator(); }
+    for (int cid : ids) row(cid);
+    // Все галочки сняты — пикер пуст. Текущая карта показана выше отдельной
+    // строкой (orphan), так что состояние не тупиковое, но подсказать надо.
+    if (ids.empty())
+        ImGui::TextDisabled("(no colormaps ticked — pick some in Settings)");
+
+    ImGui::EndCombo();
+    return changed;
+}
+
 // Опции тулбара цветовой шкалы над хитмапой.
 struct HeatmapToolbarOpts {
     // Куда сохранить выбор colormap'а (per-config + save_session). Пусто —
@@ -1174,8 +1248,7 @@ static bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = 
     bool changed = false;
 
     int cmap_idx = (int)hv.colormap;
-    ImGui::SetNextItemWidth(140);
-    if (ImGui::Combo("Colormap", &cmap_idx, kHeatmapColormapNames, kHeatmapColormapCount)) {
+    if (colormap_combo("Colormap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
         hv.colormap = (HeatmapColormap)cmap_idx;
         if (o.persist_colormap) o.persist_colormap(cmap_idx);
         changed = true;
@@ -4768,7 +4841,7 @@ static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
         reverse = hv.reverse_colormap;
         n_disc  = hv.discrete ? (hv.discrete_levels > 0 ? hv.discrete_levels : n_disc) : 0;
     }
-    if (cm < 0 || cm >= kHeatmapColormapCount) cm = kColormapTurbo;
+    cm = colormap_id_or(cm, kColormapTurbo);
 
     // Нормировка — по РАЗДВИНУТОМУ диапазону, ровно как в HeatmapView::render
     // (там vmax <= vmin даёт vmax = vmin + 1). Число полос при этом считается
@@ -5285,8 +5358,7 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             // Синхронизируем выбор в сам view ДО тулбара: тулбар читает
             // hv.colormap как источник истины. Без этого на первом кадре combo
             // показал бы дефолт view'а вместо сохранённого значения.
-            int cm = (*cfg_field >= 0) ? *cfg_field : app_default;
-            if (cm < 0 || cm >= kHeatmapColormapCount) cm = kColormapTurbo;
+            const int cm = colormap_id_or(*cfg_field, app_default);
             active_hm->colormap = (HeatmapColormap)cm;
 
             HeatmapToolbarOpts topts;
@@ -5828,8 +5900,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     if (!hv_slot) hv_slot = std::make_unique<HeatmapView>();
     HeatmapView& hv = *hv_slot;
 
-    if (c.colormap_idx < 0 || c.colormap_idx >= kHeatmapColormapCount)
-        c.colormap_idx = kColormapTurbo;
+    c.colormap_idx = colormap_id_or(c.colormap_idx, kColormapTurbo);
     hv.colormap         = (HeatmapColormap)c.colormap_idx;   // config → view
     hv.autoscale        = c.autoscale_color;
     hv.manual_vmin_text = c.c_min_text;
@@ -5891,9 +5962,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     double cmin = std::min(cmin_user, cmax_user);
     double cmax = std::max(cmin_user, cmax_user);
     if (!(cmax > cmin)) cmax = cmin + 1.0;
-    HeatmapColormap cmap = (HeatmapColormap)(
-        (c.colormap_idx >= 0 && c.colormap_idx < kHeatmapColormapCount)
-            ? c.colormap_idx : kColormapTurbo);
+    HeatmapColormap cmap = (HeatmapColormap)colormap_id_or(c.colormap_idx, kColormapTurbo);
 
     if (c.mode == 0) {
         // Colored trajectory + manual colorbar справа.
@@ -7745,9 +7814,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     auto init_cmap_from_config = [&](int i, int cfg_cmap) {
         if (hm_init_cmap_seen[i] == cfg_cmap) return;
         hm_init_cmap_seen[i] = cfg_cmap;
-        int cm = cfg_cmap >= 0 ? cfg_cmap : model.heatmap_colormap;
-        if (cm >= 0 && cm < kHeatmapColormapCount)
-            heatmaps[i].colormap = (HeatmapColormap)cm;
+        heatmaps[i].colormap =
+            (HeatmapColormap)colormap_id_or(cfg_cmap, model.heatmap_colormap);
     };
     // Sync LS exponent choice from the sub-session's persisted
     // display_exponent_idx (sentinel -1 = sum L_i) on first appearance —
@@ -8320,9 +8388,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         // и терялся при перезапуске.
                         {
                             auto& bcfg = bsn.configs[0];
-                            int cm = (bcfg.colormap_idx[0] >= 0)
-                                     ? bcfg.colormap_idx[0] : model.basins_colormap;
-                            if (cm < 0 || cm >= kHeatmapColormapCount) cm = kColormapTurbo;
+                            const int cm = colormap_id_or(bcfg.colormap_idx[0],
+                                                          model.basins_colormap);
                             bsn_hv.colormap = (HeatmapColormap)cm;
 
                             HeatmapToolbarOpts topts;
@@ -9039,6 +9106,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
             cfg.basins_avgint_colormap = m.basins_avgint_colormap;
             cfg.basins_states_colormap = m.basins_states_colormap;
+            cfg.slancm_enabled         = m.slancm_enabled;
             cfg.tick_precision         = m.tick_precision;
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
@@ -9112,6 +9180,120 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 persist_settings(model);
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
+
+            // ----------------------------------------------------------------
+            // Colormaps: какие из 200 карт slanCM показывать в пикере.
+            // Держать в combo все 200 неудобно, поэтому набор набирается
+            // галочками здесь и живёт в _app_config.json (одна маска на
+            // приложение, как и остальные настройки этой вкладки).
+            // ----------------------------------------------------------------
+            ImGui::Separator();
+            ImGui::Text("Colormaps");
+            ImGui::TextDisabled("200 colormaps from slanCM (MATLAB File Exchange #120088),");
+            ImGui::TextDisabled("numbered as in that library. Ticked ones show up in the");
+            ImGui::TextDisabled("Colormap picker above every heatmap. Viridis / Inferno /");
+            ImGui::TextDisabled("Turbo / Gray are built in and always available.");
+
+            // Битая или отсутствующая маска (конфиг от старой версии, ручная
+            // правка JSON) — молча чинится дефолтом, а не роняет вкладку.
+            if (model.slancm_enabled.size() != (size_t)kSlanCmCount) {
+                model.slancm_enabled = default_enabled_slancm();
+                set_enabled_slancm(model.slancm_enabled);
+            }
+            auto apply_cmap_mask = [&]() {
+                set_enabled_slancm(model.slancm_enabled);
+                persist_settings(model);
+            };
+
+            InputTextStr("Filter##cmap_filter", model.colormap_filter, 220.0f);
+            ImGui::SameLine();
+            ImGui::TextDisabled("name, number or category");
+
+            // Фильтрованный список номеров. 200 сравнений на кадр дешевле, чем
+            // кэш с инвалидацией по каждому нажатию в поле фильтра.
+            std::vector<int> shown;
+            shown.reserve(kSlanCmCount);
+            {
+                auto lower = [](std::string s) {
+                    // Имена и категории slanCM — чистый ASCII, поэтому обходимся
+                    // без <cctype> и без вопросов к локали.
+                    for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+                    return s;
+                };
+                const std::string q = lower(model.colormap_filter);
+                for (int n = 1; n <= kSlanCmCount; ++n) {
+                    if (q.empty()) { shown.push_back(n); continue; }
+                    const std::string hay = lower(std::string(slancm_name(n)) + ' '
+                        + slancm_category_name(slancm_category(n)) + ' ' + std::to_string(n));
+                    if (hay.find(q) != std::string::npos) shown.push_back(n);
+                }
+            }
+
+            // Кнопки работают по ВИДИМОМУ списку: с фильтром "Diverging" это
+            // даёт «включить всю категорию» одним нажатием, без фильтра —
+            // обычные select all / clear all по всем 200.
+            auto set_shown = [&](char v) {
+                for (int n : shown) model.slancm_enabled[n - 1] = v;
+                apply_cmap_mask();
+            };
+            if (ImGui::Button("Select all")) set_shown('1');
+            ImGui::SameLine();
+            if (ImGui::Button("Clear all")) set_shown('0');
+            ImGui::SameLine();
+            if (ImGui::Button("Reset to default")) {
+                model.slancm_enabled = default_enabled_slancm();
+                apply_cmap_mask();
+            }
+            ImGui::SameLine();
+            {
+                const int n_on = (int)std::count(model.slancm_enabled.begin(),
+                                                 model.slancm_enabled.end(), '1');
+                if (shown.size() == (size_t)kSlanCmCount)
+                    ImGui::Text("%d / %d selected", n_on, kSlanCmCount);
+                else
+                    ImGui::Text("%d / %d selected   (buttons apply to the %d shown)",
+                                n_on, kSlanCmCount, (int)shown.size());
+            }
+
+            {
+                const float em      = ImGui::GetFontSize();
+                const float strip_w = em * 6.0f;
+                const float col_num   = em * 2.2f;
+                const float col_strip = em * 4.4f;
+                const float col_name  = col_strip + strip_w + em * 0.6f;
+                const float col_cat   = col_name + em * 11.0f;
+                const float row_h     = ImGui::GetFrameHeightWithSpacing();
+
+                ImGui::BeginChild("##cmap_list", ImVec2(0, row_h * 12.0f), true);
+                // Клиппер: 200 строк с градиентами рисовать каждый кадр незачем,
+                // видно от силы дюжину. Высота строк одинаковая (её задаёт
+                // чекбокс), поэтому хватает Begin(count) без items_height.
+                ImGuiListClipper clip;
+                clip.Begin((int)shown.size());
+                while (clip.Step()) {
+                    for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                        const int n = shown[i];
+                        ImGui::PushID(n);
+                        bool on = (model.slancm_enabled[n - 1] == '1');
+                        if (ImGui::Checkbox("##on", &on)) {
+                            model.slancm_enabled[n - 1] = on ? '1' : '0';
+                            apply_cmap_mask();
+                        }
+                        ImGui::SameLine(col_num);
+                        ImGui::TextDisabled("%d", n);
+                        ImGui::SameLine(col_strip);
+                        colormap_strip_item(slancm_id(n), strip_w, ImGui::GetFrameHeight());
+                        ImGui::SameLine(col_name);
+                        ImGui::TextUnformatted(slancm_name(n));
+                        ImGui::SameLine(col_cat);
+                        ImGui::TextDisabled("%s", slancm_category_name(slancm_category(n)));
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::EndChild();
+                if (shown.empty())
+                    ImGui::TextDisabled("Nothing matches the filter.");
+            }
 
             // ----------------------------------------------------------------
             // Peak detection & regime thresholds — knobs configCUDA.h.

@@ -242,20 +242,32 @@ public:
     bool use_builtin_font = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
-    // 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолт — Viridis.
-    // Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет
-    // сюда; static HeatmapView в draw_lle_plot читает при первом создании.
+    // 1001..1200 — карта slanCM (id = 1000 + её родной номер); легаси 0..8
+    // мигрируют при чтении конфига. Дефолт 0 = #1 viridis. Персистится в
+    // _app_config.json. Combo «Colormap» над хитмапой пишет сюда; static
+    // HeatmapView в draw_lle_plot читает при первом создании.
     int heatmap_colormap = 0;
 
     // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/
     // States) хранит свой независимый выбор, чтобы переключение в одном не
     // влияло на остальные. Отдельно от heatmap_colormap, который шарится
-    // Bif/LLE/LS. 0=Viridis, 1=Inferno, 2=Turbo, 3=Gray. Дефолты = Turbo
-    // (хорошо разделяет дискретные / категориальные значения).
+    // Bif/LLE/LS. Дефолт 2 = #168 turbo (хорошо разделяет дискретные /
+    // категориальные значения).
     int basins_colormap        = 2;
     int basins_avgpk_colormap  = 2;
     int basins_avgint_colormap = 2;
     int basins_states_colormap = 2;
+
+    // Маска включённых карт slanCM (kSlanCmCount символов '0'/'1') — зеркало
+    // AppConfig::slancm_enabled. При изменении в Settings вызывается
+    // set_enabled_slancm() из plot_renderer.h, чтобы пикер сразу подхватил,
+    // — ровно как tick_precision + set_tick_precision() у осей.
+    std::string slancm_enabled;
+
+    // Строка фильтра в списке колормапов (Settings). Живёт в модели, а не в
+    // static внутри draw_settings: immediate-mode UI не хранит состояние
+    // между кадрами сам (см. CLAUDE.md).
+    std::string colormap_filter;
 
     // Кол-во значащих цифр в подписях тиков осей и colorbar'а (2-10).
     // Зеркалит AppConfig::tick_precision; при изменении в Settings вызывается

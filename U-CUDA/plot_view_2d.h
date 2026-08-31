@@ -27,7 +27,7 @@ struct PlotSeriesInput {
     // Используется для FastSynchro colored trajectory. При nullptr — старое поведение
     // (uniform color = `color`). points_mode и shader-line режим игнорируют это поле.
     const float*    values = nullptr;
-    HeatmapColormap colormap = HeatmapColormap::Viridis;
+    HeatmapColormap colormap = kDefaultColormap;
     float           cmin = 0.0f;
     float           cmax = 1.0f;
 

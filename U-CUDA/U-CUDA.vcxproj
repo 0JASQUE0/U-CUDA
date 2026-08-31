@@ -168,6 +168,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="app_config.h" />
     <ClInclude Include="app_model.h" />
     <ClInclude Include="codegen.hpp" />
+    <ClInclude Include="colormap_slancm_data.h" />
     <ClInclude Include="configCUDA.h" />
     <ClInclude Include="cudaLibrary.cuh" />
     <ClInclude Include="cudaMacros.cuh" />
