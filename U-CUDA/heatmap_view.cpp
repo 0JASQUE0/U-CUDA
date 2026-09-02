@@ -1,5 +1,6 @@
 ﻿#include "heatmap_view.h"
 #include "grid_snap.h"
+#include "num_parse.h"   // parse_num для поля "Levels" (общий разбор выражений)
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -436,8 +437,30 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImGui::Checkbox("Discrete colorbar", &discrete);
         if (discrete) {
             ImGui::SetNextItemWidth(80.0f);
-            ImGui::InputInt("Levels (0=auto)", &discrete_levels, 0, 0);
-            if (discrete_levels < 0) discrete_levels = 0;
+            // Раньше здесь стоял InputInt: он не пропускает CallbackHistory, и
+            // ↑/↓ в этом поле не делали ничего, хотя во всех остальных числовых
+            // полях шагают разряд под курсором. Теперь это обычный InputText с
+            // тем же digit_step_input_callback — заодно поле понимает
+            // выражения ("4*2") через общий parse_num.
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s", discrete_levels_text.c_str());
+            if (ImGui::InputText("Levels (0=auto)", buf, sizeof(buf),
+                                 ImGuiInputTextFlags_CallbackCharFilter |
+                                 ImGuiInputTextFlags_CallbackHistory,
+                                 digit_step_input_callback)) {
+                discrete_levels_text = buf;
+                const double v = parse_num(discrete_levels_text, 0.0);
+                discrete_levels = (v > 0.0 && v < 1.0e6) ? (int)v : 0;
+            }
+            // Пока поле в фокусе, источник истины — текст (иначе он затирался бы
+            // на каждом кадре и ввод было бы не набрать). Вне фокуса наоборот:
+            // подтягиваем текст из discrete_levels, чтобы значение, пришедшее
+            // не из этого поля, отображалось.
+            if (!ImGui::IsItemActive()) {
+                char cur[32];
+                std::snprintf(cur, sizeof(cur), "%d", discrete_levels);
+                discrete_levels_text = cur;
+            }
         }
         ImGui::Checkbox("Reverse colormap", &reverse_colormap);
         ImGui::Separator();

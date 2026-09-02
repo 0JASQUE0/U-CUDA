@@ -991,6 +991,9 @@ struct FastSyncConfig {
     std::string axis_y_lo_text   = "-10";
     std::string axis_y_hi_text   = "10";
     std::string n_pts_text       = "200";
+    // TT слейва. Мастеру служит общее transient_text (в режиме On Attractor
+    // оно же досаживает master-траекторию).
+    std::string transient_slave_text = "0";
     // false — grid перебирает НУ мастера (legacy default).
     // true  — grid перебирает НУ слейва, мастер фикс.
     bool        grid_swap_master_slave = false;

@@ -451,26 +451,29 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 		X[i] += h * N[i];
 }
 
-// Single-thread transient settler для FastSynchro On Grid: интегрирует ОДНУ
-// траекторию (uncoupled, K=0) на amountOfPointsForSkip шагов от X0, пишет
-// результат обратно в X0 (in place). Используется, чтобы "фиксированная"
-// (не свипуемая по сетке) IC — master или slave — стартовала на аттракторе,
-// как и master в режиме On Attractor (fillFSMasterTrajectory).
-extern "C" __global__ void fillFSTransientIC(
-	const numb* values,
-	const numb h,
-	numb* X0,
-	const int amountOfPointsForSkip)
+// --- Детектор разлёта для FastSynchro On Grid ---
+// Соглашение то же, что в loopCalculateDiscreteModel: maxValue == 0 означает
+// "пользователь не выставил ограничение", nan/inf ловятся всегда. В отличие от
+// тех функций здесь проверяется ВЕСЬ вектор состояния, а не один writableVar:
+// у FS нет выделенной наблюдаемой переменной, ошибка синхронизации считается
+// по всем компонентам сразу.
+__device__ __forceinline__ bool fsStateDiverged(const numb* X, const int amountOfX, const numb maxValue)
 {
-	if (threadIdx.x != 0 || blockIdx.x != 0) return;
-	numb X[AMOUNTOFX];
-	numb zeros[AMOUNTOFX];
-	for (int i = 0; i < AMOUNTOFX; ++i) { X[i] = X0[i]; zeros[i] = 0; }
+	for (int j = 0; j < amountOfX; ++j) {
+		if (isnan(X[j]) || isinf(X[j])) return true;
+		if (maxValue != 0 && fabs(X[j]) > maxValue) return true;
+	}
+	return false;
+}
 
-	for (int i = 0; i < amountOfPointsForSkip; ++i)
-		calculateDiscreteModelforFastSynchro(X, X, zeros, values, h, 1);
-
-	for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = X[i];
+// Что записать в ячейку, которая разлетелась. Именно NaN, а не насыщенное
+// значение вроде 999 или maxValue: ошибка синхронизации здесь не «очень
+// большая», а неизмеримая, и подмена числом врала бы в статистике и в
+// автошкале colormap'а. Хост уже отфильтровывает non-finite при поиске
+// min/max, а HeatmapView::upload_data красит такие ячейки тёмно-серым.
+__device__ __forceinline__ numb fsDivergedError()
+{
+	return (numb)nan("");
 }
 
 __global__ void calculateDiscreteModelICCforFastSynchro(
@@ -496,7 +499,9 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	numb* data,
 	int* maxValueCheckerArray,
 	numb* FastSynchroError,
-	int   swapRole)
+	int   swapRole,
+	const size_t amountOfPointsForSkipMaster,
+	const size_t amountOfPointsForSkipSlave)
 {
 	// --- Общая память в рамках одного блока ---
 	// --- Строение памяти: ---
@@ -533,11 +538,60 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 		else               localSlave[indicesOfMutVars[i]] = v;
 	}
 
-	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
-	FastSynchroError[idx] = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
-		amountOfInitialConditions, preScaller, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock);
+	// --- Транзиент (TT): у master и slave он СВОЙ и независимый ---
+	// Считается per-cell и уже ПОСЛЕ grid-override, поэтому расклад получается
+	// ровно такой, какой нужен:
+	//   swapRole==0 (сетка свипует master) — master досаживается в КАЖДОЙ
+	//     ячейке из её собственной затравки, slave — из одной фиксированной
+	//     точки (его старт от ячейки не зависит, путь один и тот же);
+	//   swapRole==1 — симметрично наоборот.
+	// Никакого ветвления по swapRole здесь не нужно: разница целиком в том,
+	// какой стороне grid-override уже подменил координаты.
+	//
+	// Фиксированная сторона проходит один и тот же детерминированный путь в
+	// каждом потоке — результат побитово тот же, что дала бы однопоточная
+	// досадка на хосте, но без её главной беды: последовательный прогон в
+	// 1 поток на длинных TT упирался в WDDM-watchdog (TDR) и ронял контекст.
+	//
+	// Uncoupled: K=0 → N[i] = K[i]*(S1[i]-X[i]) = 0, связь занулена, поэтому
+	// передавать сам X как S1 безопасно (алиасинг ни на что не влияет).
+	if (amountOfPointsForSkipMaster > 0 || amountOfPointsForSkipSlave > 0) {
+		numb transientZeros[AMOUNTOFX];
+		for (int i = 0; i < AMOUNTOFX; ++i)
+			transientZeros[i] = 0;
 
-	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
+		// Разлёт проверяется на каждом шаге, как в loopCalculateDiscreteModel:
+		// траектория может выскочить за maxValue и вернуться, и это уже повод
+		// не считать ячейку. Заодно диверг-ячейки выходят из цикла рано, так
+		// что проверка себя окупает.
+		bool diverged = false;
+
+		for (size_t step = 0; step < amountOfPointsForSkipMaster && !diverged; ++step) {
+			calculateDiscreteModelforFastSynchro(localX, localX, transientZeros, localValues, h, 1);
+			diverged = fsStateDiverged(localX, amountOfInitialConditions, maxValue);
+		}
+
+		for (size_t step = 0; step < amountOfPointsForSkipSlave && !diverged; ++step) {
+			calculateDiscreteModelforFastSynchro(localSlave, localSlave, transientZeros, localValues, h, 1);
+			diverged = fsStateDiverged(localSlave, amountOfInitialConditions, maxValue);
+		}
+
+		if (diverged) {
+			// Синхро-цикл на разлетевшемся состоянии считать нечего.
+			FastSynchroError[idx] = fsDivergedError();
+			if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
+			return;
+		}
+	}
+
+	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
+	// NaN означает, что ячейка разлетелась (по maxValue или по nan/inf).
+	const numb fsError = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
+		amountOfInitialConditions, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock);
+
+	FastSynchroError[idx] = fsError;
+	if (maxValueCheckerArray != nullptr)
+		maxValueCheckerArray[idx] = (isnan(fsError) || isinf(fsError)) ? -1 : 0;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -551,7 +605,6 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const numb h,
 	const int amountOfIterations,
 	const int amountOfX,
-	const int preScaller,
 	const numb maxValue,
 	const int	iterOfSynchr,
 	const numb* kForward,
@@ -573,18 +626,29 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 
 	numb rms_error = 0;
 
+	// Инициализация состояния — БЕЗУСЛОВНО. Раньше она жила внутри
+	// `if (data != nullptr)`, из-за чего условие «писать траекторию» и условие
+	// «инициализировать Xm/Xs/arrayZeros» были склеены: вызов с data == nullptr
+	// прогонял бы весь синхро-цикл на мусоре из регистров. Сейчас такой вызов
+	// не встречается (grid всегда передаёт буфер), но мина была настоящая.
+	for (int w = 0; w < amountOfX; w++) {
+		Xs[w] = initialConditionsSlave[w];
+		Xm[w] = x[w];
+		arrayZeros[w] = 0;
+	}
+
 	if (data != nullptr) {
-		for (int w = 0; w < amountOfX; w++) {
+		for (int w = 0; w < amountOfX; w++)
 			data[startDataIndex + w] = x[w];
-			//Xs[w] = x[w] - 0.005;
-			Xs[w] = initialConditionsSlave[w];
-			Xm[w] = x[w];
-			arrayZeros[w] = 0;
-		}
 	}
 	if (type_of_synch == 0) {
 		for (int i = 1; i < amountOfIterations; i++) {
 			calculateDiscreteModelforFastSynchro(Xm, arrayZeros, arrayZeros, values, h, 1);
+
+			// Разлёт master'а на пред-проходе: дальше в fwd/bwd циклах Xm
+			// читается из data, так что ловить его надо здесь.
+			if (fsStateDiverged(Xm, amountOfX, maxValue))
+				return fsDivergedError();
 
 			for (int w = 0; w < amountOfX; w++)
 				data[startDataIndex + w + i * amountOfX] = Xm[w];
@@ -644,11 +708,17 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 			}
 
 			calculateDiscreteModelforFastSynchro(Xs, Xm, K_local, values, h, 1);
-			
+
 			if (type_of_synch == 1) { // bidirectional sycnhro
 				calculateDiscreteModelforFastSynchro(Xm, X_prev, K_local, values, h, 1);
 			}
-		
+
+			// При type_of_synch == 0 Xm берётся из уже проверенного data —
+			// достаточно смотреть на slave; при bidir разлететься может и master.
+			if (fsStateDiverged(Xs, amountOfX, maxValue) ||
+				(type_of_synch == 1 && fsStateDiverged(Xm, amountOfX, maxValue)))
+				return fsDivergedError();
+
 		}
 
 		if (error_estim == 1) {
@@ -687,6 +757,10 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 			if (type_of_synch == 1) { // bidirectional sycnhro
 				calculateDiscreteModelforFastSynchro(Xm, X_prev, K_local, values, h, 0);
 			}
+
+			if (fsStateDiverged(Xs, amountOfX, maxValue) ||
+				(type_of_synch == 1 && fsStateDiverged(Xm, amountOfX, maxValue)))
+				return fsDivergedError();
 		}
 	}
 
@@ -721,14 +795,16 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 }
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
-	const numb h, const int amountOfIterations, const int amountOfX, const int preScaller,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data, 
 	const int startDataIndex, const int writeStep)
 {
 
 	numb xPrev[AMOUNTOFX];
 	// --- Глобальный цикл, который производит вычисления заданные amountOfIterations раз ---
-	for ( int i = 0; i < amountOfIterations; ++i )
+	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
+	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
+	for ( size_t i = 0; i < amountOfIterations; ++i )
 	{
 		for (int j = 0; j < amountOfX; ++j)
 		{
@@ -750,7 +826,7 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 
 		// --- Если maxValue == 0, это значит пользователь не выставил ограничение, иначе требуется его проверить ---
 		if ( maxValue != 0 )
-			if ( fabsf( x[writableVar] ) > maxValue )
+			if ( fabs( x[writableVar] ) > maxValue )
 			{
 				return false;
 			}
@@ -781,7 +857,7 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 
 __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
-	const numb h, const int amountOfIterations, const int amountOfX, const int preScaller,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep)
 {
@@ -899,7 +975,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 
 
 __global__ void distributedCalculateDiscreteModelCUDA(
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
 	const numb	h,
 	const numb	hSpecial,
@@ -1154,7 +1230,7 @@ __global__ void calculateDiscreteModelICCUDA(
 	const int		nPtsLimiter, 
 	const int		sizeOfBlock, 
 	const int		amountOfCalculatedPoints, 
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension, 
 	numb*			ranges, 
 	const numb	h,
@@ -1252,7 +1328,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	const int		nPtsLimiter,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb* ranges,
 	const numb	h,
@@ -2383,7 +2459,7 @@ __global__ void LLEKernelCUDA(
 	const numb	tMax,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb*			ranges,
 	const numb	h,
@@ -2600,7 +2676,7 @@ __global__ void LLEKernelICCUDA(
 	const numb	tMax,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb*			ranges,
 	const numb	h,
@@ -2775,7 +2851,7 @@ __global__ void LSKernelCUDA(
 	const numb tMax,
 	const int sizeOfBlock,
 	const int amountOfCalculatedPoints,
-	const int amountOfPointsForSkip,
+	const size_t amountOfPointsForSkip,
 	const int dimension,
 	numb* ranges,
 	const numb h,
@@ -2975,7 +3051,7 @@ __global__ void LSKernelICCUDA(
 	const numb tMax,
 	const int sizeOfBlock,
 	const int amountOfCalculatedPoints,
-	const int amountOfPointsForSkip,
+	const size_t amountOfPointsForSkip,
 	const int dimension,
 	numb* ranges,
 	const numb h,

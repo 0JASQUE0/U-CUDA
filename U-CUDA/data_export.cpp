@@ -577,6 +577,7 @@ static const char* error_estim_name(int v) {
     switch (v) {
         case 1:  return "# iters to reach FS_error_trs";
         case 2:  return "RMS at last point";
+        case 3:  return "time to reach FS_error_trs";
         default: return "RMS on last iter";
     }
 }
@@ -621,7 +622,8 @@ void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s)
     if (s.mode == 0) {
         out << "CT = " << s.tMax << "\nTT = " << s.transientTime << "\n";
     } else {
-        out << "TT = " << s.transientTime << "\n";
+        out << "TT master = " << s.transientTime << "\n";
+        out << "TT slave = "  << s.transientTimeSlave << "\n";
         out << "axis_x_var = " << s.axis_x_var << ", axis_y_var = " << s.axis_y_var << "\n";
         out << "axis_x: " << s.axis_x_lo << " .. " << s.axis_x_hi << "\n";
         out << "axis_y: " << s.axis_y_lo << " .. " << s.axis_y_hi << "\n";
@@ -965,6 +967,8 @@ void write_fastsync_config(std::ofstream& out, int set_precision,
     if (type_of_synch == 1) out << "Bidirectional synch \n";
     if (error_estim == 0)   out << "RMS(error) on the last iteration \n";
     if (error_estim == 1)   out << "number of iteration to achieve RMS(error) <= FS_error_trs \n";
+    if (error_estim == 2)   out << "RMS(error) at the last point \n";
+    if (error_estim == 3)   out << "time to achieve RMS(error) <= FS_error_trs \n";
     write_array(out, "a",          values,    amountOfValues);
     write_array(out, "X0_master",  icMaster,  amountOfInitialConditions);
     write_array(out, "X0_slave",   icSlave,   amountOfInitialConditions);

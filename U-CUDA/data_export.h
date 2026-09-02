@@ -232,6 +232,9 @@ struct FastSyncSnapshot {
     double tMax = 0.0;
     double transientTime = 0.0;
     // Mode 1:
+    // transientTime здесь — TT мастера, transientTimeSlave — TT слейва
+    // (в режиме On Grid у каждой системы транзиент свой).
+    double transientTimeSlave = 0.0;
     int    axis_x_var = 0, axis_y_var = 0;
     double axis_x_lo = 0.0, axis_x_hi = 0.0;
     double axis_y_lo = 0.0, axis_y_hi = 0.0;

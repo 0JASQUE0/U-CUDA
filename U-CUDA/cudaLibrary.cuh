@@ -45,6 +45,13 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 // swapRole: 0 = grid varies master IC (legacy default — initialConditions
 // overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
 // (initialConditionsSlave overridden per cell, initialConditions fixed).
+//
+// amountOfPointsForSkipMaster / ...Slave: транзиент (TT) в шагах h, свой для
+// каждой системы. Досадка uncoupled (K=0) идёт per-cell и уже ПОСЛЕ подстановки
+// сеточных координат: свипуемая сетка сторона садится на аттрактор из затравки
+// своей ячейки, фиксированная — из одной точки (её путь от ячейки не зависит).
+// 0 = без транзиента (legacy). size_t, а не int: transientTime/h легко
+// переваливает за 2^31 (например TT=1e5 при h=1e-5), и на int это было бы UB.
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -68,7 +75,9 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	numb* data,
 	int* maxValueCheckerArray,
 	numb* FastSynchroError,
-	int		swapRole = 0);
+	int		swapRole = 0,
+	size_t	amountOfPointsForSkipMaster = 0,
+	size_t	amountOfPointsForSkipSlave = 0);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -77,7 +86,6 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const numb h,
 	const int amountOfIterations,
 	const int amountOfX,
-	const int preScaller,
 	const numb maxValue,
 	const int	iterOfSynchr,
 	const numb* kForward,
@@ -127,7 +135,7 @@ __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a,
  */
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
-	const numb h, const int amountOfIterations, const int amountOfX, const int preScaller=0,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller=0,
 	const int writableVar = 0, const numb maxValue = 0,
 	numb* data = nullptr, const int startDataIndex = 0, 
 	const int writeStep = 1);
@@ -135,7 +143,7 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 //__device__ __host__ int loopCalculateDiscreteModel_int(
 __device__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
-	const numb h, const int amountOfIterations, const int amountOfX =3, const int preScaller = 0,
+	const numb h, const size_t amountOfIterations, const int amountOfX =3, const int preScaller = 0,
 	const int writableVar = 0, const numb maxValue = 0,
 	numb* data = nullptr, const size_t startDataIndex = 0,
 	const int writeStep = 1);
@@ -158,7 +166,7 @@ __device__ int loopCalculateDiscreteModel_int(
  */
 
 __global__ void distributedCalculateDiscreteModelCUDA(
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
 	const numb	h,
 	const numb	hSpecial,
@@ -305,7 +313,7 @@ __global__ void calculateDiscreteModelICCUDA(
 	const int		nPtsLimiter,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb*			ranges,
 	const numb	h,
@@ -327,7 +335,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	const int		nPtsLimiter,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb* ranges,
 	const numb	h,
@@ -558,7 +566,7 @@ __global__ void LLEKernelCUDA(
 	const numb	tMax,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb*			ranges,
 	const numb	h,
@@ -612,7 +620,7 @@ __global__ void LLEKernelICCUDA(
 	const numb	tMax,
 	const int		sizeOfBlock,
 	const int		amountOfCalculatedPoints,
-	const int		amountOfPointsForSkip,
+	const size_t		amountOfPointsForSkip,
 	const int		dimension,
 	numb*			ranges,
 	const numb	h,
@@ -663,7 +671,7 @@ __global__ void LSKernelCUDA(
 	const numb tMax,
 	const int sizeOfBlock,
 	const int amountOfCalculatedPoints,
-	const int amountOfPointsForSkip,
+	const size_t amountOfPointsForSkip,
 	const int dimension,
 	numb* ranges,
 	const numb h,
@@ -689,7 +697,7 @@ __global__ void LSKernelICCUDA(
 	const numb tMax,
 	const int sizeOfBlock,
 	const int amountOfCalculatedPoints,
-	const int amountOfPointsForSkip,
+	const size_t amountOfPointsForSkip,
 	const int dimension,
 	numb* ranges,
 	const numb h,
