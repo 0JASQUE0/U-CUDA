@@ -95,6 +95,13 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
     return vars.empty() ? std::string("x") : vars[0];
 }
 
+// Единственное место, где видны ОБА определения pi: configCUDA.h (его читает
+// ядро) и num_parse_detail::kPi (его подставляет разбор полей ввода). Если они
+// разъедутся, пользователь введёт "pi" и получит не то число, которое считает
+// GPU, — молча. Поэтому сверка на этапе компиляции.
+static_assert(static_cast<double>(::pi) == num_parse_detail::kPi,
+              "pi в num_parse.h разошлась с configCUDA.h");
+
 // Значение комбинации в точке траектории — зеркалит формулу ядра. Константы
 // pi/euler берутся из configCUDA.h, а не набираются заново.
 [[nodiscard]] static double combo_var_value(const std::vector<double>& pt, int nvars) {
@@ -283,17 +290,12 @@ static void refresh_auto_labels(AppModel& model) {
     return (double)(numb)parse_num(v, def);
 }
 
-// Целочисленные поля: Resolution, decimator, число бинов, N сетки. Раньше их
-// читал std::atoi, а он молча ломается на научной записи — atoi("1e3") == 1,
-// то есть введённое в Resolution "1e3" давало сетку 1x1 без единого сообщения.
-// Идём через тот же parse_num, что и вещественные поля, поэтому и "64/2"
-// работает. Мусор даёт 0, как и раньше у atoi (см. комментарий в num_parse.h).
+// Целочисленные поля: Resolution, decimator, число бинов, N сетки.
+// Тело переехало в num_parse.h к parse_num_int — там же объяснено, почему
+// вторая копия этого разбора (на std::stoi, в analysis_session.cpp) молча
+// врала на "512/2". Имя сохранено: оно стоит по месту в gui.cpp.
 [[nodiscard]] static inline int parse_int_or(const std::string& v, int def) {
-    const double d = parse_num(v, (double)def);
-    if (!std::isfinite(d)) return def;
-    const double lo = (double)std::numeric_limits<int>::min();
-    const double hi = (double)std::numeric_limits<int>::max();
-    return (int)std::llround(std::max(lo, std::min(hi, d)));
+    return parse_num_int(v, def);
 }
 
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {

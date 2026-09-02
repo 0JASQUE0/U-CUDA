@@ -212,7 +212,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
     }
 
-    int dec = std::atoi(in.decimation.c_str()); if (dec < 1) dec = 1;
+    int dec = parse_num_int(in.decimation, 1); if (dec < 1) dec = 1;
 
     int N = (int)in.ic_sets.size();
     if (N < 1) { result.error = "no initial conditions"; return result; }
@@ -583,8 +583,7 @@ static inline double parse_d(const std::string& s, double def) {
     return parse_num(s, def);   // историческое имя, см. num_parse.h
 }
 static int parse_i(const std::string& s, int def) {
-    if (s.empty()) return def;
-    try { return std::stoi(s); } catch (...) { return def; }
+    return parse_num_int(s, def);   // историческое имя, см. num_parse.h
 }
 
 // Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
@@ -1853,7 +1852,7 @@ bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
         for (auto it = by_id.rbegin(); it != by_id.rend(); ++it)
             if (it->first < 0) order.push_back(it->first);
 
-        int limit = std::atoi(c.pp_max_attractors_text.c_str());
+        int limit = parse_num_int(c.pp_max_attractors_text, 1);
         if (limit < 1) limit = 1;
         if ((int)order.size() > limit) order.resize((size_t)limit);
 
