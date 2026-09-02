@@ -76,7 +76,7 @@ extern "C" __global__ void fillFSMasterTrajectory(
     const numb* values,
     const numb h,
     const numb* X0,
-    const int amountOfPointsForSkip,
+    const size_t amountOfPointsForSkip,
     const int amountOfPoints,
     numb* timeDomain)
 {
@@ -86,7 +86,8 @@ extern "C" __global__ void fillFSMasterTrajectory(
     for (int i = 0; i < AMOUNTOFX; ++i) { X[i] = X0[i]; zeros[i] = 0; }
 
     // Transient — uncoupled forward (K=0, S1=X → coupling term зануляется).
-    for (int i = 0; i < amountOfPointsForSkip; ++i)
+    // size_t: transientTime/h переваливает за 2^31 при мелком h.
+    for (size_t i = 0; i < amountOfPointsForSkip; ++i)
         calculateDiscreteModelforFastSynchro(X, X, zeros, values, h, 1);
 
     // Save full state at every integration step.

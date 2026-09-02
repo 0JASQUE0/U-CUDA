@@ -2,10 +2,12 @@
 //
 // NVRTC-шаблон для Fast Synchro в режиме "On Grid" (2D-карта по двум IC).
 // Host-оркестрация — parametric_engine::run_fastsync(req, mode=1):
-//   1. готовит ranges[4] = {x_lo, x_hi, y_lo, y_hi}, indicesOfMutVars[2].
+//   1. готовит ranges[4] = {x_lo, x_hi, y_lo, y_hi}, indicesOfMutVars[2],
+//      amountOfPointsForSkip = transientTime / h (size_t).
 //   2. cuLaunchKernel(calculateDiscreteModelICCforFastSynchro) — на каждую
-//      ячейку сетки nPts×nPts (свип по IC) запускает synchro-цикл, пишет
-//      ошибку в FastSynchroError[nPts²].
+//      ячейку сетки nPts×nPts (свип по IC) досаживает обе системы на аттрактор
+//      транзиентом (uncoupled, per-cell, после подстановки координат ячейки),
+//      затем запускает synchro-цикл и пишет ошибку в FastSynchroError[nPts²].
 //   3. cudaMemcpyD2H FastSynchroError → FastSyncResult.heatmap.
 //
 // Плейсхолдеры идентичны fastsync_attr.template.cu (тот же runtime context).

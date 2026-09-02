@@ -110,7 +110,15 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
         int blockLen = (hLocal > 0) ? (int)(tMax / hLocal / (numb)preScaller) : 0;
         if (blockLen > sizeOfBlock) blockLen = sizeOfBlock;
-        int transient_steps = (hLocal > 0) ? (int)(transientTime / hLocal) : 0;
+        // Клампим, а не кастим вслепую: при мелком hLocal (а в h-свипе он
+        // берётся из диапазона) transientTime/hLocal перерастает 2^31, и
+        // прямой (int) — это UB, на практике мусор или отрицательное число,
+        // то есть молча пропущенный транзиент. loopCalculateDiscreteModel_int
+        // принимает int, поэтому упираемся в потолок вместо переполнения.
+        numb transient_steps_f = (hLocal > 0) ? (transientTime / hLocal) : (numb)0;
+        int transient_steps = (transient_steps_f >= (numb)2147483647.0)
+                            ? 2147483647
+                            : (int)transient_steps_f;
         if (d_actualIterations != nullptr) d_actualIterations[j] = blockLen;
 
         // Вырожденный шаг — траектории нет. Это REGIME_UNBOUND, а не fixed

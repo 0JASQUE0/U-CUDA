@@ -126,6 +126,44 @@ constexpr double kPi    = 3.1415926535897932384626433832795;
 constexpr double kEuler = 2.7182818284590452353602874713527;
 
 // ---------------------------------------------------------------------------
+// Число шагов интегрирования из времени: transient_time / h, NT / h и т.п.
+//
+// Прямой (int)(t / h) — это UB, когда частное не влезает в int: при мелком шаге
+// TT=1e5 и h=1e-5 дают 1e10. На практике получался мусор или отрицательное
+// число, то есть транзиент молча не отрабатывал вовсе — худший вид ошибки,
+// потому что расчёт выглядел успешным.
+//
+// Две версии, и выбор между ними НЕ косметический: он определяется типом
+// приёмника. Значение уходит в ядро через void*[] в cuLaunchKernel, где тип
+// обязан совпадать с параметром БАЙТ В БАЙТ: компилятор там ничего не проверит,
+// рассогласование соберётся молча и развалит буфер аргументов на запуске.
+//   ..._size_t — число ШАГОВ интегрирования. Вся цепочка расширена до size_t:
+//                параметры ядер (amountOfPointsForSkip), device-функции
+//                loopCalculateDiscreteModel / _int (amountOfIterations) вместе
+//                со счётчиками их циклов, и CPU-порт cpu_loop_model. Потолка
+//                нет — это и есть рабочая версия.
+//   ..._int    — остался ровно под settleBlocks = TT / NT: это число NT-БЛОКОВ,
+//                а не шагов, оно живёт в host-side счётчиках и на порядки
+//                меньше. Потолок INT_MAX здесь недостижим на осмысленных
+//                входах, но каст всё равно идёт через проверку, а не вслепую.
+// ---------------------------------------------------------------------------
+static inline size_t steps_from_time_size_t(double t, double h)
+{
+    if (!(h > 0.0) || !(t > 0.0)) return 0;
+    const double s = t / h;
+    if (!std::isfinite(s)) return 0;
+    return (size_t)s;
+}
+
+static inline int steps_from_time_int(double t, double h)
+{
+    if (!(h > 0.0) || !(t > 0.0)) return 0;
+    const double s = t / h;
+    if (!std::isfinite(s)) return 0;
+    return (s >= 2147483647.0) ? 2147483647 : (int)s;
+}
+
+// ---------------------------------------------------------------------------
 // Порт loopCalculateDiscreteModel_int (cudaLibrary.cu:782) на CPU.
 //
 // Отличие одно: там размерность — compile-time AMOUNTOFX, здесь она приходит
@@ -137,11 +175,11 @@ constexpr double kEuler = 2.7182818284590452353602874713527;
 // ---------------------------------------------------------------------------
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
-                   int iterations, int amountOfX, int preScaller,
+                   size_t iterations, int amountOfX, int preScaller,
                    int writableVar, numb maxValue,
                    numb* data)
 {
-    for (int i = 0; i < iterations; ++i) {
+    for (size_t i = 0; i < iterations; ++i) {
         if (data != nullptr) {
             // writableVar < 0 -> комбинация первых (до трёх) переменных.
             if (writableVar < 0) {
@@ -157,7 +195,7 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
             step(x, a, h);
         }
 
-        if (i % kCheckInterval == 0) {
+        if (i % (size_t)kCheckInterval == 0) {
             numb checker = (numb)0;
             for (int j = 0; j < amountOfX; ++j) checker += std::fabs(x[j]);
             if (std::isnan(checker) || std::isinf(checker)) return REGIME_UNBOUND;
@@ -397,7 +435,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         int pointsInBlock = (h_local > 0.0)
             ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
         if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
-        const int pointsForSkip = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
+        const size_t pointsForSkip = steps_from_time_size_t(req.transient_time, h_local);
         const numb   timeStep   = h_local * (numb)req.pre_scaller;
 
         // Вырожденный шаг — траектории нет: это unbound, а не fixed point.
@@ -566,7 +604,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
         int pointsInBlock = (h_local > (numb)0)
             ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
         if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
-        const int  pointsForSkip = (h_local > (numb)0) ? (int)(req.transient_time / h_local) : 0;
+        const size_t pointsForSkip = steps_from_time_size_t(req.transient_time, (double)h_local);
         // Шаг между записанными сэмплами: h*preScaller. Передаём его в
         // peak-finder напрямую, поэтому поправка time_scale из run_bif1d
         // (там peakFinderCUDA получает один h на весь запуск) здесь не нужна.
@@ -776,12 +814,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
 
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);   // NT-блоков; от h не зависит
-    const int settleBlocks = (int)(req.transient_time / req.NT);
+    const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // Число шагов в NT-блоке и в прогреве зависит от h, а при h-свипе h своё в
     // каждой точке — считаем их внутри цикла.
     int ntSteps   = (int)(req.NT / req.h);
-    int skipSteps = (int)(req.transient_time / req.h);
+    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -851,7 +889,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
             // Свипуем сам шаг: a[] не трогаем, пересчитываем число шагов.
             h_local   = p;
             ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
+            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -1061,11 +1099,11 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
 
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);
-    const int settleBlocks = (int)(req.transient_time / req.NT);
+    const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // См. run_lle1d_cpu: при h-свипе шаг свой в каждой точке.
     int ntSteps   = (int)(req.NT / req.h);
-    int skipSteps = (int)(req.transient_time / req.h);
+    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -1144,7 +1182,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         if (req.sweep_over_h) {
             h_local   = p;
             ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
+            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -1303,7 +1341,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
 
         int pointsInBlock = (h_local > 0.0) ? (int)(req.t_max / h_local / req.pre_scaller) : 0;
         if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
-        const int pointsForSkip = (h_local > 0.0) ? (int)(req.transient_time / h_local) : 0;
+        const size_t pointsForSkip = steps_from_time_size_t(req.transient_time, h_local);
 
         auto mark_dead = [&](int flag) {
             res.flags[j] = flag;
@@ -1487,7 +1525,6 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_fs_fill  = nullptr;  // fillFSMasterTrajectory (template, mode 0)
         CUfunction   kernel_fs_traj  = nullptr;  // calculateDiscreteModelforFastSynchroCUDA (mode 0)
         CUfunction   kernel_fs_grid  = nullptr;  // calculateDiscreteModelICCforFastSynchro (mode 1)
-        CUfunction   kernel_fs_transient = nullptr; // fillFSTransientIC (mode 1, optional TT pre-pass)
     };
     CachedFastSyncModule cached_fs_attr;
     CachedFastSyncModule cached_fs_grid;
@@ -1983,7 +2020,7 @@ struct ParametricEngine::Impl {
         // не превышает эту аллокацию (см. actualIterations).
         double worstCaseH = (hSweepAxis != -1) ? ranges[0] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
@@ -2399,7 +2436,7 @@ struct ParametricEngine::Impl {
 
         // amountOfPointsInBlock = tMax / NT — число NT-блоков интегрирования.
         int amountOfPointsInBlock = (int)(tMax / NT);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
@@ -2512,7 +2549,7 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
-            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            size_t amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 1;
             numb h_arg                     = h;
             numb eps_arg                   = eps;
@@ -2796,7 +2833,7 @@ struct ParametricEngine::Impl {
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / NT);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
@@ -2922,7 +2959,7 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
-            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            size_t amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 2;
             numb h_arg                     = h;
             numb eps_arg                   = eps;
@@ -3144,7 +3181,7 @@ struct ParametricEngine::Impl {
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / NT);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
 
@@ -3261,7 +3298,7 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
-            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            size_t amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 1;
             numb h_arg                     = h;
             numb eps_arg                   = eps;
@@ -3503,7 +3540,7 @@ struct ParametricEngine::Impl {
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / NT);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
@@ -3631,7 +3668,7 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    sizeOfBlock_arg           = amountOfPointsInBlock;
             int    amountOfCalculatedPoints  = (int)(iter * originalNPtsLimiter);
-            int    amountOfPointsForSkip_arg = amountOfPointsForSkip;
+            size_t amountOfPointsForSkip_arg = amountOfPointsForSkip;
             int    dimension_arg             = 2;
             numb h_arg                     = h;
             numb eps_arg                   = eps;
@@ -4702,7 +4739,7 @@ struct ParametricEngine::Impl {
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
@@ -5031,7 +5068,9 @@ struct ParametricEngine::Impl {
             return fail(err);
 
         const int amountOfPointsInBlock = (int)(req.t_max / req.h / req.pre_scaller);
-        const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+        // amountOfPointsForSkip здесь не нужен: в этой ветке транзиент уходит в
+        // ядро как время (transientTime_arg), и число шагов ядро считает само —
+        // по своему hLocal, который в h-свипе меняется от точки к точке.
         if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
         const int nPts  = req.n_pts;
@@ -5405,7 +5444,7 @@ struct ParametricEngine::Impl {
         // диапазоне h-оси) -- см. run_bif1d.
         double worstCaseH = (hSweepAxis == 0) ? ranges[0] : (hSweepAxis == 1) ? ranges[2] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
@@ -5818,7 +5857,7 @@ struct ParametricEngine::Impl {
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
-        int amountOfPointsForSkip = (int)(transientTime / h);
+        size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0");
@@ -6478,7 +6517,7 @@ struct ParametricEngine::Impl {
         if (slot.module) {
             cuModuleUnload(slot.module);
             slot.module = nullptr;
-            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = slot.kernel_fs_transient = nullptr;
+            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = nullptr;
             slot.key.clear();
         }
         if (!load_sources(err)) return false;
@@ -6507,7 +6546,6 @@ struct ParametricEngine::Impl {
             if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
             else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
             else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       slot.kernel_fs_grid = f;
-            else if (sym_name == "fillFSTransientIC")                             slot.kernel_fs_transient = f;
         }
         slot.key = key;
         return true;
@@ -6549,6 +6587,7 @@ struct ParametricEngine::Impl {
         res.snapshot.fs_error_trs   = req.fs_error_trs;
         res.snapshot.tMax           = req.t_max;
         res.snapshot.transientTime  = req.transient_time;
+        res.snapshot.transientTimeSlave = req.transient_time_slave;
         res.snapshot.axis_x_var     = req.axis_x_var;
         res.snapshot.axis_y_var     = req.axis_y_var;
         res.snapshot.axis_x_lo      = req.axis_x_lo;
@@ -6591,7 +6630,14 @@ struct ParametricEngine::Impl {
 
             const int amountOfNTPoints      = (int)(req.window / req.h);
             const int amountOfCTPoints      = (int)(req.t_max / req.h);
-            const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
+            // size_t + потолок — как в On Grid: (int)(TT/h) при мелком h это UB.
+            size_t amountOfPointsForSkip = 0;
+            {
+                const double skip_d = req.transient_time / req.h;   // h > 0 проверен выше
+                if (!std::isfinite(skip_d) || skip_d > 1.0e15)
+                    return fail("transient_time / h слишком велико");
+                amountOfPointsForSkip = (size_t)skip_d;
+            }
             const int nPts                  = amountOfCTPoints / (req.pre_scaller > 0 ? req.pre_scaller : 1);
             if (nPts <= 0) return fail("computed nPts <= 0 (t_max/h/preScaller)");
             // FS-kernel читает timeDomain[idx*preScaller*amountOfX + i*amountOfX + j]
@@ -6632,7 +6678,7 @@ struct ParametricEngine::Impl {
             if (req.progress) req.progress->store(0.05f);
             {
                 numb  h_arg     = req.h;
-                int     skip_arg  = amountOfPointsForSkip;
+                size_t  skip_arg  = amountOfPointsForSkip;
                 int     pts_arg   = traj_len_pts;
                 void* args_fill[] = {
                     &d_values, &h_arg, &d_X0, &skip_arg, &pts_arg, &d_timeDomain
@@ -6751,9 +6797,10 @@ struct ParametricEngine::Impl {
             if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
             if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
             if (req.axis_x_var == req.axis_y_var) return fail("axis_x_var == axis_y_var");
-            if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
+            if (req.transient_time < 0)        return fail("transient_time должно быть >= 0");
+            if (req.transient_time_slave < 0)  return fail("transient_time_slave должно быть >= 0");
 
-            std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro", "fillFSTransientIC" };
+            std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
                                    exprs, cached_fs_grid, err)) return fail(err);
@@ -6761,6 +6808,29 @@ struct ParametricEngine::Impl {
             // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
             if (amountOfPointsInBlock <= 0) return fail("computed amountOfPointsInBlock <= 0");
+
+            // Transient (TT) — число шагов интегрирования на досадку, отдельно
+            // для master и для slave. Уходят в grid-ядро, которое досаживает
+            // каждую систему per-cell после grid-override (свипуемая сторона —
+            // из затравки своей ячейки, фиксированная — из одной точки).
+            // size_t, а не int: TT/h легко перерастает 2^31 (TT=1e5 при h=1e-5
+            // даёт 1e10) — на int это UB, на практике мусор/отрицательное, и
+            // транзиент молча пропадал. h > 0 уже проверен выше.
+            auto skip_steps = [&](double tt, const char* what, size_t& out) -> bool {
+                out = 0;
+                if (tt <= 0.0) return true;
+                const double skip_d = tt / req.h;
+                if (!std::isfinite(skip_d) || skip_d > 1.0e15) {
+                    err = std::string(what) + " / h слишком велико";
+                    return false;
+                }
+                out = (size_t)skip_d;
+                return true;
+            };
+            size_t amountOfPointsForSkipMaster = 0;
+            size_t amountOfPointsForSkipSlave  = 0;
+            if (!skip_steps(req.transient_time,       "transient_time (master)", amountOfPointsForSkipMaster)) return fail(err);
+            if (!skip_steps(req.transient_time_slave, "transient_time (slave)",  amountOfPointsForSkipSlave))  return fail(err);
             const size_t total_cells = (size_t)req.n_pts * (size_t)req.n_pts;
             int amountOfIC_int     = req.amountOfX;
             int amountOfValues_int = (int)req.values.size();
@@ -6808,25 +6878,12 @@ struct ParametricEngine::Impl {
                 FS_GCHECK(cudaMemcpy(d_kB,     to_numb(req.k_backward).data(), amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kB");
             }
 
-            // Transient (TT): доводим до аттрактора ту IC, которую сетка НЕ
-            // свипует. swapRole==0 (default, "Vary slave IC" снята) — сетка
-            // свипует master, slave фиксирован → транзиент для slave.
-            // swapRole==1 — сетка свипует slave, master фиксирован →
-            // транзиент для master.
-            if (req.transient_time > 0.0) {
-                const int amountOfPointsForSkip = (int)(req.transient_time / req.h);
-                if (amountOfPointsForSkip > 0) {
-                    numb* d_fixed_ic = req.grid_swap_master_slave ? d_ic_m : d_ic_s;
-                    numb  h_arg      = req.h;
-                    int     skip_arg   = amountOfPointsForSkip;
-                    void* args_transient[] = { &d_values, &h_arg, &d_fixed_ic, &skip_arg };
-                    CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_transient,
-                                                1, 1, 1, 1, 1, 1,
-                                                0, nullptr, args_transient, nullptr);
-                    if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_grid transient): " + cu_err(r); goto FS1_FAIL; }
-                    cudaDeviceSynchronize();
-                }
-            }
+            // Transient (TT) выполняется внутри grid-ядра, per-cell и своим
+            // временем для каждой системы (см. amountOfPointsForSkip* выше и
+            // комментарий в calculateDiscreteModelICCforFastSynchro). Раньше
+            // здесь стоял однопоточный пре-пасс fillFSTransientIC с ОДНИМ TT на
+            // обоих и только для нефиксируемой IC: свипуемая сторона стартовала
+            // сырой, а сам прогон в 1 поток на длинных TT ловил TDR.
 
             size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             for (size_t i = 0; i < amountOfIteration; ++i) {
@@ -6849,6 +6906,8 @@ struct ParametricEngine::Impl {
                 int    iterOfSynchr_int          = req.iter_of_synchr;
                 numb* d_fs_err_chunk           = d_fs_err + i * originalNPtsLimiter;
                 int    swap_role_int             = req.grid_swap_master_slave ? 1 : 0;
+                size_t skip_master_arg           = amountOfPointsForSkipMaster;
+                size_t skip_slave_arg            = amountOfPointsForSkipSlave;
 
                 void* args_grid[] = {
                     &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
@@ -6858,7 +6917,7 @@ struct ParametricEngine::Impl {
                     &amountOfIterations_int, &preScaller_int, &maxValue_arg, &iterOfSynchr_int,
                     &d_kF, &d_kB,
                     &d_data, &d_helpful, &d_fs_err_chunk,
-                    &swap_role_int
+                    &swap_role_int, &skip_master_arg, &skip_slave_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
@@ -6875,6 +6934,17 @@ struct ParametricEngine::Impl {
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_grid): " + cu_err(r); goto FS1_FAIL; }
                 cudaDeviceSynchronize();
 
+                // Диверг-флаги чанка: ядро пишет -1 в разлетевшиеся ячейки и 0
+                // в остальные, так что буфер определён целиком и читать его
+                // безопасно без предварительного обнуления.
+                {
+                    std::vector<int> h_flags(cur_limiter);
+                    if (cudaMemcpy(h_flags.data(), d_helpful, cur_limiter * sizeof(int),
+                                   cudaMemcpyDeviceToHost) == cudaSuccess) {
+                        for (int f : h_flags) if (f == -1) ++res.diverged_cells;
+                    }
+                }
+
                 if (req.progress) req.progress->store((float)(i + 1) / (float)amountOfIteration);
                 if (req.cancel && req.cancel->load()) { res.cancelled = true; goto FS1_CLEANUP; }
             }
@@ -6884,6 +6954,7 @@ struct ParametricEngine::Impl {
                 FS_GCHECK(cudaMemcpy(h_out.data(), d_fs_err, total_cells * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy fs_err D2H");
                 res.heatmap.assign(h_out.begin(), h_out.end());      // numb -> double
                 res.n_pts_grid = req.n_pts;
+                res.total_cells = (int)total_cells;
                 res.axis_x_lo = req.axis_x_lo; res.axis_x_hi = req.axis_x_hi;
                 res.axis_y_lo = req.axis_y_lo; res.axis_y_hi = req.axis_y_hi;
                 res.axis_x_var = req.axis_x_var; res.axis_y_var = req.axis_y_var;

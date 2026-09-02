@@ -1072,6 +1072,7 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
     o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
     o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
+    o << "\"transient_slave_text\":"; jstr(o, c.transient_slave_text); o << ",";
     o << "\"grid_swap_master_slave\":" << (c.grid_swap_master_slave ? "true" : "false") << ",";
     o << "\"type_of_synch\":"     << c.type_of_synch         << ",";
     o << "\"error_estim\":"       << c.error_estim           << ",";
@@ -1105,6 +1106,7 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "max_value_text")      c.max_value_text      = p.str();
     else if (key == "t_max_text")          c.t_max_text          = p.str();
     else if (key == "transient_text")      c.transient_text      = p.str();
+    else if (key == "transient_slave_text") c.transient_slave_text = p.str();
     else if (key == "window_text")         c.window_text         = p.str();
     // Backward-compat: старые сессии могли называть это поле "n_time_text".
     else if (key == "n_time_text")         c.window_text         = p.str();
@@ -1170,12 +1172,30 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession
                     while (true) {
                         p.expect('{');
                         FastSyncConfig fc;
+                        // Сентинел, чтобы отличить "ключа в файле не было" от
+                        // "в файле записан 0" — см. миграцию ниже.
+                        fc.transient_slave_text.clear();
                         if (!p.opt('}')) {
                             while (true) {
                                 std::string k2 = p.str(); p.expect(':');
                                 if (!read_fastsync_field(p, fc, k2)) p.skip_value();
                                 if (p.opt(',')) continue;
                                 p.expect('}'); break;
+                            }
+                        }
+                        if (fc.transient_slave_text.empty()) {
+                            // Сессия старше раздельных TT. Тогда единственный
+                            // transient досаживал ФИКСИРОВАННУЮ сторону, а не
+                            // мастера: при снятой галочке сетка свипует мастера,
+                            // значит TT относился к слейву. Переносим, иначе
+                            // старая карта пересчиталась бы с другим смыслом.
+                            // Режим On Attractor не трогаем — там transient_text
+                            // досаживает master-траекторию и всегда значил это.
+                            if (fc.mode == 1 && !fc.grid_swap_master_slave) {
+                                fc.transient_slave_text = fc.transient_text;
+                                fc.transient_text       = "0";
+                            } else {
+                                fc.transient_slave_text = "0";
                             }
                         }
                         s.configs.push_back(std::move(fc));

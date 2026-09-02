@@ -93,6 +93,12 @@ public:
     // Right-click context menu on the plot toggles `discrete`.
     bool   discrete = false;
     int    discrete_levels = 0;
+    // Буфер ввода для поля "Levels". Значение остаётся в discrete_levels —
+    // текст нужен только чтобы поле было обычным InputText с общим
+    // digit_step_input_callback: тогда ↑/↓ шагают разряд под курсором, как во
+    // всех остальных числовых полях. Живёт в состоянии вью, а не в локальной
+    // переменной кадра — ImGui immediate-mode, локальный буфер терял бы ввод.
+    std::string discrete_levels_text = "0";
 
     // Начальное значение `discrete`, применяемое на первом кадре с реальными
     // данными (data_generation != data_gen_cached). Нужно чтобы caller мог

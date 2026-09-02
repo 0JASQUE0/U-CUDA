@@ -2158,8 +2158,9 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
     req.max_value      = parse_d(c.max_value_text, 1e6);
 
     req.t_max          = parse_d(c.t_max_text, 100.0);
-    req.transient_time = parse_d(c.transient_text, 0.0);
-    req.window         = (numb)parse_d(c.window_text, 50.0);
+    req.transient_time       = parse_d(c.transient_text, 0.0);
+    req.transient_time_slave = parse_d(c.transient_slave_text, 0.0);
+    req.window               = (numb)parse_d(c.window_text, 50.0);
 
     req.axis_x_var = (c.axis_x_var >= 0 && c.axis_x_var < req.amountOfX) ? c.axis_x_var : 0;
     req.axis_y_var = (c.axis_y_var >= 0 && c.axis_y_var < req.amountOfX) ? c.axis_y_var
@@ -2175,7 +2176,7 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     req.type_of_synch = (c.type_of_synch == 1) ? 1 : 0;
     int ee = c.error_estim;
-    if (ee < 0 || ee > 2) ee = 2;
+    if (ee < 0 || ee > 3) ee = 2;
     req.error_estim   = ee;
     req.fs_error_trs  = parse_d(c.fs_error_trs_text, 1e-12);
 

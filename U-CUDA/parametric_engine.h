@@ -904,6 +904,11 @@ struct FastSyncRequest {
     // false (default) — grid перебирает НУ мастера, НУ слейва фикс.
     // true            — grid перебирает НУ слейва, НУ мастера фикс.
     bool   grid_swap_master_slave = false;
+    // Транзиент слейва. Мастеру в этом режиме служит общее поле transient_time
+    // (в режиме On Attractor оно же досаживает master-траекторию). Свипуемая
+    // сетка сторона отрабатывает свой TT в каждой ячейке, фиксированная — из
+    // своей единственной точки; кто есть кто, решает grid_swap_master_slave.
+    double transient_time_slave = 0.0;
 
     // Runtime knobs (substituted via NVRTC #define перед include configCUDA.h).
     int    type_of_synch = 0;
@@ -941,6 +946,13 @@ struct FastSyncResult {
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int axis_x_var = 0, axis_y_var = 1;
     std::vector<double> heatmap;
+
+    // mode == 1: сколько ячеек разлетелось (по maxValue либо по nan/inf) из
+    // total_cells. Ячейка-диверг несёт в heatmap NaN, то есть в min/max не
+    // попадает и рисуется тёмно-серым; счётчик нужен, чтобы пустая карта не
+    // выглядела как «расчёт не пошёл».
+    int diverged_cells = 0;
+    int total_cells    = 0;
 
     // Min/max валидных значений sync_error/heatmap для autoscale colorbar.
     double min_val = 0.0;

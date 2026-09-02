@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -9,11 +10,26 @@
 // Единственный парсер числового поля во всём проекте.
 //
 // Все текстовые поля UI (диапазоны свипов, начальные условия, пороги, шаг)
-// хранятся строками и разбираются в double в момент использования. Понимает
-// дробь "a/b" — пользователи пишут "8/3", "1/3" в диапазонах.
+// хранятся строками и разбираются в double в момент использования. Поле
+// принимает не просто число, а АРИФМЕТИЧЕСКОЕ ВЫРАЖЕНИЕ:
 //
-// Пустая строка и мусор дают `def`: std::atof не кидает и возвращает 0 на
-// "abc", поэтому явная проверка на пустоту — единственное, что нужно.
+//     8/3        1/3        2*pi заменяется руками, констант нет
+//     0.5*1e-3   1e-3/2     100-1      (1+2)*3      -2^ нет, степени нет
+//
+// Поддержаны + - * / , унарный минус/плюс и скобки, с обычным приоритетом
+// (* / сильнее + -). Дробь "a/b" — частный случай, ради которого всё и
+// начиналось: пользователи пишут "8/3" в диапазонах свипа. Остальное добавлено
+// затем, что серии экспериментов удобно задавать относительно уже введённого
+// числа ("тот же диапазон, но вдвое шире" — это *2, а не пересчёт в уме).
+//
+// Числа читаются через strtod, поэтому научная запись остаётся целой: "1e-14"
+// это одно число, а не "1e" минус "14".
+//
+// Пустая строка и мусор дают `def`. Отличие от прежней версии: раньше parse_num
+// стоял на atof и на "5asdf" молча возвращал 5, хотя поле рядом писало
+// "invalid number, using default" — сообщение врало. Теперь хвост, который не
+// разобрался, делает ВСЮ строку невалидной, и поведение сходится с подписью.
+// Невалидны также деление на ноль и не-finite результат ("1e400").
 //
 // Зачем один на всех: реализаций было пять, и три из них (на std::stod) дробей
 // НЕ понимали. Из-за расхождения "8/3" в поле границы свипа Custom давал 2.667
@@ -21,18 +37,100 @@
 // крестика к сетке уезжали за пределы реального свипа. Один и тот же класс
 // бага чинили дважды в разных местах, поэтому теперь точка одна.
 //
-// НЕ использовать для проверки «это вообще число?» — для inline-предупреждения
-// в полях ввода есть is_numeric_string в gui.cpp, у неё другая задача.
+// Для вопроса «это вообще число?» есть parse_num_checked ниже — та же
+// грамматика, что и у parse_num, поэтому подсветка невалидного ввода и
+// фактический разбор не могут разойтись (а раньше расходились: is_numeric_string
+// в gui.cpp несла собственную копию грамматики).
 // ============================================================================
+namespace num_parse_detail {
+
+inline void skip_ws(const char*& p) {
+    while (*p == ' ' || *p == '\t') ++p;
+}
+
+inline bool parse_expr(const char*& p, double& out);   // взаимная рекурсия со скобками
+
+inline bool parse_primary(const char*& p, double& out) {
+    skip_ws(p);
+    if (*p == '(') {
+        ++p;
+        if (!parse_expr(p, out)) return false;
+        skip_ws(p);
+        if (*p != ')') return false;
+        ++p;
+        return true;
+    }
+    char* end = nullptr;
+    const double v = std::strtod(p, &end);
+    if (end == p) return false;        // ни одного символа числа не съедено
+    p = end;
+    out = v;
+    return true;
+}
+
+inline bool parse_factor(const char*& p, double& out) {
+    skip_ws(p);
+    if (*p == '+' || *p == '-') {
+        const bool negate = (*p == '-');
+        ++p;
+        double v = 0.0;
+        if (!parse_factor(p, v)) return false;   // допускает "--1" и "-(2+3)"
+        out = negate ? -v : v;
+        return true;
+    }
+    return parse_primary(p, out);
+}
+
+inline bool parse_term(const char*& p, double& out) {
+    if (!parse_factor(p, out)) return false;
+    for (;;) {
+        skip_ws(p);
+        const char op = *p;
+        if (op != '*' && op != '/') return true;
+        ++p;
+        double rhs = 0.0;
+        if (!parse_factor(p, rhs)) return false;
+        if (op == '/') {
+            if (rhs == 0.0) return false;   // "8/0" — невалидно, как и раньше
+            out /= rhs;
+        } else {
+            out *= rhs;
+        }
+    }
+}
+
+inline bool parse_expr(const char*& p, double& out) {
+    if (!parse_term(p, out)) return false;
+    for (;;) {
+        skip_ws(p);
+        const char op = *p;
+        if (op != '+' && op != '-') return true;
+        ++p;
+        double rhs = 0.0;
+        if (!parse_term(p, rhs)) return false;
+        out = (op == '+') ? (out + rhs) : (out - rhs);
+    }
+}
+
+} // namespace num_parse_detail
+
+// Разбор с ответом «получилось или нет». Пустая строка — НЕ валидна здесь
+// (вызывающий сам решает, что значит пустое поле); см. parse_num ниже.
+inline bool parse_num_checked(const std::string& s, double& out) {
+    const char* p = s.c_str();
+    double v = 0.0;
+    if (!num_parse_detail::parse_expr(p, v)) return false;
+    num_parse_detail::skip_ws(p);
+    if (*p != '\0') return false;                 // неразобранный хвост
+    if (!std::isfinite(v)) return false;          // overflow / nan / inf
+    out = v;
+    return true;
+}
+
 inline double parse_num(const std::string& s, double def) {
     if (s.empty()) return def;
-    const size_t slash = s.find('/');
-    if (slash != std::string::npos) {
-        const double num = std::atof(s.substr(0, slash).c_str());
-        const double den = std::atof(s.substr(slash + 1).c_str());
-        if (den != 0) return num / den;
-    }
-    return std::atof(s.c_str());
+    double v = 0.0;
+    return parse_num_checked(s, v) ? v : def;
 }
 
 // ============================================================================

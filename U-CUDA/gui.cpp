@@ -147,41 +147,19 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 // plot_axis.cpp::digit_step_input_callback — тем же вводом пользуется меню
 // цвета серии в plot_view_2d.cpp, и держать копию в gui.cpp было нельзя.
 
-// Проверка: парсится ли строка как число (или валидная дробь "a/b")?
-// Важно: std::stod НЕ кидает на "5asdfaxcv" — он парсит ведущее "5"
-// и тихо игнорирует остальное. Поэтому проверяем pos — что вся строка
-// (после возможных пробелов) реально была сконвертирована.
+// Проверка: разбирается ли строка как число или арифметическое выражение?
 // Пустая считается валидной (дефолт подставится дальше).
-// "8/3" — валидная дробь, "2/x" / "8/0" / "8/" / "5asdfaxcv" — нет.
+// Валидны: "2.5", "1e-14", "8/3", "0.5*1e-3", "100-1", "(1+2)*3", "-2".
+// Невалидны: "2/x", "8/0", "8/", "5asdfaxcv", "1e400", "(1+2".
+//
+// Делегирует в parse_num_checked, то есть в ТУ ЖЕ грамматику, которой поле
+// потом реально разбирается. Раньше здесь лежала своя копия на std::stod, и
+// копии успели разойтись: подсветка говорила одно, parse_num считал другое
+// (на "5asdf" поле писало «using default», а в расчёт уходило 5).
 [[nodiscard]] static bool is_numeric_string(const std::string& s) {
     if (s.empty()) return true;
-
-    // Полностью ли строка v сконвертирована в число (плюс trailing whitespace)?
-    auto parse_complete = [](const std::string& v) -> bool {
-        if (v.empty()) return false;
-        try {
-            size_t pos = 0;
-            // Результат намеренно отбрасываем — нужен только pos (сколько
-            // символов реально разобрано). Явный (void), иначе MSVC ругается
-            // на проигнорированный [[nodiscard]] у std::stod.
-            (void)std::stod(v, &pos);
-            for (size_t i = pos; i < v.size(); ++i)
-                if (!std::isspace(static_cast<unsigned char>(v[i]))) return false;
-            return true;
-        } catch (...) { return false; }
-    };
-
-    size_t slash = s.find('/');
-    if (slash != std::string::npos) {
-        std::string num = s.substr(0, slash);
-        std::string den = s.substr(slash + 1);
-        if (!parse_complete(num) || !parse_complete(den)) return false;
-        try {
-            // знаменатель не должен быть нулём
-            return std::stod(den) != 0.0;
-        } catch (...) { return false; }
-    }
-    return parse_complete(s);
+    double v = 0.0;
+    return parse_num_checked(s, v);
 }
 
 // Is `scheme_name` one of the session's custom KRS schemes (as opposed to a
@@ -5748,7 +5726,19 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         if (c.mode == 0) {
             InputNumStr("t_max",        c.t_max_text, kFieldW);
         }
-        InputNumStr("transient",        c.transient_text, kFieldW);
+        if (c.mode == 1) {
+            // On Grid: у каждой системы свой транзиент. Свипуемая сеткой
+            // сторона отрабатывает его в КАЖДОЙ ячейке (из её затравки),
+            // фиксированная — из своей единственной точки.
+            InputNumStr("transient master", c.transient_text, kFieldW);
+            InputNumStr("transient slave",  c.transient_slave_text, kFieldW);
+            ImGui::TextDisabled(c.grid_swap_master_slave
+                ? "Slave settles per grid cell, master from its fixed IC."
+                : "Master settles per grid cell, slave from its fixed IC.");
+        }
+        else {
+            InputNumStr("transient",    c.transient_text, kFieldW);
+        }
         bool window_changed = InputNumStr("window",           c.window_text, kFieldW);
         bool iter_changed   = InputNumStr("iter of synch",    c.iter_of_synchr_text, kFieldW);
         if (!window_changed && !iter_changed) {
@@ -5783,7 +5773,8 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         static const char* ee_names[] = {
             "0: RMS on last iter",
             "1: # iters to reach FS_error_trs",
-            "2: RMS at last point"
+            "2: RMS at last point",
+            "3: time to reach FS_error_trs"
         };
         ImGui::SetNextItemWidth(280);
         ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
@@ -5864,11 +5855,18 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: traj %d pts, sync_err [%.4g, %.4g]",
                 c.result.n_pts_traj, c.result.min_val, c.result.max_val);
-        else
+        else {
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: grid %dx%d, sync_err [%.4g, %.4g]",
                 c.result.n_pts_grid, c.result.n_pts_grid,
                 c.result.min_val, c.result.max_val);
+            // Разлетевшиеся ячейки несут NaN и рисуются тёмно-серым; без счётчика
+            // сплошь серая карта неотличима от "расчёт не пошёл".
+            if (c.result.diverged_cells > 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                    "diverged: %d of %d cells (maxValue / nan-inf)",
+                    c.result.diverged_cells, c.result.total_cells);
+        }
     } else if (!c.last_error.empty()) {
         draw_error_box("##fs_err", c.last_error, /*lines*/ 10);
     }
