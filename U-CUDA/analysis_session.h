@@ -985,6 +985,8 @@ struct FastSyncConfig {
     bool        ic_random_offset = false;
     std::string ic_eps_text  = "1e-3";
     std::string ic_seed_text = "12345";
+    // error_estim == 7: сколько первых циклов Беннеттина не идёт в среднее.
+    std::string gs_warmup_text = "0";
     std::map<std::string, std::string> k_forward;
     std::map<std::string, std::string> k_backward;
     std::map<std::string, std::string> param_values;
@@ -1018,7 +1020,7 @@ struct FastSyncConfig {
 
     // Runtime knobs (substituted в NVRTC #define)
     int         type_of_synch    = 0;     // 0=unidir, 1=bidir
-    int         error_estim      = 2;     // 0..5, см. configCUDA.h
+    int         error_estim      = 2;     // 0..7, см. configCUDA.h
     std::string fs_error_trs_text = "1e-12";
 
     // CSV export

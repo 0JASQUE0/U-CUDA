@@ -5615,14 +5615,31 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             "2: ||e|| at last point",
             "3: time to reach FS_error_trs",
             "4: err_stop / err_start",
-            "5: log10(err_stop / err_start)"
+            "5: log10(err_stop / err_start)",
+            "6: log10(err_stop / err_start) / iter",
+            "7: log10(rho) per cycle (Gram-Schmidt)"
         };
         ImGui::SetNextItemWidth(280);
         ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
-        if (c.error_estim == 4 || c.error_estim == 5)
+        if (c.error_estim >= 4 && c.error_estim <= 6)
             ImGui::TextDisabled("err_start/err_stop: ||e|| at the window start before / after all\n"
                                 "forward-backward passes. Cells where err_start == 0 come out\n"
-                                "non-finite and render as diverged.");
+                                "non-finite and render as diverged.\n"
+                                "6 divides by iter of synch: log10 grows as iter*log10(rho),\n"
+                                "so only the per-cycle rate compares with the linearised value.");
+        if (c.error_estim == 7) {
+            ImGui::TextDisabled("Benettin over the same forward-backward cycle: AMOUNTOFX clones\n"
+                                "at master +- eps, Gram-Schmidt and renormalisation every cycle.\n"
+                                "Gives log10(rho) per cycle directly - no speckle at low iter,\n"
+                                "no saturation, nothing to divide afterwards.");
+            InputNumStr("GS warmup cycles", c.gs_warmup_text, kFieldW);
+            ImGui::TextDisabled("Cycles dropped from the average while the basis aligns.\n"
+                                "Without it the start-basis bias only washes out as O(1/m),\n"
+                                "which is why convergence took ~100 cycles. 0 = old behaviour.");
+            if (c.type_of_synch != 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                                   "Estimator 7 needs Unidirectional synchro; every cell comes out as diverged.");
+        }
         InputNumStr("FS error trs.", c.fs_error_trs_text, kFieldW);
     }
 
@@ -5684,13 +5701,23 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     if (c.ic_random_offset) {
         InputNumStr("eps",  c.ic_eps_text,  kFieldW);
         InputNumStr("seed", c.ic_seed_text, kFieldW);
-        if (c.mode == 0)
+        // Оценщик 7 сам расставляет клонов и НУ слейва не читает — про eps ему
+        // всё сказано выше, здесь бы вышла неправда про slave.
+        if (c.error_estim == 7)
+            ImGui::TextDisabled("Estimator 7 ignores this: it perturbs its own clones by eps, seed unused.");
+        else if (c.mode == 0)
             ImGui::TextDisabled("Slave starts at the master point of its own window, +-eps per coordinate.");
         else
             ImGui::TextDisabled(fs_master_leads
                 ? "Slave starts at the master cell point (after its transient), +-eps per coordinate."
                 : "Master starts at the slave cell point (after its transient), +-eps per coordinate.");
-        ImGui::TextDisabled("Same seed reproduces the run bit-for-bit.");
+        if (c.error_estim != 7)
+            ImGui::TextDisabled("Same seed reproduces the run bit-for-bit.");
+    } else if (c.error_estim == 7) {
+        // Оценщик 7 сам расставляет клонов вокруг мастера, seed ему не нужен
+        // (базис единичный, не случайный), но величину возмущения берёт отсюда.
+        InputNumStr("eps", c.ic_eps_text, kFieldW);
+        ImGui::TextDisabled("Estimator 7 starts its clones at master +-eps; the slave IC above is unused.");
     } else {
         ImGui::TextDisabled("Off: the second system uses the fixed IC above (legacy behaviour).");
     }

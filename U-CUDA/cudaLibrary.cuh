@@ -68,7 +68,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		preScaller,
 	const int		icRandomOffset = 0,
 	const numb		icEps = 0,
-	const unsigned long long icSeed = 0);
+	const unsigned long long icSeed = 0,
+	const int		gsWarmup = 0);
 
 // swapRole: 0 = grid varies master IC (legacy default — initialConditions
 // overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
@@ -117,7 +118,27 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	size_t	amountOfPointsForSkipSlave = 0,
 	int		icRandomOffset = 0,
 	numb	icEps = 0,
-	unsigned long long icSeed = 0);
+	unsigned long long icSeed = 0,
+	int		gsWarmup = 0);
+
+// Показатель сжатия ошибки за цикл вперёд-назад по схеме Беннеттина
+// (error_estim 7). Возвращает log10 ρ за цикл; определение — в cudaLibrary.cu
+// после gramSchmidtProcess, объявление здесь, потому что зовут его из
+// loop...FastSynchro/_2, которые лежат в файле выше.
+// masterWindow — окно мастер-траектории (amountOfIterations точек по amountOfX,
+// row-major), eps — величина возмущения клонов. Только unidirectional.
+__device__ numb fsBenettinCycleExponent(
+	const numb* masterWindow,
+	const numb* values,
+	const numb h,
+	const int amountOfIterations,
+	const int amountOfX,
+	const numb maxValue,
+	const int iterOfSynchr,
+	const numb* kForward,
+	const numb* kBackward,
+	const numb eps,
+	const int gsWarmup);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -132,7 +153,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const numb* kBackward,
 	numb* data,
 	const int startDataIndex,
-	const int writeStep = 1);
+	const int writeStep = 1,
+	const numb icEps = 0,
+	const int gsWarmup = 0);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb* Xs,
@@ -149,7 +172,8 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const int icRandomOffset = 0,
 	const numb icEps = 0,
 	const unsigned long long icSeed = 0,
-	const unsigned long long icCell = 0);
+	const unsigned long long icCell = 0,
+	const int gsWarmup = 0);
 
 // Один шаг дискретной модели: новое состояние пишется обратно в x.
 __device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);

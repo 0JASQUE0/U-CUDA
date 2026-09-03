@@ -6403,6 +6403,7 @@ struct ParametricEngine::Impl {
         res.snapshot.ic_random_offset = req.ic_random_offset;
         res.snapshot.ic_eps           = req.ic_eps;
         res.snapshot.ic_seed          = req.ic_seed;
+        res.snapshot.gs_warmup        = req.gs_warmup;
         res.snapshot.var_names      = req.var_names;
 
         std::string err;
@@ -6512,6 +6513,7 @@ struct ParametricEngine::Impl {
                 int    icRandom_i         = req.ic_random_offset ? 1 : 0;
                 numb   icEps_arg          = (numb)req.ic_eps;
                 unsigned long long icSeed_arg = req.ic_seed;
+                int    gsWarmup_i         = req.gs_warmup;
 
                 void* args_fs[] = {
                     &nPts_int, &nPtsLimiter_int, &amountOfNTPoints_i, &h_arg,
@@ -6520,7 +6522,7 @@ struct ParametricEngine::Impl {
                     &iterOfSynchr_i, &amountOfValues_i, &amountOfNTPoints_i,
                     &maxValue_arg,
                     &d_timeDomain, &d_output, &preScaller_i,
-                    &icRandom_i, &icEps_arg, &icSeed_arg
+                    &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i
                 };
                 int blockSize = 32;
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
@@ -6720,6 +6722,7 @@ struct ParametricEngine::Impl {
                 int    icRandom_int              = req.ic_random_offset ? 1 : 0;
                 numb   icEps_arg                 = (numb)req.ic_eps;
                 unsigned long long icSeed_arg    = req.ic_seed;
+                int    gsWarmup_int              = req.gs_warmup;
 
                 void* args_grid[] = {
                     &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
@@ -6730,7 +6733,7 @@ struct ParametricEngine::Impl {
                     &d_kF, &d_kB,
                     &d_data, &d_helpful, &d_fs_err_chunk,
                     &swap_role_int, &skip_master_arg, &skip_slave_arg,
-                    &icRandom_int, &icEps_arg, &icSeed_arg
+                    &icRandom_int, &icEps_arg, &icSeed_arg, &gsWarmup_int
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);

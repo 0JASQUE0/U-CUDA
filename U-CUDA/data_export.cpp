@@ -569,6 +569,8 @@ static const char* error_estim_name(int v) {
         case 3:  return "time to reach FS_error_trs";
         case 4:  return "err_stop / err_start at window start";
         case 5:  return "log10(err_stop / err_start) at window start";
+        case 6:  return "log10(err_stop / err_start) / iterOfSynchr";
+        case 7:  return "log10(rho) per forward-backward cycle (Benettin/Gram-Schmidt)";
         default: return "RMS of ||e|| over last window";
     }
 }
@@ -596,6 +598,10 @@ static void write_fastsync_common(std::ofstream& out, const FastSyncSnapshot& s)
     if (s.ic_random_offset)
         out << ", ic_eps = " << s.ic_eps << ", ic_seed = " << s.ic_seed;
     out << "\n";
+    // Оценщик 7 не пользуется НУ слейва вовсе: у него eps — возмущение клонов,
+    // а warmup — сколько первых циклов отброшено из среднего.
+    if (s.error_estim == 7)
+        out << "benettin: eps = " << s.ic_eps << ", warmup cycles = " << s.gs_warmup << "\n";
     dump_vec("k_forward", s.k_forward);
     dump_vec("k_backward", s.k_backward);
     out << "h = " << s.h << "\n";
@@ -962,6 +968,8 @@ void write_fastsync_config(std::ofstream& out, int set_precision,
     if (error_estim == 3)   out << "time to achieve RMS(error) <= FS_error_trs \n";
     if (error_estim == 4)   out << "err_stop / err_start at the window start \n";
     if (error_estim == 5)   out << "log10(err_stop / err_start) at the window start \n";
+    if (error_estim == 6)   out << "log10(err_stop / err_start) / iterOfSynchr \n";
+    if (error_estim == 7)   out << "log10(rho) per forward-backward cycle (Benettin) \n";
     write_array(out, "a",          values,    amountOfValues);
     write_array(out, "X0_master",  icMaster,  amountOfInitialConditions);
     write_array(out, "X0_slave",   icSlave,   amountOfInitialConditions);
