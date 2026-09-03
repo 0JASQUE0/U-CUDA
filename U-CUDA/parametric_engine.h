@@ -826,6 +826,22 @@ struct FastSyncRequest {
     std::vector<double> ic_master;    // length = amountOfX
     std::vector<double> ic_slave;     // length = amountOfX
 
+    // НУ второй системы — общий knob обоих режимов.
+    // false (legacy) — ic_slave фиксированы на весь расчёт.
+    // true           — вторая система стартует не из своих НУ, а от точки
+    //                  первой (уже на аттракторе, после транзиента) со
+    //                  случайным отступом в кубе [-ic_eps, +ic_eps] по каждой
+    //                  координате:
+    //                    mode 0 — от точки мастера в начале окна каждого потока;
+    //                    mode 1 — от точки свипуемой стороны в каждой ячейке
+    //                             (кто свипуемый, решает grid_swap_master_slave;
+    //                             транзиент фиксированной стороны не считается).
+    // ic_seed фиксирует последовательность: тот же seed — тот же результат
+    // бит-в-бит, независимо от разбиения сетки на чанки.
+    bool               ic_random_offset = false;
+    double             ic_eps           = 1e-3;
+    unsigned long long ic_seed          = 12345;
+
     // mode == 0 (On Attractor):
     double t_max          = 100.0;
     double transient_time = 0.0;

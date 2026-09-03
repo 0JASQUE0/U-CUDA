@@ -5551,11 +5551,26 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             // On Grid: у каждой системы свой транзиент. Свипуемая сеткой
             // сторона отрабатывает его в КАЖДОЙ ячейке (из её затравки),
             // фиксированная — из своей единственной точки.
+            // В random-режиме ведомая сторона стартует ОТ точки свипуемой и
+            // своего транзиента не отрабатывает — гасим его поле, чтобы не
+            // выглядело действующим.
+            const bool master_swept  = !c.grid_swap_master_slave;
+            const bool master_derived = c.ic_random_offset && !master_swept;
+            const bool slave_derived  = c.ic_random_offset &&  master_swept;
+            ImGui::BeginDisabled(master_derived);
             InputNumStr("transient master", c.transient_text, kFieldW);
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(slave_derived);
             InputNumStr("transient slave",  c.transient_slave_text, kFieldW);
-            ImGui::TextDisabled(c.grid_swap_master_slave
-                ? "Slave settles per grid cell, master from its fixed IC."
-                : "Master settles per grid cell, slave from its fixed IC.");
+            ImGui::EndDisabled();
+            if (c.ic_random_offset)
+                ImGui::TextDisabled(master_swept
+                    ? "Master settles per grid cell; slave starts from it (random IC)."
+                    : "Slave settles per grid cell; master starts from it (random IC).");
+            else
+                ImGui::TextDisabled(c.grid_swap_master_slave
+                    ? "Slave settles per grid cell, master from its fixed IC."
+                    : "Master settles per grid cell, slave from its fixed IC.");
         }
         else {
             InputNumStr("transient",    c.transient_text, kFieldW);
@@ -5591,10 +5606,13 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         static const char* tos_names[] = { "Unidirectional", "Bidirectional" };
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Type of synch.", &c.type_of_synch, tos_names, IM_ARRAYSIZE(tos_names));
+        // Формулировки правлены по факту кода (cudaLibrary.cu): и 0, и 2 —
+        // евклидовы нормы по переменным, БЕЗ деления на их количество.
+        // 0 усредняет по времени (RMS вдоль окна), 2 берёт одну точку.
         static const char* ee_names[] = {
-            "0: RMS on last iter",
+            "0: RMS of ||e|| over last window",
             "1: # iters to reach FS_error_trs",
-            "2: RMS at last point",
+            "2: ||e|| at last point",
             "3: time to reach FS_error_trs"
         };
         ImGui::SetNextItemWidth(280);
@@ -5624,6 +5642,13 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     };
 
     // Master init | Slave init.
+    // В режиме случайных НУ ведущей (свипуемой) остаётся одна сторона, вторая
+    // получает её точку ± eps — её поля гасим, чтобы не читались как рабочие.
+    // On Attractor ведущий всегда мастер; On Grid — та сторона, которую
+    // перебирает сетка (см. grid_swap_master_slave).
+    const bool fs_master_leads   = (c.mode == 0) || !c.grid_swap_master_slave;
+    const bool fs_master_derived = c.ic_random_offset && !fs_master_leads;
+    const bool fs_slave_derived  = c.ic_random_offset &&  fs_master_leads;
     static bool ic_open = true;
     if (ImGui::BeginTable("##fs_ic_table", 2)) {
         ImGui::TableNextRow();
@@ -5635,12 +5660,33 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             for (const auto& v : s.vars) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
+                ImGui::BeginDisabled(fs_master_derived);
                 paired_input(v.c_str(), c.ic_master, "icm_");
+                ImGui::EndDisabled();
                 ImGui::TableSetColumnIndex(1);
+                ImGui::BeginDisabled(fs_slave_derived);
                 paired_input(v.c_str(), c.ic_slave,  "ics_");
+                ImGui::EndDisabled();
             }
         }
         ImGui::EndTable();
+    }
+
+    // Переключатель НУ второй системы: фиксированные (как раньше) либо
+    // случайный отступ в eps-окрестности точки ведущей системы.
+    ImGui::Checkbox("Random IC (eps-offset)##fs_ic_random", &c.ic_random_offset);
+    if (c.ic_random_offset) {
+        InputNumStr("eps",  c.ic_eps_text,  kFieldW);
+        InputNumStr("seed", c.ic_seed_text, kFieldW);
+        if (c.mode == 0)
+            ImGui::TextDisabled("Slave starts at the master point of its own window, +-eps per coordinate.");
+        else
+            ImGui::TextDisabled(fs_master_leads
+                ? "Slave starts at the master cell point (after its transient), +-eps per coordinate."
+                : "Master starts at the slave cell point (after its transient), +-eps per coordinate.");
+        ImGui::TextDisabled("Same seed reproduces the run bit-for-bit.");
+    } else {
+        ImGui::TextDisabled("Off: the second system uses the fixed IC above (legacy behaviour).");
     }
 
     // K forward (h>0) | K backward (h<0).

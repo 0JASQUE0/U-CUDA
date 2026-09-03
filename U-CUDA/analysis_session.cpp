@@ -2151,6 +2151,12 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
     req.n_pts      = std::max(1, parse_i(c.n_pts_text, 200));
     req.grid_swap_master_slave = c.grid_swap_master_slave;
 
+    req.ic_random_offset = c.ic_random_offset;
+    // eps по модулю: отступ и так симметричный, отрицательный ввод — опечатка,
+    // а не «зеркальный» режим.
+    req.ic_eps           = std::fabs(parse_d(c.ic_eps_text, 1e-3));
+    req.ic_seed          = (unsigned long long)std::max(0, parse_i(c.ic_seed_text, 12345));
+
     req.type_of_synch = (c.type_of_synch == 1) ? 1 : 0;
     int ee = c.error_estim;
     if (ee < 0 || ee > 3) ee = 2;

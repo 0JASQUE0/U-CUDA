@@ -977,6 +977,14 @@ struct FastSyncConfig {
     // Per-var значения. Все 4 секции инициализируются нулями в load_from_record.
     std::map<std::string, std::string> ic_master;
     std::map<std::string, std::string> ic_slave;
+    // Общий для обоих режимов переключатель НУ второй системы:
+    // false (legacy) — ic_slave фиксированы на весь расчёт;
+    // true           — старт от точки первой системы (уже на аттракторе) со
+    //                  случайным отступом в кубе [-eps, +eps]. См.
+    //                  FastSyncRequest::ic_random_offset.
+    bool        ic_random_offset = false;
+    std::string ic_eps_text  = "1e-3";
+    std::string ic_seed_text = "12345";
     std::map<std::string, std::string> k_forward;
     std::map<std::string, std::string> k_backward;
     std::map<std::string, std::string> param_values;

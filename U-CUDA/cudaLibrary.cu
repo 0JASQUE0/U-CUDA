@@ -389,6 +389,39 @@ __device__ __forceinline__ numb fsDivergedError()
 	return (numb)nan("");
 }
 
+// splitmix64 — детерминированный хэш-ГПСЧ для рандомных НУ второй системы
+// в FastSynchro (icRandomOffset).
+//
+// Почему не curand: под NVRTC curand_kernel.h недоступен и подменён
+// заглушкой-LCG в kernels/fastsync_*.template.cu, а у неё соседние seed'ы
+// дают коррелированные первые выборки — при seed = индекс ячейки это рисует
+// на карте регулярный узор вместо шума. splitmix64 перемешивает соседние
+// счётчики полностью и компилируется одинаково обоими путями (nvcc и NVRTC),
+// без внешних зависимостей.
+__device__ __host__ __forceinline__
+unsigned long long fsSplitMix64(unsigned long long x)
+{
+	unsigned long long z = x + 0x9E3779B97F4A7C15ULL;
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+	return z ^ (z >> 31);
+}
+
+// Равномерное значение в [-1, 1) по счётчику (seed, ячейка, компонента).
+// Не хранит состояние: одна и та же тройка всегда даёт одно и то же число,
+// поэтому расчёт воспроизводится бит-в-бит независимо от разбиения на чанки
+// и от порядка запуска блоков.
+__device__ __host__ __forceinline__
+numb fsRandSymmetric(unsigned long long seed, unsigned long long cell, int comp)
+{
+	unsigned long long h = fsSplitMix64(seed
+		^ (cell * 0x9E3779B97F4A7C15ULL)
+		^ ((unsigned long long)comp * 0xD1B54A32D192ED03ULL));
+	// Старшие 53 бита → [0, 1), затем в [-1, 1).
+	numb u = (numb)(h >> 11) * (numb)(1.0 / 9007199254740992.0);
+	return (numb)2 * u - (numb)1;
+}
+
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -414,7 +447,10 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	numb* FastSynchroError,
 	int   swapRole,
 	const size_t amountOfPointsForSkipMaster,
-	const size_t amountOfPointsForSkipSlave)
+	const size_t amountOfPointsForSkipSlave,
+	const int    icRandomOffset,
+	const numb   icEps,
+	const unsigned long long icSeed)
 {
 	// Общая память в рамках одного блока
 	// Строение памяти:
@@ -468,7 +504,20 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	//
 	// Uncoupled: K=0 → N[i] = K[i]*(S1[i]-X[i]) = 0, связь занулена, поэтому
 	// передавать сам X как S1 безопасно (алиасинг ни на что не влияет).
-	if (amountOfPointsForSkipMaster > 0 || amountOfPointsForSkipSlave > 0) {
+	//
+	// icRandomOffset: НУ фиксированной стороны берутся не из своей затравки, а
+	// из точки свипуемой стороны ПОСЛЕ её транзиента, со случайным отступом в
+	// eps-окрестности (см. блок сразу после транзиента). Собственный транзиент
+	// фиксированной стороны в этом режиме смысла не имеет — он увёл бы её из
+	// этой самой окрестности, — поэтому обнуляется.
+	size_t skipMaster = amountOfPointsForSkipMaster;
+	size_t skipSlave  = amountOfPointsForSkipSlave;
+	if (icRandomOffset) {
+		if (swapRole == 0) skipSlave = 0;
+		else               skipMaster = 0;
+	}
+
+	if (skipMaster > 0 || skipSlave > 0) {
 		numb transientZeros[AMOUNTOFX];
 		for (int i = 0; i < AMOUNTOFX; ++i)
 			transientZeros[i] = 0;
@@ -479,12 +528,12 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 		// что проверка себя окупает.
 		bool diverged = false;
 
-		for (size_t step = 0; step < amountOfPointsForSkipMaster && !diverged; ++step) {
+		for (size_t step = 0; step < skipMaster && !diverged; ++step) {
 			calculateDiscreteModelforFastSynchro(localX, localX, transientZeros, localValues, h, 1);
 			diverged = fsStateDiverged(localX, amountOfInitialConditions, maxValue);
 		}
 
-		for (size_t step = 0; step < amountOfPointsForSkipSlave && !diverged; ++step) {
+		for (size_t step = 0; step < skipSlave && !diverged; ++step) {
 			calculateDiscreteModelforFastSynchro(localSlave, localSlave, transientZeros, localValues, h, 1);
 			diverged = fsStateDiverged(localSlave, amountOfInitialConditions, maxValue);
 		}
@@ -495,6 +544,25 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 			if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
 			return;
 		}
+	}
+
+	// --- Рандомные НУ второй системы (icRandomOffset == 1).
+	// Свипуемая сторона уже стоит в точке своего аттрактора (grid-override +
+	// её транзиент отработали выше); вторая стартует от ЭТОЙ точки со
+	// случайным отступом в кубе [-eps, +eps] по каждой координате. Кто из
+	// двух свипуемый — решает swapRole, ровно как и для grid-override.
+	//
+	// Счётчик ГПСЧ — ГЛОБАЛЬНЫЙ индекс ячейки (amountOfCalculatedPoints + idx),
+	// а не idx внутри чанка: иначе отступ повторялся бы от чанка к чанку и
+	// результат зависел бы от того, на сколько запусков разбилась сетка.
+	if (icRandomOffset) {
+		const unsigned long long cell = (unsigned long long)(amountOfCalculatedPoints + idx);
+		if (swapRole == 0)
+			for (int i = 0; i < amountOfInitialConditions; ++i)
+				localSlave[i] = localX[i] + icEps * fsRandSymmetric(icSeed, cell, i);
+		else
+			for (int i = 0; i < amountOfInitialConditions; ++i)
+				localX[i] = localSlave[i] + icEps * fsRandSymmetric(icSeed, cell, i);
 	}
 
 	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
@@ -3161,7 +3229,10 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const numb		maxValue,
 	numb*			timedomain,
 	numb*			output,
-	const int		preScaller)
+	const int		preScaller,
+	const int		icRandomOffset,
+	const numb		icEps,
+	const unsigned long long icSeed)
 {
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
@@ -3183,7 +3254,11 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		amountOfInitialConditions,//const int amountOfX,
 		maxValue,//const numb maxValue,
 		timedomain,//numb* timedomain,
-		amountOfInitialConditions * idx * preScaller//const int startDataIndex
+		amountOfInitialConditions * idx * preScaller,//const int startDataIndex
+		icRandomOffset,								 //const int icRandomOffset
+		icEps,										 //const numb icEps
+		icSeed,										 //const unsigned long long icSeed
+		(unsigned long long)idx						 //const unsigned long long icCell
 	);
 	return;
 }
@@ -3199,7 +3274,11 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const int amountOfX,
 	const numb maxValue,
 	numb* timedomain,
-	const int startDataIndex)
+	const int startDataIndex,
+	const int icRandomOffset,
+	const numb icEps,
+	const unsigned long long icSeed,
+	const unsigned long long icCell)
 {
 	//numb* norm_error = new numb[(amountOfIterations - 0)];
 	//numb* Xm = new numb[amountOfX];
@@ -3215,12 +3294,20 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	//numb err0 = 0;
 	//numb err1 = 0;
 
+	// icRandomOffset == 0 — legacy: слейв стартует из фиксированных НУ, одних
+	// и тех же для всех потоков.
+	// icRandomOffset == 1 — слейв стартует от точки мастера в НАЧАЛЕ окна этого
+	// потока (timedomain[startDataIndex] — она уже на аттракторе, транзиент
+	// отработал fillFSMasterTrajectory) со случайным отступом в кубе
+	// [-eps, +eps] по каждой координате. Счётчик ГПСЧ — idx потока, так что
+	// отступ свой в каждой точке траектории и воспроизводим по seed'у.
 	for (int j = 0; j < amountOfX; ++j) {
 		if (type_of_synch == 1) // bidirectional sycnhro
 			Xm[j] = timedomain[startDataIndex + j];
 
-		Xs[j] = initConditionsSlave[j];
-		//Xs[j] = timedomain[startDataIndex + j] + 0.01;
+		Xs[j] = icRandomOffset
+			? timedomain[startDataIndex + j] + icEps * fsRandSymmetric(icSeed, icCell, j)
+			: initConditionsSlave[j];
 	}
 
 	for (int m = 0; m < iterOfSynchr; ++m) {

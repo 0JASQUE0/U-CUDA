@@ -229,6 +229,11 @@ struct FastSyncSnapshot {
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int    n_pts = 0;
     bool   grid_swap_master_slave = false;
+    // Оба режима: НУ второй системы — фиксированные (0) либо случайный отступ
+    // в eps-окрестности точки первой (1). См. FastSyncRequest::ic_random_offset.
+    bool               ic_random_offset = false;
+    double             ic_eps           = 0.0;
+    unsigned long long ic_seed          = 0;
 };
 
 // Engine-side writers. Engine calls these in chunked-streaming loops; the GUI
