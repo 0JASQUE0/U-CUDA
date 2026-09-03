@@ -6400,6 +6400,9 @@ struct ParametricEngine::Impl {
         res.snapshot.axis_y_hi      = req.axis_y_hi;
         res.snapshot.n_pts          = req.n_pts;
         res.snapshot.grid_swap_master_slave = req.grid_swap_master_slave;
+        res.snapshot.ic_random_offset = req.ic_random_offset;
+        res.snapshot.ic_eps           = req.ic_eps;
+        res.snapshot.ic_seed          = req.ic_seed;
         res.snapshot.var_names      = req.var_names;
 
         std::string err;
@@ -6504,6 +6507,11 @@ struct ParametricEngine::Impl {
                 int    preScaller_i       = req.pre_scaller;
                 numb maxValue_arg       = req.max_value;
                 int    amountOfValues_i   = amountOfValues_int;
+                // d_Xs остаётся заполненным и в random-режиме: ядро просто не
+                // читает его, когда ic_random_offset взведён.
+                int    icRandom_i         = req.ic_random_offset ? 1 : 0;
+                numb   icEps_arg          = (numb)req.ic_eps;
+                unsigned long long icSeed_arg = req.ic_seed;
 
                 void* args_fs[] = {
                     &nPts_int, &nPtsLimiter_int, &amountOfNTPoints_i, &h_arg,
@@ -6511,7 +6519,8 @@ struct ParametricEngine::Impl {
                     &d_values, &d_kF, &d_kB,
                     &iterOfSynchr_i, &amountOfValues_i, &amountOfNTPoints_i,
                     &maxValue_arg,
-                    &d_timeDomain, &d_output, &preScaller_i
+                    &d_timeDomain, &d_output, &preScaller_i,
+                    &icRandom_i, &icEps_arg, &icSeed_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
@@ -6708,6 +6717,9 @@ struct ParametricEngine::Impl {
                 int    swap_role_int             = req.grid_swap_master_slave ? 1 : 0;
                 size_t skip_master_arg           = amountOfPointsForSkipMaster;
                 size_t skip_slave_arg            = amountOfPointsForSkipSlave;
+                int    icRandom_int              = req.ic_random_offset ? 1 : 0;
+                numb   icEps_arg                 = (numb)req.ic_eps;
+                unsigned long long icSeed_arg    = req.ic_seed;
 
                 void* args_grid[] = {
                     &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
@@ -6717,7 +6729,8 @@ struct ParametricEngine::Impl {
                     &amountOfIterations_int, &preScaller_int, &maxValue_arg, &iterOfSynchr_int,
                     &d_kF, &d_kB,
                     &d_data, &d_helpful, &d_fs_err_chunk,
-                    &swap_role_int, &skip_master_arg, &skip_slave_arg
+                    &swap_role_int, &skip_master_arg, &skip_slave_arg,
+                    &icRandom_int, &icEps_arg, &icSeed_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);

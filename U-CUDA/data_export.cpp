@@ -565,9 +565,9 @@ static const char* type_of_synch_name(int v) {
 static const char* error_estim_name(int v) {
     switch (v) {
         case 1:  return "# iters to reach FS_error_trs";
-        case 2:  return "RMS at last point";
+        case 2:  return "||e|| at last point (sqrt of sum of squares)";
         case 3:  return "time to reach FS_error_trs";
-        default: return "RMS on last iter";
+        default: return "RMS of ||e|| over last window";
     }
 }
 
@@ -587,7 +587,13 @@ static void write_fastsync_common(std::ofstream& out, const FastSyncSnapshot& s)
         }
     };
     dump_vec("IC_master", s.ic_master);
+    // В random-режиме IC_slave не участвует в расчёте — пишем его как есть, но
+    // рядом отмечаем, что реальные НУ были сгенерированы от первой системы.
     dump_vec("IC_slave",  s.ic_slave);
+    out << "ic_random_offset = " << (s.ic_random_offset ? 1 : 0);
+    if (s.ic_random_offset)
+        out << ", ic_eps = " << s.ic_eps << ", ic_seed = " << s.ic_seed;
+    out << "\n";
     dump_vec("k_forward", s.k_forward);
     dump_vec("k_backward", s.k_backward);
     out << "h = " << s.h << "\n";

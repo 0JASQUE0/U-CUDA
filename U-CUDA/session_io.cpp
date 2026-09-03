@@ -1061,6 +1061,9 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
     o << "\"transient_slave_text\":"; jstr(o, c.transient_slave_text); o << ",";
     o << "\"grid_swap_master_slave\":" << (c.grid_swap_master_slave ? "true" : "false") << ",";
+    o << "\"ic_random_offset\":" << (c.ic_random_offset ? "true" : "false") << ",";
+    o << "\"ic_eps_text\":";     jstr(o, c.ic_eps_text);      o << ",";
+    o << "\"ic_seed_text\":";    jstr(o, c.ic_seed_text);     o << ",";
     o << "\"type_of_synch\":"     << c.type_of_synch         << ",";
     o << "\"error_estim\":"       << c.error_estim           << ",";
     o << "\"fs_error_trs_text\":"; jstr(o, c.fs_error_trs_text); o << ",";
@@ -1105,6 +1108,11 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "axis_y_hi_text")      c.axis_y_hi_text      = p.str();
     else if (key == "n_pts_text")          c.n_pts_text          = p.str();
     else if (key == "grid_swap_master_slave") c.grid_swap_master_slave = p.boolean();
+    // Сессии старше этого поля читаются как ic_random_offset = false, то есть
+    // ровно с прежним поведением (фиксированные НУ слейва).
+    else if (key == "ic_random_offset")    c.ic_random_offset    = p.boolean();
+    else if (key == "ic_eps_text")         c.ic_eps_text         = p.str();
+    else if (key == "ic_seed_text")        c.ic_seed_text        = p.str();
     else if (key == "type_of_synch")       c.type_of_synch       = std::stoi(p.str_or_num());
     else if (key == "error_estim")         c.error_estim         = std::stoi(p.str_or_num());
     else if (key == "fs_error_trs_text")   c.fs_error_trs_text   = p.str();

@@ -43,6 +43,12 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 // dbscanCUDA_optimized / dbscan_optimized удалены как мёртвый код — см.
 // примечание на их прежнем месте в cudaLibrary.cu.
 
+// icRandomOffset / icEps / icSeed — НУ слейва:
+//   0 (legacy) — initialConditionsSlave, одни и те же для всех потоков;
+//   1          — слейв стартует от точки мастера в начале окна СВОЕГО потока
+//                (timedomain[startDataIndex], уже на аттракторе) со случайным
+//                отступом в кубе [-icEps, +icEps] по каждой координате.
+//                icSeed делает отступ воспроизводимым: тот же seed — та же карта.
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -59,7 +65,10 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const numb		maxValue,
 	numb*			timedomain,
 	numb*			output,
-	const int		preScaller);
+	const int		preScaller,
+	const int		icRandomOffset = 0,
+	const numb		icEps = 0,
+	const unsigned long long icSeed = 0);
 
 // swapRole: 0 = grid varies master IC (legacy default — initialConditions
 // overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
@@ -71,6 +80,15 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 // своей ячейки, фиксированная — из одной точки (её путь от ячейки не зависит).
 // 0 = без транзиента (legacy). size_t, а не int: transientTime/h легко
 // переваливает за 2^31 (например TT=1e5 при h=1e-5), и на int это было бы UB.
+//
+// icRandomOffset / icEps / icSeed — НУ ФИКСИРОВАННОЙ стороны:
+//   0 (legacy) — берутся из своей затравки (initialConditions* как раньше);
+//   1          — берутся от свипуемой стороны ПОСЛЕ её транзиента, со
+//                случайным отступом в кубе [-icEps, +icEps] по каждой
+//                координате. Кто свипуемый, решает swapRole; транзиент
+//                фиксированной стороны в этом режиме не считается.
+//                Счётчик ГПСЧ — глобальный индекс ячейки, поэтому карта не
+//                зависит от разбиения расчёта на чанки.
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -96,7 +114,10 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	numb* FastSynchroError,
 	int		swapRole = 0,
 	size_t	amountOfPointsForSkipMaster = 0,
-	size_t	amountOfPointsForSkipSlave = 0);
+	size_t	amountOfPointsForSkipSlave = 0,
+	int		icRandomOffset = 0,
+	numb	icEps = 0,
+	unsigned long long icSeed = 0);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -124,7 +145,11 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const int amountOfX,
 	const numb maxValue,
 	numb* timedomain,
-	const int startDataIndex);
+	const int startDataIndex,
+	const int icRandomOffset = 0,
+	const numb icEps = 0,
+	const unsigned long long icSeed = 0,
+	const unsigned long long icCell = 0);
 
 // Один шаг дискретной модели: новое состояние пишется обратно в x.
 __device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);
