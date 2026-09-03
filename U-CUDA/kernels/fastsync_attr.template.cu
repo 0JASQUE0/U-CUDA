@@ -1,5 +1,4 @@
 ﻿// fastsync_attr.template.cu
-//
 // NVRTC-шаблон для Fast Synchro в режиме "On Attractor".
 // Pipeline (host-оркестрация в parametric_engine::run_fastsync, mode=0):
 //   1. integrateMasterTrajectoryFS — single-thread kernel, заливает d_timeDomain
@@ -60,7 +59,7 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 
 #include "cudaLibrary.cu"
 
-// ---- Master trajectory filler (FS-specific) ----
+// Master trajectory filler (FS-specific)
 // Single-thread интегратор master-системы: использует ИСКЛЮЧИТЕЛЬНО FS device
 // function `calculateDiscreteModelforFastSynchro` с K=0 / S1=Xm (zero coupling
 // = чистая интеграция master). Это полностью зеркалит то, что legacy host-side

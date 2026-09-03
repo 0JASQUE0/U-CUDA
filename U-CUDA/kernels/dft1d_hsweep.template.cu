@@ -161,7 +161,7 @@ extern "C" __global__ void dft1dHSweepKernel(
         return;
     }
 
-    // --- DFT over the block just recorded (mirrors DFT_custom / cpu_dft_block) ---
+    // DFT over the block just recorded (mirrors DFT_custom / cpu_dft_block)
     const numb hSample = hLocal * (numb)preScaller;
     const numb f_step  = (nFreq > 1) ? (freqHi - freqLo) / (numb)(nFreq - 1) : (numb)0.0;
     const numb psi     = (numb)2.0 * (numb)pi * hSample;

@@ -1,5 +1,4 @@
 ﻿// bifurcation1d.template.cu
-//
 // NVRTC-шаблон для 1D-бифуркации. Подставляется ParametricEngine'ом, потом
 // компилируется через nvrtcCompileProgram. Плейсхолдеры:
 //   AMOUNT_OF_X — размерность системы (число переменных, int)

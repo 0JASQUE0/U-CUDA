@@ -1,5 +1,4 @@
 ﻿// lle1d.template.cu
-//
 // NVRTC-шаблон для 1D-вычисления старшего показателя Ляпунова (LLE) по
 // параметру (свип). Архитектура та же, что у bifurcation1d.template.cu:
 // плейсхолдеры подставляет ParametricEngine, потом nvrtcCompileProgram.

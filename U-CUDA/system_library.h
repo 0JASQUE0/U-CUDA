@@ -34,7 +34,7 @@ public:
     // Существует ли система с таким именем.
     bool exists(const std::string& name) const;
 
-    // --- сессии: подпапка sessions/ внутри папки системы ---
+    // сессии: подпапка sessions/ внутри папки системы
     // "_last" — зарезервированное имя авто-сохранённой последней сессии.
     // Именованные сессии сохраняются рядом и доступны для переключения.
     void save_session(const std::string& sysname, const std::string& session,
@@ -49,6 +49,6 @@ private:
     std::string sanitize(const std::string& name) const;
 };
 
-// --- JSON-сериализация записи (доступна и для тестов) ---
+// JSON-сериализация записи (доступна и для тестов)
 std::string record_to_json(const SystemRecord& rec);
 SystemRecord record_from_json(const std::string& json);

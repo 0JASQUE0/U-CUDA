@@ -1,5 +1,4 @@
 ﻿// ls2d.template.cu
-//
 // NVRTC-шаблон для 2D спектра Ляпунова (LS) — N экспонент на ячейку сетки
 // nPts × nPts. Структурно копия ls1d.template.cu; отличие — в runtime-аргументах
 // kernel'а (см. parametric_engine.cpp::run_ls_2d): dimension=2, ranges[4],

@@ -20,27 +20,21 @@ static void log_run_completed(const char* label, bool ok, double secs) {
     std::fflush(stdout);
 }
 
-// ============================================================================
-// Host-порт peakFinder из cudaLibrary.cu (строка 1507).
+// Host-порт peakFinder из cudaLibrary.cu.
 //
-// Зачем копия, а не вызов оригинала: peakFinder объявлен как
-// __device__ __host__ в cudaLibrary.cuh, который парсит только nvcc, а этот
-// файл собирает MSVC. Тот же приём уже применён для getValueByIdx
-// (getValueByIdx_local в parametric_engine.cpp).
+// Зачем копия, а не вызов оригинала: peakFinder объявлен как __device__ __host__ в
+// cudaLibrary.cuh, который парсит только nvcc, а этот файл собирает MSVC. Тот же приём уже
+// применён для getValueByIdx (getValueByIdx_local в parametric_engine.cpp).
 //
-// Отличия от оригинала — только в способе доступа к настройкам: пороги берутся
-// из PeakConfig (GUI Settings), а не из constexpr-дефолтов configCUDA.h,
-// потому что на GPU те же значения инжектятся как #define перед компиляцией
-// (см. peak_config_defines). Логика поиска пиков, интерполяция вершины и
-// фильтр по eps_interPeak_delta повторены один в один — иначе Feature diagram
-// показывала бы не те точки, что реально уходят в DBSCAN 2D-бифуркации.
+// Отличия от оригинала — только в способе доступа к настройкам: пороги берутся из PeakConfig (GUI
+// Settings), а не из constexpr-дефолтов configCUDA.h, потому что на GPU те же значения инжектятся
+// как #define перед компиляцией (peak_config_defines). Логика поиска пиков, интерполяция вершины
+// и фильтр по eps_interPeak_delta повторены один в один — иначе Feature diagram показывала бы не
+// те точки, что реально уходят в DBSCAN 2D-бифуркации.
 //
-// dt — шаг ПО ВРЕМЕНИ между соседними отсчётами `data`. Вызывающий передаёт
-// h*decimator и сам ряд, прореженный тем же шагом: признаки должны считаться
-// по тому же сигналу, что уходит в peakFinderCUDA, иначе диаграмма показывает
-// не те пики, что кластеризует DBSCAN (см. место вызова).
-// Возвращает пары (значение пика; интервал от предыдущего удержанного пика).
-// ============================================================================
+// dt — шаг ПО ВРЕМЕНИ между соседними отсчётами `data`. Вызывающий передаёт h*decimator и сам ряд,
+// прореженный тем же шагом: признаки должны считаться по тому же сигналу, что уходит в
+// peakFinderCUDA. Возвращает пары (значение пика; интервал от предыдущего удержанного пика).
 static FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
     FeaturePoints out;
     const PeakConfig pc = get_peak_config();
@@ -291,25 +285,19 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         const auto& ic = in.ic_sets[k];
         std::vector<std::vector<double>>& traj = raw[k];
 
-        // Признаки (пики + интервалы) считаем по ПРОРЕЖЕННОМУ ряду и с шагом
-        // h*decimator — ровно тот сигнал и тот шаг, что получает peakFinderCUDA
-        // в 2D-бифуркации (см. timeStep = h * preScaller в parametric_engine).
+        // Признаки (пики + интервалы) считаем по ПРОРЕЖЕННОМУ ряду и с шагом h*decimator — ровно
+        // тот сигнал и тот шаг, что получает peakFinderCUDA в 2D-бифуркации (timeStep = h *
+        // preScaller в parametric_engine).
+        // Раньше здесь брался полноразрешающий raw с шагом h, «чтобы decimator не прорядил сами
+        // пики». Формально так и было, но диаграмма из-за этого переставала предсказывать карту:
+        // критерии пика (data[i]-data[i-1] > eps_peak_delta, data[i] >= data[i+1]) и интерполяция
+        // вершины по трём соседям чувствительны к шагу дискретизации, и на вчетверо более редкой
+        // сетке ядро находило другой набор пиков. Совпадение с DBSCAN важнее разрешения: диаграмма
+        // нужна, чтобы подбирать eps и множители. При decimator == 1 обе ветки эквивалентны.
         //
-        // Раньше здесь брался полноразрешающий raw с шагом h, «чтобы decimator
-        // не прорядил сами пики». Точнее так действительно было, но диаграмма
-        // из-за этого переставала предсказывать карту: критерии пика
-        // (data[i]-data[i-1] > eps_peak_delta, data[i] >= data[i+1]) и
-        // интерполяция вершины по трём соседям чувствительны к шагу
-        // дискретизации, и на вчетверо более редкой сетке ядро находило другой
-        // набор пиков. Совпадение с DBSCAN важнее разрешения: диаграмма нужна,
-        // чтобы подбирать eps и множители, а не сама по себе.
-        //
-        // При decimator == 1 обе ветки эквивалентны, поведение не меняется.
-        // Слотов dim + 1: последний (индекс dim) — комбинация переменных, тот
-        // же ряд, что ядро строит при writable_var == -1
-        // (cudaLibrary.cu: x0 + pi*x1 + euler*x2, с деградацией при dim < 3).
-        // Константы берём из configCUDA.h, чтобы диаграмма и бифуркация шли по
-        // одному и тому же ряду, а не по двум похожим.
+        // Слотов dim + 1: последний (индекс dim) — комбинация переменных, тот же ряд, что ядро
+        // строит при writable_var == -1 (x0 + pi*x1 + euler*x2, с деградацией при dim < 3).
+        // Константы берём из configCUDA.h, чтобы диаграмма и бифуркация шли по одному ряду.
         result.features[k].resize((size_t)dim + 1);
         {
             const size_t stride = (dec > 1) ? (size_t)dec : (size_t)1;
@@ -390,10 +378,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
 // Снапшот текущей session в PhaseRunInputs. Делается на главном потоке.
 static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
-    // krs_code должен быть свежим. Раньше регенерировали только при пустом
-    // кеше — это ломало правки тела custom-scheme: первый Run пёк krs_code из
-    // старого cs.body, дальнейшие правки в Library никак на него не влияли.
-    // Регенерация по факту дешёвая (codegen или просто копия cs.body), поэтому
+    // krs_code должен быть свежим. Раньше регенерировали только при пустом кеше — это ломало
+    // правки тела custom-scheme: первый Run пёк krs_code из старого cs.body, дальнейшие правки в
+    // Library на него не влияли. Регенерация дешёвая (codegen или просто копия cs.body), поэтому
     // делаем её каждый Run.
     s.regenerate_krs();
     PhaseRunInputs in;
@@ -445,8 +432,7 @@ bool PhaseAnalysisSession::poll() {
     return true;
 }
 
-
-// --- генерация КРС из системы по выбранному методу (для NVRTC) ---
+// генерация КРС из системы по выбранному методу (для NVRTC)
 static Scheme scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return Scheme::EulerCromer;
     if (s == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
@@ -473,11 +459,10 @@ void PhaseAnalysisSession::regenerate_krs() {
         }
     }
 
-    // Фоновый прогрев NVRTC-кэша под новую систему/метод — не дожидаемся
-    // Run. Не запускаем новый прогрев, пока предыдущий ещё не закончился:
-    // присвоение prewarm_future иначе заблокировало бы ЭТОТ (UI) поток на
-    // деструкторе предыдущей async-future. Best-effort — если не успеваем
-    // прогреть, настоящий Run просто скомпилирует синхронно, как раньше.
+    // Фоновый прогрев NVRTC-кэша под новую систему/метод, не дожидаясь Run. Новый прогрев не
+    // запускаем, пока предыдущий не закончился: присвоение prewarm_future иначе заблокировало бы
+    // ЭТОТ (UI) поток на деструкторе предыдущей async-future. Best-effort — если не успеваем
+    // прогреть, настоящий Run просто скомпилирует синхронно.
     bool prewarm_busy = prewarm_future.valid() &&
         prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
     if (use_gpu && !krs_code.empty() && !prewarm_busy) {
@@ -489,7 +474,7 @@ void PhaseAnalysisSession::regenerate_krs() {
     }
 }
 
-// --- BifurcationAnalysisSession ---
+// BifurcationAnalysisSession
 
 // Резолвит КРС по имени scheme: сперва среди custom_schemes (имя имеет
 // приоритет над built-in, что блокируется в System tab), иначе генерирует
@@ -684,13 +669,12 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     if (req.param_hi   < req.param_lo)   std::swap(req.param_lo,   req.param_hi);
     if (req.param_hi_2 < req.param_lo_2) std::swap(req.param_lo_2, req.param_hi_2);
     req.n_pts              = parse_i(bd.n_pts_text, 200);
-    // -1 — combination, ровно как в build_bif1d_request. 2D-цепочка идёт через
-    // тот же calculateDiscreteModelCUDA -> loopCalculateDiscreteModel_int, где
-    // сентинел обработан явно (cudaLibrary.cu), а peakFinder/DBSCAN ниже видят
-    // просто скалярный ряд. Раньше здесь стоял кламп `>= 0`: он писался до
-    // появления сентинела, поэтому комбинация молча превращалась в первую
-    // переменную. Учтите, что eps_dbscan под комбинацию обычно нужен свой —
-    // сумма x + pi*y + e*z живёт в другом масштабе, чем одна переменная.
+    // -1 — combination, ровно как в build_bif1d_request. 2D-цепочка идёт через тот же
+    // calculateDiscreteModelCUDA → loopCalculateDiscreteModel_int, где сентинел обработан явно, а
+    // peakFinder/DBSCAN ниже видят просто скалярный ряд. Раньше здесь стоял кламп `>= 0` — он
+    // писался до появления сентинела, поэтому комбинация молча превращалась в первую переменную.
+    // Учтите, что eps_dbscan под комбинацию обычно нужен свой: сумма x + pi*y + e*z живёт в другом
+    // масштабе, чем одна переменная.
     req.writable_var       = (bd.writable_var >= -1 && bd.writable_var < req.amountOfX) ? bd.writable_var : 0;
     req.h                  = parse_d(bd.h_text, 0.01);
     req.t_max              = parse_d(bd.t_max_text, 100.0);
@@ -833,10 +817,8 @@ bool BifurcationAnalysisSession::poll() {
     return true;
 }
 
-// ============================================================================
 // LLEAnalysisSession — структурно зеркалит BifurcationAnalysisSession.
 // Та же async-машинерия, та же per-curve конфигурация, тот же compute_krs_for_scheme.
-// ============================================================================
 
 void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
@@ -1129,12 +1111,10 @@ bool LLEAnalysisSession::poll() {
     return true;
 }
 
-// ============================================================================
 // Dft1DAnalysisSession — N configs на сессию (по образцу BasinsAnalysisSession:
 // один "kind", список конфигов, своя очередь). build_dft1d_request зеркалит
 // build_bif1d_request (тот же sweep/integration/IC/param маппинг) плюс
 // n_freq/freq_lo/freq_hi.
-// ============================================================================
 
 void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
@@ -1340,11 +1320,9 @@ bool Dft1DAnalysisSession::poll() {
     return true;
 }
 
-// ============================================================================
 // BasinsAnalysisSession — N configs на сессию (по образцу
 // BifurcationAnalysisSession::diagrams). 5 inner tabs (Basins/AvgPk/AvgInt/
 // States/Scatter) живут per-config через BasinsConfig::active_plot_tab.
-// ============================================================================
 
 void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
@@ -1488,6 +1466,14 @@ static_assert((int)BasinFeature::LogRMSPeaks         == BF_LOG_RMS_PEAKS,       
 static_assert((int)BasinFeature::LogRMSIntervals     == BF_LOG_RMS_INTERVALS,    "BasinFeature drift: LogRMSIntervals");
 static_assert((int)BasinFeature::LogStDevPeaks       == BF_LOG_STDEV_PEAKS,      "BasinFeature drift: LogStDevPeaks");
 static_assert((int)BasinFeature::LogStDevIntervals   == BF_LOG_STDEV_INTERVALS,  "BasinFeature drift: LogStDevIntervals");
+
+// Сама таблица kBasinFeatureNames и её проверки (длина, только-ASCII) живут в
+// analysis_session.h рядом с enum BasinFeature: static_assert'у нужен constexpr-массив, а
+// constexpr в namespace scope несовместим с extern-объявлением.
+const char* basin_feature_name(int feature_code) {
+    if (feature_code < 0 || feature_code >= BF_FEATURE_COUNT) return "unknown";
+    return kBasinFeatureNames[feature_code];
+}
 
 static void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
     c.result = std::move(r);
@@ -1651,14 +1637,10 @@ bool BasinsAnalysisSession::poll() {
     return true;
 }
 
-// ============================================================================
-// Basins → фазовые портреты.
-//
-// По одной случайной ячейке сетки на каждый найденный бассейн; из ячейки
-// восстанавливаются НУ двух осевых переменных (той же формулой, что и в
-// ядре — см. getValueByIdx в cudaLibrary.cu), остальные берутся из config'а.
-// Бассейны с id == 0 (расходящиеся) пропускаются.
-// ============================================================================
+// Basins → фазовые портреты: по одной случайной ячейке сетки на каждый найденный бассейн. Из
+// ячейки восстанавливаются НУ двух осевых переменных (той же формулой, что в ядре — getValueByIdx
+// в cudaLibrary.cu), остальные берутся из config'а. Бассейны с id == 0 (расходящиеся)
+// пропускаются.
 
 // Seed фиксированный: один и тот же результат бассейнов всегда даёт одни и те
 // же представительные точки (в т.ч. после перезапуска приложения). Домешивание
@@ -1666,12 +1648,11 @@ bool BasinsAnalysisSession::poll() {
 // бассейна не сдвигает точки всех остальных.
 static const unsigned kBasinsPhaseSeed = 12345u;
 
-// Координаты обхода NxN-сетки по спирали из центра (порт MATLAB
-// spiral_coords_from_center). Стартовая клетка — округление к верху центра:
-// для N=5 это (2,2), для N=4 это (1,1) (0-based). Дальше — right→down→left→up
-// с увеличением шага на каждом цикле полу-оборотов. Точки за границей грид-а
-// пропускаются, поэтому в итоге набирается ровно N*N валидных индексов.
-// Возвращает row-major индексы row*N + col.
+// Координаты обхода NxN-сетки по спирали из центра (порт MATLAB spiral_coords_from_center).
+// Стартовая клетка — округление к верху центра: для N=5 это (2,2), для N=4 — (1,1), 0-based.
+// Дальше right→down→left→up с увеличением шага на каждом цикле полуоборотов; точки за границей
+// сетки пропускаются, поэтому набирается ровно N*N валидных индексов. Возвращает row-major
+// индексы row*N + col.
 static std::vector<int> spiral_coords_from_center(int N) {
     std::vector<int> out;
     if (N <= 0) return out;
@@ -1866,11 +1847,10 @@ bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
         }
     }
 
-    // Тот же НАБОР ячеек, но, возможно, в другом порядке — типичный случай при
-    // toggle «Renumber (spiral)»: кластеры те же, изменились только их номера,
-    // а значит и порядок обхода «положительные по возрастанию, затем
-    // отрицательные». Считаем перестановку: perm[k] = индекс старой серии,
-    // которая должна встать на новое место k. O(n²), но n <= max attractors.
+    // Тот же НАБОР ячеек, но, возможно, в другом порядке — типичный случай при toggle «Renumber
+    // (spiral)»: кластеры те же, изменились только их номера, а значит и порядок обхода
+    // «положительные по возрастанию, затем отрицательные». Считаем перестановку: perm[k] = индекс
+    // старой серии, которая должна встать на новое место k. O(n²), но n <= max attractors.
     std::vector<int> perm;
     bool same_set = (new_cells.size() == sl.cells.size());
     if (same_set) {
@@ -2045,12 +2025,10 @@ bool BasinsAnalysisSession::poll_phase() {
     return any;
 }
 
-// ============================================================================
 // FastSyncAnalysisSession — зеркалит BasinsAnalysisSession (multi-config,
 // async worker, futures + cancel/progress). build_request читает text-fields
 // и собирает FastSyncRequest. По умолчанию k_forward/k_backward/ic_slave
 // заполняются нулями — пользователь видит сразу все vars в UI.
-// ============================================================================
 void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
     const std::vector<std::string>& params_) {
@@ -2265,9 +2243,7 @@ bool FastSyncAnalysisSession::poll() {
     return true;
 }
 
-// ============================================================================
 // LyapunovSpectrumAnalysisSession — копия LLE-паттерна для LS.
-// ============================================================================
 
 void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,

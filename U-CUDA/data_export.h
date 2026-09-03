@@ -1,17 +1,12 @@
 ﻿#pragma once
-//
 // data_export — shared CSV writer for plot results.
-//
-// Both `parametric_engine` (during compute, when csv_save_enabled is on) and
-// `gui` (on right-click "Export data...") call into this module so the on-disk
-// format stays identical byte-for-byte. The engine streams chunked rows; the
-// GUI dumps the full in-memory result. They share the same per-row formatter
-// and the same `_config.csv` writer.
-//
-// Snapshot structs are tiny PODs captured by the engine at run start and
-// carried inside the corresponding *Result so the GUI can reproduce the
-// `_config.csv` header after compute (when the original Request is gone).
-//
+// Both `parametric_engine` (during compute, when csv_save_enabled is on) and `gui` (on right-click
+// "Export data...") call into this module so the on-disk format stays identical byte-for-byte: the
+// engine streams chunked rows, the GUI dumps the full in-memory result, and both share the same
+// per-row formatter and `_config.csv` writer.
+// Snapshot structs are tiny PODs captured by the engine at run start and carried inside the
+// corresponding *Result, so the GUI can reproduce the `_config.csv` header after compute (when the
+// original Request is gone).
 
 #include <cstddef>
 #include <fstream>
@@ -35,25 +30,19 @@ struct AnalysisResult;
 
 namespace data_export {
 
-// =============================================================================
 // Snapshot structs — exactly the data engine currently prints into _config.csv.
 // Names follow the engine's local variable names (tMax / TT / etc.) so the
 // 1-to-1 mapping in writers is obvious.
-// =============================================================================
 
-// Провенанс расчёта: режим FMA-контракции NVRTC, действовавший на момент Run
-// (Settings -> GPU floating point, см. set_nvrtc_fmad). Пишется в _config.csv
-// каждым writer'ом строкой "NVRTC --fmad = on/off": результаты, посчитанные с
-// разным значением, не сравнимы побитово, а на фрактальных границах бассейнов
-// расходятся и визуально — без пометки в файле потом не установить, чем считалось.
-//
-// Снимается на старте прогона, а не при экспорте: настройку могли переключить
-// между расчётом и сохранением.
-//
-// Это настройка приложения, а не свойство устройства: две ветки считают на CPU
-// и через NVRTC не проходят вовсе (run_bif1d_cpu — continuation, и фазовый
-// портрет при снятом GPU). Там строка остаётся справочной — она говорит, как
-// был настроен компилятор ядер, а не как считался этот конкретный файл.
+// Провенанс расчёта: режим FMA-контракции NVRTC, действовавший на момент Run (Settings -> GPU
+// floating point, см. set_nvrtc_fmad). Пишется в _config.csv каждым writer'ом строкой
+// "NVRTC --fmad = on/off": результаты, посчитанные с разным значением, не сравнимы побитово, а на
+// фрактальных границах бассейнов расходятся и визуально — без пометки в файле потом не установить,
+// чем считалось. Снимается на старте прогона, а не при экспорте: настройку могли переключить между
+// расчётом и сохранением.
+// Это настройка приложения, а не свойство устройства: две ветки считают на CPU и через NVRTC не
+// проходят вовсе (run_bif1d_cpu — continuation, и фазовый портрет при снятом GPU). Там строка
+// остаётся справочной — она говорит, как был настроен компилятор ядер, а не как считался файл.
 struct Bif1DSnapshot {
     bool   gpu_fmad = true;
     std::vector<double> values;              // a[1..N] (engine prints a[N])
@@ -242,22 +231,19 @@ struct FastSyncSnapshot {
     bool   grid_swap_master_slave = false;
 };
 
-// =============================================================================
 // Engine-side writers. Engine calls these in chunked-streaming loops; the GUI
 // calls them as part of export_*. Keeping them in this module means the row
 // format only exists in one place.
-// =============================================================================
 
 // Writes the _config.csv header for a 1D classical bifurcation run. The
 // caller passes an already-opened ofstream; this function sets precision
 // itself, matching engine behaviour.
 void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s);
 
-// Writes one parameter-bin's worth of rows for a 1D bifurcation. Mirrors the
-// engine's inner loop at parametric_engine.cpp:806-818:
+// Writes one parameter-bin's worth of rows for a 1D bifurcation. Mirrors the engine's inner loop:
 //   npeaks ==  0 → "<param>, 0, 0\n"
 //   npeaks == -1 → "<param>, 0, -1\n"
-//   npeaks >  0 → npeaks rows of "<param>, <peak[j]>, <time[j]>\n"
+//   npeaks >   0 → npeaks rows of "<param>, <peak[j]>, <time[j]>\n"
 // `peaks` and `times` must point to npeaks valid doubles when npeaks > 0.
 void write_bif1d_rows(std::ofstream& out,
                       double param, int npeaks,
@@ -272,13 +258,11 @@ inline double param_value_at(std::size_t idx, int n_pts, double lo, double hi) {
                             static_cast<double>(n_pts - 1);
 }
 
-// 1D DFT. Engine writes 3 files sharing one path prefix: <path>_config.csv
-// (human-readable metadata, write_dft1d_config), <path>_AkCOS.csv and
-// <path>_BkSIN.csv (write_dft1d_header once + write_dft1d_matrix per chunk/
-// in full). Header rows use COMMA separators (unlike write_basins_ranges'
-// space separator) to stay byte-compatible with the pre-existing MATLAB
-// script that reads these files (and with hostLibrary.cu's own bifurcation_
-// DFT_1D, which writes the same 2-row comma-separated header).
+// 1D DFT. Engine writes 3 files sharing one path prefix: <path>_config.csv (human-readable
+// metadata, write_dft1d_config), <path>_AkCOS.csv and <path>_BkSIN.csv (write_dft1d_header once +
+// write_dft1d_matrix per chunk / in full). Header rows use COMMA separators (unlike
+// write_basins_ranges' space separator) to stay byte-compatible with the pre-existing MATLAB script
+// that reads these files, and with hostLibrary.cu's own bifurcation_DFT_1D.
 void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s);
 
 // Writes the 2 header rows: "range_lo, range_hi\n" then "freq_lo, freq_hi\n".
@@ -325,13 +309,11 @@ void write_basins_ranges(std::ofstream& out, const BasinsSnapshot& s);
 void write_basins_grid_int(std::ofstream& out, int n_pts, const int* values);
 void write_basins_grid_double(std::ofstream& out, int n_pts, const double* values);
 
-// FastSync — engine + GUI share these writers so on-disk format is
-// byte-identical (the engine-side path was added by PR #49).
-//   mode 0: <path> header "<var0>,...,<varN-1>,sync_error\n" + row per traj
-//           point. Engine optionally calls write_fastsync_config separately;
-//           the GUI export always writes both.
-//   mode 1: <path> two-line ranges header + n×n grid (row per Y) of sync
-//           errors with comma separator.
+// FastSync — engine + GUI share these writers so the on-disk format is byte-identical (the
+// engine-side path was added by PR #49).
+//   mode 0: <path> header "<var0>,...,<varN-1>,sync_error\n" + row per traj point. The engine
+//           optionally calls write_fastsync_config separately; the GUI export always writes both.
+//   mode 1: <path> two-line ranges header + n×n grid (row per Y) of sync errors, comma-separated.
 void write_fastsync_config(std::ofstream& out, const FastSyncSnapshot& s);
 void write_fastsync_attractor(std::ofstream& out, const FastSyncResult& res,
                               const std::vector<std::string>& var_names);
@@ -339,12 +321,10 @@ void write_fastsync_grid(std::ofstream& out, const FastSyncResult& res,
                          double axis_x_lo, double axis_x_hi,
                          double axis_y_lo, double axis_y_hi);
 
-// =============================================================================
 // GUI entry points. Writes both <path> (data) and <path>_config.csv (header).
 // Returns false if any file could not be opened; partial writes are possible
 // only if disk fills mid-write. The caller is responsible for choosing `path`
 // via a save-file dialog (or any other source).
-// =============================================================================
 
 bool export_bif1d(const Bifurcation1DResult& res, const std::string& path);
 bool export_dft1d (const Dft1DResult&         res, const std::string& path);
@@ -363,29 +343,21 @@ bool export_fastsync(const FastSyncResult&   res, const std::string& path);
 bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
                   const std::string& path);
 
-// =============================================================================
 // legacy — writer'ы `_config.csv` для hostLibrary.cu (Debug entry point).
 //
-// Формат ЭТИХ файлов не совпадает с writer'ами выше и намеренно оставлен как
-// есть: его читают внешние скрипты обработки. Отсюда сохранённые странности —
-// опечатки ("esimation", "vlaue"), пробел перед \n в заголовках, "CT =  " с
-// двумя пробелами в 2D против "CT = " в 1D, "TT =" вовсе без пробела, "eps="
-// без пробела перед знаком. Всё это воспроизведено дословно; «починка» любой
-// строки ломает чужой парсер. Функции перенесены сюда только затем, чтобы
-// CSV-форматирование проекта жило в одном модуле, а не двумя копиями.
+// Формат ЭТИХ файлов не совпадает с writer'ами выше и намеренно оставлен как есть: его читают
+// внешние скрипты обработки. Отсюда сохранённые странности — опечатки ("esimation", "vlaue"),
+// пробел перед \n в заголовках, "CT =  " с двумя пробелами в 2D против "CT = " в 1D, "TT =" вовсе
+// без пробела, "eps=" без пробела перед знаком. Всё это воспроизведено дословно; «починка» любой
+// строки ломает чужой парсер. Функции перенесены сюда только затем, чтобы CSV-форматирование
+// проекта жило в одном модуле.
 //
-// Сигнатуры берут double НАМЕРЕННО: в этих файлах числа обязаны оставаться
-// double независимо от typedef numb, иначе внешние парсеры получили бы 15
-// заявленных значащих цифр от float'а.
-//
-// Раньше это работало как растяжка: при numb = float вызовы из hostLibrary.cu
-// просто перестали бы компилироваться (громкий отказ вместо тихой потери
-// точности). Растяжка сработала ровно так, как задумано, и теперь заменена на
-// явное расширение в единственном месте, которому оно нужно, — to_dbl() в
-// hostLibrary.cu, см. комментарий там. То есть numb = float собирается, а
-// конверсия видна в коде вызова, а не спрятана в сигнатуре.
-// Менять эти double на numb нельзя: это и вернёт ту самую тихую потерю.
-// =============================================================================
+// Сигнатуры берут double НАМЕРЕННО: в этих файлах числа обязаны оставаться double независимо от
+// typedef numb, иначе внешние парсеры получили бы 15 заявленных значащих цифр от float'а. Раньше
+// это работало как растяжка (при numb = float вызовы из hostLibrary.cu просто перестали бы
+// компилироваться — громкий отказ вместо тихой потери точности); теперь расширение сделано явно в
+// единственном месте, которому оно нужно, — to_dbl() в hostLibrary.cu. Менять эти double на numb
+// нельзя: это вернёт ту самую тихую потерю.
 namespace legacy {
 
 // "<name>[N] = { v, v, ... }\n". При N == 0 легаси печатает только

@@ -16,15 +16,12 @@ void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
     bottom = 46.0f;
 }
 
-// Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после
-// возврата из InputText: пока поле активно, ImGui читает свою внутреннюю копию
-// текста и правки внешнего буфера игнорирует — граница бы «включалась» только
-// после ухода фокуса. Здесь data->Buf это как раз внутренний буфер.
-//
-// В CharFilter-событии Buf невалиден (там есть только EventChar), поэтому
-// клампим на Edit/History. History отдельно нужен потому, что ImGui выбирает
-// событие цепочкой else-if: в кадре со стрелкой ↑/↓ Edit уже не придёт, а
-// шагнуть за границу стрелка может.
+// Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
+// пока поле активно, ImGui читает свою внутреннюю копию текста и правки внешнего буфера
+// игнорирует — граница бы «включалась» только после ухода фокуса, а data->Buf это как раз
+// внутренний буфер. В CharFilter-событии Buf невалиден (там есть только EventChar), поэтому клампим
+// на Edit/History. History нужен отдельно, потому что ImGui выбирает событие цепочкой else-if: в
+// кадре со стрелкой ↑/↓ Edit уже не придёт, а шагнуть за границу стрелка может.
 static void clamp_rgb_channel_buf(ImGuiInputTextCallbackData* data) {
     if (data->Buf == nullptr || data->BufTextLen <= 0) return;
     std::string text(data->Buf, data->Buf + data->BufTextLen);
@@ -135,12 +132,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
-    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим оси X.
-    // Лог-ось переносит саму координату: в VBO уходит log10(x), потому что
-    // GL рисует вершины аффинной make_ortho_mvp, а логарифм не аффинен
-    // (см. XS/XW ниже). Флаг обязан входить в условие перезаливки — иначе
-    // переключение Log scale не тронуло бы уже залитый буфер и график молча
-    // остался бы в прежних координатах.
+    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим оси X. Лог-ось переносит саму
+    // координату: в VBO уходит log10(x), потому что GL рисует вершины аффинной make_ortho_mvp, а
+    // логарифм не аффинен (см. XS/XW ниже). Флаг обязан входить в условие перезаливки — иначе
+    // переключение Log scale не тронуло бы уже залитый буфер и график остался бы в прежних
+    // координатах.
     const bool upload_xlog = x_axis.log_scale;
     if (data_generation != series_generation || series_xlog_cached != upload_xlog) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
@@ -161,11 +157,10 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
         series_xlog_cached = upload_xlog;
         series_generation = data_generation;
-        // Не сбрасываем view_valid здесь: смена набора серий (вкл/выкл переменной
-        // через show_var) не должна двигать вид. Автофит — только по fit_request
-        // или когда вида ещё не было (view_valid и так false).
-        // Исключение: если число серий изменилось, старые индексы не годятся,
-        // поэтому локальную видимость пересобираем из init_visible.
+        // Не сбрасываем view_valid здесь: смена набора серий (вкл/выкл переменной через show_var)
+        // не должна двигать вид. Автофит — только по fit_request или когда вида ещё не было.
+        // Исключение: если число серий изменилось, старые индексы не годятся, поэтому локальную
+        // видимость пересобираем из init_visible.
         if (count_changed) {
             visible.assign(series_in.size(), true);
             for (size_t k = 0; k < series_in.size() && k < init_visible.size(); ++k)
@@ -197,11 +192,10 @@ void Plot2DView::render(PlotRenderer& renderer,
     for (int k = 0; k < series_cache_.size(); ++k)
         render_visible_mask_[k] = eff_visible(k);
 
-    // Detect legend-toggle across frames (legend clicks flip visible[k] later
-    // in this render, so the change lands in NEXT frame's mask). Any bit
-    // that flipped → autofit, so newly-visible series come into view (was
-    // asymmetric before: turning OFF shrunk view via clamp, turning ON left
-    // the clamp bounds wider but view stayed zoomed).
+    // Detect legend-toggle across frames (legend clicks flip visible[k] later in this render, so the
+    // change lands in NEXT frame's mask). Any bit that flipped → autofit, so newly-visible series
+    // come into view. Was asymmetric before: turning OFF shrunk the view via clamp, turning ON left
+    // the clamp bounds wider but the view stayed zoomed.
     bool visibility_changed = false;
     if (render_visible_mask_prev_.size() == render_visible_mask_.size()) {
         for (size_t k = 0; k < render_visible_mask_.size(); ++k) {
@@ -291,7 +285,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     axis_effective(x_axis, ex0, ex1);
     axis_effective(y_axis, ey0, ey1);
 
-    // --- Логарифмическая ось X -------------------------------------------
+    // Логарифмическая ось X
     // Реализована переносом координаты: на экран (VBO, MVP, тики, курсор,
     // крест) уходит log10(x), наружу — view_min/max, snap_x, crosshair_x,
     // колбэки, подписи — всё остаётся МИРОВЫМ. XS/XW — единственная пара
@@ -492,14 +486,12 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
-    // ε-окружность вокруг курсора (см. hover_circle_r в plot_view_2d.h) —
-    // визуальный подбор DBSCAN eps. Сэмплируем в МИРОВЫХ координатах и гоним
-    // каждую точку через X()/Y(): так сами собой выходят и разный масштаб осей
-    // (на экране эллипс), и лог-ось X. ImDrawList::AddEllipse не подошёл бы ни
-    // там, ни там — он рисует оси-параллельный эллипс в пикселях, а на лог-оси
-    // ε-окрестность вообще не эллипс (левый и правый края сжаты по-разному).
-    // Halo + ядро — как у crosshair выше, чтобы линия читалась и на светлой,
-    // и на тёмной подложке.
+    // ε-окружность вокруг курсора (hover_circle_r в plot_view_2d.h) — визуальный подбор DBSCAN eps.
+    // Сэмплируем в МИРОВЫХ координатах и гоним каждую точку через X()/Y(): так сами собой выходят и
+    // разный масштаб осей (на экране эллипс), и лог-ось X. ImDrawList::AddEllipse не подошёл бы ни
+    // там, ни там — он рисует оси-параллельный эллипс в пикселях, а на лог-оси ε-окрестность вообще
+    // не эллипс (левый и правый края сжаты по-разному). Halo + ядро — как у crosshair выше, чтобы
+    // линия читалась и на светлой, и на тёмной подложке.
     if (plot_h_ov && std::isfinite(hover_circle_r) && hover_circle_r > 0.0) {
         ImGuiIO& io = ImGui::GetIO();
         // Центр — курсор в мировых координатах (та же пара формул, что у
@@ -558,15 +550,12 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
                     col_text, xl);
 
-        // Y label — повёрнут на -90° (читается снизу вверх, mathematical
-        // convention). Рендерим текст горизонтально через AddText, затем
-        // поворачиваем все добавленные вершины вокруг pivot. На ТОЧНО -90°
-        // матрица имеет целочисленные компоненты (cos=0, sin=-1), поэтому
-        // пиксельная сетка глифов сохраняется и шрифт остаётся чётким —
-        // никакого AA-шума, который бывает на произвольных углах.
-        //
-        // Х-позиция считается ДИНАМИЧЕСКИ — за самыми широкими Y-тиками,
-        // иначе подпись наезжает на длинные числа (e.g. "0.09177").
+        // Y label повёрнут на -90° (читается снизу вверх, mathematical convention): рендерим текст
+        // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
+        // ТОЧНО -90° матрица имеет целочисленные компоненты (cos=0, sin=-1), поэтому пиксельная
+        // сетка глифов сохраняется и шрифт остаётся чётким — без AA-шума, который бывает на
+        // произвольных углах. X-позиция считается ДИНАМИЧЕСКИ, за самыми широкими Y-тиками, иначе
+        // подпись наезжает на длинные числа (например "0.09177").
         ImVec2 ts = ImGui::CalcTextSize(yl);
         if (ts.x > 0.0f && ts.y > 0.0f) {
             float max_tick_w = 0.0f;
@@ -583,11 +572,9 @@ void Plot2DView::render(PlotRenderer& renderer,
                     if (w > max_tick_w) max_tick_w = w;
                 }
             }
-            // Pivot — позиция левого-верхнего угла текста ДО поворота,
-            // одновременно центр вращения. После -90° (dx, dy) ↦ (dy, -dx):
-            //   • по X текст занимает [pivot.x, pivot.x + ts.y]
-            //   • по Y — [pivot.y - ts.x, pivot.y]
-            // Снапим к целым пикселям — критично для чёткости глифов.
+            // Pivot — позиция левого-верхнего угла текста ДО поворота, одновременно центр вращения.
+            // После -90° (dx, dy) ↦ (dy, -dx): по X текст занимает [pivot.x, pivot.x + ts.y], по Y —
+            // [pivot.y - ts.x, pivot.y]. Снапим к целым пикселям — критично для чёткости глифов.
             float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts.y);
             float pivot_y = std::floor(img_pos.y + (plot_h + ts.x) * 0.5f);
             ImVec2 pivot(pivot_x, pivot_y);
@@ -631,11 +618,10 @@ void Plot2DView::render(PlotRenderer& renderer,
         dl->AddText(ImVec2(cx, cy), col_text, buf);
     }
 
-    // 8b. Crosshair gestures — MMB drag or Shift+LMB drag inside the plot
-    // fire `on_left_drag(world_x)` every frame; release of either gesture
-    // fires `on_left_click(world_x)`. Plain LMB is left to pan alone; it
-    // does NOT trigger drill-down (a bare click just to focus the window
-    // shouldn't kick off a phase run).
+    // 8b. Crosshair gestures — MMB drag или Shift+LMB drag внутри плота каждый кадр вызывают
+    // `on_left_drag(world_x)`, а release любого из них — `on_left_click(world_x)`. Чистый LMB
+    // оставлен пану и drill-down НЕ запускает: голый клик просто для фокуса окна не должен
+    // стартовать фазовый прогон.
     if (plot_h_ov && (on_left_drag || on_left_click)) {
         ImGuiIO& io = ImGui::GetIO();
         auto cursor_wx = [&]() -> double {

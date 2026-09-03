@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <algorithm>
 
-// ---- CPU-side colormap (то же сэмплирование, что в шейдере draw_heatmap) ----
+// CPU-side colormap (то же сэмплирование, что в шейдере draw_heatmap)
 // Используется heatmap_view'ом для рисования colorbar'а и plot_view_2d'ом
 // для per-segment окраски trajectory. Раньше жил в heatmap_view.cpp::ns{}.
 namespace {
@@ -31,9 +31,7 @@ vec3f cmap_lut_sample(float t, const unsigned char lut[256][3]) {
 }
 } // namespace
 
-// ---------------------------------------------------------------------------
 // Реестр slanCM: имена/категории, миграция легаси-id, набор включённых карт.
-// ---------------------------------------------------------------------------
 
 const char* slancm_name(int n) {
     return (n >= 1 && n <= kSlanCmCount) ? kSlanCmNames[n - 1] : "";
@@ -663,7 +661,7 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
     const bool use_thick = thick_style && program_3d_thick_ != 0;
 
     if (!use_thick) {
-        // --- СТАРЫЙ путь: побайтово как до Custom line style patch ---
+        // СТАРЫЙ путь: побайтово как до Custom line style patch
         if (!program_3d_) return;
         glUseProgram(program_3d_);
         glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
@@ -681,7 +679,7 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
         return;
     }
 
-    // --- ТОЛСТЫЙ путь: geometry shader раскрывает сегменты в quads ---
+    // ТОЛСТЫЙ путь: geometry shader раскрывает сегменты в quads
     // Alpha blending включаем только тут, чтобы OFF-путь не менял GL state.
     GLboolean was_blend = glIsEnabled(GL_BLEND);
     glEnable(GL_BLEND);

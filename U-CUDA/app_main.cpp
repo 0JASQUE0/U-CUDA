@@ -29,8 +29,6 @@
 #include <filesystem>
 #include <algorithm>
 
-
-
 #pragma comment(lib, "opengl32.lib")
 
 std::string exe_dir() {
@@ -233,16 +231,16 @@ int main() {
         model.pending_screenshot.max_x = mx.x; model.pending_screenshot.max_y = mx.y;
     });
 
-    // --- инициализация GLFW + OpenGL + ImGui ---
+    // инициализация GLFW + OpenGL + ImGui
     if (!glfwInit()) return 1;
 
-    // === ИЗМЕНЕНО: запрашиваем OpenGL 3.3 Core ===
+    // ИЗМЕНЕНО: запрашиваем OpenGL 3.3 Core
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
-    // === ИЗМЕНЕНО: GLSL версия 330 (под Core 3.3) ===
+    // ИЗМЕНЕНО: GLSL версия 330 (под Core 3.3)
     const char* glsl_version = "#version 330";
 
     GLFWwindow* window = glfwCreateWindow(1100, 750,
@@ -252,7 +250,7 @@ int main() {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    // === ДОБАВЛЕНО: инициализация GLAD сразу после MakeContextCurrent ===
+    // ДОБАВЛЕНО: инициализация GLAD сразу после MakeContextCurrent
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         fprintf(stderr, "Failed to initialize GLAD\n");
         glfwDestroyWindow(window);
@@ -272,7 +270,7 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // --- UI scale: auto-detect через GLFW + override из _app_config.json ---
+    // UI scale: auto-detect через GLFW + override из _app_config.json
     {
         float xs = 1.0f, ys = 1.0f;
         if (GLFWmonitor* mon = glfwGetPrimaryMonitor())

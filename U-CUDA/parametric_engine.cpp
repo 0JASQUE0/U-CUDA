@@ -1,10 +1,8 @@
 ﻿#include "parametric_engine.h"
-//
 // Phase 2: реальная реализация. NVRTC компилит наш шаблон, который через #include
 // подтягивает cudaLibrary.cuh / cudaLibrary.cu из NonLinAnal. User's KRS определена
 // в шаблоне, default-версия в NonLinAnal закрыта #ifndef __CUDACC_RTC__.
 // Host-оркестрация мирорит bifurcation1D из hostLibrary.cu (без chunking для MVP).
-//
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -26,13 +24,10 @@
 #include <sstream>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// Глобальный PeakConfig — единственный источник истины для GUI-настраиваемых
-// knobs configCUDA.h. Пишет UI-поток (Settings), читают worker-потоки при
-// компиляции NVRTC и в CPU-ветках, поэтому под мьютексом. Epoch бампается на
-// каждую запись и входит в cache-key модулей (см. hash_key) — иначе после
-// смены настройки переиспользовался бы старый PTX.
-// ---------------------------------------------------------------------------
+// Глобальный PeakConfig — единственный источник истины для GUI-настраиваемых knobs
+// configCUDA.h. Пишет UI-поток (Settings), читают worker-потоки при компиляции NVRTC и в
+// CPU-ветках, поэтому под мьютексом. Epoch бампается на каждую запись и входит в cache-key
+// модулей (hash_key) — иначе после смены настройки переиспользовался бы старый PTX.
 namespace {
 std::mutex g_peak_mu;
 PeakConfig g_peak_cfg;
@@ -53,13 +48,10 @@ uint64_t peak_config_epoch() {
     return g_peak_epoch;
 }
 
-// ---------------------------------------------------------------------------
-// FMA-контракция для NVRTC (см. развёрнутый комментарий в parametric_engine.h).
-// Флаг всегда передаётся ЯВНО, даже когда совпадает с дефолтом NVRTC: молчаливое
-// «по умолчанию» уже один раз разъехалось между картами и портретами.
-// Хранится атомарно, а не под мьютексом: одно bool-поле, читателям нужен только
-// свежий снимок, а порядок относительно других настроек роли не играет.
-// ---------------------------------------------------------------------------
+// FMA-контракция для NVRTC (развёрнуто в parametric_engine.h). Флаг всегда передаётся ЯВНО,
+// даже совпадая с дефолтом NVRTC: молчаливое «по умолчанию» уже один раз разъехалось между
+// картами и портретами. Хранится атомарно, а не под мьютексом: одно bool-поле, читателям нужен
+// только свежий снимок.
 namespace {
 std::atomic<bool> g_nvrtc_fmad{ true };
 }  // namespace
@@ -74,27 +66,21 @@ const char* nvrtc_fmad_opt() {
     return get_nvrtc_fmad() ? "--fmad=true" : "--fmad=false";
 }
 
-// ---------------------------------------------------------------------------
-// gpu_free_budget — свободная память GPU с применённым запасом; общий первый
-// шаг всех расчётов чанкования. Возвращает false, если cudaMemGetInfo не
-// доступен (вызывающие превращают это в свой fail("cudaMemGetInfo failed")).
+// gpu_free_budget — свободная память GPU с применённым запасом; общий первый шаг всех расчётов
+// чанкования. Возвращает false, если cudaMemGetInfo недоступен (вызывающие превращают это в
+// свой fail("cudaMemGetInfo failed")).
 //
-// `reserve` — доля свободной памяти, которую анализу разрешено занять. Единого
-// значения нет, и сведено оно намеренно НЕ было:
-//     0.92  — bifurcation 1D/2D, DFT и h-свипы. Сверху ещё SAFETY_FACTOR 0.9 и
-//             вычет memConstants у вызывающего, т.е. фактически ~0.83.
-//     0.9   — basins.
-//     0.5   — LLE 1D/2D и fastsync-сетка.
-//     1/16  — LS 1D/2D. Здесь per-system память ~N (буферы возмущённых
-//             траекторий), но 1/16 всё равно куда агрессивнее, чем следует
-//             из одной этой оценки.
-//
-// Происхождение 0.5 и 1/16 не восстановлено: это следы отладки проблем с
-// памятью, а не расчёт. Поэтому числа сохранены как есть — поднять их значит
-// рискнуть теми же проблемами. Менять только после замера на реальных сетках;
-// выигрыш при этом реальный (LS сейчас использует шестнадцатую часть памяти и
-// делает в разы больше чанков, чем мог бы).
-// ---------------------------------------------------------------------------
+// `reserve` — доля свободной памяти, которую анализу разрешено занять; единого значения нет и
+// сведено оно намеренно НЕ было:
+//     0.92  — bifurcation 1D/2D, DFT и h-свипы (сверху ещё SAFETY_FACTOR 0.9 и вычет
+//             memConstants у вызывающего, т.е. фактически ~0.83)
+//     0.9   — basins
+//     0.5   — LLE 1D/2D и fastsync-сетка
+//     1/16  — LS 1D/2D: per-system память там ~N (буферы возмущённых траекторий), но 1/16 всё
+//             равно агрессивнее, чем следует из одной этой оценки.
+// Происхождение 0.5 и 1/16 не восстановлено — это следы отладки проблем с памятью, а не расчёт,
+// поэтому числа сохранены как есть. Менять только после замера на реальных сетках; выигрыш
+// реальный (LS сейчас берёт шестнадцатую часть памяти и делает в разы больше чанков).
 bool gpu_free_budget(double reserve, size_t& out_bytes) {
     size_t freeMemory = 0, totalMemory = 0;
     if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return false;
@@ -109,44 +95,33 @@ constexpr int kBlockSize         = 32;     // как в NonLinAnal::bifurcation1
 constexpr int kMaxAmountOfX      = 32;
 constexpr int kMaxAmountOfValues = 64;
 
-// ---------------------------------------------------------------------------
-// Зеркало constexpr-констант configCUDA.h. Сам заголовок сюда не включается —
-// он читается как ТЕКСТ и уходит в NVRTC (см. src_configCUDA_h), поэтому
-// значения дублируются литералами, как уже сделано в run_bif1d (blockSize_setup
-// и др.). При правке configCUDA.h эти значения надо править вместе с ним.
-//
-// Peak-knobs (doCalculatePeaks / eps_* / peak_threshold / max_amount_of_peaks)
-// здесь больше НЕ дублируются: они настраиваются из GUI, и CPU-ветки читают их
-// через get_peak_config(). Заодно ушло расхождение — kEpsFixedPoint был 1e-8
-// против 1e-6 в configCUDA.h, из-за чего CPU-ветка ловила fixed point не там,
-// где GPU.
-// ---------------------------------------------------------------------------
+// Зеркало constexpr-констант configCUDA.h. Сам заголовок сюда не включается — он читается как
+// ТЕКСТ и уходит в NVRTC (src_configCUDA_h), поэтому значения дублируются литералами, как уже
+// сделано в run_bif1d. При правке configCUDA.h эти значения надо править вместе с ним.
+// Peak-knobs (doCalculatePeaks / eps_* / peak_threshold / max_amount_of_peaks) здесь больше НЕ
+// дублируются: они настраиваются из GUI, и CPU-ветки читают их через get_peak_config(). Заодно
+// ушло расхождение — kEpsFixedPoint был 1e-8 против 1e-6 в configCUDA.h, из-за чего CPU-ветка
+// ловила fixed point не там, где GPU.
 constexpr int    kCheckInterval      = 100;      // CHECK_INTERVAL
 constexpr double kPi    = 3.1415926535897932384626433832795;
 constexpr double kEuler = 2.7182818284590452353602874713527;
 
-// ---------------------------------------------------------------------------
 // Число шагов интегрирования из времени: transient_time / h, NT / h и т.п.
 //
-// Прямой (int)(t / h) — это UB, когда частное не влезает в int: при мелком шаге
-// TT=1e5 и h=1e-5 дают 1e10. На практике получался мусор или отрицательное
-// число, то есть транзиент молча не отрабатывал вовсе — худший вид ошибки,
-// потому что расчёт выглядел успешным.
+// Прямой (int)(t / h) — UB, когда частное не влезает в int: TT=1e5 при h=1e-5 дают 1e10. На
+// практике получался мусор или отрицательное число, т.е. транзиент молча не отрабатывал вовсе —
+// худший вид ошибки, потому что расчёт выглядел успешным.
 //
-// Две версии, и выбор между ними НЕ косметический: он определяется типом
-// приёмника. Значение уходит в ядро через void*[] в cuLaunchKernel, где тип
-// обязан совпадать с параметром БАЙТ В БАЙТ: компилятор там ничего не проверит,
-// рассогласование соберётся молча и развалит буфер аргументов на запуске.
-//   ..._size_t — число ШАГОВ интегрирования. Вся цепочка расширена до size_t:
-//                параметры ядер (amountOfPointsForSkip), device-функции
-//                loopCalculateDiscreteModel / _int (amountOfIterations) вместе
-//                со счётчиками их циклов, и CPU-порт cpu_loop_model. Потолка
-//                нет — это и есть рабочая версия.
-//   ..._int    — остался ровно под settleBlocks = TT / NT: это число NT-БЛОКОВ,
-//                а не шагов, оно живёт в host-side счётчиках и на порядки
-//                меньше. Потолок INT_MAX здесь недостижим на осмысленных
+// Две версии, и выбор между ними НЕ косметический: он определяется типом приёмника. Значение
+// уходит в ядро через void*[] в cuLaunchKernel, где тип обязан совпадать с параметром БАЙТ В
+// БАЙТ — компилятор там ничего не проверит, рассогласование соберётся молча и развалит буфер
+// аргументов на запуске.
+//   ..._size_t — число ШАГОВ интегрирования; вся цепочка расширена до size_t (параметры ядер
+//                amountOfPointsForSkip, device-функции loopCalculateDiscreteModel / _int со
+//                счётчиками циклов, CPU-порт cpu_loop_model). Потолка нет — рабочая версия.
+//   ..._int    — только под settleBlocks = TT / NT: это число NT-БЛОКОВ, а не шагов, оно живёт в
+//                host-side счётчиках и на порядки меньше. INT_MAX здесь недостижим на осмысленных
 //                входах, но каст всё равно идёт через проверку, а не вслепую.
-// ---------------------------------------------------------------------------
 static inline size_t steps_from_time_size_t(double t, double h)
 {
     if (!(h > 0.0) || !(t > 0.0)) return 0;
@@ -163,16 +138,11 @@ static inline int steps_from_time_int(double t, double h)
     return (s >= 2147483647.0) ? 2147483647 : (int)s;
 }
 
-// ---------------------------------------------------------------------------
-// Порт loopCalculateDiscreteModel_int (cudaLibrary.cu:782) на CPU.
-//
-// Отличие одно: там размерность — compile-time AMOUNTOFX, здесь она приходит
-// параметром (в NVRTC-сборке AMOUNTOFX как раз и раскрывается в amountOfX, так
-// что численно это одно и то же).
-//
-// Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point,
-// 0 = unbound). Проверка расходимости — раз в kCheckInterval итераций, как на GPU.
-// ---------------------------------------------------------------------------
+// Порт loopCalculateDiscreteModel_int (cudaLibrary.cu) на CPU. Отличие одно: там размерность —
+// compile-time AMOUNTOFX, здесь она приходит параметром (в NVRTC-сборке AMOUNTOFX как раз
+// раскрывается в amountOfX, т.е. численно это одно и то же).
+// Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point, 0 = unbound). Проверка
+// расходимости — раз в kCheckInterval итераций, как на GPU.
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
@@ -218,14 +188,10 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
     return REGIME_OSCILLATION;
 }
 
-// ---------------------------------------------------------------------------
-// Порт peakFinder (cudaLibrary.cu:1503) на один блок данных.
-//
-// Индексация здесь блок-локальная (startDataIndex == 0): CPU-ветка обрабатывает
-// точки свипа потоково и держит один блок, а не матрицу nPts x record_steps.
-// Логика — построчная копия, включая параболическую интерполяцию, сдвиг пиков
-// влево на один и пересчёт timeOfPeaks в межпиковые интервалы.
-// ---------------------------------------------------------------------------
+// Порт peakFinder (cudaLibrary.cu) на один блок данных. Индексация здесь блок-локальная
+// (startDataIndex == 0): CPU-ветка обрабатывает точки свипа потоково и держит один блок, а не
+// матрицу nPts x record_steps. Логика — построчная копия, включая параболическую интерполяцию,
+// сдвиг пиков влево на один и пересчёт timeOfPeaks в межпиковые интервалы.
 int cpu_peak_finder(const numb* data, size_t amountOfPoints,
                     numb* outPeaks, numb* timeOfPeaks, numb h)
 {
@@ -297,12 +263,10 @@ int cpu_peak_finder(const numb* data, size_t amountOfPoints,
     return amountOfPeaks;
 }
 
-// ---------------------------------------------------------------------------
 // Генератор случайных чисел — побайтовая копия stub'а из шаблонов
 // kernels/lle1d.template.cu (splitmix64-инициализация + LCG). Копия, а не
 // повторная реализация: направления начального возмущения обязаны совпадать
 // с GPU-веткой, иначе первые точки λ разошлись бы из-за разного «щупа».
-// ---------------------------------------------------------------------------
 // Значение свипа в точке j continuation-цепочки. Одна формула на все три
 // анализа (Bif/LLE/LS) и на оба устройства — GPU-ядра считают её же.
 // reverse — идём от hi к lo (гистерезис), log_scale — логарифмическая сетка.
@@ -338,25 +302,18 @@ float cpu_curand_uniform(CpuRandState* s) {
     return (float)(((s->state >> 40) & 0xFFFFFFULL) + 1ULL) / 16777216.0f;
 }
 
-// ---------------------------------------------------------------------------
 // run_bif1d_continuation_cpu — CPU-двойник run_bif1d_continuation.
 //
-// Зачем вообще: GPU-версия гоняет ВЕСЬ свип в ОДНОМ потоке (kernel стартует с
-// gridDim = blockDim = 1, см. bifurcation1d_cont.template.cu) — continuation
-// последователен по построению, каждая точка стартует с конечного x[]
-// предыдущей, и распараллелить это нельзя, не сломав гистерезис. Одиночный
-// GPU-поток на зависимой FP64-цепочке — заведомо медленное железо.
+// Зачем: GPU-версия гоняет ВЕСЬ свип в ОДНОМ потоке (gridDim = blockDim = 1, см.
+// bifurcation1d_cont.template.cu) — continuation последователен по построению, каждая точка
+// стартует с конечного x[] предыдущей, и распараллелить это нельзя, не сломав гистерезис.
+// Одиночный GPU-поток на зависимой FP64-цепочке — заведомо медленное железо.
+// КРС компилируется в нативную функцию шага через krs_cpu.h: это работает и для custom, и для
+// встроенных схем (req.krs_body в обоих случаях обычный C — у встроенных вывод codegen_scheme).
 //
-// КРС компилируется в нативную функцию шага через krs_cpu.h. Это работает и для
-// custom схем, и для встроенных: req.krs_body в обоих случаях обычный C (у
-// встроенных — вывод codegen_scheme).
-//
-// Два отличия от GPU-двойника, оба в лучшую сторону:
-//   * память — один блок траектории вместо матрицы nPts x record_steps
-//     (GPU держит её трижды: d_data + d_outPeaks + d_timeOfPeaks);
-//   * отмена и прогресс работают на каждой точке свипа, а не только до
-//     запуска монолитного kernel'а.
-// ---------------------------------------------------------------------------
+// Два отличия от GPU-двойника, оба в лучшую сторону: память — один блок траектории вместо
+// матрицы nPts x record_steps (GPU держит её трижды: d_data + d_outPeaks + d_timeOfPeaks); отмена
+// и прогресс работают на каждой точке свипа, а не только до запуска монолитного kernel'а.
 Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) {
     Bifurcation1DResult res;
     auto fail = [&](const std::string& msg) -> Bifurcation1DResult& {
@@ -485,21 +442,14 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     return res;
 }
 
-// ---------------------------------------------------------------------------
-// run_bif1d_cpu — CPU-порт КЛАССИЧЕСКОГО (без continuation) 1D-свипа, двойник
-// run_bif1d. Точки независимы: каждая стартует с одних и тех же НУ и базовых
-// параметров, поэтому цепочки, как в run_bif1d_continuation_cpu, здесь нет.
-//
-// Флаги повторяют связку calculateDiscreteModelCUDA + peakFinderCUDA: kernel
-// пишет checker = REGIME_* транзиента, основной участок считается только при
-// OSCILLATION или FIXED_POINT (см. cudaLibrary.cu:1065), а peakFinderCUDA
-// пропускает FP и UNBOUND, оставляя их коды в массиве. Continuation-ветка
-// теперь ведёт себя так же (раньше она метила unbound как -1).
-//
-// Свипуемая величина — параметр, НУ или сам шаг h, как на GPU. Сетка берётся
-// из cont_sweep_value (reverse только у continuation), как у CPU-веток
-// LLE/LS/DFT.
-// ---------------------------------------------------------------------------
+// run_bif1d_cpu — CPU-порт КЛАССИЧЕСКОГО (без continuation) 1D-свипа, двойник run_bif1d. Точки
+// независимы: каждая стартует с одних и тех же НУ и базовых параметров, цепочки здесь нет.
+// Флаги повторяют связку calculateDiscreteModelCUDA + peakFinderCUDA: kernel пишет
+// checker = REGIME_* транзиента, основной участок считается только при OSCILLATION или
+// FIXED_POINT, а peakFinderCUDA пропускает FP и UNBOUND, оставляя их коды в массиве.
+// Continuation-ветка теперь ведёт себя так же (раньше метила unbound как -1).
+// Свипуемая величина — параметр, НУ или сам шаг h, как на GPU; сетка берётся из cont_sweep_value
+// (reverse только у continuation), как у CPU-веток LLE/LS/DFT.
 Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     Bifurcation1DResult res;
     auto fail = [&](const std::string& msg) -> Bifurcation1DResult& {
@@ -694,25 +644,21 @@ std::string replace_all(std::string s, const std::string& from, const std::strin
 }
 
 std::string hash_key(const std::string& krs_body, int amountOfX) {
-    // peak_config_epoch(): knobs configCUDA.h уходят в NVRTC как #define, т.е.
-    // при их смене тот же КРС даёт другой PTX. Без epoch в ключе все кэши
-    // модулей отдали бы старый модуль, и настройка не применилась бы до
-    // перезапуска приложения.
-    // fmad — то же самое, но через опцию компиляции, а не #define. Здесь в ключ
-    // идёт САМО значение, а не счётчик поколений: флаг бинарный, поэтому
-    // возврат к прежнему положению переиспользует уже собранный модуль вместо
-    // лишней перекомпиляции.
+    // peak_config_epoch(): knobs configCUDA.h уходят в NVRTC как #define, т.е. при их смене тот
+    // же КРС даёт другой PTX. Без epoch в ключе кэши модулей отдали бы старый модуль, и настройка
+    // не применилась бы до перезапуска приложения.
+    // fmad — то же самое, но через опцию компиляции. Здесь в ключ идёт САМО значение, а не счётчик
+    // поколений: флаг бинарный, поэтому возврат к прежнему положению переиспользует уже собранный
+    // модуль вместо лишней перекомпиляции.
     return std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
            std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch()) +
            ":fm" + (get_nvrtc_fmad() ? "1" : "0");
 }
 
-// Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот
-// оборачивает свои дефолты в #ifndef). Один инжект покрывает все 14 шаблонов —
-// они тянут configCUDA.h транзитивно через cudaLibrary.cuh.
-//
-// Приведение к (numb) внутри макроса безопасно: разворачивается он только в
-// местах использования (cudaLibrary.cu), т.е. заведомо после typedef numb.
+// Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот оборачивает свои
+// дефолты в #ifndef). Один инжект покрывает все 14 шаблонов — они тянут configCUDA.h транзитивно
+// через cudaLibrary.cuh. Приведение к (numb) внутри макроса безопасно: разворачивается он только
+// в местах использования (cudaLibrary.cu), т.е. заведомо после typedef numb.
 std::string peak_config_defines() {
     const PeakConfig c = get_peak_config();
     std::ostringstream o;
@@ -738,12 +684,11 @@ std::string cu_err(CUresult r) {
 // Для 1D-бифуркации valueNumber всегда 0, поэтому просто линейная интерполяция.
 // Нужна для расчёта значения параметра в CSV (host-side).
 inline double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
-    // Одна арифметика с ядром — ucuda_node_value (configCUDA.h). Раньше здесь
-    // стояло lo + (hi-lo)*idx/(n-1): при idx = nPts-1 это не давало РОВНО hi,
-    // и CSV сообщал параметр, в котором точка не считалась. Вырожденный
-    // nPts == 1 теперь тоже как в ядре (hi, а не lo).
-    // Касты явные: при numb = float сетка обязана считаться во float — ровно
-    // так, как её увидит ядро (ranges уходят туда через to_numb).
+    // Одна арифметика с ядром — ucuda_node_value (configCUDA.h). Раньше здесь стояло
+    // lo + (hi-lo)*idx/(n-1): при idx = nPts-1 это не давало РОВНО hi, и CSV сообщал параметр, в
+    // котором точка не считалась. Вырожденный nPts == 1 теперь тоже как в ядре (hi, а не lo).
+    // Касты явные: при numb = float сетка обязана считаться во float — ровно так, как её увидит
+    // ядро (ranges уходят туда через to_numb).
     return (double)ucuda_node_value((int)idx, nPts, (numb)lo, (numb)hi);
 }
 
@@ -757,32 +702,23 @@ inline double getValueByIdx_log_local(size_t idx, int nPts, double lo, double hi
     return (double)ucuda_node_value_log((int)idx, nPts, (numb)lo, (numb)hi);
 }
 
-// ---------------------------------------------------------------------------
 // run_lle1d_cpu — LLE(param) на CPU. Один код обслуживает два режима.
 //
-// continuation = false (классический свип):
-//   построчный порт LLEKernelCUDA (cudaLibrary.cu:2486) — то, что GPU делает в
-//   каждом потоке. Каждая точка независима: x сбрасывается на initial_conditions,
-//   щуп берётся из RNG с subsequence = индекс точки (ровно как idx в kernel'е),
-//   прогревается transient_time, дальше цикл Бенеттина. Нужен для проверки
-//   CPU-ядра против GPU и для счёта без GPU.
+// continuation = false (классический свип): построчный порт LLEKernelCUDA — то, что GPU делает в
+//   каждом потоке. Точки независимы: x сбрасывается на initial_conditions, щуп берётся из RNG с
+//   subsequence = индекс точки (ровно как idx в kernel'е), прогревается transient_time, дальше
+//   цикл Бенеттина. Нужен для сверки CPU-ядра с GPU и для счёта без GPU.
 //
-// continuation = true:
-//   точки выстроены в цепочку. Переносится не только траектория x[], но и САМ
-//   «щуп» y[]: к концу точки он уже развёрнут вдоль направления максимального
-//   растяжения, и следующей точке не нужно разворачивать его заново из
-//   случайного направления — кривая lambda(param) выходит глаже. GPU-двойника
-//   у этого режима нет и не будет: цепочка последовательна по построению, на
-//   GPU она выродилась бы в один поток.
-//   Прогрев (transient_time) отрабатывается на КАЖДОЙ точке, но начиная со
-//   второй идёт NT-блоками с перенормировкой — щуп остаётся прицепленным и не
-//   теряет ориентацию. Так поле transient_time сохраняет прежний смысл, а
-//   результаты остаются сравнимы с классикой.
+// continuation = true: точки выстроены в цепочку, переносится не только траектория x[], но и САМ
+//   щуп y[] — к концу точки он уже развёрнут вдоль направления максимального растяжения, и
+//   следующей точке не надо разворачивать его заново из случайного направления, отчего кривая
+//   lambda(param) выходит глаже. GPU-двойника у режима нет и не будет: цепочка последовательна по
+//   построению и выродилась бы в один поток. Прогрев отрабатывается на КАЖДОЙ точке, но начиная
+//   со второй идёт NT-блоками с перенормировкой — щуп остаётся прицепленным и не теряет
+//   ориентацию, поэтому transient_time сохраняет прежний смысл, а результаты сравнимы с классикой.
 //
-// Внутри точки алгоритм в обоих режимах одинаков: Бенеттин с одним вектором
-// возмущения, перенормировка каждые NT единиц времени,
-// lambda = sum(log(|dX|/eps)) / tMax.
-// ---------------------------------------------------------------------------
+// Внутри точки алгоритм в обоих режимах одинаков: Бенеттин с одним вектором возмущения,
+// перенормировка каждые NT единиц времени, lambda = sum(log(|dX|/eps)) / tMax.
 LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     LLE1DResult res;
     auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
@@ -956,11 +892,9 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     return res;
 }
 
-// ---------------------------------------------------------------------------
 // Оконная функция для DFT — та же, что build_window в Impl (0=None,
 // 1=Hanning, 2=Hamming). Дублируется здесь, потому что при h-свипе длина блока
 // своя в каждой точке и окно приходится строить внутри цикла.
-// ---------------------------------------------------------------------------
 void cpu_build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
     out.resize((size_t)sizeOfBlock);
     if (window_type == 0) { std::fill(out.begin(), out.end(), (numb)1); return; }
@@ -971,13 +905,9 @@ void cpu_build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) 
         for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] = (numb)0.5 * ((numb)1.0 - std::cos(gamma * (numb)n));
 }
 
-// ---------------------------------------------------------------------------
-// Порт DFT_custom (cudaLibrary.cu:1698) на один блок.
-//
-// Рекуррентный поворот вектора (cos_n, sin_n) вместо cos/sin на каждой
-// итерации, со сбросом на точное значение раз в RESET_INTERVAL — как на GPU,
-// включая float-точность в самом сбросе (там cosf/sinf).
-// ---------------------------------------------------------------------------
+// Порт DFT_custom (cudaLibrary.cu) на один блок. Рекуррентный поворот вектора (cos_n, sin_n)
+// вместо cos/sin на каждой итерации, со сбросом на точное значение раз в RESET_INTERVAL — как на
+// GPU, включая float-точность в самом сбросе (там cosf/sinf).
 void cpu_dft_block(const numb* data, int sizeOfBlock, const numb* window,
                    int nFreq, numb freq_lo, numb freq_hi, bool logFreqAxis,
                    numb h, numb* akcos, numb* bksin)
@@ -1020,11 +950,9 @@ void cpu_dft_block(const numb* data, int sizeOfBlock, const numb* window,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Порты projectionOperator и gramSchmidtProcess (cudaLibrary.cu:2832 и :2848).
 // Оригиналы объявлены __device__ __host__ и уже работают с runtime-размерностью,
 // но живут в .cu под nvcc — из обычного .cpp их не подключить, поэтому копия.
-// ---------------------------------------------------------------------------
 void cpu_projection_operator(const numb* a, const numb* b, numb* minuend, int n) {
     numb numerator = (numb)0, denominator = (numb)0;
     for (int i = 0; i < n; ++i) {
@@ -1054,20 +982,13 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullpt
     }
 }
 
-// ---------------------------------------------------------------------------
 // run_ls1d_cpu — спектр Ляпунова LS(param) на CPU, оба режима (см. run_lle1d_cpu).
-//
-// Внутри точки — построчный порт LSKernelCUDA (cudaLibrary.cu:2878): Бенеттин с
-// N векторами возмущения и ортогонализацией Грама-Шмидта каждые NT единиц
-// времени; lambda_k = sum(log(denominators[k]/eps)) / tMax.
-//
-// В continuation переносятся траектория x[] и ВСЕ N щупов y[] — они к концу
-// точки уже выстроены вдоль собственных направлений растяжения, и следующей
-// точке не нужно раскручивать их заново из случайного базиса.
-//
-// Отличие от LLE только в размере состояния: там один щуп, здесь N штук плюс
-// ортогонализация. Точка соответственно дороже примерно в N раз.
-// ---------------------------------------------------------------------------
+// Внутри точки — построчный порт LSKernelCUDA: Бенеттин с N векторами возмущения и
+// ортогонализацией Грама-Шмидта каждые NT единиц времени,
+// lambda_k = sum(log(denominators[k]/eps)) / tMax.
+// В continuation переносятся траектория x[] и ВСЕ N щупов y[] — к концу точки они уже выстроены
+// вдоль собственных направлений растяжения. Отличие от LLE только в размере состояния (там один
+// щуп, здесь N плюс ортогонализация), поэтому точка дороже примерно в N раз.
 LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     LS1DResult res;
     auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
@@ -1244,18 +1165,13 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     return res;
 }
 
-// ---------------------------------------------------------------------------
 // run_dft1d_cpu — 1D DFT на CPU, оба режима (см. run_lle1d_cpu).
-//
-// continuation = false: каждая точка независима, x сбрасывается на
-//   initial_conditions (при IC-свипе свипуемая координата подменяется).
-// continuation = true: x[] переносится с предыдущей точки — как в
-//   Bifurcation1D, тангенциальных векторов здесь нет.
-//
-// Внутри точки: transient, запись блока writable_var, окно, DFT
-// (см. cpu_dft_block — порт DFT_custom). При h-свипе число сэмплов и окно
-// пересчитываются под шаг точки; буфер выделен под худший случай.
-// ---------------------------------------------------------------------------
+// continuation = false: точки независимы, x сбрасывается на initial_conditions (при IC-свипе
+//   свипуемая координата подменяется). continuation = true: x[] переносится с предыдущей точки,
+//   как в Bifurcation1D — тангенциальных векторов здесь нет.
+// Внутри точки: transient, запись блока writable_var, окно, DFT (cpu_dft_block — порт
+// DFT_custom). При h-свипе число сэмплов и окно пересчитываются под шаг точки; буфер выделен под
+// худший случай.
 Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     Dft1DResult res;
     auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
@@ -1396,8 +1312,6 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-
 struct ParametricEngine::Impl {
     bool       inited   = false;
     CUcontext  context  = nullptr;
@@ -1409,11 +1323,11 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cu;
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
-    // curand_kernel.h перехвачен inline-stub'ом в каждом template'е (kernels/*.cu)
-    // + `#define CURAND_KERNEL_H_` блокирует реальный header. Virtual header'а
-    // здесь больше нет — иначе он повторно объявлял бы curandState_t.
-    // src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw. Сырой
-    // текст держим отдельно, чтобы пересборка при смене Settings не лезла на диск.
+    // curand_kernel.h перехвачен inline-stub'ом в каждом template'е (kernels/*.cu), а
+    // `#define CURAND_KERNEL_H_` блокирует реальный header; virtual header'а здесь больше нет —
+    // иначе он повторно объявлял бы curandState_t.
+    // src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw: сырой текст держим отдельно,
+    // чтобы пересборка при смене Settings не лезла на диск.
     std::string src_configCUDA_h_raw;
     std::string src_configCUDA_h;
     std::string src_template;        // bifurcation1d.template.cu
@@ -1712,24 +1626,16 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // build_module — общая часть всех compile_*_if_needed: подстановка
-    // плейсхолдеров в шаблон, NVRTC-компиляция с едиными опциями, добыча
-    // mangled-имён и загрузка PTX. У вызывающих различаются только шаблон, имя
-    // исходника и набор символов; всё остальное живёт здесь в одном экземпляре.
-    //
-    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и
-    // когда --fmad стал настройкой, флаг проставили в nvrtc_engine.cpp, а копии
-    // здесь остались на дефолте NVRTC — карта и фазовый портрет считались
-    // разной арифметикой, и на фрактальной границе траектория уходила в другой
-    // аттрактор (см. nvrtc_fmad_opt).
-    //
-    // Требует выставленного контекста и уже загруженных источников
-    // (load_sources). При успехе out_module загружен, а lowered содержит по
-    // одному имени на каждый вход name_exprs в том же порядке. Символы,
-    // объявленные extern "C", в name_exprs передавать не нужно — их имена не
-    // мангаются и берутся из модуля напрямую.
-    // =========================================================================
+    // build_module — общая часть всех compile_*_if_needed: подстановка плейсхолдеров в шаблон,
+    // NVRTC-компиляция с едиными опциями, добыча mangled-имён и загрузка PTX. У вызывающих
+    // различаются только шаблон, имя исходника и набор символов.
+    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и когда --fmad стал
+    // настройкой, флаг проставили в nvrtc_engine.cpp, а копии здесь остались на дефолте NVRTC —
+    // карта и фазовый портрет считались разной арифметикой, и на фрактальной границе траектория
+    // уходила в другой аттрактор (см. nvrtc_fmad_opt).
+    // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
+    // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
+    // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
     bool build_module(const std::string& tmpl,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
@@ -1877,26 +1783,19 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu:165-655.
-    // Идея: брать оригинальный код почти как есть, чтобы при обновлениях
-    // NonLinAnal перенос был механическим diff → patch. Изменения, которые
-    // ОБЯЗАТЕЛЬНЫ (помечены комментарием [ADAPT]):
-    //   - <<<grid, block, shared>>>(...) → cuLaunchKernel(CUfunction, ...) —
-    //     потому что наш kernel-модуль скомпилирован NVRTC'ом во время работы
-    //     и недоступен по compile-time символу
-    //   - gpuErrorCheck(...) — у NonLinAnal он зовёт exit() при ошибке; здесь
-    //     заменено локальным макросом BIF_CHECK, который пишет в res.error и
-    //     возвращает результат с cleanup'ом
+    // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu. Идея: брать оригинальный код
+    // почти как есть, чтобы при обновлениях NonLinAnal перенос был механическим diff → patch.
+    // ОБЯЗАТЕЛЬНЫЕ изменения (помечены комментарием [ADAPT]):
+    //   - <<<grid, block, shared>>>(...) → cuLaunchKernel(CUfunction, ...): наш kernel-модуль
+    //     скомпилирован NVRTC'ом во время работы и недоступен по compile-time символу
+    //   - gpuErrorCheck(...) у NonLinAnal зовёт exit(); здесь локальный BIF_CHECK, который пишет
+    //     в res.error и возвращает результат с cleanup'ом
     //   - OUT_FILE_PATH приходит из req.csv_output_path (пусто = CSV не пишем)
-    //   - continuation_bif1D == 1 ветка отключена — она использует host-side
-    //     calculateDiscreteModel (default Lorenz из cudaLibrary.cu:120), а не
-    //     user's KRS; для нашего адаптера это не сработает
-    //   - calculate_mean_med_freq / calculate_mean_and_variance отключены —
-    //     соответствующие kernel-ы (MeanAndMedianFreqCUDA и т.д.) не входят
-    //     в NVRTC-bundle. Включим по мере необходимости
-    //   - Результат пишется в Bifurcation1DResult (память + CSV), не в файл
-    // =========================================================================
+    //   - ветка continuation_bif1D == 1 отключена: она использует host-side
+    //     calculateDiscreteModel (default Lorenz), а не user's KRS
+    //   - calculate_mean_med_freq / calculate_mean_and_variance отключены — их kernel-ы не входят
+    //     в NVRTC-bundle
+    //   - результат пишется в Bifurcation1DResult (память + CSV), не в файл
     Bifurcation1DResult run_bif1d(const Bifurcation1DRequest& req) {
         // Continuation требует sequential x-carry — это совсем другой путь
         // (single-thread kernel). Отказываем при IC-sweep (не имеет смысла:
@@ -1927,7 +1826,7 @@ struct ParametricEngine::Impl {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
-        // ---- валидация ----
+        // валидация
         if (req.krs_body.empty())                                   return fail("krs_body пуст");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
@@ -1968,20 +1867,18 @@ struct ParametricEngine::Impl {
         // Log-масштаб сетки (любой sweep target) -- бит 0, т.к. в 1D одна ось.
         const int logAxisMask = req.log_scale ? 1 : 0;
 
-        // ---- init + контекст ----
+        // init + контекст
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
 
-        // ---- компиляция или cache hit ----
+        // компиляция или cache hit
         if (!compile_if_needed(req.krs_body, req.amountOfX,
                                req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
-        // ====================================================================
         // ПОРТ NonLinAnal::bifurcation1D (hostLibrary.cu:165-655).
         // Локальные имена мапятся на аргументы функции NonLinAnal для удобства
         // дифа — слева name из req, справа name как в hostLibrary.
-        // ====================================================================
         const double tMax                       = req.t_max;
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
@@ -1991,9 +1888,9 @@ struct ParametricEngine::Impl {
         numb   ranges[2]                        = { (numb)req.param_lo, (numb)req.param_hi };
         // Sweep target:
         //   param-sweep → indicesOfMutVars[0] = 1-based индекс параметра (a[]),
-        //                 par_or_var_arg = true  → kernel пишет в localValues.
+        //                 par_or_var_arg = true  → kernel пишет в localValues
         //   var-sweep   → indicesOfMutVars[0] = 0-based индекс переменной (X[]),
-        //                 par_or_var_arg = false → kernel пишет в localX.
+        //                 par_or_var_arg = false → kernel пишет в localX
         int    indicesOfMutVars[1]              = { req.sweep_over_var
                                                     ? req.var_sweep_index
                                                     : req.param_index };
@@ -2013,7 +1910,7 @@ struct ParametricEngine::Impl {
         // [ADAPT] continuation_bif1D, calculate_mean_med_freq отключены —
         // см. комментарий в шапке функции.
 
-        // --- amountOfPointsInBlock / amountOfPointsForSkip — порт строк 196-200 NL ---
+        // amountOfPointsInBlock / amountOfPointsForSkip — порт строк 196-200 NL
         // dt-sweep: буфер/sizeOfBlock должен вмещать худший случай (минимальный
         // h в диапазоне = param_lo после lo<=hi нормализации = больше всего
         // шагов); per-thread реальное число шагов пересчитывается в кернеле и
@@ -2025,7 +1922,7 @@ struct ParametricEngine::Impl {
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
-        // --- Memory budget (порт строк 202-244 NL) ---
+        // Memory budget (порт строк 202-244 NL)
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
@@ -2046,23 +1943,21 @@ struct ParametricEngine::Impl {
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
-        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
-        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
-        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
-        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
-        // считался нормально. Зато при n_pts < 32 округление давало 0, и Run
-        // падал с сообщением про нехватку памяти, которая была ни при чём.
+        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32) здесь больше нет:
+        // ядра сами отсекают лишние потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
+        // кратным 32 не бывает и всегда считался нормально. Зато при n_pts < 32 округление давало
+        // 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
         if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        // --- Host buffers (порт строк 257-264 NL) ---
+        // Host buffers (порт строк 257-264 NL)
         // h_data/h_meanFreq/h_medianFreq/h_localX/h_localValues нужны только для
         // continuation_bif1D и mean/median — мы их не используем.
         std::vector<numb> h_outPeaks   (nPtsLimiter * (size_t)amountOfPointsInBlock);
         std::vector<numb> h_timeOfPeaks(nPtsLimiter * (size_t)amountOfPointsInBlock);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
 
-        // --- Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq) ---
+        // Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq)
         numb* d_data              = nullptr;
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -2119,7 +2014,7 @@ struct ParametricEngine::Impl {
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_actualIterations");
 
-        // --- H2D констант (порт строк 314-319 NL) ---
+        // H2D констант (порт строк 314-319 NL)
         BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,   1 * sizeof(int),                                   cudaMemcpyHostToDevice), "memcpy d_indices");
         BIF_CHECK(cudaMemcpy(d_initialConditions, initialConditions, (size_t)amountOfInitialConditions * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_ic");
@@ -2145,7 +2040,7 @@ struct ParametricEngine::Impl {
         res.snapshot.range_lo      = ranges[0];
         res.snapshot.range_hi      = ranges[1];
 
-        // --- Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан) ---
+        // Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан)
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
             data_export::write_bif1d_config(cfg, res.snapshot);
@@ -2154,14 +2049,14 @@ struct ParametricEngine::Impl {
             trunc.close();
         }
 
-        // --- результат-аккумулятор (для GUI) ---
+        // результат-аккумулятор (для GUI)
         res.n_pts        = nPts;
         res.record_steps = amountOfPointsInBlock;
         res.flags.assign(nPts, 0);
         res.bifurcation_points.assign(nPts, {});
         res.peak_times.assign(nPts, {});
 
-        // --- Главный цикл (порт строк 396-630 NL) ---
+        // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF_CANCEL_CHECK();
             if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
@@ -2253,7 +2148,7 @@ struct ParametricEngine::Impl {
             BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
             BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
-            // --- CSV + аккумуляция результата (порт строк 574-608 NL) ---
+            // CSV + аккумуляция результата (порт строк 574-608 NL)
             std::ofstream out;
             if (!OUT_FILE_PATH.empty()) {
                 out.open(OUT_FILE_PATH, std::ios::app);
@@ -2266,11 +2161,10 @@ struct ParametricEngine::Impl {
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 int    npeaks     = h_amountOfPeaks[k];
 
-                // h-свип: peakFinderCUDA умножает разности индексов на ОДИН h
-                // (у kernel'а он общий на запуск), а у каждой точки шаг свой —
-                // при свипе по h это param_val. Межпиковый интервал линеен по
-                // h, поэтому точная поправка — домножить на отношение шагов.
-                // Значения самих пиков от h не зависят и не правятся.
+                // h-свип: peakFinderCUDA умножает разности индексов на ОДИН h (у kernel'а он общий
+                // на запуск), а у каждой точки шаг свой — при свипе по h это param_val. Межпиковый
+                // интервал линеен по h, поэтому точная поправка — домножить на отношение шагов;
+                // значения самих пиков от h не зависят и не правятся.
                 const double time_scale = req.sweep_over_h ? (param_val / h) : 1.0;
 
                 int n = npeaks;
@@ -2315,11 +2209,9 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_lle_if_needed — отдельная компиляция для LLE-шаблона.
     // Ключ кэша = hash(krs_body + amountOfX + "lle"), чтобы PTX от bif1d
     // не путался с LLE даже при одной и той же KRS.
-    // =========================================================================
     bool compile_lle_if_needed(const std::string& krs_body, int amountOfX,
                                int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
@@ -2348,20 +2240,16 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_lle_1d — порт NonLinAnal::LLE1D из hostLibrary.cu:2261-2511. Та же
-    // diff-friendly стратегия, что у run_bif1d: оригинальное имена слева,
-    // req-имена справа. [ADAPT]-комментарии — отличия от NonLinAnal.
-    //   - <<<>>> → cuLaunchKernel (NVRTC-модуль).
-    //   - gpuErrorCheck → локальный LLE_CHECK с cleanup'ом, без exit().
-    //   - OUT_FILE_PATH — req.csv_output_path; пусто = без файла.
-    //   - Результат пишется в LLE1DResult (память + опц. CSV).
-    // =========================================================================
+    // run_lle_1d — порт NonLinAnal::LLE1D из hostLibrary.cu, той же diff-friendly стратегией, что
+    // run_bif1d (оригинальные имена слева, req-имена справа). [ADAPT] — отличия от NonLinAnal:
+    // <<<>>> → cuLaunchKernel (NVRTC-модуль); gpuErrorCheck → локальный LLE_CHECK с cleanup'ом,
+    // без exit(); OUT_FILE_PATH — req.csv_output_path (пусто = без файла); результат пишется в
+    // LLE1DResult (память + опц. CSV).
     LLE1DResult run_lle_1d(const LLE1DRequest& req) {
         LLE1DResult res;
         auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
-        // ---- валидация ----
+        // валидация
         if (req.krs_body.empty())                                   return fail("krs_body пуст");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
@@ -2410,7 +2298,7 @@ struct ParametricEngine::Impl {
         if (!compile_lle_if_needed(req.krs_body, req.amountOfX,
                                    req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
-        // ===== ПОРТ NonLinAnal::LLE1D (hostLibrary.cu:2261-2511) =====
+        // ПОРТ NonLinAnal::LLE1D (hostLibrary.cu:2261-2511)
         const double tMax                       = req.t_max;
         const double NT                         = req.NT;
         const int    nPts                       = req.n_pts;
@@ -2616,13 +2504,11 @@ struct ParametricEngine::Impl {
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 double v          = h_lleResult[k];
 
-                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось).
-                // Наружу отдаём NaN, а не сырой sentinel: 999 — легитимное
-                // значение λ по типу, поэтому любой потребитель, забывший
-                // сверить flags[], молча рисовал/экспортировал выброс на 999.
-                // NaN отсекается через !isfinite (и в GUI, и в min/max), т.е.
-                // безопасен по умолчанию. flags[] остаётся источником истины
-                // о ПРИЧИНЕ отсутствия точки.
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось). Наружу отдаём
+                // NaN, а не сырой sentinel: 999 — легитимное по типу значение λ, поэтому любой
+                // потребитель, забывший сверить flags[], молча рисовал выброс на 999. NaN
+                // отсекается через !isfinite (и в GUI, и в min/max), т.е. безопасен по умолчанию;
+                // flags[] остаётся источником истины о ПРИЧИНЕ отсутствия точки.
                 const bool diverged = (v == 999.0 || v == -999.0);
                 if (diverged) v = std::numeric_limits<double>::quiet_NaN();
 
@@ -2643,12 +2529,10 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_lle_2d_if_needed — отдельный PTX-кэш для LLE-2D. Структура та
     // же, что у compile_lle_if_needed; отличия только в исходнике шаблона
     // (lle2d.template.cu) и в маркере ключа кэша (":lle2d"). Сам kernel
     // (LLEKernelCUDA) — тот же, ловится по тому же имени.
-    // =========================================================================
     bool compile_lle_2d_if_needed(const std::string& krs_body, int amountOfX,
                                   int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
@@ -2675,19 +2559,12 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_lle_2d — λ(p1, p2) на квадратной сетке. Порт NonLinAnal::LLE2D
-    // (hostLibrary.cu:2514) на NVRTC-engine. Отличия от LLE1D:
-    //   - ranges[4], indicesOfMutVars[2];
-    //   - dimension=2;
-    //   - chunking по cell'ам (n_pts × n_pts может не влезть в память за раз);
-    //   - результат — плоский row-major массив n_pts × n_pts.
-    // Идея par_or_var (compile-time):
-    //   - mixed_mode=true → par_or_var=2 (см. cudaLibrary.cu:2439);
-    //   - иначе оба свипа одного типа: par_or_var=1 если обе оси param,
-    //     0 если обе оси IC; смешанные комбинации без mixed_mode не поддержаны
-    //     (validator отказывает — kernel-ветка под это не предусмотрена).
-    // =========================================================================
+    // run_lle_2d — λ(p1, p2) на квадратной сетке, порт NonLinAnal::LLE2D на NVRTC-engine.
+    // Отличия от LLE1D: ranges[4], indicesOfMutVars[2], dimension=2, chunking по ячейкам
+    // (n_pts × n_pts может не влезть в память за раз), результат — плоский row-major массив.
+    // par_or_var (compile-time): mixed_mode=true → 2; иначе оба свипа одного типа — 1 если обе оси
+    // param, 0 если обе IC. Смешанные комбинации без mixed_mode не поддержаны (validator
+    // отказывает — kernel-ветки под это нет).
     LLE2DResult run_lle_2d(const LLE2DRequest& req) {
         LLE2DResult res;
         auto fail = [&](const std::string& msg) -> LLE2DResult& { res.error = msg; return res; };
@@ -2733,11 +2610,10 @@ struct ParametricEngine::Impl {
             return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
 
         if (req.sweep_over_h || req.sweep_over_h_2) {
-            // Ровно одна ось -- h; другая -- param либо IC. Кернел-слоты X/Y
-            // совпадают с пользовательскими X/Y напрямую -- swap_xy тут не нужен
-            // (в отличие от смешанного param/IC случая ниже: там swap существует
-            // только потому что kernel-ветка par_or_var==2 захардкожена под одну
-            // конкретную пару слотов; здесь par_or_var симметричен по слотам).
+            // Ровно одна ось — h, другая param либо IC. Кернел-слоты X/Y совпадают с
+            // пользовательскими напрямую, swap_xy тут не нужен: в смешанном param/IC случае ниже
+            // swap существует только потому, что ветка par_or_var==2 захардкожена под одну
+            // конкретную пару слотов, а здесь par_or_var симметричен по слотам.
             hSweepAxis = req.sweep_over_h ? 0 : 1;
             bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
             par_or_var = other_is_var ? 0 : 1;
@@ -3069,9 +2945,7 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_ls_if_needed — третий шаблон. Ключ кэша помечен ":ls".
-    // =========================================================================
     bool compile_ls_if_needed(const std::string& krs_body, int amountOfX,
                               int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
@@ -3098,15 +2972,10 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_ls_1d — порт NonLinAnal::LS1D (hostLibrary.cu:2698-2868). Той же
-    // стратегией, что run_bif1d / run_lle_1d. Per-system результат — вектор
-    // длины amountOfX (один Ляпунов на каждую переменную).
-    //
-    // Memory budget per thread у LS значительно больше: shared = (3*N + 2*N^2
-    // + nValues) * sizeof(numb) * blockSize. blockSize подбирается из 32K
-    // shared-лимита (как делает NonLinAnal).
-    // =========================================================================
+    // run_ls_1d — порт NonLinAnal::LS1D той же стратегией, что run_bif1d / run_lle_1d.
+    // Per-system результат — вектор длины amountOfX (один Ляпунов на переменную).
+    // Memory budget на поток у LS значительно больше: shared = (3*N + 2*N^2 + nValues) *
+    // sizeof(numb) * blockSize, и blockSize подбирается из 32K shared-лимита (как в NonLinAnal).
     LS1DResult run_ls_1d(const LS1DRequest& req) {
         LS1DResult res;
         auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
@@ -3374,10 +3243,8 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_ls_2d_if_needed — отдельный шаблон ls2d.template.cu, тот же kernel
     // LSKernelCUDA. Ключ кэша помечен ":ls2d:" — изолирован от ":ls:" slot'а.
-    // =========================================================================
     bool compile_ls_2d_if_needed(const std::string& krs_body, int amountOfX,
                                  int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
@@ -3404,13 +3271,10 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_ls_2d — спектр Ляпунова на сетке n_pts × n_pts. Гибрид run_ls_1d
-    // (per-system буфер размером N экспонент) и run_lle_2d (swap_xy логика,
-    // chunking по cell'ам). На каждую ячейку kernel возвращает N значений; D2H
-    // копирует cur_limiter * N doubles, host распаковывает по плоскостям —
+    // run_ls_2d — спектр Ляпунова на сетке n_pts × n_pts: гибрид run_ls_1d (per-system буфер на N
+    // экспонент) и run_lle_2d (swap_xy, chunking по ячейкам). Kernel возвращает N значений на
+    // ячейку; D2H копирует cur_limiter * N doubles, host распаковывает по плоскостям —
     // values[k*n*n + iy*n + ix] = k-я экспонента в ячейке (ix, iy).
-    // =========================================================================
     LS2DResult run_ls_2d(const LS2DRequest& req) {
         LS2DResult res;
         auto fail = [&](const std::string& msg) -> LS2DResult& { res.error = msg; return res; };
@@ -3769,10 +3633,8 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_bif1d_cont_if_needed — отдельный модуль (single-thread sequential
     // continuation kernel + peakFinderCUDA). Cache key с суффиксом :cont.
-    // =========================================================================
     bool compile_bif1d_cont_if_needed(const std::string& krs_body, int amountOfX,
                                       std::string& err) {
         cuCtxSetCurrent(context);
@@ -3782,11 +3644,10 @@ struct ParametricEngine::Impl {
 
         if (!load_sources(err)) return false;
 
-        // bifurcation1dContinuationKernel — extern "C" (имя не мангается),
-        // поэтому в name_exprs не идёт и берётся из модуля напрямую.
-        // peakFinderCUDA — обычный C++ символ, нужен mangled-вариант.
-        // DFT_custom — тоже обычный C++ символ, уже в этом модуле (шаблон
-        // #include'ит cudaLibrary.cu целиком); нужен run_dft_1d continuation-ветке.
+        // bifurcation1dContinuationKernel — extern "C" (имя не мангается), поэтому в name_exprs не
+        // идёт и берётся из модуля напрямую. peakFinderCUDA и DFT_custom — обычные C++ символы,
+        // нужны mangled-варианты; DFT_custom уже в этом модуле (шаблон #include'ит cudaLibrary.cu
+        // целиком) и нужен continuation-ветке run_dft_1d.
         CUmodule mod = nullptr;
         std::vector<std::string> mg;
         if (!build_module(src_template_cont, "bifurcation1d_cont.cu",
@@ -3806,12 +3667,10 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
     // compile_simple_cont_if_needed — общий компилятор для одноядерных
     // continuation-модулей (LLE и LS). От compile_bif1d_cont_if_needed
     // отличается только тем, что регистрировать mangled-имена не нужно:
     // единственный нужный символ объявлен extern "C".
-    // =========================================================================
     bool compile_simple_cont_if_needed(CachedSimpleContModule& slot,
                                        const std::string& tmpl,
                                        const char* kernel_name,
@@ -3843,12 +3702,10 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
     // run_lle1d_continuation_gpu / run_ls1d_continuation_gpu — GPU-двойники
     // CPU-веток (см. run_lle1d_cpu / run_ls1d_cpu). Тот же «костыль», что у
     // Bifurcation1D: single-thread kernel, потому что continuation — цепочка.
     // Медленнее CPU, нужны для сверки и как привычный способ считать на GPU.
-    // =========================================================================
     LLE1DResult run_lle1d_continuation_gpu(const LLE1DRequest& req) {
         LLE1DResult res;
         auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
@@ -4127,20 +3984,15 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // -------------------------------------------------------------------------
-    // run_dft1d_hsweep_gpu — классический (без continuation) свип по шагу h.
-    //
-    // Отдельно от run_dft1d_classical, потому что связка calculateDiscreteModelCUDA
-    // + DFT_custom тут неприменима: DFT_custom берёт одну длину блока, одно
-    // готовое окно и один шаг дискретизации на весь запуск, а под h-свипом все
-    // три — per-point. Ядро dft1dHSweepKernel делает траекторию и DFT в одном
-    // месте, поток на точку (в отличие от однопоточного dft1dContinuationKernel:
+    // run_dft1d_hsweep_gpu — классический (без continuation) свип по шагу h. Отдельно от
+    // run_dft1d_classical, потому что связка calculateDiscreteModelCUDA + DFT_custom тут
+    // неприменима: DFT_custom берёт одну длину блока, одно готовое окно и один шаг дискретизации
+    // на весь запуск, а под h-свипом все три — per-point. Ядро dft1dHSweepKernel делает траекторию
+    // и DFT в одном месте, поток на точку (в отличие от однопоточного dft1dContinuationKernel:
     // здесь точки независимы).
-    //
-    // Буферы считаются по worst case — наименьшему h диапазона, дающему больше
-    // всего сэмплов; так же поступают run_dft1d_cpu и run_dft1d_continuation_gpu.
-    // Chunking по nPtsLimiter — как в run_dft1d_classical / run_bif1d.
-    // -------------------------------------------------------------------------
+    // Буферы считаются по worst case — наименьшему h диапазона, дающему больше всего сэмплов; так
+    // же поступают run_dft1d_cpu и run_dft1d_continuation_gpu. Chunking по nPtsLimiter — как в
+    // run_dft1d_classical / run_bif1d.
     Dft1DResult run_dft1d_hsweep_gpu(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
@@ -4402,11 +4254,9 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // run_bif1d_continuation — single-thread sequential. Каждый параметр
     // стартует с конечного x[] предыдущего. Direction (forward/reverse)
     // обрабатывается в kernel'е. PeakFinderCUDA вызывается из того же модуля.
-    // =========================================================================
     Bifurcation1DResult run_bif1d_continuation(const Bifurcation1DRequest& req) {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
@@ -4493,7 +4343,7 @@ struct ParametricEngine::Impl {
                            (size_t)req.amountOfX * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_baseX");
         C_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        // --- Launch continuation kernel ---
+        // Launch continuation kernel
         int    nPts_arg              = nPts;
         numb lo_arg                = req.param_lo;
         numb hi_arg                = req.param_hi;
@@ -4531,7 +4381,7 @@ struct ParametricEngine::Impl {
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
-        // --- Launch peakFinderCUDA на полученные данные ---
+        // Launch peakFinderCUDA на полученные данные
         // Сигнатура: (numb* data, size_t sizeOfBlock, int amountOfBlocks,
         //             int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
         size_t sizeOfBlock_s = (size_t)amountOfPointsInBlock;
@@ -4541,11 +4391,10 @@ struct ParametricEngine::Impl {
         // double уехали бы первые 4 байта, и межпиковые интервалы разъехались
         // бы на порядки. В классическом пути тот же аргумент объявлен numb.
         numb timeStep        = (numb)(req.h * (double)req.pre_scaller);
-        // actualIterations — 8-й параметр peakFinderCUDA: реальная длина блока
-        // каждой точки (при h-свипе она своя, буфер выделен под худший случай).
-        // Раньше аргумент не передавался вовсе: cuLaunchKernel читал 8-й слот за
-        // концом peak_args[], kernel получал мусорный указатель и разыменовывал
-        // его — "illegal memory access" сразу после peak-kernel'а.
+        // actualIterations — 8-й параметр peakFinderCUDA: реальная длина блока каждой точки (при
+        // h-свипе она своя, буфер выделен под худший случай). Раньше аргумент не передавался вовсе:
+        // cuLaunchKernel читал 8-й слот за концом peak_args[], kernel получал мусорный указатель и
+        // разыменовывал его — "illegal memory access" сразу после peak-kernel'а.
         void* peak_args[] = {
             &d_data, &sizeOfBlock_s, &nBlocks,
             &d_amountOfPeaks, &d_outPeaks, &d_timeOfPeaks, &timeStep,
@@ -4559,7 +4408,7 @@ struct ParametricEngine::Impl {
                    "cuLaunchKernel(peak)");
         C_CHECK(cudaDeviceSynchronize(), "sync after peak");
 
-        // --- D2H ---
+        // D2H
         std::vector<numb> h_outPeaks   ((size_t)nPts * (size_t)amountOfPointsInBlock);
         std::vector<numb> h_timeOfPeaks((size_t)nPts * (size_t)amountOfPointsInBlock);
         std::vector<int>    h_amountOfPeaks((size_t)nPts);
@@ -4568,7 +4417,7 @@ struct ParametricEngine::Impl {
         C_CHECK(cudaMemcpy(h_amountOfPeaks.data(), d_amountOfPeaks, nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy out h_amountOfPeaks");
         C_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
-        // --- Заполнение Result ---
+        // Заполнение Result
         res.n_pts        = nPts;
         res.record_steps = amountOfPointsInBlock;
         res.param_lo     = req.param_lo;
@@ -4606,11 +4455,9 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // run_dft_1d — 1D DFT (порт bifurcation_DFT_1D из hostLibrary.cu:4900-5315).
     // Диспетчер: continuation требует param-sweep (та же причина, что и у
     // run_bif1d) — делегирует в run_dft1d_continuation, иначе classical.
-    // =========================================================================
     Dft1DResult run_dft_1d(const Dft1DRequest& req) {
         // Ограничения и порядок — как у Bif/LLE/LS 1D: continuation требует
         // param- или h-свипа (цепочка по IC бессмысленна), log-сетка по
@@ -4647,14 +4494,12 @@ struct ParametricEngine::Impl {
         return run_dft1d_classical(req);
     }
 
-    // Общая для classical/continuation: строит оконную функцию длиной
-    // sizeOfBlock. DFT_custom принимает готовое окно аргументом (НЕ считает
-    // его сам) — см. cudaLibrary.cu:DFT_custom. Три формулы совпадают с теми,
-    // что в hostLibrary.cu::bifurcation_DFT_1D закомментированы/активны как
-    // взаимоисключающие альтернативы (строки 4984-4989):
-    //   0 = None (rectangular, "h_window[n] = 1.0")
+    // Общая для classical/continuation: строит оконную функцию длиной sizeOfBlock. DFT_custom
+    // принимает готовое окно аргументом и НЕ считает его сам. Три формулы совпадают с теми, что в
+    // hostLibrary.cu::bifurcation_DFT_1D лежат как взаимоисключающие альтернативы:
+    //   0 = None (rectangular, h_window[n] = 1.0)
     //   1 = Hanning (default — активная строка в hostLibrary.cu)
-    //   2 = Hamming (закомментированная строка в hostLibrary.cu)
+    //   2 = Hamming (закомментированная строка там же)
     static void build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
         out.resize((size_t)sizeOfBlock);
         if (window_type == 0) {
@@ -4671,17 +4516,15 @@ struct ParametricEngine::Impl {
         }
     }
 
-    // -------------------------------------------------------------------------
     // run_dft1d_classical — порт classical-ветки bifurcation_DFT_1D. Реюзает
     // cached.kernel_traj (calculateDiscreteModelCUDA, тот же PTX-кэш что и
     // run_bif1d) для генерации сырых траекторий, затем cached.kernel_dft
     // (DFT_custom) вместо peakFinderCUDA. Chunked по nPtsLimiter как run_bif1d.
-    // -------------------------------------------------------------------------
     Dft1DResult run_dft1d_classical(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
-        // ---- валидация (как run_bif1d + n_freq/freq range) ----
+        // валидация (как run_bif1d + n_freq/freq range)
         if (req.krs_body.empty())                                   return fail("krs_body пуст");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
@@ -4743,11 +4586,10 @@ struct ParametricEngine::Impl {
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
-        // --- Memory budget: как run_bif1d, но выход DFT (AkCOS/BkSIN,
-        // nPtsLimiter*n_freq каждый) обычно намного меньше, чем outPeaks/
-        // timeOfPeaks (nPtsLimiter*amountOfPointsInBlock каждый) — n_freq
-        // почти всегда << amountOfPointsInBlock. d_window — константа,
-        // не масштабируется с nPtsLimiter.
+        // Memory budget: как run_bif1d, но выход DFT (AkCOS/BkSIN, nPtsLimiter*n_freq каждый)
+        // обычно намного меньше, чем outPeaks/timeOfPeaks (nPtsLimiter*amountOfPointsInBlock) —
+        // n_freq почти всегда << amountOfPointsInBlock. d_window константен и с nPtsLimiter не
+        // масштабируется.
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
@@ -4770,11 +4612,8 @@ struct ParametricEngine::Impl {
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)            nPtsLimiter = (size_t)nPts;
-        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
-        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
-        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
-        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
-        // считался нормально. Зато при n_pts < 32 округление давало 0, и Run
+        // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
+        // run_bif1d: ядра сами отсекают лишние потоки, а при n_pts < 32 округление давало 0, и Run
         // падал с сообщением про нехватку памяти, которая была ни при чём.
         if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
@@ -4915,11 +4754,10 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = writableVar;
             numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = !req.sweep_over_var;
-            // h-свип сюда не доходит: run_dft_1d уводит его в run_dft1d_hsweep_gpu
-            // (DFT_custom принимает одну длину блока, одно окно и один шаг на весь
-            // запуск — под per-point h этого не хватает). Здесь ось всегда param/IC,
-            // поэтому hSweepAxis выключен, а actualIterations не нужен: длина блока
-            // одна на весь запуск, в отличие от run_bif1d, где его читает
+            // h-свип сюда не доходит: run_dft_1d уводит его в run_dft1d_hsweep_gpu (DFT_custom
+            // берёт одну длину блока, одно окно и один шаг на весь запуск — под per-point h этого
+            // мало). Здесь ось всегда param/IC, поэтому hSweepAxis выключен, а actualIterations не
+            // нужен: длина блока одна на весь запуск, в отличие от run_bif1d, где его читает
             // peakFinderCUDA.
             int    hSweepAxis_arg            = -1;
             numb transientTime_arg         = transientTime;
@@ -5030,14 +4868,10 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // -------------------------------------------------------------------------
-    // run_dft1d_continuation — реюзает bifurcation1dContinuationKernel как есть
-    // (он уже пишет полную decimated-траекторию в d_data + флаги в
-    // d_amountOfPeaks для ВСЕГО nPts за один монолитный запуск — см. kernels/
-    // bifurcation1d_cont.template.cu). Второй проход — DFT_custom вместо
-    // peakFinderCUDA, над теми же буферами. Монолитно (без chunking), как и
-    // run_bif1d_continuation.
-    // -------------------------------------------------------------------------
+    // run_dft1d_continuation — реюзает bifurcation1dContinuationKernel как есть: он уже пишет
+    // полную decimated-траекторию в d_data и флаги в d_amountOfPeaks для ВСЕГО nPts за один
+    // монолитный запуск (kernels/bifurcation1d_cont.template.cu). Второй проход — DFT_custom вместо
+    // peakFinderCUDA над теми же буферами. Монолитно, без chunking, как run_bif1d_continuation.
     Dft1DResult run_dft1d_continuation(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
@@ -5133,7 +4967,7 @@ struct ParametricEngine::Impl {
                            (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_window");
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        // --- Launch continuation kernel (тот же, что у run_bif1d_continuation) ---
+        // Launch continuation kernel (тот же, что у run_bif1d_continuation)
         // У DFT1D нет h-свипа и log-сетки по параметру, поэтому соответствующие
         // флаги ядра выключены, а actualIterations не нужен (длина блока одна
         // на все точки) — передаём nullptr, ядро это допускает.
@@ -5172,7 +5006,7 @@ struct ParametricEngine::Impl {
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
-        // --- DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks ---
+        // DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks
         int    sizeOfBlock_i   = amountOfPointsInBlock;  // int, не size_t — см. gotcha #3
         int    nFreq_int       = nFreq;
         // numb, а не double — DFT_custom ждёт numb h; см. пояснение в
@@ -5254,11 +5088,9 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // compile_bif2d_if_needed — шаблон bifurcation2d.template.cu, три kernel'а:
     // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
     // Cache key: ":bif2d:" + par_or_var.
-    // =========================================================================
     bool compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
                                  int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
@@ -5287,17 +5119,15 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
     // run_bif2d — порт NonLinAnal::bifurcation2D (hostLibrary.cu:898-1724).
     // Три kernel'а: calculateDiscreteModelCUDA → peakFinderCUDA → dbscanCUDA.
     // Результат: число DBSCAN-кластеров на ячейку = период системы.
     // [ADAPT]: те же адаптации, что у run_bif1d + run_lle_2d (см. их комментарии).
-    // =========================================================================
     Bifurcation2DResult run_bif2d(const Bifurcation2DRequest& req) {
         Bifurcation2DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
 
-        // ---- валидация ----
+        // валидация
         if (req.krs_body.empty())                                    return fail("krs_body пуст");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
@@ -5310,7 +5140,7 @@ struct ParametricEngine::Impl {
         if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan должно быть > 0");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
 
-        // ---- par_or_var + swap_xy (та же логика что у run_lle_2d) ----
+        // par_or_var + swap_xy (та же логика что у run_lle_2d)
         auto check_param = [&](int p1based) -> bool {
             return p1based > 0 && p1based < (int)req.base_values.size();
         };
@@ -5358,14 +5188,11 @@ struct ParametricEngine::Impl {
                 }
                 idx_axis_y = 0;
             }
-            // Требование "> 0" относится ТОЛЬКО к оси, которая свипает h: это
-            // шаг интегрирования, на него ниже делит worstCaseH, и нулевой либо
-            // отрицательный шаг не считается. Вторая ось — параметр или НУ, и
-            // отрицательные значения там совершенно законны (свип sigma от -5
-            // до 5 к шагу отношения не имеет).
-            // Раньше условие требовало > 0 от ОБЕИХ осей и заворачивало такой
-            // прогон сообщением про h — то есть ограничение h-оси переносилось
-            // на соседнюю. У run_lle_2d / run_ls_2d этой проверки нет вовсе.
+            // Требование "> 0" относится ТОЛЬКО к оси, которая свипает h: это шаг интегрирования,
+            // на него ниже делит worstCaseH, и нулевой либо отрицательный шаг не считается. Вторая
+            // ось — параметр или НУ, где отрицательные значения совершенно законны (свип sigma от
+            // -5 до 5 к шагу отношения не имеет). Раньше условие требовало > 0 от ОБЕИХ осей и
+            // заворачивало такой прогон сообщением про h. У run_lle_2d / run_ls_2d проверки нет вовсе.
             const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
             const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
             if (h_lo <= 0.0 || h_hi <= 0.0)
@@ -5415,7 +5242,7 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
 
-        // ---- локальные переменные (порт hostLibrary.cu:bifurcation2D) ----
+        // локальные переменные (порт hostLibrary.cu:bifurcation2D)
         const int    nPts                       = req.n_pts;
         const double tMax                       = req.t_max;
         const double h                          = req.h;
@@ -5462,19 +5289,16 @@ struct ParametricEngine::Impl {
         size_t nPtsLimiter = (freeMemory - memConstants) / baseMemPerSystem;
         if (nPtsLimiter < (size_t)blockSize_setup) nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)             nPtsLimiter = total_cells;
-        // Округления вниз до кратного blockSize_setup (nPtsLimiter / 32 * 32)
-        // здесь больше нет. Смысла в нём не было: ядра сами отсекают лишние
-        // потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
-        // (nPts - originalNPtsLimiter * iter) кратным 32 не бывает и всегда
-        // считался нормально. Зато при число ячеек сетки < 32 округление давало 0, и Run
-        // падал с сообщением про нехватку памяти, которая была ни при чём.
+        // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
+        // run_bif1d: ядра сами отсекают лишние потоки, а при числе ячеек сетки < 32 округление
+        // давало 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
         if (nPtsLimiter == 0) return fail("сетка пуста (n_pts должно быть > 0)");
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        // ---- host buffers ----
+        // host buffers
         std::vector<int> h_dbscanResult(nPtsLimiter);
 
-        // ---- device buffers ----
+        // device buffers
         numb* d_data              = nullptr;
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -5584,7 +5408,7 @@ struct ParametricEngine::Impl {
             std::ofstream trunc(OUT_FILE_PATH); trunc.close();
         }
 
-        // ---- Главный цикл по чанкам (порт hostLibrary.cu:1212-1692) ----
+        // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF2D_CANCEL_CHECK();
             if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
@@ -5728,13 +5552,11 @@ struct ParametricEngine::Impl {
             }
         }
 
-        // Авто-нормализация colormap. Верх шкалы — по осцилляционным ячейкам
-        // (там значение = период), а низ опускаем до кода режима, если такие
-        // ячейки на карте есть: -1 (fixed point) и 0 (unbound) — это не
-        // "период -1/0", а отдельные состояния, и в res.values они лежат
-        // как есть. Раньше в шкалу шли только осцилляции, поэтому vmin был
-        // >= 1, и оба режима прижимались к самому дну — неотличимо от
-        // периода 1.
+        // Авто-нормализация colormap. Верх шкалы — по осцилляционным ячейкам (там значение =
+        // период), а низ опускаем до кода режима, если такие ячейки на карте есть: -1 (fixed point)
+        // и 0 (unbound) — это не «период -1/0», а отдельные состояния, и в res.values они лежат как
+        // есть. Раньше в шкалу шли только осцилляции, поэтому vmin был >= 1 и оба режима прижимались
+        // к самому дну — неотличимо от периода 1.
         double vmin =  std::numeric_limits<double>::infinity();
         double vmax = -std::numeric_limits<double>::infinity();
         bool has_fp = false, has_unbound = false;
@@ -5762,13 +5584,10 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
-    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует
-    // 5 kernel'ов: calculateDiscreteModelCUDA, avgPeakFinderCUDA, и три DBSCAN-
-    // kernel'а (cluster, search_fixed_points, search_clear_points). Cache-ключ
-    // помечен `:basins`. par_or_var=0 захардкоден в шаблоне, поэтому ключа не
-    // требует — только хэш krs_body/amountOfX.
-    // =========================================================================
+    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
+    // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
+    // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
+    // захардкожен в шаблоне, поэтому ключа не требует — только хэш krs_body/amountOfX.
     bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
                                   std::string& err) {
         cuCtxSetCurrent(context);
@@ -5802,15 +5621,10 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // =========================================================================
-    // run_basins — порт NonLinAnal::basinsOfAttraction (hostLibrary.cu:3235) +
-    // CUDA_dbscan host-loop (hostLibrary.cu:3066). Структура:
-    //   1. traj+avg_peak chunked loop по cell'ам;
-    //   2. host-DBSCAN: цикл по точкам, на каждой итерации запускаются
-    //      search_fixed/search_clear + cluster_kernel с расширением через
-    //      neighbors-список.
-    // Возвращает: basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
-    // =========================================================================
+    // run_basins — порт NonLinAnal::basinsOfAttraction + CUDA_dbscan host-loop (hostLibrary.cu).
+    // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) host-DBSCAN — цикл по точкам, на
+    // каждой итерации search_fixed/search_clear + cluster_kernel с расширением через
+    // neighbors-список. Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
     BasinsResult run_basins(const BasinsRequest& req) {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
@@ -5996,7 +5810,7 @@ struct ParametricEngine::Impl {
             write_ranges(OUT_FILE_PATH + "_3.csv");
         }
 
-        // ---- 1. Цикл по chunk'ам: traj-kernel + avg-peak-kernel ----
+        // 1. Цикл по chunk'ам: traj-kernel + avg-peak-kernel
         // Two-phase progress: phase 1 here (sim), phase 2 (DBSCAN) below. Each
         // phase reports its own 0..1 fraction; GUI shows the phase label.
         if (req.progress_phase) req.progress_phase->store(1, std::memory_order_relaxed);
@@ -6014,11 +5828,10 @@ struct ParametricEngine::Impl {
             if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
-            // calculateDiscreteModelCUDA — 25 args (см. run_bif1d / run_bif2d).
-            // Basins не выставляет h-свип/лог-ось в BasinsRequest, поэтому здесь
-            // они всегда "выключены" — как и в run_dft1d_classical. actualIterations
-            // допускает nullptr (см. проверку в cudaLibrary.cu) и avgPeakFinderCUDA
-            // ниже его не читает.
+            // calculateDiscreteModelCUDA — 25 args (см. run_bif1d / run_bif2d). Basins не
+            // выставляет h-свип/лог-ось в BasinsRequest, поэтому здесь они всегда выключены — как и
+            // в run_dft1d_classical. actualIterations допускает nullptr (проверка в cudaLibrary.cu),
+            // и avgPeakFinderCUDA ниже его не читает.
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_int           = (int)cur_limiter;
             size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
@@ -6062,13 +5875,11 @@ struct ParametricEngine::Impl {
             // avgPeakFinderCUDA. d_data → outPeaks (in-place); d_intervals → timeOfPeaks.
             int sizeOfBlock_int = amountOfPointsInBlock;
             int amountOfBlocks  = (int)cur_limiter;
-            // ОБЯЗАТЕЛЬНО numb, а не double: cuLaunchKernel копирует аргументы
-            // побайтово по void*, не сверяя типы с сигнатурой. Параметр `h` у
-            // avgPeakFinderCUDA объявлен как numb, поэтому при numb=float отсюда
-            // уехали бы первые 4 байта double-представления: h=0.01 приходил в
-            // ядро как 89128.96, и межпиковые интервалы (разность индексов * h)
-            // получались порядка 1e6. При numb=double размеры совпадали, и баг
-            // не проявлялся.
+            // ОБЯЗАТЕЛЬНО numb, а не double: cuLaunchKernel копирует аргументы побайтово по void*,
+            // не сверяя типы с сигнатурой. Параметр `h` у avgPeakFinderCUDA объявлен как numb,
+            // поэтому при numb=float отсюда уехали бы первые 4 байта double-представления: h=0.01
+            // приходил в ядро как 89128.96, и межпиковые интервалы (разность индексов * h) выходили
+            // порядка 1e6. При numb=double размеры совпадали, и баг не проявлялся.
             numb h_peak         = (numb)(h * (double)preScaller);
             numb* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
             numb* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
@@ -6097,7 +5908,7 @@ struct ParametricEngine::Impl {
             BAS_CHECK(cudaDeviceSynchronize(), "sync after avg_peak");
         }
 
-        // ---- 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan) ----
+        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan)
         int blockSize_db = blockSize_setup;
         int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
         int amountOfData_int = (int)total_cells;
@@ -6107,13 +5918,12 @@ struct ParametricEngine::Impl {
         std::vector<int> h_neighbors(total_cells, 0);
         int h_amountOfNeighbors      = 0;
 
-        // Progress for DBSCAN phase: the outer loop runs once PER CLUSTER (early
-        // exits when all cells classified), so main_iter is a poor metric — only
-        // reaches ~10 vs total_cells in millions. Instead, after each cluster's
-        // expansion we count classified cells in d_dbscanResult and report
-        // that fraction. Throttled to >200 ms between scans so the overhead
-        // stays bounded on large grids (each scan ~4 MB D2H + linear scan per 1M
-        // cells, ~3-5 ms; with throttle the cost is at most ~5 scans/sec).
+        // Прогресс DBSCAN-фазы: внешний цикл идёт ОДИН РАЗ НА КЛАСТЕР (с ранним выходом, когда все
+        // ячейки классифицированы), поэтому main_iter — плохая метрика: он доходит до ~10 против
+        // миллионов ячеек. Вместо него после расширения каждого кластера считаем классифицированные
+        // ячейки в d_dbscanResult и репортим долю. Троттлинг >200 мс между сканами держит накладные
+        // расходы ограниченными на больших сетках (скан ~4 МБ D2H + линейный проход на 1М ячеек,
+        // ~3-5 мс; с троттлингом это максимум ~5 сканов в секунду).
         std::vector<int> h_dbscan_check(total_cells, 0);
         auto last_progress_scan = std::chrono::steady_clock::now() - std::chrono::seconds(1);
 
@@ -6146,12 +5956,11 @@ struct ParametricEngine::Impl {
                              "cuLaunchKernel(search_clear)");
                 BAS_CHECK(cudaDeviceSynchronize(), "sync search_clear");
                 BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
-                // All cells are classified — no new seed found, stop.
-                // NB: increment goes AFTER the clearIdx check. NonLinAnal's
-                // reference (hostLibrary.cu:3151) increments before the check
-                // and so reports one extra cluster, but it returns void and the
-                // count is never read; we expose n_clusters to the UI, so the
-                // off-by-one was visible as "4 clusters" with only 3 real ones.
+                // Все ячейки классифицированы — нового seed'а нет, останавливаемся.
+                // NB: инкремент идёт ПОСЛЕ проверки clearIdx. Референс NonLinAnal инкрементирует до
+                // неё и сообщает на один кластер больше, но он возвращает void и счётчик никто не
+                // читает; мы отдаём n_clusters в UI, где off-by-one был виден как «4 кластера» при
+                // трёх реальных.
                 if (clearIdx == -1) break;
                 ++amountOfClusters;
                 resultClusters = amountOfClusters;
@@ -6220,7 +6029,7 @@ struct ParametricEngine::Impl {
             }
         }
 
-        // ---- 3. D2H результаты ----
+        // 3. D2H результаты
         res.n_pts       = nPts;
         res.axis_x_lo   = req.axis_x_lo;
         res.axis_x_hi   = req.axis_x_hi;
@@ -6243,7 +6052,7 @@ struct ParametricEngine::Impl {
         }
         BAS_CHECK(cudaMemcpy(res.helpful_array.data(), d_helpfulArray, total_cells * sizeof(int),    cudaMemcpyDeviceToHost), "memcpy helpful_array");
 
-        // ---- 4. Сводки + CSV ----
+        // 4. Сводки + CSV
         res.n_clusters       = amountOfClusters;
         res.min_cluster_idx  = amountOfNegativeClusters;
 
@@ -6291,13 +6100,10 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
-    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич.
-    // Зеркалит фазу 2 (host-DBSCAN) из run_basins, но пропускает sim-фазу:
-    // d_avgPeaks/d_avgIntervals/d_helpfulArray заливаются из request'а вместо
-    // выкатывания заново через avgPeakFinderCUDA. Мульты уже применены к
-    // загруженным фичам (см. run_basins фазу 1), поэтому здесь они не нужны.
-    // =========================================================================
+    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич. Зеркалит фазу 2
+    // (host-DBSCAN) из run_basins, но пропускает sim-фазу: d_avgPeaks/d_avgIntervals/d_helpfulArray
+    // заливаются из request'а вместо повторного прогона avgPeakFinderCUDA. Мульты уже применены к
+    // загруженным фичам (run_basins, фаза 1), поэтому здесь не нужны.
     BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req) {
         BasinsReclusterResult res;
         auto fail = [&](const std::string& msg) -> BasinsReclusterResult& {
@@ -6489,9 +6295,7 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // =========================================================================
     // FastSynchro — два режима.
-    // =========================================================================
 
     // Один helper для обоих режимов — параметризован шаблоном и списком
     // kernel-symbols. Ключ кэша включает все substituted-параметры
@@ -6551,7 +6355,7 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // ---- run_fastsync: dispatch по req.mode ----
+    // run_fastsync: dispatch по req.mode
     FastSyncResult run_fastsync(const FastSyncRequest& req) {
         FastSyncResult res;
         res.mode = req.mode;
@@ -6602,16 +6406,14 @@ struct ParametricEngine::Impl {
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
 
-        // Drain any sticky error state from previous bad launch (e.g. OOB в
-        // shared memory). Без этого cudaMalloc на старте мгновенно падает
-        // "illegal memory access" — это echo прошлой ошибки, а не текущей.
-        // (Если контекст реально corrupted — он восстановится только
-        // рестартом приложения; здесь только сбрасываем sticky-флаг для
-        // случаев, когда GPU ещё работоспособен.)
+        // Сбрасываем sticky-ошибку от прошлого неудачного запуска (например OOB в shared memory):
+        // без этого cudaMalloc на старте мгновенно падает с "illegal memory access", что является
+        // эхом прошлой ошибки, а не текущей. Реально повреждённый контекст восстановится только
+        // рестартом приложения — здесь лишь сброс флага для случаев, когда GPU ещё работоспособен.
         cudaGetLastError();
 
         if (req.mode == 0) {
-            // ===================== On Attractor =====================
+            // On Attractor
             if (req.t_max <= 0.0)         return fail("t_max должно быть > 0");
             if (req.transient_time < 0)   return fail("transient_time должно быть >= 0");
             if (req.window <= (numb)0.0)  return fail("window должно быть > 0");
@@ -6792,7 +6594,7 @@ struct ParametricEngine::Impl {
             return fail(err);
         }
         else {
-            // ======================== On Grid ========================
+            // On Grid
             if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
             if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
             if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
@@ -6809,13 +6611,12 @@ struct ParametricEngine::Impl {
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
             if (amountOfPointsInBlock <= 0) return fail("computed amountOfPointsInBlock <= 0");
 
-            // Transient (TT) — число шагов интегрирования на досадку, отдельно
-            // для master и для slave. Уходят в grid-ядро, которое досаживает
-            // каждую систему per-cell после grid-override (свипуемая сторона —
-            // из затравки своей ячейки, фиксированная — из одной точки).
-            // size_t, а не int: TT/h легко перерастает 2^31 (TT=1e5 при h=1e-5
-            // даёт 1e10) — на int это UB, на практике мусор/отрицательное, и
-            // транзиент молча пропадал. h > 0 уже проверен выше.
+            // Transient (TT) — число шагов интегрирования на досадку, отдельно для master и для
+            // slave. Уходят в grid-ядро, которое досаживает каждую систему per-cell после
+            // grid-override (свипуемая сторона — из затравки своей ячейки, фиксированная — из одной
+            // точки). size_t, а не int: TT/h легко перерастает 2^31 (TT=1e5 при h=1e-5 даёт 1e10) —
+            // на int это UB, на практике мусор или отрицательное, и транзиент молча пропадал.
+            // h > 0 уже проверен выше.
             auto skip_steps = [&](double tt, const char* what, size_t& out) -> bool {
                 out = 0;
                 if (tt <= 0.0) return true;
@@ -6878,12 +6679,11 @@ struct ParametricEngine::Impl {
                 FS_GCHECK(cudaMemcpy(d_kB,     to_numb(req.k_backward).data(), amountOfIC_int * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy kB");
             }
 
-            // Transient (TT) выполняется внутри grid-ядра, per-cell и своим
-            // временем для каждой системы (см. amountOfPointsForSkip* выше и
-            // комментарий в calculateDiscreteModelICCforFastSynchro). Раньше
-            // здесь стоял однопоточный пре-пасс fillFSTransientIC с ОДНИМ TT на
-            // обоих и только для нефиксируемой IC: свипуемая сторона стартовала
-            // сырой, а сам прогон в 1 поток на длинных TT ловил TDR.
+            // Transient выполняется внутри grid-ядра, per-cell и своим временем для каждой системы
+            // (см. amountOfPointsForSkip* выше и комментарий в
+            // calculateDiscreteModelICCforFastSynchro). Раньше здесь стоял однопоточный пре-пасс
+            // fillFSTransientIC с ОДНИМ TT на обоих и только для нефиксируемой IC: свипуемая сторона
+            // стартовала сырой, а прогон в один поток на длинных TT ловил TDR.
 
             size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             for (size_t i = 0; i < amountOfIteration; ++i) {
@@ -6921,11 +6721,10 @@ struct ParametricEngine::Impl {
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
-                // Shared memory: kernel объявляет `extern __shared__ numb s[]`
-                // и кладёт туда localX[amountOfIC] + localValues[amountOfValues]
-                // per thread. blockSize threads × (IC + values) × 8 байт. Без
-                // правильного размера → OOB в shared → illegal memory access,
-                // корраптящий весь CUDA-контекст (sticky).
+                // Shared memory: kernel объявляет `extern __shared__ numb s[]` и кладёт туда
+                // localX[amountOfIC] + localValues[amountOfValues] на поток, т.е. blockSize × (IC +
+                // values) × 8 байт. Без правильного размера — OOB в shared, illegal memory access и
+                // повреждённый (sticky) CUDA-контекст.
                 unsigned int shared_grid = (unsigned int)((amountOfIC_int + amountOfValues_int)
                                                           * sizeof(numb) * blockSize);
                 CUresult r = cuLaunchKernel(cached_fs_grid.kernel_fs_grid,
@@ -7011,8 +6810,6 @@ struct ParametricEngine::Impl {
         }
     }
 };
-
-// ---------------------------------------------------------------------------
 
 ParametricEngine::ParametricEngine()  : impl_(std::make_unique<Impl>()) {}
 ParametricEngine::~ParametricEngine() = default;

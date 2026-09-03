@@ -27,7 +27,7 @@
 #include <unordered_set>
 #include <vector>
 
-// ---- Именованные константы вместо магических чисел ----
+// Именованные константы вместо магических чисел
 // Значение, которым все хитмапы помечают «данных нет» (расходящаяся ячейка).
 // HeatmapView красит его в серый; одно и то же число в colored-1D, DFT и Basins.
 static constexpr double kSentinelNoData = 999.0;
@@ -82,13 +82,11 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
     return shade_of(ic_base_color(ic_index), vi, nv);
 }
 
-// ---- helpers: std::string <-> ImGui ----
-// Подпись комбинации переменных: x0 + pi*x1 + e*x2 — тот ряд, что ядро строит
-// при writable_var == -1 (cudaLibrary.cu, loopCalculateDiscreteModel_int), с
-// той же деградацией при dim < 3. Одна на все места, где комбинация
-// предлагается пользователю: Feature diagram и Time domain.
-// (draw_writable_var_combo держит свою копию — она старше и в этот заход не
-// трогалась.)
+// helpers: std::string <-> ImGui
+// Подпись комбинации переменных: x0 + pi*x1 + e*x2 — тот ряд, что строит ядро при
+// writable_var == -1 (loopCalculateDiscreteModel_int), с той же деградацией при
+// dim < 3. Одна на Feature diagram и Time domain; у draw_writable_var_combo своя
+// копия — она старше и в этот заход не трогалась.
 [[nodiscard]] static std::string combo_var_label(const std::vector<std::string>& vars) {
     if (vars.size() >= 3) return vars[0] + " + pi*" + vars[1] + " + e*" + vars[2];
     if (vars.size() == 2) return vars[0] + " + pi*" + vars[1];
@@ -111,13 +109,11 @@ static_assert(static_cast<double>(::pi) == num_parse_detail::kPi,
     return v;
 }
 
-// Скретч-буфер под ImGui::InputText*: ImGui пишет в сырой char*, а хранить
-// значение нам надо в std::string. Раньше КАЖДЫЙ такой виджет заводил свой
-// std::vector<char> на 1–4 КБ НА КАЖДОМ КАДРЕ — на панели с полусотней полей
-// это сотня heap-аллокаций в кадр впустую. Буфер один на поток и
-// переиспользуется: виджеты не вложены друг в друга, а ImGui копирует
-// содержимое к себе внутри вызова, поэтому дольше вызова буфер не нужен.
-// Ёмкость между кадрами сохраняется, так что assign/resize уже не аллоцируют.
+// Скретч-буфер под ImGui::InputText*: ImGui пишет в char*, а хранить значение надо
+// в std::string. Один на поток вместо vector<char> в каждом виджете на каждом кадре
+// (полсотни полей = сотня heap-аллокаций в кадр). Виджеты не вложены, а ImGui
+// копирует содержимое внутри вызова — дольше вызова буфер не нужен; ёмкость между
+// кадрами сохраняется, поэтому assign/resize уже не аллоцируют.
 static std::vector<char>& input_scratch(const std::string& str, size_t extra) {
     static thread_local std::vector<char> buf;
     buf.assign(str.begin(), str.end());
@@ -140,11 +136,10 @@ static bool InputTextStr(const char* label, std::string& str, float width = 0.0f
     return changed;
 }
 
-// Перехватываем символы ДО того, как ImGui положит их в буфер.
-// Так замена ',' → '.' происходит в момент ввода и НЕ модифицирует строку
-// между кадрами — иначе ImGui::InputText на каждом следующем кадре видит
-// внешнюю подмену буфера и возвращает changed=true, отчего auto_recompute
-// триггерится непрерывно при наличии запятой в поле.
+// Перехватываем символы ДО того, как ImGui положит их в буфер: замена ',' → '.'
+// идёт в момент ввода и не подменяет строку между кадрами. Иначе InputText на
+// каждом кадре видит внешнюю правку буфера, возвращает changed=true, и
+// auto_recompute триггерится непрерывно, пока в поле есть запятая.
 static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     if (data->EventChar == ',') data->EventChar = '.';
     return 0;
@@ -154,15 +149,12 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 // plot_axis.cpp::digit_step_input_callback — тем же вводом пользуется меню
 // цвета серии в plot_view_2d.cpp, и держать копию в gui.cpp было нельзя.
 
-// Проверка: разбирается ли строка как число или арифметическое выражение?
-// Пустая считается валидной (дефолт подставится дальше).
-// Валидны: "2.5", "1e-14", "8/3", "0.5*1e-3", "100-1", "(1+2)*3", "-2".
-// Невалидны: "2/x", "8/0", "8/", "5asdfaxcv", "1e400", "(1+2".
-//
-// Делегирует в parse_num_checked, то есть в ТУ ЖЕ грамматику, которой поле
-// потом реально разбирается. Раньше здесь лежала своя копия на std::stod, и
-// копии успели разойтись: подсветка говорила одно, parse_num считал другое
-// (на "5asdf" поле писало «using default», а в расчёт уходило 5).
+// Разбирается ли строка как число или арифметическое выражение? Пустая валидна
+// (дальше подставится дефолт). Валидны: "2.5", "1e-14", "8/3", "0.5*1e-3",
+// "100-1", "(1+2)*3", "-2". Невалидны: "2/x", "8/0", "8/", "5asdfaxcv", "1e400",
+// "(1+2". Делегирует в parse_num_checked — ту же грамматику, которой поле потом
+// реально разбирается: своя копия на std::stod успела разойтись с ней (на
+// "5asdf" подсветка писала «using default», а в расчёт уходило 5).
 [[nodiscard]] static bool is_numeric_string(const std::string& s) {
     if (s.empty()) return true;
     double v = 0.0;
@@ -189,16 +181,14 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return false;
 }
 
-// ---- Auto-labels for BD/LLE/LS configs and Parametric plot windows ----
+// Auto-labels for BD/LLE/LS configs and Parametric plot windows
 // Каждый label регенерируется каждый кадр из текущего свипа, пока
 // label_is_manual = false. Пользователь помечает как ручной, отредактировав
 // поле; очистка поля возвращает в auto.
 
-// ЕДИНСТВЕННАЯ реализация имени оси свипа. Раньше рядом жили три её копии —
-// локальные лямбды в draw_bifurcation_plot / draw_lle_plot / draw_ls_plot; они
-// отличались только fallback'ом при индексе НУ вне диапазона ("x" вместо
-// "var"). Оставлено "var": "x" выглядит как реальное имя переменной, которого
-// в системе нет.
+// ЕДИНСТВЕННАЯ реализация имени оси свипа (были три копии-лямбды в
+// draw_bifurcation_plot / draw_lle_plot / draw_ls_plot). Fallback при индексе НУ вне
+// диапазона — "var", а не "x": "x" выглядит как имя реальной, но несуществующей переменной.
 [[nodiscard]] static std::string auto_axis_name(const std::vector<std::string>& params,
                                    const std::vector<std::string>& vars,
                                    int param_idx, bool sweep_over_var, int var_idx,
@@ -318,18 +308,13 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
     return changed;
 }
 
-// ============================================================================
-// Общие хелперы диаграмм — единый источник истины для настроек view'ов и для
-// тулбаров. До этого каждая вкладка собирала всё заново, поэтому ОДНА И ТА ЖЕ
-// диаграмма отличалась между вкладками: Bif-1D в Parametric рисовал линии
-// x=0/y=0, а в Custom — нет; у Basins-хитмапы не было autoscale/vmin/vmax,
-// хотя у Bif-2D было; у Custom Basins не было даже Swap axes. Всё, что
-// относится к «как выглядит и что умеет диаграмма типа X», живёт здесь.
-// ============================================================================
+// Общие хелперы диаграмм — единый источник истины для настроек view'ов и тулбаров.
+// Раньше каждая вкладка собирала всё заново, и одна и та же диаграмма отличалась
+// между вкладками (линии x=0/y=0 у Bif-1D, autoscale/vmin/vmax у Basins, Swap axes
+// в Custom). Всё про «как выглядит и что умеет диаграмма типа X» живёт здесь.
 
-// Как InputNumStr, но число живёт не в строке, а в структуре (Settings ->
-// PeakConfig): текст здесь только буфер ввода, поэтому значение снимаем на
-// commit'е — Enter или уход фокуса, а не на каждом нажатии клавиши. Иначе
+// Как InputNumStr, но число живёт в структуре (Settings -> PeakConfig), а текст —
+// только буфер ввода: значение снимается на коммите (Enter или уход фокуса), иначе
 // промежуточное "1e-" по пути к "1e-14" ушло бы в set_peak_config и дёрнуло
 // перекомпиляцию ядер. Невалидный/пустой текст значение не трогает.
 // Возвращает true ровно на кадре коммита.
@@ -357,18 +342,12 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
     return false;
 }
 
-// ============================================================================
-// Общие блоки панелей настроек.
-//
-// Ниже — единственные реализации элементов, которые до этого были скопированы
-// по вкладкам Bif / LLE / LS / DFT / Basins / FastSync / Custom по 4–10 раз.
-// Копии успевали разойтись (в Custom пункты НУ подписывались "IC x" вместо
-// "x (IC)", у одних диаграмм был decimator, у других нет), а чинить такое
-// приходилось в каждой копии отдельно.
-//
-// ImGui-идентификаторы всюду передаются строкой снаружи и совпадают с прежними
-// побайтово — раскладка окон в imgui.ini и состояние вкладок сохраняются.
-// ============================================================================
+// Общие блоки панелей настроек: единственные реализации элементов, ранее
+// скопированных по вкладкам Bif / LLE / LS / DFT / Basins / FastSync / Custom по
+// 4–10 раз. Копии расходились (в Custom НУ подписывались "IC x" вместо "x (IC)",
+// decimator был не у всех), и чинить приходилось каждую отдельно.
+// ImGui-идентификаторы передаются строкой снаружи и побайтово совпадают с прежними —
+// раскладка imgui.ini и состояние вкладок сохраняются.
 
 // Встроенные схемы интегрирования. Один список на весь файл: раньше этот же
 // массив был выписан восемью копиями плюс девятой — для проверки конфликта
@@ -414,21 +393,19 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
     return picked;
 }
 
-// ЕДИНСТВЕННОЕ комбо выбора цели свипа: параметры, затем через разделитель
-// начальные условия как "<var> (IC)", затем "dt (h)". Раньше — семь копий по
-// ~45 строк во вкладках плюс восьмая в Custom со своим стилем подписей.
+// ЕДИНСТВЕННОЕ комбо выбора цели свипа: параметры, через разделитель начальные условия как
+// "<var> (IC)", затем "dt (h)". Раньше — семь копий по ~45 строк во вкладках плюс восьмая в
+// Custom со своим стилем подписей.
 //
-// other_over_h — флаг ВТОРОЙ оси (nullptr = 1D-контекст, ограничения нет).
-// Ровно одна ось может свипаться по h: движок кодирует её ОДНИМ числом
-// hSweepAxis (-1 нет / 0 X / 1 Y), и запрос с обеими осями по h отвергает.
-// Поэтому пункт "dt (h)" здесь всегда доступен, а выбор ПЕРЕНОСИТ шаг на эту
-// ось, гася флаг соседней. Раньше на одно это правило приходилось три разных
-// поведения: ось X вкладок переносила, ось Y вкладок прятала пункт вообще (и
-// было не понять, куда он делся), а Custom показывал его серым — то есть
-// перенести шаг с оси на ось можно было только в две операции.
+// other_over_h — флаг ВТОРОЙ оси (nullptr = 1D-контекст, ограничения нет). По h может
+// свипаться ровно одна ось: движок кодирует её ОДНИМ числом hSweepAxis (-1 нет / 0 X / 1 Y) и
+// запрос с обеими осями отвергает. Поэтому "dt (h)" здесь всегда доступен, а выбор ПЕРЕНОСИТ
+// шаг на эту ось, гася флаг соседней. Раньше на это правило приходилось три разных поведения
+// (ось X переносила, ось Y прятала пункт вовсе, Custom показывал серым), и перенести шаг
+// можно было только в две операции.
 //
-// note_when_empty — показывать ли подсказку вместо комбо, когда в системе нет
-// ни параметров, ни переменных (так делают вкладки; Custom рисует комбо всегда).
+// note_when_empty — показывать ли подсказку вместо комбо, когда в системе нет ни параметров,
+// ни переменных (так делают вкладки; Custom рисует комбо всегда).
 static void draw_sweep_target_combo(const char* label,
                                     const std::vector<std::string>& params,
                                     const std::vector<std::string>& vars,
@@ -566,11 +543,10 @@ struct TabBarResult {
     int to_remove = -1;
 };
 
-// Таб-бар "одна вкладка на конфиг + кнопка +". Раньше — шесть копий.
-// item_id_prefix задаёт неизменную часть ID вкладки ("bd_tab_", "lle_tab_", …),
-// поэтому идентификаторы совпадают с прежними побайтово.
-// body == nullptr — тело вкладки пустое (DFT/Basins/FastSync рисуют настройки
-// активного конфига уже после EndTabBar).
+// Таб-бар "одна вкладка на конфиг + кнопка +" (раньше — шесть копий).
+// item_id_prefix задаёт неизменную часть ID вкладки ("bd_tab_", "lle_tab_", …), поэтому
+// идентификаторы побайтово совпадают с прежними. body == nullptr — тело вкладки пустое
+// (DFT/Basins/FastSync рисуют настройки активного конфига уже после EndTabBar).
 // request_select — внешний запрос выбрать вкладку (тулбар Colored 1D у Bif).
 static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_prefix,
                                         int n, bool in_flight, int running_index,
@@ -622,16 +598,13 @@ struct RunAllGroup {
     std::function<void(int)>        enqueue;   // положить элемент i в очередь
 };
 
-// Строка "Run (Ctrl+R) [| доп. кнопка] | Run all... (Ctrl+Shift+R) | (N queued)"
-// вместе с попапом выбора. Раньше — четыре копии по ~60 строк.
-//
-// Отметки хранятся ПО popup_id: единый static сливал бы выбор между вкладками.
-// Живут они снаружи if(BeginPopup) намеренно — Ctrl+Shift+R обязан пушить те же
-// отметки, даже если попап ни разу не открывали (тогда отмечено всё).
-//
-// block_run_all передаётся отдельно от busy/no_active: вкладки блокируют
-// "Run all..." ещё и при пустом списке конфигов, а Parametric — только на время
-// расчёта (у него три независимых списка).
+// Строка "Run (Ctrl+R) [| доп. кнопка] | Run all... (Ctrl+Shift+R) | (N queued)" вместе с
+// попапом выбора; раньше — четыре копии по ~60 строк.
+// Отметки хранятся ПО popup_id (единый static сливал бы выбор между вкладками) и живут
+// снаружи if(BeginPopup) намеренно: Ctrl+Shift+R обязан пушить те же отметки, даже если попап
+// ни разу не открывали — тогда отмечено всё.
+// block_run_all передаётся отдельно от busy/no_active: вкладки блокируют "Run all..." ещё и
+// при пустом списке конфигов, а Parametric — только на время расчёта (у него три списка).
 static void draw_run_and_run_all(const char* popup_id,
                                  bool busy, bool no_active, bool block_run_all,
                                  float run_w,
@@ -714,22 +687,17 @@ static void draw_run_and_run_all(const char* popup_id,
 // чтобы конфигурация Plot2DView шла из ОДНОГО места.
 enum class ParamPlotKind { Bifurcation, LLE, LS };
 
-// Единая конфигурация Plot2DView под параметрический 1D-график.
-// Вызывается и из Parametric, и из Custom — иначе одинаковые диаграммы
-// расходятся по отрисовке.
+// Единая конфигурация Plot2DView под параметрический 1D-график. Вызывается и из
+// Parametric, и из Custom — иначе одинаковые диаграммы расходятся по отрисовке.
 //
-// ВАЖНО: здесь задаются ТОЛЬКО свойства типа диаграммы и НИКОГДА —
-// пользовательское состояние. Custom вызывает эту функцию каждый кадр, поэтому
-// всё, что пользователь может переключить сам (show_legend, lock/invert осей),
-// затиралось бы на следующем же кадре. Именно так ломалась галка «Show legend»
-// на 1D-графиках Custom: show_legend стоял здесь. Дефолты пользовательских
-// полей живут в самом Plot2DView (show_legend = true) — дублировать их тут не
-// нужно и нельзя.
+// Задавать здесь ТОЛЬКО свойства типа диаграммы и НИКОГДА пользовательское
+// состояние (show_legend, lock/invert осей): Custom зовёт функцию каждый кадр и
+// затирал бы переключённое пользователем — так ломалась галка «Show legend» на
+// 1D-графиках Custom. Дефолты таких полей живут в самом Plot2DView.
 //
-// Про show_zero_*: по X это всегда ось параметра, ноль на ней произволен →
-// линии нет. По Y ноль осмыслен ТОЛЬКО у LLE/LS: λ=0 — граница хаос/порядок,
-// стандартный референс в литературе, поэтому её оставляем. У Bif по Y идёт
-// переменная состояния — ноль произволен, линии нет.
+// show_zero_y осмыслен ТОЛЬКО у LLE/LS (λ=0 — граница хаос/порядок, стандартный
+// референс). По X это ось параметра, по Y у Bif — переменная состояния: ноль там
+// произволен, линии нет.
 static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
     view.pad_x       = false;   // данные вплотную к боковым рамкам
     view.show_zero_x = false;
@@ -756,22 +724,17 @@ static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
     }
 }
 
-// ---- Custom point style (Bifurcation 1D scatter) ----
+// Custom point style (Bifurcation 1D scatter)
 // ЕДИНСТВЕННАЯ реализация тулбара «Custom point style / Marker / Point size /
-// Alpha» — им пользуются и Parametric (draw_bifurcation_plot), и Custom
-// (Level-1D Bif-слоты), чтобы настройка вела себя одинаково во всех вкладках,
-// где есть Bifurcation 1D. Состояние живёт в самой БД
-// (BifurcationDiagramConfig) и персистится вместе с сессией.
-// Возвращает true, если пользователь что-то изменил (вызывающий решает, надо
-// ли сохранять сессию).
-// Галочка стиля + параметры в выпадающем меню. Раньше параметры выкладывались
-// в ту же строку через SameLine: в узком докированном окне они уезжали за
-// правый край, и добраться до них можно было только расширив окно. Теперь в
-// строке остаются только галочка и стрелка "▾", а параметры живут в popup'е.
+// Alpha»: им пользуются и Parametric (draw_bifurcation_plot), и Custom (Level-1D
+// Bif-слоты), чтобы настройка вела себя одинаково везде, где есть Bifurcation 1D.
+// Состояние живёт в BifurcationDiagramConfig и персистится вместе с сессией.
+// Возвращает true, если пользователь что-то изменил (сохранять сессию решает вызывающий).
 //
-// Popup рисуется ВСЕГДА, а не только при enabled: иначе, сняв галочку с
-// открытым меню, мы бы пропустили EndPopup для уже открытого ImGui-окна.
-// Возвращает true, если пользователь что-то изменил.
+// В строке остаются только галочка и стрелка "▾", параметры — в popup'е: через
+// SameLine они уезжали за правый край узкого докированного окна. Popup рисуется
+// ВСЕГДА, а не только при enabled, иначе снятие галочки с открытым меню пропустило
+// бы EndPopup для уже открытого ImGui-окна.
 static bool draw_style_toolbar(const char* label, const char* id_suffix,
                                bool& enabled,
                                const std::function<bool()>& body) {
@@ -820,21 +783,17 @@ static void apply_point_style(Plot2DView& view, const BifurcationDiagramConfig& 
     view.point_size_px = bd.custom_point_style ? bd.point_size   : 2.0f;
 }
 
-// ---- Continuation + выбор устройства: ЕДИНЫЙ блок для Bif / LLE / LS 1D ----
-// Раньше у Bif он был свой, а у LLE/LS свой — состав элементов и ограничения
-// расходились. Теперь одна реализация на все три:
-//   continuation — точки идут цепочкой (переносятся траектория и, у LLE/LS,
-//     векторы возмущения). Требует param-свипа: IC-свип с цепочкой
-//     несовместим. h-свип и log-сетка поддержаны. В 2D-режиме неприменим.
-//   use_gpu — где считать. Обе ветки существуют для всех трёх анализов;
-//     GPU-continuation — single-thread kernel, поэтому CPU там быстрее, и при
-//     включении continuation мы переключаемся на CPU по умолчанию.
-// Шаблон, а не общий базовый класс: конфиги независимы, связывать их
-// наследованием ради трёх полей было бы хуже.
-// blocked считает вызывающий: у Bif/LLE/LS это mode_2d || sweep_over_var, у
-// DFT1D 2D-режима нет вовсе. Передавать условие снаружи проще, чем требовать
-// от всех конфигов одинакового набора полей.
-// device_locked — выбор устройства недоступен (2D-режим: CPU-веток для 2D нет).
+// Continuation + выбор устройства: ЕДИНЫЙ блок для Bif / LLE / LS 1D (раньше у Bif
+// был свой, у LLE/LS свой, и состав элементов с ограничениями расходился):
+//   continuation — точки идут цепочкой (переносятся траектория и, у LLE/LS, векторы
+//     возмущения). Требует param-свипа: IC-свип с цепочкой несовместим. h-свип и
+//     log-сетка поддержаны, в 2D-режиме неприменим.
+//   use_gpu — где считать. Обе ветки есть у всех трёх анализов, но GPU-continuation —
+//     single-thread kernel, поэтому при включении continuation уходим на CPU.
+// Шаблон, а не общий базовый класс: конфиги независимы, наследование ради трёх полей
+// было бы хуже. blocked считает вызывающий (у Bif/LLE/LS это mode_2d || sweep_over_var,
+// у DFT1D 2D-режима нет вовсе) — это проще, чем требовать от конфигов общий набор
+// полей. device_locked — выбор устройства недоступен (в 2D CPU-веток нет).
 template <class Cfg>
 static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
                                            bool device_locked) {
@@ -848,11 +807,9 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
     bool cont = c.continuation;
     if (ImGui::Checkbox(("Continuation##" + sfx).c_str(), &cont)) {
         c.continuation = cont;
-        // При включении continuation по умолчанию уходим на CPU: GPU-ветка
-        // там однопоточная и заметно медленнее. При выключении возвращаемся на
-        // GPU — в классическом свипе точки независимы и он там кратно быстрее.
-        // В обе стороны это только дефолт: радио ниже остаётся активным, и
-        // выбор пользователя держится, пока он снова не щёлкнет галку.
+        // При включении continuation по умолчанию уходим на CPU (GPU-ветка там
+        // однопоточная), при выключении возвращаемся на GPU. В обе стороны это
+        // только дефолт: радио ниже активно, и выбор пользователя держится.
         c.use_gpu = !cont;
     }
     if (c.continuation) {
@@ -900,37 +857,30 @@ static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
     }
 }
 
-// Значение свипа в узле k из n — ТА ЖЕ формула, по которой движок считал эту
-// точку (cont_sweep_value / getValueByIdx_log в parametric_engine.cpp).
-// Раньше графики раскладывали точки линейно всегда, поэтому при log_scale
-// данные уезжали относительно лог-оси: узлы лежат на 10^(l0 + (l1-l0)*t), а
-// рисовались на lo + (hi-lo)*t.
-// lo/hi <= 0 при log_scale — сюда может долететь живой чекбокс без
-// соответствующего прогона; деградируем на линейную сетку вместо NaN
-// (тот же приём, что в SnapCursorToGrid1D).
-// continuation — у него СВОЯ конвенция узлов (lo + (hi-lo)*t, плюс reverse):
-// она живёт в kernels/*_cont.template.cu и в cont_sweep_value
-// (parametric_engine.cpp), и здесь остаётся копией — те шаблоны configCUDA.h
-// не включают, свести их в одну функцию этой правкой нельзя.
-// Классический свип идёт через общую с ядром ucuda_node_value (configCUDA.h).
-// Раньше обе ветки считались cont-формулой, поэтому ось классической диаграммы
-// и значение fix-слайдера расходились с getValueByIdx в последних битах, а на
-// правом конце оси — сильнее (lerp даёт РОВНО hi, cont-форма — не обязательно).
+// Значение свипа в узле k из n — ТА ЖЕ формула, по которой движок считал эту точку
+// (cont_sweep_value / getValueByIdx_log в parametric_engine.cpp). Графики когда-то
+// всегда раскладывали точки линейно, и при log_scale данные уезжали относительно
+// лог-оси: узлы лежат на 10^(l0 + (l1-l0)*t), а рисовались на lo + (hi-lo)*t.
+// При lo/hi <= 0 на лог-ветке деградируем на линейную сетку вместо NaN: сюда может
+// долететь живой чекбокс без прогона (тот же приём, что в SnapCursorToGrid1D).
 //
-// `reverse` тут авторитетнее флага: он приходит из РЕЗУЛЬТАТА
-// (result.continuation_reverse), а `continuation` — из конфига, и они разъезжаются,
-// если пользователь снял галочку continuation, не перезапустив расчёт. Данные в
-// этом случае по-прежнему backward, и классическая ветка (она reverse не знает)
-// нарисовала бы кривую зеркально. Поэтому reverse == true всегда идёт в
-// cont-ветку — для не-continuation данных он и не выставляется.
+// Классический свип идёт через общую с ядром ucuda_node_value (configCUDA.h);
+// раньше обе ветки считались cont-формулой, из-за чего ось классической диаграммы
+// расходилась с getValueByIdx в последних битах, а на правом конце сильнее (lerp даёт
+// РОВНО hi). У continuation СВОЯ конвенция узлов (lo + (hi-lo)*t плюс reverse) — она
+// живёт в kernels/*_cont.template.cu и cont_sweep_value и остаётся здесь копией: те
+// шаблоны configCUDA.h не включают.
+//
+// `reverse` авторитетнее флага continuation: первый приходит из РЕЗУЛЬТАТА
+// (result.continuation_reverse), второй из конфига, и они разъезжаются, если снять
+// галочку без перезапуска. Данные тогда по-прежнему backward, а классическая ветка
+// про reverse не знает и нарисовала бы кривую зеркально.
 [[nodiscard]] static double sweep_value_at(int k, int n, double lo, double hi,
                              bool log_scale, bool reverse, bool continuation) {
     if (continuation || reverse) {
-        // Та же функция, что у cont-ядер и у cont_sweep_value — конвенция
-        // continuation живёт в ucuda_node_value_cont (configCUDA.h). Гард
-        // lo/hi > 0 на лог-ветке оставлен здесь: сюда может долететь живой
-        // чекбокс лога без соответствующего прогона, а log10(<=0) отравил бы
-        // ось NaN'ом (тот же приём, что в SnapCursorToGrid1D).
+        // Та же функция, что у cont-ядер и cont_sweep_value: конвенция continuation
+        // живёт в ucuda_node_value_cont (configCUDA.h). Гард lo/hi > 0 на лог-ветке —
+        // сюда может долететь живой чекбокс без прогона, а log10(<=0) отравил бы ось NaN'ом.
         const bool log_ok_cont = log_scale && lo > 0.0 && hi > 0.0;
         return (double)ucuda_node_value_cont(k, n, (numb)lo, (numb)hi, log_ok_cont, reverse);
     }
@@ -947,12 +897,12 @@ struct SweepAxisMember {
     double lo = 0.0, hi = 1.0; // диапазон, с которым РЕАЛЬНО шёл Run
 };
 
-// Общая настройка X-оси 1D-графика по членам окна:
+// Общая настройка X-оси 1D-графика по членам окна (раньше — три почти одинаковых
+// блока по ~35 строк в Bif/LLE/LS):
 //   - подпись = общий sweep-таргет; если члены свипают разное — "parameter";
-//   - fit-диапазон = union(lo, hi) ВСЕХ членов: ось обязана охватывать весь
-//     свип, даже если часть точек разошлась и на графике их нет;
+//   - fit-диапазон = union(lo, hi) ВСЕХ членов: ось обязана охватывать весь свип,
+//     даже если часть точек разошлась и на графике их нет;
 //   - log_scale только если он одинаков у всех членов.
-// Раньше — три почти идентичных блока по ~35 строк в Bif/LLE/LS.
 static void configure_sweep_x_axis(Plot2DView& view,
                                    const std::vector<SweepAxisMember>& members,
                                    const std::vector<std::string>& params,
@@ -1064,11 +1014,10 @@ static void apply_snap_x_from_first_member(Plot2DView& view,
                              c.param_lo_text, c.param_hi_text, c.n_pts_text);
 }
 
-// Right-click «Export data...» подменю: перечисляет ВСЕ конфиги сессии с
-// готовым прогоном (не только members этого окна — экспорт не привязан к
-// окну). Раньше — три идентичные копии в Bif/LLE/LS.
-//   ready(i) — есть ли законченный прогон, busy(i) — считается ли сейчас,
-//   do_export(i, path) — собственно запись.
+// Right-click «Export data...» подменю: перечисляет ВСЕ конфиги сессии с готовым
+// прогоном, а не только members этого окна — экспорт к окну не привязан.
+// ready(i) — есть законченный прогон, busy(i) — считается сейчас, do_export(i, path) —
+// собственно запись. Раньше — три идентичные копии в Bif/LLE/LS.
 static void draw_export_submenu(const char* id_tag, int n,
                                 const std::function<std::string(int)>& label,
                                 const std::function<bool(int)>& ready,
@@ -1093,11 +1042,10 @@ static void draw_export_submenu(const char* id_tag, int n,
     ImGui::EndMenu();
 }
 
-// Ленивое создание per-config HeatmapView в map'е окна (map уже per-window,
-// поэтому пересечений между окнами нет). При первом создании подхватывает
-// colormap: приоритет у выбора, сохранённого в конфиге (cfg_colormap, -1 =
-// не задан), иначе общий app-дефолт. cfg_exponent_idx применяется только если
-// != kNoExponent (актуально лишь для LS).
+// Ленивое создание per-config HeatmapView в map'е окна (map уже per-window, пересечений
+// между окнами нет). При первом создании подхватывает colormap: приоритет у выбора из
+// конфига (cfg_colormap, -1 = не задан), иначе общий app-дефолт. cfg_exponent_idx
+// применяется только при != kNoExponent (актуально лишь для LS).
 // Раньше — четыре копии лямбды get_*_heatmap (Bif / LLE / LS / DFT1D).
 static constexpr int kNoExponent = -999;
 static HeatmapView& get_or_create_heatmap(
@@ -1113,19 +1061,14 @@ static HeatmapView& get_or_create_heatmap(
     return *slot;
 }
 
-// Скретч-буферы точек одного plot-окна (по одному на серию). Между кадрами
-// живут намеренно: buf.clear() у вызывающего сохраняет capacity, поэтому со
-// второго кадра push_back уже не аллоцирует — на диаграммах в миллионы точек
-// это заметно.
-//
-// Ключ — стабильный ParametricPlotWindow::id, как у кэшей HeatmapView выше.
-// Раньше на каждую из трёх функций был один static, общий ВСЕМ окнам: при двух
-// окнах с разным числом серий assign() передёргивал буферы каждый кадр, и
-// оптимизация не работала вовсе. Корректности это не нарушало (render()
-// забирает точки синхронно), но и пользы не приносило.
-//
-// Записи удалённых окон остаются в карте до перезапуска — как и у хитмап;
-// окон единицы, и создаёт их руками пользователь.
+// Скретч-буферы точек одного plot-окна (по одному на серию). Между кадрами живут намеренно:
+// buf.clear() у вызывающего сохраняет capacity, поэтому со второго кадра push_back уже не
+// аллоцирует — на диаграммах в миллионы точек это заметно.
+// Ключ — стабильный ParametricPlotWindow::id, как у кэшей HeatmapView выше. Раньше на каждую
+// из трёх функций был один static, общий ВСЕМ окнам: при двух окнах с разным числом серий
+// assign() передёргивал буферы каждый кадр, и оптимизация не работала (корректность при этом
+// не страдала — render() забирает точки синхронно).
+// Записи удалённых окон остаются в карте до перезапуска, как и у хитмап: окон единицы.
 static std::vector<std::vector<float>>& window_point_bufs(int window_id, size_t n_series) {
     static std::map<int, std::vector<std::vector<float>>> cache;
     auto& bufs = cache[window_id];
@@ -1133,11 +1076,10 @@ static std::vector<std::vector<float>>& window_point_bufs(int window_id, size_t 
     return bufs;
 }
 
-// Полоска-превью колормапа как ImGui-виджет: kSeg сегментов с линейным
-// градиентом внутри каждого, плюс Dummy того же размера, чтобы полоска
-// занимала место в layout'е. 24 сегмента хватает, чтобы даже рваные
-// качественные карты (tab20, glasbey) читались, а рисуется это только для
-// видимых строк — и в попапе пикера, и под клиппером в Settings.
+// Полоска-превью колормапа как ImGui-виджет: kSeg сегментов с линейным градиентом внутри
+// каждого плюс Dummy того же размера, чтобы полоска занимала место в layout'е. 24 сегмента
+// хватает, чтобы читались даже рваные качественные карты (tab20, glasbey), а рисуется это
+// только для видимых строк — и в попапе пикера, и под клиппером в Settings.
 static void colormap_strip_item(int id, float w, float h) {
     constexpr int kSeg = 24;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1156,11 +1098,10 @@ static void colormap_strip_item(int id, float w, float h) {
     ImGui::Dummy(ImVec2(w, h));
 }
 
-// Пикер колормапа: BeginCombo вместо ImGui::Combo, потому что список теперь
-// разреженный (только отмеченные пользователем карты slanCM) и в каждой
-// строке рисуется градиент. Текущий id показывается всегда, даже если карта
-// снята галочкой в Settings — иначе открытая сессия молча переехала бы на
-// другую карту. Возвращает true, если выбор изменился.
+// Пикер колормапа: BeginCombo вместо ImGui::Combo, потому что список теперь разреженный
+// (только отмеченные пользователем карты slanCM) и в каждой строке рисуется градиент. Текущий
+// id показывается всегда, даже если карта снята галочкой в Settings — иначе открытая сессия
+// молча переехала бы на другую карту. Возвращает true, если выбор изменился.
 static bool colormap_combo(const char* label, int* id, float width) {
     bool changed = false;
     const float h = ImGui::GetTextLineHeight();
@@ -1219,10 +1160,9 @@ struct HeatmapToolbarOpts {
     bool show_swap = true;
 };
 
-// ЕДИНСТВЕННАЯ реализация тулбара «Colormap / Autoscale / vmin / vmax /
-// Swap axes» — раньше он был скопирован в 7 мест с разным составом
-// элементов. Всё состояние живёт в самом HeatmapView, поэтому вызывающему
-// достаточно передать, куда персистить colormap.
+// ЕДИНСТВЕННАЯ реализация тулбара «Colormap / Autoscale / vmin / vmax / Swap axes»
+// (раньше был скопирован в 7 мест с разным составом). Состояние живёт в самом
+// HeatmapView — вызывающему достаточно передать, куда персистить colormap.
 // Возвращает true, если пользователь что-то изменил.
 static bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = {}) {
     bool changed = false;
@@ -1259,11 +1199,10 @@ static bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = 
     return changed;
 }
 
-// LS exponent picker: λ1..λN + "sum L_i" (sentinel -1, а не N — чтобы выбор не
-// «съезжал», если N поменяется на следующем Run). Выбор живёт в HeatmapView, а
-// не в конфиге: два окна с одной и той же кривой не должны дёргать друг у
-// друга индекс. on_pick — персистентность на стороне вызывающего.
-// Раньше — две почти идентичные копии (draw_ls_plot и Custom-слот 2).
+// LS exponent picker: λ1..λN + "sum L_i" (sentinel -1, а не N, чтобы выбор не съезжал
+// при смене N на следующем Run). Выбор живёт в HeatmapView, а не в конфиге: два окна с
+// одной кривой не должны дёргать друг у друга индекс. on_pick — персистентность на
+// стороне вызывающего. Раньше — две копии (draw_ls_plot и Custom-слот 2).
 static void draw_ls_exponent_picker(HeatmapView& hv, int n_exponents,
                                     const std::function<void(int)>& on_pick) {
     if (n_exponents <= 0) return;
@@ -1291,16 +1230,14 @@ static void draw_ls_exponent_picker(HeatmapView& hv, int n_exponents,
     }
 }
 
-// Выбор отображаемой плоскости LS-2D по индексу экспоненты `k`.
+// Выбор отображаемой плоскости LS-2D по индексу экспоненты `k`:
 //   k >= 0  — готовая плоскость из result_2d.values (без копирования),
-//   k == -1 — "sum L_i": поэлементная сумма всех N плоскостей, считается ОДИН
-//             раз на data_generation_2d и кэшируется в самом конфиге (кэш общий
-//             для всех окон с этой кривой). Diverged-ячейки (flags<0) получают
-//             sentinel 999.0 — тот же, что engine пишет в одиночные плоскости,
-//             чтобы HeatmapView закрасил их тем же серым.
-// gen мешает поколение чанка с индексом экспоненты, иначе переключение
-// экспоненты не перезалило бы текстуру.
-// Раньше — две копии по ~40 строк (draw_ls_plot и draw_custom_plot_windows).
+//   k == -1 — "sum L_i": поэлементная сумма всех N плоскостей, считается ОДИН раз на
+//             data_generation_2d и кэшируется в конфиге (кэш общий для всех окон с этой
+//             кривой). Diverged-ячейки (flags<0) получают тот же sentinel 999.0, что
+//             engine пишет в одиночные плоскости, — HeatmapView красит их тем же серым.
+// gen мешает поколение чанка с индексом экспоненты, иначе переключение экспоненты не
+// перезалило бы текстуру. Раньше — две копии по ~40 строк.
 static void ls_resolve_plane(LSCurveConfig& cact, int k,
                              const double*& plane, double& vmin, double& vmax, int& gen) {
     const size_t plane_size = (size_t)cact.result_2d.n_pts * (size_t)cact.result_2d.n_pts;
@@ -1342,9 +1279,7 @@ static void ls_resolve_plane(LSCurveConfig& cact, int k,
     }
 }
 
-// ============================================================
 // Вкладка System: ввод системы, методы, генерация кода
-// ============================================================
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     model.poll(); // забрать результат OCR, если готов
 
@@ -1418,7 +1353,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         }
     }
 
-    // ----- Variables / Parameters (новый раздельный формат) -----
+    // Variables / Parameters (новый раздельный формат)
     ImGui::Text("Variables:");
     ImGui::SameLine();
     if (ImGui::SmallButton("Auto-detect")) {
@@ -1445,7 +1380,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::TextDisabled("Comma-sep, e.g. sigma,rho,beta. These are a[1..M] in KRS.");
     InputTextStr("##params_text", model.params_text);
 
-    // ----- Legacy: единый алфавит -----
+    // Legacy: единый алфавит
     if (ImGui::CollapsingHeader("Legacy: single alphabet field")) {
         ImGui::TextDisabled("Used by older systems where vars/params live in one list.\n"
                             "If Variables AND Parameters above are both filled, this is ignored.");
@@ -1474,7 +1409,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Checkbox("DOPRI78", &model.scheme_dopri78); ImGui::SameLine();
     ImGui::Checkbox("CD", &model.scheme_cd);
 
-    // ----- Custom KRS schemes (raw C/CUDA код вместо codegen) -----
+    // Custom KRS schemes (raw C/CUDA код вместо codegen)
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Custom KRS schemes",
         model.custom_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1573,9 +1508,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     }
 }
 
-// ============================================================
 // Вкладка Parameters: НУ, значения/диапазоны параметров, шаг
-// ============================================================
 static void draw_parameters_tab(AppModel& model) {
     ImGui::TextDisabled("Parameter fields appear after parsing the system.");
     if (ImGui::Button("Refresh from system")) {
@@ -1632,13 +1565,10 @@ static void draw_parameters_tab(AppModel& model) {
     }
 }
 
-// ============================================================
-// Library tab: two states — list (table of saved systems + note preview)
-// and editor (System + Parameters sub-tabs with Save/Cancel). The editor
-// edits AppModel::library_edit_buffer (a scratch AppModel), never the live
-// model, so browsing/editing/Cancel never affects the system currently
-// active in Parametric/Phase/Basins/FastSync.
-// ============================================================
+// Library tab: two states — list (table of saved systems + note preview) and editor
+// (System + Parameters sub-tabs with Save/Cancel). The editor edits
+// AppModel::library_edit_buffer (a scratch AppModel), never the live model, so
+// browsing/editing/Cancel never affects the system active in Parametric/Phase/Basins/FastSync.
 
 // Trim leading/trailing ASCII whitespace.
 [[nodiscard]] static std::string trim_copy(const std::string& s) {
@@ -1648,20 +1578,15 @@ static void draw_parameters_tab(AppModel& model) {
     return s.substr(a, b - a + 1);
 }
 
-// ---- Кэш списка систем для вкладки Library ----
-// Раньше draw_library_list КАЖДЫЙ КАДР обходил каталог (lib.list()) и читал с
-// диска system.json КАЖДОЙ системы — только чтобы показать бейдж "[N custom]"
-// и подобрать ширину колонки Name. При двух десятках систем и 60 FPS это больше
-// тысячи разборов JSON в секунду.
-//
-// Файлы библиотеки никто не правит извне при работающем приложении, поэтому
-// хватает редкого опроса. Всё, что меняет библиотеку изнутри (Save, Delete,
-// Duplicate, Rename), сбрасывает кэш немедленно: иначе удалённая система висела
-// бы в таблице до десяти секунд, и это читалось бы как зависание.
-//
-// Заодно сюда переехал кэш превью заметки — он жил рядом отдельными static'ами
-// и НЕ сбрасывался после сохранения, поэтому отредактированная заметка
-// показывалась старой, пока не выберешь другую строку и не вернёшься.
+// Кэш списка систем для вкладки Library.
+// draw_library_list раньше КАЖДЫЙ КАДР обходил каталог (lib.list()) и читал с диска
+// system.json каждой системы — только ради бейджа "[N custom]" и ширины колонки Name:
+// при двух десятках систем и 60 FPS это больше тысячи разборов JSON в секунду. Извне
+// файлы никто не правит при работающем приложении, поэтому хватает редкого опроса, а
+// всё, что меняет библиотеку изнутри (Save, Delete, Duplicate, Rename), сбрасывает кэш
+// немедленно — иначе удалённая система висела бы в таблице до десяти секунд.
+// Сюда же переехал кэш превью заметки: он жил отдельными static'ами и не сбрасывался
+// после сохранения, поэтому отредактированная заметка показывалась старой.
 struct LibraryListCache {
     std::vector<std::string> names;
     std::vector<int>         custom_counts;   // параллелен names
@@ -1696,13 +1621,11 @@ static const LibraryListCache& library_list_cached(SystemLibrary& lib) {
     return g_library_cache;
 }
 
-// Save-side logic for the editor: validate name, handle rename for
-// EditExisting, persist the scratch buffer via SystemLibrary. Only mirrors
-// the save into the live model if the edited system is the one currently
-// active elsewhere — editing/saving any other (inactive) system must not
-// disturb what Parametric/Phase/Basins/FastSync currently have loaded. On
-// success returns to list mode; on failure sets model.edit_error and stays
-// in the editor.
+// Save-side logic for the editor: validate name, handle rename for EditExisting, persist
+// the scratch buffer via SystemLibrary. Mirrors the save into the live model only if the
+// edited system is the one currently active elsewhere — saving any other system must not
+// disturb what Parametric/Phase/Basins/FastSync have loaded. On success returns to list
+// mode; on failure sets model.edit_error and stays in the editor.
 static void library_editor_save(AppModel& model, SystemLibrary& lib) {
     AppModel& buf = *model.library_edit_buffer;
     std::string name = trim_copy(buf.name);
@@ -1955,16 +1878,12 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
     }
 }
 
-
-// ============================================================
 // РЕЖИМ АНАЛИЗА: пространство фазовых портретов
-// ============================================================
 
-// Панель настроек сессии: параметры (общие), НУ (список), проекции (список),
-// время/шаг, метод (заглушка), кнопка пересчёта.
-// Reset lambda: what happens when the user hits "Reset to defaults".
-// Analysis-tab passes model.from_record + start_phase_analysis; Custom-tab
-// passes nullptr (Custom users reload from System tab or Run pipeline).
+// Панель настроек сессии: параметры (общие), НУ (список), проекции (список), время/шаг,
+// метод (заглушка), кнопка пересчёта. Reset lambda — что делает «Reset to defaults»:
+// Analysis-tab передаёт model.from_record + start_phase_analysis, Custom-tab nullptr
+// (там перезагружаются из System tab или Run pipeline).
 static void draw_phase_controls(PhaseAnalysisSession& s,
                                 std::function<void()> on_reset_defaults) {
     bool changed = false;
@@ -1976,7 +1895,6 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     // so the sandbox disclaimer would be misleading.
     if (on_reset_defaults)
         ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
-
 
     // метод моделирования + пользовательские схемы из системы
     ImGui::Text("Method:"); ImGui::SameLine();
@@ -2095,15 +2013,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             }
         }
         else if (pr.type == ProjType::FeatureDiagram) {
-            // Одна переменная: по ней ищутся пики. Оси фиксированы (значение
-            // пика / интервал), поэтому переиспользуем axis_x и не заводим
-            // отдельного поля в Projection.
-            // Индекс vars.size() — комбинация x0 + pi*x1 + e*x2: тот же ряд,
-            // что даёт writable_var == -1 в ядре (см. draw_writable_var_combo).
-            // Сентинелом взят именно size(), а НЕ -1, как у writable_var:
-            // соседние ветки берут s.vars[axis_x] по схеме
-            // `axis_x < size() ? axis_x : 0`, и -1 у них ушёл бы в
-            // отрицательный индекс при переключении типа проекции.
+            // Одна переменная: по ней ищутся пики. Оси фиксированы (значение пика /
+            // интервал), поэтому переиспользуем axis_x без отдельного поля в Projection.
+            // Индекс vars.size() — комбинация x0 + pi*x1 + e*x2, тот же ряд, что даёт
+            // writable_var == -1 в ядре. Сентинел именно size(), а НЕ -1: соседние ветки
+            // берут s.vars[axis_x] по схеме `axis_x < size() ? axis_x : 0`, и -1 ушёл бы
+            // в отрицательный индекс при переключении типа проекции.
             const int nv = (int)s.vars.size();
             const bool feat_is_combo = (nv >= 2 && pr.axis_x == nv);
             const std::string preview = s.vars.empty()
@@ -2151,10 +2066,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         }
         else { // TimeDomain — галочки переменных
             // Слотов на один больше числа переменных: последний — комбинация
-            // x0 + pi*x1 + e*x2. При смене размера старые галочки переносим, а
-            // комбинацию гасим — иначе у сохранённых сессий сама собой
-            // появилась бы новая кривая и перемасштабировала бы ось Y (её
-            // амплитуда заметно больше, чем у отдельных переменных).
+            // x0 + pi*x1 + e*x2. При смене размера старые галочки переносим, а комбинацию
+            // гасим: иначе у сохранённых сессий сама собой появилась бы новая кривая и
+            // перемасштабировала ось Y (её амплитуда заметно больше).
             const int nv_td = (int)s.vars.size();
             if ((int)pr.show_var.size() != nv_td + 1) {
                 std::vector<bool> prev = pr.show_var;
@@ -2288,14 +2202,10 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
 }
 
-// ============================================================================
-// Единый счётчик режимов для статусных строк всех панелей.
-//
-// Раньше каждая панель считала "diverged" по flags[k] < 0, и одна и та же
-// подпись значила разное: для Bif1D/Bif2D отрицательный флаг — это fixed
-// point, а для LLE/LS — расходимость. Теперь коды канонические (REGIME_* в
-// configCUDA.h), и категории раскладываются одинаково везде.
-// ============================================================================
+// Единый счётчик режимов для статусных строк всех панелей. Раньше каждая панель считала
+// "diverged" по flags[k] < 0, и подпись значила разное: у Bif1D/Bif2D отрицательный флаг —
+// это fixed point, а у LLE/LS — расходимость. Теперь коды канонические (REGIME_* в
+// configCUDA.h) и категории раскладываются одинаково везде.
 static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) {
     fp = unb = osc = 0;
     for (int f : flags) {
@@ -2315,12 +2225,10 @@ static void draw_regime_summary(const std::vector<int>& flags) {
                         fp, unb, osc);
 }
 
-// Рисует окна проекций (каждая — отдельное docking-окно с графиком).
-// Optional `before_begin` runs immediately before each projection window's
-// ImGui::Begin (Custom mode uses it to assign initial dock target); optional
-// `after_begin` runs right after Begin returns true (Custom mode uses it to
-// attach the Move-to-Tab context menu). Both empty (default) preserve the
-// Analysis-mode behaviour.
+// Рисует окна проекций (каждая — отдельное docking-окно с графиком). Optional `before_begin`
+// runs immediately before each projection window's ImGui::Begin (Custom mode uses it to assign
+// the initial dock target); optional `after_begin` runs right after Begin returns true (Custom
+// attaches the Move-to-Tab context menu there). Both empty by default = Analysis-mode behaviour.
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
 
 // Per-IC стиль серии (используется фазовыми портретами по бассейнам): цвет
@@ -2335,12 +2243,11 @@ struct PhaseSeriesStyle {
 };
 using PhaseStyleFn = std::function<bool(int ic_index, PhaseSeriesStyle& out)>;
 
-// Подпись НУ для легенды (галка "Legend shows initial conditions").
-// Берём ЧИСЛА, которые реально ушли в расчёт (result.snapshot.ic_flat), и
-// форматируем через fmt_tick — то есть с Tick precision из Settings. Так
-// сгенерированные НУ (узлы сетки бассейнов пишутся с %.17g) не разносят
-// легенду на пол-экрана, а смена точности в Settings применяется сразу, без
-// пересчёта. Fallback на сохранённый result.ic_text — если снапшота нет.
+// Подпись НУ для легенды (галка "Legend shows initial conditions"). Берём ЧИСЛА, реально
+// ушедшие в расчёт (result.snapshot.ic_flat), и форматируем через fmt_tick, т.е. с Tick
+// precision из Settings: так сгенерированные НУ (узлы сетки бассейнов пишутся с %.17g) не
+// разносят легенду на пол-экрана, а смена точности применяется сразу, без пересчёта.
+// Fallback на сохранённый result.ic_text — если снапшота нет.
 [[nodiscard]] static std::string ic_legend_text(const AnalysisResult& res, size_t k) {
     if (k < res.snapshot.ic_flat.size() && !res.snapshot.ic_flat[k].empty()) {
         const std::vector<double>& v = res.snapshot.ic_flat[k];
@@ -2354,22 +2261,18 @@ using PhaseStyleFn = std::function<bool(int ic_index, PhaseSeriesStyle& out)>;
     }
     return (k < res.ic_text.size()) ? res.ic_text[k] : std::string();
 }
-// `title_suffix` is appended to every projection window's title (e.g.
-// "##sys_<name>") so imgui.ini stores dock state per system in Custom mode.
-// `owner_id_delta` is XOR'd into the per-projection owner_id passed to
-// Plot2D/3D so the SHARED PlotRenderer cache (static in this function) is
-// keyed per system — without it, Chen and Rossler both used owner_id=0
-// for their first projection and Rossler saw Chen's cached FBO texture.
-// Analysis mode passes zero and gets the previous behaviour.
-// Параметры кластеризации для диаграммы признаков — те же множители осей и eps,
-// с которыми работает dbscan (cudaLibrary.cu). Нужны, чтобы диаграмма показывала
-// ТО пространство, в котором реально считаются кластеры: множители применяются
-// только внутри ядра, и без них диаграмма рисовала сырые (пик; IPI). Из-за этого
-// по ней нельзя было предсказать результат — при mult interval = 0 ядро видит
-// одномерную задачу, а на картинке оставалось двумерное облако.
+// `title_suffix` is appended to every projection window's title (e.g. "##sys_<name>") so
+// imgui.ini stores dock state per system in Custom mode. `owner_id_delta` is XOR'd into the
+// per-projection owner_id passed to Plot2D/3D so the SHARED PlotRenderer cache (static in this
+// function) is keyed per system — without it Chen and Rossler both used owner_id=0 for their
+// first projection and Rossler saw Chen's cached FBO. Analysis mode passes zero.
 //
-// valid=false — вызывающий не связан ни с каким DBSCAN-конфигом (вкладка Phase
-// analysis). Тогда рисуем сырые признаки и без окружности, как было.
+// Параметры кластеризации для диаграммы признаков — те же множители осей и eps, с которыми
+// работает dbscan (cudaLibrary.cu): множители применяются только внутри ядра, и без них
+// диаграмма рисовала сырые (пик; IPI), по которым нельзя предсказать результат — при
+// mult interval = 0 ядро видит одномерную задачу, а на картинке оставалось двумерное облако.
+// valid=false — вызывающий не связан ни с каким DBSCAN-конфигом (вкладка Phase analysis):
+// тогда рисуем сырые признаки и без окружности.
 struct FeatureClusterParams {
     bool   valid         = false;
     double mult_peak     = 1.0;
@@ -2385,11 +2288,10 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                     const PhaseStyleFn& style_fn = {},
                                     const FeatureClusterParams& clust = {}) {
     const AnalysisResult& res = s.result;
-    // Lambda installed on every projection view that has data — right-click
-    // "Export data..." writes the full double-precision trajectory set (all
-    // coords for all ICs) + a _config.csv sidecar. Ставится и на Phase3D:
-    // Plot3DView теперь тоже поддерживает popup_extras, поэтому экспорт
-    // доступен во всех трёх типах проекций одинаково.
+    // Lambda installed on every projection view that has data — right-click "Export data..."
+    // writes the full double-precision trajectory set (all coords for all ICs) + a _config.csv
+    // sidecar. Ставится и на Phase3D: Plot3DView тоже поддерживает popup_extras, поэтому
+    // экспорт доступен во всех трёх типах проекций одинаково.
     const bool phase_busy = s.in_flight;
     auto phase_popup_extras = [&res, &cb, phase_busy]() {
         const bool has_data = res.ok && !res.trajectories.empty();
@@ -2397,15 +2299,13 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
             data_export::export_phase(res, res.snapshot, p);
         });
     };
-    // Свой offscreen-рендерер (FBO/текстура) на КАЖДУЮ проекцию: иначе все окна
-    // показывали бы одну общую текстуру (геометрию последней отрисованной).
-    // PlotRenderer некопируемый -> храним через unique_ptr, подгоняем под число проекций.
-    // Кэш ключуется по owner_id_delta: у функции появился второй потребитель
-    // (Basins → фазовые портреты, свой delta на каждый config), и с общим
-    // вектором переключение между ними пересоздавало бы FBO каждый кадр.
-    // Analysis передаёт 0 и получает ровно прежнее поведение.
-    // Давно не рисовавшиеся владельцы вытесняются: каждый держит по FBO на
-    // проекцию (мегабайты видеопамяти), а число систем/config'ов не ограничено.
+    // Свой offscreen-рендерер (FBO/текстура) на КАЖДУЮ проекцию: иначе все окна показывали бы
+    // одну общую текстуру (геометрию последней отрисованной). PlotRenderer некопируемый — храним
+    // через unique_ptr и подгоняем под число проекций. Кэш ключуется по owner_id_delta: у функции
+    // появился второй потребитель (Basins → фазовые портреты, свой delta на каждый config), и с
+    // общим вектором переключение между ними пересоздавало бы FBO каждый кадр; Analysis передаёт 0.
+    // Давно не рисовавшиеся владельцы вытесняются: каждый держит по FBO на проекцию (мегабайты
+    // видеопамяти), а число систем/config'ов не ограничено.
     struct RendererBucket {
         std::vector<std::unique_ptr<PlotRenderer>> v;
         int last_frame = 0;
@@ -2431,11 +2331,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
-        // ε-окружность включает ТОЛЬКО ветка FeatureDiagram ниже. Гасим её
-        // здесь каждый кадр: view2d переживает смену типа проекции (объект
-        // переиспользуется, см. `if (!pr.view2d)` в ветках), и без сброса
-        // кружок остался бы висеть на фазовом портрете после переключения
-        // комбо типа.
+        // ε-окружность включает ТОЛЬКО ветка FeatureDiagram ниже. Гасим её здесь каждый кадр:
+        // view2d переживает смену типа проекции (объект переиспользуется, см. `if (!pr.view2d)`),
+        // и без сброса кружок остался бы висеть на фазовом портрете после переключения комбо.
         if (pr.view2d) pr.view2d->hover_circle_r = std::numeric_limits<double>::quiet_NaN();
         std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation) + title_suffix;
         bool open = true; // крестик закрытия
@@ -2488,11 +2386,10 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->imdraw_lines      = pr.custom_line_style;
                     pr.view2d->line_thickness_px = pr.line_width;
 
-                    // подготовить серии: для каждой траектории выбираем координаты по (ax, ay).
-                    // Буфер локальный: render() ниже забирает точки синхронно, дольше вызова
-                    // указатели не нужны. static тут был и бесполезен (clear()+resize() всё
-                    // равно уничтожает capacity), и опасен — три вызова draw_projection_windows
-                    // делили бы один буфер на всех.
+                    // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
+                    // локальный — render() ниже забирает точки синхронно. static тут был
+                    // бесполезен (clear()+resize() всё равно убивает capacity) и опасен:
+                    // три вызова draw_projection_windows делили бы один буфер.
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput> series_in;
@@ -2597,11 +2494,10 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = true;
                     pr.view2d->legend_ignore_series_alpha = true;
-                    // ε-окружность под курсором: радиус eps в ТЕХ ЖЕ осях, в
-                    // которых уложены точки (множители уже применены ниже),
-                    // поэтому накрытые ею пики — то, что dbscan сольёт в один
-                    // кластер. Без DBSCAN-конфига радиуса нет → NaN, ничего не
-                    // рисуется. Ставится каждый кадр: immediate mode.
+                    // ε-окружность под курсором: радиус eps в ТЕХ ЖЕ осях, в которых
+                    // уложены точки (множители уже применены), поэтому накрытые ею пики —
+                    // то, что dbscan сольёт в один кластер. Без DBSCAN-конфига радиуса нет
+                    // → NaN, ничего не рисуется. Ставится каждый кадр: immediate mode.
                     pr.view2d->hover_circle_r = (clust.valid && clust.eps > 0.0)
                         ? clust.eps
                         : std::numeric_limits<double>::quiet_NaN();
@@ -2822,11 +2718,10 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Alpha slider fades the trajectory, not the legend swatch.
                     pr.view3d->legend_ignore_series_alpha = true;
 
-                    // Toolbar над плотом: opt-in custom line styling (толщина + α).
-                    // В 3D нет ImDrawList-fallback (потерялся бы depth-sorting),
-                    // толщина идёт через glLineWidth — драйвер может клампить,
-                    // α точно уходит в шейдер. При выключенной фиче — восстанавливаем
-                    // старый хардкод 1.5f, чтобы поведение осталось прежним.
+                    // Toolbar над плотом: opt-in custom line styling (толщина + α). В 3D нет
+                    // ImDrawList-fallback (потерялся бы depth-sorting), толщина идёт через
+                    // glLineWidth и может клампиться драйвером, α точно уходит в шейдер.
+                    // При выключенной фиче восстанавливаем прежний хардкод 1.5f.
                     draw_style_toolbar("Custom line style", "phase3d", pr.custom_line_style,
                         [&pr]() {
                             bool ch = false;
@@ -2899,13 +2794,10 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
     s.fit_request = false;
 }
 
-// ============================================================
-// Combo "Writable var": список переменных + (через разделитель) комбинация
-// x[0] + pi*x[1] + euler*x[2] (для |vars|=2 — без e*x[2], для |vars|=1 —
-// только сама переменная). Sentinel в hostside int — -1 = combination.
-// Используется в Bifurcation и Basins (где kernel пишет data[i] через
-// loopCalculateDiscreteModel_int — он умеет оба режима, см. cudaLibrary.cu).
-// ============================================================
+// Combo "Writable var": переменные + (через разделитель) комбинация
+// x[0] + pi*x[1] + euler*x[2] (при |vars|=2 без e*x[2], при |vars|=1 — сама переменная).
+// Sentinel в hostside int: -1 = комбинация. Используется в Bifurcation и Basins, где
+// kernel пишет data[i] через loopCalculateDiscreteModel_int — он умеет оба режима.
 static void draw_writable_var_combo(const std::vector<std::string>& vars,
                                     int& writable_var,
                                     const char* combo_id) {
@@ -2938,9 +2830,7 @@ static void draw_writable_var_combo(const std::vector<std::string>& vars,
     }
 }
 
-// ============================================================
 // Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
-// ============================================================
 // Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
 // нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
 static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
@@ -2951,17 +2841,16 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         bd.label_is_manual = !bd.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    // ----- Scheme (built-in + custom) -----
+    // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes);
     ImGui::Separator();
 
-    // ----- Sweep target (parameter ИЛИ initial condition) -----
-    // Один combo с разделителем: сверху параметры, снизу переменные (IC).
-    // Выбор переменной → BD строится по начальному условию (par_or_var = 0
-    // в engine), runtime-флаг — никакой пересборки PTX.
-    // dt (h) доступен и в continuation: шаг пересчитывается в каждой точке
-    // цепочки (см. run_bif1d_continuation / _cpu). Вторую ось гасим только в
-    // 2D-режиме — в 1D флаг sweep_over_h_2 не используется и трогать его незачем.
+    // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
+    // параметры, снизу переменные (IC). Выбор переменной → БД строится по начальному
+    // условию (par_or_var = 0 в engine), это runtime-флаг, без пересборки PTX.
+    // dt (h) доступен и в continuation: шаг пересчитывается в каждой точке цепочки
+    // (run_bif1d_continuation / _cpu). Вторую ось гасим только в 2D-режиме — в 1D флаг
+    // sweep_over_h_2 не используется.
     draw_sweep_target_combo("Sweep", s.params, s.vars,
                             bd.param_index, bd.sweep_over_var, bd.var_sweep_index,
                             bd.sweep_over_h,
@@ -2972,17 +2861,16 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
     if (bd.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
-    // Continuation: каждая следующая точка стартует с конечного x[] предыдущей.
-    // Единый блок с LLE и LS 1D (см. draw_continuation_device_block) — он же
-    // гасит и сбрасывает флаги в 2D-режиме: run_bif2d идёт своим 3-kernel
-    // pipeline'ом и continuation игнорирует, скрытое состояние туда утекать не
-    // должно. Классический свип у БД CPU-реализации не имеет, поэтому радио
+    // Continuation: каждая следующая точка стартует с конечного x[] предыдущей. Единый блок
+    // с LLE и LS 1D (draw_continuation_device_block); он же гасит и сбрасывает флаги в 2D,
+    // где run_bif2d идёт своим 3-kernel pipeline'ом и continuation игнорирует — скрытое
+    // состояние туда утекать не должно. Классического CPU-свипа у БД нет, поэтому радио
     // GPU/CPU влияет только на continuation.
     draw_continuation_device_block(bd, "bd", bd.mode_2d || bd.sweep_over_var, bd.mode_2d);
 
     ImGui::Separator();
 
-    // ----- 2D mode: хитмап «период»(p1, p2) через DBSCAN -----
+    // 2D mode: хитмап «период»(p1, p2) через DBSCAN
     if (ImGui::Checkbox("2D mode (period heatmap)", &bd.mode_2d) && bd.mode_2d)
         bd.colored_1d = false;   // взаимоисключающе с Colored 1D diagram
     if (bd.mode_2d) {
@@ -3009,7 +2897,7 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
 
     ImGui::Separator();
 
-    // ----- Variable + resolution + inter-peaks -----
+    // Variable + resolution + inter-peaks
     draw_writable_var_combo(s.vars, bd.writable_var, "Writable var##bd_wv");
     InputNumStr("Resolution", bd.n_pts_text, kFieldW);
     if (!bd.mode_2d)
@@ -3035,7 +2923,7 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         ImGui::Checkbox("Logarithmic density scale", &bd.colored_1d_log);
     }
 
-    // ----- Integration (collapsible) -----
+    // Integration (collapsible)
     {
         IntegrationFields f;
         f.h           = &bd.h_text;
@@ -3090,12 +2978,11 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
 static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
 
-    // Tab bar: одна вкладка на БД + кнопка "+" справа для добавления новой БД
-    // (копия последней). Активная вкладка хранится в s.active_diagram_index и
-    // используется Ctrl+R. request_select_diagram — внешний запрос выбрать
-    // вкладку: его шлёт тулбар Colored 1D над плотом, иначе галка включалась бы
-    // у одной БД, а настройки показывались для другой.
-    // Run-кнопка + Ctrl+R живут в draw_parametric_controls (общие для Bif/LLE/LS).
+    // Tab bar: одна вкладка на БД + кнопка "+" справа (копия последней). Активная вкладка
+    // хранится в s.active_diagram_index и используется Ctrl+R. request_select_diagram —
+    // внешний запрос выбрать вкладку от тулбара Colored 1D над плотом, иначе галка
+    // включалась бы у одной БД, а настройки показывались для другой.
+    // Run-кнопка и Ctrl+R живут в draw_parametric_controls (общие для Bif/LLE/LS).
     const TabBarResult tabs = draw_config_tab_bar(
         "##bd_tabs", "bd_tab_", (int)s.diagrams.size(),
         s.in_flight, s.running_diagram_index,
@@ -3137,11 +3024,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                                    PlotRenderer& renderer, Plot2DView& view,
                                    std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
-    // Per-diagram HeatmapView, keyed by diagram index within THIS window's
-    // own map (map is already per-window, so no cross-window bleed).
-    // Per-diagram persisted choice takes priority; falls back to the shared
-    // "last touched anywhere" default for a diagram that's never had its own
-    // colormap set (см. get_or_create_heatmap).
+    // Per-diagram HeatmapView, keyed by diagram index within THIS window's own map (map is
+    // already per-window, so no cross-window bleed). Per-diagram persisted choice takes
+    // priority; falls back to the shared "last touched anywhere" default (get_or_create_heatmap).
     auto get_bd_heatmap = [&](int idx) -> HeatmapView& {
         const int cfg_cm = (idx >= 0 && idx < (int)s.diagrams.size())
                            ? s.diagrams[idx].colormap_idx : -1;
@@ -3153,14 +3038,11 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         return;
     }
 
-    // Тулбар-тумблер над плотом: переключает ЭТО окно между classic scatter
-    // и colored-1D heatmap напрямую, без похода в Plot windows → Type →
-    // Members. Держит diagram-флаг синхронно с window-флагом. Если членов
-    // больше одного (overlay в classic-режиме) — оставляем первого как
-    // "фокусного", остальные отбрасываются (heatmap-режимы — single-member,
-    // как и раньше при переключении через Type combo).
-    // Только для Bifurcation 1D — Colored 1D не имеет смысла поверх настоящего
-    // 2D bifurcation (уже heatmap по двум параметрам).
+    // Тулбар-тумблер над плотом: переключает ЭТО окно между classic scatter и colored-1D
+    // heatmap напрямую, минуя Plot windows → Type → Members, держа diagram-флаг синхронно с
+    // window-флагом. Если членов больше одного (overlay), оставляем первого как фокусного —
+    // heatmap-режимы single-member, как и при переключении через Type combo.
+    // Только для Bifurcation 1D: поверх настоящего 2D Colored 1D смысла не имеет.
     if (!win.mode_2d) {
         bool c1d = win.colored_1d;
         if (ImGui::Checkbox("Colored 1D diagram##bdtoolbar", &c1d)) {
@@ -3180,12 +3062,10 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             }
             model.parametric_plot_windows_dirty = true;
         }
-        // Custom point style — справа от Colored 1D. В colored-режиме плот
-        // становится хитмапой, стиль точек к ней неприменим → disabled.
-        // Настройка живёт в самой БД, а окно может показывать несколько БД
-        // наложением: читаем состояние у фокусного члена (members[0]) и при
-        // изменении записываем во ВСЕ члены окна — иначе overlay разъехался бы
-        // по стилю (маркер/размер — свойства вида, они одни на окно).
+        // Custom point style — справа от Colored 1D; в colored-режиме плот становится
+        // хитмапой и стиль точек неприменим → disabled. Настройка живёт в самой БД, а окно
+        // может показывать несколько БД наложением: читаем у фокусного члена (members[0]),
+        // а пишем во ВСЕ члены окна — маркер и размер это свойства вида, они одни на окно.
         ImGui::SameLine();
         ImGui::BeginDisabled(win.colored_1d);
         {
@@ -3576,9 +3456,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 series_in, init_vis, glob_vis, any_fit);
 }
 
-// ============================================================
 // LLE: контролы (per-curve в табе) + line-plot λ(param)
-// ============================================================
 
 // Контролы одной LLE-кривой. Возвращает true, если пользователь нажал Run
 // для этой кривой.
@@ -3607,7 +3485,6 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
 
     draw_continuation_device_block(c, "lle", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
-
     ImGui::Separator();
     // 2D-режим. Сетка квадратная (см. analysis_session.h:LLECurveConfig коммент)
     // — Resolution выше применяется и к X, и к Y.
@@ -3630,7 +3507,7 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
 
     ImGui::Separator();
 
-    // ----- Integration (collapsible) -----
+    // Integration (collapsible)
     {
         IntegrationFields f;
         f.h          = &c.h_text;
@@ -3641,7 +3518,7 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f);
     }
 
-    // ----- LLE (Wolf/Benettin) (collapsible) -----
+    // LLE (Wolf/Benettin) (collapsible)
     if (ImGui::CollapsingHeader("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
@@ -3695,11 +3572,9 @@ static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.to_remove >= 0) model.remove_lle_curve(tabs.to_remove);
 }
 
-// Plot LLE: линии (points_mode=false). Каждая кривая — λ(param).
-// При mode_2d=true у активной кривой вместо линий рисуется HeatmapView
-// (квадратная сетка λ(p1, p2) с colormap'ом).
-// Plots one Parametric plot window of kind LLE. Same per-window-state shape
-// as draw_bifurcation_plot (see there for the rationale).
+// Plot LLE: линии (points_mode=false), каждая кривая — λ(param). При mode_2d=true у
+// активной кривой вместо линий рисуется HeatmapView (сетка λ(p1, p2) с colormap'ом).
+// Per-window-state shape — как у draw_bifurcation_plot (обоснование см. там).
 static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                           const ParametricPlotWindow& win,
                           PlotRenderer& renderer, Plot2DView& view,
@@ -3790,7 +3665,6 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
         return;
     }
 
-
     // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
     configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
         [](const LLECurveConfig& c, double& lo, double& hi) {
@@ -3871,10 +3745,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
                 series_in, init_vis, glob_vis, any_fit);
 }
 
-// ============================================================
 // LS: контролы (per-curve в табе) + line-plot λ_k(param), N экспонент
 // на один спектр-«прогон». UX зеркало LLE.
-// ============================================================
 
 static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) {
     LSCurveConfig& c = s.curves[idx];
@@ -3921,7 +3793,7 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
 
     ImGui::Separator();
 
-    // ----- Integration (collapsible) -----
+    // Integration (collapsible)
     {
         IntegrationFields f;
         f.h          = &c.h_text;
@@ -3932,7 +3804,7 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f);
     }
 
-    // ----- LS (Wolf/Benettin + Gram-Schmidt) (collapsible) -----
+    // LS (Wolf/Benettin + Gram-Schmidt) (collapsible)
     if (ImGui::CollapsingHeader("LS (Wolf/Benettin + Gram-Schmidt)##ls_wbgs", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
@@ -3984,13 +3856,11 @@ static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.to_remove >= 0) model.remove_ls_curve(tabs.to_remove);
 }
 
-// Plot LS: каждая кривая раскладывается на N лiний (по числу экспонент).
-// Серия: spectrum_idx * N + exponent_idx. Цвета через ic_base_color(seq).
-// При mode_2d=true у активной кривой вместо линий рисуется HeatmapView с
-// одной выбранной экспонентой; combo "Exponent" над хитмапой переключает
-// плоскость без повторного Run.
-// Plots one Parametric plot window of kind LS. Same per-window-state shape
-// as draw_bifurcation_plot (see there for the rationale).
+// Plot LS: каждая кривая раскладывается на N линий по числу экспонент, серия =
+// spectrum_idx * N + exponent_idx, цвета через ic_base_color(seq). При mode_2d=true у
+// активной кривой рисуется HeatmapView с одной выбранной экспонентой; combo "Exponent"
+// над хитмапой переключает плоскость без повторного Run.
+// Per-window-state shape — как у draw_bifurcation_plot (обоснование см. там).
 static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                          const ParametricPlotWindow& win,
                          PlotRenderer& renderer, Plot2DView& view,
@@ -4100,7 +3970,6 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         return;
     }
 
-
     // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
     configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
         [](const LSCurveConfig& c, double& lo, double& hi) {
@@ -4199,15 +4068,10 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                 series_in, init_vis, glob_vis, any_fit);
 }
 
-// ============================================================
-// Parametric plot windows — shared setup-row helper.
-//
-// The row (Label | Type | Members... | X) is rendered both in the Plot
-// windows manager on the settings panel (draw_parametric_controls) and
-// at the top of each per-window Begin() (draw_parametric_plot_windows),
-// so users can retype the chart without going back to the panel. The
+// Parametric plot windows — shared setup-row helper. The row (Label | Type | Members... | X)
+// is rendered both in the Plot windows manager on the settings panel and at the top of each
+// per-window Begin(), so users can retype the chart without going back to the panel; the
 // helpers live at file scope so both callsites share one implementation.
-// ============================================================
 struct ParamPlotMatchItem { int index; std::string label; };
 
 [[nodiscard]] static std::vector<ParamPlotMatchItem>
@@ -4312,16 +4176,12 @@ static bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWind
     return close_clicked;
 }
 
-// ============================================================
-// Parametric mode: dynamic plot windows (mirrors draw_projection_windows
-// in Phase). One ImGui window per model.parametric_plot_windows entry,
-// each with its own PlotRenderer/Plot2DView/HeatmapView-map keyed by
-// ParametricPlotWindow::id (not vector position — position shifts when an
-// earlier window is removed, id doesn't). Closing a window (X) removes it
-// from the list; "Reset windows layout" (in draw_parametric_controls) bumps
-// model.parametric_layout_generation, baked into every title, so ImGui
-// treats them as brand-new windows and re-cascades default positions.
-// ============================================================
+// Parametric mode: dynamic plot windows (mirrors draw_projection_windows in Phase). One ImGui
+// window per model.parametric_plot_windows entry, each with its own
+// PlotRenderer/Plot2DView/HeatmapView-map keyed by ParametricPlotWindow::id — not vector
+// position, which shifts when an earlier window is removed. Closing a window (X) removes it;
+// "Reset windows layout" bumps model.parametric_layout_generation, baked into every title, so
+// ImGui treats them as brand-new windows and re-cascades default positions.
 static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
     static std::map<int, std::unique_ptr<Plot2DView>>    views;
@@ -4347,11 +4207,9 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
         }
         auto& hm_map = heatmaps[win.id];
 
-        // Use "###" so ImGui hashes the ID from the suffix only (win.id +
-        // layout generation), independent of the visible label. This keeps
-        // docking/position stable when the user renames the window; a Reset
-        // windows layout bumps parametric_layout_generation, which changes
-        // the ID and re-cascades default positions.
+        // "###" makes ImGui hash the ID from the suffix only (win.id + layout generation),
+        // independent of the visible label: docking/position stay stable when the user renames
+        // the window, and a layout reset changes the ID to re-cascade default positions.
         std::string title = win.label + "###pwin" + std::to_string(win.id)
                            + "_g" + std::to_string(model.parametric_layout_generation);
         bool open = true;
@@ -4392,11 +4250,9 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
     }
 }
 
-// ============================================================
 // 1D DFT: controls (system picker + Run/Run all + config tab bar, mirrors
 // draw_basins_controls) + dynamic Plot windows (mirrors draw_parametric_
 // controls' manager + draw_bifurcation_plot's colored_1d heatmap toolbar).
-// ============================================================
 
 static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     Dft1DConfig& c = s.configs[idx];
@@ -4406,11 +4262,11 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    // ----- Scheme (built-in + custom) -----
+    // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
     ImGui::Separator();
 
-    // ----- Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls -----
+    // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
     // dt (h) — как у Bif/LLE/LS 1D: число сэмплов блока и окно пересчитываются
     // под шаг каждой точки. Второй оси у DFT нет, поэтому other_over_h = nullptr.
     draw_sweep_target_combo("Sweep", s.params, s.vars,
@@ -4427,7 +4283,7 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     draw_continuation_device_block(c, "dft", c.sweep_over_var, /*device_locked*/ false);
     ImGui::Separator();
 
-    // ----- Variable + Resolution X -----
+    // Variable + Resolution X
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##dft_wv");
     InputNumStr("Resolution X", c.n_pts_text, kFieldW);
     ImGui::Separator();
@@ -4446,7 +4302,7 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
     }
 
-    // ----- Display mode + normalize -----
+    // Display mode + normalize
     if (ImGui::CollapsingHeader("Display##dft_disp", ImGuiTreeNodeFlags_DefaultOpen)) {
         static const char* modes[] = { "Power spectrum", "Amplitude", "Phase" };
         ImGui::SetNextItemWidth(kComboW);
@@ -4454,7 +4310,7 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         ImGui::Checkbox("Normalize?", &c.normalize);
     }
 
-    // ----- Integration (collapsible) -----
+    // Integration (collapsible)
     {
         IntegrationFields f;
         f.h           = &c.h_text;
@@ -4488,8 +4344,7 @@ static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("1D DFT");
     ImGui::TextDisabled("Parametric discrete Fourier transform via NVRTC + DFT_custom.");
 
-
-    // ----- Run / Run all... (общая реализация, см. draw_run_and_run_all) -----
+    // Run / Run all... (общая реализация, см. draw_run_and_run_all)
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;
@@ -4530,7 +4385,7 @@ static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
 
     draw_dft1d_diagram_controls(s, s.active_config_index);
 
-    // ----- Plot windows: dynamic list, mirrors Parametric's manager section -----
+    // Plot windows: dynamic list, mirrors Parametric's manager section
     // No Type combo needed (DFT1D has only one display kind); "Members..."
     // is single-select (radio) — each window shows exactly one config's
     // heatmap, same as Bifurcation's colored_1d/mode_2d windows.
@@ -4747,35 +4602,17 @@ static void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const G
     }
 }
 
-// ============================================================
 // Basins of attraction: controls + 5-plot window (inner tab-bar).
-// ============================================================
 
-// ============================================================
 // Basins: общие хелперы карты + панель фазовых портретов по бассейнам.
-// ============================================================
 
-// Диапазон colorbar'а таба «Basins» — единственный источник истины и для самой
-// хитмапы, и для цвета траекторий в фазовых портретах (иначе цвет бассейна на
-// карте и цвет его траектории разъезжаются).
+// Диапазон colorbar'а таба «Basins» — единственный источник истины и для хитмапы, и для цвета
+// траекторий в фазовых портретах (иначе цвет бассейна на карте и его траектории разъезжаются):
 //   min_cluster_id..-1 — FP-кластеры (если есть отрицательные)
 //   0                  — расходящиеся ячейки (helpful_array[i] == 0)
 //   1..n_clusters      — осциллирующие кластеры
-// Когда FP-кластеров нет и ничего не разошлось, «кластер 0» не существует —
-// сдвигаем vmin к 1, чтобы в colorbar'е не было фантомной полосы.
-// Названия 12 признаков DBSCAN (BF_* в configCUDA.h / enum BasinFeature в
-// analysis_session.h). Один список на файл: раньше он был выписан дважды — в
-// панели настроек и в подписях осей scatter'а — с комментарием «должны быть
-// синхронизированы», то есть с ручной синхронизацией вместо общей константы.
-static const char* const kFeatureNames[] = {
-    "Avg peaks",             "Avg intervals",
-    "RMS peaks",             "RMS intervals",
-    "StDev peaks",           "StDev intervals",
-    "sign\xc2\xb7log10|avg peaks|", "sign\xc2\xb7log10|avg intervals|",
-    "log10 RMS peaks",       "log10 RMS intervals",
-    "log10 StDev peaks",     "log10 StDev intervals",
-};
-
+// Когда FP-кластеров нет и ничего не разошлось, «кластера 0» не существует — сдвигаем vmin к 1,
+// чтобы в colorbar'е не было фантомной полосы.
 static void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& vmax) {
     const int n_clusters     = c.renumber_spiral ? c.n_clusters_spiral      : c.result.n_clusters;
     const int min_cluster_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
@@ -4823,10 +4660,9 @@ static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
     }
     cm = colormap_id_or(cm, kColormapTurbo);
 
-    // Нормировка — по РАЗДВИНУТОМУ диапазону, ровно как в HeatmapView::render
-    // (там vmax <= vmin даёт vmax = vmin + 1). Число полос при этом считается
-    // по исходному — тоже как там. Раньше здесь вырожденный диапазон давал
-    // t = 0.5, а карта для того же id — t = 0, и единственный бассейн
+    // Нормировка — по РАЗДВИНУТОМУ диапазону, ровно как в HeatmapView::render (там vmax <= vmin
+    // даёт vmax = vmin + 1), а число полос считается по исходному — тоже как там. Раньше здесь
+    // вырожденный диапазон давал t = 0.5, а карта для того же id — t = 0, и единственный бассейн
     // получал на портрете другой цвет, чем на хитмапе.
     double vmax_n = vmax;
     if (vmax_n <= vmin) vmax_n = vmin + 1.0;
@@ -4856,7 +4692,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
 
     bool changed = false;
 
-    // ---- Run / Autorun / устройство ----
+    // Run / Autorun / устройство
     const bool basins_busy = s.in_flight && s.running_config_index == cfg_idx;
     const bool phase_busy  = sl.phase.in_flight;
     const bool no_data     = !c.last_run_ok || c.result.basin_idx.empty();
@@ -4881,7 +4717,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
         }
     }
 
-    // ---- Собственные параметры интегрирования ----
+    // Собственные параметры интегрирования
     changed |= InputNumStr("computing time##pp", c.pp_t_max_text, kFieldW);
     changed |= InputNumStr("transient time##pp", c.pp_transient_text, kFieldW);
     changed |= InputNumStr("decimator##pp",      c.pp_prescaller_text, kFieldW);
@@ -4891,7 +4727,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     if (ImGui::SliderFloat("FP marker size##pp", &c.pp_marker_size, 2.0f, 12.0f, "%.0f px"))
         changed = true;
 
-    // ---- Сводка: сколько бассейнов нашлось / сколько рисуем / сколько памяти ----
+    // Сводка: сколько бассейнов нашлось / сколько рисуем / сколько памяти
     if (no_data) {
         ImGui::TextDisabled("No basins data yet — run the map first.");
     } else {
@@ -4929,7 +4765,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
         }
     }
 
-    // ---- Статус актуальности ----
+    // Статус актуальности
     const std::string sig = build_basins_phase_signature(c);
     if (!no_data && sig != sl.run_signature && !phase_busy) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
@@ -4943,7 +4779,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
         else ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", sl.phase.result.error.c_str());
     }
 
-    // ---- Окна (проекции) ----
+    // Окна (проекции)
     ImGui::SeparatorText("Windows");
     int pr_to_remove = -1;
     for (int i = 0; i < (int)sl.phase.projections.size(); ++i) {
@@ -5006,7 +4842,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     ImGui::SameLine();
     if (ImGui::Button("Reset windows layout##pp")) sl.phase.layout_generation++;
 
-    // ---- Легенда/видимость бассейнов ----
+    // Легенда/видимость бассейнов
     if (!sl.phase.ic_sets.empty()) {
         ImGui::SeparatorText("Basins drawn");
         ImGui::Checkbox("Legend shows initial conditions##pp", &sl.phase.legend_show_ic);
@@ -5037,11 +4873,9 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
 
-    // ----- Run / Run all... (moved up to sit right under the system picker,
-    // above the tab bar — these drive the currently active config so they
-    // stay accessible without scrolling past every section). -----
-    // Batch "Run all..." across basin configs. Pushes selected indices into
-    // model.basins_queue; draw_gui ticks the queue after polls.
+    // Run / Run all... — сразу под пикером системы, над таб-баром: управляют активным конфигом
+    // и должны быть доступны без прокрутки. "Run all..." кладёт выбранные индексы в
+    // model.basins_queue; draw_gui тикает очередь после poll'ов.
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;
@@ -5086,11 +4920,11 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     draw_label_rename("Label##basins_label", c.label);
     ImGui::Separator();
 
-    // ----- Scheme -----
+    // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
     ImGui::Separator();
 
-    // ----- Axes (X, Y по двум IC-переменным) -----
+    // Axes (X, Y по двум IC-переменным)
     if (!s.vars.empty()) {
         if (c.axis_x_var < 0 || c.axis_x_var >= (int)s.vars.size()) c.axis_x_var = 0;
         if (c.axis_y_var < 0 || c.axis_y_var >= (int)s.vars.size())
@@ -5111,12 +4945,12 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
     InputNumStr("Resolution", c.n_pts_text, kFieldW);
 
-    // ----- Writable var (для peak finder) -----
+    // Writable var (для peak finder)
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##bas_wv");
 
     ImGui::Separator();
 
-    // ----- Integration (collapsible, swapped above Features) -----
+    // Integration (collapsible, swapped above Features)
     {
         IntegrationFields f;
         f.h           = &c.h_text;
@@ -5128,7 +4962,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         draw_integration_block("Integration", c.scheme, s.custom_schemes, f);
     }
 
-    // ----- Features (DBSCAN axes + plot data) (collapsible) -----
+    // Features (DBSCAN axes + plot data) (collapsible)
     // 12 фич (см. BF_* в configCUDA.h / enum BasinFeature в analysis_session.h).
     // Feature 1 пишется в outAvgPeaks-буфер (X-координата DBSCAN), Feature 2 —
     // в AvgTimeOfPeaks-буфер (Y-координата). Множители применяются ПОСЛЕ
@@ -5138,21 +4972,20 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         if (c.feature1 < 0 || c.feature1 >= BF_FEATURE_COUNT) c.feature1 = BF_FEATURE1_DEFAULT;
         if (c.feature2 < 0 || c.feature2 >= BF_FEATURE_COUNT) c.feature2 = BF_FEATURE2_DEFAULT;
         ImGui::SetNextItemWidth(220);
-        ImGui::Combo("Feature 1##bas", &c.feature1, kFeatureNames, IM_ARRAYSIZE(kFeatureNames));
+        ImGui::Combo("Feature 1##bas", &c.feature1, kBasinFeatureNames, BF_FEATURE_COUNT);
         ImGui::SameLine();
         InputNumStr("mult##bas_f1", c.mult_feature1_text, 80);
         ImGui::SetNextItemWidth(220);
-        ImGui::Combo("Feature 2##bas", &c.feature2, kFeatureNames, IM_ARRAYSIZE(kFeatureNames));
+        ImGui::Combo("Feature 2##bas", &c.feature2, kBasinFeatureNames, BF_FEATURE_COUNT);
         ImGui::SameLine();
         InputNumStr("mult##bas_f2", c.mult_feature2_text, 80);
     }
 
-    // DBSCAN eps — кластеризационный радиус в (Feature 1, Feature 2) пространстве.
-    // Оставлен снаружи Features-секции: тюнится чаще, чем выбор самих фич.
-    // Рядом — кнопка "Clustering": перезапускает только DBSCAN-фазу по уже
-    // посчитанным фичам (avg_peaks / avg_intervals в c.result), быстрее чем
-    // полный Run в десятки/сотни раз. Дизейблится, если нет валидного
-    // предыдущего результата или уже идёт расчёт.
+    // DBSCAN eps — кластеризационный радиус в пространстве (Feature 1, Feature 2). Оставлен
+    // снаружи Features-секции: тюнится чаще, чем выбор самих фич. Рядом кнопка "Clustering":
+    // перезапускает только DBSCAN-фазу по уже посчитанным фичам (avg_peaks / avg_intervals в
+    // c.result) — в десятки-сотни раз быстрее полного Run. Дизейблится без валидного
+    // предыдущего результата или во время расчёта.
     InputNumStr("DBSCAN eps", c.eps_dbscan_text, kFieldW);
     ImGui::SameLine();
     const bool can_recluster = !s.in_flight && c.last_run_ok &&
@@ -5172,7 +5005,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
                           "Values for non-axis variables.");
     draw_named_num_fields("Parameters", s.params, c.param_values);
 
-    // ----- Phase portraits from basins (collapsible) -----
+    // Phase portraits from basins (collapsible)
     // Отдельные окна 2D / Time domain по одной представительной точке из
     // каждого найденного бассейна (см. draw_basins_phase_controls).
     if (ImGui::CollapsingHeader("Phase portraits")) {
@@ -5194,18 +5027,15 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     }
 }
 
-// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views — per
-// (config × tab) в std::map по owner_id. HeatmapView/Plot2DView хранят
-// data_gen_cached внутри без учёта owner_id, поэтому переиспользовать один
-// view между разными configs нельзя (после Run All у двух configs одинаковый
-// data_generation=1 → cache не invalidate'тся и на чужой вкладке показывается
-// предыдущий buffer). Map с lazy-init решает это и сохраняет независимый
-// zoom/pan per (config, tab).
-// spiral_coords_from_center / renumber_basins_spiral / ensure_basins_spiral_cache
-// переехали в analysis_session.cpp: перенумерация нужна не только для
-// отрисовки, но и для выбора представительных ячеек в фазовых портретах по
-// бассейнам (BasinsAnalysisSession::rebuild_phase_ics), а тот слой про GUI
-// ничего не знает. Объявления — в analysis_session.h.
+// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views — per (config × tab) в
+// std::map по owner_id: HeatmapView/Plot2DView хранят data_gen_cached внутри без учёта
+// owner_id, поэтому один view нельзя переиспользовать между configs (после Run All у двух
+// configs одинаковый data_generation=1 → кэш не инвалидируется и на чужой вкладке виден
+// предыдущий буфер). Map с lazy-init решает это и сохраняет независимый zoom/pan per (config, tab).
+// spiral_coords_from_center / renumber_basins_spiral / ensure_basins_spiral_cache переехали в
+// analysis_session.cpp (объявления в analysis_session.h): перенумерация нужна не только для
+// отрисовки, но и для выбора представительных ячеек в фазовых портретах
+// (BasinsAnalysisSession::rebuild_phase_ics), а тот слой про GUI ничего не знает.
 
 static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
@@ -5258,13 +5088,11 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         return;
     }
 
-    // Right-click "Export data..." — exports the full 4-file Basins set
-    // (basin_idx, avg_peaks, avg_intervals, helpful_array) at the chosen
-    // path. All four heatmap views share the same source result, so the
-    // same lambda works for any tab. Scatter (tab 4) uses Plot2DView, so
-    // the same hook is set there too. Если включён Renumber (spiral),
-    // basin_idx в файл уйдёт перенумерованный — чтобы экспорт совпадал с
-    // тем, что пользователь видит на экране.
+    // Right-click "Export data..." — exports the full 4-file Basins set (basin_idx, avg_peaks,
+    // avg_intervals, helpful_array) at the chosen path. All four heatmap views share the same
+    // source result, so one lambda works for any tab; scatter (tab 4) uses Plot2DView and gets
+    // the same hook. Если включён Renumber (spiral), basin_idx уйдёт в файл перенумерованным —
+    // чтобы экспорт совпадал с тем, что пользователь видит на экране.
     const bool basins_busy = s.in_flight &&
                              s.active_config_index == s.running_config_index;
     auto basins_export_extras = [&c, &cb, basins_busy]() {
@@ -5301,12 +5129,10 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         ImGui::EndTabBar();
     }
 
-    // Combo выбора colormap — свой для каждого heatmap-таба (Basins/AvgPk/
-    // AvgInt/States). Каждый выбор пишется в свой field в AppModel и
-    // персистится в _app_config.json. Все эти поля независимы от
-    // model.heatmap_colormap (тот шарится Bif/LLE/LS) — смена здесь их не
-    // затрагивает, и наоборот. Scatter-таб использует Plot2DView, без
-    // colormap.
+    // Combo выбора colormap — свой для каждого heatmap-таба (Basins/AvgPk/AvgInt/States).
+    // Каждый выбор пишется в своё поле AppModel и персистится в _app_config.json. Эти поля
+    // независимы от model.heatmap_colormap (тот шарится Bif/LLE/LS) — смена здесь их не
+    // затрагивает и наоборот. Scatter-таб использует Plot2DView, без colormap.
     {
         // Per-tab colormap: приоритет — выбор, сохранённый в ЭТОМ config'е
         // (уходит в _last_basins.json); -1 = не задан → app-дефолт из Settings.
@@ -5495,17 +5321,16 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             init_vis.push_back(true);
             glob_vis.push_back(true);
         }
-        // Имена осей scatter'а — выбранные фичи, из общего kFeatureNames
-        // (тот же список, что в комбо панели настроек).
+        // Имена осей scatter'а — выбранные фичи, из общего kBasinFeatureNames
+        // (analysis_session.h: тот же список, что в комбо настроек и в _config.csv).
         int f1 = (c.feature1 >= 0 && c.feature1 < BF_FEATURE_COUNT) ? c.feature1 : BF_FEATURE1_DEFAULT;
         int f2 = (c.feature2 >= 0 && c.feature2 < BF_FEATURE_COUNT) ? c.feature2 : BF_FEATURE2_DEFAULT;
-        scatter_v.x_axis.name = kFeatureNames[f1];
-        scatter_v.y_axis.name = kFeatureNames[f2];
-        // ε-окружность под курсором. Здесь она точна по определению: точки
-        // scatter'а — это ровно те avg_peaks/avg_intervals-буферы, которые
-        // читает cell-level DBSCAN (CUDA_dbscan_kernel: sqrt(dx^2+dy^2) <= eps),
-        // и множители Feature 1/2 в них уже вписаны на GPU. Так что накрытые
-        // кружком ячейки — кандидаты попасть в один бассейн.
+        scatter_v.x_axis.name = kBasinFeatureNames[f1];
+        scatter_v.y_axis.name = kBasinFeatureNames[f2];
+        // ε-окружность под курсором. Здесь она точна по определению: точки scatter'а — ровно те
+        // avg_peaks/avg_intervals-буферы, которые читает cell-level DBSCAN (CUDA_dbscan_kernel:
+        // sqrt(dx^2+dy^2) <= eps), и множители Feature 1/2 в них уже вписаны на GPU, поэтому
+        // накрытые кружком ячейки — кандидаты попасть в один бассейн.
         scatter_v.hover_circle_r = parse_ratio_or(c.eps_dbscan_text, 0.5);
         // gen-token включает renumber_spiral — иначе Plot2DView::series_cache_
         // не перезаливает GPU-буфер и подписи/цвета остаются от прошлой версии.
@@ -5550,15 +5375,13 @@ static void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
         return true;
     };
 
-    // Диаграмма признаков в этих окнах — облако (пик; IPI) по выбранным
-    // ячейкам, а cell-level DBSCAN бассейнов мерит eps в пространстве
-    // (Feature1 x mult1, Feature2 x mult2), по ОДНОЙ точке на ячейку. Единицы
-    // совпадают с осями диаграммы ровно тогда, когда выбраны средние: тогда
-    // точка ячейки — центроид этого самого облака, и eps-кружок на нём
-    // осмыслен. На RMS/StDev/log-фичах множители относятся к другой величине,
-    // и растягивать на них ось «пик» значило бы врать — там оставляем сырые
-    // оси и без кружка, как было. Клампы f1/f2 повторяют engine
-    // (analysis_session.cpp): вне диапазона он берёт дефолт, т.е. средние.
+    // Диаграмма признаков здесь — облако (пик; IPI) по выбранным ячейкам, а cell-level
+    // DBSCAN бассейнов мерит eps в пространстве (Feature1 x mult1, Feature2 x mult2) по
+    // ОДНОЙ точке на ячейку. Единицы совпадают с осями диаграммы только при выбранных
+    // средних: тогда точка ячейки — центроид этого облака и eps-кружок на нём осмыслен.
+    // На RMS/StDev/log-фичах множители относятся к другой величине, поэтому там оставляем
+    // сырые оси и без кружка. Клампы f1/f2 повторяют engine (analysis_session.cpp): вне
+    // диапазона он берёт дефолт, т.е. средние.
     FeatureClusterParams clust;
     {
         const int f1 = (c.feature1 >= 0 && c.feature1 < BF_FEATURE_COUNT) ? c.feature1 : BF_FEATURE1_DEFAULT;
@@ -5583,11 +5406,10 @@ static void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
 }
 
-// Раз в кадр: пометить устаревшие портреты и, если включён Autorun, поставить
-// их в очередь. Дебаунс 300 мс — иначе каждое нажатие клавиши в текстовом поле
-// стартовало бы новый GPU-прогон. Проходим по ВСЕМ config'ам: после «Run all…»
-// автозапуск должен подхватить каждый пересчитанный конфиг, а не только
-// открытый в данный момент.
+// Раз в кадр: пометить устаревшие портреты и, если включён Autorun, поставить их в
+// очередь. Дебаунс 300 мс — иначе каждое нажатие клавиши в текстовом поле стартовало бы
+// новый GPU-прогон. Проходим по ВСЕМ config'ам: после «Run all…» автозапуск должен
+// подхватить каждый пересчитанный конфиг, а не только открытый.
 static void basins_phase_tick(AppModel& model) {
     BasinsAnalysisSession& s = model.basins_session;
     s.ensure_phase_slots();
@@ -5609,10 +5431,8 @@ static void basins_phase_tick(AppModel& model) {
     }
 }
 
-// ============================================================
 // Fast Synchro Controls + Plot — recurrent synchronization (anti-sync).
 // Mode 0 = On Attractor (trajectory + per-point error); Mode 1 = On Grid.
-// ============================================================
 static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     FastSyncAnalysisSession& s = model.fastsync_session;
 
@@ -5625,11 +5445,10 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
 
-    // ----- Run / Cancel / Run all... (moved up to sit right under the system
-    // picker, above the tab bar — these buttons drive the currently active
-    // config, so they stay accessible without scrolling past all sections). -----
-    // Batch "Run all..." across FastSync configs. Pushes selected indices into
-    // model.fastsync_queue; draw_gui ticks the queue after polls.
+    // Run / Cancel / Run all... — сразу под пикером системы, над таб-баром: эти кнопки
+    // управляют активным конфигом и должны быть доступны без прокрутки.
+    // "Run all..." кладёт выбранные индексы в model.fastsync_queue; draw_gui тикает
+    // очередь после poll'ов.
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;
@@ -5677,19 +5496,19 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     draw_label_rename("Label##fs_label", c.label);
     ImGui::Separator();
 
-    // ----- Mode -----
+    // Mode
     ImGui::Text("Mode:");
     ImGui::RadioButton("On Attractor", &c.mode, 0); ImGui::SameLine();
     ImGui::RadioButton("On Grid",      &c.mode, 1);
     ImGui::Separator();
 
-    // ----- Scheme -----
+    // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
     if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
 
-    // ----- Mode-specific axes -----
+    // Mode-specific axes
     if (c.mode == 1 && !s.vars.empty()) {
         if (c.axis_x_var < 0 || c.axis_x_var >= (int)s.vars.size()) c.axis_x_var = 0;
         if (c.axis_y_var < 0 || c.axis_y_var >= (int)s.vars.size())
@@ -5722,7 +5541,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Separator();
     }
 
-    // ----- Integration (collapsible) -----
+    // Integration (collapsible)
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("h",                c.h_text, kFieldW);
         if (c.mode == 0) {
@@ -5767,7 +5586,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         InputNumStr("max value",        c.max_value_text, kFieldW);
     }
 
-    // ----- Synchro runtime (collapsible) -----
+    // Synchro runtime (collapsible)
     if (ImGui::CollapsingHeader("Synchro runtime", ImGuiTreeNodeFlags_DefaultOpen)) {
         static const char* tos_names[] = { "Unidirectional", "Bidirectional" };
         ImGui::SetNextItemWidth(kComboW);
@@ -5783,14 +5602,13 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         InputNumStr("FS error trs.", c.fs_error_trs_text, kFieldW);
     }
 
-    // ----- Parameters (collapsible, placed under Synchro runtime) -----
+    // Parameters (collapsible, placed under Synchro runtime)
     draw_named_num_fields("Parameters", s.params, c.param_values);
 
-    // ----- Paired collapsible sections: one click on either header collapses
-    // both halves together. Shared open state is forced into each header via
-    // SetNextItemOpen each frame; IsItemToggledOpen captures the click and
-    // flips the shared state. Variables render row-by-row so x_master pairs
-    // horizontally with x_slave (same for K forward/backward). -----
+    // Парные сворачиваемые секции: клик по любому заголовку сворачивает обе половины.
+    // Общее состояние навязывается каждому заголовку через SetNextItemOpen каждый кадр,
+    // IsItemToggledOpen ловит клик и переключает его. Переменные рисуются построчно,
+    // чтобы x_master вставал напротив x_slave (то же для K forward/backward).
     auto paired_header = [](const char* label, bool& open) {
         ImGui::SetNextItemOpen(open, ImGuiCond_Always);
         ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_None);
@@ -5845,7 +5663,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::EndTable();
     }
 
-    // ----- CSV output (collapsible, moved to the bottom) -----
+    // CSV output (collapsible, moved to the bottom)
     draw_csv_output_block("CSV output", "Save to file##fs_csv", c.csv_save_enabled,
                           "##fs_csv_path", c.csv_output_path,
                           c.mode == 0
@@ -5891,11 +5709,10 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     static std::map<unsigned, std::unique_ptr<Plot2DView>>  traj_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
 
-    // ---- Visualization toolbar — общая реализация (draw_heatmap_toolbar) ----
-    // Цветовая шкала FastSync держится в HeatmapView даже в mode 0 (colored
-    // trajectory, где хитмапы нет): так тулбар совпадает с остальными
-    // вкладками до последнего виджета. Персистентность при этом остаётся в
-    // config'е (он уходит в сессию), поэтому синхронизируем в обе стороны.
+    // Visualization toolbar — общая реализация (draw_heatmap_toolbar). Цветовая шкала
+    // FastSync держится в HeatmapView даже в mode 0 (colored trajectory, где хитмапы нет),
+    // чтобы тулбар совпадал с остальными вкладками до последнего виджета; персистентность
+    // при этом в config'е (он уходит в сессию), поэтому синхронизируем в обе стороны.
     auto& hv_slot = hm_map[base_oid];
     if (!hv_slot) hv_slot = std::make_unique<HeatmapView>();
     HeatmapView& hv = *hv_slot;
@@ -5943,12 +5760,11 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         return std::string("x");
     };
 
-    // cmin/cmax: при autoscale берём диапазон актуальных значений из result.
-    // Если пользователь ввёл vmin > vmax вручную — это сигнал «перевернуть
-    // колормапу», а не ошибка. Сортируем диапазон и взводим invert_cmap, чтобы
-    // mode-0 (colored trajectory) отзеркалил соответствие value→цвет.
-    // (Heatmap-режим использует user-typed как и раньше — HeatmapView сам
-    // защищается от обратного диапазона.)
+    // cmin/cmax: при autoscale берём диапазон актуальных значений из result. Введённый
+    // вручную vmin > vmax — это сигнал «перевернуть колормапу», а не ошибка: сортируем
+    // диапазон и взводим invert_cmap, чтобы mode-0 (colored trajectory) отзеркалил
+    // соответствие value→цвет. Heatmap-режим берёт user-typed как раньше — HeatmapView
+    // сам защищается от обратного диапазона.
     double cmin_user, cmax_user;
     if (c.autoscale_color) {
         cmin_user = c.result.min_val;
@@ -6029,11 +5845,9 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             err_buf[i] = (float)(invert_cmap ? (cmin + cmax - v_err) : v_err);
         }
 
-        // Painter's algorithm: сортируем сегменты по средней координате оси Z
-        // (первая var, не равная vx/vy). Дальние сегменты рисуются первыми,
-        // ближние — поверх. Без сортировки артефакты "красное поверх синего"
-        // справа на скриншоте — последний по времени сегмент перекрывает
-        // более ранние независимо от их Z.
+        // Painter's algorithm: сортируем сегменты по средней координате оси Z (первая var,
+        // не равная vx/vy) — дальние рисуются первыми, ближние поверх. Без сортировки
+        // последний по времени сегмент перекрывает более ранние независимо от их Z.
         int vz = -1;
         for (int k = 0; k < nX; ++k) if (k != vx && k != vy) { vz = k; break; }
         static std::vector<int>   seg_order;
@@ -6098,11 +5912,10 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
                  series_in, vis, vis, fit);
         v.popup_extras = nullptr; // не утечь callback в другой кадр
 
-        // ---- Colorbar справа — общая реализация (draw_colorbar) ----
-        // Марджины плота обязаны совпадать с Plot2DView (он рисует внутри
-        // plot_avail): раньше они были продублированы здесь тремя числами и
-        // разъезжались при любой правке лэйаута. Теперь берутся из
-        // plot_2d_margins(), т.е. один источник истины.
+        // Colorbar справа — общая реализация (draw_colorbar). Марджины плота обязаны
+        // совпадать с Plot2DView (он рисует внутри plot_avail): продублированные здесь
+        // тремя числами, они разъезжались при любой правке лэйаута, поэтому берутся из
+        // plot_2d_margins() — один источник истины.
         float margin_left, margin_top, margin_right, margin_bottom;
         plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
         const float plot_w = std::max(64.0f, plot_avail.x - margin_left - margin_right);
@@ -6140,9 +5953,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     }
 }
 
-// ============================================================
 // Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
-// ============================================================
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Parametric analysis");
     ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
@@ -6155,12 +5966,11 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
                       || model.lle_session.in_flight
                       || model.ls_session.in_flight;
 
-    // ----- Run (active sub-tab, active config) + batch Run all -----
-    // Кнопка Run единая для Bif/LLE/LS, диспатчится по parametric_active_analysis
-    // (0=Bif, 1=LLE, 2=LS) к соответствующему active_*_index. Run all — глобальный
-    // по всем трём спискам: попап показывает чекбоксы для каждой диаграммы /
-    // кривой / спектра, Run кладёт отмеченные в model.parametric_queue и
-    // стартует первый; draw_gui тикает очередь после poll'ов.
+    // Run (active sub-tab, active config) + batch Run all. Кнопка Run единая для Bif/LLE/LS,
+    // диспатчится по parametric_active_analysis (0=Bif, 1=LLE, 2=LS) к соответствующему
+    // active_*_index. Run all — глобальный по всем трём спискам: попап показывает чекбоксы
+    // для каждой диаграммы / кривой / спектра, Run кладёт отмеченные в
+    // model.parametric_queue и стартует первый; draw_gui тикает очередь после poll'ов.
     {
         const int kind = model.parametric_active_analysis;
         int  active_idx = -1;
@@ -6234,12 +6044,10 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::EndTabBar();
     }
 
-    // ----- Plot windows: dynamic list, mirrors Phase's Projections section -----
-    // A sibling of the Bif/LLE/LS tabs above (not nested in any of them) —
-    // always visible regardless of which analysis type tab is active, since
-    // a plot window can be any (kind, dimension) combo. Each row has its own
-    // Type combo (like Phase's projection type combo) so the chart type can
-    // be changed freely after creation, instead of being fixed at "Add".
+    // Plot windows: dynamic list, mirrors Phase's Projections section. A sibling of the
+    // Bif/LLE/LS tabs above (not nested in any of them) — always visible, since a plot window
+    // can be any (kind, dimension) combo. Each row has its own Type combo so the chart type
+    // can be changed after creation instead of being fixed at "Add".
     ImGui::Separator();
     ImGui::SeparatorText("Plot windows");
 
@@ -6259,24 +6067,19 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     if (ImGui::Button("Reset windows layout")) { model.parametric_layout_generation++; }
 }
 
-// ============================================================================
 // Атомарное применение сохранённой сессии.
 //
-// Парсеры session_from_json_* пишут поля ПО МЕРЕ чтения JSON и бросают на
-// первой же структурной ошибке. Поэтому на битом (обрезанном при падении,
-// правленом руками) _last_*.json сессия оставалась перезаписанной наполовину:
-// часть полей из файла, часть — сидированные из записи системы. Возвращаемый
-// bool при этом игнорировался во ВСЕХ точках вызова, так что пользователь
-// видел молча испорченные настройки.
+// Парсеры session_from_json_* пишут поля ПО МЕРЕ чтения JSON и бросают на первой же
+// структурной ошибке, поэтому на битом _last_*.json (обрезанном при падении, правленом
+// руками) сессия оставалась перезаписанной наполовину: часть полей из файла, часть
+// сидированная из записи системы. Возвращаемый bool при этом игнорировался во ВСЕХ точках
+// вызова, и пользователь видел молча испорченные настройки.
 //
-// Здесь разбор идёт в два прохода: сначала в отдельный пустой объект — только
-// чтобы убедиться, что файл дочитывается целиком, — и лишь потом в настоящую
-// сессию. Второй проход не может упасть там, где прошёл первый: парсеры не
-// зависят от прежнего состояния приёмника. Файлы сессий небольшие, двойной
-// разбор незаметен на фоне загрузки системы.
-//
+// Здесь разбор идёт в два прохода: сначала в отдельный пустой объект — только чтобы
+// убедиться, что файл дочитывается целиком, — и лишь потом в настоящую сессию. Второй
+// проход не может упасть там, где прошёл первый: парсеры не зависят от прежнего состояния
+// приёмника. Файлы сессий небольшие, двойной разбор незаметен.
 // Пустой json — не ошибка: сессии просто нет (первый запуск / новая система).
-// ============================================================================
 template <class Session>
 static bool apply_session_json(AppModel& model,
                                const std::string& json,
@@ -6302,10 +6105,9 @@ static bool apply_session_json(AppModel& model,
     return true;
 }
 
-// Global system switch — fired from the top-bar combo. Loads the record and
-// re-inits the CURRENT tab (mirrors what each per-tab combo used to do).
-// Other tabs re-init on entry via the block in draw_gui.
-// Non-static: also called from app_main.cpp on startup to restore the
+// Global system switch — fired from the top-bar combo. Loads the record and re-inits the
+// CURRENT tab (mirrors what each per-tab combo used to do); other tabs re-init on entry via
+// the block in draw_gui. Non-static: also called from app_main.cpp on startup to restore the
 // last-used system (see gui.h::apply_system_switch).
 void apply_system_switch(AppModel& model, SystemLibrary& lib,
                          const std::string& name)
@@ -6378,9 +6180,7 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
     } catch (...) {}
 }
 
-// ============================================================
 // Custom tab (master-detail pipeline) — see custom_session.h
-// ============================================================
 
 namespace {
 
@@ -6389,7 +6189,7 @@ namespace {
 // лежали их локальные копии: комбо со своим стилем подписей ("IC x" вместо
 // "x (IC)") и обёртка parse_num_default поверх того же парсера.
 
-// ---- Shared config panel ----
+// Shared config panel
 
 void draw_shared_config(CustomSession& cs,
                         const std::vector<CustomScheme>& custom_schemes) {
@@ -6399,11 +6199,10 @@ void draw_shared_config(CustomSession& cs,
     auto& phase  = cs.phase_session;
     ImGui::SeparatorText("Shared config");
 
-    // Scheme combo — mirrors draw_diagram_controls / draw_lle_controls layout
-    // so users get the same familiar picker with built-ins + custom schemes.
-    // On change, propagate to Phase (L3 shows the same picker; keep in sync)
-    // and rebuild its KRS body so the next Phase Run uses the new integrator.
-    // L1D/L2D pick up the new scheme via copy_integrator_and_state on Run.
+    // Scheme combo — mirrors draw_diagram_controls / draw_lle_controls layout, so users get
+    // the same picker with built-ins + custom schemes. On change, propagate to Phase (L3 shows
+    // the same picker) and rebuild its KRS body so the next Phase Run uses the new integrator;
+    // L1D/L2D pick it up via copy_integrator_and_state on Run.
     draw_scheme_combo("Scheme", c.scheme, custom_schemes,
         [&phase, &custom_schemes](const std::string& nm) {
             phase.scheme = nm;
@@ -6412,13 +6211,12 @@ void draw_shared_config(CustomSession& cs,
             if (is_custom_scheme(nm, custom_schemes)) phase.use_gpu = true;
         });
 
-    // Integration group — mirrors "Integration##bd_int" collapsing header in
-    // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓).
-    // Each edited field is mirrored into L1D's own override (`l1d_h_text` for
-    // step) and into `phase_session`'s corresponding field, so the value the
-    // user typed here shows up in the L1D and L3 panels without waiting for
-    // Run. L1D still keeps independent transient/computing-time overrides —
-    // step is intentionally the ONLY per-L1D field kept in sync with shared.
+    // Integration group — mirrors the "Integration##bd_int" collapsing header in
+    // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is
+    // mirrored into L1D's own override (`l1d_h_text` for step) and into `phase_session`, so the
+    // typed value shows up in the L1D and L3 panels without waiting for Run. L1D keeps
+    // independent transient/computing-time overrides — step is intentionally the ONLY per-L1D
+    // field kept in sync with shared.
     if (ImGui::CollapsingHeader("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (InputNumStr("h",              c.h_text, kFieldW)) {
             c.l1d_h_text  = c.h_text;
@@ -6448,11 +6246,10 @@ void draw_shared_config(CustomSession& cs,
     // Non-swept params are also mirrored to phase.param_values so the L3
     // Phase panel Parameters section shows the same live values.
     if (ImGui::CollapsingHeader("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // All params are always editable — sweep will overwrite swept-axis
-        // values at run time anyway, but the manual value is useful for
-        // initial-frame edits and for non-sweeping levels (e.g. L3 Phase).
-        // We still MARK swept params with a "(swept)" tag so the user can
-        // tell at a glance which values will be replaced by the sweep.
+        // All params stay editable — the sweep overwrites swept-axis values at run time anyway,
+        // and the manual value is useful for initial-frame edits and non-sweeping levels (L3
+        // Phase). Swept params are MARKED with a "(swept)" tag so it is visible at a glance
+        // which values the sweep will replace.
         std::vector<bool> is_swept(params.size(), false);
         const bool any_2d   = c.bif2d_enabled || c.lle2d_enabled || c.ls2d_enabled;
         const bool any_1d_x = c.bif1d_x_enabled || c.lle1d_x_enabled || c.ls1d_x_enabled;
@@ -6509,7 +6306,7 @@ void draw_shared_config(CustomSession& cs,
     }
 }
 
-// ---- Level 2D detail ----
+// Level 2D detail
 
 void draw_level2d_detail(CustomSession& cs) {
     auto& c = cs.shared;
@@ -6582,7 +6379,7 @@ void draw_level2d_detail(CustomSession& cs) {
     // is edit-only.
 }
 
-// ---- Level 1D detail ----
+// Level 1D detail
 
 void draw_level1d_detail(CustomSession& cs) {
     auto& c = cs.shared;
@@ -6600,15 +6397,12 @@ void draw_level1d_detail(CustomSession& cs) {
     EffectiveSweep sx = effective_sweep_x(c);
     EffectiveSweep sy = effective_sweep_y(c);
 
-    // Inherit disables ONLY the sweep axis (par target + lo/hi + log), leaving
-    // N and the L1D-specific integrator fields (h/TT/CT below) always
-    // editable — L1D is cheap and interactive, so users may want a finer
-    // grid or a longer transient than L2D even when sharing the same axis.
-    //
-    // В inherit-режиме виджеты кормим КОПИЯМИ эффективного свипа: править их
-    // всё равно нельзя (BeginDisabled), зато в панели видно то, что реально
-    // пойдёт в расчёт. Раньше показывались собственные sweep_*, которые в этом
-    // режиме не используются, — то есть панель врала об осях среза.
+    // Inherit disables ONLY the sweep axis (par target + lo/hi + log), leaving N and the
+    // L1D-specific integrator fields (h/TT/CT below) always editable — L1D is cheap and
+    // interactive, so a finer grid or longer transient than L2D makes sense even on a shared axis.
+    // В inherit-режиме виджеты кормим КОПИЯМИ эффективного свипа: править их всё равно нельзя
+    // (BeginDisabled), зато в панели видно то, что реально пойдёт в расчёт. Раньше показывались
+    // собственные sweep_*, которые в этом режиме не используются, — панель врала об осях среза.
     auto sweep_row = [&](const char* label, const char* tag,
                          const EffectiveSweep& eff,
                          int& own_par, bool& own_ov, int& own_vi,
@@ -6676,41 +6470,34 @@ void draw_level1d_detail(CustomSession& cs) {
     InputNumStr("computing time##l1d", c.l1d_t_max_text, kFieldW);
 
     ImGui::Separator();
-    // Slice sliders — clamped to the current effective ranges. Values snap
-    // to the FINER of the two grids per axis: L2D `resolution_text` (N×N
-    // pixels of the heatmap) and L1D `n_{x,y}_1d_text` (samples of the
-    // corresponding slice). When the user cranks 1D resolution up (typical
-    // — L1D is cheap, 2D is expensive), the slider gets finer too, so the
-    // crosshair on the X-slice plot lands on X-slice data points instead
-    // of drifting between them; on the heatmap the crosshair may then sit
-    // between pixel columns, an acceptable trade-off.
-    // SliderScalar<Double> stays in double throughout (SliderFloat would
-    // downcast to float and land 0.2 as 0.20000000298023224). Drag only
-    // moves the crosshair; recompute fires on IsItemDeactivatedAfterEdit.
+    // Slice sliders — clamped to the current effective ranges. Values snap to the FINER of the two
+    // grids per axis: L2D `resolution_text` (N×N heatmap pixels) and L1D `n_{x,y}_1d_text` (slice
+    // samples). When the user cranks 1D resolution up (typical — L1D is cheap, 2D is expensive),
+    // the slider gets finer too, so the crosshair on the X-slice plot lands on X-slice data points
+    // instead of drifting between them; on the heatmap it may then sit between pixel columns, an
+    // acceptable trade-off. SliderScalar<Double> stays in double throughout (SliderFloat would
+    // downcast and land 0.2 as 0.20000000298023224). Drag only moves the crosshair; recompute
+    // fires on IsItemDeactivatedAfterEdit.
     double fx_lo = parse_ratio_or(sx.lo_text, 0.0);
     double fx_hi = parse_ratio_or(sx.hi_text, 1.0);
     double fy_lo = parse_ratio_or(sy.lo_text, 0.0);
     double fy_hi = parse_ratio_or(sy.hi_text, 1.0);
     if (fx_hi < fx_lo) std::swap(fx_lo, fx_hi);
     if (fy_hi < fy_lo) std::swap(fy_lo, fy_hi);
-    // Discrete slider via index-value trick: SliderScalar<Int> steps by 1
-    // (thumb snaps hard, no continuous drift), value = grid index. Format
-    // string is a LITERAL world-coord string (no % specifier), so the
-    // bubble shows "0.158730" instead of "5". Bubble text is precomputed
-    // from the CURRENT idx before SliderScalar runs — during drag it
-    // shows the previous frame's snapped world value (1-frame lag on the
-    // text only, but the thumb itself always sits on a grid node).
+    // Discrete slider via index-value trick: SliderScalar<Int> steps by 1 (thumb snaps hard, no
+    // continuous drift), value = grid index. The format string is a LITERAL world-coord string (no
+    // % specifier), so the bubble shows "0.158730" instead of "5". Bubble text is precomputed from
+    // the CURRENT idx before SliderScalar runs — during drag it shows the previous frame's snapped
+    // world value (1-frame lag on the text only; the thumb always sits on a grid node).
     int n_2d   = parse_int_or(c.resolution_text, 64); if (n_2d   < 2) n_2d   = 64;
     int n_1d_x = parse_int_or(c.n_x_1d_text,     64); if (n_1d_x < 2) n_1d_x = 64;
     int n_1d_y = parse_int_or(c.n_y_1d_text,     64); if (n_1d_y < 2) n_1d_y = 64;
     int n_snap_x = (n_1d_x > n_2d) ? n_1d_x : n_2d;
     int n_snap_y = (n_1d_y > n_2d) ? n_1d_y : n_2d;
-    // При log-свипе узлы сетки распределены лог-равномерно (см.
-    // sweep_value_at / getValueByIdx_log), поэтому и шаг ползунка обязан идти
-    // по логарифму — иначе thumb «прилипает» к линейным позициям, которых в
-    // данных нет, и крестик на графике уезжает с узла.
-    // log при lo<=0 невалиден (движок такой Run отклонит) — деградируем на
-    // линейную сетку, чтобы до Run ползунок не выдавал NaN.
+        // При log-свипе узлы распределены лог-равномерно (sweep_value_at / getValueByIdx_log),
+        // поэтому и шаг ползунка обязан идти по логарифму — иначе thumb прилипает к линейным
+        // позициям, которых в данных нет, и крестик уезжает с узла. log при lo<=0 невалиден
+        // (движок такой Run отклонит) — деградируем на линейную сетку, чтобы до Run не было NaN.
     auto log_ok = [](bool log_scale, double lo, double hi) {
         return log_scale && lo > 0.0 && hi > 0.0;
     };
@@ -6761,12 +6548,10 @@ void draw_level1d_detail(CustomSession& cs) {
                             &idx_min, &idx_max, fmt);
         bool released     = ImGui::IsItemDeactivatedAfterEdit();
         bool slider_edit  = ImGui::IsItemActive() || released;
-        // Only overwrite fix_value on real user interaction. Otherwise the
-        // idx_from_world → world_from_idx round-trip would re-snap a
-        // fix_value that arrived from the heatmap (on the coarser 2D grid)
-        // to the nearest slider-grid node (max(2D, 1D) — potentially the
-        // finer 1D grid), silently drifting it off the 2D pixel the user
-        // just clicked.
+        // Only overwrite fix_value on real user interaction: otherwise the idx_from_world →
+        // world_from_idx round-trip would re-snap a fix_value that arrived from the heatmap (on the
+        // coarser 2D grid) to the nearest slider-grid node — potentially the finer 1D grid —
+        // silently drifting it off the 2D pixel the user just clicked.
         if (slider_edit || step_changed)
             fix_value = world_from_idx(idx, lo, hi, n_snap, log_scale);
         // Arrow clicks fire the same debounce path as slider release —
@@ -6837,7 +6622,7 @@ void draw_level1d_detail(CustomSession& cs) {
     ImGui::Checkbox("Auto-recompute 1D on slider/sweep change", &c.auto_recompute_1d);
 }
 
-// ---- Level 3 detail ----
+// Level 3 detail
 
 void draw_level3_detail(CustomSession& cs) {
     auto& c = cs.shared;
@@ -6850,10 +6635,9 @@ void draw_level3_detail(CustomSession& cs) {
 
     ImGui::Separator();
     if (c.level3_kind == 0) {
-        // Phase: full IC-sets / integrator / projections UI is embedded
-        // right here, so everything lives inside the pipeline's L3 config
-        // (no separate top-level window). The Analysis-tab uses the same
-        // helper with model.phase_session — here we pass Custom's own
+        // Phase: the full IC-sets / integrator / projections UI is embedded right here, so
+        // everything lives inside the pipeline's L3 config (no separate top-level window). The
+        // Analysis tab uses the same helper with model.phase_session; here we pass Custom's own
         // isolated cs.phase_session.
         draw_phase_controls(cs.phase_session, nullptr);
     } else {
@@ -6890,11 +6674,9 @@ void draw_level3_detail(CustomSession& cs) {
             InputNumStr("hi##by", bc.axis_y_hi_text, kFieldW);
             InputNumStr("N##bxy", bc.n_pts_text, kFieldW);
 
-            // Переменная, чью траекторию читает feature-экстрактор. Своя, а не
-            // от Level 2D: у Basins другая задача (оси — IC-пространство), и в
-            // отдельной вкладке Basins этот выбор тоже свой (см. gui.cpp
-            // draw_basins_controls). Без этого комбо в Custom всегда шла
-            // первая переменная.
+            // Переменная, чью траекторию читает feature-экстрактор. Своя, а не от Level 2D: у
+            // Basins другая задача (оси — IC-пространство), и в отдельной вкладке Basins этот
+            // выбор тоже свой. Без комбо в Custom всегда шла первая переменная.
             draw_writable_var_combo(cs.vars, bc.writable_var, "Writable var##custom_bas_wv");
 
             ImGui::InputInt("feature1", &bc.feature1);
@@ -6904,7 +6686,7 @@ void draw_level3_detail(CustomSession& cs) {
     }
 }
 
-// ---- Pipeline column (master) ----
+// Pipeline column (master)
 
 // draw_pipeline_column / level_status_badge жили здесь и не вызывались ни
 // разу: колонка со списком уровней была заменена на level_header внутри
@@ -6918,12 +6700,11 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     auto& cs = model.custom_session;
     auto& c  = cs.shared;
 
-    // Top row: Run + Stop + status. Also bound to Ctrl+R (same shortcut
-    // Phase controls / Bif controls use for their local Run). Dirty-tracked:
-    // build each level's signature, compare with the last committed one; if
-    // nothing changed for a level AND its last run succeeded, skip enqueue.
-    // Newly-enqueued signatures land in `pending_armed`; a successful poll
-    // then promotes pending → committed (see poll_and_commit below).
+    // Top row: Run + Stop + status, also bound to Ctrl+R (тот же шорткат, что у локального Run
+    // в Phase/Bif controls). Dirty-tracked: строим сигнатуру каждого уровня, сравниваем с
+    // последней закоммиченной и пропускаем enqueue, если ничего не менялось И прошлый прогон
+    // удался. Новые сигнатуры кладутся в `pending_armed`, успешный poll промоутит
+    // pending → committed (см. poll_and_commit ниже).
     bool run_now = ImGui::Button("Run");
     if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false))
         run_now = true;
@@ -6951,15 +6732,13 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::SameLine();
     ImGui::TextDisabled("(%zu queued)", model.custom_queue.size());
 
-    // Auto-recompute 1D on slider settle, plus Phase (if L3=Phase and
-    // autorun_on_drilldown is on) so drag-releasing the crosshair or the
-    // slider gives immediate feedback. Debounce 200 ms + no in-flight.
-    // Per-axis timers (last_fix_{x,y}_change_time) let us enqueue ONLY the
-    // slices that actually depend on the moved axis — fix_x drag re-runs
-    // Y-slices (they pin X at fix_x), fix_y drag re-runs X-slices. Without
-    // the split the untouched slice would re-run with identical data and
-    // trigger an autofit that resets the user's manual zoom. Heatmap drag
-    // bumps BOTH timers, so it still recomputes both sides.
+    // Auto-recompute 1D on slider settle, plus Phase (если L3=Phase и включён
+    // autorun_on_drilldown), чтобы отпускание крестика или ползунка давало отклик сразу.
+    // Дебаунс 200 мс + отсутствие расчёта в полёте. Per-axis таймеры
+    // (last_fix_{x,y}_change_time) позволяют ставить в очередь ТОЛЬКО срезы, зависящие от
+    // сдвинутой оси: drag fix_x пересчитывает Y-срезы (они фиксируют X при fix_x), drag fix_y —
+    // X-срезы. Без разделения нетронутый срез пересчитывался бы с теми же данными и вызывал
+    // autofit, сбрасывающий ручной зум. Drag хитмапы двигает ОБА таймера.
     if (c.level_1d_enabled && !cs.any_in_flight()) {
         double now = ImGui::GetTime();
         // 500 ms debounce: long enough that stepping a numeric field with
@@ -6978,22 +6757,18 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                     /*x_slices*/ y_settled,
                     /*y_slices*/ x_settled);
             }
-            // Pin the shared param_values from the EFFECTIVE sweep axes.
-            // Previously this was inside `if (autorun_on_drilldown && ...)`
-            // AND always used the L2D axes — so a 1D-standalone sweep
-            // (inherit off) never propagated a slider drag back to the
-            // shared Parameters section. Now we pin unconditionally on
-            // settle, using effective_sweep_x/y so L2D-inherit and L1D-
-            // standalone both update the correct param.
-            // Ось может свипаться по параметру, по НУ или по шагу h. Здесь
-            // отражаем в общие поля только param-случай (НУ и h подставляются
-            // в под-конфиги перед самим Run — см. pin_fixed_* в app_model.cpp);
-            // для h дополнительно обновляем общий h_text, чтобы панель
-            // показывала тот шаг, с которым реально пойдёт расчёт.
-            // Формат — round-trip (fmt_num_shortest), а НЕ %.6g: v это значение
-            // узла сетки, посчитанное ucuda_node_value, и оно уходит в ядро
-            // через parse_num. Шесть цифр отрезали ~10 знаков, и drill-down
-            // считался в параметре, в котором ячейка не считалась.
+            // Pin the shared param_values from the EFFECTIVE sweep axes. Раньше это жило внутри
+            // `if (autorun_on_drilldown && ...)` и всегда брало оси L2D, поэтому 1D-standalone
+            // свип (inherit off) не пробрасывал drag ползунка обратно в общую секцию Parameters.
+            // Теперь пиним безусловно на settle, по effective_sweep_x/y — корректно и для
+            // L2D-inherit, и для L1D-standalone.
+            // Ось может свипаться по параметру, по НУ или по шагу h; в общие поля отражаем только
+            // param-случай (НУ и h подставляются в под-конфиги перед Run — pin_fixed_* в
+            // app_model.cpp), а для h дополнительно обновляем общий h_text, чтобы панель
+            // показывала реальный шаг расчёта.
+            // Формат round-trip (fmt_num_shortest), а НЕ %.6g: v — значение узла сетки от
+            // ucuda_node_value, уходящее в ядро через parse_num, и шесть цифр отрезали ~10 знаков,
+            // из-за чего drill-down считался в параметре, в котором ячейка не считалась.
             auto pin_axis = [&](const EffectiveSweep& e, double v) {
                 if (e.over_h) {
                     if (v > 0.0) c.l1d_h_text = fmt_num_shortest(v);
@@ -7022,21 +6797,15 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
 
     ImGui::Separator();
 
-    // Each level = enable-checkbox + CollapsingHeader + status label,
-    // headers stay open/closed as the user last left them (SetNextItemOpen
-    // uses FirstUseEver, so the first-ever appearance opens L2D and closes
-    // the others; later, the ImGui-managed state wins). Multiple headers
-    // can be open at once — no forced current-level.
-    // Level colour ladder: base = theme's Header colour, HUE rotated by
-    // +45°/level so the three markers land on visually distinct points of
-    // the colour wheel (default dark theme's blue → violet → magenta).
-    // Saturation was previously index-tied — the three shades read as "the
-    // same colour, just fading", so telling levels apart at a glance was
-    // hard. Rotating hue keeps the theme-derived feel but each level is a
-    // recognisably different colour. Both saturation and value are pinned
-    // at the base's values so all three stay on the theme's "brightness".
-    // When a user-picked primary colour lands later, swap `base` and the
-    // rotation cascades automatically.
+    // Each level = enable-checkbox + CollapsingHeader + status label; headers keep the
+    // open/closed state the user left them in (SetNextItemOpen with FirstUseEver opens L2D on
+    // the very first appearance, after that ImGui's own state wins). Several headers may be
+    // open at once — there is no forced current level.
+    // Level colour ladder: base = theme's Header colour, HUE rotated by +45°/level so the three
+    // markers land on distinct points of the wheel (dark theme: blue → violet → magenta).
+    // Saturation used to be index-tied, which read as one colour fading; both saturation and
+    // value are now pinned to the base so all three keep the theme's brightness. Swapping `base`
+    // for a user-picked primary makes the rotation cascade automatically.
     auto level_marker_color = [](int level_idx) {
         const ImVec4 base = ImGui::GetStyleColorVec4(ImGuiCol_Header);
         float h, s, v;
@@ -7143,11 +6912,9 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                  [&](){ draw_level3_detail(cs); });
 }
 
-// ---- Custom-tab plot windows ----
-//
-// Minimal renderer for the pipeline output. Full-featured versions with
-// colormap toolbars, colorbar controls, and colored-1D density are TODO;
-// this MVP shows results + wires drill-down clicks / crosshairs.
+// Custom-tab plot windows: minimal renderer for the pipeline output. Full-featured versions
+// with colormap toolbars, colorbar controls and colored-1D density are TODO; this MVP shows
+// results and wires drill-down clicks / crosshairs.
 namespace {
 
 // Helper: bind slider fix_x/fix_y as crosshair on the given heatmap view,
@@ -7159,11 +6926,10 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
                                                 : std::numeric_limits<double>::quiet_NaN();
     hv.crosshair_y = cs.shared.level_1d_enabled ? cs.shared.fix_y_value
                                                 : std::numeric_limits<double>::quiet_NaN();
-    // Drag callback: fires every frame while LMB is held inside the plot
-    // (see HeatmapView on_left_drag). Cheap — just moves the crosshair by
-    // updating fix_x/fix_y so the shared crosshair on every 2D window
-    // follows the cursor. Recompute (Phase/Basins enqueue + param_values
-    // update) is deferred to on_left_click on release.
+    // Drag callback: fires every frame while LMB is held inside the plot (HeatmapView
+    // on_left_drag). Cheap — just moves the crosshair via fix_x/fix_y so the shared crosshair on
+    // every 2D window follows the cursor. Recompute (Phase/Basins enqueue + param_values update)
+    // is deferred to on_left_click on release.
     hv.on_left_drag = [&cs](int, int, double snap_x, double snap_y) {
         cs.shared.fix_x_value = snap_x;
         cs.shared.fix_y_value = snap_y;
@@ -7181,13 +6947,11 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         double t = ImGui::GetTime();
         s.last_fix_x_change_time = t;
         s.last_fix_y_change_time = t;
-        // Update shared.param_values so any subsequent Phase/Basins run reads
-        // the drilled-down location. Only pins param-sweeps (var-sweeps stay
-        // as IC edits — pipeline drainer handles that path).
-        // snap_x/snap_y — значения узлов от ucuda_node_value (та же функция, что
-        // у ядра), поэтому пишем их round-trip форматом: %.6g, стоявший здесь,
-        // ронял точность до 6 цифр, и портрет по клику считался рядом с
-        // пикселем, а не в нём.
+        // Update shared.param_values so any later Phase/Basins run reads the drilled-down
+        // location. Only param-sweeps are pinned; var-sweeps stay as IC edits (handled by the
+        // pipeline drainer). snap_x/snap_y — значения узлов от ucuda_node_value (та же функция,
+        // что у ядра), поэтому пишем их round-trip форматом: стоявший здесь %.6g ронял точность
+        // до 6 цифр, и портрет по клику считался рядом с пикселем, а не в нём.
         if (!s.axis_x_over_var && s.axis_x_par_index >= 0 &&
             s.axis_x_par_index < (int)cs.params.size()) {
             s.param_values[cs.params[s.axis_x_par_index]] = fmt_num_shortest(snap_x);
@@ -7205,47 +6969,27 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
 
 } // namespace
 
-// ============================================================================
 // Custom Workspace — split-region layout for Custom AppMode.
 //
-// Structure per frame:
-//   +---------------------------------------------------------------+
-//   |                       AppMode radios                          |  (MainHost)
-//   +---------+---+-------------------------------------------------+
-//   |         | s |  [ Tab 1 | Tab 2 | + ]                          |
-//   | Custom  | p |  +--------------------------------------------+ |
-//   | Controls| l |  |                                            | |
-//   |  panel  | i |  |   Per-tab DockSpace (plot windows here)    | |
-//   |         | t |  |                                            | |
-//   +---------+---+--+--------------------------------------------+-+
+// Per frame: AppMode radios on top (MainHost); below, Custom Controls panel | splitter |
+// tab bar [ Tab 1 | Tab 2 | + ] over a per-tab DockSpace that hosts the plot windows.
 //
 // Docking model:
-//   - Each tab owns one DockSpace with a STABLE id derived from tab.id
-//     via ws_dock_id() — deliberately NOT ImGui::GetID(str), because
-//     GetID hashes with the current window-ID stack (different id inside
-//     BeginTabItem vs outside), and we submit the same dockspace both in
-//     KeepAliveOnly form (before BeginTabBar) and in real form (inside
-//     BeginTabItem of the active tab).
-//   - Every frame, we submit ALL per-tab dockspaces with the flag
-//     ImGuiDockNodeFlags_KeepAliveOnly. This tells ImGui "these nodes
-//     still exist" so windows docked inside inactive tabs don't get
-//     orphaned to a floating state.
-//   - The active tab additionally re-submits its dockspace with normal
-//     flags inside BeginTabItem so it renders.
-//   - Plot windows are docked into their tab's dockspace via
-//     DockBuilderDockWindow on first appearance; imgui.ini persists the
-//     internal split layout across sessions.
-//   - Cross-tab drag&drop: BeginDragDropSource on each plot's title bar
-//     + BeginDragDropTarget on each tab item → drop calls
-//     DockBuilderDockWindow(name, target_ds) and switches to that tab.
-// ============================================================================
+//   - Each tab owns one DockSpace with a STABLE id from tab.id via ws_dock_id() — deliberately
+//     NOT ImGui::GetID(str), which hashes with the current window-ID stack and would differ
+//     inside BeginTabItem vs outside; we submit the same dockspace both ways (KeepAliveOnly
+//     before BeginTabBar, real inside BeginTabItem of the active tab).
+//   - ALL per-tab dockspaces are submitted every frame with ImGuiDockNodeFlags_KeepAliveOnly so
+//     ImGui keeps the nodes alive and windows docked in inactive tabs don't orphan to floating.
+//   - Plot windows are docked via DockBuilderDockWindow on first appearance; imgui.ini persists
+//     the internal split layout across sessions.
+//   - Cross-tab drag&drop: BeginDragDropSource on each plot title bar + BeginDragDropTarget on
+//     each tab item → drop calls DockBuilderDockWindow(name, target_ds) and switches tab.
 
-// Stable dockspace ID for a workspace tab. Independent of ImGui's ID-stack
-// scope (so the same id is produced whether we compute it inside a window
-// or outside), and unlikely to collide with other IDs in the app.
-// Includes a hash of the currently-loaded system name so imgui.ini stores a
-// completely separate dock layout per system — otherwise switching systems
-// leaked one system's plot placement into another's tabs.
+// Stable dockspace ID for a workspace tab: independent of ImGui's ID-stack scope (same id
+// inside or outside a window) and unlikely to collide with other IDs. Includes a hash of the
+// loaded system name so imgui.ini keeps a separate dock layout per system — otherwise switching
+// systems leaked one system's plot placement into another's tabs.
 [[nodiscard]] static inline ImGuiID ws_dock_id(int tab_id, const std::string& sys) {
     ImGuiID sys_hash = sys.empty() ? 0u : ImHashStr(sys.c_str());
     return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id ^ sys_hash;
@@ -7318,15 +7062,12 @@ static void draw_custom_workspace_panel(CustomSession& cs,
     }
 
     // Tab bar with +, close, rename, and cross-tab drop targets.
-    // NOTE ON DOCKING: the real DockSpace for the active tab is submitted
-    // AFTER EndTabBar (not inside BeginTabItem body). Reason: submitting
-    // DockSpace(id) inside BeginTabItem pushes an ID-stack entry (the tab
-    // item), so ImGui creates an auto-child host window "…/DockSpace_XXX"
-    // whose host context differs from the KeepAliveOnly submit outside
-    // BeginTabItem. That mismatch caused docked windows to orphan on tab
-    // switch (plots vanishing when returning to a previously-active tab).
-    // Submitting real + keep-alive from the same context (workspace panel
-    // window, outside BeginTabItem) keeps the host consistent.
+    // NOTE ON DOCKING: the real DockSpace for the active tab is submitted AFTER EndTabBar, not
+    // inside the BeginTabItem body. Submitting DockSpace(id) inside BeginTabItem pushes an
+    // ID-stack entry, so ImGui creates an auto-child host "…/DockSpace_XXX" whose host context
+    // differs from the KeepAliveOnly submit outside — that mismatch orphaned docked windows on
+    // tab switch (plots vanishing when returning to a tab). Real + keep-alive from the same
+    // context (workspace panel window) keeps the host consistent.
     int close_id = 0;
     int switch_to_id = 0;
     ImGuiTabBarFlags tb_flags = ImGuiTabBarFlags_Reorderable
@@ -7344,13 +7085,11 @@ static void draw_custom_workspace_panel(CustomSession& cs,
             bool item_open = ImGui::BeginTabItem(label.c_str(),
                                                  allow_close ? &keep : nullptr,
                                                  ImGuiTabItemFlags_None);
-            // Drop-target for cross-tab window move. Accepts:
-            //   - Our custom payload (WS_DRAG_PAYLOAD, `const char*` name):
-            //     used if we ever add an explicit drag handle.
-            //   - ImGui's native window docking payload (IMGUI_PAYLOAD_TYPE_WINDOW,
-            //     `ImGuiWindow*`): fired when the user drags a docked plot's
-            //     tab out of its dockspace and hovers over ours. This is what
-            //     enables the requested "native drag&drop between tabs" UX.
+            // Drop-target for cross-tab window move. Accepts our own payload (WS_DRAG_PAYLOAD,
+            // `const char*` name) for a future explicit drag handle, and ImGui's native window
+            // docking payload (IMGUI_PAYLOAD_TYPE_WINDOW, `ImGuiWindow*`), which fires when the
+            // user drags a docked plot's tab out of its dockspace onto ours — that is what makes
+            // native drag&drop between tabs work.
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(WS_DRAG_PAYLOAD)) {
                     const char* win_name = (const char*)p->Data;
@@ -7396,11 +7135,9 @@ static void draw_custom_workspace_panel(CustomSession& cs,
         if (ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing
                                     | ImGuiTabItemFlags_NoTooltip)) {
             WorkspaceTab nt;
-            // id keeps monotonically incrementing — it seeds the DockSpace
-            // node id, so reusing an id could collide with imgui.ini state
-            // of a previously-closed tab. Display name, though, picks the
-            // lowest unused "Tab N" number so the user doesn't watch the
-            // counter grow to 20+ after a few open/close cycles.
+            // id keeps monotonically incrementing — it seeds the DockSpace node id, and reusing
+            // one could collide with imgui.ini state of a previously-closed tab. The display name
+            // instead picks the lowest unused "Tab N" so the counter doesn't grow to 20+.
             nt.id = ws.next_tab_id++;
             int label_num = 1;
             auto name_taken = [&](int n){
@@ -7414,13 +7151,11 @@ static void draw_custom_workspace_panel(CustomSession& cs,
             ws.active_tab_id = nt.id;
             ws.dirty = true;
         }
-        // Sync ws.tabs order with ImGui's internal reordered order — user
-        // can drag tabs (Reorderable flag) but ImGui only shuffles its own
-        // Tabs array; without this our vector stays in the original order,
-        // so plots that a user docked into "the third tab visually" end up
-        // in whichever tab id happens to be third in ws.tabs on restart.
-        // Sync fixes both "tab order not remembered" AND "plots appear in
-        // the wrong tab after restart" symptoms.
+        // Sync ws.tabs order with ImGui's internal reordered order: the user can drag tabs
+        // (Reorderable), but ImGui only shuffles its own Tabs array. Without this our vector keeps
+        // the original order, so plots docked into "the third tab visually" land in whichever tab
+        // id is third in ws.tabs on restart — the sync fixes both the forgotten tab order and the
+        // wrong-tab plots.
         if (ImGuiTabBar* tb = ImGui::GetCurrentTabBar()) {
             if (tb->Tabs.Size >= 2 && (int)ws.tabs.size() == tb->Tabs.Size) {
                 std::vector<WorkspaceTab> reordered;
@@ -7453,11 +7188,10 @@ static void draw_custom_workspace_panel(CustomSession& cs,
         ImGui::EndTabBar();
     }
 
-    // Submit all workspace dockspaces from the SAME host context (workspace
-    // panel, outside BeginTabItem). Active tab gets a real submit that
-    // renders + hosts its docked windows; inactive tabs get KeepAliveOnly
-    // so their docked windows remain docked (invisible until user switches
-    // to that tab) instead of orphaning to floating state.
+    // Submit all workspace dockspaces from the SAME host context (workspace panel, outside
+    // BeginTabItem). The active tab gets a real submit that renders and hosts its docked windows;
+    // inactive tabs get KeepAliveOnly so their windows stay docked (invisible until switched to)
+    // instead of orphaning to floating state.
     for (const auto& tab : ws.tabs) {
         if (tab.id != ws.active_tab_id) {
             ImGui::DockSpace(ws_dock_id(tab.id, sys), ImVec2(0, 0),
@@ -7511,12 +7245,10 @@ static void draw_custom_workspace_panel(CustomSession& cs,
     ImGui::End();
     ImGui::PopStyleVar();
 
-    // Rename modal — centered on viewport, Esc = Cancel, auto-reset if the
-    // user clicks outside. IMPORTANT: SetNextWindowPos must be INSIDE the
-    // "opening" branch — an unconditional call left the "next-window-pos"
-    // flag dangling and got applied to the first plot window created that
-    // frame (which appeared floating at viewport center and looked like a
-    // dark overlay covering the workspace).
+    // Rename modal — centered on viewport, Esc = Cancel, auto-reset if the user clicks outside.
+    // IMPORTANT: SetNextWindowPos must be INSIDE the "opening" branch — unconditional, it left
+    // the next-window-pos flag dangling and got applied to the first plot window created that
+    // frame, which appeared floating at viewport center like a dark overlay.
     if (g_ws_rename.target_id != 0) {
         ImGui::OpenPopup("Rename tab##custom_ws");
         ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -7635,12 +7367,11 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // Empty when no system is loaded — safe (title unchanged from before).
     const std::string& sys    = model.loaded_name;
     const std::string  suffix = custom_win_suffix(sys);
-    // Per-system delta XOR'd into every plot's owner_id — HeatmapView /
-    // PlotRenderer cache their GPU texture per owner_id, so without this
-    // both systems shared one texture and the FIRST system's rendered pixels
-    // stayed on screen while the SECOND system's data sat unrendered
-    // underneath. Low bits of the system-name hash — enough entropy without
-    // colliding with the hand-picked owner_id constants below.
+    // Per-system delta XOR'd into every plot's owner_id: HeatmapView / PlotRenderer cache their
+    // GPU texture per owner_id, so without it both systems shared one texture and the FIRST
+    // system's pixels stayed on screen while the SECOND system's data sat unrendered underneath.
+    // Low bits of the system-name hash — enough entropy without colliding with the hand-picked
+    // owner_id constants below.
     const int sys_owner_delta = sys.empty() ? 0
                               : (int)(ImHashStr(sys.c_str()) & 0x00FFFFFF);
 
@@ -7661,28 +7392,22 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     static PlotRenderer                                 bsn_renderer;
     for (auto& r : renderers_2d) if (!r) r = std::make_unique<PlotRenderer>();
 
-    // System-change detection. Slot-indexed static caches (HeatmapView state
-    // — view_valid, autofit ranges, seen colormap; Plot2DView state — view
-    // limits, cached VBO series_generation) leaked across systems because
-    // slot 0 for both Chen and Rossler used the same HeatmapView instance.
-    // On rename of the loaded system, wipe the per-slot view / seen state so
-    // the new system starts with fresh autofit + fresh colormap seeding.
-    // renderers_* (PlotRenderer/GPU textures + FBOs) are reused: owner_id
-    // XOR'd with sys_owner_delta already forces PlotRenderer to treat the
-    // slot as a new cache entry, and destroying them here would leak GPU
-    // memory tied to the GL context.
+    // System-change detection. Slot-indexed static caches (HeatmapView view_valid, autofit ranges,
+    // seen colormap; Plot2DView view limits and cached VBO series_generation) leaked across systems
+    // because slot 0 of Chen and Rossler shared one HeatmapView instance. On rename of the loaded
+    // system, wipe the per-slot view / seen state so the new one starts with fresh autofit and
+    // colormap seeding. renderers_* (PlotRenderer/GPU textures + FBOs) are reused: the owner_id XOR
+    // with sys_owner_delta already makes PlotRenderer treat the slot as a new cache entry, and
+    // destroying them here would leak GPU memory tied to the GL context.
     static std::string last_system_for_plots;
     if (last_system_for_plots != sys) {
         last_system_for_plots = sys;
-        // HeatmapView / Plot2DView are non-copyable — reset only the fields
-        // that gate rendering (view_valid / data_gen_cached / series_generation),
-        // which are the actual source of the leak. Plot2DView caches its VBO
-        // by (owner_id, series_generation); the owner_id XOR alone wasn't
-        // enough — series_generation also had to be invalidated, else the
-        // second system's data_generation=1 matched the first's cached
-        // series_generation=1 and Plot2DView kept rendering the FIRST
-        // system's VBO with its coordinates. Colormap / autoscale / manual
-        // v-limits stay so user prefs aren't wiped mid-session.
+        // HeatmapView / Plot2DView are non-copyable — reset only the fields that gate rendering
+        // (view_valid / data_gen_cached / series_generation), which are the actual leak. Plot2DView
+        // caches its VBO by (owner_id, series_generation), and the owner_id XOR alone wasn't enough:
+        // the second system's data_generation=1 matched the first's cached series_generation=1, so
+        // Plot2DView kept rendering the FIRST system's VBO. Colormap / autoscale / manual v-limits
+        // stay, so user prefs aren't wiped mid-session.
         for (auto& hv : heatmaps) { hv.view_valid = false; hv.data_gen_cached = -1; }
         for (auto& v  : l1_views) if (v) { v->view_valid = false; v->series_generation = -1; }
         for (auto& b  : l1_bufs)  b.clear();
@@ -7691,12 +7416,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         ls_init_exp_seen  = -999;
     }
 
-    // Clamp fix_x/fix_y to the current effective sweep range every frame.
-    // custom_session.h documents this ("clamped to current effective sweep
-    // ranges") but it was never actually implemented — a stale fix outside
-    // the sweep range fed the kernel via apply_shared_to_bif1d/pin_param and
-    // produced degenerate 1D results (all-zero or empty on Run) until the
-    // user dragged the slider back inside the range.
+    // Clamp fix_x/fix_y to the current effective sweep range every frame. custom_session.h
+    // documents this ("clamped to current effective sweep ranges") but it was never implemented —
+    // a stale fix outside the range fed the kernel via apply_shared_to_bif1d/pin_param and produced
+    // degenerate 1D results (all-zero or empty on Run) until the user dragged the slider back in.
     {
         EffectiveSweep esx = effective_sweep_x(cs.shared);
         EffectiveSweep esy = effective_sweep_y(cs.shared);
@@ -7710,17 +7433,12 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         if (cs.shared.fix_y_value > y_hi) cs.shared.fix_y_value = y_hi;
     }
 
-    // Dock a plot window into the active tab ONLY when there is no dock
-    // memory for it — neither at runtime (`window->DockId`) NOR in
-    // imgui.ini (`ImGuiWindowSettings::DockId`). This lets a reloaded
-    // session restore its per-tab layout from ini on the very first frame
-    // (when the window hasn't been Begun yet, so FindWindowByName returns
-    // null but ImGui has the settings ready to apply). Overriding a
-    // persisted DockId here caused "plots all get dumped into the active
-    // tab on startup".
-    //
-    // Skipped while the mouse is held down so we don't yank a window out
-    // of an in-flight drag.
+    // Dock a plot window into the active tab ONLY when there is no dock memory for it — neither at
+    // runtime (`window->DockId`) NOR in imgui.ini (`ImGuiWindowSettings::DockId`). This lets a
+    // reloaded session restore its per-tab layout from ini on the very first frame, when the window
+    // hasn't been Begun yet (FindWindowByName returns null) but ImGui has the settings ready.
+    // Overriding a persisted DockId here dumped all plots into the active tab on startup.
+    // Skipped while the mouse is held down, so an in-flight drag isn't yanked.
     auto ensure_docked = [&](const std::string& name) {
         if (ImGui::GetIO().MouseDown[0]) return;
         ImGuiID persisted_dock = 0;
@@ -7734,11 +7452,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         ImGui::DockBuilderDockWindow(name.c_str(), ws_dock_id(ws.active_tab_id, sys));
     };
 
-    // Cross-tab window move is handled entirely via native ImGui drag&drop:
-    // drop a plot's tab onto a target tab in the workspace tab bar (see
-    // BeginDragDropTarget in draw_custom_workspace_panel, which accepts
-    // IMGUI_PAYLOAD_TYPE_WINDOW). No MMB menu here — MMB is claimed by
-    // heatmap/1D-plot views for crosshair-drag / slice movement.
+    // Cross-tab window move is handled entirely via native ImGui drag&drop: drop a plot's tab onto
+    // a target tab in the workspace tab bar (BeginDragDropTarget in draw_custom_workspace_panel
+    // accepts IMGUI_PAYLOAD_TYPE_WINDOW). No MMB menu here — MMB is claimed by heatmap/1D-plot
+    // views for crosshair-drag / slice movement.
 
     auto axis_name = [&](bool over_var, int par_i, int var_i, bool over_h) -> std::string {
         if (over_h)   return "h";
@@ -7755,7 +7472,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                        cs.shared.axis_y_var_index,
                                        cs.shared.axis_y_over_h);
 
-    // --- Level 2D heatmaps ---
+    // Level 2D heatmaps
     struct L2Slot {
         std::string title;   // includes per-system suffix so imgui.ini isolates layout per system
         bool        show;
@@ -7789,11 +7506,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         }
         if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
             auto& c = cs.ls_session.curves[0];
-            // Fallback plane pointer = first exponent (L1). Real plane for
-            // has_data / render is picked later in the toolbar block, so
-            // has_data must NOT depend on which exponent (or "sum") is
-            // currently selected — otherwise picking "sum L_i" flips the
-            // slot to "No data yet" because the fallback here goes nullptr.
+            // Fallback plane pointer = first exponent (L1). The real plane for has_data / render is
+            // picked later in the toolbar block, so has_data must NOT depend on the currently
+            // selected exponent — otherwise picking "sum L_i" flips the slot to "No data yet"
+            // because the fallback here goes nullptr.
             const double* values_default = c.result_2d.values.empty()
                 ? nullptr : c.result_2d.values.data();
             double vmin = c.result_2d.min_val.empty() ? 0.0 : c.result_2d.min_val[0];
@@ -7805,24 +7521,20 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                          vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta };
         }
     }
-    // One-time init of per-slot HeatmapView colormap from the sub-session
-    // config (or app default). Runs whenever the sub-session-level slot's
-    // colormap changes, so first appearance of a slot picks up the persisted
-    // choice; subsequent user picks from the toolbar update both places.
-    // (hm_init_cmap_seen is hoisted to the top of this function so the
-    // system-change reset can wipe it.)
+    // One-time init of per-slot HeatmapView colormap from the sub-session config (or app default).
+    // Runs whenever the sub-session-level slot's colormap changes, so a slot's first appearance
+    // picks up the persisted choice while later toolbar picks update both places.
+    // (hm_init_cmap_seen is hoisted to the top of this function so the system-change reset can wipe it.)
     auto init_cmap_from_config = [&](int i, int cfg_cmap) {
         if (hm_init_cmap_seen[i] == cfg_cmap) return;
         hm_init_cmap_seen[i] = cfg_cmap;
         heatmaps[i].colormap =
             (HeatmapColormap)colormap_id_or(cfg_cmap, model.heatmap_colormap);
     };
-    // Sync LS exponent choice from the sub-session's persisted
-    // display_exponent_idx (sentinel -1 = sum L_i) on first appearance —
-    // otherwise session_from_json_custom loads the pref but the HeatmapView
-    // silently starts at 0 (L1) until the user re-picks. Uses the same
-    // "seen" pattern as the colormap sync so subsequent user picks aren't
-    // clobbered. (ls_init_exp_seen hoisted to the top of the function.)
+    // Sync LS exponent choice from the sub-session's persisted display_exponent_idx (sentinel -1 =
+    // sum L_i) on first appearance — otherwise session_from_json_custom loads the pref but the
+    // HeatmapView silently starts at 0 (L1) until the user re-picks. Same "seen" pattern as the
+    // colormap sync, so later user picks aren't clobbered. (ls_init_exp_seen hoisted to the top.)
     if (!cs.ls_session.curves.empty()) {
         int cfg_exp = cs.ls_session.curves[0].display_exponent_idx;
         if (ls_init_exp_seen != cfg_exp) {
@@ -7886,12 +7598,11 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             } else {
                 hv.x_axis.name = ax_x;
                 hv.y_axis.name = ax_y;
-                // Лог-оси — как в Parametric (hb.x_axis.log_scale = bd.log_scale):
-                // движок раскладывает узлы лог-равномерно, ось обязана это
-                // повторить, иначе тики и snap курсора врут. Флаг берём из
-                // конфига слота, а не из живого shared: конфиг получает log
-                // вместе с диапазоном на Run (apply_shared_to_*), поэтому ось
-                // и данные всегда описывают один и тот же прогон.
+                // Лог-оси — как в Parametric (hb.x_axis.log_scale = bd.log_scale): движок
+                // раскладывает узлы лог-равномерно, ось обязана это повторить, иначе тики и
+                // snap курсора врут. Флаг берём из конфига слота, а не из живого shared:
+                // конфиг получает log вместе с диапазоном на Run (apply_shared_to_*), поэтому
+                // ось и данные всегда описывают один прогон.
                 if (i == 0 && !cs.bif_session.diagrams.empty()) {
                     hv.x_axis.log_scale = cs.bif_session.diagrams[0].log_scale;
                     hv.y_axis.log_scale = cs.bif_session.diagrams[0].log_scale_2;
@@ -7950,7 +7661,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         ImGui::End();
     }
 
-    // --- Level 1D slice plots (six independently toggleable) ---
+    // Level 1D slice plots (six independently toggleable)
     // Kind enum for the slot dispatch. Each slot picks its data from the
     // owning sub-session's slot [1] (X-slice) or [2] (Y-slice).
     enum class L1Kind { Bif, LLE, LS };
@@ -8017,11 +7728,9 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         int  data_gen = 0;
         double param_lo = 0.0, param_hi = 1.0;
         int    n_pts = 0;
-        // Лог-масштаб оси среза. Берём из КОНФИГА слота, а не из shared:
-        // конфиг получает log вместе с param_lo/hi в apply_shared_to_bif1d на
-        // Run, поэтому ось и диапазон всегда описывают один и тот же прогон.
-        // Живой чекбокс в панели поменяет ось после Run (он входит в
-        // l1d-сигнатуру, так что Run пересчитает уровень).
+        // Лог-масштаб оси среза берём из КОНФИГА слота, а не из shared: конфиг получает log
+        // вместе с param_lo/hi в apply_shared_to_bif1d на Run, поэтому ось и диапазон описывают
+        // один прогон. Живой чекбокс в панели поменяет ось после Run (он входит в l1d-сигнатуру).
         bool   slice_log = false;
         // Y-axis label + series bookkeeping filled per-kind below.
 
@@ -8096,23 +7805,18 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         view.crosshair_x = cs.shared.level_1d_enabled
                            ? lslots[i].fix_pt
                            : std::numeric_limits<double>::quiet_NaN();
-        // Colour the vertical crosshair by which sweep this slice belongs
-        // to, so the same colour on the 2D heatmap and its 1D slice tells
-        // the eye which axis you're looking at.
-        //  cfg_idx == 1 → X-slice → matches heatmap's vertical X-sweep line
-        //  cfg_idx == 2 → Y-slice → matches heatmap's horizontal Y-sweep line
+        // Красим вертикальный крест по тому свипу, которому принадлежит срез: один цвет на 2D
+        // хитмапе и её 1D срезе показывает, на какую ось смотришь.
+        //  cfg_idx == 1 → X-срез → совпадает с вертикальной X-линией хитмапы
+        //  cfg_idx == 2 → Y-срез → совпадает с горизонтальной Y-линией
         view.crosshair_x_color = (lslots[i].cfg_idx == 2)
                                   ? 0xFFFF9028u   // orange = Y sweep
                                   : 0xFF50A0FFu;  // blue   = X sweep
 
-        // Wire crosshair drag: MMB or Shift+LMB inside the plot moves the
-        // corresponding fix_* value along the sweep axis of this slice.
-        // Release triggers the shared auto-recompute (Level 1D + Phase)
-        // via last_fix_{x,y}_change_time — same debounce path the L2D
-        // heatmap drag and the fix sliders already go through, so all
-        // three sources produce identical downstream behaviour.
-        //  cfg_idx == 1 → X-slice sweeps X → drag updates fix_x
-        //  cfg_idx == 2 → Y-slice sweeps Y → drag updates fix_y
+        // Перетаскивание креста: MMB или Shift+LMB внутри плота двигает соответствующий fix_*
+        // вдоль оси свипа этого среза (cfg_idx 1 → fix_x, 2 → fix_y). Отпускание запускает общий
+        // авто-пересчёт (Level 1D + Phase) через last_fix_{x,y}_change_time — тот же дебаунс,
+        // что у drag'а L2D-хитмапы и fix-слайдеров, чтобы все три источника вели себя одинаково.
         const bool slice_is_x = (lslots[i].cfg_idx == 1);
         // Snap crosshair drag to this slice's OWN grid nodes — the sampled
         // points the 1D compute actually produced — so the crosshair always
@@ -8328,13 +8032,11 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     // draw_level3_detail). Here we only spawn the projection windows so
     // 2D / 3D / TimeDomain plots dock alongside the other custom plots.
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 0) {
-        // Auto-place phase projections into the active tab on first appearance.
-        // Suffix + owner_id delta both keep per-system isolation: suffix for
-        // imgui.ini dock state, delta for the SHARED PlotRenderer cache
-        // (otherwise Rossler's projection 0 saw Chen's cached FBO texture).
-        // Диаграмма признаков рисуется в осях кластеризации того же 2D-конфига,
-        // чьи eps/множители стоят в Shared config — иначе по ней нельзя судить,
-        // что именно сольёт dbscan (см. FeatureClusterParams).
+        // Auto-place phase projections into the active tab on first appearance. Suffix + owner_id
+        // delta both keep per-system isolation: suffix for imgui.ini dock state, delta for the
+        // SHARED PlotRenderer cache (otherwise Rossler's projection 0 saw Chen's cached FBO).
+        // Диаграмма признаков рисуется в осях кластеризации того же 2D-конфига, чьи eps/множители
+        // стоят в Shared config — иначе по ней нельзя судить, что сольёт dbscan (FeatureClusterParams).
         FeatureClusterParams clust;
         if (!cs.bif_session.diagrams.empty()) {
             const auto& bd = cs.bif_session.diagrams[0];
@@ -8347,7 +8049,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             [&](int /*idx*/, const std::string& title) { ensure_docked(title); },
             {}, suffix, sys_owner_delta, {}, clust);
     }
-    // --- Level 3 Basins window (unchanged HeatmapView minimal renderer) ---
+    // Level 3 Basins window (unchanged HeatmapView minimal renderer)
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
         std::string basins_title = "Custom Basins" + suffix;
         ensure_docked(basins_title);
@@ -8380,12 +8082,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                             if (v > vmax) vmax = v;
                         }
                         if (!std::isfinite(vmin)) { vmin = 0.0; vmax = 1.0; }
-                        // Тот же тулбар, что и у остальных хитмап (раньше здесь
-                        // был только combo Colormap — без autoscale/vmin/vmax
-                        // и без Swap axes, хотя это ровно такая же диаграмма).
-                        // Выбор colormap'а теперь персистится в config (слот 0
-                        // = таб "Basins"); раньше он жил только в static-view
-                        // и терялся при перезапуске.
+                        // Тот же тулбар, что и у остальных хитмап: раньше здесь был только combo
+                        // Colormap, без autoscale/vmin/vmax и Swap axes, хотя диаграмма ровно такая
+                        // же. Выбор colormap'а теперь персистится в config (слот 0 = таб "Basins") —
+                        // раньше он жил только в static-view и терялся при перезапуске.
                         {
                             auto& bcfg = bsn.configs[0];
                             const int cm = colormap_id_or(bcfg.colormap_idx[0],
@@ -8419,15 +8119,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     }
 }
 
-// ============================================================================
-// Индикатор компьюта в верхней строке.
-//
-// Раньше состояние снималось лестницей из двенадцати почти одинаковых веток:
-// каждая доставала из своей сессии одну и ту же четвёрку — подпись
-// запущенного конфига, время старта, cancel_token, progress_token. Ветки
-// успели разойтись: три подставляли запасное имя только при выходе индекса за
-// границы, три — ещё и при пустом label.
-// ============================================================================
+// Индикатор компьюта в верхней строке. Раньше состояние снималось лестницей из двенадцати
+// почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
+// запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
+// три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
 enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom };
 
 struct BusyInfo {
@@ -8463,9 +8158,7 @@ template <class Session>
     return b;
 }
 
-// ============================================================
 // Главное окно: переключатель режимов Library / Analysis / Parametric
-// ============================================================
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -8480,15 +8173,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::Begin("MainHost", nullptr, host_flags);
     ImGui::PopStyleVar(2);
 
-    // custom_schemes — единственное поле, которое может отредактироваться
-    // в System tab БЕЗ переключения режима (т.е. без start_*_analysis).
-    // Чтобы scheme combo в Phase/Parametric/Basins/FastSync увидел свежий
-    // список сразу после "+ Add custom scheme" ИЛИ правки тела существующей
-    // схемы, синкаем копию live → сессии каждый кадр. Раньше Basins и
-    // FastSync были пропущены: Basins полностью, FastSync синкался только
-    // когда его окно активно (см. draw_fastsync_controls). Из-за этого
-    // отредактированное тело cs.body не доходило до compute_krs_for_scheme
-    // на момент Run, и NVRTC брал устаревший body из кеша / запускал старый.
+    // custom_schemes — единственное поле, которое может отредактироваться в System tab БЕЗ
+    // переключения режима (без start_*_analysis). Чтобы scheme combo в Phase/Parametric/Basins/
+    // FastSync увидел свежий список сразу после "+ Add custom scheme" или правки тела схемы,
+    // синкаем копию live → сессии каждый кадр. Раньше Basins был пропущен полностью, а FastSync
+    // синкался только при активном окне, из-за чего отредактированное cs.body не доходило до
+    // compute_krs_for_scheme на момент Run и NVRTC брал устаревший body из кеша.
     model.phase_session.custom_schemes       = model.custom_schemes;
     model.bifurcation_session.custom_schemes = model.custom_schemes;
     model.lle_session.custom_schemes         = model.custom_schemes;
@@ -8582,11 +8272,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last_fastsync",
                              session_to_json_fastsync(model.fastsync_session));
     }
-    // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on
-    // any completion so we don't rewrite _last_custom.json five times.
-    // Also save on any workspace mutation (add/close/rename tab, splitter
-    // drag, cross-tab window move) — the compute-completion save alone
-    // meant a closed tab could resurrect after a plain app restart.
+    // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
+    // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
+    // (add/close/rename таба, drag сплиттера, перенос окна между табами) — с одним лишь
+    // сохранением по завершении компьюта закрытый таб воскресал после перезапуска.
     bool custom_dirty = model.custom_session.poll_all();
     if (model.custom_session.workspace.dirty) {
         custom_dirty = true;
@@ -8641,11 +8330,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                               "Running an analysis and switching systems will overwrite the file.");
     }
 
-    // Индикатор компьюта — справа по правой границе окна, виден во всех режимах.
-    // Layout: [text] [progress bar] [Stop] for in-flight cancellable sessions;
-    // [text] only for phase or for "Done/Cancelled" persistent state. Stop also
-    // drains parametric_queue and basins_queue so remaining batch items
-    // don't auto-start.
+    // Индикатор компьюта — справа по границе окна, виден во всех режимах. Layout:
+    // [text] [progress bar] [Stop] для отменяемых сессий, только [text] для phase и для
+    // персистентного "Done/Cancelled". Stop заодно осушает parametric_queue и basins_queue,
+    // чтобы остаток пачки не стартовал сам.
     BusyInfo busy;                    // подпись/старт/отмена/прогресс — см. busy_from
     bool   show_done    = false;      // not in flight — show persistent last-run info
     bool   last_ok      = true;       // for show_done: true = green "Done", false = red "Cancelled"
@@ -8882,15 +8570,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         if (any_in_flight) ImGui::EndDisabled();
     }
-    // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать
-    // сессию. Init происходит когда:
-    //   1) система сменилась относительно той, для которой session была собрана;
-    //   2) session ещё ни разу не была инициализирована (vars пустой) — это
-    //      случай несохранённых систем, где model.name = loaded_system_name = "";
-    //   3) у model сменился алфавит / vars_text, и session.vars/params уже
-    //      не совпадают с актуальным model.known_vars/known_params.
-    // Случай 3 раньше требовал перезапуска приложения, чтобы подхватить новый
-    // алфавит — теперь подхватывается при следующем входе в режим.
+    // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать сессию. Init идёт,
+    // когда: 1) система сменилась относительно той, для которой собиралась session; 2) session ещё
+    // не инициализирована (vars пустой) — несохранённые системы, где model.name =
+    // loaded_system_name = ""; 3) у model сменился алфавит / vars_text и session.vars/params уже не
+    // совпадают с model.known_vars/known_params. Случай 3 раньше требовал перезапуска приложения.
     bool entering_phase  = (AppModel::AppMode)mode == AppModel::AppMode::Analysis &&
                            model.app_mode != AppModel::AppMode::Analysis;
     bool entering_par    = (AppModel::AppMode)mode == AppModel::AppMode::Parametric &&
@@ -9014,11 +8698,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::End(); // MainHost
 
     if (model.app_mode == AppModel::AppMode::Library) {
-        // Library mode: list view by default, editor view (System/Parameters
-        // sub-tabs + Save/Cancel) after Edit or Add new. Top-level tab
-        // switching is safe during edit — the editor works on
-        // model.library_edit_buffer, a scratch AppModel, so it never touches
-        // the system currently active in Parametric/Phase/Basins/FastSync.
+        // Library mode: list view by default, editor view (System/Parameters sub-tabs +
+        // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the
+        // editor works on model.library_edit_buffer, a scratch AppModel, so it never touches the
+        // system active in Parametric/Phase/Basins/FastSync.
         if (ImGui::Begin("Editor")) {
             if (model.library_edit_mode == AppModel::LibraryEditMode::None)
                 draw_library_list(model, lib);
@@ -9091,11 +8774,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         draw_custom_mode_layout(model, lib, cb, custom_area_pos, custom_area_size);
     }
     else { // AppMode::Settings
-        // Settings состоит из независимых виджетов, а save_app_config пишет
-        // файл целиком — поэтому read-modify-write, как в draw_top_bar. Раньше
-        // каждый обработчик собирал AppConfig с нуля и терял last_app_mode /
-        // last_system_name (а слайдер UI scale и чекбокс шрифта — ещё и
-        // dark_theme: тема сбрасывалась в Dark при правке масштаба).
+        // Settings состоит из независимых виджетов, а save_app_config пишет файл целиком —
+        // поэтому read-modify-write, как в draw_top_bar. Раньше каждый обработчик собирал AppConfig
+        // с нуля и терял last_app_mode / last_system_name, а слайдер UI scale и чекбокс шрифта —
+        // ещё и dark_theme (тема сбрасывалась в Dark при правке масштаба).
         auto persist_settings = [](const AppModel& m) {
             AppConfig cfg;
             load_app_config(get_exe_dir_with_sep(), cfg);
@@ -9181,12 +8863,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
 
-            // ----------------------------------------------------------------
             // Colormaps: какие из 200 карт slanCM показывать в пикере.
             // Держать в combo все 200 неудобно, поэтому набор набирается
             // галочками здесь и живёт в _app_config.json (одна маска на
             // приложение, как и остальные настройки этой вкладки).
-            // ----------------------------------------------------------------
             ImGui::Separator();
             ImGui::Text("Colormaps");
             ImGui::TextDisabled("200 colormaps from slanCM (MATLAB File Exchange #120088),");
@@ -9295,11 +8975,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     ImGui::TextDisabled("Nothing matches the filter.");
             }
 
-            // ----------------------------------------------------------------
             // Peak detection & regime thresholds — knobs configCUDA.h.
             // Уходят в NVRTC как #define, поэтому правка = перекомпиляция ядер
             // на следующем Run (set_peak_config бампает cache-epoch).
-            // ----------------------------------------------------------------
             ImGui::Separator();
             ImGui::Text("Peak detection & regime thresholds");
             ImGui::TextDisabled("Applies to every GPU calculation: bifurcations, LLE/LS,");
@@ -9378,13 +9056,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 persist_settings(model);
             }
 
-            // ----------------------------------------------------------------
-            // GPU floating point — опция компиляции NVRTC, а не #define, но
-            // логика та же: смена значения = другой PTX, кэши модулей обоих
-            // движков инвалидируются ключом (см. parametric_engine.h).
-            // Настройка ОДНА на приложение сознательно: карта и фазовый портрет
-            // по её ячейке обязаны считать одинаково.
-            // ----------------------------------------------------------------
+            // GPU floating point — опция компиляции NVRTC, а не #define, но логика та же: смена
+            // значения = другой PTX, кэши модулей обоих движков инвалидируются ключом (см.
+            // parametric_engine.h). Настройка ОДНА на приложение сознательно: карта и фазовый
+            // портрет по её ячейке обязаны считать одинаково.
             ImGui::Separator();
             ImGui::Text("GPU floating point");
             ImGui::TextDisabled("Applies to every NVRTC kernel: bifurcations, LLE/LS, basins,");

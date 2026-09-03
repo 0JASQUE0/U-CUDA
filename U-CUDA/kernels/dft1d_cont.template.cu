@@ -153,7 +153,7 @@ extern "C" __global__ void dft1dContinuationKernel(
             continue;
         }
 
-        // --- DFT over the block just recorded (mirrors DFT_custom) ---
+        // DFT over the block just recorded (mirrors DFT_custom)
         const numb hSample = hLocal * (numb)preScaller;
         const numb f_step  = (nFreq > 1) ? (freqHi - freqLo) / (numb)(nFreq - 1) : (numb)0.0;
         const numb psi     = (numb)2.0 * (numb)pi * hSample;

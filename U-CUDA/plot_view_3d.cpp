@@ -258,4 +258,3 @@ void Plot3DView::render(PlotRenderer& renderer,
         ImGui::EndPopup();
     }
 }
-

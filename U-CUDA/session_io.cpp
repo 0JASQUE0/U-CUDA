@@ -3,7 +3,7 @@
 #include <cctype>
 #include <stdexcept>
 
-// ---------- сериализация ----------
+// сериализация
 namespace {
 
     std::string esc(const std::string& s) {
@@ -31,7 +31,7 @@ namespace {
         o << "}";
     }
 
-    // ---------- мини-парсер JSON ----------
+    // мини-парсер JSON
     struct JP {
         std::string s; size_t i = 0;
         JP(std::string src) :s(std::move(src)) {}
@@ -210,9 +210,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
         return false;
     }
 }
-// ============================================================================
 // BifurcationAnalysisSession
-// ============================================================================
 
 // Сериализует одну БД в JSON-объект (без обёртки фигурными). Используется
 // внутри массива "diagrams".
@@ -418,10 +416,8 @@ bool session_from_json_parametric(const std::string& json, BifurcationAnalysisSe
     }
 }
 
-// ============================================================================
 // LLEAnalysisSession — отдельный JSON-файл `_last_lle.json`. Структура та же
 // что у parametric (массив объектов), отличаются только поля per-«прогон».
-// ============================================================================
 
 namespace {
 
@@ -575,10 +571,8 @@ bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s) {
     }
 }
 
-// ============================================================================
 // LyapunovSpectrumAnalysisSession — `_last_ls.json`. Поля LSCurveConfig
 // идентичны LLECurveConfig — копия LLE-сериализатора.
-// ============================================================================
 
 namespace {
 
@@ -732,12 +726,10 @@ bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSessi
     }
 }
 
-// ============================================================================
 // Dft1DAnalysisSession — `_last_dft1d.json`. Multi-config layout как у
 // Basins/FastSync (см. read_fastsync_field — тот же "чистый", без legacy
 // fallback, шаблон, т.к. это новая фича без старых сохранений). Result не
 // сохраняется, как и display_cache* (транзиентный, перестраивается лениво).
-// ============================================================================
 static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "{";
     o << "\"label\":";              jstr(o, c.label);              o << ",";
@@ -873,16 +865,13 @@ bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisSession& s) {
     }
 }
 
-// ============================================================================
 // BasinsAnalysisSession — `_last_basins.json`. Один config на сессию
 // (без curves-vector). Result не сохраняется.
-// ============================================================================
 
-// Запись одного BasinsConfig в JSON (без внешних { } — пишет голый объект).
-// Используется внутри массива "configs".
-// Проекции фазовых портретов по бассейнам. Формат — тот же, что у
-// "projections" в session_to_json(PhaseAnalysisSession); дублируется, а не
-// шарится, чтобы не трогать рабочий сериализатор Phase-сессии.
+// Запись одного BasinsConfig в JSON (без внешних { } — пишет голый объект), используется внутри
+// массива "configs". Проекции фазовых портретов по бассейнам: формат тот же, что у "projections" в
+// session_to_json(PhaseAnalysisSession); дублируется, а не шарится, чтобы не трогать рабочий
+// сериализатор Phase-сессии.
 static void write_basins_phase_projections(std::ostringstream& o,
                                            const std::vector<Projection>& projs) {
     o << "[";
@@ -1049,9 +1038,7 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     return o.str();
 }
 
-// ============================================================================
 // FastSyncAnalysisSession JSON — multi-config layout как у basins.
-// ============================================================================
 static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);            o << ",";
@@ -1184,13 +1171,11 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession
                             }
                         }
                         if (fc.transient_slave_text.empty()) {
-                            // Сессия старше раздельных TT. Тогда единственный
-                            // transient досаживал ФИКСИРОВАННУЮ сторону, а не
-                            // мастера: при снятой галочке сетка свипует мастера,
-                            // значит TT относился к слейву. Переносим, иначе
-                            // старая карта пересчиталась бы с другим смыслом.
-                            // Режим On Attractor не трогаем — там transient_text
-                            // досаживает master-траекторию и всегда значил это.
+                            // Сессия старше раздельных TT: единственный transient досаживал
+                            // ФИКСИРОВАННУЮ сторону, а не мастера — при снятой галочке сетка свипует
+                            // мастера, значит TT относился к слейву. Переносим, иначе старая карта
+                            // пересчиталась бы с другим смыслом. Режим On Attractor не трогаем: там
+                            // transient_text досаживает master-траекторию и всегда значил это.
                             if (fc.mode == 1 && !fc.grid_swap_master_slave) {
                                 fc.transient_slave_text = fc.transient_text;
                                 fc.transient_text       = "0";
@@ -1467,9 +1452,7 @@ bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DP
     }
 }
 
-// ============================================================================
 // Custom-tab bundle: shared config + five embedded sub-session objects.
-// ============================================================================
 
 namespace {
 void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) {

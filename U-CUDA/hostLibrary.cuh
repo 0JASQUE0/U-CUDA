@@ -1,240 +1,214 @@
 ﻿#pragma once
 
-// -----------------------
-// --- Библиотеки CUDA ---
-// -----------------------
+// Библиотеки CUDA
 #include "configCUDA.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-// -----------------------
-
-// --------------------------------------------
-// --- KiShiVi библиотеки для работы с CUDA ---
-// --------------------------------------------
+// KiShiVi библиотеки для работы с CUDA
 
 #include "cudaMacros.cuh"
 #include "cudaLibrary.cuh"
 
-// --------------------------------------------
-
-// -----------------------------
-// --- Встроенные библиотеки ---
-// -----------------------------
+// Встроенные библиотеки
 
 #include <iomanip>
 #include <string>
 
-// -----------------------------
+// Общие параметры функций ниже (в их объявлениях не повторяются):
+//   tMax          - время моделирования системы
+//   transientTime - время, моделируемое до начала расчёта диаграммы (транзиент)
+//   NT / NTime    - время нормализации (LLE, LS) / длина отрезка синхронизации
+//   nPts          - разрешение диаграммы
+//   h             - шаг интегрирования
+//   initialConditions, amountOfInitialConditions - начальные условия и их
+//                   количество (= число уравнений в системе)
+//   values, amountOfValues - параметры системы и их количество
+//   ranges        - диапазоны изменения свипуемых величин, по паре на измерение
+//   indicesOfMutVars - индексы изменяемых величин в values
+//   writableVar   - индекс уравнения, по которому строится диаграмма
+//   maxValue      - порог по модулю, выше которого система считается разошедшейся
+//   preScaller    - прореживание: рассчитывается только каждая preScaller-я точка
+//   eps           - радиус окрестности DBSCAN (bifurcation2D, basins*,
+//                   neuronClasterization2D) либо величина возмущения (LLE*, LS*)
+//   kForward / kBackward - массивы коэффициентов синхронизации вперёд и назад
+//   iterOfSynchr  - число итераций синхронизации
+//   OUT_FILE_PATH - путь для сохранения результата в CSV
 
-
+// Быстрая синхронизация пары мастер/слейв: временная реализация ошибки.
 __host__ void FastSynchro(
-	const numb		tMax,								// Время моделирования системы
-	const numb		transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb		NTime,								// Длина отрезка по которому будет проводиться синхронизация
-	const numb*		values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const numb		h,									// Шаг интегрирования
-	const numb*		kForward,							// Массив коэффициентов синхронизации вперед
-	const numb*		kBackward,							// Массив коэффициентов синхронизации назад
+	const numb		tMax,
+	const numb		transientTime,
+	const numb		NTime,
+	const numb*		values,
+	const int		amountOfValues,
+	const numb		h,
+	const numb*		kForward,
+	const numb*		kBackward,
 	const numb*		initialConditionsMaster,			// Массив с начальными условиями мастера
 	const numb*		initialConditionsSlave,				// Массив с начальными условиями слейва
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb		maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся
-	const int		iterOfSynchr,						// Число итераций синхронизации
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-	std::string		OUT_FILE_PATH);						// Эпсилон для алгоритма DBSCAN 
-
-__host__ void FastSynchro_2(
-	const numb	NTime,								// Длина отрезка по которому будет проводиться синхронизация
-	const int		nPts,							// Разрешение диаграммы
-	const numb*	values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const numb	h,									// Шаг интегрирования
-	const numb*	ranges,								// Диапазоны изменения параметров
-	const int*		indicesOfMutVars,					// Индексы изменяемых параметров
-	const numb*	kForward,							// Массив коэффициентов синхронизации вперед
-	const numb*	kBackward,							// Массив коэффициентов синхронизации назад
-	const numb*	initialConditions,			// Массив с начальными условиями мастера
-	const numb* initConditionsSlave,
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся
-	const int		iterOfSynchr,						// Число итераций синхронизации
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const int		amountOfInitialConditions,
+	const numb		maxValue,
+	const int		iterOfSynchr,
+	const int		preScaller,
 	std::string		OUT_FILE_PATH);
 
-/**
- * Функция, для расчета одномерной бифуркационной диаграммы.
- */
+// Быстрая синхронизация: карта ошибки по сетке nPts x nPts.
+__host__ void FastSynchro_2(
+	const numb	NTime,
+	const int		nPts,
+	const numb*	values,
+	const int		amountOfValues,
+	const numb	h,
+	const numb*	ranges,
+	const int*		indicesOfMutVars,
+	const numb*	kForward,
+	const numb*	kBackward,
+	const numb*	initialConditions,
+	const numb* initConditionsSlave,
+	const int		amountOfInitialConditions,
+	const numb	maxValue,
+	const int		iterOfSynchr,
+	const int		preScaller,
+	std::string		OUT_FILE_PATH);
+
+// Ансамбль систем, разнесённых по шагу интегрирования (hSpecial — смещение между потоками).
 __host__ void distributedSystemSimulation(
-	const numb	tMax,							// Время моделирования системы
-	const numb	h,								// Шаг интегрирования
-	const numb	hSpecial,						// Шаг смещения между потоками
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb*	initialConditions,				// Массив с начальными условиями
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb*	values,							// Параметры
+	const numb	tMax,
+	const numb	h,
+	const numb	hSpecial,
+	const int		amountOfInitialConditions,
+	const numb*	initialConditions,
+	const int		writableVar,
+	const numb	transientTime,
+	const numb*	values,
 	const int		amountOfValues,
-	std::string		OUT_FILE_PATH);				// Количество параметров				
+	std::string		OUT_FILE_PATH);
 
-/**
- * Функция, для расчета одномерной бифуркационной диаграммы.
- */
-
+// Одномерная бифуркационная диаграмма.
 __host__ void bifurcation1D(
-	const numb	tMax,								// Время моделирования системы
-	const int	nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int	amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb*	initialConditions,					// Массив с начальными условиями
-	const numb*	ranges,								// Диапазон изменения переменной
-	const int*	indicesOfMutVars,					// Индекс изменяемой переменной в массиве values
-	const int	writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb*	values,								// Параметры
-	const int	amountOfValues,						// Количество параметров
+	const numb	tMax,
+	const int	nPts,
+	const numb	h,
+	const int	amountOfInitialConditions,
+	const numb*	initialConditions,
+	const numb*	ranges,
+	const int*	indicesOfMutVars,
+	const int	writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb*	values,
+	const int	amountOfValues,
 	const int	preScaller,
-	std::string	OUT_FILE_PATH);						// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	std::string	OUT_FILE_PATH);
 
-
+// Временные реализации для набора точек свипа.
 __host__ void TimeDomainCalculation(
-	const numb	tMax,							// Время моделирования системы
-	const int		nPts,							// Разрешение диаграммы
-	const numb	h,								// Шаг интегрирования
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,				// Массив с начальными условиями
-	const numb* ranges,							// Диаппазон изменения переменной
-	const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,							// Параметры
-	const int		amountOfValues,					// Количество параметров
-	const int		preScaller,
-	std::string		OUT_FILE_PATH);						// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-
-/**
- * Функция, для расчета одномерной бифуркационной диаграммы по шагу.
- */
-__host__ void bifurcation1DForH(
-	const numb	tMax,							// Время моделирования системы
-	const int		nPts,							// Разрешение диаграммы
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb*	initialConditions,				// Массив с начальными условиями
-	const numb*	ranges,							// Диапазон изменения шага
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb*	values,							// Параметры
-	const int		amountOfValues,					// Количество параметров
-	const int		preScaller,
-	std::string		OUT_FILE_PATH);					// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-
-
-
-
-
-
-/**
- * Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN)
- */
-__host__ void bifurcation2D(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* __restrict__	initialConditions,					// Массив с начальными условиями
-	const numb* __restrict__	ranges,								// Диапазоны изменения параметров
-	const int* __restrict__		indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* __restrict__	values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-	const numb	eps,
-	std::string		OUT_FILE_PATH);								// Эпсилон для алгоритма DBSCAN 
-
-__host__ void bifurcation_DFT_1D(
-	const numb	tMax,								// Время моделирования системы
-	const int	nPts,								// Разрешение диаграммы
-	const int	nFreq,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const numb* rangesFreq,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-	const numb	eps,
-	std::string		OUT_FILE_PATH);								// Эпсилон для алгоритма DBSCAN 
-
-__host__ void neuronClasterization2D(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-	const numb	eps,
-	std::string		OUT_FILE_PATH);								// Эпсилон для алгоритма DBSCAN 
-
-
-/**
- * Построение 1D LLE диаграммы
- */
-__host__ void LLE1D(
-	const numb	tMax,								// Время моделирования системы
-	const numb	NT,									// Время нормализации
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const numb	eps,								// Эпсилон для LLE
-	const numb*	initialConditions,					// Массив с начальными условиями
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb*	ranges,								// Диапазоны изменения параметров
-	const int*		indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb*	values,								// Параметры
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
 	const int		amountOfValues,
-	std::string		OUT_FILE_PATH);					// Количество параметров
+	const int		preScaller,
+	std::string		OUT_FILE_PATH);
 
+// Одномерная бифуркационная диаграмма по шагу интегрирования (ranges — диапазон h).
+__host__ void bifurcation1DForH(
+	const numb	tMax,
+	const int		nPts,
+	const int		amountOfInitialConditions,
+	const numb*	initialConditions,
+	const numb*	ranges,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb*	values,
+	const int		amountOfValues,
+	const int		preScaller,
+	std::string		OUT_FILE_PATH);
 
+// Двумерная бифуркационная диаграмма (кластеризация DBSCAN).
+__host__ void bifurcation2D(
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* __restrict__	initialConditions,
+	const numb* __restrict__	ranges,
+	const int* __restrict__		indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* __restrict__	values,
+	const int		amountOfValues,
+	const int		preScaller,
+	const numb	eps,
+	std::string		OUT_FILE_PATH);
 
-/**
- * Construction of a 2D LLE diagram
- *
- * \param tMax - Simulation time
- * \param NT - Normalization time
- * \param nPts - Resolution
- * \param h - Integration step
- * \param eps - Eps
- * \param initialConditions - Array of initial conditions
- * \param amountOfInitialConditions - Amount of initial conditions
- * \param ranges - Array with variable parameter ranges
- * \param indicesOfMutVars - Index of unknown variable
- * \param writableVar - Evaluation axis (X - 0, Y - 1, Z - 2)
- * \param maxValue - Threshold signal level
- * \param transientTime - Transient time
- * \param values - Array of parameters
- * \param amountOfValues - Amount of Parameters
- * \return -
- */
+// Одномерная бифуркационная диаграмма в частотной области (спектр по DFT).
+__host__ void bifurcation_DFT_1D(
+	const numb	tMax,
+	const int	nPts,
+	const int	nFreq,								// Разрешение по частоте
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const numb* rangesFreq,								// Диапазон частот
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
+	const numb	eps,
+	std::string		OUT_FILE_PATH);
+
+// Двумерная карта режимов нейронной модели (кластеризация DBSCAN).
+__host__ void neuronClasterization2D(
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
+	const numb	eps,
+	std::string		OUT_FILE_PATH);
+
+// Одномерная диаграмма старшего показателя Ляпунова.
+__host__ void LLE1D(
+	const numb	tMax,
+	const numb	NT,
+	const int		nPts,
+	const numb	h,
+	const numb	eps,
+	const numb*	initialConditions,
+	const int		amountOfInitialConditions,
+	const numb*	ranges,
+	const int*		indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb*	values,
+	const int		amountOfValues,
+	std::string		OUT_FILE_PATH);
+
+// Двумерная диаграмма старшего показателя Ляпунова.
 __host__ void LLE2D(
 	const numb tMax,
 	const numb NT,
@@ -252,50 +226,7 @@ __host__ void LLE2D(
 	const int amountOfValues,
 	std::string		OUT_FILE_PATH);
 
-
-
-/**
- * Construction of a 2D LLE diagram (for initial conditions)
- *
- * \param tMax - Simulation time
- * \param NT - Normalization time
- * \param nPts - Resolution
- * \param h - Integration step
- * \param eps - Eps
- * \param initialConditions - Array of initial conditions
- * \param amountOfInitialConditions - Amount of initial conditions
- * \param ranges - Array with variable parameter ranges
- * \param indicesOfMutVars - Index of unknown variable
- * \param writableVar - Evaluation axis (X - 0, Y - 1, Z - 2)
- * \param maxValue - Threshold signal level
- * \param transientTime - Transient time
- * \param values - Array of parameters
- * \param amountOfValues - Amount of Parameters
- * \return -
- */
-
-
-
-
-/**
- * Construction of a 1D LS diagram
- *
- * \param tMax - Simulation time
- * \param NT - Normalization time
- * \param nPts - Resolution
- * \param h - Integration step
- * \param eps - Eps
- * \param initialConditions - Array of initial conditions
- * \param amountOfInitialConditions - Amount of initial conditions
- * \param ranges - Array with variable parameter ranges
- * \param indicesOfMutVars - Index of unknown variable
- * \param writableVar - Evaluation axis (X - 0, Y - 1, Z - 2)
- * \param maxValue - Threshold signal level
- * \param transientTime - Transient time
- * \param values - Array of parameters
- * \param amountOfValues - Amount of Parameters
- * \return -
- */
+// Одномерная диаграмма спектра показателей Ляпунова.
 __host__ void LS1D(
 	const numb tMax,
 	const numb NT,
@@ -313,26 +244,7 @@ __host__ void LS1D(
 	const int amountOfValues,
 	std::string		OUT_FILE_PATH);
 
-
-/**
- * Construction of a 2D LS diagram
- *
- * \param tMax - Simulation time
- * \param NT - Normalization time
- * \param nPts - Resolution
- * \param h - Integration step
- * \param eps - Eps
- * \param initialConditions - Array of initial conditions
- * \param amountOfInitialConditions - Amount of initial conditions
- * \param ranges - Array with variable parameter ranges
- * \param indicesOfMutVars - Index of unknown variable
- * \param writableVar - Evaluation axis (X - 0, Y - 1, Z - 2)
- * \param maxValue - Threshold signal level
- * \param transientTime - Transient time
- * \param values - Array of parameters
- * \param amountOfValues - Amount of Parameters
- * \return -
- */
+// Двумерная диаграмма спектра показателей Ляпунова.
 __host__ void LS2D(
 	const numb tMax,
 	const numb NT,
@@ -350,49 +262,42 @@ __host__ void LS2D(
 	const int amountOfValues,
 	std::string		OUT_FILE_PATH);
 
-
-
 void CUDA_dbscan(numb* data, numb* intervals, int* labels, int* helpfulArray, const int amountOfData, const numb eps, const int blockSize_fixed = blockSize_setup);
 
-
-/**
- * Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN) (for initial conditions)
- */
+// Бассейны притяжения: свип по начальным условиям + DBSCAN
+// (blockSize_fixed — размер блока CUDA, 0 = дефолт blockSize_setup).
 __host__ void basinsOfAttraction(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
 	std::string		OUT_FILE_PATH,
-	const int blockSize_fixed);								// Эпсилон для алгоритма DBSCAN 
+	const int blockSize_fixed);
 
-
-
-
+// То же, что basinsOfAttraction, но узлы сетки распределены логарифмически.
 __host__ void basinsOfAttraction_logAxes(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
-	std::string		OUT_FILE_PATH);								// Эпсилон для алгоритма DBSCAN 
-
+	std::string		OUT_FILE_PATH);

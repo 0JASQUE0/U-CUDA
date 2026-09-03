@@ -24,16 +24,13 @@ System AppModel::build_system() const {
         return parse_system_from_latex(latex_text, alpha, param_order, funcs);
     }
 
-    // InputMode::Plain — обычный синтаксис.
-    // Здесь пользователь вводит уравнения в простом виде; для простоты пока
-    // используем тот же многострочный разбор, но без LaTeX-флага не получится:
-    // parse_system_from_latex ждёт LaTeX. Для Plain нужен отдельный путь.
-    // Пока трактуем Plain так же, как LaTeX-текст (часто работает: x*(r-z) и т.п.).
+    // InputMode::Plain — обычный синтаксис. Пока разбираем его тем же многострочным путём, что и
+    // LaTeX: parse_system_from_latex ждёт LaTeX, и для Plain нужен отдельный парсер. На практике
+    // часто срабатывает (x*(r-z) и т.п.).
     if (plain_text.empty()) throw std::runtime_error("equations are empty");
     if (alpha.empty()) throw std::runtime_error("alphabet is empty");
     return parse_system_from_latex(plain_text, alpha, param_order, funcs);
 }
-
 
 // Парсит систему, обновляет списки символов и синхронизирует словари значений.
 bool AppModel::refresh_symbols() {
@@ -172,7 +169,6 @@ void AppModel::from_record(const SystemRecord& r) {
         generate();
 }
 
-
 void AppModel::clear() {
     name.clear();
     note.clear();
@@ -198,7 +194,6 @@ void AppModel::clear() {
     generated_code.clear();
     error_message.clear();
 }
-
 
 bool AppModel::start_phase_analysis() {
     // распарсить систему -> known_vars/known_params
@@ -360,16 +355,13 @@ void AppModel::propagate_to_sessions() {
     phase_session.krs_code.clear();
 }
 
-// ============================================================================
 // Peak-knobs: число -> текст буфера ввода
-// ============================================================================
 
 namespace {
-// Печатает значение так, чтобы оно (а) читалось человеком и (б) парсилось
-// обратно ровно в то же double. %.6g даёт "1e-14" вместо "1.000e-14", но для
-// значений, которые в шесть значащих цифр не влезают, молча бы соврал — поэтому
-// повышаем точность, пока round-trip не совпадёт. %.17g — гарантированный
-// потолок для double.
+// Печатает значение так, чтобы оно (а) читалось человеком и (б) парсилось обратно ровно в то же
+// double. %.6g даёт "1e-14" вместо "1.000e-14", но для значений, не влезающих в шесть значащих
+// цифр, молча соврал бы — поэтому повышаем точность, пока round-trip не совпадёт. %.17g —
+// гарантированный потолок для double.
 std::string fmt_peak_num(double v) {
     char buf[64];
     for (int prec : {6, 9, 17}) {
@@ -388,9 +380,7 @@ void AppModel::sync_peak_text() {
     peak_max_amount_text          = std::to_string(peak.max_amount_of_peaks);
 }
 
-// ============================================================================
 // Cross-analysis batch queue
-// ============================================================================
 
 bool AppModel::start_next_in_parametric_queue() {
     if (bifurcation_session.in_flight ||
@@ -423,17 +413,14 @@ bool AppModel::start_next_in_parametric_queue() {
     return false;
 }
 
-// ============================================================================
 // Custom-tab pipeline queue drainer
-// ============================================================================
 
 namespace {
 // Format a double for insertion into a text-based numeric input field.
-// Все три вызывающих (pin_fixed_param / _h / _ic) пиннят ЗНАЧЕНИЕ УЗЛА сетки,
-// пришедшее из snap'а по карте или по 1D-графику, поэтому формат обязан быть
-// round-trip: значение уходит в ядро через parse_num, и шесть значащих цифр
-// (стояли здесь раньше) отрезали ~10 знаков — drill-down считался не в том
-// параметре, в котором посчитана ячейка. См. fmt_num_shortest в num_parse.h.
+// Все три вызывающих (pin_fixed_param / _h / _ic) пиннят ЗНАЧЕНИЕ УЗЛА сетки, пришедшее из snap'а
+// по карте или по 1D-графику, поэтому формат обязан быть round-trip: значение уходит в ядро через
+// parse_num, и шесть значащих цифр (стояли здесь раньше) отрезали ~10 знаков — drill-down считался
+// не в том параметре, в котором посчитана ячейка. См. fmt_num_shortest в num_parse.h.
 std::string fmt_num_for_input(double v) {
     return fmt_num_shortest(v);
 }

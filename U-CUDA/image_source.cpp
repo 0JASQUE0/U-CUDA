@@ -5,7 +5,7 @@
 #include <cstring>
 #include <algorithm>
 
-// ---- Файловый источник (без изменений) ----
+// Файловый источник (без изменений)
 std::vector<unsigned char> FileImageSource::get_png() {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open image: " + path);
@@ -13,7 +13,7 @@ std::vector<unsigned char> FileImageSource::get_png() {
         std::istreambuf_iterator<char>());
 }
 
-// ---- Источник из буфера обмена (Windows) ----
+// Источник из буфера обмена (Windows)
 #ifdef _WIN32
 #include <glad/glad.h>
 #include <windows.h>
