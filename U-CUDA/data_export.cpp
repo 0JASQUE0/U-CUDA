@@ -567,6 +567,8 @@ static const char* error_estim_name(int v) {
         case 1:  return "# iters to reach FS_error_trs";
         case 2:  return "||e|| at last point (sqrt of sum of squares)";
         case 3:  return "time to reach FS_error_trs";
+        case 4:  return "err_stop / err_start at window start";
+        case 5:  return "log10(err_stop / err_start) at window start";
         default: return "RMS of ||e|| over last window";
     }
 }
@@ -958,6 +960,8 @@ void write_fastsync_config(std::ofstream& out, int set_precision,
     if (error_estim == 1)   out << "number of iteration to achieve RMS(error) <= FS_error_trs \n";
     if (error_estim == 2)   out << "RMS(error) at the last point \n";
     if (error_estim == 3)   out << "time to achieve RMS(error) <= FS_error_trs \n";
+    if (error_estim == 4)   out << "err_stop / err_start at the window start \n";
+    if (error_estim == 5)   out << "log10(err_stop / err_start) at the window start \n";
     write_array(out, "a",          values,    amountOfValues);
     write_array(out, "X0_master",  icMaster,  amountOfInitialConditions);
     write_array(out, "X0_slave",   icSlave,   amountOfInitialConditions);

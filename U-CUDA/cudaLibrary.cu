@@ -618,6 +618,26 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 		arrayZeros[w] = 0;
 	}
 
+	// error_estim 4/5 — сжатие ошибки за проходы синхронизации:
+	//   err_start — ‖Xm(t0) − Xs(t0)‖ в начале окна ДО синхронизации;
+	//   err_stop  — ‖Xm(t0) − Xs(t0)‖ в ТОЙ ЖЕ точке после iterOfSynchr проходов
+	//               вперёд-назад (последовательность кончается обратным проходом,
+	//               лишнего прямого в конце нет);
+	//   4 → err_stop / err_start, 5 → log10(err_stop / err_start).
+	// В отличие от оценщиков 0..3 последний обратный проход идёт в зачёт: именно
+	// он возвращает slave в начало окна, где и сравниваем.
+	//
+	// Считаем здесь: Xm ещё равен старту мастера при обоих type_of_synch —
+	// пред-пасс unidir, прокручивающий Xm вперёд для заливки data, идёт ниже.
+	numb err_start = 0;
+	if (error_estim == 4 || error_estim == 5) {
+		for (int j = 0; j < amountOfX; ++j) {
+			numb e = Xm[j] - Xs[j];
+			err_start += e * e;
+		}
+		err_start = sqrt(err_start);
+	}
+
 	if (data != nullptr) {
 		for (int w = 0; w < amountOfX; w++)
 			data[startDataIndex + w] = x[w];
@@ -745,6 +765,28 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 		}
 	}
 
+	// err_stop — та же стартовая точка окна, но после всех проходов.
+	// Опорная точка мастера: при unidir мастер задан заранее и не менялся —
+	// берём x[] (входные НУ мастера, loop_2 их не трогает; читать то же самое из
+	// data[startDataIndex] было бы лишней зависимостью от ненулевого буфера).
+	// При bidir мастер тоже интегрировался и последним обратным проходом
+	// вернулся в начало окна — там берём текущий Xm.
+	//
+	// Деление на ноль НЕ глушим: err_start == 0 (slave стартовал ровно из точки
+	// мастера) даёт inf либо NaN, и это честное «не измерено», а не нулевая
+	// ошибка. Хост выбрасывает non-finite из min/max, такие ячейки красятся
+	// тёмно-серым, как и разлетевшиеся.
+	if (error_estim == 4 || error_estim == 5) {
+		numb err_stop = 0;
+		for (int j = 0; j < amountOfX; ++j) {
+			numb e = (type_of_synch == 1 ? Xm[j] : x[j]) - Xs[j];
+			err_stop += e * e;
+		}
+		err_stop = sqrt(err_stop);
+		const numb ratio = err_stop / err_start;
+		return (error_estim == 4) ? ratio : log10(ratio);
+	}
+
 	if (error_estim == 0)
 		rms_error = sqrt(rms_error / (numb)(amountOfIterations - 1));
 
@@ -773,6 +815,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 		return rms_error;
 	if (error_estim == 3)
 		return (numb)amountOfIterations * h;
+	return fsDivergedError();   // недостижимо: все error_estim разобраны выше
 }
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
@@ -3310,6 +3353,26 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 			: initConditionsSlave[j];
 	}
 
+	// error_estim 4/5 — сжатие ошибки за проходы синхронизации:
+	//   err_start — ‖Xm(t0) − Xs(t0)‖ в начале окна ДО синхронизации;
+	//   err_stop  — ‖Xm(t0) − Xs(t0)‖ в ТОЙ ЖЕ точке после iterOfSynchr проходов
+	//               вперёд-назад (последовательность кончается обратным проходом,
+	//               лишнего прямого в конце нет);
+	//   4 → err_stop / err_start, 5 → log10(err_stop / err_start).
+	// В отличие от оценщиков 0..3 последний обратный проход идёт в зачёт: именно
+	// он возвращает slave в начало окна, где и сравниваем.
+	//
+	// Мастер в t0 — timedomain[startDataIndex] при любом type_of_synch: при bidir
+	// Xm ровно оттуда и проинициализирован парой строк выше.
+	numb err_start = 0;
+	if (error_estim == 4 || error_estim == 5) {
+		for (int j = 0; j < amountOfX; ++j) {
+			numb e = timedomain[startDataIndex + j] - Xs[j];
+			err_start += e * e;
+		}
+		err_start = sqrt(err_start);
+	}
+
 	for (int m = 0; m < iterOfSynchr; ++m) {
 
 		for (int j = 0; j < amountOfX; j++)
@@ -3412,6 +3475,26 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	//	rms_error = rms_error + norm_error[j];
 	//}
 
+	// err_stop — та же стартовая точка окна, но после всех проходов.
+	// Опорная точка мастера: при unidir мастер задан заранее и не менялся
+	// (timedomain[startDataIndex]); при bidir он тоже интегрировался и последним
+	// обратным проходом вернулся в начало окна — берём текущий Xm.
+	//
+	// Деление на ноль НЕ глушим: err_start == 0 (slave стартовал ровно из точки
+	// мастера) даёт inf либо NaN, и это честное «не измерено», а не нулевая
+	// ошибка. Хост выбрасывает non-finite из min/max, такие точки не попадают
+	// в автошкалу.
+	if (error_estim == 4 || error_estim == 5) {
+		numb err_stop = 0;
+		for (int j = 0; j < amountOfX; ++j) {
+			numb e = (type_of_synch == 1 ? Xm[j] : timedomain[startDataIndex + j]) - Xs[j];
+			err_stop += e * e;
+		}
+		err_stop = sqrt(err_stop);
+		const numb ratio = err_stop / err_start;
+		return (error_estim == 4) ? ratio : log10(ratio);
+	}
+
 	if (error_estim == 0)
 		rms_error = sqrt(rms_error / (numb)(amountOfIterations - 1));
 
@@ -3440,6 +3523,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 		return rms_error;
 	if (error_estim == 3)
 		return (numb)amountOfIterations*h;
+	return (numb)nan("");   // недостижимо: все error_estim разобраны выше
 }
 // (Закрытие NVRTC-guard'а, который ранее окружал FS-kernels, удалено —
 // теперь они видимы как обычные символы и для NVRTC, и для nvcc.)

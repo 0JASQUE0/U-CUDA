@@ -78,7 +78,11 @@ constexpr int type_of_synch = 0;
 #endif
 #ifndef error_estim
 // 0 = RMS of ||e|| over the last synchro window; 1 = #iters to reach FS_error_trs;
-// 2 = ||e|| at the last point of the last forward pass.
+// 2 = ||e|| at the last point of the last forward pass;
+// 4 = err_stop / err_start, 5 = log10(err_stop / err_start), где err_start и
+//     err_stop — ||e|| в стартовой точке окна до и после iterOfSynchr проходов
+//     вперёд-назад. Только в этих двух вариантах последний обратный проход идёт
+//     в зачёт: он и возвращает slave в стартовую точку.
 // ||e|| здесь — евклидова норма по переменным, sqrt(sum_j (Xm_j - Xs_j)^2), БЕЗ
 // деления на их количество (то есть норма, а не среднеквадратичное по
 // переменным). Единственное усреднение — по времени и только в варианте 0.

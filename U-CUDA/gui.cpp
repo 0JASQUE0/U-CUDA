@@ -5613,10 +5613,16 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             "0: RMS of ||e|| over last window",
             "1: # iters to reach FS_error_trs",
             "2: ||e|| at last point",
-            "3: time to reach FS_error_trs"
+            "3: time to reach FS_error_trs",
+            "4: err_stop / err_start",
+            "5: log10(err_stop / err_start)"
         };
         ImGui::SetNextItemWidth(280);
         ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
+        if (c.error_estim == 4 || c.error_estim == 5)
+            ImGui::TextDisabled("err_start/err_stop: ||e|| at the window start before / after all\n"
+                                "forward-backward passes. Cells where err_start == 0 come out\n"
+                                "non-finite and render as diverged.");
         InputNumStr("FS error trs.", c.fs_error_trs_text, kFieldW);
     }
 
