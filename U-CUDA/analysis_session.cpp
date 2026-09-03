@@ -2159,7 +2159,7 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     req.type_of_synch = (c.type_of_synch == 1) ? 1 : 0;
     int ee = c.error_estim;
-    if (ee < 0 || ee > 3) ee = 2;
+    if (ee < 0 || ee > 5) ee = 2;
     req.error_estim   = ee;
     req.fs_error_trs  = parse_d(c.fs_error_trs_text, 1e-12);
 

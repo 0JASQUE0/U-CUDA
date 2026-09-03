@@ -1018,7 +1018,7 @@ struct FastSyncConfig {
 
     // Runtime knobs (substituted в NVRTC #define)
     int         type_of_synch    = 0;     // 0=unidir, 1=bidir
-    int         error_estim      = 2;     // 0|1|2
+    int         error_estim      = 2;     // 0..5, см. configCUDA.h
     std::string fs_error_trs_text = "1e-12";
 
     // CSV export
