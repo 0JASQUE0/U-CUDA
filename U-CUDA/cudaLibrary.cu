@@ -450,7 +450,8 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	const size_t amountOfPointsForSkipSlave,
 	const int    icRandomOffset,
 	const numb   icEps,
-	const unsigned long long icSeed)
+	const unsigned long long icSeed,
+	const int    gsWarmup)
 {
 	// Общая память в рамках одного блока
 	// Строение памяти:
@@ -568,7 +569,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
 	// NaN означает, что ячейка разлетелась (по maxValue или по nan/inf).
 	const numb fsError = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
-		amountOfInitialConditions, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock);
+		amountOfInitialConditions, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock, 1, icEps, gsWarmup);
 
 	FastSynchroError[idx] = fsError;
 	if (maxValueCheckerArray != nullptr)
@@ -592,7 +593,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const numb* kBackward,
 	numb* data,
 	const int startDataIndex,
-	const int writeStep)
+	const int writeStep,
+	const numb icEps,
+	const int gsWarmup)
 {
 	//numb* Xm = new numb[amountOfX];
 	//numb* Xs = new numb[amountOfX];
@@ -630,7 +633,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	// Считаем здесь: Xm ещё равен старту мастера при обоих type_of_synch —
 	// пред-пасс unidir, прокручивающий Xm вперёд для заливки data, идёт ниже.
 	numb err_start = 0;
-	if (error_estim == 4 || error_estim == 5) {
+	if (error_estim == 4 || error_estim == 5 || error_estim == 6) {
 		for (int j = 0; j < amountOfX; ++j) {
 			numb e = Xm[j] - Xs[j];
 			err_start += e * e;
@@ -654,6 +657,17 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 			for (int w = 0; w < amountOfX; w++)
 				data[startDataIndex + w + i * amountOfX] = Xm[w];
 		}
+	}
+
+	// error_estim 7 — Беннеттин поверх того же цикла вперёд-назад; окно мастера
+	// к этому моменту уже залито. Только unidirectional: при bidir мастер сам
+	// подтягивается к слейву, и ρ означала бы не ту величину (см. комментарий
+	// у fsBenettinCycleExponent).
+	if (error_estim == 7) {
+		if (type_of_synch != 0 || data == nullptr)
+			return fsDivergedError();
+		return fsBenettinCycleExponent(data + startDataIndex, values, h, amountOfIterations,
+			amountOfX, maxValue, iterOfSynchr, kForward, kBackward, icEps, gsWarmup);
 	}
 
 	for (int m = 0; m < iterOfSynchr; ++m) {
@@ -776,7 +790,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	// мастера) даёт inf либо NaN, и это честное «не измерено», а не нулевая
 	// ошибка. Хост выбрасывает non-finite из min/max, такие ячейки красятся
 	// тёмно-серым, как и разлетевшиеся.
-	if (error_estim == 4 || error_estim == 5) {
+	if (error_estim == 4 || error_estim == 5 || error_estim == 6) {
 		numb err_stop = 0;
 		for (int j = 0; j < amountOfX; ++j) {
 			numb e = (type_of_synch == 1 ? Xm[j] : x[j]) - Xs[j];
@@ -784,7 +798,13 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 		}
 		err_stop = sqrt(err_stop);
 		const numb ratio = err_stop / err_start;
-		return (error_estim == 4) ? ratio : log10(ratio);
+		if (error_estim == 4)
+			return ratio;
+		const numb lg = log10(ratio);
+		// 6 — та же величина, делённая на число циклов: log10(ratio) растёт как
+		// m*log10 ρ, и только после деления на m получается скорость ЗА ЦИКЛ,
+		// сравнимая с log10 ρ из линеаризованного расчёта.
+		return (error_estim == 5) ? lg : lg / (numb)iterOfSynchr;
 	}
 
 	if (error_estim == 0)
@@ -2586,6 +2606,121 @@ __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVector
 	}
 }
 
+// error_estim 7 — показатель сжатия ошибки за один цикл вперёд-назад,
+// посчитанный схемой Беннеттина поверх ТОГО ЖЕ forward-backward оператора,
+// что и оценщики 4..6. Возвращает log10 ρ за цикл, где ρ — спектральный
+// радиус оператора цикла; это ровно та величина, которую даёт линеаризованный
+// расчёт через матрицу монодромии (Phi_b*Phi_f) и max|eig|.
+//
+// Зачем отдельная схема, если 6 тоже делит на число циклов: там мерится
+// усиление ОДНОГО вектора, которое зависит от его направления (при малом числе
+// циклов карта идёт крапом) и упирается либо в нелинейное насыщение при ρ>1,
+// либо в машинный ноль при ρ<1. Здесь возмущение ренормируется на eps после
+// КАЖДОГО цикла, так что расчёт всё время идёт в линейном режиме, а базис
+// ортонормируется — направление сходится к доминирующему за пару циклов.
+//
+// Опорная орбита — мастер (вдоль неё и линеаризуют), клоны — AMOUNTOFX слейвов,
+// стартующих из Xm(t0) + eps*e_k и подтягиваемых к мастеру теми же K, что и
+// обычный слейв. Якобиан не нужен: это та же клон-схема, что в LSKernelCUDA.
+//
+// denominators[] после GS несут весь спектр |λ_k| оператора цикла; наружу
+// отдаём только ведущий (denominators[0]) — если понадобится остальной спектр,
+// он тут уже посчитан.
+//
+// ТОЛЬКО unidirectional: при bidir мастер сам подтягивается к слейву, оператор
+// действует на совместном состоянии (2N измерений), и ρ означала бы уже не то,
+// что считает линеаризация вдоль свободной мастер-орбиты. Вызывающий код в этом
+// случае сюда не заходит.
+__device__ numb fsBenettinCycleExponent(
+	const numb* masterWindow,
+	const numb* values,
+	const numb h,
+	const int amountOfIterations,
+	const int amountOfX,
+	const numb maxValue,
+	const int iterOfSynchr,
+	const numb* kForward,
+	const numb* kBackward,
+	const numb eps,
+	const int gsWarmup)
+{
+	if (!(eps > 0) || iterOfSynchr <= 0)
+		return fsDivergedError();
+
+	// Прогревочные циклы: их логарифмы в среднее не идут. Стартовый базис с
+	// доминирующим направлением не совпадает, и первые циклы дают
+	// нерепрезентативные коэффициенты; в среднем по ВСЕМ циклам это смещение
+	// вымывается лишь как O(1/m), из-за чего сходимость требовала сотни циклов.
+	// Отбросив разогрев, получаем сходимость по |λ2/λ1|^m — ориентация базиса
+	// сходится геометрически, и вымывать из среднего уже нечего.
+	// Клампим, а не отбраковываем: хотя бы один цикл обязан попасть в среднее.
+	const int warmup = (gsWarmup <= 0) ? 0
+		: ((gsWarmup >= iterOfSynchr) ? iterOfSynchr - 1 : gsWarmup);
+
+	numb y[AMOUNTOFX * AMOUNTOFX];   // клоны в абсолютных координатах
+	numb z[AMOUNTOFX * AMOUNTOFX];   // ортонормированный базис после GS
+	numb denominators[AMOUNTOFX];
+	numb Xm[AMOUNTOFX];
+	numb K_local[AMOUNTOFX];
+
+	// Стартовый базис — единичный, а не случайный (как в LS): направления тогда
+	// детерминированы, ячейка воспроизводится бит-в-бит и seed не нужен. За
+	// первые же циклы GS всё равно развернёт базис под оператор.
+	for (int k = 0; k < amountOfX; ++k)
+		for (int j = 0; j < amountOfX; ++j)
+			y[k * amountOfX + j] = masterWindow[j] + ((k == j) ? eps : (numb)0);
+
+	numb sumLog10 = 0;
+	int  counted = 0;
+
+	for (int m = 0; m < iterOfSynchr; ++m) {
+
+		for (int j = 0; j < amountOfX; ++j) K_local[j] = kForward[j];
+		for (int i = 0; i < amountOfIterations - 1; ++i) {
+			for (int j = 0; j < amountOfX; ++j)
+				Xm[j] = masterWindow[i * amountOfX + j];
+			for (int k = 0; k < amountOfX; ++k)
+				calculateDiscreteModelforFastSynchro(y + k * amountOfX, Xm, K_local, values, h, 1);
+		}
+
+		for (int j = 0; j < amountOfX; ++j) K_local[j] = kBackward[j];
+		for (int i = amountOfIterations - 1; i > 0; --i) {
+			for (int j = 0; j < amountOfX; ++j)
+				Xm[j] = masterWindow[i * amountOfX + j];
+			for (int k = 0; k < amountOfX; ++k)
+				calculateDiscreteModelforFastSynchro(y + k * amountOfX, Xm, K_local, values, h, 0);
+		}
+
+		// Разлёт проверяем раз в цикл, а не на каждом шаге: ренормировка держит
+		// клоны в eps-окрестности мастера, так что вылет за maxValue возможен
+		// только при уже испорченном окне.
+		for (int k = 0; k < amountOfX; ++k)
+			if (fsStateDiverged(y + k * amountOfX, amountOfX, maxValue))
+				return fsDivergedError();
+
+		// Отклонения от мастера в стартовой точке окна — цикл вернул клоны
+		// именно туда (последний проход обратный).
+		for (int k = 0; k < amountOfX; ++k)
+			for (int j = 0; j < amountOfX; ++j)
+				y[k * amountOfX + j] -= masterWindow[j];
+
+		gramSchmidtProcess(y, z, amountOfX, denominators);
+
+		if (!(denominators[0] > 0))
+			return fsDivergedError();
+		if (m >= warmup) {
+			sumLog10 += log10(denominators[0] / eps);
+			++counted;
+		}
+
+		for (int k = 0; k < amountOfX; ++k)
+			for (int j = 0; j < amountOfX; ++j)
+				y[k * amountOfX + j] = masterWindow[j] + z[k * amountOfX + j] * eps;
+	}
+
+	return sumLog10 / (numb)counted;
+}
+
 __global__ void LSKernelCUDA(
 	const int nPts,
 	const int nPtsLimiter,
@@ -3275,7 +3410,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		preScaller,
 	const int		icRandomOffset,
 	const numb		icEps,
-	const unsigned long long icSeed)
+	const unsigned long long icSeed,
+	const int		gsWarmup)
 {
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
@@ -3301,7 +3437,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		icRandomOffset,								 //const int icRandomOffset
 		icEps,										 //const numb icEps
 		icSeed,										 //const unsigned long long icSeed
-		(unsigned long long)idx						 //const unsigned long long icCell
+		(unsigned long long)idx,					 //const unsigned long long icCell
+		gsWarmup									 //const int gsWarmup
 	);
 	return;
 }
@@ -3321,8 +3458,19 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const int icRandomOffset,
 	const numb icEps,
 	const unsigned long long icSeed,
-	const unsigned long long icCell)
+	const unsigned long long icCell,
+	const int gsWarmup)
 {
+	// error_estim 7 — Беннеттин поверх того же цикла вперёд-назад; окно мастера
+	// залито заранее (fillFSMasterTrajectory). Только unidirectional — см.
+	// комментарий у fsBenettinCycleExponent.
+	if (error_estim == 7) {
+		if (type_of_synch != 0)
+			return fsDivergedError();
+		return fsBenettinCycleExponent(timedomain + startDataIndex, values, h, amountOfIterations,
+			amountOfX, maxValue, (int)iterOfSynchr, K_Forward, K_Backward, icEps, gsWarmup);
+	}
+
 	//numb* norm_error = new numb[(amountOfIterations - 0)];
 	//numb* Xm = new numb[amountOfX];
 	//numb* X_prev = new numb[amountOfX];
@@ -3365,7 +3513,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	// Мастер в t0 — timedomain[startDataIndex] при любом type_of_synch: при bidir
 	// Xm ровно оттуда и проинициализирован парой строк выше.
 	numb err_start = 0;
-	if (error_estim == 4 || error_estim == 5) {
+	if (error_estim == 4 || error_estim == 5 || error_estim == 6) {
 		for (int j = 0; j < amountOfX; ++j) {
 			numb e = timedomain[startDataIndex + j] - Xs[j];
 			err_start += e * e;
@@ -3484,7 +3632,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	// мастера) даёт inf либо NaN, и это честное «не измерено», а не нулевая
 	// ошибка. Хост выбрасывает non-finite из min/max, такие точки не попадают
 	// в автошкалу.
-	if (error_estim == 4 || error_estim == 5) {
+	if (error_estim == 4 || error_estim == 5 || error_estim == 6) {
 		numb err_stop = 0;
 		for (int j = 0; j < amountOfX; ++j) {
 			numb e = (type_of_synch == 1 ? Xm[j] : timedomain[startDataIndex + j]) - Xs[j];
@@ -3492,7 +3640,13 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 		}
 		err_stop = sqrt(err_stop);
 		const numb ratio = err_stop / err_start;
-		return (error_estim == 4) ? ratio : log10(ratio);
+		if (error_estim == 4)
+			return ratio;
+		const numb lg = log10(ratio);
+		// 6 — та же величина, делённая на число циклов: log10(ratio) растёт как
+		// m*log10 ρ, и только после деления на m получается скорость ЗА ЦИКЛ,
+		// сравнимая с log10 ρ из линеаризованного расчёта.
+		return (error_estim == 5) ? lg : lg / (numb)iterOfSynchr;
 	}
 
 	if (error_estim == 0)

@@ -234,6 +234,8 @@ struct FastSyncSnapshot {
     bool               ic_random_offset = false;
     double             ic_eps           = 0.0;
     unsigned long long ic_seed          = 0;
+    // error_estim == 7: отброшенные циклы Беннеттина.
+    int                gs_warmup        = 0;
 };
 
 // Engine-side writers. Engine calls these in chunked-streaming loops; the GUI

@@ -842,6 +842,12 @@ struct FastSyncRequest {
     double             ic_eps           = 1e-3;
     unsigned long long ic_seed          = 12345;
 
+    // error_estim == 7 (Беннеттин): сколько первых циклов НЕ идёт в среднее.
+    // Стартовый базис не совпадает с доминирующим направлением, и без отброса
+    // это смещение вымывается из среднего лишь как O(1/m). ic_eps здесь —
+    // величина возмущения клонов (ic_random_offset на оценщик 7 не влияет).
+    int                gs_warmup        = 0;
+
     // mode == 0 (On Attractor):
     double t_max          = 100.0;
     double transient_time = 0.0;
