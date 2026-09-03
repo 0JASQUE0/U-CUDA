@@ -1,4 +1,6 @@
-﻿// --- Заголовочный файл ---
+﻿// Назначение параметров, общих для функций ниже (tMax, nPts, h, ranges,
+// writableVar, maxValue, preScaller, eps и т.д.), описано одним словарём
+// в hostLibrary.cuh — здесь не дублируется.
 #include "hostLibrary.cuh"
 
 // Writer'ы _config.csv: формат легаси-файлов живёт в data_export::legacy, а не
@@ -7,7 +9,6 @@
 #include "data_export.h"
 #include <vector>
 
-// ---------------------------------------------------------------------------
 // numb[] -> double[] для legacy CSV-writer'ов.
 //
 // Они НАМЕРЕННО объявлены с const double* (см. комментарий над namespace legacy
@@ -24,40 +25,38 @@
 // n — сколько элементов ЧИТАЕТ writer, а не размер массива у вызывающего:
 // у ranges это 4 для двухосевых диаграмм и 2 для однооосевых
 // (data_export.cpp: two_axes в write_lyap_config).
-// ---------------------------------------------------------------------------
 static std::vector<double> to_dbl(const numb* p, int n)
 {
 	if (p == nullptr || n <= 0) return std::vector<double>();
 	return std::vector<double>(p, p + n);
 }
 
-// --- Путь для сохранения результирующих файлов ---
+// Путь для сохранения результирующих файлов
 //#define OUT_FILE_PATH "C:\\Users\\KiShiVi\\Desktop\\mat.csv"
 //#define OUT_FILE_PATH "C:\\CUDA\\mat.csv"
 
-// --- Директива, объявление которой выводит в консоль отладочные сообщения ---
+// Директива, объявление которой выводит в консоль отладочные сообщения
 #define DEBUG
 
-
 __host__ void distributedSystemSimulation(
-	const numb	tMax,							// Время моделирования системы
-	const numb	h,								// Шаг интегрирования
+	const numb	tMax,
+	const numb	h,
 	const numb	hSpecial,						// Шаг смещения между потоками
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,				// Массив с начальными условиями
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,							// Параметры
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const int		writableVar,
+	const numb	transientTime,
+	const numb* values,
 	const int		amountOfValues,
-	std::string		OUT_FILE_PATH)					// Количество параметров	
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h;
 
 	int amountOfThreads = hSpecial / h;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -67,49 +66,31 @@ __host__ void distributedSystemSimulation(
 
 	freeMemory *= 0.8;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)	
 
-	// ---------------------------------------------------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата (пики и их количество для каждой системы) ---
-	// ---------------------------------------------------------------------------------------------------
+	// Выделяем память для хранения конечного результата (пики и их количество для каждой системы)
 
 	numb* h_data = new numb[amountOfPointsInBlock * sizeof(numb)];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_initialConditions;	// Указатель на массив с начальными условиями
 	numb* d_values;				// Указатель на массив с параметрами
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_initialConditions, amountOfInitialConditions * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_values, amountOfValues * sizeof(numb)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH);
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Distributed System Simulation\n");
@@ -119,10 +100,10 @@ __host__ void distributedSystemSimulation(
 	int minGridSize;		// Переменная для хранения минимального размера сетки
 	int gridSize;			// Переменная для хранения сетки
 
-	// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-	// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-	// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-	// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+	// Считаем, что один блок не может использовать больше чем 48КБ памяти
+	// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+	// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+	// Учитваем, что в блоке не может быть больше 1024 потоков
 	blockSize = ceil((1024.0f * 8.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 	if (blockSize < 1)
 	{
@@ -151,21 +132,17 @@ __host__ void distributedSystemSimulation(
 			d_data
 			);
 
-	// --- Проверка на CUDA ошибки ---
+	// Проверка на CUDA ошибки
 	gpuGlobalErrorCheck();
 
-	// --- Ждем пока все потоки завершат свою работу ---
+	// Ждем пока все потоки завершат свою работу
 	gpuErrorCheck(cudaDeviceSynchronize());
 
-	// -------------------------------------------------------------------------------------
-	// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-	// -------------------------------------------------------------------------------------
+	// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 	gpuErrorCheck(cudaMemcpy(h_data, d_data, amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-	// -------------------------------------------------------------------------------------
-
-	// --- Точность чисел с плавающей запятой ---
+	// Точность чисел с плавающей запятой
 	outFileStream << std::setprecision(set_precision);
 
 	for (size_t j = 0; j < amountOfPointsInBlock; ++j)
@@ -179,7 +156,6 @@ __host__ void distributedSystemSimulation(
 			exit(1);
 		}
 
-
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_initialConditions));
 	gpuErrorCheck(cudaFree(d_values));
@@ -187,28 +163,24 @@ __host__ void distributedSystemSimulation(
 	delete[] h_data;
 }
 
-
-// ----------------------------------------------------------------------------
-// --- Определение функции, для расчета одномерной бифуркационной диаграммы ---
-// ----------------------------------------------------------------------------
+// Определение функции, для расчета одномерной бифуркационной диаграммы
 
 __host__ void bifurcation1D(
-	const numb	tMax,							// Время моделирования системы
-	const int	nPts,						// Разрешение диаграммы
-	const numb	h,								// Шаг интегрирования
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb*	initialConditions,				// Массив с начальными условиями
-	const numb*	ranges,							// Диаппазон изменения переменной
-	const int*		indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb*	values,							// Параметры
-	const int		amountOfValues,					// Количество параметров
+	const numb	tMax,
+	const int	nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb*	initialConditions,
+	const numb*	ranges,
+	const int*		indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb*	values,
+	const int		amountOfValues,
 	const int		preScaller,
-	std::string		OUT_FILE_PATH)						// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	std::string		OUT_FILE_PATH)
 {
-	
 
 	// Максимальный blockSize, ограниченный shared памятью
 	// blockSize * requiredSharedMemPerThread <= sharedMemPerBlockLimit
@@ -221,12 +193,11 @@ __host__ void bifurcation1D(
 	//	return; // или другая логика
 	//}
 
-	
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 	//int nPts = resolution[0];
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -236,7 +207,7 @@ __host__ void bifurcation1D(
 
 	freeMemory *= 0.92;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Точный расчет памяти для bifurcation1D ---
+	// Точный расчет памяти для bifurcation1D
 	// 1. Память на ОДНУ систему (масштабируется с nPtsLimiter)
 	size_t memPerSystem =
 		3 * amountOfPointsInBlock * sizeof(numb) +  // d_data, d_outPeaks, d_timeOfPeaks
@@ -278,11 +249,7 @@ __host__ void bifurcation1D(
 	//nPtsLimiter = nPtsLimiter > nPts ? nPts : nPtsLimiter;	// Если мы можем расчитать больше систем, чем требуется, то ставим ограничитель на максимум (nPts)
 	//size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ---------------------------------------------------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата (пики и их количество для каждой системы) ---
-	// ---------------------------------------------------------------------------------------------------
+	// Выделяем память для хранения конечного результата (пики и их количество для каждой системы)
 
 	numb* h_timeOfPeaks = new numb[nPtsLimiter * amountOfPointsInBlock];
 	numb* h_outPeaks = new numb[nPtsLimiter * amountOfPointsInBlock];
@@ -293,17 +260,13 @@ __host__ void bifurcation1D(
 	numb* h_localX = new numb[amountOfInitialConditions];
 	numb* h_localValues = new numb[amountOfValues];
 
-
 	for (int i = 0; i < amountOfInitialConditions; i++)
 		h_localX[i] = initialConditions[i];
 
 	for (int i = 0; i < amountOfValues; i++)
 		h_localValues[i] = values[i];
 
-
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -316,13 +279,7 @@ __host__ void bifurcation1D(
 	numb* d_meanFreq;
 	numb* d_medianFreq;
 
-
-
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)&d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_ranges, 2 * sizeof(numb)));
@@ -335,11 +292,7 @@ __host__ void bifurcation1D(
 	gpuErrorCheck(cudaMalloc((void**)&d_meanFreq, nPtsLimiter * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_medianFreq, nPtsLimiter * sizeof(numb)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 1 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
@@ -348,15 +301,10 @@ __host__ void bifurcation1D(
 	gpuGlobalErrorCheck();
 	gpuErrorCheck(cudaDeviceSynchronize());
 
-
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)nPts / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
@@ -373,7 +321,6 @@ __host__ void bifurcation1D(
 	outFileStream.close();
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(1) + ".csv");
 	outFileStream.close();
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 1D\n");
@@ -385,18 +332,11 @@ __host__ void bifurcation1D(
 	printf("[continuation_bif1D=%d] Data size: %zu bytes (%.2f GB)\n",
 		continuation_bif1D, dataSize, dataSize / 1e9f);
 
-	//size_t allocatedSize;
-	//cudaDeviceGetAttribute(&allocatedSize, cudaDevAttrMaxAllocationSize, 0);
-	//if (dataSize > allocatedSize) {
-	//	printf("ERROR: Not enough GPU memory! Requested: %zu, Max allowed: %zu\n",
-	//		dataSize, allocatedSize);
-	//}
-
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = nPts - (nPtsLimiter * i);
 
@@ -404,10 +344,10 @@ __host__ void bifurcation1D(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		//blockSize = ceil((1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, calculateDiscreteModelCUDA, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize, blockSize_setup);
 		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
@@ -416,41 +356,37 @@ __host__ void bifurcation1D(
 
 		if (continuation_bif1D == 0) {
 
-
-			// --------------------------------------------------
-			// --- CUDA функция для расчета траектории систем ---
-			// --------------------------------------------------
+			// CUDA функция для расчета траектории систем
 
 			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
-					nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+					nPtsLimiter,
 					amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 					i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-					amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+					amountOfPointsForSkip,
 					1,							// Размерность ( диаграмма одномерная )
 					d_ranges,					// Массив с диапазонами
-					h,							// Шаг интегрирования
+					h,
 					d_indicesOfMutVars,			// Индексы изменяемых параметров
 					d_initialConditions,		// Начальные условия
-					amountOfInitialConditions,	// Количество начальных условий
+					amountOfInitialConditions,
 					d_values,					// Параметры
-					amountOfValues,				// Количество параметров
+					amountOfValues,
 					amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-					preScaller,					// Множитель, который уменьшает время и объем расчетов
-					writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-					maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+					preScaller,
+					writableVar,
+					maxValue,
 					d_data,						// Массив, где будет хранится траектория систем
 					d_amountOfPeaks,
 					par_or_var);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-			// --------------------------------------------------
 		}
 		else {
 			for (int j = 0; j < nPtsLimiter; j++) {
 				numb xPrev[AMOUNTOFX];
 				numb checker;
 				h_localValues[indicesOfMutVars[0]] = ranges[0] + (numb)(i * originalNPtsLimiter + j) * (ranges[1] - ranges[0]) / ((numb)nPts - (numb)1.0);
-				
+
 				if (h_localValues[writableVar] == 0) {
 					h_localX[0] = -1e-6; h_localX[1] = -1e-6;
 					printf("Param: %f value: %f\n", h_localValues[indicesOfMutVars[0]], h_localX[writableVar]);
@@ -466,8 +402,6 @@ __host__ void bifurcation1D(
 				//	break;
 				//}
 
-
-
 				for (int k = 0; k < amountOfPointsInBlock; k++) {
 
 					for (int m = 0; m < amountOfInitialConditions; ++m)
@@ -478,7 +412,6 @@ __host__ void bifurcation1D(
 					for (int m = 0; m < preScaller; m++) 
 						calculateDiscreteModel(h_localX, h_localValues, h);
 
-
 				}
 
 				h_amountOfPeaks[j] = 1;
@@ -486,7 +419,6 @@ __host__ void bifurcation1D(
 				checker = 0;
 				for (int m = 0; m < amountOfInitialConditions; ++m) 
 					checker = checker + fabsf(h_localX[m]);
-
 
 				if (isnan(checker) || isinf(checker) || fabsf(checker) > maxValue)
 					h_amountOfPeaks[j] = 0;
@@ -507,32 +439,27 @@ __host__ void bifurcation1D(
 			gpuErrorCheck(cudaMemcpy(d_amountOfPeaks, h_amountOfPeaks, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
 		}
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
-
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, peakFinderCUDA, 0, blockSize_setup);
 		//gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 		gpuGlobalErrorCheck();
 		gpuErrorCheck(cudaDeviceSynchronize());
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		peakFinderCUDA << <gridSize, blockSize >> >
 			(	d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 				d_outPeaks,					// Выходной массив, куда будут записаны значения пиков
 				d_timeOfPeaks,				// Межпиковый интервал здесь нужен
 				h * (numb)preScaller);			// Шаг интегрирования нужен
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 		gpuErrorCheck(cudaMemcpy(h_outPeaks, d_outPeaks, nPtsLimiter * amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
@@ -541,9 +468,7 @@ __host__ void bifurcation1D(
 
 		gpuGlobalErrorCheck();
 		gpuErrorCheck(cudaDeviceSynchronize());
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		if (calculate_mean_med_freq) {
 			cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, MeanAndMedianFreqCUDA, 0, blockSize_setup);
@@ -552,7 +477,7 @@ __host__ void bifurcation1D(
 			MeanAndMedianFreqCUDA << <gridSize, blockSize >> >
 				(
 					amountOfPointsInBlock,		// Количество точек в одной траектории
-					nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+					nPtsLimiter,
 					d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 					d_outPeaks,					// Выходной массив, куда будут записаны значения пиков
 					d_timeOfPeaks,				// Межпиковый интервал здесь нужен
@@ -568,12 +493,11 @@ __host__ void bifurcation1D(
 			gpuGlobalErrorCheck();
 			gpuErrorCheck(cudaDeviceSynchronize());
 		}
-		// -------------------------------------------------------------------------------------
 
-		// --- Точность чисел с плавающей запятой ---
+		// Точность чисел с плавающей запятой
 		outFileStream << std::setprecision(set_precision);
 
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		outFileStream.open(OUT_FILE_PATH, std::ios::app);
 		for (size_t k = 0; k < nPtsLimiter; ++k) {
 			if (h_amountOfPeaks[k] == 0) {
@@ -629,9 +553,7 @@ __host__ void bifurcation1D(
 #endif
 	}
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
 	gpuErrorCheck(cudaFree(d_indicesOfMutVars));
@@ -651,28 +573,26 @@ __host__ void bifurcation1D(
 	delete[] h_outPeaks;
 	delete[] h_amountOfPeaks;
 
-	// ---------------------------
 }
-
 
 /**
  * Функция, для расчета одномерной бифуркационной диаграммы по шагу.
  */
 __host__ void bifurcation1DForH(
-	const numb	tMax,							// Время моделирования системы
-	const int		nPts,							// Разрешение диаграммы
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,				// Массив с начальными условиями
-	const numb* ranges,							// Диапазон изменения шага
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,							// Параметры
-	const int		amountOfValues,					// Количество параметров
+	const numb	tMax,
+	const int		nPts,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
 	const int		preScaller,
-	std::string		OUT_FILE_PATH)						// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек в одном блоке ---
+	// Количество точек в одном блоке
 	int amountOfPointsInBlock = tMax / (ranges[0] < ranges[1] ? ranges[0] : ranges[1]) / preScaller;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -682,7 +602,7 @@ __host__ void bifurcation1DForH(
 
 	freeMemory *= 0.5;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 2);
 
@@ -690,18 +610,12 @@ __host__ void bifurcation1DForH(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ---------------------------------------------------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата (пики и их количество для каждой системы) ---
-	// ---------------------------------------------------------------------------------------------------
+	// Выделяем память для хранения конечного результата (пики и их количество для каждой системы)
 
 	numb* h_outPeaks = new numb[nPtsLimiter * amountOfPointsInBlock * sizeof(numb)];
 	int* h_amountOfPeaks = new int[nPtsLimiter * sizeof(int)];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -711,11 +625,7 @@ __host__ void bifurcation1DForH(
 	numb* d_outPeaks;				// Указатель на массив в GPU с результирующими пиками биф. диаграммы
 	int* d_amountOfPeaks;		// Указатель на массив в GPU с кол-вом пиков в каждой системе.
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 2 * sizeof(numb)));
@@ -725,29 +635,19 @@ __host__ void bifurcation1DForH(
 	gpuErrorCheck(cudaMalloc((void**)& d_outPeaks, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_amountOfPeaks, nPtsLimiter * sizeof(int)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)nPts / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH);
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 1D\n");
@@ -755,11 +655,11 @@ __host__ void bifurcation1DForH(
 	printf("Amount of iterations %zu: \n", amountOfIteration);
 #endif
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = nPts - (nPtsLimiter * i);
 
@@ -767,10 +667,10 @@ __host__ void bifurcation1DForH(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		blockSize = ceil((1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		if (blockSize < 1)
 		{
@@ -784,75 +684,63 @@ __host__ void bifurcation1DForH(
 
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 
 		calculateDiscreteModelCUDA_H << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
 			(nPts,						// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-				transientTime,				// Время пропуска ( transientTime )
+				transientTime,
 				1,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
 				d_initialConditions,		// Начальные условия
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
-				tMax,						// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				amountOfValues,
+				tMax,
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,						// Массив, где будет хранится траектория систем
 				d_amountOfPeaks);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, peakFinderCUDA, 0, blockSize_setup);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		peakFinderCUDA_H << <gridSize, blockSize >> >
 			(d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 				d_outPeaks,					// Выходной массив, куда будут записаны значения пиков
 				nullptr,					// Межпиковый интервал здесь не нужен
 				0);							// Шаг интегрирования не нужен
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		gpuErrorCheck(cudaMemcpy(h_outPeaks, d_outPeaks, nPtsLimiter * amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 		gpuErrorCheck(cudaMemcpy(h_amountOfPeaks, d_amountOfPeaks, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-		// -------------------------------------------------------------------------------------
-
-		// --- Точность чисел с плавающей запятой ---
+		// Точность чисел с плавающей запятой
 		outFileStream << std::setprecision(set_precision);
 
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		for (size_t k = 0; k < nPtsLimiter; ++k)
 			for (size_t j = 0; j < h_amountOfPeaks[k]; ++j)
 				if (outFileStream.is_open())
@@ -873,9 +761,7 @@ __host__ void bifurcation1DForH(
 #endif
 	}
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
 	gpuErrorCheck(cudaFree(d_initialConditions));
@@ -887,36 +773,32 @@ __host__ void bifurcation1DForH(
 	delete[] h_outPeaks;
 	delete[] h_amountOfPeaks;
 
-	// ---------------------------
 }
 
-
-// ------------------------------------------------------------------------
-// --- Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN) ---
-// ------------------------------------------------------------------------
+// Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN)
 
 __host__ void bifurcation2D(
-	const numb	tMax,								// Время моделирования системы
-	const int	nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* __restrict__ initialConditions,					// Массив с начальными условиями
-	const numb* __restrict__ ranges,								// Диапазоны изменения параметров
-	const int* __restrict__ indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* __restrict__ values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int	nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* __restrict__ initialConditions,
+	const numb* __restrict__ ranges,
+	const int* __restrict__ indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* __restrict__ values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
-	std::string		OUT_FILE_PATH)								// Эпсилон для алгоритма DBSCAN 
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	size_t amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	size_t amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -925,7 +807,6 @@ __host__ void bifurcation2D(
 	gpuErrorCheck(cudaMemGetInfo(&freeMemory, &totalMemory));	// Получаем свободный и общий объемы памяти GPU
 
 	freeMemory *= 0.92;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
-
 
 	// Базовая оценка: 3 массива по amountOfPointsInBlock + 2 int + резерв 20%
 	size_t baseMemPerSystem = amountOfPointsInBlock * 3 * sizeof(numb) + 2 * sizeof(int);
@@ -943,7 +824,7 @@ __host__ void bifurcation2D(
 		std::min(nPtsLimiter, static_cast<size_t>(nPts * nPts)));
 	nPtsLimiter = (nPtsLimiter / blockSize_setup) * blockSize_setup;
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	//size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 3);
 
@@ -951,9 +832,7 @@ __host__ void bifurcation2D(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	int*  h_dbscanResult =		new int[nPtsLimiter];
 	numb* h_meanFreq =			new numb[nPtsLimiter];
@@ -967,9 +846,7 @@ __host__ void bifurcation2D(
 	numb* h_globalPeak =		new numb[nPtsLimiter];
 	int*  h_amountOfPeaks =		new int[nPtsLimiter];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -990,11 +867,8 @@ __host__ void bifurcation2D(
 	numb* d_maxInterval		;
 	numb* d_maxPeak			;
 	numb* d_globalPeak		;
-	// -----------------------------------------
 
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 4 * sizeof(numb)));
@@ -1006,7 +880,6 @@ __host__ void bifurcation2D(
 	gpuErrorCheck(cudaMalloc((void**)& d_intervals, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_dbscanResult, nPtsLimiter * sizeof(int)));
 	gpuErrorCheck(cudaMalloc((void**)& d_helpfulArray, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
-	// -----------------------------
 	gpuErrorCheck(cudaMalloc((void**)&d_meanFreq, nPtsLimiter * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_medianFreq, nPtsLimiter * sizeof(numb)));
 
@@ -1018,29 +891,19 @@ __host__ void bifurcation2D(
 	gpuErrorCheck(cudaMalloc((void**)&d_maxPeak			, nPtsLimiter * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_globalPeak		, nPtsLimiter * sizeof(numb)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 4 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts * nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 2D\n");
@@ -1059,9 +922,8 @@ __host__ void bifurcation2D(
 	int stringCounter_8 = 0;
 	int stringCounter_9 = 0;
 	int stringCounter_10 = 0;
-	// --- Выводим в самое начало файла исследуемые диапазон ---
+	// Выводим в самое начало файла исследуемые диапазон
 
-	
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
 	data_export::legacy::write_bif2d_config(
@@ -1082,7 +944,7 @@ __host__ void bifurcation2D(
 	outFileStream.close();
 	if (calculate_global_peak) {
 		outFileStream.open(OUT_FILE_PATH + "_globalPeak.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1093,7 +955,7 @@ __host__ void bifurcation2D(
 
 	if (calculate_mean_med_freq) {
 		outFileStream.open(OUT_FILE_PATH + "_meanFreq.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1102,7 +964,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_medFreq.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1113,7 +975,7 @@ __host__ void bifurcation2D(
 
 	if (calculate_mean_and_variance) {
 		outFileStream.open(OUT_FILE_PATH + "_meanPeak.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1122,7 +984,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_variancePeak.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1131,7 +993,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_meanInterval.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1140,7 +1002,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_varianceInterval.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1149,7 +1011,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_maxPeak.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1158,7 +1020,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_maxInterval.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1167,7 +1029,7 @@ __host__ void bifurcation2D(
 		outFileStream.close();
 
 		outFileStream.open(OUT_FILE_PATH + "_amountOfPeaks.csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1175,13 +1037,13 @@ __host__ void bifurcation2D(
 		}
 		outFileStream.close();
 	}
-	
+
 	size_t startTime = std::clock();
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts * nPts) - (nPtsLimiter * i);
 
@@ -1189,30 +1051,12 @@ __host__ void bifurcation2D(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
-		
-		//blockSize = ceil((1*1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
-		
-		//printf("blockSize: %zu", blockSize);
-//		if (blockSize < 1)
-//		{
-//#ifdef DEBUG
-//			printf("Error : BlockSize < 1; %d line\n", __LINE__);
-//			exit(1);
-//#endif
-//		}
-//
-		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
+		// blockSize фиксирован (blockSize_setup); прежний расчёт из объёма
+		// shared memory на поток остался в истории git.
 		blockSize = blockSize_setup;
-		//blockSize = 10000 / ((amountOfInitialConditions + amountOfValues) * sizeof(numb));
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 		size_t sharedMemNeeded = (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize;
 		if (sharedMemNeeded > 48 * 1024) {
 			fprintf(stderr, "WARNING: Shared memory per block (%zu) exceeds limit (48KB). Reduce blockSize.\n", sharedMemNeeded);
@@ -1220,34 +1064,31 @@ __host__ void bifurcation2D(
 
 		calculateDiscreteModelCUDA << <gridSize, blockSize, sharedMemNeeded >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-				amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+				amountOfPointsForSkip,
 				2,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
-				h,							// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,			// Индексы изменяемых параметров
 				d_initialConditions,		// Начальные условия
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,						// Массив, где будет хранится траектория систем
 				d_amountOfPeaks,
 				par_or_var);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
-
 
 		if (calculate_global_peak) {
 			blockSize = 32;
@@ -1256,7 +1097,7 @@ __host__ void bifurcation2D(
 			globalPeakFinderCUDA << <gridSize, blockSize >> >
 				(d_data,						// Данные с траекториями систем
 					amountOfPointsInBlock,		// Количество точек в одной траектории
-					nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+					nPtsLimiter,
 					d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 					d_globalPeak);							// Шаг интегрирования
 
@@ -1267,7 +1108,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_globalPeak.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1293,31 +1134,27 @@ __host__ void bifurcation2D(
 			////////////////////////////////////////////////////////////
 		}
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, peakFinderCUDA, 0, blockSize_setup);
 		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;			// Не превышаем ограничение в 512 потока в блоке
 		blockSize = blockSize_setup;
 		//printf(", %zu", blockSize);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		peakFinderCUDA << <gridSize, blockSize >> >
 			(   d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 				d_data,						// Выходной массив, куда будут записаны значения пиков
 				d_intervals,				// Межпиковый интервал
-				h * preScaller);							// Шаг интегрирования
+				h * preScaller);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 		if (calculate_mean_med_freq) {
@@ -1328,7 +1165,7 @@ __host__ void bifurcation2D(
 			MeanAndMedianFreqCUDA << <gridSize, blockSize >> >
 				(
 					amountOfPointsInBlock,		// Количество точек в одной траектории
-					nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+					nPtsLimiter,
 					d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 					d_data,					// Выходной массив, куда будут записаны значения пиков
 					d_intervals,				// Межпиковый интервал здесь нужен
@@ -1343,7 +1180,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_meanFreq.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1370,7 +1207,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_medFreq.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1402,7 +1239,7 @@ __host__ void bifurcation2D(
 			MeanAndVarianceCUDA << <gridSize, blockSize >> >
 				(
 					amountOfPointsInBlock,		// Количество точек в одной траектории
-					nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+					nPtsLimiter,
 					d_amountOfPeaks,			// Выходной массив, куда будут записаны количества пиков для каждой системы
 					d_data,					// Выходной массив, куда будут записаны значения пиков
 					d_intervals,				// Межпиковый интервал здесь нужен
@@ -1428,7 +1265,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_meanPeak.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1453,7 +1290,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_variancePeak.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1478,7 +1315,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_meanInterval.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1503,7 +1340,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_varianceInterval.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1528,7 +1365,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_maxPeak.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1553,7 +1390,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_maxInterval.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1578,7 +1415,7 @@ __host__ void bifurcation2D(
 
 			outFileStream.open(OUT_FILE_PATH + "_amountOfPeaks.csv", std::ios::app);
 			outFileStream << std::setprecision(set_precision);
-			// --- Сохранение данных в файл ---
+			// Сохранение данных в файл
 			for (size_t i = 0; i < nPtsLimiter; ++i)
 				if (outFileStream.is_open())
 				{
@@ -1602,9 +1439,9 @@ __host__ void bifurcation2D(
 			outFileStream.close();
 		}
 
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, dbscanCUDA, 0, blockSize_setup);
@@ -1613,32 +1450,25 @@ __host__ void bifurcation2D(
 		//printf(", %zu\n", blockSize);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-		// -----------------------------------------
-		// --- CUDA функция для алгоритма DBSCAN ---
-		// -----------------------------------------
+		// CUDA функция для алгоритма DBSCAN
 
 		dbscanCUDA << <gridSize, blockSize >> > (d_data, amountOfPointsInBlock, nPtsLimiter, d_amountOfPeaks, d_intervals, d_helpfulArray, eps, d_dbscanResult);
 
 		//dbscanCUDA_optimized << <gridSize, blockSize >> > (d_data, amountOfPointsInBlock, nPtsLimiter, d_amountOfPeaks, d_intervals, eps, d_dbscanResult);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		gpuErrorCheck(cudaMemcpy(h_dbscanResult, d_dbscanResult, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-
 		outFileStream.open(OUT_FILE_PATH, std::ios::app);
 		outFileStream << std::setprecision(set_precision);
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		for (size_t i = 0; i < nPtsLimiter; ++i)
 			if (outFileStream.is_open())
 			{
@@ -1667,9 +1497,7 @@ __host__ void bifurcation2D(
 #endif
 	}
 	printf("Time of runnig: %zu ms\n", std::clock() - startTime);
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
@@ -1701,32 +1529,30 @@ __host__ void bifurcation2D(
 	delete[] h_maxInterval;
 	delete[] h_amountOfPeaks;
 	delete[] h_globalPeak;
-	// ---------------------------
 }
 
-
 __host__ void neuronClasterization2D(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
-	std::string		OUT_FILE_PATH)								// Эпсилон для алгоритма DBSCAN 
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -1736,7 +1562,7 @@ __host__ void neuronClasterization2D(
 
 	freeMemory *= 0.9;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 3);
 
@@ -1744,17 +1570,11 @@ __host__ void neuronClasterization2D(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	//int* h_dbscanResult = new int[nPtsLimiter * sizeof(numb)];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -1765,24 +1585,20 @@ __host__ void neuronClasterization2D(
 	int* d_amountOfPeaks;		// Указатель на массив в GPU с кол-вом пиков в каждой системе.
 	numb* d_intervals;			// Указатель на массив в GPU с межпиковыми интервалами пиков
 	int* d_dbscanResult;			// Указатель на массив в GPU результирующей матрицы (диаграммы) в GPU
-	
+
 	int* d_sysCheker;			// Указатель на массив в GPU на вспомогательный массив
 	numb* d_avgPeaks;
 	numb* d_avgIntervals;
 	numb* d_helpfulArray;
 		//int* d_dbscanResult;
-	// -----------------------------------------
 
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 4 * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_indicesOfMutVars, 2 * sizeof(int)));
 	gpuErrorCheck(cudaMalloc((void**)& d_initialConditions, amountOfInitialConditions * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_values, amountOfValues * sizeof(numb)));
-
 
 	gpuErrorCheck(cudaMalloc((void**)& d_intervals, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 //	gpuErrorCheck(cudaMalloc((void**)& d_dbscanResult, nPtsLimiter * sizeof(int)));
@@ -1794,30 +1610,23 @@ __host__ void neuronClasterization2D(
 	gpuErrorCheck(cudaMalloc((void**)& d_avgPeaks, nPts * nPts * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_avgIntervals, nPts * nPts * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_dbscanResult, nPts * nPts * sizeof(int)));
-	// -----------------------------
 
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 4 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts * nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH);
 
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 	if (outFileStream.is_open())
 	{
 		outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1827,7 +1636,7 @@ __host__ void neuronClasterization2D(
 
 	for (int i = 1; i < 5; i++) {
 		outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(i) + ".csv");
-		// --- Выводим в самое начало файла исследуемые диапазон ---
+		// Выводим в самое начало файла исследуемые диапазон
 		if (outFileStream.is_open())
 		{
 			outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -1835,9 +1644,6 @@ __host__ void neuronClasterization2D(
 		}
 		outFileStream.close();
 	}
-	
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 2D\n");
@@ -1847,13 +1653,11 @@ __host__ void neuronClasterization2D(
 
 	int stringCounter = 0; // Вспомогательная переменная для корректной записи матрицы в файл
 
-
-
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts * nPts) - (nPtsLimiter * i);
 
@@ -1861,69 +1665,51 @@ __host__ void neuronClasterization2D(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 
-		//blockSize = ceil((1*1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		blockSize = 10000 / ((amountOfInitialConditions + amountOfValues) * sizeof(numb));
 
-		//		if (blockSize < 1)
-		//		{
-		//#ifdef DEBUG
-		//			printf("Error : BlockSize < 1; %d line\n", __LINE__);
-		//			exit(1);
-		//#endif
-		//		}
-		//
-		//		blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
-		//
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
-
+		// CUDA функция для расчета траектории систем
 
 		calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-				amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+				amountOfPointsForSkip,
 				2,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
-				h,							// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,			// Индексы изменяемых параметров
 				d_initialConditions,		// Начальные условия
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,						// Массив, где будет хранится траектория систем
 				d_sysCheker + (i* originalNPtsLimiter),
 				par_or_var);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настроек блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настроек блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, peakFinderCUDA, 0, blockSize_setup);
 		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;			// Не превышаем ограничение в 512 потока в блоке
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		//peakFinderCUDA << <gridSize, blockSize >> >
 		//	(d_data,						// Данные с траекториями систем
@@ -1937,41 +1723,36 @@ __host__ void neuronClasterization2D(
 		avgPeakFinderCUDA_for2Dbif << <gridSize, blockSize >> >
 				(d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_avgPeaks + (i * originalNPtsLimiter),
 				d_avgIntervals + (i * originalNPtsLimiter),
 				d_data,						// Выходной массив, куда будут записаны значения пиков
 				d_intervals,				// Межпиковый интервал
 				d_amountOfPeaks + (i* originalNPtsLimiter),
 				d_sysCheker + (i * originalNPtsLimiter),
-				h* preScaller);			// Шаг интегрирования
+				h* preScaller);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, dbscanCUDA, 0, blockSize_setup);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, dbscanCUDA, 0, blockSize_setup);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
-		// -----------------------------------------
-		// --- CUDA функция для алгоритма DBSCAN ---
-		// -----------------------------------------
+		// CUDA функция для алгоритма DBSCAN
 
 		dbscanCUDA << <gridSize, blockSize >> >
 			(	d_data,
@@ -1984,23 +1765,15 @@ __host__ void neuronClasterization2D(
 				d_dbscanResult + (i* originalNPtsLimiter)
 			);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
-
-
-		// -----------------------------------------
-		// --- CUDA функция для алгоритма DBSCAN ---
-		// -----------------------------------------
+		// CUDA функция для алгоритма DBSCAN
 
 		//dbscanCUDA << <gridSize, blockSize >> >
 		//	(d_data,
@@ -2012,46 +1785,11 @@ __host__ void neuronClasterization2D(
 		//		eps,
 		//		d_dbscanResult);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
-
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
-
-		//gpuErrorCheck(cudaMemcpy(h_dbscanResult, d_dbscanResult, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
-
-		// -------------------------------------------------------------------------------------
-
-		// --- Точность чисел с плавающей запятой ---
-		//outFileStream << std::setprecision(set_precision);
-
-//		// --- Сохранение данных в файл ---
-//		for (size_t i = 0; i < nPtsLimiter; ++i)
-//			if (outFileStream.is_open())
-//			{
-//				if (stringCounter != 0)
-//					outFileStream << ", ";
-//				if (stringCounter == nPts)
-//				{
-//					outFileStream << "\n";
-//					stringCounter = 0;
-//				}
-//				outFileStream << h_dbscanResult[i];
-//				++stringCounter;
-//			}
-//			else
-//			{
-//#ifdef DEBUG
-//				printf("\nOutput file open error\n");
-//#endif
-//				exit(1);
-//			}
 
 #ifdef DEBUG
 		printf("Progress: %f\%\n", (100.0f / (numb)amountOfIteration) * (i + 1));
@@ -2069,14 +1807,10 @@ __host__ void neuronClasterization2D(
 	gpuErrorCheck(cudaMemcpy(h_sysCheker, d_sysCheker, nPts* nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_dbscanResult, d_dbscanResult, nPts* nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_amountOfPeaks, d_amountOfPeaks, nPts* nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
-	
 
+	// Освобождение памяти
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
-
-		// --- Сохранение найденных бассейнов притяжений в файл ---
+		// Сохранение найденных бассейнов притяжений в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH, std::ios::app);
@@ -2218,40 +1952,35 @@ __host__ void neuronClasterization2D(
 	delete[] h_avgIntervals;
 	delete[] h_sysCheker; 
 	delete[] h_amountOfPeaks;
-	// ---------------------------
 }
 
-// ------------------------------------------------------------------------------
-// --- Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN) по IC ---
-// ------------------------------------------------------------------------------
-
-
+// Функция, для расчета двумерной бифуркационной диаграммы (DBSCAN) по IC
 
 __host__ void LLE1D(
-	const numb	tMax,								// Время моделирования системы
-	const numb	NT,									// Время нормализации
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const numb	eps,								// Эпсилон для LLE
-	const numb* initialConditions,					// Массив с начальными условиями
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
+	const numb	tMax,
+	const numb	NT,
+	const int		nPts,
+	const numb	h,
+	const numb	eps,
+	const numb* initialConditions,
+	const int		amountOfInitialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
 	const int		amountOfValues,
-	std::string		OUT_FILE_PATH)						// Количество параметров
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой во время нормализации NT ---
+	// Количество точек, которое будет смоделировано одной системой во время нормализации NT
 	size_t amountOfNT_points = NT / h;
 
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / NT;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;																// Переменная для хранения свободного объема памяти в GPU
@@ -2261,7 +1990,7 @@ __host__ void LLE1D(
 
 	freeMemory *= 0.5;																// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock);
 
@@ -2269,15 +1998,11 @@ __host__ void LLE1D(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	numb* h_lleResult = new numb[nPtsLimiter];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_ranges;				   // Указатель на массив с диапазоном изменения переменной
 	int* d_indicesOfMutVars;		   // Указатель на массив с индексом изменяемой переменной в массиве values
@@ -2286,11 +2011,7 @@ __host__ void LLE1D(
 
 	numb* d_lleResult;			   // Память для хранения конечного результата
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 2 * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_indicesOfMutVars, 1 * sizeof(int)));
@@ -2299,25 +2020,17 @@ __host__ void LLE1D(
 
 	gpuErrorCheck(cudaMalloc((void**)& d_lleResult, nPtsLimiter * sizeof(numb)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 1 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceilf((numb)nPts / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 
@@ -2332,19 +2045,17 @@ __host__ void LLE1D(
 
 	outFileStream.open(OUT_FILE_PATH);
 
-	// ------------------------------------------------------
-
 #ifdef DEBUG
 	printf("LLE 1D\n");
 	printf("nPtsLimiter : %zu\n", nPtsLimiter);
 	printf("Amount of iterations %zu: \n", amountOfIteration);
 #endif
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = nPts - (nPtsLimiter * i);
 
@@ -2370,55 +2081,45 @@ __host__ void LLE1D(
 		blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-
-		// ------------------------------------
-		// --- CUDA функция для расчета LLE ---
-		// ------------------------------------
+		// CUDA функция для расчета LLE
 
 		LLEKernelCUDA << < gridSize, blockSize, (3 * amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
 			(nPts,								// Общее разрешение
-				nPtsLimiter, 						// Разрешение в текущем расчете
-				NT, 								// Время нормализации
-				tMax, 								// Время моделирования
+				nPtsLimiter,
+				NT,
+				tMax,
 				amountOfPointsInBlock,				// Количество точек, занимаемое одной системой в "data"
 				i * originalNPtsLimiter, 			// Количество уже посчитанных точек
-				amountOfPointsForSkip,				// Количество точек, которое будет промоделированно до основного расчета (transientTime)
+				amountOfPointsForSkip,
 				1, 									// Размерность
 				d_ranges, 							// Массив, содержащий диапазоны перебираемого параметра
-				h, 									// Шаг интегрирования
-				eps, 								// Эпсилон
+				h,
+				eps,
 				d_indicesOfMutVars, 				// Индексы изменяемых параметров
 				d_initialConditions,				// Начальные условия
-				amountOfInitialConditions, 			// Количество начальных условий
+				amountOfInitialConditions,
 				d_values, 							// Параметры
-				amountOfValues, 					// Количество параметров
+				amountOfValues,
 				tMax / NT, 							// Количество итерация (вычисляется от tMax)
 				1, 									// Множитель для ускорения расчетов
-				writableVar,						// Индекс переменной в x[] по которому строим диаграмму
-				maxValue, 							// Макксимальное значение переменной при моделировании
+				writableVar,
+				maxValue,
 				d_lleResult);						// Результирующий массив
 
-		// ------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		gpuErrorCheck(cudaMemcpy(h_lleResult, d_lleResult, nPtsLimiter * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-		// -------------------------------------------------------------------------------------
-
-		// --- Точность чисел с плавающей запятой ---
+		// Точность чисел с плавающей запятой
 		outFileStream << std::setprecision(set_precision);
 
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 
 		for (size_t k = 0; k < nPtsLimiter; ++k)
 			if (outFileStream.is_open())
@@ -2437,9 +2138,7 @@ __host__ void LLE1D(
 #endif
 	}
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_ranges));
 	gpuErrorCheck(cudaFree(d_indicesOfMutVars));
@@ -2450,7 +2149,6 @@ __host__ void LLE1D(
 
 	delete[] h_lleResult;
 }
-
 
 __host__ void LLE2D(
 	const numb tMax,
@@ -2482,7 +2180,7 @@ __host__ void LLE2D(
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock);
 
 	//nPtsLimiter = 10000; // Pizdec kostil' ot Boga
-	
+
 	nPtsLimiter = nPtsLimiter > (nPts * nPts) ? (nPts * nPts) : nPtsLimiter;
 	//nPtsLimiter = nPtsLimiter > amount_GPU ? amount_GPU : nPtsLimiter;
 	size_t originalNPtsLimiter = nPtsLimiter;
@@ -2507,7 +2205,6 @@ __host__ void LLE2D(
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
-
 
 	size_t amountOfIteration = (size_t)ceilf(((numb)nPts * (numb)nPts) / (numb)nPtsLimiter);
 
@@ -2556,7 +2253,6 @@ __host__ void LLE2D(
 		cudaOccupancyMaxPotentialBlockSize(&gridSize, &blockSize, LLEKernelCUDA, 0, blockSize_setup);
 		//blockSize = 32;
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
-
 
 		//LLEKernelCUDA << < gridSize, blockSize, (3 * amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> > (
 		LLEKernelCUDA << < gridSize, blockSize, (3 * amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> > (
@@ -2661,7 +2357,6 @@ __host__ void LS1D(
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-
 	size_t amountOfIteration = (size_t)ceilf((numb)nPts / (numb)nPtsLimiter);
 
 	std::ofstream outFileStream;
@@ -2693,14 +2388,13 @@ __host__ void LS1D(
 		int blockSize;
 		int minGridSize;
 		int gridSize;
-		
+
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, LSKernelCUDA, 0, blockSize_setup);
 		//gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 
 		//blockSizeMax = 32000 / ((3 * amountOfInitialConditions + 2 * amountOfInitialConditions * amountOfInitialConditions + amountOfValues) * sizeof(numb));
 		//blockSizeMin = (3 + amountOfValues) * sizeof(numb);
 		//blockSize = blockSizeMax;// (blockSizeMax + blockSizeMin) / 2;
-
 
 		blockSizeMax = 32000 / ((3 * amountOfInitialConditions + 2 * amountOfInitialConditions * amountOfInitialConditions + amountOfValues) * sizeof(numb));
 		//blockSizeMin = (3 + amountOfValues) * sizeof(numb);
@@ -2805,11 +2499,10 @@ __host__ void LS2D(
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-
 	size_t amountOfIteration = (size_t)ceilf(((numb)nPts * (numb)nPts) / (numb)nPtsLimiter);
 
 	std::ofstream outFileStream;
-	
+
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
 	data_export::legacy::write_lyap_config(
@@ -2818,7 +2511,6 @@ __host__ void LS2D(
 		to_dbl(initialConditions, amountOfInitialConditions).data(), amountOfInitialConditions,
 		tMax, NT, transientTime, h, eps, indicesOfMutVars, to_dbl(ranges, 4).data());
 	outFileStream.close();
-
 
 #ifdef DEBUG
 	printf("LS2D\n");
@@ -2855,7 +2547,7 @@ __host__ void LS2D(
 
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, LSKernelCUDA, 24576, 128);
 		//gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
-		
+
 		blockSizeMax = 32000 / ((amountOfInitialConditions * amountOfInitialConditions * amountOfInitialConditions + amountOfValues) * sizeof(numb));
 		//blockSizeMin = (3 + amountOfValues) * sizeof(numb);
 		blockSize = blockSizeMax;// (blockSizeMax + blockSizeMin) / 2;
@@ -2941,7 +2633,6 @@ void CUDA_dbscan(numb* data, numb* intervals, int* labels, int* helpfulArray, co
 	int blockSize1;			// Переменная для хранения размера блока
 	int minGridSize1;		// Переменная для хранения минимального размера сетки
 	int gridSize1;			// Переменная для хранения сетки
-
 
 	cudaOccupancyMaxPotentialBlockSize(&minGridSize1, &blockSize1, CUDA_dbscan_kernel, 0, blockSize_setup);
 
@@ -3049,7 +2740,6 @@ void CUDA_dbscan(numb* data, numb* intervals, int* labels, int* helpfulArray, co
 		cudaMemcpy(amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost);
 		cudaMemcpy(neighbors, d_neighbors, sizeof(int) * (*amountOfNeighbors), cudaMemcpyDeviceToHost);
 
-
 		for (size_t i = 0; i < *amountOfNeighbors; ++i)
 		{
 
@@ -3075,7 +2765,7 @@ void CUDA_dbscan(numb* data, numb* intervals, int* labels, int* helpfulArray, co
 		}
 
 		//delete[] clearIdx;
-		
+
 	}
 
 	delete[] clearIdx;
@@ -3088,28 +2778,28 @@ void CUDA_dbscan(numb* data, numb* intervals, int* labels, int* helpfulArray, co
 }
 
 __host__ void basinsOfAttraction(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
 	std::string		OUT_FILE_PATH,
 	const int blockSize_fixed)								// Эпсилон для алгоритма DBSCAN 
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -3119,7 +2809,7 @@ __host__ void basinsOfAttraction(
 
 	freeMemory *= 0.9;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 	printf("freeMemory: %zu\n", freeMemory);
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * (amountOfPointsInBlock * (2)));
 
@@ -3128,9 +2818,7 @@ __host__ void basinsOfAttraction(
 	//nPtsLimiter = nPtsLimiter - (nPtsLimiter % blockSize_fixed);
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -3146,9 +2834,7 @@ __host__ void basinsOfAttraction(
 	numb* d_avgPeaks;
 	numb* d_avgIntervals;
 
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 4 * sizeof(numb)));
@@ -3161,28 +2847,20 @@ __host__ void basinsOfAttraction(
 	gpuErrorCheck(cudaMalloc((void**)& d_dbscanResult, nPts * nPts * sizeof(int)));
 	gpuErrorCheck(cudaMalloc((void**)& d_helpfulArray, nPts * nPts * sizeof(int)));
 
-
 	gpuErrorCheck(cudaMalloc((void**)& d_avgPeaks, nPts * nPts * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_avgIntervals, nPts * nPts * sizeof(numb)));
-	// -----------------------------
 
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 4 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts * nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 
@@ -3195,8 +2873,6 @@ __host__ void basinsOfAttraction(
 		writableVar, indicesOfMutVars[0], indicesOfMutVars[1], to_dbl(ranges, 4).data());
 	outFileStream.close();
 
-	// ------------------------------------------------------
-
 #ifdef DEBUG
 	//printf("Basins of attraction\n");
 	//printf("nPtsLimiter : %zu\n", nPtsLimiter);
@@ -3205,10 +2881,10 @@ __host__ void basinsOfAttraction(
 
 	int stringCounter = 0; // Вспомогательная переменная для корректной записи матрицы в файл
 	outFileStream.open(OUT_FILE_PATH);
-	// --- Точность чисел с плавающей запятой ---
+	// Точность чисел с плавающей запятой
 	outFileStream << std::setprecision(set_precision);
 
-	// --- Выводим в самое начало файла исследуемые диапазон ---
+	// Выводим в самое начало файла исследуемые диапазон
 	if (outFileStream.is_open())
 	{
 		outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -3244,8 +2920,6 @@ __host__ void basinsOfAttraction(
 
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-	
 	int blockSize;			// Переменная для хранения размера блока
 	int minGridSize;		// Переменная для хранения минимального размера сетки
 	int gridSize;			// Переменная для хранения сетки
@@ -3257,18 +2931,18 @@ __host__ void basinsOfAttraction(
 	printf(", blockSize: %zu\n", blockSize_fixed);
 	size_t startTime = std::clock();
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts * nPts) - (nPtsLimiter * i);
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		blockSize = ceil((1024.0f * 48.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		//cudaOccupancyMaxPotentialBlockSize(&gridSize, &blockSize, calculateDiscreteModelCUDA, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize, 0);
 		//printf("Recommended block size: %d\n", blockSize);
@@ -3286,67 +2960,59 @@ __host__ void basinsOfAttraction(
 		blockSize = blockSize_fixed;
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 
 			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
 			(	nPts,						// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-				amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+				amountOfPointsForSkip,
 				2,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
-				h,							// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,			// Индексы изменяемых параметров
 				d_initialConditions,		// Начальные условия
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,						// Массив, где будет хранится траектория систем
 				d_helpfulArray + (i * originalNPtsLimiter), // Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 				0);			
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, avgPeakFinderCUDA, 0, blockSize_setup);
 		blockSize = blockSize > 256 ? 256 : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
 		blockSize = blockSize_fixed;
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		avgPeakFinderCUDA << <gridSize, blockSize >> >
 				(d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_avgPeaks + (i * originalNPtsLimiter),
 				d_avgIntervals + (i * originalNPtsLimiter),
 				d_data,						// Выходной массив, куда будут записаны значения пиков
 				d_intervals,				// Межпиковый интервал
 				d_helpfulArray + (i * originalNPtsLimiter),
-				h * preScaller);			// Шаг интегрирования
+				h * preScaller);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 #ifdef DEBUG
@@ -3358,9 +3024,6 @@ __host__ void basinsOfAttraction(
 	int* h_dbscanResult = new int[nPts * nPts];
 	for (int i = 0; i < nPts * nPts; i++)
 		h_dbscanResult[i] = 0;
-
-	
-	
 
 	gpuErrorCheck(cudaMemcpy(d_dbscanResult, h_dbscanResult, nPts * nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
@@ -3376,10 +3039,8 @@ __host__ void basinsOfAttraction(
 	gpuErrorCheck(cudaMemcpy(h_avgPeaks,	 d_avgPeaks,	 nPts * nPts * sizeof(numb),  cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_avgIntervals, d_avgIntervals, nPts * nPts * sizeof(numb),  cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_helpfulArray, d_helpfulArray, nPts * nPts * sizeof(int),		cudaMemcpyKind::cudaMemcpyDeviceToHost));
-	
-	
 
-	// --- Сохранение найденных бассейнов притяжений в файл ---
+	// Сохранение найденных бассейнов притяжений в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH, std::ios::app);
@@ -3406,7 +3067,7 @@ __host__ void basinsOfAttraction(
 		}
 	outFileStream.close();
 
-	// --- Сохранение средних значений пиков в файл ---
+	// Сохранение средних значений пиков в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(1) + ".csv", std::ios::app);
@@ -3428,7 +3089,7 @@ __host__ void basinsOfAttraction(
 		}
 	outFileStream.close();
 
-	// --- Сохранение средних значений межпиков в файл ---
+	// Сохранение средних значений межпиков в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(2) + ".csv", std::ios::app);
@@ -3451,7 +3112,7 @@ __host__ void basinsOfAttraction(
 		}
 	outFileStream.close();
 
-	// --- Сохранение характеристик точек сетки начальных условий в файл ---
+	// Сохранение характеристик точек сетки начальных условий в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(3) + ".csv", std::ios::app);
@@ -3474,10 +3135,7 @@ __host__ void basinsOfAttraction(
 		}
 	outFileStream.close();
 
-
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
@@ -3496,31 +3154,30 @@ __host__ void basinsOfAttraction(
 	delete[] h_avgIntervals;
 	delete[] h_helpfulArray;
 
-	// ---------------------------
 }
 
 __host__ void basinsOfAttraction_logAxes(
-	const numb	tMax,								// Время моделирования системы
-	const int		nPts,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
-	std::string		OUT_FILE_PATH)								// Эпсилон для алгоритма DBSCAN 
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -3530,7 +3187,7 @@ __host__ void basinsOfAttraction_logAxes(
 
 	freeMemory *= 0.95;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * amountOfInitialConditions * 0.5);
 
@@ -3538,18 +3195,12 @@ __host__ void basinsOfAttraction_logAxes(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	//int* h_dbscanResult = new int[nPtsLimiter * sizeof(numb)];
 	//numb* h_helpfulArray = new numb[nPts * nPts];			// Указатель на массив в GPU на вспомогательный массив
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -3565,11 +3216,7 @@ __host__ void basinsOfAttraction_logAxes(
 	numb* d_avgPeaks;
 	numb* d_avgIntervals;
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)&d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_ranges, 4 * sizeof(numb)));
@@ -3582,28 +3229,20 @@ __host__ void basinsOfAttraction_logAxes(
 	gpuErrorCheck(cudaMalloc((void**)&d_dbscanResult, nPts * nPts * sizeof(int)));
 	gpuErrorCheck(cudaMalloc((void**)&d_helpfulArray, nPts * nPts * sizeof(int)));
 
-
 	gpuErrorCheck(cudaMalloc((void**)&d_avgPeaks, nPts * nPts * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_avgIntervals, nPts * nPts * sizeof(numb)));
-	// -----------------------------
 
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 4 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts * nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 
@@ -3618,8 +3257,6 @@ __host__ void basinsOfAttraction_logAxes(
 
 	outFileStream.open(OUT_FILE_PATH);
 
-	// ------------------------------------------------------
-
 #ifdef DEBUG
 	printf("Basins of attraction\n");
 	printf("nPtsLimiter : %zu\n", nPtsLimiter);
@@ -3628,10 +3265,10 @@ __host__ void basinsOfAttraction_logAxes(
 
 	int stringCounter = 0; // Вспомогательная переменная для корректной записи матрицы в файл
 
-	// --- Точность чисел с плавающей запятой ---
+	// Точность чисел с плавающей запятой
 	outFileStream << std::setprecision(set_precision);
 
-	// --- Выводим в самое начало файла исследуемые диапазон ---
+	// Выводим в самое начало файла исследуемые диапазон
 	if (outFileStream.is_open())
 	{
 		outFileStream << ranges[0] << " " << ranges[1] << "\n";
@@ -3667,24 +3304,22 @@ __host__ void basinsOfAttraction_logAxes(
 
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
 	int blockSize;			// Переменная для хранения размера блока
 	int minGridSize;		// Переменная для хранения минимального размера сетки
 	int gridSize;			// Переменная для хранения сетки
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts * nPts) - (nPtsLimiter * i);
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		blockSize = ceil((1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		if (blockSize < 1)
 		{
@@ -3697,67 +3332,59 @@ __host__ void basinsOfAttraction_logAxes(
 		blockSize = blockSize > 256 ? 256 : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 
 		calculateDiscreteModelICCUDA_logAxes << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
 			(	nPts,										// Общее разрешение диаграммы - nPts
-				nPtsLimiter,								// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfPointsInBlock,						// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,					// Количество уже посчитанных точек систем
-				amountOfPointsForSkip,						// Количество точек для пропуска ( transientTime )
+				amountOfPointsForSkip,
 				2,											// Размерность ( диаграмма одномерная )
 				d_ranges,									// Массив с диапазонами
-				h,											// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,							// Индексы изменяемых параметров
 				d_initialConditions,						// Начальные условия
-				amountOfInitialConditions,					// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,									// Параметры
-				amountOfValues,								// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,						// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,									// Множитель, который уменьшает время и объем расчетов
-				writableVar,								// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,									// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,										// Массив, где будет хранится траектория систем
 				d_helpfulArray + (i * originalNPtsLimiter)	// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 			);												
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, avgPeakFinderCUDA_logMaximas, 0, blockSize_setup);
 
 		blockSize = blockSize > 256 ? 256 : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		avgPeakFinderCUDA_logMaximas << <gridSize, blockSize >> >
 			(d_data,						// Данные с траекториями систем
 				amountOfPointsInBlock,		// Количество точек в одной траектории
-				nPtsLimiter,				// Количетсво систем, высчитываемой в текущей итерации
+				nPtsLimiter,
 				d_avgPeaks + (i * originalNPtsLimiter),
 				d_avgIntervals + (i * originalNPtsLimiter),
 				d_data,						// Выходной массив, куда будут записаны значения пиков
 				d_intervals,				// Межпиковый интервал
 				d_helpfulArray + (i * originalNPtsLimiter),
-				h * preScaller);			// Шаг интегрирования
+				h * preScaller);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 #ifdef DEBUG
@@ -3771,23 +3398,18 @@ __host__ void basinsOfAttraction_logAxes(
 
 	gpuErrorCheck(cudaMemcpy(d_dbscanResult, h_dbscanResult, nPts * nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-
 	CUDA_dbscan(d_avgPeaks, d_avgIntervals, d_dbscanResult, d_helpfulArray, nPts * nPts, eps);
-
 
 	numb* h_avgPeaks = new numb[nPts * nPts];
 	numb* h_avgIntervals = new numb[nPts * nPts];
 	int* h_helpfulArray = new int[nPts * nPts];
-
-
 
 	gpuErrorCheck(cudaMemcpy(h_dbscanResult, d_dbscanResult, nPts * nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_avgPeaks, d_avgPeaks, nPts * nPts * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_avgIntervals, d_avgIntervals, nPts * nPts * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 	gpuErrorCheck(cudaMemcpy(h_helpfulArray, d_helpfulArray, nPts * nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-
-	// --- Сохранение найденных бассейнов притяжений в файл ---
+	// Сохранение найденных бассейнов притяжений в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH, std::ios::app);
@@ -3814,7 +3436,7 @@ __host__ void basinsOfAttraction_logAxes(
 		}
 	outFileStream.close();
 
-	// --- Сохранение средних значений пиков в файл ---
+	// Сохранение средних значений пиков в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(1) + ".csv", std::ios::app);
@@ -3836,7 +3458,7 @@ __host__ void basinsOfAttraction_logAxes(
 		}
 	outFileStream.close();
 
-	// --- Сохранение средних значений межпиков в файл ---
+	// Сохранение средних значений межпиков в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(2) + ".csv", std::ios::app);
@@ -3859,7 +3481,7 @@ __host__ void basinsOfAttraction_logAxes(
 		}
 	outFileStream.close();
 
-	// --- Сохранение характеристик точек сетки начальных условий в файл ---
+	// Сохранение характеристик точек сетки начальных условий в файл
 
 	stringCounter = 0;
 	outFileStream.open(OUT_FILE_PATH + "_" + std::to_string(3) + ".csv", std::ios::app);
@@ -3882,10 +3504,7 @@ __host__ void basinsOfAttraction_logAxes(
 		}
 	outFileStream.close();
 
-
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
@@ -3904,31 +3523,29 @@ __host__ void basinsOfAttraction_logAxes(
 	delete[] h_avgIntervals;
 	delete[] h_helpfulArray;
 
-	// ---------------------------
 }
 
-
 __host__ void TimeDomainCalculation(
-	const numb	tMax,							// Время моделирования системы
-	const int		nPts,							// Разрешение диаграммы
-	const numb	h,								// Шаг интегрирования
-	const int		amountOfInitialConditions,		// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,				// Массив с начальными условиями
-	const numb* ranges,							// Диаппазон изменения переменной
-	const int* indicesOfMutVars,				// Индекс изменяемой переменной в массиве values
-	const int		writableVar,					// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,						// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,					// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,							// Параметры
-	const int		amountOfValues,					// Количество параметров
+	const numb	tMax,
+	const int		nPts,
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
 	const int		preScaller,
-	std::string		OUT_FILE_PATH)						// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -3938,7 +3555,7 @@ __host__ void TimeDomainCalculation(
 
 	freeMemory *= 0.5;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 2);
 
@@ -3946,18 +3563,12 @@ __host__ void TimeDomainCalculation(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ---------------------------------------------------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата (пики и их количество для каждой системы) ---
-	// ---------------------------------------------------------------------------------------------------
+	// Выделяем память для хранения конечного результата (пики и их количество для каждой системы)
 
 	//numb* h_outPeaks = new numb[nPtsLimiter * amountOfPointsInBlock * sizeof(numb)];
 	//int* h_amountOfPeaks = new int[nPtsLimiter * sizeof(int)];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -3968,11 +3579,7 @@ __host__ void TimeDomainCalculation(
 	//numb* d_outPeaks;				// Указатель на массив в GPU с результирующими пиками биф. диаграммы
 	//int* d_amountOfPeaks;		// Указатель на массив в GPU с кол-вом пиков в каждой системе.
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)& d_data, nPts * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)& d_ranges, 2 * sizeof(numb)));
@@ -3983,36 +3590,28 @@ __host__ void TimeDomainCalculation(
 	//gpuErrorCheck(cudaMalloc((void**)& d_outPeaks, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	//gpuErrorCheck(cudaMalloc((void**)& d_amountOfPeaks, nPtsLimiter * sizeof(int)));
 
-	// -----------------------------
-
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 1 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_initialConditions, initialConditions, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
-	// ---------------------------------------------------------
-
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)nPts / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	//std::ofstream outFileStream;
 	//outFileStream.open(OUT_FILE_PATH);
 
 	//static curandState *states = NULL;
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = nPts - (nPtsLimiter * i);
 
@@ -4020,10 +3619,10 @@ __host__ void TimeDomainCalculation(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		blockSize = ceil((1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		if (blockSize < 1)
 		{
@@ -4037,52 +3636,42 @@ __host__ void TimeDomainCalculation(
 
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 
 		calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
 		//calculateDiscreteModelCUDA_rand << <gridSize, blockSize >> >
 			(	
-				nPts,						// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPts,
+				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-				amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+				amountOfPointsForSkip,
 				1,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
-				h,							// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,			// Индексы изменяемых параметров
 				d_initialConditions,		// Начальные условия
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				writableVar,
+				maxValue,
 				d_data,						// Массив, где будет хранится траектория систем
 				nullptr,
 				par_or_var);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		//gpuErrorCheck(cudaMemcpy(h_outPeaks, d_outPeaks, nPtsLimiter * amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 		//gpuErrorCheck(cudaMemcpy(h_amountOfPeaks, d_amountOfPeaks, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyDeviceToHost));
-
-		// -------------------------------------------------------------------------------------
-
-
 
 #ifdef DEBUG
 		printf("Progress: %f\%\n", (100.0f / (numb)amountOfIteration) * (i + 1));
@@ -4093,7 +3682,7 @@ __host__ void TimeDomainCalculation(
 
 	gpuErrorCheck(cudaMemcpy(h_data, d_data, nPts* amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-	// --- Точность чисел с плавающей запятой ---
+	// Точность чисел с плавающей запятой
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH);
@@ -4110,27 +3699,15 @@ __host__ void TimeDomainCalculation(
 				else
 					outFileStream << 999;
 
-				//if (stringCounter != 0)
-				//	outFileStream << ", ";
-				//if (stringCounter == amountOfPointsInBlock-1)
-				//{
-				//	outFileStream << "\n";
-				//	stringCounter = 0;
-				//}
-				//else
 				outFileStream << ", ";
-				//outFileStream << h_avgIntervals[i];
 
-	//			++stringCounter;
 			}
 		} 
 		outFileStream << "\n";
 	}
 	outFileStream.close();
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
 	gpuErrorCheck(cudaFree(d_indicesOfMutVars));
@@ -4145,35 +3722,33 @@ __host__ void TimeDomainCalculation(
 	//delete[] h_outPeaks;
 	//delete[] h_amountOfPeaks;
 
-	// ---------------------------
 }
 
 __host__ void FastSynchro(
-	const numb		tMax,								// Время моделирования системы
-	const numb		transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb		NTime,								// Длина отрезка по которому будет проводиться синхронизация
-	const numb*		values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const numb		h,									// Шаг интегрирования
-	const numb*		kForward,							// Массив коэффициентов синхронизации вперед
-	const numb*		kBackward,							// Массив коэффициентов синхронизации назад
+	const numb		tMax,
+	const numb		transientTime,
+	const numb		NTime,
+	const numb*		values,
+	const int		amountOfValues,
+	const numb		h,
+	const numb*		kForward,
+	const numb*		kBackward,
 	const numb*		initialConditionsMaster,			// Массив с начальными условиями мастера
 	const numb*		initialConditionsSlave,				// Массив с начальными условиями слейва
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb		maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся
-	const int		iterOfSynchr,						// Число итераций синхронизации
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
-	std::string		OUT_FILE_PATH)						// Эпсилон для алгоритма DBSCAN 
+	const int		amountOfInitialConditions,
+	const numb		maxValue,
+	const int		iterOfSynchr,
+	const int		preScaller,
+	std::string		OUT_FILE_PATH)
 {
 
-
-	// --- Количество точек, которое используется в окне синхронизации ---
+	// Количество точек, которое используется в окне синхронизации
 	int amountOfNTPoints = NTime / h;
 
-	// --- Общее количесвто точек в исходной траектории ---
+	// Общее количесвто точек в исходной траектории
 	int amountOfCTPoints = tMax / h;
 
-	// --- Количество точек переходного процесса ---
+	// Количество точек переходного процесса
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -4184,14 +3759,13 @@ __host__ void FastSynchro(
 
 	freeMemory *= 1.0;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 // TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) *  (2.0 * nPts));
 
 	nPtsLimiter = nPtsLimiter > nPts ? nPts : nPtsLimiter; // Если мы можем расчитать больше систем, чем требуется, то ставим ограничитель на максимум (nPts)
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
-
 
 	//numb* timeDomain = new numb[(amountOfCTPoints + amountOfNTPoints) * sizeof(numb) * amountOfInitialConditions];
 	//numb* arrayZeros = new numb[sizeof(numb) * amountOfInitialConditions];
@@ -4203,20 +3777,20 @@ __host__ void FastSynchro(
 	numb* Xm = new numb[amountOfInitialConditions];
 	numb* Xs = new numb[amountOfInitialConditions];
 
-	// --- Инициализация начальных условий ---
+	// Инициализация начальных условий
 	for (int i = 0; i < amountOfInitialConditions; i++) {
 		arrayZeros[i] = 0;
 		Xm[i] = initialConditionsMaster[i];
 		Xs[i] = initialConditionsSlave[i];
 	}
 
-	// --- Расчет переходного процесса ---
+	// Расчет переходного процесса
 	for (size_t i = 0; i < amountOfPointsForSkip; i++) {
 		calculateDiscreteModelforFastSynchro(Xm, Xm, arrayZeros, values, h, 1);
 		//calculateDiscreteModelforFastSynchro(Xm, arrayZeros, arrayZeros, values, h, 1);
 	}
 
-	// --- Расчет исходной траектории ---
+	// Расчет исходной траектории
 	for (size_t i = 0; i < amountOfCTPoints + amountOfNTPoints; i++) {
 
 		for (int j = 0; j < amountOfInitialConditions; j++)
@@ -4232,7 +3806,7 @@ __host__ void FastSynchro(
 	// --- Выделяем память для хранения конечного результата 
 	//numb* h_output = new numb[nPts * sizeof(numb)];
 	numb* h_output = new numb[nPts];
-	// --- Указатели на области памяти в GPU ---
+	// Указатели на области памяти в GPU
 
 	numb* d_timeDomain;
 	numb* d_output;
@@ -4241,7 +3815,7 @@ __host__ void FastSynchro(
 	numb* d_kForward;
 	numb* d_kBackward;
 
-	// --- Выделяем память в GPU ---
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)&d_timeDomain, amountOfInitialConditions * (amountOfCTPoints + amountOfNTPoints) * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_output, nPts * sizeof(numb)));
@@ -4250,19 +3824,17 @@ __host__ void FastSynchro(
 	gpuErrorCheck(cudaMalloc((void**)&d_kBackward, amountOfInitialConditions * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_values, amountOfValues * sizeof(numb)));
 
-	// --- Копируем начальные входные параметры в память GPU ---
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_timeDomain, timeDomain, amountOfInitialConditions * (amountOfCTPoints + amountOfNTPoints) * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_Xs, Xs, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_kForward, kForward, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_kBackward, kBackward, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)nPts / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 
@@ -4280,11 +3852,11 @@ __host__ void FastSynchro(
 
 	outFileStream.open(OUT_FILE_PATH);
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = nPts - (nPtsLimiter * i);
 
@@ -4292,10 +3864,10 @@ __host__ void FastSynchro(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 
 		//blockSize = ceil((1*1024.0f * 4.0f) / (amountOfNTPoints * sizeof(numb)));
 		//blockSize = ceil((1 * 1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
@@ -4307,39 +3879,35 @@ __host__ void FastSynchro(
 		blockSize = blockSize_setup;
 		//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, calculateDiscreteModelforFastSynchroCUDA, 0, blockSize_setup);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
-
+		// CUDA функция для расчета траектории систем
 
 			//calculateDiscreteModelforFastSynchroCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
 			//calculateDiscreteModelforFastSynchroCUDA << <4*1024, 16>> > //, 1*(amountOfInitialConditions + amountOfValues + amountOfNTPoints) * sizeof(numb)* 1 >> >
 
 		calculateDiscreteModelforFastSynchroCUDA << < gridSize, blockSize >> >
 			(
-				nPts,						//const int		nPts,
-				nPtsLimiter,				//const int		nPtsLimiter,
+				nPts,
+				nPtsLimiter,
 				amountOfNTPoints,		//const int		sizeOfBlock,
-				h, 							//const numb	h,
+				h,
 				d_Xs,						//numb* initialConditions,
-				amountOfInitialConditions,	//const int		amountOfInitialConditions,
+				amountOfInitialConditions,
 				d_values,						//const numb* values,
 				d_kForward,					//const numb* k_forward,
 				d_kBackward,					//const numb* k_backward,
-				iterOfSynchr,							//const int		iterOfSynchr,
-				amountOfValues,								//const int		
+				iterOfSynchr,
+				amountOfValues,
 				amountOfNTPoints,							//const int		amountOfIterations,
-				maxValue,									//const numb	maxValue,
+				maxValue,
 				d_timeDomain + (i * originalNPtsLimiter) * amountOfInitialConditions * preScaller,								//numb* timedomain,
 				d_output + (i * originalNPtsLimiter),			//numb* output
 				preScaller);
 
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
-
 
 #ifdef DEBUG
 		printf(" --- Progress: %f\%\n", (100.0f / (numb)amountOfIteration) * (i + 1));
@@ -4388,28 +3956,28 @@ __host__ void FastSynchro(
 }
 
 __host__ void FastSynchro_2(
-	const numb		NTime,								// Длина отрезка по которому будет проводиться синхронизация
-	const int		nPts,								// Разрешение диаграммы
-	const numb*		values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const numb		h,									// Шаг интегрирования
-	const numb*		ranges,								// Диапазоны изменения параметров
-	const int*		indicesOfMutVars,					// Индексы изменяемых параметров
-	const numb*		kForward,							// Массив коэффициентов синхронизации вперед
-	const numb*		kBackward,							// Массив коэффициентов синхронизации назад
-	const numb*		initialConditions,					// Массив с начальными условиями мастера
+	const numb		NTime,
+	const int		nPts,
+	const numb*		values,
+	const int		amountOfValues,
+	const numb		h,
+	const numb*		ranges,
+	const int*		indicesOfMutVars,
+	const numb*		kForward,
+	const numb*		kBackward,
+	const numb*		initialConditions,
 	const numb*		initConditionsSlave,
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb		maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся
-	const int		iterOfSynchr,						// Число итераций синхронизации
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const int		amountOfInitialConditions,
+	const numb		maxValue,
+	const int		iterOfSynchr,
+	const int		preScaller,
 	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = NTime / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = 0;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -4419,7 +3987,7 @@ __host__ void FastSynchro_2(
 
 	freeMemory *= 0.5;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfInitialConditions * amountOfPointsInBlock * amountOfInitialConditions);
 
@@ -4427,17 +3995,11 @@ __host__ void FastSynchro_2(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-
-
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	numb* h_dbscanResult = new numb[nPtsLimiter * sizeof(numb)];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -4454,9 +4016,7 @@ __host__ void FastSynchro_2(
 	numb* d_kForward;
 	numb* d_kBackward;
 
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	gpuErrorCheck(cudaMalloc((void**)&d_data, amountOfInitialConditions * nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_ranges, 4 * sizeof(numb)));
@@ -4472,9 +4032,7 @@ __host__ void FastSynchro_2(
 	gpuErrorCheck(cudaMalloc((void**)&d_dbscanResult, nPtsLimiter * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_helpfulArray, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 4 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_indicesOfMutVars, indicesOfMutVars, 2 * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
@@ -4483,19 +4041,14 @@ __host__ void FastSynchro_2(
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_kForward, kForward, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_kBackward, kBackward, amountOfInitialConditions * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
-	// ---------------------------------------------------------
 
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts * nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
 	outFileStream.open(OUT_FILE_PATH);
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 2DIC\n");
@@ -4505,18 +4058,18 @@ __host__ void FastSynchro_2(
 
 	int stringCounter = 0; // Вспомогательная переменная для корректной записи матрицы в файл
 
-	// --- Выводим в самое начало файла исследуемые диапазон ---
+	// Выводим в самое начало файла исследуемые диапазон
 	if (outFileStream.is_open())
 	{
 		outFileStream << ranges[0] << " " << ranges[1] << "\n";
 		outFileStream << ranges[2] << " " << ranges[3] << "\n";
 	}
 
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts * nPts) - (nPtsLimiter * i);
 
@@ -4524,10 +4077,10 @@ __host__ void FastSynchro_2(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 		blockSize = ceil((1024.0f * 32.0f) / ((amountOfInitialConditions + amountOfValues) * sizeof(numb)));
 		if (blockSize < 1)
 		{
@@ -4541,27 +4094,25 @@ __host__ void FastSynchro_2(
 
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-		// --------------------------------------------------
-		// --- CUDA функция для расчета траектории систем ---
-		// --------------------------------------------------
+		// CUDA функция для расчета траектории систем
 
 		calculateDiscreteModelICCforFastSynchro << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
 			(nPts,							// Общее разрешение диаграммы - nPts
-				nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+				nPtsLimiter,
 				amountOfInitialConditions * amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 				i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
 				2,							// Размерность ( диаграмма одномерная )
 				d_ranges,					// Массив с диапазонами
-				h,							// Шаг интегрирования
+				h,
 				d_indicesOfMutVars,			// Индексы изменяемых параметров
 				d_initialConditions,		// Начальные условия
 				d_initialConditionsSlave,
-				amountOfInitialConditions,	// Количество начальных условий
+				amountOfInitialConditions,
 				d_values,					// Параметры
-				amountOfValues,				// Количество параметров
+				amountOfValues,
 				amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-				preScaller,					// Множитель, который уменьшает время и объем расчетов
-				maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+				preScaller,
+				maxValue,
 				iterOfSynchr,
 				d_kForward,
 				d_kBackward,
@@ -4569,50 +4120,20 @@ __host__ void FastSynchro_2(
 				d_amountOfPeaks,
 				d_dbscanResult);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-
-		//const int		nPts,
-		//	const int		nPtsLimiter,
-		//	const int		sizeOfBlock,
-		//	const int		amountOfCalculatedPoints,
-		//	const int		dimension,
-		//	numb* ranges,
-		//	const numb	h,
-		//	int* indicesOfMutVars,
-		//	numb* initialConditions,
-		//	const int		amountOfInitialConditions,
-		//	const numb* values,
-		//	const int		amountOfValues,
-		//	const int		amountOfIterations,
-		//	const int		preScaller,
-		//	const numb	maxValue,
-		//	const int		iterOfSynchr,
-		//	const numb* kForward,
-		//	const numb* kBackward,
-		//	numb* data,
-		//	int* maxValueCheckerArray,
-		//	numb* FastSynchroError)
-
-		// --------------------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-
-		// -------------------------------------------------------------------------------------
-		// --- Копирование значений пиков и их количества из памяти GPU в оперативную память ---
-		// -------------------------------------------------------------------------------------
+		// Копирование значений пиков и их количества из памяти GPU в оперативную память
 
 		gpuErrorCheck(cudaMemcpy(h_dbscanResult, d_dbscanResult, nPtsLimiter * sizeof(numb), cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-		// -------------------------------------------------------------------------------------
-
-		// --- Точность чисел с плавающей запятой ---
+		// Точность чисел с плавающей запятой
 		outFileStream << std::setprecision(set_precision);
 
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		for (size_t i = 0; i < nPtsLimiter; ++i)
 			if (outFileStream.is_open())
 			{
@@ -4639,9 +4160,7 @@ __host__ void FastSynchro_2(
 #endif
 	}
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
@@ -4656,33 +4175,32 @@ __host__ void FastSynchro_2(
 
 	delete[] h_dbscanResult;
 
-
 }
 
 __host__ void bifurcation_DFT_1D(
-	const numb	tMax,								// Время моделирования системы
-	const int	nPts,								// Разрешение диаграммы
+	const numb	tMax,
+	const int	nPts,
 	const int	nFreq,								// Разрешение диаграммы
-	const numb	h,									// Шаг интегрирования
-	const int		amountOfInitialConditions,			// Количество начальных условий ( уравнений в системе )
-	const numb* initialConditions,					// Массив с начальными условиями
-	const numb* ranges,								// Диапазоны изменения параметров
+	const numb	h,
+	const int		amountOfInitialConditions,
+	const numb* initialConditions,
+	const numb* ranges,
 	const numb* rangesFreq,								// Диапазоны изменения параметров
-	const int* indicesOfMutVars,					// Индексы изменяемых параметров
-	const int		writableVar,						// Индекс уравнения, по которому будем строить диаграмму
-	const numb	maxValue,							// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
-	const numb	transientTime,						// Время, которое будет промоделировано перед расчетом диаграммы
-	const numb* values,								// Параметры
-	const int		amountOfValues,						// Количество параметров
-	const int		preScaller,							// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
+	const int* indicesOfMutVars,
+	const int		writableVar,
+	const numb	maxValue,
+	const numb	transientTime,
+	const numb* values,
+	const int		amountOfValues,
+	const int		preScaller,
 	const numb	eps,
-	std::string		OUT_FILE_PATH)								// Эпсилон для алгоритма DBSCAN 
+	std::string		OUT_FILE_PATH)
 {
-	// --- Количество точек, которое будет смоделировано одной системой с одним набором параметров ---
+	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
-	// --- Количество точек, которое будет пропущено при моделировании системы ---
-	// --- (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах) ---
+	// Количество точек, которое будет пропущено при моделировании системы
+	// (amountOfPointsForSkip первых смоделированных точек не будет учитываться в расчетах)
 	int amountOfPointsForSkip = transientTime / h;
 
 	size_t freeMemory;											// Переменная для хранения свободного объема памяти в GPU
@@ -4692,7 +4210,7 @@ __host__ void bifurcation_DFT_1D(
 
 	freeMemory *= 0.9;											// Ограничитель памяти (будем занимать лишь часть доступной GPU памяти)		
 
-	// --- Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени ---
+	// Расчет количества систем, которые мы сможем промоделировать параллельно в один момент времени
 	// TODO Сделать расчет требуемой памяти
 	size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 1.0 + sizeof(numb) * nPts * nFreq * 0.0);
 	//size_t nPtsLimiter = freeMemory / (sizeof(numb) * amountOfPointsInBlock * 3.0);
@@ -4700,9 +4218,7 @@ __host__ void bifurcation_DFT_1D(
 
 	size_t originalNPtsLimiter = nPtsLimiter;				// Запоминаем исходное значение nPts для дальнейших расчетов ( getValueByIdx )
 
-	// ----------------------------------------------------------
-	// --- Выделяем память для хранения конечного результата  ---
-	// ----------------------------------------------------------
+	// Выделяем память для хранения конечного результата
 
 	int* h_dbscanResult = new int[nPtsLimiter];
 	numb* h_AkCOS = new numb[nPtsLimiter * nFreq];
@@ -4719,9 +4235,7 @@ __host__ void bifurcation_DFT_1D(
 	for (int i = 0; i < amountOfValues; i++)
 		h_localValues[i] = values[i];
 
-	// -----------------------------------------
-	// --- Указатели на области памяти в GPU ---
-	// -----------------------------------------
+	// Указатели на области памяти в GPU
 
 	numb* d_data;					// Указатель на массив в памяти GPU для хранения траектории системы
 	numb* d_ranges;				// Указатель на массив с диапазоном изменения переменной
@@ -4737,11 +4251,7 @@ __host__ void bifurcation_DFT_1D(
 	numb* d_helpfulArray;			// Указатель на массив в GPU на вспомогательный массив
 	numb* d_window;
 
-	// -----------------------------------------
-
-	// -----------------------------
-	// --- Выделяем память в GPU ---
-	// -----------------------------
+	// Выделяем память в GPU
 
 	const numb gamma = (numb)2.0 * pi / (numb)(amountOfPointsInBlock - 1);
 	for (int n = 0; n < amountOfPointsInBlock; ++n) {
@@ -4749,7 +4259,6 @@ __host__ void bifurcation_DFT_1D(
 		h_window[n] = (numb)0.5 * ((numb)1.0 - cos(gamma * n)); // Hanning
 		//h_window[n] = (numb)1.0;
 	}
-
 
 	gpuErrorCheck(cudaMalloc((void**)&d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_ranges, 2 * sizeof(numb)));
@@ -4765,11 +4274,8 @@ __host__ void bifurcation_DFT_1D(
 	gpuErrorCheck(cudaMalloc((void**)&d_dbscanResult, nPtsLimiter * sizeof(int)));
 	gpuErrorCheck(cudaMalloc((void**)&d_helpfulArray, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
 	gpuErrorCheck(cudaMalloc((void**)&d_window, amountOfPointsInBlock * sizeof(numb)));
-	// -----------------------------
 
-	// ---------------------------------------------------------
-	// --- Копируем начальные входные параметры в память GPU ---
-	// ---------------------------------------------------------
+	// Копируем начальные входные параметры в память GPU
 	gpuErrorCheck(cudaMemcpy(d_window, h_window, amountOfPointsInBlock * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_ranges, ranges, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuErrorCheck(cudaMemcpy(d_rangesFreq, rangesFreq, 2 * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
@@ -4778,18 +4284,13 @@ __host__ void bifurcation_DFT_1D(
 	gpuErrorCheck(cudaMemcpy(d_values, values, amountOfValues * sizeof(numb), cudaMemcpyKind::cudaMemcpyHostToDevice));
 	gpuGlobalErrorCheck();
 	gpuErrorCheck(cudaDeviceSynchronize());
-	// ---------------------------------------------------------
 
-	// --- Расчет количества итераций для генерации бифуркационной диаграммы ---
+	// Расчет количества итераций для генерации бифуркационной диаграммы
 	size_t amountOfIteration = (size_t)ceil((numb)(nPts) / (numb)nPtsLimiter);
 
-	// ------------------------------------------------------
-	// --- Открытие выходного текстового файла для записи ---
-	// ------------------------------------------------------
+	// Открытие выходного текстового файла для записи
 
 	std::ofstream outFileStream;
-
-	// ------------------------------------------------------
 
 #ifdef DEBUG
 	printf("Bifurcation 2D\n");
@@ -4799,8 +4300,7 @@ __host__ void bifurcation_DFT_1D(
 
 	int stringCounter = 0; // Вспомогательная переменная для корректной записи матрицы в файл
 	int stringCounter_1 = 0;
-	// --- Выводим в самое начало файла исследуемые диапазон ---
-
+	// Выводим в самое начало файла исследуемые диапазон
 
 	outFileStream.open(OUT_FILE_PATH + "_" + "config.csv");
 
@@ -4828,12 +4328,11 @@ __host__ void bifurcation_DFT_1D(
 	}
 	outFileStream.close();
 
-
-	// --- Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем ---
+	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
 	for (int i = 0; i < amountOfIteration; ++i)
 	{
-		// --- Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным ---
-		// --- оставшемуся нерасчитанному куску ---
+		// Если мы на последней итерации, требуется подкорректировать nPtsLimiter и сделать его равным
+		// оставшемуся нерасчитанному куску
 		if (i == amountOfIteration - 1)
 			nPtsLimiter = (nPts) - (nPtsLimiter * i);
 
@@ -4841,10 +4340,10 @@ __host__ void bifurcation_DFT_1D(
 		int minGridSize;		// Переменная для хранения минимального размера сетки
 		int gridSize;			// Переменная для хранения сетки
 
-		// --- Считаем, что один блок не может использовать больше чем 48КБ памяти ---
-		// --- Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт ---
-		// --- Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить ---
-		// --- Учитваем, что в блоке не может быть больше 1024 потоков ---
+		// Считаем, что один блок не может использовать больше чем 48КБ памяти
+		// Одному потоку в блоке требуется (amountOfInitialConditions + amountOfValues) * sizeof(numb) байт
+		// Производим расчет, какое максимальное количество потоков в блоке мы можем обечпечить
+		// Учитваем, что в блоке не может быть больше 1024 потоков
 
 		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
 		//blockSize = 10000 / ((amountOfInitialConditions + amountOfValues) * sizeof(numb));
@@ -4854,34 +4353,30 @@ __host__ void bifurcation_DFT_1D(
 			blockSize = 32;
 			gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
-			// --------------------------------------------------
-			// --- CUDA функция для расчета траектории систем ---
-			// --------------------------------------------------
-
+			// CUDA функция для расчета траектории систем
 
 			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
-					nPtsLimiter,				// Разрешение диаграммы, которое рассчитывается на данной итерации - nPtsLimiter
+					nPtsLimiter,
 					amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
 					i * originalNPtsLimiter,	// Количество уже посчитанных точек систем
-					amountOfPointsForSkip,		// Количество точек для пропуска ( transientTime )
+					amountOfPointsForSkip,
 					1,							// Размерность ( диаграмма одномерная )
 					d_ranges,					// Массив с диапазонами
-					h,							// Шаг интегрирования
+					h,
 					d_indicesOfMutVars,			// Индексы изменяемых параметров
 					d_initialConditions,		// Начальные условия
-					amountOfInitialConditions,	// Количество начальных условий
+					amountOfInitialConditions,
 					d_values,					// Параметры
-					amountOfValues,				// Количество параметров
+					amountOfValues,
 					amountOfPointsInBlock,		// Количество итераций ( равно количеству точек для одной системы )
-					preScaller,					// Множитель, который уменьшает время и объем расчетов
-					writableVar,				// Индекс уравнения, по которому будем строить диаграмму
-					maxValue,					// Максимальное значение (по модулю), выше которого система считаемся "расшедшейся"
+					preScaller,
+					writableVar,
+					maxValue,
 					d_data,						// Массив, где будет хранится траектория систем
 					d_amountOfPeaks,
 					par_or_var);			// Вспомогательный массив, куда при возникновении ошибки будет записано '-1' в соостветсвующую систему
 
-			// --------------------------------------------------
 		}
 		else {
 			for (int j = 0; j < nPtsLimiter; j++) {
@@ -4910,7 +4405,6 @@ __host__ void bifurcation_DFT_1D(
 				for (int m = 0; m < amountOfInitialConditions; ++m)
 					checker = checker + fabsf(h_localX[m]);
 
-
 				if (isnan(checker) || isinf(checker) || fabsf(checker) > maxValue)
 					h_amountOfPeaks[j] = 0;
 
@@ -4926,23 +4420,20 @@ __host__ void bifurcation_DFT_1D(
 			gpuErrorCheck(cudaMemcpy(d_amountOfPeaks, h_amountOfPeaks, nPtsLimiter * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 		}
 
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
-		// --- Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки ---
+		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, peakFinderCUDA, 0, blockSize_setup);
 		//blockSize = blockSize > blockSize_setup ? blockSize_setup : blockSize;			// Не превышаем ограничение в 512 потока в блоке
 		blockSize = 64;
 		//printf(", %zu", blockSize);
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;
 		printf("Trajectories done\n");
-		// -----------------------------------------
-		// --- CUDA функция для нахождения пиков ---
-		// -----------------------------------------
+		// CUDA функция для нахождения пиков
 
 		DFT_custom << <gridSize, blockSize >> >
 			(
@@ -4957,12 +4448,10 @@ __host__ void bifurcation_DFT_1D(
 				nFreq, 
 				h * preScaller);
 
-		// -----------------------------------------
-
-		// --- Проверка на CUDA ошибки ---
+		// Проверка на CUDA ошибки
 		gpuGlobalErrorCheck();
 
-		// --- Ждем пока все потоки завершат свою работу ---
+		// Ждем пока все потоки завершат свою работу
 		gpuErrorCheck(cudaDeviceSynchronize());
 
 		////
@@ -4972,7 +4461,7 @@ __host__ void bifurcation_DFT_1D(
 
 		outFileStream.open(OUT_FILE_PATH + "_" + "AkCOS.csv", std::ios::app);
 		outFileStream << std::setprecision(set_precision);
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		for (size_t i = 0; i < nPtsLimiter; ++i)
 			for (size_t j = 0; j < nFreq; ++j)
 				if (outFileStream.is_open())
@@ -4993,7 +4482,7 @@ __host__ void bifurcation_DFT_1D(
 
 		outFileStream.open(OUT_FILE_PATH + "_" + "BkSIN.csv", std::ios::app);
 		outFileStream << std::setprecision(set_precision);
-		// --- Сохранение данных в файл ---
+		// Сохранение данных в файл
 		for (size_t i = 0; i < nPtsLimiter; ++i)
 			for (size_t j = 0; j < nFreq; ++j)
 				if (outFileStream.is_open())
@@ -5012,15 +4501,12 @@ __host__ void bifurcation_DFT_1D(
 				}
 		outFileStream.close();
 
-
 #ifdef DEBUG
 		printf("Progress: %f\%\n", (100.0f / (numb)amountOfIteration) * (i + 1));
 #endif
 	}
 
-	// ---------------------------
-	// --- Освобождение памяти ---
-	// ---------------------------
+	// Освобождение памяти
 
 	gpuErrorCheck(cudaFree(d_data));
 	gpuErrorCheck(cudaFree(d_ranges));
@@ -5042,6 +4528,4 @@ __host__ void bifurcation_DFT_1D(
 	delete[] h_dbscanResult;
 	delete[] h_AkCOS;
 	delete[] h_BkSIN;
-	// ---------------------------
 }
-

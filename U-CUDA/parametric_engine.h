@@ -1,21 +1,18 @@
 ﻿#pragma once
-//
 // parametric_engine — фасад для параметрического анализа через NVRTC.
 //
 // Цель: изолировать остальной проект (GUI, AppModel, session_io) от внутренностей
-// hostLibrary.cu / cudaLibrary.cu / main_NonLinAnal.cu. Эти файлы дорабатываются
-// внешне и иногда меняются — здесь стабильный, проектный API, который при
-// обновлении NonLinAnal правится в одном-двух местах, а не по всему коду.
+// hostLibrary.cu / cudaLibrary.cu / main_NonLinAnal.cu. Те дорабатываются внешне и иногда
+// меняются — здесь стабильный проектный API, который при обновлении NonLinAnal правится в
+// одном-двух местах, а не по всему коду.
 //
 // Архитектура:
-//   1. Adapter (этот файл + .cpp): хранит стабильный API
-//      run_bifurcation_1d/2d/lle/etc. и реализацию через NVRTC.
-//   2. Шаблоны ядер: U-CUDA/kernels/*.template.cu — текстовые файлы,
-//      копируются Post-Build Event в OutDir рядом с exe. NVRTC грузит и
-//      подставляет КРС-тело + размерность.
-//   3. Кэш PTX по хэшу (КРС + размерность) — чтобы не перекомпилировать
-//      при смене только параметров анализа.
-//
+//   1. Adapter (этот файл + .cpp): стабильный API run_bifurcation_1d/2d/lle/etc. и реализация
+//      через NVRTC.
+//   2. Шаблоны ядер kernels/*.template.cu — текстовые файлы, копируются Post-Build Event в OutDir
+//      рядом с exe; NVRTC грузит их и подставляет КРС-тело + размерность.
+//   3. Кэш PTX по хэшу (КРС + размерность), чтобы не перекомпилировать при смене только
+//      параметров анализа.
 
 #include <atomic>
 #include <cstdint>
@@ -25,20 +22,13 @@
 #include "configCUDA.h"   // typedef numb, REGIME_*, BF_* feature codes, mult_avg_* defaults
 #include "data_export.h"  // snapshot structs embedded into *Result for right-click export
 
-// ============================================================================
 // PeakConfig — knobs configCUDA.h, настраиваемые из GUI (вкладка Settings).
-//
-// В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот
-// оборачивает свои дефолты в #ifndef), поэтому смена любого поля означает
-// другой PTX. Инвалидацию всех кэшей модулей обеспечивает peak_config_epoch(),
-// входящий в cache-key (см. hash_key в parametric_engine.cpp).
-//
-// Дефолты берутся из configCUDA.h с ::-квалификацией: без неё имя нашло бы
-// одноимённое поле этой же структуры.
-//
-// Debug/legacy сборка (main_NonLinAnal.cu) сюда не заглядывает и работает на
-// constexpr-дефолтах configCUDA.h — поведение прежнее.
-// ============================================================================
+// В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот оборачивает свои дефолты
+// в #ifndef), поэтому смена любого поля означает другой PTX; инвалидацию всех кэшей модулей
+// обеспечивает peak_config_epoch(), входящий в cache-key (hash_key в parametric_engine.cpp).
+// Дефолты берутся из configCUDA.h с ::-квалификацией: без неё имя нашло бы одноимённое поле этой
+// же структуры. Debug/legacy сборка (main_NonLinAnal.cu) сюда не заглядывает и работает на
+// constexpr-дефолтах configCUDA.h.
 struct PeakConfig {
     bool   do_calculate_peaks   = ::doCalculatePeaks;
     bool   do_interpolate_peaks = ::doInterpolatePeaks;
@@ -71,40 +61,30 @@ void       set_peak_config(const PeakConfig& c);   // бампает epoch
 PeakConfig get_peak_config();
 uint64_t   peak_config_epoch();
 
-// ============================================================================
-// FMA-контракция (--fmad) для NVRTC. ОДНА настройка на всё приложение — в этом
-// весь смысл: карта (bif/LLE/LS/basins, parametric_engine) и фазовый портрет,
-// который рисуется по её ячейке (nvrtc_engine), обязаны считать одинаковой
-// арифметикой. Разъехавшись, они на фрактальной границе бассейнов уводят
-// траекторию в другой аттрактор — ровно это и было, пока портрет компилировался
-// с --fmad=false, а карты с дефолтным true.
-//
-// true (дефолт) — a*b+c сворачивается в FMA: одно округление, быстрее, так
-//                 работает nvcc/NVRTC по умолчанию.
-// false          — умножение и сложение округляются раздельно; ближе к CPU-ветке
-//                 (MSVC сам не контрактит) и к сторонним референсам вроде MATLAB.
-//
-// Смена значения = другой PTX при том же КРС. Инвалидацию кэшей обеспечивают:
-//   - hash_key() в parametric_engine.cpp (подмешивает флаг в ключ модуля),
-//   - ключ кэша в NvrtcEngine::compile (nvrtc_engine.cpp).
-// Без этого настройка молча не применялась бы до перезапуска.
-// ============================================================================
+// FMA-контракция (--fmad) для NVRTC. ОДНА настройка на всё приложение — в этом весь смысл: карта
+// (bif/LLE/LS/basins, parametric_engine) и фазовый портрет по её ячейке (nvrtc_engine) обязаны
+// считать одинаковой арифметикой. Разъехавшись, они на фрактальной границе бассейнов уводят
+// траекторию в другой аттрактор — ровно это и было, пока портрет компилировался с --fmad=false,
+// а карты с дефолтным true.
+//   true (дефолт) — a*b+c сворачивается в FMA: одно округление, быстрее, так работает
+//                   nvcc/NVRTC по умолчанию.
+//   false         — умножение и сложение округляются раздельно; ближе к CPU-ветке (MSVC сам не
+//                   контрактит) и к сторонним референсам вроде MATLAB.
+// Смена значения = другой PTX при том же КРС. Инвалидацию кэшей обеспечивают hash_key() в
+// parametric_engine.cpp (подмешивает флаг в ключ модуля) и ключ кэша в NvrtcEngine::compile —
+// без этого настройка молча не применялась бы до перезапуска.
 void set_nvrtc_fmad(bool enabled);
 bool get_nvrtc_fmad();
 
-// ============================================================================
-// Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point,
-// 0 = unbound, 1 = oscillation.
-//
-// Контракт flags[] по типам расчёта:
-//   Bif1D / Bif2D / DFT — СЫРОЙ выход peakFinder / DBSCAN:
-//                         -1 = FP, 0 = unbound, N > 0 = число пиков (период).
-//   LLE / LS            — -1 = FP (сейчас не производится: ветка детекта в
-//                         LLEKernelCUDA намеренно выключена, FP считается как
-//                         обычная точка), 0 = unbound, 1 = oscillation.
-//   Basins helpful_array— ровно -1 / 0 / 1.
+// Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point, 0 = unbound,
+// 1 = oscillation. Контракт flags[] по типам расчёта:
+//   Bif1D / Bif2D / DFT  — СЫРОЙ выход peakFinder / DBSCAN: -1 = FP, 0 = unbound,
+//                          N > 0 = число пиков (период).
+//   LLE / LS             — -1 = FP (сейчас не производится: ветка детекта в LLEKernelCUDA
+//                          намеренно выключена, FP считается как обычная точка), 0 = unbound,
+//                          1 = oscillation.
+//   Basins helpful_array — ровно -1 / 0 / 1.
 // regime_code() приводит любой из них к каноническим -1 / 0 / 1.
-// ============================================================================
 inline int regime_code(int flag) {
     return flag < 0 ? REGIME_FIXED_POINT
                     : (flag == 0 ? REGIME_UNBOUND : REGIME_OSCILLATION);
@@ -122,11 +102,10 @@ struct Bifurcation1DRequest {
     std::vector<double> initial_conditions;  // длина == amountOfX
     std::vector<double> base_values;         // все параметры системы
 
-    // Изменяемый параметр (sweep target).
-    // По умолчанию свип идёт по параметру (par_or_var = 1):
-    //   param_index — 1-based индекс в base_values (a[0] зарезервирован).
-    // При sweep_over_var = true (par_or_var = 0) свип идёт по начальному
-    // условию: var_sweep_index — 0-based индекс в initial_conditions.
+    // Изменяемый параметр (sweep target). По умолчанию свип идёт по параметру (par_or_var = 1):
+    // param_index — 1-based индекс в base_values (a[0] зарезервирован). При sweep_over_var = true
+    // (par_or_var = 0) свип идёт по начальному условию: var_sweep_index — 0-based индекс в
+    // initial_conditions.
     int  param_index    = 0;
     bool sweep_over_var = false;
     int  var_sweep_index = 0;
@@ -137,18 +116,16 @@ struct Bifurcation1DRequest {
     bool sweep_over_h = false;
     // Log-масштаб сетки (любой sweep target). Требует param_lo>0 и param_hi>0.
     bool log_scale = false;
-    // Continuation: каждая новая точка параметра стартует с конечного x[]
-    // предыдущей (вместо сброса на initial_conditions). Игнорируется при
-    // sweep_over_var = true или sweep_over_h = true (валидатор отказывает).
-    //   continuation_reverse = false → forward (lo→hi)
-    //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
+    // Continuation: каждая новая точка параметра стартует с конечного x[] предыдущей (вместо
+    // сброса на initial_conditions). Игнорируется при sweep_over_var или sweep_over_h (валидатор
+    // отказывает). continuation_reverse: false → forward (lo→hi), true → backward (hi→lo, для
+    // гистерезиса).
     bool continuation = false;
     bool continuation_reverse = false;
-    // Считать continuation на CPU вместо GPU. Осмысленно только вместе с
-    // continuation: GPU-ветка гоняет весь свип в ОДНОМ потоке (иначе нельзя —
-    // точки зависят друг от друга), и обычное CPU-ядро на такой зависимой
-    // цепочке кратно быстрее. Классический (не continuation) свип массово
-    // параллелен — там CPU-реализации нет и флаг игнорируется.
+    // Считать continuation на CPU вместо GPU. Осмысленно только вместе с continuation: GPU-ветка
+    // гоняет весь свип в ОДНОМ потоке (иначе нельзя — точки зависят друг от друга), и обычное
+    // CPU-ядро на такой зависимой цепочке кратно быстрее. Классический свип массово параллелен —
+    // там CPU-реализации нет и флаг игнорируется.
     bool use_cpu = false;
     double param_lo = 0.0;
     double param_hi = 1.0;
@@ -216,17 +193,13 @@ struct Bifurcation1DResult {
     data_export::Bif1DSnapshot snapshot;
 };
 
-// ============================================================================
-// 1D DFT — параметрическое дискретное преобразование Фурье. Для каждой точки
-// свипа (параметр или IC, как в Bifurcation1D) считает decimated-траекторию
-// writable_var, накладывает окно Ханна и находит nFreq косинус/синус
-// коэффициентов (AkCOS/BkSIN) в диапазоне частот [freq_lo, freq_hi] через
-// kernel DFT_custom (cudaLibrary.cuh). Порт bifurcation_DFT_1D из
-// hostLibrary.cu на NVRTC-пайплайн; classical-ветка переиспользует тот же
-// kernel_traj что и Bifurcation1D (calculateDiscreteModelCUDA), continuation
-// переиспользует bifurcation1dContinuationKernel как есть — оба уже пишут
-// сырую траекторию в d_data, DFT_custom просто второй проход по тем же данным.
-// ============================================================================
+// 1D DFT — параметрическое дискретное преобразование Фурье. Для каждой точки свипа (параметр или
+// IC, как в Bifurcation1D) считает decimated-траекторию writable_var, накладывает окно Ханна и
+// находит nFreq косинус/синус коэффициентов (AkCOS/BkSIN) в диапазоне [freq_lo, freq_hi] через
+// kernel DFT_custom (cudaLibrary.cuh). Порт bifurcation_DFT_1D на NVRTC-пайплайн: classical-ветка
+// переиспользует тот же kernel_traj, что и Bifurcation1D (calculateDiscreteModelCUDA),
+// continuation — bifurcation1dContinuationKernel как есть. Оба уже пишут сырую траекторию в
+// d_data, DFT_custom просто второй проход по тем же данным.
 
 struct Dft1DRequest {
     std::string krs_body;
@@ -316,12 +289,10 @@ struct Dft1DResult {
     data_export::Dft1DSnapshot snapshot;
 };
 
-// ============================================================================
 // LLE (Largest Lyapunov Exponent) 1D — свип параметра, λ(param).
 // Алгоритм: Wolf/Benettin с малым возмущением. Реализован в NonLinAnal
 // (cudaLibrary.cu:LLEKernelCUDA), engine подключает его через NVRTC и
 // шаблон kernels/lle1d.template.cu.
-// ============================================================================
 
 struct LLE1DRequest {
     std::string krs_body;
@@ -342,15 +313,12 @@ struct LLE1DRequest {
     bool sweep_over_h = false;
     bool log_scale = false;  // требует param_lo>0 и param_hi>0
     int param_index = 0;                     // индекс в base_values (1-based)
-    // Continuation: следующая точка параметра стартует с состояния предыдущей,
-    // а не со сброса на initial_conditions. В отличие от Bifurcation1D
-    // переносится НЕ ТОЛЬКО траектория x[], но и вектор возмущения («щуп»):
-    // он уже развёрнут вдоль направления максимального растяжения, поэтому
-    // кривая λ(param) получается глаже. Требует param-свипа (не IC и не dt).
-    //   continuation_reverse = false → forward (lo→hi)
-    //   continuation_reverse = true  → backward (hi→lo) — для гистерезиса.
-    // Реализация только CPU: свип последователен по построению и на GPU шёл бы
-    // в одном потоке, поэтому GPU-ветки для continuation нет.
+    // Continuation: следующая точка параметра стартует с состояния предыдущей, а не со сброса на
+    // initial_conditions. В отличие от Bifurcation1D переносится НЕ ТОЛЬКО траектория x[], но и
+    // вектор возмущения («щуп»): он уже развёрнут вдоль направления максимального растяжения,
+    // поэтому кривая λ(param) выходит глаже. Требует param-свипа (не IC и не dt).
+    // continuation_reverse: false → forward (lo→hi), true → backward (hi→lo, для гистерезиса).
+    // Реализация только CPU: свип последователен по построению и на GPU шёл бы в одном потоке.
     bool continuation = false;
     bool continuation_reverse = false;
     // Считать КЛАССИЧЕСКИЙ (не continuation) свип на CPU вместо GPU. GPU здесь
@@ -398,13 +366,11 @@ struct LLE1DResult {
     // Снапшот направления continuation (см. Bifurcation1DResult): при backward
     // точка k соответствует param_hi - (hi-lo)*k/(n-1), а не lo + ...
     bool   continuation_reverse = false;
-    // lyapunov[i] — оценка λ для i-го значения параметра. Единственное
-    // спец-значение — NaN: точка не посчиталась (kernel-флаги 999/-999 «сошёл
-    // с аттрактора» / «разошёлся за maxValue» конвертируются в NaN сразу при
-    // readback в run_lle_1d), либо численная проблема. Сырые 999 наружу НЕ
-    // попадают — по типу это валидное λ, и потребитель, забывший сверить
-    // flags[], рисовал выброс; NaN же отсекается штатным !isfinite.
-    // Причину смотреть в flags[].
+    // lyapunov[i] — оценка λ для i-го значения параметра. Единственное спец-значение — NaN: точка
+    // не посчиталась (kernel-флаги 999/-999 «сошёл с аттрактора» / «разошёлся за maxValue»
+    // конвертируются в NaN сразу при readback в run_lle_1d) либо численная проблема. Сырые 999
+    // наружу НЕ попадают: по типу это валидное λ, и потребитель, забывший сверить flags[], рисовал
+    // выброс, тогда как NaN отсекается штатным !isfinite. Причину смотреть в flags[].
     std::vector<double> lyapunov;
     // flags[i] — REGIME_*: 1 = oscillation, 0 = unbound. FP отдельно не
     // детектируется (см. комментарий к regime_code выше), поэтому -1 здесь
@@ -415,12 +381,10 @@ struct LLE1DResult {
     data_export::LLE1DSnapshot snapshot;
 };
 
-// ============================================================================
 // LS (Lyapunov Spectrum) 1D — на каждую точку параметра N экспонент (по числу
 // переменных). Алгоритм: Wolf/Benettin + Gram-Schmidt. Реализован в NonLinAnal
 // (cudaLibrary.cu:LSKernelCUDA). Поля Request — копия LLE1DRequest (тот же
 // набор управляющих параметров, eps и NT). Result — матрица nPts × amountOfX.
-// ============================================================================
 
 struct LS1DRequest {
     std::string krs_body;
@@ -480,27 +444,20 @@ struct LS1DResult {
     data_export::LS1DSnapshot snapshot;
 };
 
-// ============================================================================
-// LLE 2D — λ(p1, p2) на квадратной сетке n_pts × n_pts. Алгоритм тот же
-// (LLEKernelCUDA, см. cudaLibrary.cu:2380) — kernel принимает runtime-аргумент
-// dimension=2, ranges[4] и indicesOfMutVars[2]. par_or_var (compile-time)
-// принимает три значения:
-//   1 — оба свипа по параметрам;
-//   0 — оба свипа по начальным условиям;
-//   2 — смешанный: ось 1 (X в kernel'е) по IC, ось 2 (Y в kernel'е) по param.
-// Сетка квадратная — таково ограничение getValueByIdx (cu:1276): idx∈[0,n²),
-// pointIdx_x = idx%n, pointIdx_y = idx/n. Разная разрешалка по осям без
-// правок NonLinAnal невозможна — поэтому здесь один n_pts на обе оси.
+// LLE 2D — λ(p1, p2) на квадратной сетке n_pts × n_pts. Алгоритм тот же (LLEKernelCUDA): kernel
+// принимает runtime-аргументы dimension=2, ranges[4] и indicesOfMutVars[2]. par_or_var
+// (compile-time): 1 — оба свипа по параметрам, 0 — оба по начальным условиям, 2 — смешанный
+// (ось 1 / X в kernel'е по IC, ось 2 / Y по param).
+// Сетка квадратная — ограничение getValueByIdx: idx∈[0,n²), pointIdx_x = idx%n,
+// pointIdx_y = idx/n. Разное разрешение по осям без правок NonLinAnal невозможно.
 //
-// Engine принимает любую комбинацию sweep_over_var/_2 без отдельного флага
-// "mixed". Маппинг (user X/Y → kernel-ось 1/2):
+// Engine принимает любую комбинацию sweep_over_var/_2 без отдельного флага "mixed".
+// Маппинг (user X/Y → kernel-ось 1/2):
 //   - sweep_over_var == sweep_over_var_2 → par_or_var=0|1, оси один в один;
-//   - sweep_over_var=true, sweep_over_var_2=false → par_or_var=2, оси один в один;
-//   - sweep_over_var=false, sweep_over_var_2=true → par_or_var=2 + внутренний
-//     своп: indicesOfMutVars/ranges подаются в kernel "перевёрнуто" (X↔Y), а
-//     полученный flat-массив транспонируется на хосте, так что наружу result
-//     по-прежнему row-major idx=iy*n+ix в системе пользователя.
-// ============================================================================
+//   - var=true, var_2=false → par_or_var=2, оси один в один;
+//   - var=false, var_2=true → par_or_var=2 + внутренний своп: indicesOfMutVars/ranges подаются в
+//     kernel перевёрнуто (X↔Y), а полученный flat-массив транспонируется на хосте, так что наружу
+//     result по-прежнему row-major idx=iy*n+ix в системе пользователя.
 
 struct LLE2DRequest {
     std::string krs_body;
@@ -575,20 +532,14 @@ struct LLE2DResult {
     data_export::LLE2DSnapshot snapshot;
 };
 
-// ============================================================================
-// Bifurcation 2D — «период»(p1, p2) на квадратной сетке n_pts × n_pts.
-// Алгоритм — порт bifurcation2D из hostLibrary.cu: три ядра на каждый чанк:
+// Bifurcation 2D — «период»(p1, p2) на квадратной сетке n_pts × n_pts. Порт bifurcation2D из
+// hostLibrary.cu: три ядра на каждый чанк —
 //   calculateDiscreteModelCUDA (dimension=2, par_or_var compile-time)
-//   → peakFinderCUDA   → пики амплитуд + межпиковые интервалы
-//   → dbscanCUDA       → число кластеров = период системы в ячейке
-//
-// par_or_var (compile-time) — три значения (cudaLibrary.cu:973-990):
-//   1 — обе оси по параметрам;
-//   0 — обе оси по начальным условиям;
-//   2 — смешанный: ось 1 (X kernel) по IC, ось 2 (Y kernel) по param.
-// Маппинг sweep_over_var/_2 → par_or_var и логика своп/транспонирования — та
-// же что у LLE-2D (см. комментарий к LLE2DRequest выше).
-// ============================================================================
+//   → peakFinderCUDA (пики амплитуд + межпиковые интервалы)
+//   → dbscanCUDA (число кластеров = период системы в ячейке)
+// par_or_var (compile-time): 1 — обе оси по параметрам, 0 — обе по начальным условиям,
+// 2 — смешанный (ось 1 / X kernel по IC, ось 2 / Y по param). Маппинг sweep_over_var/_2 →
+// par_or_var и логика свопа/транспонирования — та же, что у LLE-2D (см. LLE2DRequest выше).
 
 struct Bifurcation2DRequest {
     std::string krs_body;
@@ -630,14 +581,11 @@ struct Bifurcation2DRequest {
     // Тот же смысл, что eps в bifurcation2D NonLinAnal (hostLibrary.cu:912).
     double eps_dbscan = 0.1;
 
-    // Множители осей признаков перед кластеризацией: X = значение пика,
-    // Y = межпиковый интервал (см. dbscan в cudaLibrary.cu). Кластеризация
-    // идёт по евклидову расстоянию, поэтому множители задают, какая из осей
-    // вообще влияет на период: mult_interval = 0 (дефолт configCUDA.h)
-    // схлопывает Y и кластеризует ТОЛЬКО по амплитуде пиков.
-    // Дефолты совпадают с константами configCUDA.h — поведение по умолчанию
-    // не меняется. Увидеть само облако точек можно в Feature diagram
-    // (ProjType::FeatureDiagram) фазового анализа.
+    // Множители осей признаков перед кластеризацией: X = значение пика, Y = межпиковый интервал
+    // (см. dbscan в cudaLibrary.cu). Кластеризация идёт по евклидову расстоянию, поэтому множители
+    // задают, какая из осей вообще влияет на период: mult_interval = 0 (дефолт configCUDA.h)
+    // схлопывает Y и кластеризует ТОЛЬКО по амплитуде пиков. Дефолты совпадают с константами
+    // configCUDA.h. Само облако точек видно в Feature diagram (ProjType::FeatureDiagram).
     double mult_peak     = (double)::mult_peak;
     double mult_interval = (double)::mult_interval;
 
@@ -678,14 +626,11 @@ struct Bifurcation2DResult {
     data_export::Bif2DSnapshot snapshot;
 };
 
-// ============================================================================
-// LS 2D — полный спектр N экспонент в каждой ячейке сетки n_pts × n_pts.
-// Алгоритм тот же (LSKernelCUDA, cudaLibrary.cu:2732), kernel принимает
-// runtime-аргумент dimension=2, ranges[4] и indicesOfMutVars[2]. par_or_var
-// (compile-time) три значения — как у LLE-2D (см. комментарий к LLE2DRequest).
-// Отличие от LLE-2D: на ячейку kernel возвращает N экспонент, не одну. D2H
-// копирует cur_limiter * N значений и распаковывает по плоскостям-экспонентам.
-// ============================================================================
+// LS 2D — полный спектр N экспонент в каждой ячейке сетки n_pts × n_pts. Алгоритм тот же
+// (LSKernelCUDA), kernel принимает runtime-аргументы dimension=2, ranges[4], indicesOfMutVars[2];
+// par_or_var (compile-time) — три значения, как у LLE-2D. Отличие от LLE-2D: на ячейку kernel
+// возвращает N экспонент, не одну — D2H копирует cur_limiter * N значений и распаковывает по
+// плоскостям-экспонентам.
 
 struct LS2DRequest {
     std::string krs_body;
@@ -756,14 +701,11 @@ struct LS2DResult {
     data_export::LS2DSnapshot snapshot;
 };
 
-// ============================================================================
-// Basins of Attraction — карта классификации траекторий на сетке n_pts × n_pts
-// начальных условий (axis_x_var, axis_y_var). На каждую ячейку считается:
-//   - flag классификации (-1=FP / 0=Unbound / 1=Osc) через calculateDiscreteModelCUDA
-//   - avgPeak и avgInterval через avgPeakFinderCUDA (с множителями mult_avg_*)
-//   - cluster id через CUDA_dbscan (host-цикл из 3 kernel'ов)
-// Свип ВСЕГДА по двум IC — par_or_var=0 в шаблоне жёстко.
-// ============================================================================
+// Basins of Attraction — карта классификации траекторий на сетке n_pts × n_pts начальных условий
+// (axis_x_var, axis_y_var). На каждую ячейку считается флаг классификации (-1=FP / 0=Unbound /
+// 1=Osc) через calculateDiscreteModelCUDA, avgPeak и avgInterval через avgPeakFinderCUDA (с
+// множителями mult_avg_*) и cluster id через CUDA_dbscan (host-цикл из 3 kernel'ов).
+// Свип ВСЕГДА по двум IC — par_or_var=0 жёстко зашит в шаблоне.
 
 struct BasinsRequest {
     std::string krs_body;
@@ -831,14 +773,11 @@ struct BasinsResult {
     data_export::BasinsSnapshot snapshot;
 };
 
-// ============================================================================
-// Basins recluster — DBSCAN-only прогон поверх кэшированных фич (avg_peaks /
-// avg_intervals / helpful_array из предыдущего run_basins). Используется
-// кнопкой "Clustering" в GUI: меняешь eps_dbscan, не пересчитывая всю
-// траекторно-feature часть (≈99% времени основного run_basins).
-// krs_body + amountOfX нужны, чтобы compile_basins_if_needed подхватил
-// кэш-ключ модуля; сами DBSCAN-kernel'ы не зависят от системы уравнений.
-// ============================================================================
+// Basins recluster — DBSCAN-only прогон поверх кэшированных фич (avg_peaks / avg_intervals /
+// helpful_array из предыдущего run_basins). Используется кнопкой "Clustering" в GUI: меняешь
+// eps_dbscan, не пересчитывая траекторно-feature часть (≈99% времени основного run_basins).
+// krs_body + amountOfX нужны, чтобы compile_basins_if_needed подхватил кэш-ключ модуля; сами
+// DBSCAN-kernel'ы от системы уравнений не зависят.
 struct BasinsReclusterRequest {
     std::string krs_body;
     int amountOfX = 0;
@@ -861,17 +800,14 @@ struct BasinsReclusterResult {
     int min_cluster_idx = 0;
 };
 
-// ============================================================================
-// Fast Synchro — анализ возвратной синхронизации.
-// Два режима:
-//   mode 0 ("On Attractor"): интегрируем master trajectory, в каждой её точке
-//     запускаем cycle synchro → ошибка per-point. Результат — массив точек
-//     (traj_x, traj_y) + sync_error длиной nPts (после decimator'а).
-//   mode 1 ("On Grid"): свип по двум IC (n_pts × n_pts), per-cell sync error.
-//     Результат — 2D heatmap.
-// type_of_synch / error_estim / fs_error_trs — knobs из configCUDA.h,
-// override'имые через NVRTC #define (поэтому PTX-кэш ключ включает их).
-// ============================================================================
+// Fast Synchro — анализ возвратной синхронизации. Два режима:
+//   mode 0 ("On Attractor") — интегрируем master trajectory, в каждой её точке запускаем cycle
+//     synchro → ошибка per-point. Результат: массив точек (traj_x, traj_y) + sync_error длиной
+//     nPts (после decimator'а).
+//   mode 1 ("On Grid") — свип по двум IC (n_pts × n_pts), per-cell sync error, результат — 2D
+//     heatmap.
+// type_of_synch / error_estim / fs_error_trs — knobs из configCUDA.h, override'имые через NVRTC
+// #define (поэтому PTX-кэш ключ включает их).
 
 struct FastSyncRequest {
     std::string krs_body;

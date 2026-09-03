@@ -255,7 +255,7 @@ namespace {
 
 } // namespace
 
-// ---- Разбор определений функций: "h(x) = тело" ----
+// Разбор определений функций: "h(x) = тело"
 // Принимает LaTeX или plain. Снимает окружения (\begin{aligned}, \big, ...),
 // разбивает по "\\", берёт части с '=' (пустые/служебные пропускает).
 FuncDefs parse_func_defs(const std::string& text) {
@@ -531,10 +531,8 @@ System parse_system_from_latex(const std::string& multiline_latex,
     return sys;
 }
 
-// ============================================================================
 // detect_alphabet — авто-классификация идентификаторов из LaTeX/Plain текста.
 // Идентификаторы внутри производных → vars; остальные → params.
-// ============================================================================
 
 DetectedAlphabet detect_alphabet(const std::string& text) {
     DetectedAlphabet out;
@@ -560,7 +558,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         "operatorname","mathrm","text"
     };
 
-    // ---- preprocess: убираем OCR-мусор и `\mathrm{d}` ----
+    // preprocess: убираем OCR-мусор и `\mathrm{d}`
     // Делаем это до сканирования, чтобы дальше можно было искать только `d`/`t`.
     std::string s = text;
     auto str_replace_all = [&](const std::string& from, const std::string& to) {
@@ -600,7 +598,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         return i;
     };
 
-    // ---- 1) производные: \dot{X}, \dot X ----
+    // 1) производные: \dot{X}, \dot X
     for (size_t i = 0; i + 4 <= s.size(); ) {
         if (s.compare(i, 4, "\\dot") == 0) {
             size_t j = skip_ws(s, i + 4);
@@ -625,7 +623,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         ++i;
     }
 
-    // ---- 2) производные: \frac{d X}{d t}, \dfrac{...}{...} ----
+    // 2) производные: \frac{d X}{d t}, \dfrac{...}{...}
     auto try_frac_at = [&](size_t i) -> size_t {
         // Возвращает индекс после frac-группы (если успешно), иначе 0.
         const std::string& src = s;
@@ -680,7 +678,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         ++i;
     }
 
-    // ---- 3) производные: dX/dt, X' ----
+    // 3) производные: dX/dt, X'
     for (size_t i = 0; i + 1 < s.size(); ) {
         // dX/dt: literal 'd', then var, optional ws, '/', 'd', then 't'/\tau...
         if (s[i] == 'd' && i + 2 < s.size()) {
@@ -718,7 +716,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         ++i;
     }
 
-    // ---- 4) params: всё остальное ----
+    // 4) params: всё остальное
     for (size_t i = 0; i < s.size(); ) {
         auto [len, tok] = read_token(s, i);
         if (len == 0) { ++i; continue; }

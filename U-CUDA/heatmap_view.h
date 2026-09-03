@@ -8,31 +8,23 @@
 #include <functional>
 #include <limits>
 
-// HeatmapView — рисует 2D-скалярное поле n×m в виде хитмапы с colormap'ом.
-// Зеркало Plot2DView по структуре (свой AxisInfo, autofit, pan/zoom через ось),
-// но без серий/легенды — данные одни (одна R32F-текстура).
-//
+// HeatmapView — рисует 2D-скалярное поле n×m в виде хитмапы с colormap'ом. Зеркало Plot2DView по
+// структуре (свой AxisInfo, autofit, pan/zoom через ось), но без серий/легенды — данные одни (одна
+// R32F-текстура).
 // Использование: каждый кадр GUI отдаёт текущий снапшот данных в render():
 //   - data_generation — если изменилось, текстура заливается заново;
 //   - values — n*m doubles row-major (idx = iy*n + ix);
 //   - vmin/vmax — диапазон цветовой шкалы (engine считает по валидным точкам).
-//
-// Спец-значения (kernel выдаёт diverged как 999/-999, либо NaN/inf):
-// HeatmapView заменит их на FLT_MAX перед загрузкой, шейдер отрисует
-// тёмно-серым.
+// Спец-значения (kernel выдаёт diverged как 999/-999, либо NaN/inf) заменяются на FLT_MAX перед
+// загрузкой, шейдер отрисует их тёмно-серым.
 
 // HeatmapColormap определён в plot_renderer.h (используется ещё и для
 // colored trajectory). plot_renderer.h уже included через #include выше.
 
-// ===========================================================================
-// Общий вертикальный colorbar. Потребители: HeatmapView (section 9 в render)
-// и FastSync mode-0 (colored trajectory — хитмапы там нет, а цветовая шкала
-// нужна). Раньше FastSync рисовал свою копию с марджинами плота,
-// скопированными из Plot2DView числами (78/20/46): любая правка лэйаута
-// молча разъезжала шкалу, и тики у него были 5 равноотстоящих вместо
-// «красивых» nice_step, т.е. одна и та же шкала выглядела по-разному в
-// разных вкладках.
-// ===========================================================================
+// Общий вертикальный colorbar. Потребители: HeatmapView (section 9 в render) и FastSync mode-0
+// (colored trajectory — хитмапы там нет, а цветовая шкала нужна). Раньше FastSync рисовал свою
+// копию с марджинами плота, скопированными из Plot2DView числами (78/20/46): любая правка лэйаута
+// молча разъезжала шкалу, и тики у него были 5 равноотстоящих вместо «красивых» nice_step.
 
 // Геометрия блока — одинакова у всех потребителей.
 constexpr float kColorbarWidth   = 18.0f;
@@ -40,10 +32,9 @@ constexpr float kColorbarGap     = 12.0f;
 constexpr float kColorbarTickLen = 4.0f;
 constexpr float kColorbarTextGap = 2.0f;
 
-// `label` — что печатаем, `frac` — позиция 0..1 вдоль шкалы (0 = vmin/низ,
-// 1 = vmax/верх). Они разделены, потому что в discrete-режиме подпись — это
-// целый уровень (vmin + k), а позиция обязана быть ЦЕНТРОМ полосы
-// (k + 0.5)/n — иначе подписи стоят на границах, а не в середине цветного
+// `label` — что печатаем, `frac` — позиция 0..1 вдоль шкалы (0 = vmin/низ, 1 = vmax/верх). Они
+// разделены, потому что в discrete-режиме подпись — это целый уровень (vmin + k), а позиция обязана
+// быть ЦЕНТРОМ полосы (k + 0.5)/n: иначе подписи стоят на границах, а не в середине цветного
 // прямоугольника (зеркалит MATLAB `cb.Ticks = idx + 0.5`).
 struct ColorbarTick { double label; float frac; };
 
@@ -75,12 +66,10 @@ public:
     bool   autoscale = true;
     float  manual_vmin = 0.0f;
     float  manual_vmax = 1.0f;
-    // Текстовое представление manual_vmin/vmax для UI — тот же InputNumStr
-    // (gui.cpp), что у Initial conditions/Parameters/Fast Synchro vmin/vmax,
-    // с шаговым вводом через ↑/↓ (digit_step_callback), а не InputFloat со
-    // сломанными при step=0 кнопками. Caller парсит их в manual_vmin/vmax
-    // сам каждый кадр (см. draw_bifurcation_plot/draw_lle_plot/draw_ls_plot,
-    // по образцу FastSync) — HeatmapView не тянет зависимость на gui.cpp.
+    // Текстовое представление manual_vmin/vmax для UI — тот же InputNumStr (gui.cpp), что у Initial
+    // conditions/Parameters/Fast Synchro vmin/vmax, с шаговым вводом через ↑/↓
+    // (digit_step_callback), а не InputFloat со сломанными при step=0 кнопками. Caller парсит их в
+    // manual_vmin/vmax сам каждый кадр — HeatmapView не тянет зависимость на gui.cpp.
     std::string manual_vmin_text = "0";
     std::string manual_vmax_text = "1";
     // Авто-рассчитанные на последнем render (для UI-отображения).
@@ -93,83 +82,67 @@ public:
     // Right-click context menu on the plot toggles `discrete`.
     bool   discrete = false;
     int    discrete_levels = 0;
-    // Буфер ввода для поля "Levels". Значение остаётся в discrete_levels —
-    // текст нужен только чтобы поле было обычным InputText с общим
-    // digit_step_input_callback: тогда ↑/↓ шагают разряд под курсором, как во
-    // всех остальных числовых полях. Живёт в состоянии вью, а не в локальной
-    // переменной кадра — ImGui immediate-mode, локальный буфер терял бы ввод.
+    // Буфер ввода для поля "Levels". Значение остаётся в discrete_levels — текст нужен только чтобы
+    // поле было обычным InputText с общим digit_step_input_callback: тогда ↑/↓ шагают разряд под
+    // курсором, как во всех остальных числовых полях. Живёт в состоянии вью, а не в локальной
+    // переменной кадра: ImGui immediate-mode, локальный буфер терял бы ввод.
     std::string discrete_levels_text = "0";
 
-    // Начальное значение `discrete`, применяемое на первом кадре с реальными
-    // данными (data_generation != data_gen_cached). Нужно чтобы caller мог
-    // задать «дефолт checked» для basins-heatmap'а до того, как пользователь
-    // начал крутить toggle. После первого apply флаг discrete_default_applied_
-    // взводится и render() больше в discrete не пишет — пользовательский
-    // toggle через popup работает нормально.
+    // Начальное значение `discrete`, применяемое на первом кадре с реальными данными
+    // (data_generation != data_gen_cached). Нужно, чтобы caller мог задать «дефолт checked» для
+    // basins-хитмапы до того, как пользователь начал крутить toggle. После первого apply флаг
+    // discrete_default_applied_ взводится и render() больше в discrete не пишет.
     bool   discrete_default = false;
 
-    // Swap-axes toggle: транспонирует картинку и меняет местами визуальный X<->Y
-    // (диапазоны, тики, подписи и tooltip). Действует только на отрисовку —
-    // исходные значения `values`, `param_lo/hi_*` и AxisInfo.name остаются
-    // нетронутыми. Переключается кнопкой "Swap axes" в toolbar'е каждого
+    // Swap-axes toggle: транспонирует картинку и меняет местами визуальный X<->Y (диапазоны, тики,
+    // подписи и tooltip). Действует только на отрисовку — исходные `values`, `param_lo/hi_*` и
+    // AxisInfo.name остаются нетронутыми. Переключается кнопкой "Swap axes" в toolbar'е каждого
     // heatmap-плота; повторное переключение возвращает исходную ориентацию.
     bool   swap_axes = false;
 
-    // Reverse colormap: t := 1-t перед сэмплированием (и в GPU-шейдере, и в
-    // colorbar'е). Не персистится (сессионный toggle, как swap_axes) — каждый
-    // HeatmapView уже создаётся отдельно на диаграмму/config, так что флаг
-    // автоматически независим между ними. Переключается чекбоксом в том же
-    // right-click меню, что и Discrete colorbar (см. render()).
+    // Reverse colormap: t := 1-t перед сэмплированием (и в GPU-шейдере, и в colorbar'е). Не
+    // персистится (сессионный toggle, как swap_axes) — каждый HeatmapView создаётся отдельно на
+    // диаграмму/config, так что флаг автоматически независим между ними. Переключается чекбоксом в
+    // том же right-click меню, что и Discrete colorbar.
     bool   reverse_colormap = false;
 
-    // Индекс отображаемой экспоненты (λ1/λ2/...) — актуально только для LS2D
-    // (draw_ls_plot в gui.cpp держит свою копию здесь, а не в общем
-    // LSCurveConfig::display_exponent_idx, чтобы два окна с одной и той же
-    // кривой не дёргали одну и ту же переменную). Остальные потребители
-    // HeatmapView (Bifurcation2D/LLE2D/Basins) поле не используют.
+    // Индекс отображаемой экспоненты (λ1/λ2/...) — актуально только для LS2D: draw_ls_plot держит
+    // свою копию здесь, а не в общем LSCurveConfig::display_exponent_idx, чтобы два окна с одной
+    // кривой не дёргали одну переменную. Остальные потребители HeatmapView
+    // (Bifurcation2D/LLE2D/Basins) поле не используют.
     int    display_exponent_idx = 0;
 
-    // Optional callback for extra items in the right-click popup menu (after
-    // the standard Discrete-colorbar toggle). Caller assigns a lambda before
-    // each render(); the view invokes it inside its existing BeginPopup /
-    // EndPopup block. Used by gui.cpp to inject the "Export data..." action.
-    // Mirrors Plot2DView::popup_extras (see plot_view_2d.h).
+    // Optional callback for extra items in the right-click popup menu (after the standard
+    // Discrete-colorbar toggle). Caller assigns a lambda before each render(); the view invokes it
+    // inside its existing BeginPopup / EndPopup block. Used by gui.cpp to inject "Export data...".
+    // Mirrors Plot2DView::popup_extras (plot_view_2d.h).
     std::function<void()> popup_extras;
 
-    // Optional left-click callback: fires on mouse release inside the plot.
-    // Not called on double-click. Arguments: pixel indices (nx_idx, ny_idx)
-    // and the snapped world coordinates of that pixel's node centre (same
-    // math the hover tooltip uses).
-    //
-    // ВСЕГДА в координатах ДАННЫХ — то есть в том же порядке осей, в котором
-    // caller передал values / param_lo/hi_* в render(), независимо от
-    // swap_axes. Внутри вью после swap всё живёт в визуальных координатах, и
-    // перед вызовом коллбэка пары переставляются обратно (см. render()):
-    // caller про swap не знает и кладёт первый аргумент в fix_x.
-    // Used by the Custom-tab for drill-down:
-    // release LMB after a click or drag → enqueue a Phase run at (snap_x,
-    // snap_y). When `on_left_drag` is also set (see below), this fires on
-    // release regardless of whether the gesture was a drag; when only
-    // on_left_click is set, it fires only if release-without-drag.
+    // Optional left-click callback: fires on mouse release inside the plot (not on double-click).
+    // Arguments: pixel indices (nx_idx, ny_idx) and the snapped world coordinates of that pixel's
+    // node centre (same math the hover tooltip uses).
+    // ВСЕГДА в координатах ДАННЫХ — в том же порядке осей, в котором caller передал values /
+    // param_lo/hi_* в render(), независимо от swap_axes. Внутри вью после swap всё живёт в
+    // визуальных координатах, и перед вызовом коллбэка пары переставляются обратно: caller про swap
+    // не знает и кладёт первый аргумент в fix_x.
+    // Used by the Custom tab for drill-down: release LMB after a click or drag → enqueue a Phase run
+    // at (snap_x, snap_y). With `on_left_drag` also set this fires on release regardless of whether
+    // the gesture was a drag; with only on_left_click set, it fires only on release-without-drag.
     std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_click;
 
-    // Optional live-drag callback for LMB. When set, holding LMB inside the
-    // plot no longer pans — every frame while the button is down the callback
-    // is invoked with the current cursor's pixel indices and snapped world
-    // coordinates. Used by the Custom-tab so the fix_x/fix_y crosshair
-    // follows the cursor during a drag while the heavy recompute is deferred
-    // to on_left_click (release). Leave unset in Parametric to keep the
-    // classic LMB-pan behaviour.
+    // Optional live-drag callback for LMB. When set, holding LMB inside the plot no longer pans —
+    // every frame while the button is down the callback is invoked with the current cursor's pixel
+    // indices and snapped world coordinates. Used by the Custom tab so the fix_x/fix_y crosshair
+    // follows the cursor during a drag while the heavy recompute is deferred to on_left_click
+    // (release). Leave unset in Parametric to keep the classic LMB-pan behaviour.
     std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_drag;
 
-    // Crosshair overlay — vertical and horizontal lines drawn on top of the
-    // heatmap at the given world coordinates. NaN disables the corresponding
-    // axis (both NaN by default → nothing rendered, zero cost). Used by the
-    // Custom-tab to visualise fix_x/fix_y slider positions across all three
-    // 2D heatmaps.
-    // Как и у on_left_click, значения — в координатах ДАННЫХ: при swap_axes
-    // crosshair_x рисуется горизонтальной линией, а не вертикальной, и цвета
-    // едут вместе со значениями (они кодируют ось СВИПА, см. ниже).
+    // Crosshair overlay — vertical and horizontal lines drawn on top of the heatmap at the given
+    // world coordinates. NaN disables the corresponding axis (both NaN by default → nothing
+    // rendered, zero cost). Used by the Custom tab to visualise fix_x/fix_y slider positions across
+    // all three 2D heatmaps. Как и у on_left_click, значения — в координатах ДАННЫХ: при swap_axes
+    // crosshair_x рисуется горизонтальной линией, а не вертикальной, и цвета едут вместе со
+    // значениями (они кодируют ось СВИПА, см. ниже).
     double crosshair_x = std::numeric_limits<double>::quiet_NaN();
     double crosshair_y = std::numeric_limits<double>::quiet_NaN();
     // ARGB (0xAA_RR_GG_BB) — matches IM_COL32 default layout. Two colours

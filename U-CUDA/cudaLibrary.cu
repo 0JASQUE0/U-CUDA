@@ -12,11 +12,7 @@
 #include <cuda_runtime.h>
 #endif
 
-
-
-// ---------------------------------------------------------------------------------
-// --- Вычисляет следующее значение дискретной модели и записывает результат в x ---
-// ---------------------------------------------------------------------------------
+// Вычисляет следующее значение дискретной модели и записывает результат в x
 
 // calculateDiscreteModel_rand зависит от curand_kernel.h, которого нет в NVRTC.
 // Под NVRTC эта функция не нужна (kernel-ы для bif1d/LLE/basins её не зовут).
@@ -24,51 +20,17 @@
 __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a, const numb h)
 {
 	curandState_t state;
-	//curand_init(seed, 0, 0, &state);
-
-	//numb h1 = h / 2;
-
-	//X[0] = X[0] - h1 * (X[1] + X[2]);
-	//X[1] = X[1] + h1 * (X[0] + X[1] * a[0]);
-	//X[2] = X[2] + h1 * (a[1] + X[2] * (X[0] - a[2]));
-
-	//X[2] = (X[2] + h1 * a[1]) / (1 - h1 * (X[0] - a[2]));
-	//X[1] = (X[1] + h1 * X[0]) / (1 - h1 * a[0]);
-	//X[0] = X[0] - h1 * (X[1] + X[2]);
-
-	//X[0] = X[0] + 0.5*(curand_uniform(&state) - 0.5);
-
-
-	///////////////////////////////////////////////////////////////////////////////////////////////////////
 	numb X1[3], k[4][4], Im, Id, Iin;
 	numb pi = 3.14159265359;
 	numb u1, u2;
 	int N = 3;
 	int i, j;
 
-
 	for (i = 0; i < N; i++) {
 		X1[i] = X[i];
 	}
 
 	for (j = 0; j < 4; j++) {
-
-
-		//Id = a[4] * (exp((X[0] + a[6]) / a[9]) - exp(-(X[0] + a[6]) / a[9])) + (a[2] / a[10]) * (X[0] + a[6]) * exp(-(X[0] + a[6] - a[10]) / a[10]) + a[3] * (atan(a[17] * (X[0] + a[6] - a[18])) + atan(a[17] * (X[0] + a[6] + a[18])));
-
-		//if ((X[0] + a[7]) > 0)
-		//	Im = (X[0] + a[7]) * X[1] / a[19] + a[5];
-		//else
-		//	Im = (X[0] + a[7]) * X[1] / a[20] - a[5];
-
-		////Iin   = a[25];
-		//Iin = a[25] * ((fmod(X[2] + a[28], a[26]) < a[27]) ? 1 : 0);
-		////Iin = a[25] *  (fmod(X[2] + a[28], a[26])  )/a[26];		
-
-		//k[0][j] = (Iin - Im - Id) / a[8];
-		//k[1][j] = (1 / a[21]) * (1 / (1 + exp(-1 / (a[15] * a[15]) * ((X[0] + a[7]) - X[3]) * ((X[0] + a[7]) - a[13])))) * ((1 - 1 / (exp((a[1] * X[1] + a[23])))) * (1 - X[1]) + X[1] * (1 - 1 / (exp(a[1] * (1 - X[1]))))) - (1 / a[22]) * (1 - 1 / (1 + exp(-1 / (a[16] * a[16]) * ((X[0] + a[7]) - a[14]) * ((X[0] + a[7]) - X[4])))) * ((1 - 1 / (exp((a[1] * X[1])))) * (1 - X[1]) + X[1] * (1 - 1 / (exp(a[1] * (1 - X[1]) + a[24]))));
-		
-		////////////////////////////////////////////////////////////////////////////////////
 
 		Id = a[4] * (expf((X[0] + a[6]) / a[9]) - expf(-(X[0] + a[6]) / a[9])) + (a[2] / a[10]) * (X[0] + a[6]) * expf(-(X[0] + a[6] - a[10]) / a[10]) + a[3] * (atanf(a[17] * (X[0] + a[6] - a[18])) + atanf(a[17] * (X[0] + a[6] + a[18])));
 
@@ -83,8 +45,6 @@ __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a,
 
 		k[0][j] = (Iin - Im - Id) / a[8];
 		k[1][j] = (1 / a[21]) * (1 / (1 + expf(-1 / (a[15] * a[15]) * ((X[0] + a[7]) - X[3]) * ((X[0] + a[7]) - a[13])))) * ((1 - 1 / (expf((a[1] * X[1] + a[23])))) * (1 - X[1]) + X[1] * (1 - 1 / (expf(a[1] * (1 - X[1]))))) - (1 / a[22]) * (1 - 1 / (1 + expf(-1 / (a[16] * a[16]) * ((X[0] + a[7]) - a[14]) * ((X[0] + a[7]) - X[4])))) * ((1 - 1 / (expf((a[1] * X[1])))) * (1 - X[1]) + X[1] * (1 - 1 / (expf(a[1] * (1 - X[1]) + a[24]))));
-
-
 
 		if ((k[1][j] < 0) && (X[5] == 0)) {
 			curand_init(seed, 0, 0, &state);
@@ -105,7 +65,6 @@ __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a,
 			X[6] = 1;
 		}
 		k[2][j] = 1;
-
 
 		if (j == 3) {
 			for (i = 0; i < N; i++) {
@@ -276,54 +235,12 @@ __device__ __host__ numb psi_two_scale(numb x, numb m, numb M, numb d, numb kslo
 	return res;
 }
 
-//__device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb kslope, numb dmargin) {
-//	
-//	
-//
-//	if (d < 1e-14) {
-//		return -x;;
-//	}
-//	numb y = 0;
-//	numb sg = 1;
-//	if (x < 0) {
-//		x = -x;
-//		sg = -1;
-//	}
-//
-//	if (x < (m - 2) / (m - 1) / kslope * d) {
-//		y = -kslope * x;
-//	}
-//	else {
-//		if (x < (m - 2) / (m - 1) * d) {
-//			y = -(m - 2) / (m - 1) * d;
-//		}
-//		else {
-//			if (x > (m / (m - 1) * d)) {
-//				if (x < dmargin * d) {
-//					y = -m / (m - 1) * d;
-//				}
-//				else {
-//					y = -kslope * (x - dmargin * d) - m / (m - 1) * d;
-//				}
-//			}
-//			else {
-//				numb xnew = (x - d);
-//				y = chua_multistep_extended(xnew, m, d / m, kslope, dmargin) - d;
-//			}
-//		}
-//
-//	}
-//	return sg * y;
-//}
-
 __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb kslope, numb dmargin) {
 	// Защита от некорректных параметров
 	if (m <= 1.0 || kslope <= 0.0) return -x;
 
 	numb sg_prod = 1.0;    // mulst sg_i — накопленное произведение знаков
 	numb offset = 0.0;     // sum (sg_prod_k * d_k) — накопленное смещение
-
-
 
 	const int MAX_ITER = 10000;
 	int iter = 0;
@@ -343,8 +260,6 @@ __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb ks
 		numb thr1 = (m - 2) / (m - 1) / kslope * d;
 		numb thr2 = (m - 2) / (m - 1) * d;
 		numb thr3 = m / (m - 1) * d;
-
-
 
 		// 3. Обработка нерекурсивных зон
 		if (x_abs < thr1) {
@@ -370,10 +285,8 @@ __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb ks
 					++iter;
 				}
 			}	
-	
+
 		}
-			
-			
 
 	}
 
@@ -394,7 +307,7 @@ __device__ __host__ numb psi_m(numb x, numb M, numb d, numb k, numb dmargin) {
 
 	if (x == 0)
 		x = 1e-15;
-	
+
 	bool flag = 1;
 
 	while (flag) {
@@ -451,7 +364,7 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 		X[i] += h * N[i];
 }
 
-// --- Детектор разлёта для FastSynchro On Grid ---
+// Детектор разлёта для FastSynchro On Grid
 // Соглашение то же, что в loopCalculateDiscreteModel: maxValue == 0 означает
 // "пользователь не выставил ограничение", nan/inf ловятся всегда. В отличие от
 // тех функций здесь проверяется ВЕСЬ вектор состояния, а не один writableVar:
@@ -503,28 +416,28 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	const size_t amountOfPointsForSkipMaster,
 	const size_t amountOfPointsForSkipSlave)
 {
-	// --- Общая память в рамках одного блока ---
-	// --- Строение памяти: ---
-	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
+	// Общая память в рамках одного блока
+	// Строение памяти:
+	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
 	extern __shared__ numb s[];
 
-	// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
+	// В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами
 	numb* localX = s + (threadIdx.x * amountOfInitialConditions);
 	numb* localValues = s + (blockDim.x * amountOfInitialConditions) + (threadIdx.x * amountOfValues);
 
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Определяем localX[] начальными условиями master + lokalSlave для slave ---
+	// Определяем localX[] начальными условиями master + lokalSlave для slave
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		localX[i] = initialConditions[i];
 	numb localSlave[AMOUNTOFX];
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		localSlave[i] = initialConditionsSlave[i];
 
-	// --- Определяем localValues[] начальными параметрами ---
+	// Определяем localValues[] начальными параметрами
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
@@ -538,7 +451,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 		else               localSlave[indicesOfMutVars[i]] = v;
 	}
 
-	// --- Транзиент (TT): у master и slave он СВОЙ и независимый ---
+	// Транзиент (TT): у master и slave он СВОЙ и независимый
 	// Считается per-cell и уже ПОСЛЕ grid-override, поэтому расклад получается
 	// ровно такой, какой нужен:
 	//   swapRole==0 (сетка свипует master) — master досаживается в КАЖДОЙ
@@ -617,7 +530,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	//numb* Xs = new numb[amountOfX];
 	//numb* arrayZeros = new numb[amountOfX];
 	//numb* K_local = new numb[amountOfX];
-	
+
 	numb Xm[AMOUNTOFX];
 	numb Xs[AMOUNTOFX];
 	numb X_prev[AMOUNTOFX];
@@ -660,7 +573,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 		for (int j = 0; j < amountOfX; j++)
 			K_local[j] = kForward[j];
 
-		// --- Глобальный цикл, который производит вычисления заданные amountOfIterations раз ---
+		// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 		for (int i = 0; i < amountOfIterations - 1; ++i) {
 
 			if (type_of_synch == 0) {
@@ -801,7 +714,7 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 {
 
 	numb xPrev[AMOUNTOFX];
-	// --- Глобальный цикл, который производит вычисления заданные amountOfIterations раз ---
+	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
 	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
 	for ( size_t i = 0; i < amountOfIterations; ++i )
@@ -810,21 +723,21 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 		{
 			xPrev[j] = x[j];
 		}
-		// --- Если все-таки передали массив для записи - записываем значение переменной ---
+		// Если все-таки передали массив для записи - записываем значение переменной
 		if ( data != nullptr )
 			data[startDataIndex + i * writeStep] = x[writableVar];
 
-		// --- Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории ) ---
+		// Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории )
 		for ( int j = 0; j < preScaller; ++j )
 			calculateDiscreteModel(x, values, h);
 
-		// --- Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы ---
+		// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 		if ( isnan( x[writableVar] ) || isinf( x[writableVar] ) )
 		{
 			return false;
 		}
 
-		// --- Если maxValue == 0, это значит пользователь не выставил ограничение, иначе требуется его проверить ---
+		// Если maxValue == 0, это значит пользователь не выставил ограничение, иначе требуется его проверить
 		if ( maxValue != 0 )
 			if ( fabs( x[writableVar] ) > maxValue )
 			{
@@ -832,28 +745,8 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 			}
 	}
 
-	// --- Проверка на сваливание в точку ---
-	//numb tempResult = 0;
-	//for (int j = 0; j < amountOfX; ++j)
-	//{
-	//	tempResult += ((x[j] - xPrev[j]) * (x[j] - xPrev[j]));
-	//}
-
-	//if (tempResult == 0)
-	//{
-	//	delete[] xPrev;
-	//	return false;
-	//}
-
-	//if (sqrt(tempResult) < 1e-12)
-	//{
-	//	delete[] xPrev;
-	//	return false;
-	//}
-
 	return true;
 }
-
 
 __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
@@ -865,8 +758,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb xPrev[AMOUNTOFX];
 	numb checker;
 
-
-	// --- Глобальный цикл, который производит вычисления заданные amountOfIterations раз ---
+	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	for (size_t i = 0; i < amountOfIterations; ++i)
 	{	
 		//#pragma unroll
@@ -874,8 +766,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 		//{
 		//	xPrev[j] = x[j];
 		//}
-		// --- Если все-таки передали массив для записи - записываем значение переменной ---
-
+		// Если все-таки передали массив для записи - записываем значение переменной
 
 		if (data != nullptr) {
 			// writableVar < 0 -> комбинация первых до 3 переменных (port MATLAB).
@@ -901,7 +792,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 		}
 		else
 			calculateDiscreteModel(x, values, h);
-	
+
 		if (i % CHECK_INTERVAL == 0) {
 			checker = 0;
 			//#pragma unroll
@@ -909,14 +800,14 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 				checker = checker + abs(x[j]);
 			}
 
-			// --- Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы ---
+			// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 			if (isnan(checker) || isinf(checker))
 			{
 				//delete[] xPrev;
 				return 0;
 			}
 
-			// --- Если maxValue == 0, это значит пользователь не выставил ограничение, иначе требуется его проверить ---
+			// Если maxValue == 0, это значит пользователь не выставил ограничение, иначе требуется его проверить
 			if (maxValue != 0)
 				if (abs(checker) > maxValue)
 				{
@@ -931,17 +822,13 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	{
 		xPrev[j] = x[j];
 	}
-	// --- Если все-таки передали массив для записи - записываем значение переменной ---
-
-
+	// Если все-таки передали массив для записи - записываем значение переменной
 
 	//#pragma unroll
 	for (int j = 0; j < preScaller; ++j) {
 		//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
 		calculateDiscreteModel(x, values, h);
 	}
-
-
 
 	// Возврат — REGIME_* из configCUDA.h:
 	//    1 (REGIME_OSCILLATION) — норма
@@ -973,7 +860,6 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	return 1;
 }
 
-
 __global__ void distributedCalculateDiscreteModelCUDA(
 	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
@@ -1001,7 +887,7 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
+	// Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime )
 	loopCalculateDiscreteModel(localX, localValues, h, amountOfPointsForSkip,
 		amountOfInitialConditions, 1, 0, 0, nullptr, 0);
 
@@ -1014,11 +900,7 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 	return;
 }
 
-
-
-// --------------------------------------------------------------------------
-// --- Глобальная функция, которая вычисляет траекторию нескольких систем ---
-// --------------------------------------------------------------------------
+// Глобальная функция, которая вычисляет траекторию нескольких систем
 
 __global__ void calculateDiscreteModelCUDA(
 	const int		nPts, 
@@ -1047,17 +929,16 @@ __global__ void calculateDiscreteModelCUDA(
 	int*			actualIterations,
 	const int		logAxisMask)
 {
-	// --- Общая память в рамках одного блока ---
-	// --- Строение памяти: ---
-	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
+	// Общая память в рамках одного блока
+	// Строение памяти:
+	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
 
 	extern __shared__ numb s[];
 	//////// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
 	numb* localX = s + ( threadIdx.x * amountOfInitialConditions );
 	numb* localValues = s + ( blockDim.x * amountOfInitialConditions ) + ( threadIdx.x * amountOfValues );
 
-
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -1091,25 +972,16 @@ __global__ void calculateDiscreteModelCUDA(
 	if (iters_local > amountOfIterations) iters_local = amountOfIterations;  // defensive clamp to the allocated buffer
 	if (actualIterations != nullptr) actualIterations[idx] = (int)iters_local;
 
-	// --- Определяем localX[] начальными условиями ---
+	// Определяем localX[] начальными условиями
 	#pragma unroll
 	for ( int i = 0; i < AMOUNTOFX; ++i )
 		localX[i] = initialConditions[i];
 
-	// --- Определяем localValues[] начальными параметрами ---
+	// Определяем localValues[] начальными параметрами
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	// --- Меняем значение изменяемых параметров на результат функции getValueByIdx ---
-
-	//if (par_or_var){
-	//	for (int i = 0; i < dimension; ++i)
-	//		localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-	//}
-	//else {
-	//	for (int i = 0; i < dimension; ++i)
-	//		localX[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-	//}
+	// Меняем значение изменяемых параметров на результат функции getValueByIdx
 
 	if (par_or_var == 1) {
 		for (int i = 0; i < dimension; ++i) {
@@ -1141,12 +1013,12 @@ __global__ void calculateDiscreteModelCUDA(
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1);
 
-	// --- Теперь уже по-взрослому моделируем систему ---
+	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1);
 
-	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
+	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
 	if (maxValueCheckerArray != nullptr) {
 		maxValueCheckerArray[idx] = flag;
@@ -1155,8 +1027,6 @@ __global__ void calculateDiscreteModelCUDA(
 	//delete[] localValues;
 	return;
 }
-
-
 
 __global__ void calculateDiscreteModelCUDA_H(
 	const int		nPts,
@@ -1177,25 +1047,25 @@ __global__ void calculateDiscreteModelCUDA_H(
 	numb*			data,
 	int*			maxValueCheckerArray)
 {
-	// --- Общая память в рамках одного блока ---
-	// --- Строение памяти: ---
-	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
+	// Общая память в рамках одного блока
+	// Строение памяти:
+	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
 	extern __shared__ numb s[];
 
-	// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
+	// В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами
 	numb* localX = s + (threadIdx.x * amountOfInitialConditions);
 	numb* localValues = s + (blockDim.x * amountOfInitialConditions) + (threadIdx.x * amountOfValues);
 
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Определяем localX[] начальными условиями ---
+	// Определяем localX[] начальными условиями
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		localX[i] = initialConditions[i];
 
-	// --- Определяем localValues[] начальными параметрами ---
+	// Определяем localValues[] начальными параметрами
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
@@ -1206,15 +1076,15 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 	numb h = (numb)pow((numb)10.0, getValueByIdxLog(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0));
 
-	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
+	// Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime )
 	loopCalculateDiscreteModel(localX, localValues, h, transientTime / h,
 		amountOfInitialConditions, 1, 0, 0, nullptr, idx * sizeOfBlock);
 
-	// --- Теперь уже по-взрослому моделируем систему --- 
+	// Теперь уже по-взрослому моделируем систему
 	bool flag = loopCalculateDiscreteModel(localX, localValues, h, tMax / h / preScaller,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, data, idx * sizeOfBlock);
 
-	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
+	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 	if (!flag && maxValueCheckerArray != nullptr)
 		maxValueCheckerArray[idx] = -1;
 	else
@@ -1222,8 +1092,6 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 	return;
 }
-
-
 
 __global__ void calculateDiscreteModelICCUDA(
 	const int		nPts, 
@@ -1246,32 +1114,32 @@ __global__ void calculateDiscreteModelICCUDA(
 	numb*			data, 
 	int*			maxValueCheckerArray)
 {
-	// --- Общая память в рамках одного блока ---
-	// --- Строение памяти: ---
-	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
+	// Общая память в рамках одного блока
+	// Строение памяти:
+	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
 	extern __shared__ numb s[];
 
-	// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
+	// В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами
 	numb* localX = s + ( threadIdx.x * amountOfInitialConditions );
 	numb* localValues = s + ( blockDim.x * amountOfInitialConditions ) + ( threadIdx.x * amountOfValues );
 
 	//numb* localX = new numb[amountOfInitialConditions];
 	//numb* localValues = new numb[amountOfValues];
 
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Определяем localX[] начальными условиями ---
+	// Определяем localX[] начальными условиями
 	for ( int i = 0; i < amountOfInitialConditions; ++i )
 		localX[i] = initialConditions[i];
 
-	// --- Определяем localValues[] начальными параметрами ---
+	// Определяем localValues[] начальными параметрами
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	// --- Меняем значение изменяемых параметров на результат функции getValueByIdx ---
+	// Меняем значение изменяемых параметров на результат функции getValueByIdx
 	for (int i = 0; i < dimension; ++i)
 		localX[indicesOfMutVars[i]] = getValueByIdx( amountOfCalculatedPoints + idx, 
 			nPts, ranges[i * 2], ranges[i * 2 + 1], i );
@@ -1300,17 +1168,17 @@ __global__ void calculateDiscreteModelICCUDA(
 	//	maxValueCheckerArray[idx] = 1;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	
-	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
-	
+
+	// Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime )
+
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT, 0 = UNBOUND
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, 0, nullptr, idx * sizeOfBlock);
 
-	// --- Теперь уже по-взрослому моделируем систему ---
+	// Теперь уже по-взрослому моделируем систему
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfIterations,amountOfInitialConditions, preScaller, writableVar, maxValue, data, idx * sizeOfBlock);
 
-	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
+	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
 	if (maxValueCheckerArray != nullptr) {
 		maxValueCheckerArray[idx] = flag;
@@ -1344,47 +1212,45 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	numb* data,
 	int* maxValueCheckerArray)
 {
-	// --- Общая память в рамках одного блока ---
-	// --- Строение памяти: ---
-	// --- {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...} ---
+	// Общая память в рамках одного блока
+	// Строение памяти:
+	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
 	extern __shared__ numb s[];
 
-	// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
+	// В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами
 	numb* localX = s + (threadIdx.x * amountOfInitialConditions);
 	numb* localValues = s + (blockDim.x * amountOfInitialConditions) + (threadIdx.x * amountOfValues);
 
-
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Определяем localX[] начальными условиями ---
+	// Определяем localX[] начальными условиями
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		localX[i] = initialConditions[i];
 
-	// --- Определяем localValues[] начальными параметрами ---
+	// Определяем localValues[] начальными параметрами
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	// --- Меняем значение изменяемых параметров на результат функции getValueByIdx ---
+	// Меняем значение изменяемых параметров на результат функции getValueByIdx
 	for (int i = 0; i < dimension; ++i)
 		localX[indicesOfMutVars[i]] = getValueByIdx_forLogBains(amountOfCalculatedPoints + idx,
 			nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 
-
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
+	// Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime )
 
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT, 0 = UNBOUND
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfPointsForSkip, amountOfInitialConditions, 1, 0, 0, nullptr, idx * sizeOfBlock);
 
-	// --- Теперь уже по-взрослому моделируем систему ---
+	// Теперь уже по-взрослому моделируем систему
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h, amountOfIterations, amountOfInitialConditions, preScaller, writableVar, maxValue, data, idx * sizeOfBlock);
 
-	// --- Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе ---
+	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
 	if (maxValueCheckerArray != nullptr) {
 		maxValueCheckerArray[idx] = flag;
@@ -1392,7 +1258,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	return;
 }
 
-// --- Функция, которая находит индекс в последовательности значений ---
+// Функция, которая находит индекс в последовательности значений
 
 //__device__ __host__ numb getValueByIdx(const size_t idx, const int nPts,
 //	const numb startRange, const numb finishRange, const int valueNumber)
@@ -1411,7 +1277,6 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 //	// Если valueNumber == 1 (ось Y), делитель равен nPts.
 //	const int64_t divisor = (valueNumber == 0) ? 1 : nPts;
 //	const int64_t pointIdx = (idx / divisor) % nPts;
-//
 //
 //	// 2. Вычисление шага сетки. 
 //	// Приводим (nPts - 1) к типу numb, чтобы избежать неявного повышения до double
@@ -1456,8 +1321,7 @@ __device__ __host__ numb getValueByIdx_forLogBains(const int idx, const int nPts
 
 }
 
-
-// --- Функция, которая находит индекс в последовательности значений ---
+// Функция, которая находит индекс в последовательности значений
 __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber)
 {
@@ -1484,13 +1348,8 @@ __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const 
 	return ucuda_node_value_log(n, nPts, startRange, finishRange);
 }
 
-
-
-// ---------------------------------------------------------------------------------------------------
-// --- Находит пики в интервале [startDataIndex; startDataIndex + amountOfPoints] в "data" массиве ---
-// ---------------------------------------------------------------------------------------------------
+// Находит пики в интервале [startDataIndex; startDataIndex + amountOfPoints] в "data" массиве
 //peakFinder(data, idx* sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
-
 
 __device__ __host__ void MeanAndMedianFreq(const int idx, const int startDataIndex, int amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq)
 {
@@ -1503,27 +1362,6 @@ __device__ __host__ void MeanAndMedianFreq(const int idx, const int startDataInd
 
 	medianFreq[idx] = 1.0 / timeOfPeaks[startDataIndex];
 
-	//for (size_t i = 0; i < amountOfPeaks - 1; ++i) {
-	//	size_t min_idx = i;
-	//	for (size_t j = i + 1; j < amountOfPeaks; ++j) {
-	//		if (timeOfPeaks[startDataIndex + j] < timeOfPeaks[startDataIndex + min_idx]) {
-	//			min_idx = j;
-	//		}
-	//	}
-	//	numb localII = timeOfPeaks[startDataIndex + min_idx];
-	//	timeOfPeaks[startDataIndex + min_idx] = timeOfPeaks[startDataIndex + i];
-	//	timeOfPeaks[startDataIndex + i] = localII;
-	//}
-
-	//if (amountOfPeaks % 2 == 0) {
-	//	//medianFreq[idx] = 0.5 *((1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks)) - 1]) + (1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks)) + 0]));
-	//	medianFreq[idx] = 0.5 * ((1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks)) ]) + (1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks)) + 1]));
-
-	//}
-	//else {
-	//	//medianFreq[idx] = 1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks - 1))];
-	//	medianFreq[idx] = 1.0 / timeOfPeaks[startDataIndex + (int)(0.5 * (amountOfPeaks + 1))];
-	//}
 }
 
 __device__ __host__ void MeanAndVariance(const int idx, const int startDataIndex, int amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval)
@@ -1558,7 +1396,7 @@ __device__ __host__ void MeanAndVariance(const int idx, const int startDataIndex
 	for (size_t i = 0; i < amountOfPeaks; ++i)
 		if (outPeaks[startDataIndex + i] > localValue)
 			localValue = outPeaks[startDataIndex + i];
-	
+
 	maxPeak[idx] = localValue;
 
 	localValue = -9999999999;
@@ -1573,17 +1411,17 @@ __device__ __host__ void MeanAndVariance(const int idx, const int startDataIndex
 __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataIndex,
 	const size_t amountOfPoints)
 {
-		// --- Переменная для хранения найденных пиков ---
+		// Переменная для хранения найденных пиков
 		numb maxValue = -1e25;
-		// --- Начинаем просматривать заданных интервал на наличие пиков ---
+		// Начинаем просматривать заданных интервал на наличие пиков
 		for (size_t i = startDataIndex + 1; i < startDataIndex + amountOfPoints - 1; ++i)
 		{
-			// --- Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) ) ---
+			// Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) )
 			if (data[i] >= maxValue) //
 			{
 				maxValue = data[i];
 			}
-				
+
 		}
 
 		return maxValue;
@@ -1594,28 +1432,28 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 {
 
 	if (doCalculatePeaks) {
-		// --- Переменная для хранения найденных пиков ---
+		// Переменная для хранения найденных пиков
 		int amountOfPeaks = 0;
 
-		// --- Начинаем просматривать заданных интервал на наличие пиков ---
+		// Начинаем просматривать заданных интервал на наличие пиков
 		for (size_t i = startDataIndex + 2; i < startDataIndex + amountOfPoints - 2; ++i)
 		{
-			// --- Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) ) ---
+			// Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) )
 			if (data[i] - data[i - 1] > eps_peak_delta && data[i] > peak_threshold && data[i] >= data[i + 1]) //
 			{
-				// --- От найденной точки начинаем идти вперед, пока не наткнемся на точку строго больше или меньше ---
+				// От найденной точки начинаем идти вперед, пока не наткнемся на точку строго больше или меньше
 				for (size_t j = i; j < startDataIndex + amountOfPoints - 2; ++j)
 				{
-					// --- Если наткнулись на точку строго больше, значит это был не пик ---
+					// Если наткнулись на точку строго больше, значит это был не пик
 					if (data[j] < data[j + 1])
 					{
 						i = j + 1;	// --- Обновляем внешний счетчик, чтобы дважды не проходить один и тот же интервал
 						break;		// --- Возвращаемся к внешнему циклу
 					}
-					// --- Если о чудо, мы нашли точку меньше, чем текущая, значит мы нашли пик ---
+					// Если о чудо, мы нашли точку меньше, чем текущая, значит мы нашли пик
 					if (data[j] - data[j + 1] > eps_peak_delta)
 					{
-						
+
 						if (doInterpolatePeaks) {
 							numb denom = data[j - 1] - (numb)2.0 * data[j] + data[j + 1];
 							numb delta = 0.0;
@@ -1627,15 +1465,15 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 							timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
 						}
 						else {
-							// --- Если массик outPeaks не пуст, то делаем запись ---
+							// Если массик outPeaks не пуст, то делаем запись
 							if (outPeaks != nullptr)
 								outPeaks[startDataIndex + amountOfPeaks] = data[j]; //data[j];
-							// --- Если массик timeOfPeaks не пуст, то делаем запись ---
+							// Если массик timeOfPeaks не пуст, то делаем запись
 							if (timeOfPeaks != nullptr)
 								timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(i - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = trunc( ( (numb)j + (numb)i ) / (numb)2 );	// Выбираем индекс посередине между j и i
-						
+
 						}
 						++amountOfPeaks;
 						i = j + 1; // Потому что следующая точка точно не может быть пиком ( два пика не могут идти подряд )
@@ -1645,7 +1483,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 			}
 		}
 
-		// --- Межпиковые интервалы + фильтр по eps_interPeak_delta ---
+		// Межпиковые интервалы + фильтр по eps_interPeak_delta
 		// Опорный (anchor) пик, от него меряем интервал до следующего; всё, что
 		// ближе eps_interPeak_delta, отбрасывается, а опора не сдвигается.
 		// При eps_interPeak_delta == 0 (дефолт) условие delta >= 0 выполняется
@@ -1703,16 +1541,12 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 }
 
-
-
-// ----------------------------------------------------------------
-// --- Нахождение пиков в "data" массиве в многопоточном режиме ---
-// ----------------------------------------------------------------
+// Нахождение пиков в "data" массиве в многопоточном режиме
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if ( idx >= amountOfBlocks )		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -1750,12 +1584,12 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* globalPeakValue)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
+	// Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее
 	if (amountOfPeaks[idx] == 0)
 	{
 		amountOfPeaks[idx] = 0;
@@ -1763,17 +1597,15 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 		return;
 	}
 
-
 	globalPeakValue[idx] = globalPeakFinder(data, (size_t)idx * sizeOfBlock, sizeOfBlock);
 	return;
 }
-
 
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -1832,13 +1664,6 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 
 		for (size_t n = 0; n < sizeOfBlock; n++) {
 
-			//numb h_window = 0.53836 - 0.46164 * cos(gamma * n ); // Hamming
-			//numb h_window = 0.5*(1.0 - cos(gamma * n)); // Hanning
-			//numb h_window = 1.0;
-
-			//AkCOS[startIndexFreq + k] += data[startDataIndex + n] * cos(theta * f_k * (numb)n);
-			//BkSIN[startIndexFreq + k] += data[startDataIndex + n] * sin(theta * f_k * (numb)n);
-
 			// window[n]*data[n] раньше считалось дважды подряд (для AkCOS и
 			// для BkSIN отдельно) — считаем один раз и переиспользуем. Оба
 			// массива этот kernel только читает — __ldg() (read-only cache).
@@ -1875,16 +1700,15 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	return;
 }
 
-
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
+	// Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее
 	if (amountOfPeaks[idx] == -1)
 	{
 		meanFreq[idx] = 0;
@@ -1909,12 +1733,12 @@ __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfB
 __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
+	// Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее
 	if (amountOfPeaks[idx] == -1)
 	{
 		meanPeak[idx] = 0;
@@ -1960,16 +1784,15 @@ __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlo
 	//return;
 }
 
-
 __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
+	// Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее
 	if (amountOfPeaks[idx] == -1)
 	{
 		amountOfPeaks[idx] = 0;
@@ -1979,8 +1802,6 @@ __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int am
 	amountOfPeaks[idx] = peakFinder(data, idx * sizeOfBlock, amountOfPeaks[idx], outPeaks, timeOfPeaks, h);
 	return;
 }
-
-
 
 __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, bool* flags, numb ostrovskyThreshold)
@@ -2047,8 +1868,6 @@ __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data,
 		flags[idx * 5 + 4] = false;
 	return;
 }
-
-
 
 __device__ __host__ int kde(numb* data, const int startDataIndex, const int amountOfPoints,
 	int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
@@ -2118,8 +1937,6 @@ __device__ __host__ int kde(numb* data, const int startDataIndex, const int amou
 	return resultKde;
 }
 
-
-
 __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, int* kdeResult, int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
 	numb kdeSamplesInterval2, numb kdeSmoothH)
@@ -2137,10 +1954,7 @@ __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlo
 		kdeSampling, kdeSamplesInterval1, kdeSamplesInterval2, kdeSmoothH);
 }
 
-
-// ------------------------------------------------
-// --- Вычисляет расстояние между двумя точками ---
-// ------------------------------------------------
+// Вычисляет расстояние между двумя точками
 
 __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 {
@@ -2154,19 +1968,13 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 	return sqrt(dx*dx + dy*dy);
 }
 
-
-
-// ----------------------
-// --- Функция DBSCAN ---
-// ----------------------
+// Функция DBSCAN
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
 	const int idx, const numb eps, int* outData,
 	const numb multPeak, const numb multInterval)
 {
-	// ------------------------------------------------------------
-	// --- Если пиков 0 или 1 - даже не обрабатываем эти случаи ---
-	// ------------------------------------------------------------
+	// Если пиков 0 или 1 - даже не обрабатываем эти случаи
 
 	if (amountOfPeaks == -1)
 		return -1;
@@ -2180,22 +1988,15 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	//if (amountOfPeaks >= 3600)
 	//	return 0;
 
-
-	// ------------------------------------------------------------
-
-
 	int cluster = 0;
 
 	for (size_t i = startDataIndex; i < startDataIndex + sizeOfHelpfulArray; ++i) {
 		helpfulArray[i] = 0;
 	}
 
-	// ------------------------------------------------------------
 	//for (int i = 0; i < amountOfPeaks; i++) {
 	//	helpfulArray[startDataIndex + i] = (int)(100*sqrt(data[startDataIndex + i] * data[startDataIndex + i] + intervals[startDataIndex + i] * intervals[startDataIndex + i]));
 	//}
-	// ------------------------------------------------------------
-
 
 	// Масштабирование осей признаков перед кластеризацией. Раньше здесь стояли
 	// constexpr mult_peak / mult_interval из configCUDA.h — теперь множители
@@ -2206,7 +2007,6 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 		data[startDataIndex + i] = data[startDataIndex + i] * multPeak;
 		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
 	}
-
 
 	// Ёмкость стека обхода. Пока инвариант про две половины helpfulArray
 	// выполняется, sp < stackCap истинно всегда и проверка ничего не меняет;
@@ -2256,165 +2056,14 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	return cluster - 1;
 }
 
-
-//__device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
-//	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
-//	const int idx, const numb eps, int* outData)
-//{
-//	// ------------------------------------------------------------
-//	// --- Валидация входных параметров ---
-//	// ------------------------------------------------------------
-//
-//	// Некорректное количество пиков
-//	if (amountOfPeaks <= 0)
-//		return 0;
-//
-//	// Проверка: достаточно ли памяти в helpfulArray?
-//	// Нам нужно: amountOfPeaks (метки) + amountOfPeaks (стек)
-//	// Если памяти мало — работаем в безопасном режиме (только метки, но медленно)
-//	const bool hasStackBuffer = (sizeOfHelpfulArray >= 2 * amountOfPeaks);
-//
-//	// ------------------------------------------------------------
-//	// --- Предобработка данных (масштабирование) ---
-//	// ------------------------------------------------------------
-//
-//	// Предполагается, что mult_peak и mult_interval определены глобально 
-//	// или переданы через параметры/константы
-//	for (int i = 0; i < amountOfPeaks; i++) {
-//		data[startDataIndex + i] = data[startDataIndex + i] * mult_peak;
-//		intervals[startDataIndex + i] = intervals[startDataIndex + i] * mult_interval;
-//	}
-//
-//	// ------------------------------------------------------------
-//	// --- Инициализация массива меток ---
-//	// ------------------------------------------------------------
-//
-//	// helpfulArray[startDataIndex + i] будет хранить ID кластера для точки i
-//	// 0 означает "не посещен" (кластеры нумеруются с 1)
-//
-//	// Оптимизация: очищаем только нужный диапазон
-//	// Если helpfulArray используется где-то еще, возможно, потребуется очистка всего sizeOfHelpfulArray
-//	for (int i = 0; i < amountOfPeaks; ++i) {
-//		helpfulArray[startDataIndex + i] = 0;
-//	}
-//
-//	// Указатель на стек в helpfulArray (если есть место)
-//	// Стек хранит индексы точек для обхода
-//	// Расположен сразу после меток: [метки][стек]
-//	// Индекс в helpfulArray для стека: startDataIndex + amountOfPeaks + offset
-//	int* stackBuffer = hasStackBuffer ?
-//		reinterpret_cast<int*>(&helpfulArray[startDataIndex + amountOfPeaks]) : nullptr;
-//
-//	int cluster_count = 0;
-//
-//	// ------------------------------------------------------------
-//	// --- Основной цикл кластеризации (Поиск связных компонент) ---
-//	// ------------------------------------------------------------
-//
-//	// При minPts = 1 DBSCAN вырождается в поиск компонент связности графа,
-//	// где ребра проведены между точками с расстоянием < eps
-//
-//	for (int i = 0; i < amountOfPeaks; i++) {
-//
-//		// Если точка уже имеет метку (посещена), пропускаем её
-//		if (helpfulArray[startDataIndex + i] != 0)
-//			continue;
-//
-//		// Начинаем новый кластер
-//		++cluster_count;
-//		int current_cluster_id = cluster_count;
-//
-//		// --- Инициализация стека для обхода в глубину (DFS) ---
-//		int stack_size = 0;
-//
-//		// Push: добавляем стартовую точку i в стек
-//		// Если есть выделенный буфер — пишем туда, иначе используем локальный массив (для малых N)
-//		// В данном примере предполагаем, что stackBuffer доступен
-//		if (hasStackBuffer) {
-//			stackBuffer[stack_size++] = i;
-//		}
-//		else {
-//			// Fallback: если буфера нет, кладем индекс прямо в метку (хак) 
-//			// и потом восстанавливаем. Но лучше просто выделить память.
-//			// Для простоты здесь просто пропускаем стек и делаем рекурсивный вызов 
-//			// (не рекомендуется для GPU) или просто помечаем точку.
-//			// В исправленном коде мы требуем наличия буфера.
-//			// Здесь для надежности просто помечаем текущую и переходим к следующей, 
-//			// если нет места под стек (упрощение для примера).
-//			// Но правильнее:
-//			// Вернуть ошибку или требовать достаточный sizeOfHelpfulArray.
-//		}
-//
-//		helpfulArray[startDataIndex + i] = current_cluster_id;
-//
-//		// --- Обход графа (DFS) ---
-//		while (stack_size > 0) {
-//			// Pop: извлекаем индекс из стека
-//			int curr_idx = hasStackBuffer ? stackBuffer[--stack_size] : -1;
-//
-//			// Защитная проверка
-//			if (curr_idx < 0 || curr_idx >= amountOfPeaks) continue;
-//
-//			// Перебор всех возможных соседей
-//			// ИСПРАВЛЕНО: цикл до amountOfPeaks (ранее было amountOfPeaks - 1)
-//			for (int k = 0; k < amountOfPeaks; k++) {
-//
-//				// Не сравниваем точку саму с собой
-//				if (k == curr_idx) continue;
-//
-//				// Если точка уже посещена (имеет метку), пропускаем
-//				// Это критически важно, чтобы не зациклиться
-//				if (helpfulArray[startDataIndex + k] != 0)
-//					continue;
-//
-//				// Вычисление расстояния
-//				// Функция distance должна быть определена как __device__ __host__
-//				numb dist = distance(
-//					data[startDataIndex + curr_idx],
-//					intervals[startDataIndex + curr_idx],
-//					data[startDataIndex + k],
-//					intervals[startDataIndex + k]
-//				);
-//
-//				// Проверка условия соседства
-//				if (dist < eps) {
-//					// Помечаем соседа как принадлежащий к текущему кластеру
-//					helpfulArray[startDataIndex + k] = current_cluster_id;
-//
-//					// Добавляем соседа в стек для дальнейшего обхода его соседей
-//					// ИСПРАВЛЕНО: пишем по индексу stack_size, а не по индексу k!
-//					if (hasStackBuffer && stack_size < amountOfPeaks) {
-//						stackBuffer[stack_size++] = k;
-//					}
-//				}
-//			}
-//		}
-//	}
-//
-//	// ------------------------------------------------------------
-//	// --- Завершение ---
-//	// ------------------------------------------------------------
-//
-//	// Возвращаем количество найденных кластеров
-//	// Если кластеров нет, вернется 0.
-//
-//	// Если outData передан, можно записать туда подробную статистику
-//	// if (outData != nullptr) *outData = cluster_count;
-//
-//	return cluster_count;
-//}
-
-
-// ---------------------------------
-// --- Глобальная функция DBSCAN ---
-// ---------------------------------
+// Глобальная функция DBSCAN
 
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData,
 	const numb multPeak, const numb multInterval)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -2445,9 +2094,7 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 // удаления max_amount_of_peaks больше НЕ бьёт по local memory и occupancy —
 // он ограничивает только число пиков в peakFinder и размеры device-буферов.
 
-// --------------------
-// --- Ядро для LLE ---
-// --------------------
+// Ядро для LLE
 // LLEKernelCUDA (Wolf/Benettin) под NVRTC ВКЛЮЧЁН — curand_kernel.h теперь
 // доступен из cudaLibrary.cuh. Всё что после этого kernel'а (LLE_IC, LS,
 // dbscan, fastSynchro и пр.) остаётся под гардом, потому что не требуется
@@ -2522,15 +2169,6 @@ __global__ void LLEKernelCUDA(
 	for (int i = 0; i < amountOfValues; ++i)
 		localValues[i] = values[i];
 
-	//if (par_or_var) {
-	//	for (int i = 0; i < dimension; ++i)
-	//		localValues[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-	//}
-	//else {
-	//	for (int i = 0; i < dimension; ++i)
-	//		x[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-	//}
-
 	if (par_or_var == 1) {
 		for (int i = 0; i < dimension; ++i) {
 			if (i == hSweepAxis) continue;
@@ -2596,7 +2234,6 @@ __global__ void LLEKernelCUDA(
 		z[i] /= zPower;
 	}
 
-
 	//Calculating
 
 	for (int i = 0; i < amountOfInitialConditions; ++i) {
@@ -2647,7 +2284,7 @@ __global__ void LLEKernelCUDA(
 		}
 
 		result += log(tempData);
-		
+
 		//if (tempData != 0)
 		//	tempData = (1 / tempData);
 		//else
@@ -2666,9 +2303,7 @@ __global__ void LLEKernelCUDA(
 // под NVRTC. По мере необходимости (LS, dbscan и др.) — снимать гард точечно.
 #ifndef __CUDACC_RTC__
 
-// -------------------------
-// --- Ядро для LLE (IC) ---
-// -------------------------
+// Ядро для LLE (IC)
 __global__ void LLEKernelICCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -2727,7 +2362,6 @@ __global__ void LLEKernelICCUDA(
 		z[i] = 0;
 	}
 
-
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 	{
 		curand_init(seed + i, 0, 0, &state);
@@ -2742,7 +2376,6 @@ __global__ void LLEKernelICCUDA(
 	{
 		z[i] /= zPower;
 	}
-
 
 	loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip,
 		amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
@@ -2841,8 +2474,6 @@ __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVector
 			denominators[i] = denominator;
 	}
 }
-
-
 
 __global__ void LSKernelCUDA(
 	const int nPts,
@@ -2950,7 +2581,6 @@ __global__ void LSKernelCUDA(
 			                                                              : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
-
 	// Общий seed для всех потоков + номер подпоследовательности = idx (см.
 	// LLEKernelCUDA выше — тот же аргумент против idx-как-seed).
 	const unsigned long long ppSeed = 1234567891ULL;
@@ -2984,9 +2614,7 @@ __global__ void LSKernelCUDA(
 
 	//Calculating
 
-
 	gramSchmidtProcess(z, y, amountOfInitialConditions);
-
 
 	for (int j = 0; j < amountOfInitialConditions; ++j)
 	{
@@ -3018,7 +2646,6 @@ __global__ void LSKernelCUDA(
 		//__syncthreads();
 
 		//NORMALIZTION??????????
-		// 
 		for (int k = 0; k < amountOfInitialConditions; ++k)
 			for (int l = 0; l < amountOfInitialConditions; ++l)
 				y[k * amountOfInitialConditions + l] = y[k * amountOfInitialConditions + l] - x[l];
@@ -3108,8 +2735,6 @@ __global__ void LSKernelICCUDA(
 		x[indicesOfMutVars[i]] = getValueByIdx(amountOfCalculatedPoints + idx,
 			nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 
-
-
 	size_t seed = idx;
 	curandState_t state;
 
@@ -3134,15 +2759,12 @@ __global__ void LSKernelICCUDA(
 		}
 	}
 
-
 	loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip,
 		amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 	//Calculating
 
-
 	gramSchmidtProcess(z, y, amountOfInitialConditions);
-
 
 	for (int j = 0; j < amountOfInitialConditions; ++j)
 	{
@@ -3171,7 +2793,6 @@ __global__ void LSKernelICCUDA(
 		//__syncthreads();
 
 		//NORMALIZTION??????????
-		// 
 		for (int k = 0; k < amountOfInitialConditions; ++k)
 			for (int l = 0; l < amountOfInitialConditions; ++l)
 				y[k * amountOfInitialConditions + l] = y[k * amountOfInitialConditions + l] - x[l];
@@ -3194,14 +2815,12 @@ __global__ void LSKernelICCUDA(
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
 }
 
-// ------------------------------------------------------------------
-// --- Нахождение среднего значения пиков и межпиковых интервалов ---
-// ------------------------------------------------------------------
+// Нахождение среднего значения пиков и межпиковых интервалов
 
 __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -3221,21 +2840,8 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 		return;
 	}
 
-
-
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
-	//if (outAvgPeaks[idx] == -1)
-	//{
-	//	outAvgPeaks[idx] = NAN;
-	//	AvgTimeOfPeaks[idx] = NAN;
-	//	return;
-	//}
-
 	outAvgPeaks[idx] = 0;
 	AvgTimeOfPeaks[idx] = 0;
-
-	//__device__ __host__ int peakFinder(numb* data, const int startDataIndex,
-	//	const int amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h)
 
 	int amountOfPeaks = peakFinder(data, idx * sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
 
@@ -3267,7 +2873,7 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 	return;
 }
 
-// ===== Открываем доступ под NVRTC для basins-pipeline (U-CUDA) =====
+// Открываем доступ под NVRTC для basins-pipeline (U-CUDA)
 // Группа kernel'ов до CUDA_dbscan_search_unbound_points_kernel включительно
 // нужна U-CUDA::run_basins. До правки весь блок был внутри
 // `#ifndef __CUDACC_RTC__` (LLE/LS-зависимости), и NVRTC не находил символы
@@ -3397,7 +3003,7 @@ __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int a
 __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* PeaksAmount, int* systemCheker, numb h)
 {
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= amountOfBlocks)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -3419,19 +3025,8 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 		return;
 	}
 
-	// --- Если на предыдущих этапах систему уже отметили как "непригодную", то пропускаем ее ---
-	//if (outAvgPeaks[idx] == -1)
-	//{
-	//	outAvgPeaks[idx] = NAN;
-	//	AvgTimeOfPeaks[idx] = NAN;
-	//	return;
-	//}
-
 	outAvgPeaks[idx] = 0;
 	AvgTimeOfPeaks[idx] = 0;
-
-	//__device__ __host__ int peakFinder(numb* data, const int startDataIndex,
-	//	const int amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h)
 
 	int amountOfPeaks = peakFinder(data, idx * sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
 
@@ -3502,8 +3097,6 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 	}
 }
 
-
-
 __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -3517,8 +3110,6 @@ __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* interva
 		return;
 	}
 }
-
-
 
 __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
@@ -3548,7 +3139,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 	}
 }
 
-// ===== FastSynchro kernels — теперь ВНУТРИ NVRTC-окна =====
+// FastSynchro kernels — теперь ВНУТРИ NVRTC-окна
 // Раньше эта группа была спрятана под `#ifndef __CUDACC_RTC__`, но U-CUDA
 // run_fastsync (Release-режим через NVRTC) их подгружает по lowered-имени
 // (cuModuleGetFunction → "named symbol not found" иначе). NonLinAnal
@@ -3573,14 +3164,13 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		preScaller)
 {
 
-	// --- Вычисляем индекс потока, в котором находимся в даный момент ---
+	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// --- Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime ) --- 
+	// Прогоняем систему amountOfPointsForSkip раз ( для отработки transientTime )
 		//numb Xs[3] = { initialConditions[0] , initialConditions[1], initialConditions[2] };
-
 
 	output[idx] = loopCalculateDiscreteModelForFastSynchro(
 		initialConditionsSlave,//numb* Xs,
@@ -3625,7 +3215,6 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	//numb err0 = 0;
 	//numb err1 = 0;
 
-
 	for (int j = 0; j < amountOfX; ++j) {
 		if (type_of_synch == 1) // bidirectional sycnhro
 			Xm[j] = timedomain[startDataIndex + j];
@@ -3634,14 +3223,12 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 		//Xs[j] = timedomain[startDataIndex + j] + 0.01;
 	}
 
-
-
 	for (int m = 0; m < iterOfSynchr; ++m) {
 
 		for (int j = 0; j < amountOfX; j++)
 			K_local[j] = K_Forward[j];
 
-		// --- Глобальный цикл, который производит вычисления заданные amountOfIterations раз ---
+		// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 		for (int i = 0; i < amountOfIterations - 1; ++i)
 		{
 			if (type_of_synch == 0) {
@@ -3709,7 +3296,6 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 				rms_error = 0;
 		}
 
-
 		for (int j = 0; j < amountOfX; ++j)
 			K_local[j] = K_Backward[j];
 
@@ -3735,7 +3321,6 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 		}
 	}
 
-
 	//for (int j = 0; j < amountOfIterations - 1; ++j) {
 	//	rms_error = rms_error + norm_error[j];
 	//}
@@ -3745,7 +3330,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 
 	if (error_estim == 2)
 		rms_error = sqrt(rms_error);
-	
+
 	if (rms_error <= FS_error_trs)
 		rms_error = log10(FS_error_trs);
 	else

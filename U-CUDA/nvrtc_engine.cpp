@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <sstream>
 
-// --- помощники проверки ошибок, пишут в error_ ---
+// помощники проверки ошибок, пишут в error_
 #define NV_FAIL(msg) do { error_ = (msg); return false; } while(0)
 
 static bool nvrtc_ok(nvrtcResult r, std::string& err, const char* where) {

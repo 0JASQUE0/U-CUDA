@@ -1,5 +1,4 @@
 ﻿// bifurcation2d.template.cu
-//
 // NVRTC-шаблон для 2D-бифуркации (хитмап «период(p1, p2)» через DBSCAN).
 // Структура идентична bifurcation1d.template.cu; отличие — в runtime-аргументах
 // kernel'а (см. parametric_engine.cpp::run_bif2d): dimension=2, ranges[4],

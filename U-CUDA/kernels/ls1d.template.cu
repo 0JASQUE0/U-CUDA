@@ -1,5 +1,4 @@
 ﻿// ls1d.template.cu
-//
 // NVRTC-шаблон для 1D спектра Ляпунова (LS). Подставляется ParametricEngine'ом
 // тем же способом, что bifurcation1d/lle1d. Алгоритм — NonLinAnal::LSKernelCUDA
 // (cudaLibrary.cu:2732), Wolf/Benettin с Gram-Schmidt'ом для N ортогональных

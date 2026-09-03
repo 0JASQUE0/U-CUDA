@@ -31,13 +31,12 @@ struct ParametricQueueItem {
     int  index = 0;
 };
 
-// One dynamic plot window in Parametric mode (mirrors PhaseAnalysisSession's
-// Projection, but must span 3 independent sessions — bifurcation_session /
-// lle_session / ls_session — so it lives on AppModel rather than inside any
-// one of them). Replaces the old fixed "Bifurcation 1D"/"LLE 1D"/"Lyapunov
-// Spectrum" windows and the per-diagram bool `visible`: a window's own
-// `members` list is now the only source of "what's shown here", since the
-// same diagram/curve can belong to zero, one, or several windows at once.
+// One dynamic plot window in Parametric mode (mirrors PhaseAnalysisSession's Projection, but must
+// span 3 independent sessions — bifurcation_session / lle_session / ls_session — so it lives on
+// AppModel rather than inside any one of them). Replaces the old fixed "Bifurcation 1D"/"LLE 1D"/
+// "Lyapunov Spectrum" windows and the per-diagram bool `visible`: a window's `members` list is now
+// the only source of "what's shown here", since the same diagram/curve can belong to zero, one, or
+// several windows at once.
 struct ParametricPlotWindow {
     enum class Kind { Bifurcation, LLE, LS };
     Kind        kind    = Kind::Bifurcation;
@@ -52,11 +51,10 @@ struct ParametricPlotWindow {
     // сбрасывается при очистке поля. Дефолт true — старые сохранения
     // без ключа не перезатираем.
     bool        label_is_manual = true;
-    // Indices into bifurcation_session.diagrams / lle_session.curves /
-    // ls_session.curves (selected by `kind`), filtered to items whose
-    // .mode_2d/.colored_1d matches this window's own. Multiple entries =
-    // overlay (typical for 1D); 2D/Colored-1D windows are UI-nudged, not
-    // hard-capped, toward exactly one member.
+    // Indices into bifurcation_session.diagrams / lle_session.curves / ls_session.curves (selected
+    // by `kind`), filtered to items whose .mode_2d/.colored_1d matches this window's own. Multiple
+    // entries = overlay (typical for 1D); 2D/Colored-1D windows are UI-nudged, not hard-capped,
+    // toward exactly one member.
     std::vector<int> members;
     // Stable identity for render-side caches (PlotRenderer/Plot2DView/
     // HeatmapView instances keyed by this, not by vector position — position
@@ -64,12 +62,11 @@ struct ParametricPlotWindow {
     int id = 0;
 };
 
-// Dynamic plot window for DFT1D mode — mirrors ParametricPlotWindow, but
-// simplified: only one display kind exists (heatmap), so no `kind`/`mode_2d`/
-// `colored_1d` fields are needed. `members` indexes dft1d_session.configs and
-// always holds at most one entry — a DFT1D window shows exactly one config's
-// heatmap (same as Bifurcation's 2D/colored-1D windows; single-select radio
-// in the "Members..." popup, enforced again in add_dft1d_plot_window).
+// Dynamic plot window for DFT1D mode — mirrors ParametricPlotWindow but simplified: only one
+// display kind exists (heatmap), so no `kind`/`mode_2d`/`colored_1d` fields. `members` indexes
+// dft1d_session.configs and always holds at most one entry — a DFT1D window shows exactly one
+// config's heatmap (as Bifurcation's 2D/colored-1D windows do; single-select radio in the
+// "Members..." popup, enforced again in add_dft1d_plot_window).
 struct Dft1DPlotWindow {
     std::string label = "Plot 1";
     bool        label_is_manual = true;
@@ -84,10 +81,9 @@ struct Dft1DQueueItem {
     int index = 0;
 };
 
-// Один элемент basins-очереди — индекс config'а в basins_session.configs.
-// Basins живёт в отдельной очереди (а не в parametric_queue), потому что
-// сейчас параметрика и basins не пересекаются по UI: parametric "Run all"
-// пушит BD/LLE/LS, а basins "Run all" — свои configs. Драйнится тем же
+// Один элемент basins-очереди — индекс config'а в basins_session.configs. Basins живёт в отдельной
+// очереди (а не в parametric_queue), потому что параметрика и basins сейчас не пересекаются по UI:
+// parametric "Run all" пушит BD/LLE/LS, а basins "Run all" — свои configs. Драйнится тем же
 // движком, но независимым тиком в draw_gui.
 struct BasinsQueueItem {
     int index = 0;
@@ -102,12 +98,10 @@ struct FastSyncQueueItem {
 // Состояние распознавания (для UI-индикации).
 enum class OcrState { Idle, Running, Done, Failed };
 
-// Отложенный запрос "скопировать диаграмму в буфер" (правый клик "Copy
-// image to clipboard" — см. plot_axis.h request_plot_screenshot).
-// Разбирается один раз в главном цикле app_main.cpp: сам glReadPixels ждёт
-// пару кадров после
-// запроса, потому что right-click popup закрывается только на СЛЕДУЮЩЕМ
-// кадре (семантика ImGui) — иначе он попадёт в захваченную картинку.
+// Отложенный запрос «скопировать диаграмму в буфер» (правый клик "Copy image to clipboard", см.
+// plot_axis.h request_plot_screenshot). Разбирается один раз в главном цикле app_main.cpp: сам
+// glReadPixels ждёт пару кадров после запроса, потому что right-click popup закрывается только на
+// СЛЕДУЮЩЕМ кадре (семантика ImGui) — иначе он попадёт в захваченную картинку.
 struct PendingScreenshot {
     bool  active = false;
     int   frames_left = 0;
@@ -123,7 +117,7 @@ public:
     // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
     PendingScreenshot pending_screenshot;
 
-    // ---- редактируемые UI-поля (UI читает/пишет напрямую) ----
+    // редактируемые UI-поля (UI читает/пишет напрямую)
     InputMode mode = InputMode::Image;
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
@@ -155,11 +149,11 @@ public:
     bool use_aux_funcs = false;
     std::string func_defs_text;
 
-    // --- метаданные для библиотеки ---
+    // метаданные для библиотеки
     std::string name;
     std::string note;
 
-    // --- значения по умолчанию (всё опционально, пустая строка = не задано) ---
+    // значения по умолчанию (всё опционально, пустая строка = не задано)
     std::string step_h;
     std::map<std::string, std::string> init_conditions; // var -> value
     std::map<std::string, std::string> param_values;    // param -> value
@@ -172,7 +166,7 @@ public:
     // Пусто = система ещё не сохранена/загружена под именем.
     std::string loaded_name;
 
-    // --- Library-tab edit state (in-memory only, not persisted to session) ---
+    // Library-tab edit state (in-memory only, not persisted to session)
     // Library sub-tab has two states: a plain list (None) and an editor
     // (EditExisting for the "Edit" action, AddNew for "Add new system").
     // The editor edits into library_edit_buffer (a scratch AppModel), never
@@ -188,7 +182,7 @@ public:
     std::string     edit_error;              // inline validation / rename error in the editor
     std::unique_ptr<AppModel> library_edit_buffer; // scratch model the editor actually edits
 
-    // --- режим приложения и сессия анализа (слой 2) ---
+    // режим приложения и сессия анализа (слой 2)
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.
     enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings };
@@ -225,11 +219,10 @@ public:
     // indicator. По умолчанию — Bifurcation.
     int parametric_active_analysis = 0;
 
-    // UI scale (DPI-aware). `ui_scale_auto` выставляется однократно при старте
-    // из glfwGetMonitorContentScale. `ui_scale_override` — слайдер в GUI;
-    // 0.0 означает «использовать auto». Эффективный scale (см. helper) идёт
-    // в apply_ui_scale в app_main каждый кадр — если изменился, шрифт и
-    // ImGui-style пересоздаются.
+    // UI scale (DPI-aware). `ui_scale_auto` выставляется однократно при старте из
+    // glfwGetMonitorContentScale, `ui_scale_override` — слайдер в GUI, где 0.0 означает
+    // «использовать auto». Эффективный scale идёт в apply_ui_scale в app_main каждый кадр: если
+    // изменился, шрифт и ImGui-style пересоздаются.
     float ui_scale_auto     = 1.0f;
     float ui_scale_override = 0.0f;
     float effective_ui_scale() const {
@@ -241,18 +234,16 @@ public:
     // Чекбокс — в Settings; персистится в _app_config.json.
     bool use_builtin_font = false;
 
-    // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
-    // 1001..1200 — карта slanCM (id = 1000 + её родной номер); легаси 0..8
-    // мигрируют при чтении конфига. Дефолт 0 = #1 viridis. Персистится в
-    // _app_config.json. Combo «Colormap» над хитмапой пишет сюда; static
+    // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
+    // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1
+    // viridis. Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет сюда, а static
     // HeatmapView в draw_lle_plot читает при первом создании.
     int heatmap_colormap = 0;
 
-    // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/
-    // States) хранит свой независимый выбор, чтобы переключение в одном не
-    // влияло на остальные. Отдельно от heatmap_colormap, который шарится
-    // Bif/LLE/LS. Дефолт 2 = #168 turbo (хорошо разделяет дискретные /
-    // категориальные значения).
+    // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/States) хранит свой
+    // независимый выбор, чтобы переключение в одном не влияло на остальные; отдельно от
+    // heatmap_colormap, который шарится Bif/LLE/LS. Дефолт 2 = #168 turbo (хорошо разделяет
+    // дискретные / категориальные значения).
     int basins_colormap        = 2;
     int basins_avgpk_colormap  = 2;
     int basins_avgint_colormap = 2;
@@ -286,12 +277,11 @@ public:
     // который бампает epoch и инвалидирует PTX-кэши движка.
     PeakConfig peak;
 
-    // Текстовые буферы полей peak-конфига в Settings. Ввод чисел там такой же,
-    // как во вкладках анализа (InputNumStr поверх InputText: ↑/↓ шаг по разряду,
-    // запятая→точка, дроби "a/b", inline-предупреждение), а не InputDouble с
-    // фиксированным "%.3e". Строка — только буфер ввода; источник истины —
-    // сам `peak`, поэтому буферы пересеиваются из него через sync_peak_text()
-    // при старте, после загрузки конфига и после клампа/сброса.
+    // Текстовые буферы полей peak-конфига в Settings. Ввод чисел там такой же, как во вкладках
+    // анализа (InputNumStr поверх InputText: ↑/↓ шаг по разряду, запятая→точка, дроби "a/b",
+    // inline-предупреждение), а не InputDouble с фиксированным "%.3e". Строка — только буфер ввода;
+    // источник истины сам `peak`, поэтому буферы пересеиваются из него через sync_peak_text() при
+    // старте, после загрузки конфига и после клампа/сброса.
     std::string peak_eps_fixed_point_text;
     std::string peak_eps_peak_delta_text;
     std::string peak_eps_interPeak_delta_text;
@@ -330,10 +320,9 @@ public:
     std::vector<ParametricPlotWindow> parametric_plot_windows;
     int  next_parametric_plot_window_id = 1;
     // Bumped by "Reset windows layout" in draw_parametric_controls — mirrors
-    // PhaseAnalysisSession::layout_generation, but shared across all 3 kinds
-    // (one button resets every parametric plot window's docking at once).
-    // Goes into each window's ImGui title so docking treats them as new
-    // windows after a reset. Not persisted (transient, like Phase's).
+    // PhaseAnalysisSession::layout_generation, but shared across all 3 kinds (one button resets
+    // every parametric plot window's docking at once). Goes into each window's ImGui title so
+    // docking treats them as new windows after a reset. Not persisted (transient, like Phase's).
     int  parametric_layout_generation = 0;
     // Set by add/remove/membership edits on parametric_plot_windows; drained
     // once per frame in draw_gui to trigger a "_last_parametric_windows"
@@ -350,13 +339,11 @@ public:
     // Plot windows list, or a closed floating window).
     void remove_parametric_plot_window(int pos);
 
-    // Load parametric_plot_windows from a previously-saved
-    // "_last_parametric_windows" JSON (json empty = file never existed for
-    // this system). If empty, synthesizes one default window per
-    // (kind, mode_2d) combo that has >=1 diagram/curve — reproduces the old
-    // "everything overlaid in one shared plot per kind" behavior as the
-    // day-one default. If json is present (even an empty window list,
-    // meaning the user deliberately closed everything), respects it as-is.
+    // Load parametric_plot_windows from a previously-saved "_last_parametric_windows" JSON (empty
+    // json = file never existed for this system). If empty, synthesizes one default window per
+    // (kind, mode_2d) combo that has >=1 diagram/curve — reproducing the old "everything overlaid in
+    // one shared plot per kind" behaviour as the day-one default. If json is present (even an empty
+    // window list, meaning the user deliberately closed everything), respects it as-is.
     void load_or_init_parametric_plot_windows(const std::string& json);
 
     // DFT1D batch queue — независимая от parametric_queue (см. Dft1DQueueItem).
@@ -415,19 +402,18 @@ public:
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
     bool start_custom_analysis();
 
-    // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params)
-    // во ВСЕ сессии без сброса per-config настроек. Используется в Save /
-    // Save as copy: после правки тела custom-схемы или уравнений системы
-    // следующий Run в любом режиме подхватит свежее состояние без
-    // переоткрытия вкладки. Phase'у дополнительно сбрасывается krs_code,
-    // чтобы regenerate_krs пересчитался от актуального cs.body / sys.
+    // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params) во ВСЕ сессии без
+    // сброса per-config настроек. Используется в Save / Save as copy: после правки тела
+    // custom-схемы или уравнений системы следующий Run в любом режиме подхватит свежее состояние
+    // без переоткрытия вкладки. Phase'у дополнительно сбрасывается krs_code, чтобы regenerate_krs
+    // пересчитался от актуального cs.body / sys.
     void propagate_to_sessions();
 
-    // ---- результат генерации ----
+    // результат генерации
     std::string generated_code;    // итоговый код всех выбранных схем
     std::string error_message;     // ошибка парсинга/генерации (для показа в UI)
 
-    // ---- запуск фонового OCR ----
+    // запуск фонового OCR
     // Не блокирует UI. Источник изображения передаётся владением.
     void start_ocr(std::unique_ptr<ImageSource> src) {
         if (ocr_state_ == OcrState::Running) return; // одно распознавание за раз
@@ -465,7 +451,7 @@ public:
     OcrState ocr_state() const { return ocr_state_; }
     const std::string& ocr_error() const { return ocr_error_; }
 
-    // ---- генерация кода из текущих полей ----
+    // генерация кода из текущих полей
     // Возвращает true при успехе, иначе заполняет error_message.
     bool generate() {
         error_message.clear();
@@ -536,13 +522,10 @@ private:
 
     OcrFn ocr_;
 
-    // Форматирует сырой LaTeX в единообразный вид: каждое уравнение на своей
-    // строке, без \begin{aligned}/\end{aligned} и без \\, все формы
-    // производных нормализуются к \dot{X}.
-    // Поддерживаемые исходные формы производных:
-    //   \frac{dX}{dt}, \dfrac{dX}{dt} (+ варианты с \tau, \theta, пробелами)
-    //   X'                   (prime)
-    //   dX/dt                (slash-form)
+    // Форматирует сырой LaTeX в единообразный вид: каждое уравнение на своей строке, без
+    // \begin{aligned}/\end{aligned} и без \\, все формы производных нормализуются к \dot{X}.
+    // Поддерживаемые исходные формы: \frac{dX}{dt}, \dfrac{dX}{dt} (+ варианты с \tau, \theta,
+    // пробелами), X' (prime), dX/dt (slash-form).
     static std::string format_latex(const std::string& raw) {
         std::string s = raw;
         // 1) Снимаем обёртки окружений.

@@ -10,7 +10,7 @@ namespace fs = std::filesystem;
 // папка сессий внутри папки системы (определение ниже)
 static std::string sessions_dir(const std::string& sysdir);
 
-// ==================== JSON helpers ====================
+// JSON helpers
 namespace {
 
     // Экранирование строки для JSON.
@@ -52,7 +52,7 @@ namespace {
         o << "}" << (last ? "\n" : ",\n");
     }
 
-    // ---- Минимальный JSON-парсер (под нашу плоскую структуру) ----
+    // Минимальный JSON-парсер (под нашу плоскую структуру)
     struct JParser {
         std::string s; size_t i = 0;
         JParser(std::string src) : s(std::move(src)) {}
@@ -122,7 +122,7 @@ namespace {
 
 } // namespace
 
-// ==================== record <-> JSON ====================
+// record <-> JSON
 std::string record_to_json(const SystemRecord& r) {
     std::ostringstream o;
     o << "{\n";
@@ -232,7 +232,7 @@ SystemRecord record_from_json(const std::string& json) {
     return r;
 }
 
-// ==================== SystemLibrary ====================
+// SystemLibrary
 SystemLibrary::SystemLibrary(std::string dir) : dir_(std::move(dir)) {
     std::error_code ec;
     fs::create_directories(dir_, ec);
@@ -348,7 +348,7 @@ std::string SystemLibrary::duplicate(const std::string& name) {
     return saved;
 }
 
-// --- сессии: sessions/<name>.json в папке системы ---
+// сессии: sessions/<name>.json в папке системы
 static std::string sessions_dir(const std::string& sysdir) {
     return (fs::path(sysdir) / "sessions").string();
 }
@@ -369,4 +369,3 @@ std::string SystemLibrary::load_session(const std::string& sysname,
     std::stringstream ss; ss << f.rdbuf();
     return ss.str();
 }
-

@@ -4,9 +4,7 @@
 #include <cmath>       // std::sqrt — геометрическая середина лог-диапазона
 #include <cstdio>
 
-// ============================================================================
 // Helpers
-// ============================================================================
 
 namespace {
 
@@ -43,9 +41,7 @@ void copy_prescaller(const CustomTabSharedConfig&,   LSCurveConfig&)  { /* no su
 
 } // namespace
 
-// ============================================================================
 // Effective sweep ranges (respects inherit_sweep_from_2d + level_2d_enabled)
-// ============================================================================
 
 EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s) {
     EffectiveSweep e;
@@ -96,9 +92,7 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
     return e;
 }
 
-// ============================================================================
 // apply_shared_to_* — one function per (type, mode) combination.
-// ============================================================================
 
 void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c) {
     copy_integrator_and_state(s, c);
@@ -261,13 +255,11 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, const LSCurveConfig& c
 
 void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession& ph,
                            const std::vector<std::string>& /*vars*/) {
-    // Shared config drives the integrator + parameter values on Run.
-    // IC-sets are owned by PhaseAnalysisSession and edited via the L3
-    // Phase controls panel (parity with Analysis tab), so the shared
-    // "Initial conditions" block affects only BD/LLE/LS/Basins — not
-    // phase, which typically wants several ICs the shared field can't
-    // express. Ensure at least one slot exists so recompute_async has
-    // something to run.
+    // Shared config drives the integrator + parameter values on Run. IC-sets are owned by
+    // PhaseAnalysisSession and edited via the L3 Phase controls panel (parity with the Analysis tab),
+    // so the shared "Initial conditions" block affects only BD/LLE/LS/Basins — not phase, which
+    // typically wants several ICs the shared field can't express. Ensure at least one slot exists so
+    // recompute_async has something to run.
     ph.scheme     = s.scheme;
     ph.symmetry_s = s.symmetry_s;
     ph.step_h     = s.h_text;
@@ -289,9 +281,7 @@ void apply_shared_to_basins(const CustomTabSharedConfig& s, BasinsConfig& c) {
     // are applied by the queue driver, which knows the parameter names.
 }
 
-// ============================================================================
 // CustomSession members
-// ============================================================================
 
 void CustomSession::load_from_record(const SystemRecord& r,
                                      const std::vector<std::string>& vars_,
@@ -300,16 +290,14 @@ void CustomSession::load_from_record(const SystemRecord& r,
     params = params_;
     custom_schemes = r.custom_schemes;
 
-    // Hard-reset shared to struct defaults BEFORE seeding from the record.
-    // Previously we only overrode a subset of fields (scheme, symmetry, h,
-    // ICs, param_values, default sweep indices) — everything else (fix_x/y,
-    // sweep ranges, resolution, level/sub-type enables, inherit flag, log
-    // scales, level3_kind, etc.) leaked from the PREVIOUS system when the
-    // new system had no saved _last_custom.json. That fed the wrong
-    // fix_x/fix_y and axis targets straight into the kernel via
-    // apply_shared_to_bif2d/pin_param and made the second-system Run look
-    // "similar but wrong". Now defaults come from the struct itself and the
-    // explicit assignments below override just what the record specifies.
+    // Hard-reset shared to struct defaults BEFORE seeding from the record. Previously we overrode
+    // only a subset of fields (scheme, symmetry, h, ICs, param_values, default sweep indices), and
+    // everything else (fix_x/y, sweep ranges, resolution, level/sub-type enables, inherit flag, log
+    // scales, level3_kind…) leaked from the PREVIOUS system when the new one had no saved
+    // _last_custom.json. That fed the wrong fix_x/fix_y and axis targets straight into the kernel via
+    // apply_shared_to_bif2d/pin_param and made the second system's Run look "similar but wrong". Now
+    // defaults come from the struct itself and the assignments below override just what the record
+    // specifies.
     shared = CustomTabSharedConfig{};
 
     // Seed shared config from the record's defaults.
@@ -338,22 +326,18 @@ void CustomSession::load_from_record(const SystemRecord& r,
     shared.sweep_x_par_index = shared.axis_x_par_index;
     shared.sweep_y_par_index = shared.axis_y_par_index;
 
-    // Default fix_x/y to the MIDPOINT of the effective sweep range instead
-    // of leaving them at struct-default 0.0. On a fresh (never-visited)
-    // system, 0.0 on the pinned axis pushed many systems into degenerate
-    // trajectories, and 1D-Run appeared to "produce nothing" until the user
-    // dragged the fix slider off zero. Midpoint of default 0..1 is 0.5 —
-    // a much better neutral starting point.
-    // parse_num (num_parse.h) — тот же разбор, что у движка, включая дробь
-    // "a/b": иначе середина диапазона "0..8/3" считалась бы от 8, а не от 2.667.
+    // Default fix_x/y to the MIDPOINT of the effective sweep range instead of the struct-default 0.0.
+    // On a fresh system 0.0 on the pinned axis pushed many systems into degenerate trajectories, and
+    // 1D-Run appeared to «produce nothing» until the user dragged the fix slider off zero; midpoint
+    // of the default 0..1 is 0.5, гораздо более нейтральная стартовая точка.
+    // parse_num (num_parse.h) — тот же разбор, что у движка, включая дробь "a/b": иначе середина
+    // диапазона "0..8/3" считалась бы от 8, а не от 2.667.
     auto safe_parse = [](const std::string& s, double def) { return parse_num(s, def); };
-    // На лог-оси середина диапазона геометрическая, а не арифметическая: узлы
-    // свипа лежат на 10^(l0 + (l1-l0)*t), и «серединный» узел — sqrt(lo*hi).
-    // Раньше и здесь бралось (lo+hi)/2, поэтому на лог-свипе крест стартовал
-    // почти у правого края (для 0.001..10 это 5.0005 вместо 0.1) — и до первого
-    // движения ползунка выглядел привязанным к линейной шкале. Условие lo>0 &&
-    // hi>0 — тот же guard, что у log_ok/sweep_value_at: лог при неположительной
-    // границе невалиден, там деградируем на арифметическую середину.
+    // На лог-оси середина диапазона геометрическая, а не арифметическая: узлы свипа лежат на
+    // 10^(l0 + (l1-l0)*t), и «серединный» узел — sqrt(lo*hi). Раньше и здесь бралось (lo+hi)/2,
+    // поэтому на лог-свипе крест стартовал почти у правого края (для 0.001..10 это 5.0005 вместо
+    // 0.1) и до первого движения ползунка выглядел привязанным к линейной шкале. Условие
+    // lo>0 && hi>0 — тот же guard, что у log_ok/sweep_value_at.
     auto sweep_mid = [&safe_parse](const EffectiveSweep& e) {
         const double lo = safe_parse(e.lo_text, 0.0);
         const double hi = safe_parse(e.hi_text, 1.0);
@@ -465,11 +449,9 @@ bool CustomSession::poll_all() {
     return any;
 }
 
-// ============================================================================
 // Level signatures — string blobs summarising every input a level consumes.
 // Two identical strings ⇒ downstream compute lands on identical data ⇒ the
 // Run drainer can skip the level.
-// ============================================================================
 namespace {
     // Append map<string, string> sorted by key for deterministic output.
     void sig_append_map(std::string& o, const char* tag,
@@ -586,11 +568,10 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     sig_append_bool(o, "ly", s.lle1d_y_enabled);
     sig_append_bool(o, "sx", s.ls1d_x_enabled);
     sig_append_bool(o, "sy", s.ls1d_y_enabled);
-    // LLE/LS-срезы наследуют eps/NT из своего слота 2D (apply_shared_to_lle1d /
-    // _ls1d), значит правка этих полей в панели Level 2D обязана пометить L1D
-    // грязным — иначе Run посчитал бы только карту, а срез остался бы со старым
-    // eps. Каждый тип учитываем только когда включён хотя бы один его срез: на
-    // данные остальных эти поля не влияют, и лишний ре-ран им ни к чему.
+    // LLE/LS-срезы наследуют eps/NT из своего слота 2D (apply_shared_to_lle1d / _ls1d), значит
+    // правка этих полей в панели Level 2D обязана пометить L1D грязным — иначе Run посчитал бы
+    // только карту, а срез остался бы со старым eps. Каждый тип учитываем только когда включён хотя
+    // бы один его срез: на данные остальных эти поля не влияют.
     if ((s.lle1d_x_enabled || s.lle1d_y_enabled) && !cs.lle_session.curves.empty()) {
         sig_append_str(o, "leps", cs.lle_session.curves[0].eps_text);
         sig_append_str(o, "lnt",  cs.lle_session.curves[0].nt_text);

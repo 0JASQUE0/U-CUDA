@@ -16,7 +16,7 @@
 
 namespace { // внутренняя линковка: всё ниже не видно из других .cpp/.cu
 
-    // ---------- Мини-AST ----------
+    // Мини-AST
     struct Node {
         enum Kind { Num, Sym, Call, Add, Sub, Mul, Div, Pow, Neg } kind;
         double num = 0; std::string name;
@@ -55,7 +55,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return m;
     }
 
-    // ---------- Парсер ----------
+    // Парсер
     struct Parser {
         std::string s; size_t i = 0; bool latex;
         Parser(std::string src, bool lx = false) :s(std::move(src)), latex(lx) {}
@@ -233,7 +233,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         }
     };
 
-    // ---------- Печать ----------
+    // Печать
     struct NameMap {
         std::map<std::string, std::string> m;
         std::string resolve(const std::string& nm) const {
@@ -318,7 +318,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return out;
     }
 
-    // ---------- emit_plain: AST -> plain-выражение (имена как есть) ----------
+    // emit_plain: AST -> plain-выражение (имена как есть)
     // Используется CD-генератором как нормализация: парсер AST понимает и LaTeX,
     // и обычный синтаксис; emit_plain даёт каноничную plain-строку, по которой
     // дальше работает регекс-логика разложения rhs на (sign, coef, remainder).
@@ -348,7 +348,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         }
     }
 
-    // ---------- CD helpers (порт Python-скрипта; работают по plain-строкам) ----------
+    // CD helpers (порт Python-скрипта; работают по plain-строкам)
     const std::set<std::string>& cd_known_functions() {
         static const std::set<std::string> f = {
             "sin","cos","tan","exp","log","ln","sqrt","abs","fabs",
@@ -576,7 +576,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return code;
     }
 
-    // ---------- Схемы ----------
+    // Схемы
     std::string scheme_euler(const System& s) {
         int N = s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
         o << "    numb X1[" << N << "];\n    int i;\n";
@@ -674,7 +674,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return o.str();
     }
 
-    // ---------- CD: Composition D-method (диагонально-неявная схема) ----------
+    // CD: Composition D-method (диагонально-неявная схема)
     // Из теории (см. PDF, формулы 8–9): Ψ_h,s = Φ_h1 ∘ Φ*_h2, где
     //   h1 = h * s, h2 = h * (1 - s), s — коэффициент симметрии (a[0]).
     // Φ_h1 — явный полушаг прямого порядка; Φ*_h2 — неявный полушаг обратного
@@ -794,7 +794,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return o.str();
     }
 
-    // ---------- Байткод-интерпретатор (для CPU-расчёта без компиляции) ----------
+    // Байткод-интерпретатор (для CPU-расчёта без компиляции)
     // Дерево выражения компилируется в постфиксную программу; вычисление идёт
     // по плоскому массиву инструкций на стеке — быстро и кэш-френдли.
     enum OpCode : int {
@@ -903,7 +903,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
 
 } // anonymous namespace
 
-// ---------- Реализация SystemEvaluator ----------
+// Реализация SystemEvaluator
 struct SystemEvaluator::Impl {
     int dim = 0;
     std::vector<std::vector<Instr>> programs; // по одной на уравнение
@@ -947,7 +947,7 @@ void SystemEvaluator::eval(const double* X, const double* a, double* deriv) cons
         deriv[i] = run_program(impl_->programs[i], X, a, st);
 }
 
-// ---------- Публичная функция ----------
+// Публичная функция
 std::string codegen_scheme(const System& s, Scheme sch) {
     switch (sch) {
     case Scheme::Euler:            return scheme_euler(s);
@@ -970,17 +970,15 @@ Scheme scheme_from_name(const std::string& name) {
 }
 
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
-    // For non-CD schemes the CPU integrator evaluates the same AST through a
-    // bytecode interpreter; the resulting algorithm matches the codegen output
-    // (same expression, same operation order). So we just return codegen_scheme.
-    // Only CD has a genuinely different CPU algorithm — 4 simple iterations per
-    // variable instead of the analytic linear solve used on GPU.
+    // For non-CD schemes the CPU integrator evaluates the same AST through a bytecode interpreter,
+    // and the resulting algorithm matches the codegen output (same expression, same operation order),
+    // so we just return codegen_scheme. Only CD has a genuinely different CPU algorithm — 4 simple
+    // iterations per variable instead of the analytic linear solve used on GPU.
     if (sch == Scheme::CD) return scheme_cd_iter_only(s);
     return codegen_scheme(s, sch);
 }
 
-
-// ---------- Нормализация значения параметра ----------
+// Нормализация значения параметра
 std::string normalize_value(const std::string& value) {
     // trim
     size_t a = value.find_first_not_of(" \t\n\r");

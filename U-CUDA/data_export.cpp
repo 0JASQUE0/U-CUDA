@@ -18,9 +18,7 @@ static void write_fmad_line(std::ofstream& out, bool gpu_fmad)
     out << "NVRTC --fmad = " << (gpu_fmad ? "on" : "off") << "\n";
 }
 
-// =============================================================================
 // Bif1D
-// =============================================================================
 
 void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
 {
@@ -99,9 +97,7 @@ bool export_bif1d(const Bifurcation1DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // 1D DFT
-// =============================================================================
 
 void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s)
 {
@@ -182,9 +178,7 @@ bool export_dft1d(const Dft1DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // LLE1D
-// =============================================================================
 
 static void write_curve1d_config_common(std::ofstream& out,
                                         const char* title_line,
@@ -255,9 +249,7 @@ bool export_lle1d(const LLE1DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // LS1D
-// =============================================================================
 
 void write_ls1d_config(std::ofstream& out, const LS1DSnapshot& s)
 {
@@ -306,9 +298,7 @@ bool export_ls1d(const LS1DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // 2D shared config helper
-// =============================================================================
 
 static void write_par_or_var_line(std::ofstream& out, int par_or_var)
 {
@@ -350,9 +340,7 @@ static void write_grid(std::ofstream& out, int n_pts, const double* values)
     }
 }
 
-// =============================================================================
 // Bif2D
-// =============================================================================
 
 void write_bif2d_config(std::ofstream& out, const Bif2DSnapshot& s)
 {
@@ -393,9 +381,7 @@ bool export_bif2d(const Bifurcation2DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // LLE2D
-// =============================================================================
 
 void write_lle2d_config(std::ofstream& out, const LLE2DSnapshot& s)
 {
@@ -432,9 +418,7 @@ bool export_lle2d(const LLE2DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // LS2D
-// =============================================================================
 
 void write_ls2d_config(std::ofstream& out, const LS2DSnapshot& s)
 {
@@ -484,9 +468,7 @@ bool export_ls2d(const LS2DResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // Basins
-// =============================================================================
 
 void write_basins_config(std::ofstream& out, const BasinsSnapshot& s)
 {
@@ -497,6 +479,15 @@ void write_basins_config(std::ofstream& out, const BasinsSnapshot& s)
     out << "CT = " << s.tMax << "\nTT = " << s.transientTime
         << "\nh = " << s.h << "\n";
     out << "decimator = " << s.preScaller << "\neps_DBSCAN = " << s.eps_dbscan << "\n";
+    // Признаки, по которым кластеризовались ячейки: без них eps_DBSCAN выше не интерпретируется —
+    // радиус меряется в пространстве (feature_1 * mult_1, feature_2 * mult_2), и одно и то же
+    // значение eps означает разное на «Avg peaks» и на «log10 StDev intervals». Код пишем рядом с
+    // названием: имя читает человек, код (BF_* в configCUDA.h) — внешние скрипты, и он переживает
+    // переименование подписи.
+    out << "feature_1 = " << basin_feature_name(s.feature1) << " (code " << s.feature1
+        << "), mult_1 = " << s.mult1 << "\n";
+    out << "feature_2 = " << basin_feature_name(s.feature2) << " (code " << s.feature2
+        << "), mult_2 = " << s.mult2 << "\n";
     out << "indexVar for peakfinder = " << s.writableVar << "\n";
     out << "indexVar for estimation = " << s.axis_x_var << ", " << s.axis_y_var << "\n";
     out << "start value_1 = " << s.axis_x_lo << ", stop value_1 = " << s.axis_x_hi << "\n";
@@ -563,9 +554,7 @@ bool export_basins(const BasinsResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
 // FastSync
-// =============================================================================
 
 // Names must match the combo box entries in gui.cpp (FastSync "Synchro
 // runtime" section) so the config file reads the same as the UI.
@@ -676,9 +665,7 @@ void write_fastsync_grid(std::ofstream& out, const FastSyncResult& res,
     }
 }
 
-// =============================================================================
 // Phase / TimeSeries
-// =============================================================================
 
 static void write_phase_config(std::ofstream& out, const PhaseSnapshot& s)
 {
@@ -802,13 +789,9 @@ bool export_fastsync(const FastSyncResult& res, const std::string& path)
     return true;
 }
 
-// =============================================================================
-// legacy — построчные копии блоков _config.csv из hostLibrary.cu.
-//
-// Каждая строка перенесена дословно, включая опечатки и расстановку пробелов
-// (обоснование — в data_export.h). Сверять правки надо с форматом, а не с
-// «как правильно»: эти файлы читают внешние скрипты.
-// =============================================================================
+// legacy — построчные копии блоков _config.csv из hostLibrary.cu. Каждая строка перенесена
+// дословно, включая опечатки и расстановку пробелов (обоснование — в data_export.h). Сверять правки
+// надо с форматом, а не с «как правильно»: эти файлы читают внешние скрипты.
 namespace legacy {
 
 void write_array(std::ofstream& out, const char* name, const double* v, int n)

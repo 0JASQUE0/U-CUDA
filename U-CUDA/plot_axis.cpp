@@ -22,20 +22,16 @@ double nice_step(double range, int target_count) {
 // из app_main при загрузке config и из Settings UI при изменении слайдера).
 static int g_tick_precision = 4;
 
-// =====================================================================
 // Plot palette state. set_plot_light_theme зовётся из gui.cpp (Settings)
 // + app_main.cpp (startup, читает AppConfig::dark_theme). Геттеры
 // возвращают цвета под текущую тему — без перекомпиляции/ссылок на ImGui
 // стиль, чтобы plot-код не зависел от того, активен ли ImGui контекст.
-// =====================================================================
 static bool g_plot_light = false;
 
 void set_plot_light_theme(bool light) { g_plot_light = light; }
 bool plot_light_theme()               { return g_plot_light; }
 
-// =====================================================================
 // Screenshot-to-clipboard sink. См. plot_axis.h.
-// =====================================================================
 static std::function<void(ImVec2, ImVec2)> g_screenshot_sink;
 
 void set_screenshot_request_sink(std::function<void(ImVec2, ImVec2)> sink) {
@@ -45,7 +41,6 @@ void request_plot_screenshot(ImVec2 min, ImVec2 max) {
     if (g_screenshot_sink) g_screenshot_sink(min, max);
 }
 
-// =====================================================================
 // Совмещённый callback числовых полей: запятая→точка (CallbackCharFilter) +
 // digit-step на ↑/↓ (CallbackHistory). ImGui позволяет OR'ить флаги; здесь
 // диспетчеризуем по EventFlag. CallbackHistory — специальный event, который
@@ -53,7 +48,6 @@ void request_plot_screenshot(ImVec2 min, ImVec2 max) {
 // REPL command history). Ровно то, что нам нужно: клавиша уже отфильтрована
 // и передана нам через колбэк — не нужен ни IsKeyPressed, ни pending-cursor
 // state. См. объявление в plot_axis.h.
-// =====================================================================
 int digit_step_input_callback(ImGuiInputTextCallbackData* data) {
     if (data->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) {
         if (data->EventChar == ',') data->EventChar = '.';

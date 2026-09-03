@@ -5,30 +5,22 @@
 #include <vector>
 #include "imgui.h"   // ImU32 для cmap_sample
 
-// 2D scalar → RGB colormap. Раньше жил в heatmap_view.h; перемещён в
-// plot_renderer.h, потому что:
-//   1) `PlotRenderer::draw_heatmap` уже его принимает (int colormap_id);
-//   2) `plot_view_2d.cpp` теперь использует то же сэмплирование для
-//      per-segment colored trajectory.
-//
-// Id колормапа — int, и ЖИВЫХ значений ровно одно семейство: 1001..1200,
-// карты slanCM (см. kSlanCmIdBase ниже). Тип остался enum'ом, потому что им
-// типизированы HeatmapView::colormap и PlotSeriesInput::colormap, а сами
-// перечисленные ниже константы — это таблица миграции, не выбор.
-// Всё, что приходит из конфигов и сессий, прогоняется через colormap_id_or().
+// 2D scalar → RGB colormap. Раньше жил в heatmap_view.h; перемещён сюда, потому что
+// PlotRenderer::draw_heatmap уже принимает int colormap_id, а plot_view_2d.cpp использует то же
+// сэмплирование для per-segment colored trajectory.
+// Id колормапа — int, и ЖИВЫХ значений ровно одно семейство: 1001..1200, карты slanCM
+// (kSlanCmIdBase ниже). Тип остался enum'ом, потому что им типизированы HeatmapView::colormap и
+// PlotSeriesInput::colormap, а перечисленные ниже константы — таблица миграции, не выбор. Всё, что
+// приходит из конфигов и сессий, прогоняется через colormap_id_or().
 enum class HeatmapColormap : int {
-    // 0-8 — ЛЕГАСИ, только для чтения старых конфигов и сессий; новые значения
-    // сюда не пишутся. 0-3 были полиномиальными приближениями matplotlib-
-    // таблиц прямо в шейдере, 4-8 — пятью LUT-картами в отдельной текстуре
-    // 256x5. Все девять есть в slanCM под своими именами, поэтому дублировать
-    // их в пикере незачем: colormap_id_or() переводит каждое из этих значений
-    // в соответствующий slanCM-id.
-    //
-    // Для 4-8 замена побитовая (проверено при генерации colormap_slancm_data.h).
-    // Для 0-3 — с точностью до качества старого полиномиального fit'а:
-    // gray совпадает точно, viridis расходится максимум на 4/255, inferno на
-    // 9/255, turbo на 32/255 в тёмном конце. Это не потеря, а исправление —
-    // таблица slanCM и есть эталон, который полиномы приближали.
+    // 0-8 — ЛЕГАСИ, только для чтения старых конфигов и сессий; новые значения сюда не пишутся.
+    // 0-3 были полиномиальными приближениями matplotlib-таблиц прямо в шейдере, 4-8 — пятью
+    // LUT-картами в текстуре 256x5. Все девять есть в slanCM под своими именами, поэтому в пикере
+    // не дублируются: colormap_id_or() переводит каждое в соответствующий slanCM-id.
+    // Для 4-8 замена побитовая (проверено при генерации colormap_slancm_data.h). Для 0-3 — с
+    // точностью до качества старого полиномиального fit'а: gray совпадает точно, viridis расходится
+    // максимум на 4/255, inferno на 9/255, turbo на 32/255 в тёмном конце. Это не потеря, а
+    // исправление — таблица slanCM и есть эталон, который полиномы приближали.
     LegacyViridis      = 0,
     LegacyInferno      = 1,
     LegacyTurbo        = 2,
@@ -40,11 +32,9 @@ enum class HeatmapColormap : int {
     LegacyGistNcar     = 8,
 };
 
-// ---------------------------------------------------------------------------
 // slanCM — 200 колормап (Zhaoxu Liu, MATLAB File Exchange #120088). Таблица
 // цветов лежит в colormap_slancm_data.h и включается только в
 // plot_renderer.cpp; наружу выходят имена, категории и сэмплирование.
-// ---------------------------------------------------------------------------
 constexpr int kSlanCmCount = 200;
 // Id карты slanCM = kSlanCmIdBase + N, где N — её РОДНОЙ номер 1..200 из
 // библиотеки (именно N видит пользователь в пикере и в Settings). Смещение
@@ -75,14 +65,13 @@ const char* slancm_category_name(int cat);
 // приложения (строки строятся один раз).
 const char* colormap_label(int id);
 
-// Единственная точка валидации id, пришедшего снаружи (конфиг, сессия,
-// per-diagram colormap_idx). Возвращает: сам id, если он валиден; slanCM-
-// эквивалент, если это легаси 0..8; иначе — fallback (тоже провалидированный,
-// а если и он мусор — #1 viridis). Отрицательный id означает «не задано» и
-// уходит в fallback, что сохраняет прежнюю семантику `cfg >= 0 ? cfg : def`.
+// Единственная точка валидации id, пришедшего снаружи (конфиг, сессия, per-diagram colormap_idx).
+// Возвращает сам id, если он валиден; slanCM-эквивалент, если это легаси 0..8; иначе fallback
+// (тоже провалидированный, а если и он мусор — #1 viridis). Отрицательный id означает «не задано»
+// и уходит в fallback, что сохраняет прежнюю семантику `cfg >= 0 ? cfg : def`.
 int colormap_id_or(int id, int fallback);
 
-// ---- Набор карт, включённых пользователем (чекбоксы в Settings) ----
+// Набор карт, включённых пользователем (чекбоксы в Settings)
 // Маска из kSlanCmCount символов '0'/'1', символ i — карта #(i+1). Хранится
 // в _app_config.json; set_enabled_slancm зовётся на bootstrap'е и на каждое
 // изменение в Settings — ровно как set_tick_precision() у осей.
@@ -117,11 +106,10 @@ enum class PointMarker : int {
 extern const char* const kPointMarkerNames[7];
 constexpr int kPointMarkerCount = 7;
 
-// CPU-side колормап: линейная интерполяция между соседними элементами
-// 256-элементной таблицы slanCM. Визуально идентично GPU-пути (там та же
-// таблица сэмплится билинейно), но не гарантированно bit-exact. Легаси-id
-// 0-8 сначала мигрируют через colormap_id_or. t clamp'ится в [0,1].
-// Возвращает ImU32 (ImDrawList).
+// CPU-side колормап: линейная интерполяция между соседними элементами 256-элементной таблицы
+// slanCM. Визуально идентично GPU-пути (там та же таблица сэмплится билинейно), но не
+// гарантированно bit-exact. Легаси-id 0-8 сначала мигрируют через colormap_id_or; t клампится в
+// [0,1]. Возвращает ImU32 (ImDrawList).
 ImU32 cmap_sample(float t, HeatmapColormap m);
 // Тот же сэмплер для int-id (в UI id таскаются как int, а не как enum).
 ImU32 cmap_sample_id(float t, int colormap_id);
@@ -142,40 +130,34 @@ public:
     void draw_line(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
 
-    // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS.
-    // Этим же путём рисуются точки 1D-бифуркационных диаграмм.
-    // marker < 0 — старый путь: сплошной квадрат, GL-состояние не трогается.
-    // marker >= 0 (PointMarker) — шейдерная маска формы + alpha-блендинг
-    // (color[3] перестаёт игнорироваться).
+    // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS; этим же путём рисуются точки
+    // 1D-бифуркационных диаграмм. marker < 0 — старый путь: сплошной квадрат, GL-состояние не
+    // трогается. marker >= 0 (PointMarker) — шейдерная маска формы + alpha-блендинг (color[3]
+    // перестаёт игнорироваться).
     void draw_points(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float point_size, int marker = -1);
 
-    // Хитмапа: рендерит fullscreen-quad внутри текущего FBO (begin_frame),
-    // сэмплит R32F-текстуру tex и применяет colormap.
-    //   colormap_id: 1001..1200 — карта slanCM. Значение прогоняется через
-    //   colormap_id_or() прямо здесь, поэтому легаси 0..8 и мусор из старых
-    //   сессий безопасны для любого вызывающего.
-    //   uv_off/uv_scale: маппинг fullscreen-quad UV [0,1] в UV данных:
-    //     uv_data = v_uv * uv_scale + uv_off
-    //   используется для zoom/pan — view ⊂ data ставит scale<1 + offset>0;
-    //   view ⊃ data → UV вылезет за [0,1], CLAMP_TO_BORDER (см. ensure_tex
-    //   в HeatmapView) даст тёмный фон, чтобы пользователь видел границы.
-    // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер
-    // отображает тёмно-серым (используется engine'ом для diverged/spec).
-    // n_discrete: 0 = continuous shading, N>0 = quantize into N color bands.
-    // reverse: true -> t := 1-t перед сэмплированием colormap'а (после
-    // discrete-квантования), т.е. разворачивает градиент целиком.
+    // Хитмапа: рендерит fullscreen-quad внутри текущего FBO (begin_frame), сэмплит R32F-текстуру
+    // tex и применяет colormap.
+    //   colormap_id: 1001..1200 — карта slanCM. Значение прогоняется через colormap_id_or() прямо
+    //     здесь, поэтому легаси 0..8 и мусор из старых сессий безопасны для любого вызывающего.
+    //   uv_off/uv_scale: маппинг fullscreen-quad UV [0,1] в UV данных
+    //     (uv_data = v_uv * uv_scale + uv_off) для zoom/pan: view ⊂ data ставит scale<1 + offset>0;
+    //     при view ⊃ data UV вылезет за [0,1] и CLAMP_TO_BORDER (ensure_tex в HeatmapView) даст
+    //     тёмный фон, чтобы пользователь видел границы.
+    //   n_discrete: 0 = continuous shading, N>0 = квантование в N цветовых полос.
+    //   reverse: t := 1-t перед сэмплированием colormap'а (после discrete-квантования).
+    // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер отображает тёмно-серым
+    // (используется engine'ом для diverged/spec).
     void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                       float uv_off_x, float uv_off_y,
                       float uv_scale_x, float uv_scale_y,
                       int n_discrete = 0, bool reverse = false);
 
-    // Рисует 3D-линию (vbo с float[3] на вершину).
-    // thick_style=false — старый быстрый путь: program_3d_ + glLineWidth
-    // (в core-profile драйвер обычно клампит до 1px, α не блендится).
-    // thick_style=true — раскрываем сегменты в screen-aligned quads через
-    // geometry shader, включаем BLEND для честного alpha compositing.
-    // Depth test работает в обоих случаях.
+    // Рисует 3D-линию (vbo с float[3] на вершину). thick_style=false — старый быстрый путь:
+    // program_3d_ + glLineWidth (в core-profile драйвер обычно клампит до 1px, α не блендится).
+    // thick_style=true — раскрываем сегменты в screen-aligned quads через geometry shader и
+    // включаем BLEND для честного alpha compositing. Depth test работает в обоих случаях.
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width, bool thick_style = false);
 

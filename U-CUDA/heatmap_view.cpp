@@ -60,10 +60,8 @@ void HeatmapView::do_autofit(double lo_x, double hi_x, double lo_y, double hi_y)
 // cmap_sample / HeatmapColormap перемещены в plot_renderer.h/.cpp —
 // используется ещё для colored trajectory в plot_view_2d.cpp.
 
-// ===========================================================================
 // Общий colorbar (см. heatmap_view.h). Вынесен из HeatmapView::render, чтобы
 // FastSync mode-0 рисовал ровно ту же шкалу, а не свою копию.
-// ===========================================================================
 std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete) {
     std::vector<ColorbarTick> out;
     const double range = (double)vmax - (double)vmin;
@@ -199,12 +197,11 @@ void HeatmapView::render(PlotRenderer& renderer,
     // = data Y → берём y_axis.name. И симметрично для визуального Y.
     const std::string& vis_x_name = swap_axes ? y_axis.name : x_axis.name;
     const std::string& vis_y_name = swap_axes ? x_axis.name : y_axis.name;
-    // log_scale — свойство ДАННЫХ (как движок разложил узлы), поэтому свапается
-    // вместе с nx/ny и param-диапазонами. А view_min/view_max и invert — наоборот,
-    // свойства ВИЗУАЛЬНОЙ оси (её пан/зум/разворот), и остаются на месте.
-    // Раньше swap переставлял диапазоны, а флаги лога нет: на лог-оси после
-    // swap тики, tooltip, снап курсора и крест считались линейной формулой
-    // по лог-сетке, т.е. показывали узлы, которых движок не считал.
+    // log_scale — свойство ДАННЫХ (как движок разложил узлы), поэтому свапается вместе с nx/ny и
+    // param-диапазонами. А view_min/view_max и invert — свойства ВИЗУАЛЬНОЙ оси (пан/зум/разворот)
+    // и остаются на месте. Раньше swap переставлял диапазоны, а флаги лога нет: на лог-оси после
+    // swap тики, tooltip, снап курсора и крест считались линейной формулой по лог-сетке, т.е.
+    // показывали узлы, которых движок не считал.
     const bool vis_log_x = swap_axes ? y_axis.log_scale : x_axis.log_scale;
     const bool vis_log_y = swap_axes ? x_axis.log_scale : y_axis.log_scale;
 
@@ -238,11 +235,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         vmin = manual_vmin;
         vmax = manual_vmax;
     }
-    // Вырожденный диапазон (все значения равны) нормировать нельзя — раздвигаем.
-    // Но число дискретных полос обязано считаться по ИСХОДНОМУ диапазону:
-    // раньше span брался уже после раздвижки, и единственный кластер бассейнов
-    // рисовался как два (span 1 -> 2), а цвет траектории в фазовом портрете
-    // (basins_id_color) при этом считался по исходному и не совпадал с картой.
+    // Вырожденный диапазон (все значения равны) нормировать нельзя — раздвигаем. Но число
+    // дискретных полос обязано считаться по ИСХОДНОМУ диапазону: раньше span брался уже после
+    // раздвижки, и единственный кластер бассейнов рисовался как два (span 1 -> 2), а цвет
+    // траектории в портрете (basins_id_color) считался по исходному и с картой не совпадал.
     const float vmin_raw = vmin, vmax_raw = vmax;
     if (vmax <= vmin) vmax = vmin + 1.0f;
     shown_vmin = vmin;
@@ -268,11 +264,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // Тики и ширина блока colorbar'а — общие хелперы (см. heatmap_view.h).
-    // Диапазон — исходный, как и у n_disc: colorbar_ticks считает подписи
-    // «целочисленными» только если span совпадает с числом полос. С
-    // раздвинутым диапазоном единственная полоса не проходила эту проверку,
-    // уходила в непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
+    // Тики и ширина блока colorbar'а — общие хелперы (heatmap_view.h). Диапазон исходный, как и у
+    // n_disc: colorbar_ticks считает подписи «целочисленными», только если span совпадает с числом
+    // полос, а с раздвинутым диапазоном единственная полоса не проходила эту проверку, уходила в
+    // непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
     const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
     const float margin_right = colorbar_total_width(tick_vals);
 
@@ -291,17 +286,14 @@ void HeatmapView::render(PlotRenderer& renderer,
     double view_min_x = x_axis.view_min, view_max_x = x_axis.view_max;
     double view_min_y = y_axis.view_min, view_max_y = y_axis.view_max;
 
-    // Node step (расстояние между соседними узлами). Values хранятся в N узлах
-    // на data range [param_lo, param_hi]: node k в позиции param_lo + k*step.
-    // Renderer рисует ровно N пикселей текстуры GL_NEAREST, значит визуально
-    // ширина пикселя должна равняться step_node, а не data_range/N — иначе
-    // тики на осях не выровнены по центрам пикселей и tooltip показывает
-    // не тот узел, что визуально закрашен под курсором.
-    //
-    // Решение: рендерим текстуру с полупиксельным паддингом с каждой стороны
-    // и оси/tooltip работают в этом "visual"-диапазоне. Внутреннее состояние
-    // x_axis.view_min/max остаётся в node-координатах — pan/zoom/rect-zoom
-    // конвертят между vis и node на входе/выходе.
+    // Node step (расстояние между соседними узлами). Values хранятся в N узлах на data range
+    // [param_lo, param_hi]: узел k в позиции param_lo + k*step. Renderer рисует ровно N пикселей
+    // текстуры GL_NEAREST, значит визуальная ширина пикселя должна равняться step_node, а не
+    // data_range/N — иначе тики не выровнены по центрам пикселей и tooltip показывает не тот узел,
+    // что визуально закрашен под курсором.
+    // Решение: рендерим текстуру с полупиксельным паддингом с каждой стороны, оси и tooltip
+    // работают в этом «visual»-диапазоне, а внутреннее x_axis.view_min/max остаётся в
+    // node-координатах — pan/zoom/rect-zoom конвертят между vis и node на входе/выходе.
     double step_x = (nx > 1) ? data_rx / (double)(nx - 1) : 0.0;
     double step_y = (ny > 1) ? data_ry / (double)(ny - 1) : 0.0;
     double vis_view_min_x = view_min_x - step_x * 0.5;
@@ -313,24 +305,20 @@ void HeatmapView::render(PlotRenderer& renderer,
     double vis_param_lo_x = param_lo_x - step_x * 0.5;
     double vis_param_lo_y = param_lo_y - step_y * 0.5;
 
-    // Значение узла k по оси. При лог-сетке узлы движка лежат на
-    // 10^(l0 + k*(l1-l0)/(n-1)) (getValueByIdx_log), а НЕ на param_lo + k*step.
-    // Индекс пикселя ix от этого не зависит — ячейки на экране равномерны в
-    // обоих режимах, — а обратный перевод индекса в значение зависит.
-    // Guard >0: live-чекбокс лога мог быть включён до Run с неположительной
-    // границей, log10(0) = -inf дал бы NaN; там деградируем на линейный узел.
+    // Значение узла k по оси. При лог-сетке узлы движка лежат на 10^(l0 + k*(l1-l0)/(n-1))
+    // (getValueByIdx_log), а НЕ на param_lo + k*step. Индекс пикселя ix от этого не зависит —
+    // ячейки на экране равномерны в обоих режимах, — а обратный перевод индекса в значение зависит.
+    // Guard >0: live-чекбокс лога мог быть включён до Run с неположительной границей, log10(0) =
+    // -inf дал бы NaN, поэтому там деградируем на линейный узел.
+    // Раньше формула стояла ТОЛЬКО в hover-tooltip, а crosshair-drag и drill-down собирали значение
+    // линейно: подсказка показывала верное, а в параметры портретов и признаков уходило линейное —
+    // на оси 0.1..14 вместо 1.67222 записывалось 8.023.
     //
-    // Раньше формула стояла ТОЛЬКО в hover-tooltip, а crosshair-drag и
-    // drill-down собирали значение линейно. Поэтому подсказка показывала
-    // верное значение, а в параметры фазовых портретов и признаков уходило
-    // линейное: на оси 0.1..14 вместо 1.67222 записывалось 8.023.
-    // Обратное к node_value: положение мирового значения в ВИЗУАЛЬНОМ домене.
-    // Ячейки карты выкладываются равномерно по индексу узла, поэтому при
-    // лог-сетке значение сначала переводится в дробный индекс, а уже он — в
-    // линейную vis-координату. Без этого оверлеи (крест) ставились по прямому
-    // линейному маппингу и уезжали относительно своей же ячейки: на оси
-    // 0.1..14 значение 1.09868 попадало в 7% высоты вместо ~50%.
-    // Не-лог путь — тождество, поэтому линейные карты не меняются.
+    // Обратное к node_value: положение мирового значения в ВИЗУАЛЬНОМ домене. Ячейки выкладываются
+    // равномерно по индексу узла, поэтому при лог-сетке значение сначала переводится в дробный
+    // индекс, а уже он — в линейную vis-координату. Без этого оверлеи (крест) ставились по прямому
+    // линейному маппингу и уезжали относительно своей же ячейки: на оси 0.1..14 значение 1.09868
+    // попадало в 7% высоты вместо ~50%. Не-лог путь — тождество, линейные карты не меняются.
     auto vis_pos = [](double v, int n, double lo, double hi, bool log_scale, double step) {
         if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && v > 0.0) {
             const double l0 = std::log10(lo), l1 = std::log10(hi);
@@ -340,12 +328,11 @@ void HeatmapView::render(PlotRenderer& renderer,
         return v;
     };
 
-    // Значение узла — ОБЩАЯ с ядром реализация (ucuda_node_value* в
-    // configCUDA.h). Раньше здесь стояла своя пара формул: линейная через
-    // lo + k*step и лог с умножением до деления — и то, и другое расходилось
-    // с getValueByIdx в последних битах, а на правом конце оси — и заметнее.
-    // `step` больше не участвует: параметр оставлен, чтобы не трогать четыре
-    // места вызова (crosshair-drag, drill-down, tooltip).
+    // Значение узла — ОБЩАЯ с ядром реализация (ucuda_node_value* в configCUDA.h). Раньше здесь
+    // стояла своя пара формул: линейная через lo + k*step и лог с умножением до деления — и то, и
+    // другое расходилось с getValueByIdx в последних битах, а на правом конце оси заметнее.
+    // `step` больше не участвует: параметр оставлен, чтобы не трогать четыре места вызова
+    // (crosshair-drag, drill-down, tooltip).
     auto node_value = [](int k, int n, double lo, double hi, bool log_scale, double step) {
         (void)step;
         if (log_scale && lo > 0.0 && hi > 0.0 && n > 1)
@@ -353,13 +340,12 @@ void HeatmapView::render(PlotRenderer& renderer,
         return (double)ucuda_node_value(k, n, (numb)lo, (numb)hi);
     };
 
-    // Эффективные визуальные границы с учётом AxisInfo::invert. evis_x0 —
-    // значение у ЛЕВОГО края плота, evis_x1 — у правого; evis_y0 — у НИЖНЕГО,
-    // evis_y1 — у верхнего. При invert границы меняются местами, span
-    // становится отрицательным, и ВСЕ маппинги screen<->world ниже (UV,
-    // курсор, тики, crosshair, rect-zoom, pan) разворачиваются сами. Это тот
-    // же приём, что axis_effective() в plot_axis.h у Plot2DView — до этого
-    // HeatmapView поля lock/invert общей структуры AxisInfo просто игнорировал.
+    // Эффективные визуальные границы с учётом AxisInfo::invert: evis_x0 — значение у ЛЕВОГО края
+    // плота, evis_x1 — у правого; evis_y0 — у НИЖНЕГО, evis_y1 — у верхнего. При invert границы
+    // меняются местами, span становится отрицательным, и ВСЕ маппинги screen<->world ниже (UV,
+    // курсор, тики, crosshair, rect-zoom, pan) разворачиваются сами. Тот же приём, что
+    // axis_effective() в plot_axis.h у Plot2DView — до этого HeatmapView поля lock/invert общей
+    // структуры AxisInfo просто игнорировал.
     const double evis_x0 = x_axis.invert ? vis_view_max_x : vis_view_min_x;
     const double evis_x1 = x_axis.invert ? vis_view_min_x : vis_view_max_x;
     const double evis_y0 = y_axis.invert ? vis_view_max_y : vis_view_min_y;
@@ -415,10 +401,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
     if (ImGui::BeginPopup(ctx_id)) {
-        // Блок осей — тот же набор, что в Plot2DView (см. plot_view_2d.cpp
-        // «12. Rect-zoom + popup»). Раньше у хитмапы этих пунктов не было
-        // вовсе: одна и та же диаграмма в 1D-режиме умела Lock/Invert/Auto fit,
-        // а в 2D — нет. Auto fit намеренно игнорирует lock: явная команда из
+        // Блок осей — тот же набор, что в Plot2DView (plot_view_2d.cpp, «12. Rect-zoom + popup»).
+        // Раньше у хитмапы этих пунктов не было вовсе: одна и та же диаграмма в 1D-режиме умела
+        // Lock/Invert/Auto fit, а в 2D — нет. Auto fit намеренно игнорирует lock: явная команда из
         // меню сильнее защиты от случайного зума мышью (как у Plot2DView).
         if (ImGui::MenuItem("Auto fit (both)")) view_valid = false;
         if (ImGui::MenuItem("Auto fit X")) {
@@ -437,11 +422,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImGui::Checkbox("Discrete colorbar", &discrete);
         if (discrete) {
             ImGui::SetNextItemWidth(80.0f);
-            // Раньше здесь стоял InputInt: он не пропускает CallbackHistory, и
-            // ↑/↓ в этом поле не делали ничего, хотя во всех остальных числовых
-            // полях шагают разряд под курсором. Теперь это обычный InputText с
-            // тем же digit_step_input_callback — заодно поле понимает
-            // выражения ("4*2") через общий parse_num.
+            // Раньше здесь стоял InputInt: он не пропускает CallbackHistory, и ↑/↓ в этом поле не
+            // делали ничего, хотя во всех остальных числовых полях шагают разряд под курсором.
+            // Теперь это обычный InputText с тем же digit_step_input_callback — заодно поле
+            // понимает выражения ("4*2") через общий parse_num.
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%s", discrete_levels_text.c_str());
             if (ImGui::InputText("Levels (0=auto)", buf, sizeof(buf),
@@ -522,15 +506,14 @@ void HeatmapView::render(PlotRenderer& renderer,
     }
 
     ImGuiIO& io = ImGui::GetIO();
-    // Хелпер: мировые координаты под текущей позицией курсора (учитывает Y↑).
-    // Работает в vis-домене — визуально левый край плота соответствует
-    // vis_view_min_x = view_min_x - step_x/2, чтобы центр пикселя визуально
-    // совпадал с позицией узла. Для нижестоящих операций (rect-zoom, wheel-
-    // zoom) это надо конвертить обратно в node-домен (view_min = vis - step/2
-    // и симметрично для max) — там где обновляем x_axis.view_min/view_max.
-    // Единственный маппинг экран → мир. До этого та же формула была
-    // продублирована в четырёх местах (mouse_world, crosshair-drag, tooltip,
-    // on_left_click), что делало добавление invert трудноуловимым.
+    // Хелпер: мировые координаты под текущей позицией курсора (учитывает Y↑). Работает в
+    // vis-домене — визуально левый край плота соответствует vis_view_min_x = view_min_x - step_x/2,
+    // чтобы центр пикселя визуально совпадал с позицией узла. Для нижестоящих операций (rect-zoom,
+    // wheel-zoom) это надо конвертить обратно в node-домен (view_min = vis - step/2 и симметрично
+    // для max) там, где обновляем x_axis.view_min/view_max.
+    // Единственный маппинг экран → мир: до этого та же формула была продублирована в четырёх местах
+    // (mouse_world, crosshair-drag, tooltip, on_left_click), что делало добавление invert
+    // трудноуловимым.
     auto screen_to_world = [&](ImVec2 pos, double& wx, double& wy) {
         double tx = (double)(pos.x - img_pos.x) / (double)plot_w;
         double ty = 1.0 - (double)(pos.y - img_pos.y) / (double)plot_h;
@@ -606,14 +589,12 @@ void HeatmapView::render(PlotRenderer& renderer,
         y_axis.view_max = std::max(a_y, b_y) - step_y * 0.5;
     }
 
-    // 8b. Pan ЛКМ — в плоте по обеим осям, в оси — только этой оси.
-    // Delta считаем в vis-домене (тогда 1 экранный пиксель → сдвиг ровно
-    // на один визуальный пиксель). Сама операция — симметричный сдвиг
-    // view_min/max, поэтому вис-и-нод-домен смещаются одинаково.
-    // Crosshair drag gestures (Custom-tab): MMB drag OR Shift+LMB drag →
-    // move fix_x/y crosshair. Plain LMB drag (no Shift) stays a pan gesture,
-    // same as Parametric, so a zoomed-in view can still be panned. The heavy
-    // recompute is deferred to release (see on_left_click block below).
+    // 8b. Pan ЛКМ — в плоте по обеим осям, в оси — только этой оси. Delta считаем в vis-домене
+    // (тогда 1 экранный пиксель → сдвиг ровно на один визуальный пиксель); сама операция —
+    // симметричный сдвиг view_min/max, поэтому vis- и node-домен смещаются одинаково.
+    // Жесты креста (Custom-tab): MMB drag ИЛИ Shift+LMB drag двигают fix_x/y. Чистый LMB drag
+    // остаётся паном, как в Parametric, чтобы зумленный вид можно было двигать. Тяжёлый пересчёт
+    // отложен до release (см. блок on_left_click ниже).
     {
         ImGuiIO& io = ImGui::GetIO();
         bool crosshair_gesture = on_left_drag && step_x > 0.0 && step_y > 0.0 &&
@@ -626,11 +607,10 @@ void HeatmapView::render(PlotRenderer& renderer,
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
                 double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
                 double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
-                // Наружу — В КООРДИНАТАХ ДАННЫХ, а не визуальных: caller про
-                // swap_axes ничего не знает и кладёт первый аргумент в fix_x.
-                // При swap визуальный X — это data Y, поэтому пары меняем
-                // обратно. Раньше при включённом swap drill-down уезжал в
-                // чужую точку: в fix_x попадало значение оси Y и наоборот.
+                // Наружу — В КООРДИНАТАХ ДАННЫХ, а не визуальных: caller про swap_axes ничего не
+                // знает и кладёт первый аргумент в fix_x. При swap визуальный X — это data Y,
+                // поэтому пары меняем обратно. Раньше при включённом swap drill-down уезжал в чужую
+                // точку: в fix_x попадало значение оси Y и наоборот.
                 if (swap_axes) on_left_drag(iy, ix, snap_y, snap_x);
                 else           on_left_drag(ix, iy, snap_x, snap_y);
             }
@@ -665,12 +645,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
     }
 
-    // 8c. Rect-zoom ПКМ. Начало drag'а — запоминаем стартовую точку в мире и
-    //    режим (плот / X / Y). На release — назначаем новый view по выделенной
-    //    зоне. Во время drag'а — рисуем рамку (внизу, см. ниже).
-    // wx/wy приходят из mouse_world в vis-домене → на release конвертим в
-    // node-домен для x_axis.view_min/max: view = vis + step/2 для min и
-    // view = vis - step/2 для max.
+    // 8c. Rect-zoom ПКМ. Начало drag'а — запоминаем стартовую точку в мире и режим (плот / X / Y);
+    // на release назначаем новый view по выделенной зоне; во время drag'а рисуем рамку (ниже).
+    // wx/wy приходят из mouse_world в vis-домене → на release конвертим в node-домен для
+    // x_axis.view_min/max: view = vis + step/2 для min и view = vis - step/2 для max.
     bool rmb_down = ImGui::IsMouseDown(ImGuiMouseButton_Right);
     if (rect_zoom_mode_ == 0 && rmb_down) {
         double wx, wy; mouse_world(wx, wy);
@@ -718,15 +696,13 @@ void HeatmapView::render(PlotRenderer& renderer,
     //    x_axis/y_axis напрямую и показывают актуальное состояние.
     clamp_view();
 
-    // Гибрид тиков: без зума (view == весь диапазон данных) показываем
-    // «красивые» круглые числа обычным nice_step — они почти всегда совпадают
-    // с границами данных (пользователь сам их выбирает), выглядят привычно и
-    // не зависят от того, насколько «неровно» N делит диапазон. При зуме
-    // отдельные узлы становятся визуально различимы (один узел — несколько
-    // экранных пикселей), и тики привязываем к сетке, чтобы не «плавали»
-    // между цветовыми полосами. clamp_view() выше форсит view_min/max в ТОЧНОЕ
-    // равенство param_lo/hi, когда пользователь зумит дальше данных — поэтому
-    // сравнение на равенство (без эпсилон) надёжно отличает «без зума».
+    // Гибрид тиков: без зума (view == весь диапазон данных) показываем «красивые» круглые числа
+    // обычным nice_step — они почти всегда совпадают с границами данных, выглядят привычно и не
+    // зависят от того, насколько неровно N делит диапазон. При зуме отдельные узлы становятся
+    // визуально различимы (один узел — несколько экранных пикселей), и тики привязываем к сетке,
+    // чтобы они не плавали между цветовыми полосами. clamp_view() выше форсит view_min/max в ТОЧНОЕ
+    // равенство param_lo/hi, когда пользователь зумит дальше данных, поэтому сравнение на равенство
+    // (без эпсилон) надёжно отличает «без зума».
     bool x_full_view = (nx <= 1) || (x_axis.view_min == param_lo_x && x_axis.view_max == param_hi_x);
     bool y_full_view = (ny <= 1) || (y_axis.view_min == param_lo_y && y_axis.view_max == param_hi_y);
 
@@ -735,15 +711,13 @@ void HeatmapView::render(PlotRenderer& renderer,
     //    цветового поля.
     ImU32 col_text = plot_col_text();
     ImU32 col_axis = plot_col_border();
-    // Tick'и: формула числа тиков и проверки overshoot/clip — те же, что в
-    // plot_axis.cpp (draw_axis_x_grid/y_grid), но без сетки через плот.
-    // Хелпер: собирает список tick-значений в [lo, hi] с nice-step, округлённым
-    // к кратному step_node (когда step_node > 0 и n_nodes > 1), плюс форс-
-    // включение крайних узлов (param_lo / param_hi), если они в кадре и не
-    // слишком близко к соседнему тику. Так, во-первых, тики всегда падают на
-    // узлы (нет промежуточных значений между цветовыми пикселями), и во-вторых
-    // крайнее значение диапазона всегда отрисовано (напр., "30" не пропадает
-    // при выборе mult, не делящего N-1).
+    // Тики: формула числа тиков и проверки overshoot/clip — те же, что в plot_axis.cpp
+    // (draw_axis_x_grid/y_grid), но без сетки через плот. Хелпер собирает список tick-значений в
+    // [lo, hi] с nice-step, округлённым к кратному step_node (когда step_node > 0 и n_nodes > 1),
+    // плюс форс-включение крайних узлов (param_lo / param_hi), если они в кадре и не слишком близко
+    // к соседнему тику. Так тики всегда падают на узлы (нет промежуточных значений между цветовыми
+    // пикселями) и крайнее значение диапазона всегда отрисовано (например "30" не пропадает при
+    // выборе mult, не делящего N-1).
     auto compute_axis_ticks = [](double lo, double hi, int target_count,
                             double step_node, double node_origin, int n_nodes,
                             double force_lo, double force_hi)
@@ -803,12 +777,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     };
 
     auto draw_x_ticks = [&]() {
-        // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы
-        // цветовые ячейки центрировались на узлах. Для log-оси линейный
-        // полушаг у границ (напр. 0.001) даёт заметный сдвиг подписи --
-        // берём точный view_min/max без этого паддинга.
-        // invert: границы уже переставлены в evis_x0/x1, для log-оси делаем то
-        // же вручную (там паддинг не применяется).
+        // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы цветовые ячейки
+        // центрировались на узлах. Для log-оси линейный полушаг у границ (например 0.001) даёт
+        // заметный сдвиг подписи — берём точный view_min/max без этого паддинга.
+        // invert: границы уже переставлены в evis_x0/x1, для log-оси делаем то же вручную.
         double emin = vis_log_x
                       ? (x_axis.invert ? x_axis.view_max : x_axis.view_min) : evis_x0;
         double emax = vis_log_x
@@ -908,12 +880,11 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImU32 col_halo = IM_COL32(0, 0, 0, 220);
         double range_x = evis_x1 - evis_x0;
         double range_y = evis_y1 - evis_y0;
-        // crosshair_x/_y приходят от caller'а в КООРДИНАТАХ ДАННЫХ (это
-        // fix_x/fix_y), поэтому при swap_axes вертикальную линию рисуем по
-        // data-Y, а горизонтальную — по data-X. Цвета переставляем вместе со
-        // значениями: они кодируют, к какой ОСИ СВИПА относится линия (см.
-        // crosshair_*_color), и должны совпадать с крестом на 1D-срезе той же
-        // оси. Без перестановки крест при swap показывал не на свою ячейку.
+        // crosshair_x/_y приходят от caller'а в КООРДИНАТАХ ДАННЫХ (это fix_x/fix_y), поэтому при
+        // swap_axes вертикальную линию рисуем по data-Y, а горизонтальную по data-X. Цвета
+        // переставляем вместе со значениями: они кодируют, к какой ОСИ СВИПА относится линия
+        // (crosshair_*_color), и должны совпадать с крестом на 1D-срезе той же оси. Без
+        // перестановки крест при swap показывал не на свою ячейку.
         const double ch_src_x = swap_axes ? crosshair_y : crosshair_x;
         const double ch_src_y = swap_axes ? crosshair_x : crosshair_y;
         const unsigned ch_col_x = swap_axes ? crosshair_y_color : crosshair_x_color;
@@ -949,13 +920,11 @@ void HeatmapView::render(PlotRenderer& renderer,
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
     dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
 
-    // Y-метка — повёрнута на -90° (читается снизу вверх, mathematical
-    // convention). Рендерим горизонтально через AddText, затем поворачиваем
-    // все добавленные вершины вокруг pivot. На ТОЧНО -90° матрица имеет
-    // целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
-    // сохраняется → шрифт остаётся чётким (AA-шум бывает только на
-    // произвольных углах). X-позиция считается ДИНАМИЧЕСКИ за самыми
-    // широкими тиками, иначе подпись наезжает на длинные числа.
+    // Y-метка повёрнута на -90° (читается снизу вверх, mathematical convention): рендерим
+    // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
+    // ТОЧНО -90° матрица имеет целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
+    // сохраняется и шрифт остаётся чётким (AA-шум бывает только на произвольных углах). X-позиция
+    // считается ДИНАМИЧЕСКИ за самыми широкими тиками, иначе подпись наезжает на длинные числа.
     ImVec2 ts_yl = ImGui::CalcTextSize(yl);
     if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
@@ -976,14 +945,11 @@ void HeatmapView::render(PlotRenderer& renderer,
                 if (w > max_tick_w) max_tick_w = w;
             }
         }
-        // Pivot — позиция левого-верхнего угла ДО поворота, она же центр
-        // вращения. После -90° (dx, dy) ↦ (dy, -dx):
-        //   • по X текст займёт [pivot.x, pivot.x + ts_yl.y]
-        //   • по Y — [pivot.y - ts_yl.x, pivot.y]
-        // Снапим к целым пикселям для чёткости глифов.
-        // label_gap — доп. зазор между самым широким тиком и Y-подписью:
-        // без него текст вплотную касается цифр (оба span'а стыкуются в одной
-        // точке img_pos.x - max_tick_w - 8).
+        // Pivot — позиция левого-верхнего угла ДО поворота, она же центр вращения. После -90°
+        // (dx, dy) ↦ (dy, -dx): по X текст займёт [pivot.x, pivot.x + ts_yl.y], по Y —
+        // [pivot.y - ts_yl.x, pivot.y]. Снапим к целым пикселям для чёткости глифов.
+        // label_gap — доп. зазор между самым широким тиком и Y-подписью: без него текст вплотную
+        // касается цифр (оба span'а стыкуются в точке img_pos.x - max_tick_w - 8).
         const float label_gap = 6.0f;
         float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - label_gap - ts_yl.y);
         float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
@@ -1035,11 +1001,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
-    // 10b. Drill-down / crosshair-commit callback. Fires ONLY on release
-    // of a crosshair gesture (MMB or Shift+LMB) — the drag itself was
-    // live-crosshair, release means "commit + recompute". Plain LMB is
-    // reserved for pan; a bare LMB click no longer moves the crosshair
-    // (that was surprising when just clicking to focus the window).
+    // 10b. Drill-down / crosshair-commit callback. Срабатывает ТОЛЬКО на release жеста креста (MMB
+    // или Shift+LMB): сам drag был живым крестом, release значит «зафиксировать и пересчитать».
+    // Чистый LMB зарезервирован под пан; голый клик LMB крест больше не двигает (это удивляло при
+    // простом клике для фокуса окна).
     if (plot_hov && on_left_click && step_x > 0.0 && step_y > 0.0
         && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         ImGuiIO& io = ImGui::GetIO();
