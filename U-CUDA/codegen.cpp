@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <regex>
 #include <vector>
 
 namespace { // внутренняя линковка: всё ниже не видно из других .cpp/.cu
@@ -318,262 +317,142 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return out;
     }
 
-    // emit_plain: AST -> plain-выражение (имена как есть)
-    // Используется CD-генератором как нормализация: парсер AST понимает и LaTeX,
-    // и обычный синтаксис; emit_plain даёт каноничную plain-строку, по которой
-    // дальше работает регекс-логика разложения rhs на (sign, coef, remainder).
-    void emit_plain(const PN& n, std::ostream& o);
-    void emit_plain_child(const PN& n, std::ostream& o, int pp) {
-        bool paren = prec(n->kind) < pp;
-        if (paren) { o << "("; emit_plain(n, o); o << ")"; }
-        else { emit_plain(n, o); }
-    }
-    void emit_plain(const PN& n, std::ostream& o) {
+    // CD helpers (AST-based).
+    // Composition D-method (see chapter 1.1 of the theory PDF) assembles the
+    // implicit half-step by trying to write the RHS f_i as coef*v + rem where
+    // v == vars[i] and both coef, rem are v-free. On success the diagonal
+    // implicit equation X = X_saved + h2*f admits the analytic solution
+    //     X = (X_saved + h2*rem) / (1 - h2*coef)
+    // (one division, no iterations). When v enters non-linearly -- through a
+    // product v*v, division by v, or any pow/call argument -- the extraction
+    // fails and we fall back to simple iterations, matching the CPU integrator
+    // in integrator.cpp::step_cd exactly. This replaces an earlier regex-based
+    // pass that miscounted parenthesised subtractions, missed numeric/compound
+    // coefficients, and dropped repeated linear-in-v terms into the remainder.
+
+    // Number of simple iterations used in the fallback path. Must stay in sync
+    // with integrator.cpp::step_cd so that CPU and GPU trajectories match.
+    constexpr int CD_ITERS = 4;
+
+    bool pn_contains_var(const PN& n, const std::string& v) {
+        if (!n) return false;
         switch (n->kind) {
-        case Node::Num: o << fmtnum(n->num); break;
-        case Node::Sym: o << n->name; break;
-        case Node::Neg: o << "-"; emit_plain_child(n->a, o, prec(Node::Neg)); break;
-        case Node::Add: emit_plain_child(n->a, o, 1); o << " + "; emit_plain_child(n->b, o, 1); break;
-        case Node::Sub: emit_plain_child(n->a, o, 1); o << " - "; emit_plain_child(n->b, o, 2); break;
-        case Node::Mul: emit_plain_child(n->a, o, 2); o << " * "; emit_plain_child(n->b, o, 2); break;
-        case Node::Div: emit_plain_child(n->a, o, 2); o << " / "; emit_plain_child(n->b, o, 3); break;
+        case Node::Sym:  return n->name == v;
+        case Node::Num:  return false;
+        case Node::Neg:  return pn_contains_var(n->a, v);
+        case Node::Add: case Node::Sub:
+        case Node::Mul: case Node::Div:
         case Node::Pow:
-            // Печатаем как X^N, чтобы CD-регекс мог распознать степень переменной.
-            emit_plain_child(n->a, o, 4); o << "^"; emit_plain_child(n->b, o, 4); break;
+            return pn_contains_var(n->a, v) || pn_contains_var(n->b, v);
         case Node::Call:
-            o << n->name << "(";
-            for (size_t k = 0; k < n->args.size(); ++k) { if (k) o << ", "; emit_plain(n->args[k], o); }
-            o << ")";
-            break;
+            for (auto& c : n->args) if (pn_contains_var(c, v)) return true;
+            return false;
         }
+        return false;
     }
 
-    // CD helpers (порт Python-скрипта; работают по plain-строкам)
-    const std::set<std::string>& cd_known_functions() {
-        static const std::set<std::string> f = {
-            "sin","cos","tan","exp","log","ln","sqrt","abs","fabs",
-            "asin","acos","atan","sinh","cosh","tanh","pow"
-        };
-        return f;
+    PN pn_num(double v) { auto n = mk(Node::Num); n->num = v; return n; }
+    bool pn_is_zero(const PN& n) { return n && n->kind == Node::Num && n->num == 0.0; }
+    bool pn_is_one (const PN& n) { return n && n->kind == Node::Num && n->num == 1.0; }
+
+    // Peephole constructors: fold trivial identities so the generated C code
+    // stays readable. Only algebraic no-ops (x*1, 1*x, x*0, 0*x, --x, -(Num)),
+    // never re-associates. Correctness is unchanged.
+    PN pn_neg(PN a) {
+        if (a && a->kind == Node::Neg) return a->a;                       // -(-x) -> x
+        if (a && a->kind == Node::Num) return pn_num(-a->num);            // -(c)  -> (-c)
+        auto n = mk(Node::Neg); n->a = std::move(a); return n;
+    }
+    PN pn_add(PN a, PN b) { auto n = mk(Node::Add); n->a = std::move(a); n->b = std::move(b); return n; }
+    PN pn_sub(PN a, PN b) { auto n = mk(Node::Sub); n->a = std::move(a); n->b = std::move(b); return n; }
+    // Parser emits literal -1 as Neg(Num(1)) rather than Num(-1), so catch
+    // both shapes here (my own pn_neg fold produces Num(-1), the parser does
+    // not).
+    bool pn_is_neg_one(const PN& n) {
+        if (!n) return false;
+        if (n->kind == Node::Num && n->num == -1.0) return true;
+        if (n->kind == Node::Neg && pn_is_one(n->a)) return true;
+        return false;
+    }
+    PN pn_mul(PN a, PN b) {
+        if (pn_is_zero(a) || pn_is_zero(b)) return pn_num(0);
+        if (pn_is_one(a)) return b;
+        if (pn_is_one(b)) return a;
+        if (pn_is_neg_one(a)) return pn_neg(std::move(b));                // (-1)*x -> -x
+        if (pn_is_neg_one(b)) return pn_neg(std::move(a));                // x*(-1) -> -x
+        auto n = mk(Node::Mul); n->a = std::move(a); n->b = std::move(b); return n;
+    }
+    PN pn_div(PN a, PN b) { auto n = mk(Node::Div); n->a = std::move(a); n->b = std::move(b); return n; }
+
+    // Try to split n = coef*v + rem with coef, rem both free of v.
+    // Returns false when v enters non-linearly and the analytic solve is
+    // unsafe: product v*v, division by an expression that contains v, or v
+    // appearing inside a pow-exponent or function call.
+    bool cd_try_extract_linear(const PN& n, const std::string& v, PN& coef, PN& rem) {
+        if (!n) { coef = pn_num(0); rem = pn_num(0); return true; }
+        switch (n->kind) {
+        case Node::Num:
+            coef = pn_num(0); rem = n; return true;
+        case Node::Sym:
+            if (n->name == v) { coef = pn_num(1); rem = pn_num(0); }
+            else              { coef = pn_num(0); rem = n; }
+            return true;
+        case Node::Neg: {
+            PN ca, ra;
+            if (!cd_try_extract_linear(n->a, v, ca, ra)) return false;
+            coef = pn_is_zero(ca) ? pn_num(0) : pn_neg(ca);
+            rem  = pn_is_zero(ra) ? pn_num(0) : pn_neg(ra);
+            return true;
+        }
+        case Node::Add: {
+            PN ca, ra, cb, rb;
+            if (!cd_try_extract_linear(n->a, v, ca, ra)) return false;
+            if (!cd_try_extract_linear(n->b, v, cb, rb)) return false;
+            coef = pn_is_zero(ca) ? cb : (pn_is_zero(cb) ? ca : pn_add(ca, cb));
+            rem  = pn_is_zero(ra) ? rb : (pn_is_zero(rb) ? ra : pn_add(ra, rb));
+            return true;
+        }
+        case Node::Sub: {
+            PN ca, ra, cb, rb;
+            if (!cd_try_extract_linear(n->a, v, ca, ra)) return false;
+            if (!cd_try_extract_linear(n->b, v, cb, rb)) return false;
+            coef = pn_is_zero(cb) ? ca : (pn_is_zero(ca) ? pn_neg(cb) : pn_sub(ca, cb));
+            rem  = pn_is_zero(rb) ? ra : (pn_is_zero(ra) ? pn_neg(rb) : pn_sub(ra, rb));
+            return true;
+        }
+        case Node::Mul: {
+            bool la = pn_contains_var(n->a, v);
+            bool lb = pn_contains_var(n->b, v);
+            if (la && lb) return false;                    // v*v-like coupling
+            if (!la && !lb) { coef = pn_num(0); rem = n; return true; }
+            PN linear_side = la ? n->a : n->b;
+            PN const_side  = la ? n->b : n->a;
+            PN ci, ri;
+            if (!cd_try_extract_linear(linear_side, v, ci, ri)) return false;
+            coef = pn_is_zero(ci) ? pn_num(0) : pn_mul(const_side, ci);
+            rem  = pn_is_zero(ri) ? pn_num(0) : pn_mul(const_side, ri);
+            return true;
+        }
+        case Node::Div: {
+            if (pn_contains_var(n->b, v)) return false;    // v in denominator
+            PN ci, ri;
+            if (!cd_try_extract_linear(n->a, v, ci, ri)) return false;
+            coef = pn_is_zero(ci) ? pn_num(0) : pn_div(ci, n->b);
+            rem  = pn_is_zero(ri) ? pn_num(0) : pn_div(ri, n->b);
+            return true;
+        }
+        case Node::Pow:
+            if (pn_contains_var(n->a, v) || pn_contains_var(n->b, v)) return false;
+            coef = pn_num(0); rem = n; return true;
+        case Node::Call:
+            for (auto& c : n->args) if (pn_contains_var(c, v)) return false;
+            coef = pn_num(0); rem = n; return true;
+        }
+        return false;
     }
 
-    std::string cd_strip(const std::string& s) {
-        size_t a = s.find_first_not_of(" \t\n\r");
-        if (a == std::string::npos) return "";
-        size_t b = s.find_last_not_of(" \t\n\r");
-        return s.substr(a, b - a + 1);
-    }
-
-    bool cd_contains_variable(const std::string& expr, const std::string& var) {
-        try {
-            std::regex re("\\b" + var + "\\b");
-            return std::regex_search(expr, re);
-        } catch (...) { return false; }
-    }
-
-    enum class CdNonlin { None, Linear, Nonlinear };
-
-    CdNonlin cd_get_nonlinearity_type(const std::string& expr, const std::string& var) {
-        if (!cd_contains_variable(expr, var)) return CdNonlin::None;
-        // var^N (N >= 2)
-        try {
-            std::regex pow_re("\\b" + var + "\\s*\\^\\s*(\\d+)");
-            std::smatch m;
-            if (std::regex_search(expr, m, pow_re)) {
-                int p = std::stoi(m[1].str());
-                if (p >= 2) return CdNonlin::Nonlinear;
-            }
-        } catch (...) {}
-        // var * var
-        try {
-            std::regex mm_re("\\b" + var + "\\s*\\*\\s*" + var + "\\b");
-            if (std::regex_search(expr, mm_re)) return CdNonlin::Nonlinear;
-        } catch (...) {}
-        // var внутри функции f(... var ...)
-        for (const auto& fn : cd_known_functions()) {
-            try {
-                std::regex f_re(fn + "\\s*\\([^)]*\\b" + var + "\\b[^)]*\\)");
-                if (std::regex_search(expr, f_re)) return CdNonlin::Nonlinear;
-            } catch (...) {}
-        }
-        return CdNonlin::Linear;
-    }
-
-    // Разбивает выражение по знакам +/- (на верхнем уровне Python это не учитывает,
-    // мы тоже не учитываем). Не разрезает e+5 / e-5 у чисел.
-    std::vector<std::string> cd_split_terms(const std::string& expr) {
-        std::vector<std::string> out;
-        size_t start = 0;
-        for (size_t i = 0; i < expr.size(); ++i) {
-            if (i > 0 && (expr[i] == '+' || expr[i] == '-')) {
-                char prev = expr[i - 1];
-                if (prev == 'e' || prev == 'E') continue;
-                std::string tok = cd_strip(expr.substr(start, i - start));
-                if (!tok.empty()) out.push_back(tok);
-                start = i;
-            }
-        }
-        if (start < expr.size()) {
-            std::string tok = cd_strip(expr.substr(start));
-            if (!tok.empty()) out.push_back(tok);
-        }
-        return out;
-    }
-
-    struct CdExpand { std::string sign; std::string coef; std::string remainder; };
-
-    // По набору токенов tok с outer_coef-обёрткой раскладывает на (var_sign, remainder).
-    // Используется в case 1 и case 2 (paren_mult и simple_paren).
-    void cd_expand_paren_tokens(const std::vector<std::string>& tokens,
-                                const std::string& var,
-                                const std::string& outer_coef,
-                                std::string& out_var_sign,
-                                std::string& out_remainder) {
-        out_var_sign = "+";
-        std::vector<std::string> rem_parts;
-        for (const auto& token : tokens) {
-            std::string token_sign = "+";
-            std::string token_body = token;
-            if (!token.empty() && token[0] == '-') { token_sign = "-"; token_body = cd_strip(token.substr(1)); }
-            else if (!token.empty() && token[0] == '+') { token_body = cd_strip(token.substr(1)); }
-
-            try {
-                std::regex var_re("^" + var + "$");
-                if (std::regex_match(token_body, var_re)) { out_var_sign = token_sign; continue; }
-            } catch (...) {}
-            if (token_sign == "-") rem_parts.push_back("- " + outer_coef + " * " + token_body);
-            else rem_parts.push_back("+ " + outer_coef + " * " + token_body);
-        }
-        std::string rem;
-        for (auto& p : rem_parts) rem += (rem.empty() ? "" : " ") + p;
-        if (!rem.empty() && rem[0] == '+') rem = cd_strip(rem.substr(1));
-        out_remainder = rem;
-    }
-
-    CdExpand cd_expand_expression(const std::string& expr_in, const std::string& var) {
-        std::string expr = cd_strip(expr_in);
-        CdExpand r{ "+", "1", "" };
-
-        // Case 1: (expr1) * (expr2), переменная только в одной из скобок.
-        try {
-            std::regex re(R"(^\(([^)]+)\)\s*\*\s*\(([^)]+)\)$)");
-            std::smatch m;
-            if (std::regex_match(expr, m, re)) {
-                std::string left = m[1].str();
-                std::string right = m[2].str();
-                bool right_has = cd_contains_variable(right, var);
-                bool left_has = cd_contains_variable(left, var);
-                if (right_has && !left_has) {
-                    std::string outer = "(" + left + ")";
-                    std::string inner = right;
-                    if (!inner.empty() && inner[0] != '+' && inner[0] != '-') inner = "+" + inner;
-                    auto tokens = cd_split_terms(inner);
-                    std::string vs, rem;
-                    cd_expand_paren_tokens(tokens, var, outer, vs, rem);
-                    r.sign = vs; r.coef = outer; r.remainder = rem;
-                    return r;
-                }
-            }
-        } catch (...) {}
-
-        // Case 2: coef * (expr), где coef — простой идентификатор.
-        try {
-            std::regex re(R"(^([a-zA-Z_]\w*)\s*\*\s*\((.+)\)$)");
-            std::smatch m;
-            if (std::regex_match(expr, m, re)) {
-                std::string outer = m[1].str();
-                std::string inner = m[2].str();
-                if (cd_contains_variable(inner, var)) {
-                    if (!inner.empty() && inner[0] != '+' && inner[0] != '-') inner = "+" + inner;
-                    auto tokens = cd_split_terms(inner);
-                    std::string vs, rem;
-                    cd_expand_paren_tokens(tokens, var, outer, vs, rem);
-                    r.sign = vs; r.coef = outer; r.remainder = rem;
-                    return r;
-                }
-            }
-        } catch (...) {}
-
-        // Case 3: обычная сумма членов.
-        std::string expr2 = expr;
-        if (!expr2.empty() && expr2[0] != '+' && expr2[0] != '-') expr2 = "+" + expr2;
-        auto tokens = cd_split_terms(expr2);
-        std::string var_sign = "+";
-        std::string var_coef = "1";
-        std::vector<std::string> rem_parts;
-        bool found = false;
-        for (const auto& token : tokens) {
-            std::string token_sign = "+";
-            std::string token_body = token;
-            if (!token.empty() && token[0] == '-') { token_sign = "-"; token_body = cd_strip(token.substr(1)); }
-            else if (!token.empty() && token[0] == '+') { token_body = cd_strip(token.substr(1)); }
-
-            bool has = false;
-            std::smatch m;
-            try {
-                std::regex r1("^([a-zA-Z_]\\w*)\\s*\\*\\s*" + var + "$");
-                if (std::regex_match(token_body, m, r1)) { has = true; var_coef = m[1].str(); }
-            } catch (...) {}
-            if (!has) try {
-                std::regex r2("^" + var + "\\s*\\*\\s*([a-zA-Z_]\\w*)$");
-                if (std::regex_match(token_body, m, r2)) { has = true; var_coef = m[1].str(); }
-            } catch (...) {}
-            if (!has) try {
-                std::regex r3("^" + var + "$");
-                if (std::regex_match(token_body, r3)) { has = true; var_coef = "1"; }
-            } catch (...) {}
-
-            if (has && !found) { found = true; var_sign = token_sign; }
-            else { rem_parts.push_back(token); }
-        }
-        std::string rem;
-        for (auto& p : rem_parts) rem += (rem.empty() ? "" : " ") + p;
-        if (!rem.empty() && rem[0] == '+') rem = cd_strip(rem.substr(1));
-        r.sign = var_sign; r.coef = var_coef; r.remainder = rem;
-        return r;
-    }
-
-    // Превращает plain-выражение с символическими именами в C-код:
-    //   var^N  -> pow(var, N)
-    //   ln(.)  -> log(.)
-    //   var    -> X[i]
-    //   param  -> a[1+j]
-    std::string cd_expr_to_code(const std::string& expr_in,
-                                const std::vector<std::string>& vars,
-                                const std::vector<std::string>& params) {
-        std::string code = expr_in;
-        // 1) var^N -> pow(var, N) (до подстановки X[i], чтобы регекс распознал имя)
-        for (size_t i = 0; i < vars.size(); ++i) {
-            try {
-                std::regex re("\\b" + vars[i] + "\\s*\\^\\s*(\\d+)");
-                code = std::regex_replace(code, re, "pow(" + vars[i] + ", $1)");
-            } catch (...) {}
-        }
-        // 2) X[i]^N -> pow(X[i], N) (на случай если уже было)
-        try {
-            std::regex re(R"((X\[\d+\])\s*\^\s*(\d+))");
-            code = std::regex_replace(code, re, "pow($1, $2)");
-        } catch (...) {}
-        // 3) ln(  -> log(  (страховка; парсер уже мапит ln→log)
-        try {
-            std::regex re("\\bln\\s*\\(");
-            code = std::regex_replace(code, re, "log(");
-        } catch (...) {}
-        // 4) переменные -> X[i]
-        for (size_t i = 0; i < vars.size(); ++i) {
-            try {
-                std::regex re("\\b" + vars[i] + "\\b");
-                code = std::regex_replace(code, re, "X[" + std::to_string(i) + "]");
-            } catch (...) {}
-        }
-        // 5) параметры -> a[1+j]
-        for (size_t j = 0; j < params.size(); ++j) {
-            try {
-                std::regex re("\\b" + params[j] + "\\b");
-                code = std::regex_replace(code, re, "a[" + std::to_string(1 + (int)j) + "]");
-            } catch (...) {}
-        }
-        return code;
+    std::string emit_to_str(const PN& n, const NameMap& nm) {
+        std::ostringstream o; emit(n, nm, o); return o.str();
     }
 
     // Схемы
@@ -674,121 +553,150 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return o.str();
     }
 
-    // CD: Composition D-method (диагонально-неявная схема)
-    // Из теории (см. PDF, формулы 8–9): Ψ_h,s = Φ_h1 ∘ Φ*_h2, где
-    //   h1 = h * s, h2 = h * (1 - s), s — коэффициент симметрии (a[0]).
-    // Φ_h1 — явный полушаг прямого порядка; Φ*_h2 — неявный полушаг обратного
-    // порядка. Диагональная неявность по var_i решается аналитически когда RHS
-    // линеен по var_i (формула X = (X + h2*rem) / (1 ± h2*coef)), и итерациями
-    // (4 шага) когда RHS нелинеен. Структурно совпадает с Python-прототипом
-    // в @CD.txt; здесь работает по plain-выражению, полученному из AST через
-    // emit_plain (что даёт корректную работу и с LaTeX-входом).
+    // CD: Composition D-method (diagonally-implicit symplectic composition).
+    // Theory (PDF chapter 1.1): Psi_{h,s} = Phi_{h1} o Phi*_{h2} with
+    // h1 = h*s and h2 = h*(1 - s), s = a[0] symmetry coefficient. Phi is an
+    // explicit half-step in forward variable order (Euler-Cromer flavour);
+    // Phi* is a diagonally-implicit half-step in reverse order, where each
+    // equation X[i] = X_saved + h2 * f_i(X) is solved for its own X[i].
+    // For every equation we ask cd_try_extract_linear whether f_i can be
+    // written as coef*v + rem with v = vars[i] and coef, rem free of v:
+    //   - success  -> analytic step X[i] = (X_saved + h2*rem) / (1 - h2*coef);
+    //   - failure  -> CD_ITERS simple iterations, identical to the CPU path.
+    // Extraction, unlike the previous regex pipeline, walks the AST directly
+    // so parenthesised sub-expressions, numeric/compound coefficients and
+    // repeated linear-in-v terms are handled uniformly.
     std::string scheme_cd(const System& s) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
         if (N < 2) throw std::runtime_error("CD method requires N >= 2");
 
-        // Парсим каждый RHS и эмитим в plain (нормализация LaTeX -> plain).
-        std::vector<std::string> rhs_plain(N);
+        NameMap nm = build_namemap(s, "X");
+        std::vector<PN> rhs_ast(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
-            PN ast = p.parse();
-            std::ostringstream pp;
-            emit_plain(ast, pp);
-            rhs_plain[i] = pp.str();
+            rhs_ast[i] = p.parse();
         }
 
         std::ostringstream o;
         o << "    numb h1 = h * a[0];\n";
         o << "    numb h2 = h * (1 - a[0]);\n";
 
-        // Явный полушаг: прямой порядок переменных.
-        for (int i = 0; i < N; ++i) {
-            std::string code = cd_expr_to_code(rhs_plain[i], s.vars, s.params);
-            o << "    X[" << i << "] = X[" << i << "] + h1 * (" << code << ");\n";
-        }
+        // Phi_{h1}: explicit half-step, forward order. Each X[i] update sees
+        // the just-written values of X[0..i-1] (Euler-Cromer coupling).
+        for (int i = 0; i < N; ++i)
+            o << "    X[" << i << "] = X[" << i << "] + h1 * ("
+              << emit_to_str(rhs_ast[i], nm) << ");\n";
 
-        // Неявный полушаг: обратный порядок.
+        // Phi*_{h2}: diagonally-implicit half-step, reverse order.
+        // Wrap a subterm in parentheses only when its top-level operator binds
+        // less tightly than '*'/'/' (i.e. Add or Sub); otherwise emit it raw so
+        // that `h2 * X[0] * X[1]` stays a left-associative multiplication chain
+        // instead of turning into `h2 * (X[0] * X[1])`. Under FMA both forms
+        // are algebraically equal but not bit-identical, and a chaotic system
+        // (Lorenz, Rossler, ...) amplifies that ULP-level split over ~10^3-10^4
+        // steps into visibly different trajectories.
+        auto needs_paren_after_mul = [](const PN& n) {
+            return n && (n->kind == Node::Add || n->kind == Node::Sub);
+        };
+        auto wrap = [](const std::string& s, bool w) {
+            return w ? "(" + s + ")" : s;
+        };
+        // Absorb a leading minus of a rem/coef into the operator sign: peel one
+        // Neg or a negative Num off the node, so that `- h2 * -a[1]` and
+        // `+ h2 * -a[1]` come out as `+ h2 * a[1]` and `- h2 * a[1]` -- the
+        // shape a person would write by hand, and one less negation for the
+        // compiler to chase. Returns the sign character to emit before "h2 * ".
+        auto peel_sign = [](PN& n, char pos, char neg) -> char {
+            if (!n) return pos;
+            if (n->kind == Node::Neg) { n = n->a; return neg; }
+            if (n->kind == Node::Num && n->num < 0.0) { n = pn_num(-n->num); return neg; }
+            return pos;
+        };
+        // "h2 * factor" -> "h2" when factor == 1 (post-peel-sign), same reason
+        // as the pn_mul(x, Num(1)) fold: the multiplication reads like noise
+        // both to a human and to the peephole compiler expects.
+        auto mul_h2 = [&](const PN& factor, const std::string& factor_c) {
+            return pn_is_one(factor) ? std::string("h2") : "h2 * " + factor_c;
+        };
         for (int i = N - 1; i >= 0; --i) {
-            const std::string& var = s.vars[i];
-            const std::string& rhs = rhs_plain[i];
+            const std::string& v = s.vars[i];
             std::string x = "X[" + std::to_string(i) + "]";
-            CdNonlin t = cd_get_nonlinearity_type(rhs, var);
+            PN coef, rem;
+            bool linear = cd_try_extract_linear(rhs_ast[i], v, coef, rem);
 
-            if (t == CdNonlin::None) {
-                std::string rhs_code = cd_expr_to_code(rhs, s.vars, s.params);
-                o << "    " << x << " = " << x << " + h2 * (" << rhs_code << ");\n";
+            if (linear && pn_is_zero(coef)) {
+                // v absent from f_i -> explicit one-shot update.
+                char sgn = peel_sign(rem, '+', '-');
+                std::string rem_c = wrap(emit_to_str(rem, nm),
+                                         needs_paren_after_mul(rem));
+                o << "    " << x << " = " << x
+                  << " " << sgn << " " << mul_h2(rem, rem_c) << ";\n";
             }
-            else if (t == CdNonlin::Linear) {
-                CdExpand e = cd_expand_expression(rhs, var);
-                std::string rem_code = e.remainder.empty()
-                    ? std::string()
-                    : cd_expr_to_code(e.remainder, s.vars, s.params);
-                std::string coef_code = (e.coef == "1")
-                    ? std::string("1")
-                    : cd_expr_to_code(e.coef, s.vars, s.params);
-                // sign — знак при var в RHS. f = sign*coef*var + rem  =>
-                //   var_new = (var + h2*rem) / (1 - sign*h2*coef)
-                std::string denom_sign = (e.sign == "-") ? "+" : "-";
-                std::string denom = (coef_code == "1")
-                    ? std::string("(1 ") + denom_sign + " h2)"
-                    : std::string("(1 ") + denom_sign + " h2 * " + coef_code + ")";
-                if (!rem_code.empty())
-                    o << "    " << x << " = (" << x << " + h2 * (" << rem_code << ")) / " << denom << ";\n";
-                else
-                    o << "    " << x << " = " << x << " / " << denom << ";\n";
+            else if (linear) {
+                // Denominator: 1 (- | +) h2 * |coef|.
+                char dsgn = peel_sign(coef, '-', '+');
+                std::string coef_c = wrap(emit_to_str(coef, nm),
+                                          needs_paren_after_mul(coef));
+                if (pn_is_zero(rem))
+                    o << "    " << x << " = " << x
+                      << " / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
+                else {
+                    // Numerator: X_saved (+ | -) h2 * |rem|.
+                    char nsgn = peel_sign(rem, '+', '-');
+                    std::string rem_c = wrap(emit_to_str(rem, nm),
+                                             needs_paren_after_mul(rem));
+                    o << "    " << x << " = (" << x
+                      << " " << nsgn << " " << mul_h2(rem, rem_c)
+                      << ") / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
+                }
             }
             else {
-                // Нелинейный случай — 4 итерации простой итерации с фиксированным
-                // "стартовым" значением переменной (одномерная неподвижная точка).
-                std::string temp = "x" + std::to_string(i) + "_cd";
-                std::string rhs_code = cd_expr_to_code(rhs, s.vars, s.params);
-                o << "    numb " << temp << " = " << x << ";\n";
-                for (int k = 0; k < 4; ++k)
-                    o << "    " << x << " = " << temp << " + h2 * (" << rhs_code << ");\n";
+                // v enters non-linearly -> fixed-point iterations from X_saved.
+                std::string rhs_c = emit_to_str(rhs_ast[i], nm);
+                bool w = needs_paren_after_mul(rhs_ast[i]);
+                std::string saved = "x" + std::to_string(i) + "_cd";
+                o << "    numb " << saved << " = " << x << ";\n";
+                for (int k = 0; k < CD_ITERS; ++k)
+                    o << "    " << x << " = " << saved
+                      << " + h2 * " << wrap(rhs_c, w) << ";\n";
             }
         }
 
         return o.str();
     }
 
-    // CPU-equivalent of scheme_cd: all variables use 4 simple iterations,
-    // no analytic Linear branch. Mirrors integrator.cpp::step_cd exactly so the
-    // debug panel can show what the CPU integrator computes per step.
+    // CPU-visible pseudo-code path: mirrors integrator.cpp::step_cd exactly
+    // (every variable uses CD_ITERS simple iterations, no analytic branch), so
+    // the CPU debug view prints the algorithm the CPU integrator actually runs.
     std::string scheme_cd_iter_only(const System& s) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
         if (N < 2) throw std::runtime_error("CD method requires N >= 2");
 
-        std::vector<std::string> rhs_plain(N);
+        NameMap nm = build_namemap(s, "X");
+        std::vector<std::string> rhs_c(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
             PN ast = p.parse();
-            std::ostringstream pp;
-            emit_plain(ast, pp);
-            rhs_plain[i] = pp.str();
+            rhs_c[i] = emit_to_str(ast, nm);
         }
 
         std::ostringstream o;
         o << "    numb h1 = h * a[0];\n";
         o << "    numb h2 = h * (1 - a[0]);\n";
 
-        // Explicit half-step, forward order (same as GPU).
-        for (int i = 0; i < N; ++i) {
-            std::string code = cd_expr_to_code(rhs_plain[i], s.vars, s.params);
-            o << "    X[" << i << "] = X[" << i << "] + h1 * (" << code << ");\n";
-        }
+        for (int i = 0; i < N; ++i)
+            o << "    X[" << i << "] = X[" << i << "] + h1 * (" << rhs_c[i] << ");\n";
 
-        // Implicit half-step, reverse order: 4 simple iterations for every var.
         for (int i = N - 1; i >= 0; --i) {
             std::string x = "X[" + std::to_string(i) + "]";
-            std::string temp = "x" + std::to_string(i) + "_cd";
-            std::string rhs_code = cd_expr_to_code(rhs_plain[i], s.vars, s.params);
-            o << "    numb " << temp << " = " << x << ";\n";
-            for (int k = 0; k < 4; ++k)
-                o << "    " << x << " = " << temp << " + h2 * (" << rhs_code << ");\n";
+            std::string saved = "x" + std::to_string(i) + "_cd";
+            o << "    numb " << saved << " = " << x << ";\n";
+            for (int k = 0; k < CD_ITERS; ++k)
+                o << "    " << x << " = " << saved << " + h2 * (" << rhs_c[i] << ");\n";
         }
 
         return o.str();
