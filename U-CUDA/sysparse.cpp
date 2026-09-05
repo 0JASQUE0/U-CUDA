@@ -546,16 +546,20 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         v.push_back(tok);
     };
 
-    // Black-list для params (math functions + LaTeX commands + constants).
+    // Names that must never end up in params. Keep in sync with known_funcs()
+    // in codegen.cpp plus common LaTeX commands and constants.
     static const std::set<std::string> EXCLUDED = {
         "sin","cos","tan","sec","csc","cot",
         "arcsin","arccos","arctan",
+        "asin","acos","atan","atan2",
         "sinh","cosh","tanh","asinh","acosh","atanh",
-        "exp","log","ln","sqrt","abs","max","min",
+        "exp","log","ln","log2","log10","sqrt","cbrt","pow","fmod",
+        "abs","fabs","max","min","floor","ceil",
         "pi","infty","cdot","times","div","pm","mp","cdots","ldots",
-        "frac","dfrac","dot","ddot","left","right","begin","end",
-        "tau","theta",   // часто переменная времени — не параметр
-        "operatorname","mathrm","text"
+        "frac","dfrac","dot","ddot","left","right","big","Big","bigg","Bigg",
+        "begin","end",
+        "tau","theta",
+        "operatorname","mathrm","text","mathbf","mathit","mathcal"
     };
 
     // preprocess: убираем OCR-мусор и `\mathrm{d}`
@@ -575,8 +579,8 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
     str_replace_all("\\mathrm t",  "t");
     str_replace_all("\\operatorname{d}", "d");
 
-    // Хелпер: считает один токен-идентификатор начиная с позиции i.
-    // Возвращает {длина_в_символах, имя_токена_без_изменений}. Если нет — длина 0.
+    // Reads one identifier token: {length, text}. Multi-char plain form so
+    // sin/sigma/rho stay whole (EXCLUDED filter matches full names only).
     auto read_token = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
         if (i >= src.size()) return { 0, "" };
         char c = src[i];
@@ -584,10 +588,14 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
             size_t j = i + 1;
             while (j < src.size() && std::isalpha((unsigned char)src[j])) ++j;
             if (j > i + 1) return { j - i, src.substr(i, j - i) };
-            return { 1, "" };   // \{ \\ и т.п. — пропускаем 1 символ
+            return { 1, "" };
         }
-        if (std::isalpha((unsigned char)c)) {
-            return { 1, std::string(1, c) };
+        if (std::isalpha((unsigned char)c) || c == '_') {
+            size_t j = i + 1;
+            while (j < src.size()
+                   && (std::isalnum((unsigned char)src[j]) || src[j] == '_'))
+                ++j;
+            return { j - i, src.substr(i, j - i) };
         }
         return { 0, "" };
     };
@@ -716,7 +724,11 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         ++i;
     }
 
-    // 4) params: всё остальное
+    // Slash-form leftovers: after section 3 promoted X from dX/dt, the raw
+    // `dX` and `dt` sequences are still there for section 4 to see.
+    static const std::set<std::string> TIME_TAILS = { "t", "tau", "theta" };
+
+    // 4) params: everything else
     for (size_t i = 0; i < s.size(); ) {
         auto [len, tok] = read_token(s, i);
         if (len == 0) { ++i; continue; }
@@ -727,6 +739,10 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         if (EXCLUDED.count(canon)) continue;
         if (canon == "d" || canon == "t") continue;
         if (var_set.count(tok)) continue;
+        if (canon.size() > 1 && canon[0] == 'd') {
+            std::string tail = canon.substr(1);
+            if (var_set.count(tail) || TIME_TAILS.count(tail)) continue;
+        }
         push_unique(out.params, param_set, tok);
     }
 

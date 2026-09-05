@@ -140,7 +140,8 @@ void AppModel::from_record(const SystemRecord& r) {
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
-    latex_text = r.latex_text;
+    // Same normaliser as fresh OCR output; idempotent.
+    latex_text = r.latex_text.empty() ? r.latex_text : format_latex(r.latex_text);
     plain_text = r.plain_text;
     alphabet_text = r.alphabet_text;
     vars_text = r.vars_text;
