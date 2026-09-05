@@ -365,7 +365,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
     }
     PN pn_add(PN a, PN b) { auto n = mk(Node::Add); n->a = std::move(a); n->b = std::move(b); return n; }
     PN pn_sub(PN a, PN b) { auto n = mk(Node::Sub); n->a = std::move(a); n->b = std::move(b); return n; }
-    bool pn_is_neg_one(const PN& n) { return n && n->kind == Node::Num && n->num == -1.0; }
+    // Parser emits literal -1 as Neg(Num(1)) rather than Num(-1), so catch
+    // both shapes here (my own pn_neg fold produces Num(-1), the parser does
+    // not).
+    bool pn_is_neg_one(const PN& n) {
+        if (!n) return false;
+        if (n->kind == Node::Num && n->num == -1.0) return true;
+        if (n->kind == Node::Neg && pn_is_one(n->a)) return true;
+        return false;
+    }
     PN pn_mul(PN a, PN b) {
         if (pn_is_zero(a) || pn_is_zero(b)) return pn_num(0);
         if (pn_is_one(a)) return b;
