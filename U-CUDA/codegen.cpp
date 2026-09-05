@@ -352,12 +352,29 @@ namespace { // внутренняя линковка: всё ниже не ви�
     }
 
     PN pn_num(double v) { auto n = mk(Node::Num); n->num = v; return n; }
-    PN pn_neg(PN a)     { auto n = mk(Node::Neg); n->a = std::move(a); return n; }
+    bool pn_is_zero(const PN& n) { return n && n->kind == Node::Num && n->num == 0.0; }
+    bool pn_is_one (const PN& n) { return n && n->kind == Node::Num && n->num == 1.0; }
+
+    // Peephole constructors: fold trivial identities so the generated C code
+    // stays readable. Only algebraic no-ops (x*1, 1*x, x*0, 0*x, --x, -(Num)),
+    // never re-associates. Correctness is unchanged.
+    PN pn_neg(PN a) {
+        if (a && a->kind == Node::Neg) return a->a;                       // -(-x) -> x
+        if (a && a->kind == Node::Num) return pn_num(-a->num);            // -(c)  -> (-c)
+        auto n = mk(Node::Neg); n->a = std::move(a); return n;
+    }
     PN pn_add(PN a, PN b) { auto n = mk(Node::Add); n->a = std::move(a); n->b = std::move(b); return n; }
     PN pn_sub(PN a, PN b) { auto n = mk(Node::Sub); n->a = std::move(a); n->b = std::move(b); return n; }
-    PN pn_mul(PN a, PN b) { auto n = mk(Node::Mul); n->a = std::move(a); n->b = std::move(b); return n; }
+    bool pn_is_neg_one(const PN& n) { return n && n->kind == Node::Num && n->num == -1.0; }
+    PN pn_mul(PN a, PN b) {
+        if (pn_is_zero(a) || pn_is_zero(b)) return pn_num(0);
+        if (pn_is_one(a)) return b;
+        if (pn_is_one(b)) return a;
+        if (pn_is_neg_one(a)) return pn_neg(std::move(b));                // (-1)*x -> -x
+        if (pn_is_neg_one(b)) return pn_neg(std::move(a));                // x*(-1) -> -x
+        auto n = mk(Node::Mul); n->a = std::move(a); n->b = std::move(b); return n;
+    }
     PN pn_div(PN a, PN b) { auto n = mk(Node::Div); n->a = std::move(a); n->b = std::move(b); return n; }
-    bool pn_is_zero(const PN& n) { return n && n->kind == Node::Num && n->num == 0.0; }
 
     // Try to split n = coef*v + rem with coef, rem both free of v.
     // Returns false when v enters non-linearly and the analytic solve is
