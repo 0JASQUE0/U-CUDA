@@ -590,6 +590,19 @@ namespace { // внутренняя линковка: всё ниже не ви�
               << emit_to_str(rhs_ast[i], nm) << ");\n";
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order.
+        // Wrap a subterm in parentheses only when its top-level operator binds
+        // less tightly than '*'/'/' (i.e. Add or Sub); otherwise emit it raw so
+        // that `h2 * X[0] * X[1]` stays a left-associative multiplication chain
+        // instead of turning into `h2 * (X[0] * X[1])`. Under FMA both forms
+        // are algebraically equal but not bit-identical, and a chaotic system
+        // (Lorenz, Rossler, ...) amplifies that ULP-level split over ~10^3-10^4
+        // steps into visibly different trajectories.
+        auto needs_paren_after_mul = [](const PN& n) {
+            return n && (n->kind == Node::Add || n->kind == Node::Sub);
+        };
+        auto wrap = [](const std::string& s, bool w) {
+            return w ? "(" + s + ")" : s;
+        };
         for (int i = N - 1; i >= 0; --i) {
             const std::string& v = s.vars[i];
             std::string x = "X[" + std::to_string(i) + "]";
@@ -598,27 +611,34 @@ namespace { // внутренняя линковка: всё ниже не ви�
 
             if (linear && pn_is_zero(coef)) {
                 // v absent from f_i -> explicit one-shot update.
+                std::string rem_c = emit_to_str(rem, nm);
                 o << "    " << x << " = " << x
-                  << " + h2 * (" << emit_to_str(rem, nm) << ");\n";
+                  << " + h2 * " << wrap(rem_c, needs_paren_after_mul(rem))
+                  << ";\n";
             }
             else if (linear) {
-                std::string coef_c = emit_to_str(coef, nm);
+                std::string coef_c = wrap(emit_to_str(coef, nm),
+                                          needs_paren_after_mul(coef));
                 if (pn_is_zero(rem))
                     o << "    " << x << " = " << x
-                      << " / (1 - h2 * (" << coef_c << "));\n";
-                else
+                      << " / (1 - h2 * " << coef_c << ");\n";
+                else {
+                    std::string rem_c = wrap(emit_to_str(rem, nm),
+                                             needs_paren_after_mul(rem));
                     o << "    " << x << " = (" << x
-                      << " + h2 * (" << emit_to_str(rem, nm)
-                      << ")) / (1 - h2 * (" << coef_c << "));\n";
+                      << " + h2 * " << rem_c
+                      << ") / (1 - h2 * " << coef_c << ");\n";
+                }
             }
             else {
                 // v enters non-linearly -> fixed-point iterations from X_saved.
                 std::string rhs_c = emit_to_str(rhs_ast[i], nm);
+                bool w = needs_paren_after_mul(rhs_ast[i]);
                 std::string saved = "x" + std::to_string(i) + "_cd";
                 o << "    numb " << saved << " = " << x << ";\n";
                 for (int k = 0; k < CD_ITERS; ++k)
                     o << "    " << x << " = " << saved
-                      << " + h2 * (" << rhs_c << ");\n";
+                      << " + h2 * " << wrap(rhs_c, w) << ";\n";
             }
         }
 
