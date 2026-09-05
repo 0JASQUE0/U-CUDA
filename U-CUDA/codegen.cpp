@@ -603,6 +603,23 @@ namespace { // внутренняя линковка: всё ниже не ви�
         auto wrap = [](const std::string& s, bool w) {
             return w ? "(" + s + ")" : s;
         };
+        // Absorb a leading minus of a rem/coef into the operator sign: peel one
+        // Neg or a negative Num off the node, so that `- h2 * -a[1]` and
+        // `+ h2 * -a[1]` come out as `+ h2 * a[1]` and `- h2 * a[1]` -- the
+        // shape a person would write by hand, and one less negation for the
+        // compiler to chase. Returns the sign character to emit before "h2 * ".
+        auto peel_sign = [](PN& n, char pos, char neg) -> char {
+            if (!n) return pos;
+            if (n->kind == Node::Neg) { n = n->a; return neg; }
+            if (n->kind == Node::Num && n->num < 0.0) { n = pn_num(-n->num); return neg; }
+            return pos;
+        };
+        // "h2 * factor" -> "h2" when factor == 1 (post-peel-sign), same reason
+        // as the pn_mul(x, Num(1)) fold: the multiplication reads like noise
+        // both to a human and to the peephole compiler expects.
+        auto mul_h2 = [&](const PN& factor, const std::string& factor_c) {
+            return pn_is_one(factor) ? std::string("h2") : "h2 * " + factor_c;
+        };
         for (int i = N - 1; i >= 0; --i) {
             const std::string& v = s.vars[i];
             std::string x = "X[" + std::to_string(i) + "]";
@@ -611,23 +628,28 @@ namespace { // внутренняя линковка: всё ниже не ви�
 
             if (linear && pn_is_zero(coef)) {
                 // v absent from f_i -> explicit one-shot update.
-                std::string rem_c = emit_to_str(rem, nm);
+                char sgn = peel_sign(rem, '+', '-');
+                std::string rem_c = wrap(emit_to_str(rem, nm),
+                                         needs_paren_after_mul(rem));
                 o << "    " << x << " = " << x
-                  << " + h2 * " << wrap(rem_c, needs_paren_after_mul(rem))
-                  << ";\n";
+                  << " " << sgn << " " << mul_h2(rem, rem_c) << ";\n";
             }
             else if (linear) {
+                // Denominator: 1 (- | +) h2 * |coef|.
+                char dsgn = peel_sign(coef, '-', '+');
                 std::string coef_c = wrap(emit_to_str(coef, nm),
                                           needs_paren_after_mul(coef));
                 if (pn_is_zero(rem))
                     o << "    " << x << " = " << x
-                      << " / (1 - h2 * " << coef_c << ");\n";
+                      << " / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
                 else {
+                    // Numerator: X_saved (+ | -) h2 * |rem|.
+                    char nsgn = peel_sign(rem, '+', '-');
                     std::string rem_c = wrap(emit_to_str(rem, nm),
                                              needs_paren_after_mul(rem));
                     o << "    " << x << " = (" << x
-                      << " + h2 * " << rem_c
-                      << ") / (1 - h2 * " << coef_c << ");\n";
+                      << " " << nsgn << " " << mul_h2(rem, rem_c)
+                      << ") / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
                 }
             }
             else {
