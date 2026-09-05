@@ -69,17 +69,24 @@ void Plot2DView::do_autofit() {
             wxmin -= padx; wxmax += padx;
         }
         double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
-        if (x_fit_use_explicit) {
-            x_axis.view_min = x_fit_min;
-            x_axis.view_max = x_fit_max;
-        } else {
-            x_axis.view_min = wxmin;
-            x_axis.view_max = wxmax;
+        // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
+        // locked axes, but fit_request used to stomp them on every data change
+        // (esp. visible in phase continuation, where each tick refit the view).
+        if (!x_axis.lock) {
+            if (x_fit_use_explicit) {
+                x_axis.view_min = x_fit_min;
+                x_axis.view_max = x_fit_max;
+            } else {
+                x_axis.view_min = wxmin;
+                x_axis.view_max = wxmax;
+            }
         }
-        y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+        if (!y_axis.lock) {
+            y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+        }
         view_valid = true;
     }
-    else if (x_fit_use_explicit) {
+    else if (x_fit_use_explicit && !x_axis.lock) {
         // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;

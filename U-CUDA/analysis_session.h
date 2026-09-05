@@ -85,6 +85,9 @@ struct AnalysisResult {
     // пики, и интервалы между ними. Сразу по всем переменным: объём мал (<= max_amount_of_peaks на
     // переменную), зато переключение переменной в комбо не требует пересчёта.
     std::vector<std::vector<FeaturePoints>> features;
+    // Final integrator state per IC (pre-decimation), so continuation mode can
+    // seed the next chunk from the true X[] rather than a decimated sample.
+    std::vector<std::vector<double>> final_states;
     bool ok = false;
     std::string error;
     int generation = 0;
@@ -118,6 +121,20 @@ struct PhaseAnalysisSession {
     std::string decimation = "1";      // выводить каждую N-ю точку
     bool auto_recompute = false;       // пересчитывать сразу при изменении
     bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
+
+    // Continuation (live) mode — timer-driven chain of async recomputes that
+    // seeds each new chunk from the last integrator state, so the attractor
+    // visually "flows". Only the two persisted toggles below are saved; the
+    // runtime state resets on load.
+    bool        continuation_mode      = false;   // persisted UI toggle
+    std::string continuation_delay_ms  = "50";    // persisted frame delay text
+
+    // Runtime: separate from continuation_mode so a load never resurrects a
+    // running loop. GUI sets active = mode on Start, back to false on Stop.
+    bool continuation_active      = false;
+    bool continuation_first_frame = true;         // apply skip_time on frame 0 only
+    std::vector<std::vector<double>> continuation_state;  // [ic][coord] carried across frames
+    std::chrono::steady_clock::time_point continuation_last_frame;
 
     // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.
     System sys;                        // правые части и т.д.
