@@ -546,16 +546,20 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         v.push_back(tok);
     };
 
-    // Black-list для params (math functions + LaTeX commands + constants).
+    // Names that must never end up in params. Keep in sync with known_funcs()
+    // in codegen.cpp plus common LaTeX commands and constants.
     static const std::set<std::string> EXCLUDED = {
         "sin","cos","tan","sec","csc","cot",
         "arcsin","arccos","arctan",
+        "asin","acos","atan","atan2",
         "sinh","cosh","tanh","asinh","acosh","atanh",
-        "exp","log","ln","sqrt","abs","max","min",
+        "exp","log","ln","log2","log10","sqrt","cbrt","pow","fmod",
+        "abs","fabs","max","min","floor","ceil",
         "pi","infty","cdot","times","div","pm","mp","cdots","ldots",
-        "frac","dfrac","dot","ddot","left","right","begin","end",
-        "tau","theta",   // часто переменная времени — не параметр
-        "operatorname","mathrm","text"
+        "frac","dfrac","dot","ddot","left","right","big","Big","bigg","Bigg",
+        "begin","end",
+        "tau","theta",
+        "operatorname","mathrm","text","mathbf","mathit","mathcal"
     };
 
     // preprocess: убираем OCR-мусор и `\mathrm{d}`
@@ -574,9 +578,14 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
     str_replace_all("\\mathrm d",  "d");
     str_replace_all("\\mathrm t",  "t");
     str_replace_all("\\operatorname{d}", "d");
+    // Flatten `_{sub}` -> `_sub` so read_token grabs `x_m` as one identifier;
+    // matches what strip_env does for the AST parser.
+    try {
+        s = std::regex_replace(s, std::regex(R"(_\s*\{([A-Za-z0-9]+)\})"), "_$1");
+    } catch (const std::regex_error&) {}
 
-    // Хелпер: считает один токен-идентификатор начиная с позиции i.
-    // Возвращает {длина_в_символах, имя_токена_без_изменений}. Если нет — длина 0.
+    // Reads one identifier token: {length, text}. Multi-char plain form so
+    // sin/sigma/rho stay whole (EXCLUDED filter matches full names only).
     auto read_token = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
         if (i >= src.size()) return { 0, "" };
         char c = src[i];
@@ -584,10 +593,14 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
             size_t j = i + 1;
             while (j < src.size() && std::isalpha((unsigned char)src[j])) ++j;
             if (j > i + 1) return { j - i, src.substr(i, j - i) };
-            return { 1, "" };   // \{ \\ и т.п. — пропускаем 1 символ
+            return { 1, "" };
         }
-        if (std::isalpha((unsigned char)c)) {
-            return { 1, std::string(1, c) };
+        if (std::isalpha((unsigned char)c) || c == '_') {
+            size_t j = i + 1;
+            while (j < src.size()
+                   && (std::isalnum((unsigned char)src[j]) || src[j] == '_'))
+                ++j;
+            return { j - i, src.substr(i, j - i) };
         }
         return { 0, "" };
     };
@@ -598,7 +611,26 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         return i;
     };
 
-    // 1) производные: \dot{X}, \dot X
+    // Reads a `_sub` suffix (post-flatten form only) at position i.
+    // Returns {chars_consumed, "_sub"}; {0, ""} if nothing.
+    auto read_subscript = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
+        if (i >= src.size() || src[i] != '_') return { 0, "" };
+        size_t j = i + 1;
+        while (j < src.size()
+               && (std::isalnum((unsigned char)src[j]) || src[j] == '_'))
+            ++j;
+        if (j == i + 1) return { 0, "" };
+        return { j - i, src.substr(i, j - i) };
+    };
+
+    // Blanks out a byte range in `s`. Sections 1-3 use it to hide their
+    // consumed derivatives from section 4, which otherwise re-tokenises the
+    // var letters inside \dot{x}_m and dumps `x`/`_m` into params.
+    auto blank_range = [&](size_t a, size_t b) {
+        for (size_t k = a; k < b && k < s.size(); ++k) s[k] = ' ';
+    };
+
+    // 1) производные: \dot{X}, \dot X (+ optional `_sub` suffix)
     for (size_t i = 0; i + 4 <= s.size(); ) {
         if (s.compare(i, 4, "\\dot") == 0) {
             size_t j = skip_ws(s, i + 4);
@@ -608,15 +640,26 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
                     std::string inner = s.substr(j + 1, end - j - 1);
                     size_t a = inner.find_first_not_of(" \t");
                     size_t b = inner.find_last_not_of(" \t");
-                    if (a != std::string::npos)
-                        push_unique(out.vars, var_set, inner.substr(a, b - a + 1));
+                    if (a != std::string::npos) {
+                        std::string name = inner.substr(a, b - a + 1);
+                        auto [slen, sub] = read_subscript(s, end + 1);
+                        if (slen > 0) { name += sub; end += slen; }
+                        push_unique(out.vars, var_set, name);
+                    }
+                    blank_range(i, end + 1);
+                    i = end + 1;
+                    continue;
                 }
-                i = (end == std::string::npos) ? i + 4 : end + 1;
+                i = i + 4;
                 continue;
             }
             auto [len, tok] = read_token(s, j);
-            if (len > 0 && !tok.empty())
+            if (len > 0 && !tok.empty()) {
+                auto [slen, sub] = read_subscript(s, j + len);
+                if (slen > 0) { tok += sub; len += slen; }
                 push_unique(out.vars, var_set, tok);
+                blank_range(i, j + len);
+            }
             i = j + (len > 0 ? len : 1);
             continue;
         }
@@ -673,7 +716,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
     for (size_t i = 0; i < s.size(); ) {
         if (s[i] == '\\') {
             size_t nxt = try_frac_at(i);
-            if (nxt > 0) { i = nxt; continue; }
+            if (nxt > 0) { blank_range(i, nxt); i = nxt; continue; }
         }
         ++i;
     }
@@ -688,35 +731,47 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
                 size_t e = j + 1;
                 while (e < s.size() && std::isalpha((unsigned char)s[e])) ++e;
                 if (e > j + 1) { var = s.substr(j, e - j); j = e; }
-            } else if (j < s.size() && std::isalpha((unsigned char)s[j])
-                       && (j + 1 >= s.size() || !std::isalpha((unsigned char)s[j + 1]))) {
-                var = std::string(1, s[j]); j = j + 1;
+            } else if (j < s.size() && std::isalpha((unsigned char)s[j])) {
+                // Multi-char var + optional `_sub`. Slash-form is validated
+                // below by the mandatory `/dt` (or `/dtau`/`/dtheta`) tail.
+                auto [vlen, vtok] = read_token(s, j);
+                if (vlen > 0) { var = vtok; j += vlen; }
+                auto [slen, sub] = read_subscript(s, j);
+                if (slen > 0) { var += sub; j += slen; }
             }
-            if (!var.empty()) {
+            if (!var.empty() && var != "t") {
                 size_t k = skip_ws(s, j);
                 if (k < s.size() && s[k] == '/' && k + 1 < s.size() && s[k + 1] == 'd') {
                     size_t m = k + 2;
-                    if (m < s.size() && (s[m] == 't' || s[m] == '\\')) {
+                    size_t tail_end = m;
+                    if (m < s.size() && s[m] == 't') tail_end = m + 1;
+                    else if (m < s.size() && s[m] == '\\') {
+                        auto [tlen, ttok] = read_token(s, m);
+                        if (tlen > 0) tail_end = m + tlen;
+                    }
+                    if (tail_end > m) {
                         push_unique(out.vars, var_set, var);
-                        i = m + 1; continue;
+                        blank_range(i, tail_end);
+                        i = tail_end; continue;
                     }
                 }
             }
         }
-        // X' — одна буква + ' (prime). Чтобы не цеплять кавычку посреди слова, требуем,
-        // что слева — не буква.
+        // X' — letter (+ optional `_sub`) followed by prime. Left of the
+        // letter must not itself be a letter, to avoid quoting mid-word.
         if (s[i + 1] == '\'') {
             char c = s[i];
             bool left_ok = (i == 0) || !std::isalpha((unsigned char)s[i - 1]);
             if (std::isalpha((unsigned char)c) && left_ok) {
                 push_unique(out.vars, var_set, std::string(1, c));
+                blank_range(i, i + 2);
                 i += 2; continue;
             }
         }
         ++i;
     }
 
-    // 4) params: всё остальное
+    // 4) params: everything else
     for (size_t i = 0; i < s.size(); ) {
         auto [len, tok] = read_token(s, i);
         if (len == 0) { ++i; continue; }
@@ -725,7 +780,7 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         std::string canon = tok;
         if (canon[0] == '\\') canon.erase(0, 1);
         if (EXCLUDED.count(canon)) continue;
-        if (canon == "d" || canon == "t") continue;
+        if (canon == "t") continue;
         if (var_set.count(tok)) continue;
         push_unique(out.params, param_set, tok);
     }
