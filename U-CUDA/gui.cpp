@@ -1941,6 +1941,20 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Checkbox("Legend shows initial conditions", &s.legend_show_ic); ImGui::SameLine();
     ImGui::Checkbox("GPU", &s.use_gpu);
 
+    // Continuation is Analysis-only: Custom-tab phase is a pipeline stage
+    // whose queue would fight a timer-driven re-run.
+    if (on_reset_defaults) {
+        // Toggle only arms the mode — the loop starts on the next Recompute so
+        // enabling continuation never launches a compute on its own.
+        // Unticking mid-run stops the loop (mirrors the Stop button).
+        if (ImGui::Checkbox("Continuation (live)", &s.continuation_mode)) {
+            if (!s.continuation_mode) s.continuation_active = false;
+        }
+        ImGui::SameLine();
+        ImGui::Text("Frame delay (ms):"); ImGui::SameLine();
+        InputNumStr("##cdelay", s.continuation_delay_ms, 70);
+    }
+
     ImGui::Separator();
 
     // параметры (общие на все проекции)
@@ -2184,7 +2198,20 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     // Recompute по кнопке или Ctrl+R, дисейблится во время async-расчёта.
     // Авто-сохранение _last делается в draw_gui::poll(), когда результат готов.
     bool do_recompute = false;
-    if (s.in_flight) {
+    if (s.continuation_active) {
+        // Stop supersedes Recomputing... — the loop is expected to keep an
+        // async in flight most of the time, and hiding Stop behind it would
+        // trap the user until a chunk finishes.
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.28f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.50f, 0.15f, 0.15f, 1.0f));
+        if (ImGui::Button("Stop (continuation)", ImVec2(-1, 0))) {
+            s.continuation_active = false;
+            s.continuation_mode   = false;
+        }
+        ImGui::PopStyleColor(3);
+    }
+    else if (s.in_flight) {
         ImGui::BeginDisabled();
         ImGui::Button("Recomputing...", ImVec2(-1, 0));
         ImGui::EndDisabled();
@@ -2195,6 +2222,14 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (s.auto_recompute && changed) do_recompute = true;
     }
     if (do_recompute) {
+        // Fresh manual Run resets continuation seed even if the mode is on,
+        // so a user tweak (params/IC/method) always starts from the edited IC.
+        if (s.continuation_mode) {
+            s.continuation_active      = true;
+            s.continuation_first_frame = true;
+            s.continuation_state.clear();
+            s.continuation_last_frame  = std::chrono::steady_clock::now();
+        }
         s.recompute_async();
     }
 
@@ -8320,6 +8355,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last",
                              session_to_json(model.phase_session));
+    }
+    // Continuation timer: after each frame finishes and once the debounce
+    // window elapses, schedule the next chunk. Runs off the per-frame poll —
+    // no separate thread, no wakeup while the previous chunk is still async.
+    {
+        auto& ps = model.phase_session;
+        if (ps.continuation_active && !ps.in_flight) {
+            const auto  now      = std::chrono::steady_clock::now();
+            const double delay_ms = std::max(0.0, parse_num(ps.continuation_delay_ms, 50.0));
+            const auto  due      = ps.continuation_last_frame +
+                                   std::chrono::milliseconds((long long)delay_ms);
+            if (now >= due) {
+                ps.continuation_last_frame = now;
+                ps.recompute_async();
+            }
+        }
     }
     // Basins: один config на сессию. Сохраняем JSON каждый кадр (после poll
     // - но также при изменении полей в controls). Здесь только after-poll save.

@@ -95,6 +95,10 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
     o << "  \"legend_show_ic\":" << (s.legend_show_ic ? "true" : "false") << ",\n";
     o << "  \"use_gpu\":" << (s.use_gpu ? "true" : "false") << ",\n";
+    // Continuation: only persist user-facing toggles; runtime seed/timer are
+    // rebuilt from scratch on Start so a load never resurrects a running loop.
+    o << "  \"continuation_mode\":" << (s.continuation_mode ? "true" : "false") << ",\n";
+    o << "  \"continuation_delay_ms\":"; jstr(o, s.continuation_delay_ms); o << ",\n";
     o << "  \"param_values\":"; jmap(o, s.param_values); o << ",\n";
     // ic_sets: [ {label, visible, values{...}} ]
     o << "  \"ic_sets\":[";
@@ -141,6 +145,8 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();
             else if (key == "legend_show_ic") s.legend_show_ic = p.boolean();
             else if (key == "use_gpu")        s.use_gpu = p.boolean();
+            else if (key == "continuation_mode")     s.continuation_mode = p.boolean();
+            else if (key == "continuation_delay_ms") s.continuation_delay_ms = p.str();
             else if (key == "param_values")   s.param_values = p.map_ss();
             else if (key == "ic_sets") {
                 s.ic_sets.clear();

@@ -179,6 +179,11 @@ struct PhaseRunInputs {
     bool        krs_is_custom = false;
     std::map<std::string, std::string>  param_values;
     std::vector<InitialConditionSet>    ic_sets;
+    // Continuation mode plumbing. When ic_override is populated it takes
+    // precedence over parsing ic_sets, and skip_transient=false zeroes the
+    // in-kernel transient loop so the resumed chunk starts recording immediately.
+    bool                              skip_transient = true;
+    std::vector<std::vector<double>>  ic_override;   // [ic][coord]; empty → use ic_sets text
 };
 } // namespace
 
@@ -195,7 +200,8 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     double tsim = parse_val(in.sim_time, 50.0);
     double tskip = parse_val(in.skip_time, 0.0);
     int total = (int)(tsim / h); if (total <= 0) total = 1;
-    int skip = (int)(tskip / h); if (skip < 0) skip = 0;
+    int skip = in.skip_transient ? (int)(tskip / h) : 0;
+    if (skip < 0) skip = 0;
 
     // параметры: a[0] зарезервирован под CD-коэф. симметрии, a[1..] = params
     int nparams = (int)in.params.size();
@@ -212,11 +218,21 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     if (N < 1) { result.error = "no initial conditions"; return result; }
 
     std::vector<double> ic_flat((size_t)N * dim, 0.0);
+    // Continuation seeds ic_flat from the previous chunk's final state; skip
+    // parsing so a Lorenz-scale double reaches the kernel bit-exact.
+    const bool use_override = (int)in.ic_override.size() == N &&
+                              (in.ic_override.empty() || (int)in.ic_override[0].size() >= dim);
     for (int k = 0; k < N; ++k) {
-        const auto& ic = in.ic_sets[k];
-        for (int i = 0; i < dim; ++i) {
-            auto it = ic.values.find(in.vars[i]);
-            ic_flat[(size_t)k * dim + i] = parse_val(it != ic.values.end() ? it->second : "", 0.0);
+        if (use_override) {
+            for (int i = 0; i < dim; ++i)
+                ic_flat[(size_t)k * dim + i] = in.ic_override[k][i];
+        }
+        else {
+            const auto& ic = in.ic_sets[k];
+            for (int i = 0; i < dim; ++i) {
+                auto it = ic.values.find(in.vars[i]);
+                ic_flat[(size_t)k * dim + i] = parse_val(it != ic.values.end() ? it->second : "", 0.0);
+            }
         }
     }
 
@@ -281,9 +297,13 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
 
     result.features.resize(N);
+    // Preallocated so a divergent trajectory (empty traj[]) still leaves a
+    // zero-length slot at the same index as ic_sets[k].
+    result.final_states.assign(N, std::vector<double>{});
     for (int k = 0; k < N; ++k) {
         const auto& ic = in.ic_sets[k];
         std::vector<std::vector<double>>& traj = raw[k];
+        if (!traj.empty()) result.final_states[k] = traj.back();
 
         // Признаки (пики + интервалы) считаем по ПРОРЕЖЕННОМУ ряду и с шагом h*decimator — ровно
         // тот сигнал и тот шаг, что получает peakFinderCUDA в 2D-бифуркации (timeStep = h *
@@ -400,6 +420,14 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
         if (cs.name == s.scheme) { in.krs_is_custom = true; break; }
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
+    // Continuation: on frames >= 1 resume from the previous chunk's final X[]
+    // and skip the transient (already burned in). Size mismatch (user added or
+    // removed an IC mid-run) falls back to first-frame semantics.
+    if (s.continuation_active && !s.continuation_first_frame &&
+        s.continuation_state.size() == s.ic_sets.size()) {
+        in.ic_override    = s.continuation_state;
+        in.skip_transient = false;
+    }
     return in;
 }
 
@@ -429,6 +457,13 @@ bool PhaseAnalysisSession::poll() {
     fit_request = true;
     data_generation++;
     in_flight = false;
+    // Carry the final X[] forward for the next continuation chunk. Only
+    // adopt on success so a divergent frame doesn't corrupt the seed.
+    if (continuation_active && result.ok &&
+        result.final_states.size() == ic_sets.size()) {
+        continuation_state       = std::move(result.final_states);
+        continuation_first_frame = false;
+    }
     return true;
 }
 
