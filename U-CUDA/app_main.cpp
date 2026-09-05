@@ -244,7 +244,7 @@ int main() {
     const char* glsl_version = "#version 330";
 
     GLFWwindow* window = glfwCreateWindow(1100, 750,
-        "Dynamical Systems Code Generator", nullptr, nullptr);
+        "U-CUDA", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMaximizeWindow(window);
     glfwMakeContextCurrent(window);
