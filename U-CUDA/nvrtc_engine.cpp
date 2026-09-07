@@ -4,6 +4,12 @@
 #include <nvrtc.h>
 #include <cstdio>
 #include <sstream>
+#include <fstream>
+
+// exe_dir(): единственное внешнее определение живёт в app_main.cpp (Release) /
+// main_NonLinAnal.cu (Debug) — копия в parametric_engine.cpp лежит в
+// анонимном namespace и снаружи не видна.
+extern std::string exe_dir();
 
 // помощники проверки ошибок, пишут в error_
 #define NV_FAIL(msg) do { error_ = (msg); return false; } while(0)
@@ -96,12 +102,46 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
 
     amountOfX_ = amountOfX;
 
+    // Схемы с комплексными коэффициентами (Complex CD) держат внутри шага
+    // ucmplx — тип объявлен в configCUDA.h. В отличие от параметрического
+    // движка, этот исходник самодостаточен и собирается вообще без -I, поэтому
+    // заголовок подаём текстом, и только когда он реально нужен: для остальных
+    // схем исходник и опции компиляции остаются прежними.
+    // Признак берём из самого тела — ucmplx в нём есть тогда и только тогда,
+    // когда схема комплексная, а тело и так является ключом кеша модулей, так
+    // что рассинхронизироваться тут нечему.
+    const bool needs_complex = krs_body.find("ucmplx") != std::string::npos;
+    std::string cfg_header;
+    if (needs_complex) {
+        const std::string path = exe_dir() + "\\kernels\\configCUDA.h";
+        std::ifstream f(path, std::ios::binary);
+        if (!f) NV_FAIL("не найден " + path + " (нужен для схем с комплексными "
+                        "коэффициентами; проверь, что kernels\\ скопирован рядом с .exe)");
+        std::ostringstream ss; ss << f.rdbuf();
+        cfg_header = ss.str();
+        // Санитайзинг — тот же, что в parametric_engine.cpp::read_text_file, и
+        // по той же причине. Все исходники проекта в UTF-8 С BOM
+        // (.editorconfig): файл, найденный по -I, NVRTC разбирает сам, но
+        // заголовок, поданный ТЕКСТОМ, попадает в препроцессор как есть, и BOM
+        // становится "unrecognized token" ещё до #pragma once (проверено: и в
+        // первой строке, и в любой другой). Не-ASCII байты глушим до пробела:
+        // весь не-ASCII в configCUDA.h живёт в комментариях, а исторически
+        // NVRTC спотыкался и о них.
+        if (cfg_header.size() >= 3 && (unsigned char)cfg_header[0] == 0xEF
+            && (unsigned char)cfg_header[1] == 0xBB && (unsigned char)cfg_header[2] == 0xBF)
+            cfg_header.erase(0, 3);
+        for (char& c : cfg_header) if ((unsigned char)c >= 0x80) c = ' ';
+    }
+
     // Собираем полный CUDA-исходник: тип, КРС как __device__, ядро траектории.
     // krs_body использует X[], a[], h (как выдаёт codegen). Тип numb=double тут.
     std::ostringstream src;
     src << "typedef double numb;\n"
-        << "#define AMOUNTOFX " << amountOfX << "\n"
-        << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
+        << "#define AMOUNTOFX " << amountOfX << "\n";
+    // configCUDA.h сам объявляет numb и AMOUNTOFX (второе — под #ifndef, первое
+    // повторным typedef того же типа, что легально), поэтому порядок безопасен.
+    if (needs_complex) src << "#include \"configCUDA.h\"\n";
+    src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
         << krs_body << "\n"
         << "}\n"
         // Ядро на N траекторий: поток tid считает траекторию для НУ номер tid.
@@ -124,7 +164,12 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     std::string code = src.str();
 
     nvrtcProgram prog;
-    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu", 0, nullptr, nullptr), "createProgram");
+    const char* hdr_src[]  = { cfg_header.c_str() };
+    const char* hdr_name[] = { "configCUDA.h" };
+    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu",
+                            needs_complex ? 1 : 0,
+                            needs_complex ? hdr_src  : nullptr,
+                            needs_complex ? hdr_name : nullptr), "createProgram");
     char arch[32];
     snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
     // FMA-контракция обязана совпадать с parametric_engine.cpp: фазовый портрет

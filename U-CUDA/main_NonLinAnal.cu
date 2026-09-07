@@ -3298,7 +3298,8 @@ int main()
 //		//	sizeof(params) / sizeof(numb),		// Количество параметров
 //		//	1,										// Множитель, который уменьшает время и объем расчетов (будет рассчитываться только каждая 'preScaller' точка)
 //		//	0.05,									// Эпсилон для алгоритма DBSCAN
-//		//	"D:\\CUDAresults\\Basins_ROSSLER1.csv"
+//		//	"D:\\CUDAresults\\Basins_ROSSLER1.csv",
+//		//	32										// Размер блока CUDA
 //		//);
 //
 //		//Log basins for artur/burkin Matreshka

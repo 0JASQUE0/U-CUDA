@@ -41,9 +41,12 @@ struct SystemRecord {
     bool scheme_rk4      = false;
     bool scheme_dopri78  = false;
     bool scheme_cd       = false;
+    bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
+    bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
 
-    // Коэффициент симметрии s для CD-метода (передаётся в kernel как a[0]).
-    // 0.5 = классический симметричный CD. Используется только когда scheme == "CD".
+    // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
+    // 0.5 = классический симметричный CD. Читается схемами "CD" и "Complex CD"
+    // (а также пользовательскими КРС, чьё тело обращается к a[0]).
     std::string symmetry_s = "0.5";
 
     // Пользовательские именованные КРС (см. CustomScheme выше).

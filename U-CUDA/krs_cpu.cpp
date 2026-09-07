@@ -8,6 +8,10 @@
 #include <mutex>
 #include <sstream>
 
+// exe_dir(): определён в app_main.cpp (Release) / main_NonLinAnal.cu (Debug).
+// Нужен, чтобы дать cl.exe путь к configCUDA.h из kernels\ рядом с .exe.
+extern std::string exe_dir();
+
 // Часть 1. Статическая проверка индексов
 namespace {
 
@@ -265,16 +269,20 @@ namespace {
 // пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
 // numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
 // подхватилась бы DLL, собранная в другой точности.
-constexpr int kPreludeVersion = 3;
-
-// Имя типа numb в тексте генерируемого исходника. Берётся из самого typedef,
-// поэтому configCUDA.h остаётся единственным источником истины.
-constexpr const char* numb_type_name() {
-    return sizeof(numb) == sizeof(float) ? "float" : "double";
-}
+constexpr int kPreludeVersion = 4;
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
+//
+// numb, AMOUNTOFX, pi, euler и ucmplx приходят из configCUDA.h — того самого
+// файла, который NVRTC подставляет в ядро. Раньше пролог объявлял их сам
+// (typedef + две константы), и тело, написанное под GPU, на CPU могло не
+// собраться: схемы с комплексными полушагами (Complex CD и любая custom КРС на
+// её основе) падали с "C2065: ucmplx необъявленный идентификатор", потому что
+// тип живёт в заголовке, а сюда он не попадал. Дублировать объявления второй
+// раз — тот же класс ошибки в будущем, поэтому берём заголовок целиком: он
+// уже лежит рядом с .exe (post-build копирует его в kernels\), и путь к нему
+// уходит в cl через /I.
 //
 // `using std::abs` обязателен. Без него <stdlib.h> даёт только целочисленные
 // перегрузки (int/long/__int64), и `numb s_abs = abs(sigma);` из схемы
@@ -282,23 +290,17 @@ constexpr const char* numb_type_name() {
 // значение до целого. В CUDA abs(double) — это double, приводим к тому же.
 // min/max для double тоже есть в device-коде CUDA, объявляем их сами.
 //
-// pi / euler дублируют configCUDA.h; локальное объявление внутри тела
-// (см. схему "sine") их просто затеняет — ровно как на GPU.
+// AMOUNTOFX определяем ДО include: в configCUDA.h он под #ifndef, наш #define
+// выигрывает, как и в NVRTC-шаблонах.
 std::string make_source(const std::string& body, int amountOfX) {
     std::ostringstream o;
-    // numb берётся из configCUDA.h — тело схемы обязано считаться в той же
-    // точности, что на GPU. min/max/pi/euler объявлены тем же типом, иначе
-    // при numb=float выражение молча поднялось бы до double в середине.
-    const char* nt = numb_type_name();
     o << "#include <cmath>\n"
          "#include <cstdlib>\n"
          "using std::abs;\n"
-         "typedef " << nt << " numb;\n"
+         "#define AMOUNTOFX " << amountOfX << "\n"
+         "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
-         "#define AMOUNTOFX " << amountOfX << "\n"
-         "static const numb pi    = (numb)3.1415926535897932384626433832795;\n"
-         "static const numb euler = (numb)2.7182818284590452353602874713527;\n"
          "extern \"C\" __declspec(dllexport)\n"
          "void krs_step(numb* X, const numb* a, numb h) {\n"
          // Дальше — код пользователя. #line переводит нумерацию компилятора
@@ -438,8 +440,14 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         // Пути к /Fo и /Fd задаём ПОФАЙЛОВО, а не каталогом: каталог
         // оканчивается на '\', и в "...\dir\" обратный слэш экранирует
         // закрывающую кавычку — аргументы слипаются, cl падает с C1083.
+        // /I — каталог с configCUDA.h (его копию post-build кладёт в kernels\
+        // рядом с .exe; оттуда же его читает NVRTC-путь, так что CPU и GPU
+        // видят один и тот же файл).
+        const std::string inc_dir = exe_dir() + "\\kernels";
+
         const std::string cmd =
             "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /LD"
+            " /I\"" + inc_dir + "\""
             " /Fe:\"" + dll + "\""
             " /Fo:\"" + dir + "krs.obj\""
             " /Fd:\"" + dir + "krs.pdb\""

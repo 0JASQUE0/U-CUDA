@@ -126,6 +126,8 @@ SystemRecord AppModel::to_record() const {
     r.scheme_rk4 = scheme_rk4;
     r.scheme_dopri78 = scheme_dopri78;
     r.scheme_cd = scheme_cd;
+    r.scheme_ccd = scheme_ccd;
+    r.scheme_ccd4 = scheme_ccd4;
     r.symmetry_s = symmetry_s;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
@@ -155,6 +157,8 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_rk4 = r.scheme_rk4;
     scheme_dopri78 = r.scheme_dopri78;
     scheme_cd = r.scheme_cd;
+    scheme_ccd = r.scheme_ccd;
+    scheme_ccd4 = r.scheme_ccd4;
     symmetry_s = r.symmetry_s;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
@@ -166,7 +170,8 @@ void AppModel::from_record(const SystemRecord& r) {
     // сразу перегенерируем код загруженной системы (если выбраны методы),
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
-    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_cd)
+    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
+        || scheme_cd || scheme_ccd || scheme_ccd4)
         generate();
 }
 
@@ -184,7 +189,8 @@ void AppModel::clear() {
     params_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
-    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_cd = false;
+    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
+        = scheme_cd = scheme_ccd = scheme_ccd4 = false;
     symmetry_s = "0.5";
     step_h.clear();
     init_conditions.clear();
@@ -426,34 +432,38 @@ std::string fmt_num_for_input(double v) {
     return fmt_num_shortest(v);
 }
 
-// Pin the "other axis" parameter (the one held fixed while the swept axis
-// varies) into the per-config param_values. Only applies when the fixed axis
-// sweeps a parameter — for var-sweeps, the "fix" applies to an initial
-// condition, not a param, so we handle those separately below.
+// Закреплённая ось (та, что держится фиксированной, пока свипуется другая)
+// может идти по параметру, по начальному условию или по ШАГУ — и «зафиксировать»
+// её значит подставить значение в РАЗНЫЕ поля конфига. Все три подстановки
+// вызываются вместе и решают по одной и той же EffectiveSweep: срабатывает
+// ровно одна.
+//
+// Флаги приходят одним объектом намеренно. Раньше каждая функция получала свои
+// флаги отдельными аргументами, и pin_fixed_param проверяла только over_var —
+// а при свипе по шагу over_var как раз false (см. draw_sweep_target_combo:
+// выбор "dt (h)" ставит over_h и гасит over_var). В результате значение ШАГА
+// уходило в параметр с индексом par_index — обычно первый в списке, — и в
+// панели Parameters на глазах менялся посторонний параметр.
 void pin_fixed_param(std::map<std::string,std::string>& pv,
                      const std::vector<std::string>& params,
-                     int par_index, bool over_var, double value) {
-    if (over_var) return;
-    if (par_index < 0 || par_index >= (int)params.size()) return;
-    pv[params[par_index]] = fmt_num_for_input(value);
+                     const EffectiveSweep& e, double value) {
+    if (e.over_var || e.over_h) return;
+    if (e.par_index < 0 || e.par_index >= (int)params.size()) return;
+    pv[params[e.par_index]] = fmt_num_for_input(value);
 }
 
-// Третий вариант той же фиксации: закреплённая ось свипует ШАГ. Тогда «фиксация»
-// — это подстановка h, а не значения параметра или НУ. Зовётся вместе с
-// pin_fixed_param/pin_fixed_ic; ровно одна из трёх что-то делает, остальные
-// выходят по своему флагу.
-void pin_fixed_h(std::string& h_text, bool over_h, double value) {
-    if (!over_h) return;
+void pin_fixed_h(std::string& h_text, const EffectiveSweep& e, double value) {
+    if (!e.over_h) return;
     if (value <= 0.0) return;             // шаг <= 0 бессмыслен, оставляем прежний
     h_text = fmt_num_for_input(value);
 }
 
 void pin_fixed_ic(std::map<std::string,std::string>& ic,
                   const std::vector<std::string>& vars,
-                  int var_index, bool over_var, double value) {
-    if (!over_var) return;
-    if (var_index < 0 || var_index >= (int)vars.size()) return;
-    ic[vars[var_index]] = fmt_num_for_input(value);
+                  const EffectiveSweep& e, double value) {
+    if (!e.over_var || e.over_h) return;
+    if (e.var_index < 0 || e.var_index >= (int)vars.size()) return;
+    ic[vars[e.var_index]] = fmt_num_for_input(value);
 }
 } // namespace
 
@@ -497,9 +507,9 @@ bool AppModel::start_next_in_custom_queue() {
                 apply_shared_to_bif1d(shared, c, 0);
                 // Pin the OTHER (Y) axis at fix_y.
                 EffectiveSweep swy = effective_sweep_y(shared);
-                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
+                pin_fixed_param(c.param_values, cs.params, swy, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swy, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy, shared.fix_y_value);
                 ok = cs.bif_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -508,9 +518,9 @@ bool AppModel::start_next_in_custom_queue() {
                 auto& c = cs.bif_session.diagrams[2];
                 apply_shared_to_bif1d(shared, c, 1);
                 EffectiveSweep swx = effective_sweep_x(shared);
-                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
+                pin_fixed_param(c.param_values, cs.params, swx, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swx, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx, shared.fix_x_value);
                 ok = cs.bif_session.run_async(*parametric_engine, 2);
             }
             break;
@@ -519,9 +529,9 @@ bool AppModel::start_next_in_custom_queue() {
                 auto& c = cs.lle_session.curves[1];
                 apply_shared_to_lle1d(shared, cs.lle_session.curves[0], c, 0);
                 EffectiveSweep swy = effective_sweep_y(shared);
-                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
+                pin_fixed_param(c.param_values, cs.params, swy, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swy, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy, shared.fix_y_value);
                 ok = cs.lle_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -530,9 +540,9 @@ bool AppModel::start_next_in_custom_queue() {
                 auto& c = cs.lle_session.curves[2];
                 apply_shared_to_lle1d(shared, cs.lle_session.curves[0], c, 1);
                 EffectiveSweep swx = effective_sweep_x(shared);
-                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
+                pin_fixed_param(c.param_values, cs.params, swx, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swx, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx, shared.fix_x_value);
                 ok = cs.lle_session.run_async(*parametric_engine, 2);
             }
             break;
@@ -541,9 +551,9 @@ bool AppModel::start_next_in_custom_queue() {
                 auto& c = cs.ls_session.curves[1];
                 apply_shared_to_ls1d(shared, cs.ls_session.curves[0], c, 0);
                 EffectiveSweep swy = effective_sweep_y(shared);
-                pin_fixed_param(c.param_values, cs.params, swy.par_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swy.var_index, swy.over_var, shared.fix_y_value);
-                pin_fixed_h    (c.h_text, swy.over_h, shared.fix_y_value);
+                pin_fixed_param(c.param_values, cs.params, swy, shared.fix_y_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swy, shared.fix_y_value);
+                pin_fixed_h    (c.h_text, swy, shared.fix_y_value);
                 ok = cs.ls_session.run_async(*parametric_engine, 1);
             }
             break;
@@ -552,9 +562,9 @@ bool AppModel::start_next_in_custom_queue() {
                 auto& c = cs.ls_session.curves[2];
                 apply_shared_to_ls1d(shared, cs.ls_session.curves[0], c, 1);
                 EffectiveSweep swx = effective_sweep_x(shared);
-                pin_fixed_param(c.param_values, cs.params, swx.par_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_ic   (c.initial_conditions, cs.vars,  swx.var_index, swx.over_var, shared.fix_x_value);
-                pin_fixed_h    (c.h_text, swx.over_h, shared.fix_x_value);
+                pin_fixed_param(c.param_values, cs.params, swx, shared.fix_x_value);
+                pin_fixed_ic   (c.initial_conditions, cs.vars, swx, shared.fix_x_value);
+                pin_fixed_h    (c.h_text, swx, shared.fix_x_value);
                 ok = cs.ls_session.run_async(*parametric_engine, 2);
             }
             break;

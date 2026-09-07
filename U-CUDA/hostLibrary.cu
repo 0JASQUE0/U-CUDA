@@ -2793,8 +2793,13 @@ __host__ void basinsOfAttraction(
 	const int		preScaller,
 	const numb	eps,
 	std::string		OUT_FILE_PATH,
-	const int blockSize_fixed)								// Эпсилон для алгоритма DBSCAN 
+	const int blockSize_fixed)								// Размер блока CUDA (0 = дефолт blockSize_setup)
 {
+	// blockSize_fixed == 0 трактуем как «взять дефолт» — этот контракт объявлен
+	// в hostLibrary.cuh. Без нормализации ноль доезжал до
+	// gridSize = (nPtsLimiter + blockSize - 1) / blockSize и ронял расчёт делением на ноль.
+	const int blockSizeBasins = blockSize_fixed > 0 ? blockSize_fixed : blockSize_setup;
+
 	// Количество точек, которое будет смоделировано одной системой с одним набором параметров
 	int amountOfPointsInBlock = tMax / h / preScaller;
 
@@ -2924,11 +2929,11 @@ __host__ void basinsOfAttraction(
 	int minGridSize;		// Переменная для хранения минимального размера сетки
 	int gridSize;			// Переменная для хранения сетки
 
-	printf("Basins, CT: %zu", (int)tMax);
-	printf(", res: %zu x %zu", nPts, nPts);
+	printf("Basins, CT: %d", (int)tMax);
+	printf(", res: %d x %d", nPts, nPts);
 	printf(", amountOfIteration: %zu", amountOfIteration);
 	printf(", nPtsLimiter: %zu", nPtsLimiter);
-	printf(", blockSize: %zu\n", blockSize_fixed);
+	printf(", blockSize: %d\n", blockSizeBasins);
 	size_t startTime = std::clock();
 
 	// Основной цикл, который выполняет amountOfIteration расчетов для наборов размером nPtsLimiter систем
@@ -2957,7 +2962,7 @@ __host__ void basinsOfAttraction(
 		}
 
 		//blockSize = blockSize > 256 ? 256 : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
-		blockSize = blockSize_fixed;
+		blockSize = blockSizeBasins;
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
 		// CUDA функция для расчета траектории систем
@@ -2993,7 +2998,7 @@ __host__ void basinsOfAttraction(
 		// Используем встроенную функцию CUDA, для нахождения оптимальных настреок блока и сетки
 		cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, avgPeakFinderCUDA, 0, blockSize_setup);
 		blockSize = blockSize > 256 ? 256 : blockSize;		// Не превышаем ограничение в 1024 потока в блоке
-		blockSize = blockSize_fixed;
+		blockSize = blockSizeBasins;
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
 		// CUDA функция для нахождения пиков
@@ -3028,7 +3033,7 @@ __host__ void basinsOfAttraction(
 	gpuErrorCheck(cudaMemcpy(d_dbscanResult, h_dbscanResult, nPts * nPts * sizeof(int), cudaMemcpyKind::cudaMemcpyHostToDevice));
 
 	startTime = clock();
-	CUDA_dbscan(d_avgPeaks, d_avgIntervals, d_dbscanResult, d_helpfulArray, nPts * nPts, eps, blockSize_fixed);
+	CUDA_dbscan(d_avgPeaks, d_avgIntervals, d_dbscanResult, d_helpfulArray, nPts * nPts, eps, blockSizeBasins);
 	printf("DBSCAN done in: %zu ms\n\n", std::clock() - startTime);
 
 	numb* h_avgPeaks = new numb[nPts * nPts];

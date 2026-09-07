@@ -181,6 +181,18 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return false;
 }
 
+// Читает ли схема коэффициент симметрии a[0] — от этого зависит, показывать ли
+// поле symmetry в конфигах. Встроенных таких две: CD (h1 = s*h, h2 = (1-s)*h) и
+// Complex CD (то же деление шага, плюс мнимая часть ±h*sqrt(3)/6). Один
+// предикат на весь файл: раньше проверка была выписана четырьмя копиями
+// `scheme == "CD" || custom_scheme_uses_symmetry(...)`, и добавление схемы
+// требовало не забыть все четыре.
+[[nodiscard]] static bool scheme_uses_symmetry(const std::string& scheme_name,
+                                         const std::vector<CustomScheme>& custom_schemes) {
+    return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+        || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
+}
+
 // Auto-labels for BD/LLE/LS configs and Parametric plot windows
 // Каждый label регенерируется каждый кадр из текущего свипа, пока
 // label_is_manual = false. Пользователь помечает как ручной, отредактировав
@@ -353,7 +365,8 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
 // массив был выписан восемью копиями плюс девятой — для проверки конфликта
 // имён пользовательских схем.
 static const char* const kBuiltinSchemeNames[] = {
-    "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD"
+    "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD",
+    "Complex CD", "Complex CD4"
 };
 
 // Имена для ImGui::Combo, которому нужен массив const char*. Указатели живут,
@@ -472,7 +485,7 @@ static bool draw_integration_block(const char* header,
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return false;
     bool changed = false;
     if (f.h) changed |= InputNumStr("h", *f.h, kFieldW);
-    if (f.symmetry_s && (scheme == "CD" || custom_scheme_uses_symmetry(scheme, custom_schemes)))
+    if (f.symmetry_s && scheme_uses_symmetry(scheme, custom_schemes))
         changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW);
     if (f.t_max)       changed |= InputNumStr("computing time", *f.t_max,       kFieldW);
     if (f.transient)   changed |= InputNumStr("transient time", *f.transient,   kFieldW);
@@ -1399,15 +1412,31 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // методы
     ImGui::Text("Schemes to generate:");
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = true;
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = false;
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = false;
     ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
     ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
     ImGui::Checkbox("DOPRI78", &model.scheme_dopri78); ImGui::SameLine();
-    ImGui::Checkbox("CD", &model.scheme_cd);
+    ImGui::Checkbox("CD", &model.scheme_cd); ImGui::SameLine();
+    ImGui::Checkbox("Complex CD", &model.scheme_ccd);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("CD с комплексными полушагами:\n"
+                          "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
+                          "s = a[0] — тот же коэффициент симметрии, что у CD.\n"
+                          "Шаг считается в комплексных числах, наружу идёт Re.\n"
+                          "При s = 0.5 (дефолт) полушаги сопряжены и порядок 2.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Complex CD4", &model.scheme_ccd4);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Композиция ДВУХ симметричных CD с комплексными шагами:\n"
+                          "проход 1 — шаг gamma*h, проход 2 — conj(gamma)*h,\n"
+                          "gamma = 1/2 + i*sqrt(3)/6. Re берётся один раз в конце.\n"
+                          "Порядок 4 (замерено 4.00 на Лоренце и Рёсслере).\n"
+                          "Требует s = a[0] = 0.5: при других s внутренний CD\n"
+                          "несимметричен и порядок падает до первого.");
 
     // Custom KRS schemes (raw C/CUDA код вместо codegen)
     ImGui::Spacing();
@@ -1922,7 +1951,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     changed |= InputNumStr("##ssk", s.skip_time, 70);
     // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
     // only show the field if the body actually references a[0].
-    if (s.scheme == "CD" || custom_scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
+    if (scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
         ImGui::Text("Symmetry s:"); ImGui::SameLine();
         changed |= InputNumStr("##sym", s.symmetry_s, 70);
     }
@@ -2160,10 +2189,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         std::vector<char>& buf_cpu = input_scratch(cpu_cache_body, 1);
         ImGui::InputTextMultiline("##krs_cpu", buf_cpu.data(), buf_cpu.size(),
             ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
-        if (s.scheme != "CD")
+        if (s.scheme != "CD" && s.scheme != "Complex CD" && s.scheme != "Complex CD4")
             ImGui::TextDisabled("(for %s CPU and GPU evaluate the same AST — texts match)", s.scheme.c_str());
         else
-            ImGui::TextDisabled("(for CD: GPU uses analytic solve for linear vars; CPU always uses 4 iterations)");
+            ImGui::TextDisabled("(for %s: GPU uses analytic solve for linear vars; CPU always uses 4 iterations)",
+                                s.scheme.c_str());
 
         ImGui::SeparatorText("Parsed inputs (double, %.17g)");
         // Панель показывает ИМЕННО то, что увидит движок, поэтому обязана
@@ -5539,7 +5569,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
-    if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, s.custom_schemes))
+    if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
 
@@ -6336,7 +6366,7 @@ void draw_shared_config(CustomSession& cs,
             c.l1d_h_text  = c.h_text;
             phase.step_h  = c.h_text;
         }
-        if (c.scheme == "CD" || custom_scheme_uses_symmetry(c.scheme, custom_schemes))
+        if (scheme_uses_symmetry(c.scheme, custom_schemes))
             if (InputNumStr("symmetry s", c.symmetry_s, kFieldW))
                 phase.symmetry_s = c.symmetry_s;
         // TT before CT: transient runs first, computing-time is what's
@@ -6368,23 +6398,26 @@ void draw_shared_config(CustomSession& cs,
         const bool any_2d   = c.bif2d_enabled || c.lle2d_enabled || c.ls2d_enabled;
         const bool any_1d_x = c.bif1d_x_enabled || c.lle1d_x_enabled || c.ls1d_x_enabled;
         const bool any_1d_y = c.bif1d_y_enabled || c.lle1d_y_enabled || c.ls1d_y_enabled;
-        auto mark = [&](int par_i, bool over_var) {
-            if (over_var) return;
+        // over_h проверяется наравне с over_var: при свипе по шагу par_index
+        // остаётся от прежнего выбора, и без этого условия "(swept)" висело на
+        // постороннем параметре — том, чей индекс случайно лежал в par_index.
+        auto mark = [&](int par_i, bool over_var, bool over_h) {
+            if (over_var || over_h) return;
             if (par_i < 0 || par_i >= (int)params.size()) return;
             is_swept[par_i] = true;
         };
         if (c.level_2d_enabled && any_2d) {
-            mark(c.axis_x_par_index, c.axis_x_over_var);
-            mark(c.axis_y_par_index, c.axis_y_over_var);
+            mark(c.axis_x_par_index, c.axis_x_over_var, c.axis_x_over_h);
+            mark(c.axis_y_par_index, c.axis_y_over_var, c.axis_y_over_h);
         }
         if (c.level_1d_enabled) {
             if (any_1d_x) {
                 EffectiveSweep esx = effective_sweep_x(c);
-                mark(esx.par_index, esx.over_var);
+                mark(esx.par_index, esx.over_var, esx.over_h);
             }
             if (any_1d_y) {
                 EffectiveSweep esy = effective_sweep_y(c);
-                mark(esy.par_index, esy.over_var);
+                mark(esy.par_index, esy.over_var, esy.over_h);
             }
         }
         // Effective sweep axes cached once — used by both the (swept) label
@@ -6408,8 +6441,8 @@ void draw_shared_config(CustomSession& cs,
                 // crosshair to the new pinned value so 1D slice plots and
                 // 2D heatmaps show it there immediately.
                 double new_val = parse_ratio_or(c.param_values[p], 0.0);
-                if (!esx.over_var && esx.par_index == i) c.fix_x_value = new_val;
-                if (!esy.over_var && esy.par_index == i) c.fix_y_value = new_val;
+                if (!esx.over_var && !esx.over_h && esx.par_index == i) c.fix_x_value = new_val;
+                if (!esy.over_var && !esy.over_h && esy.par_index == i) c.fix_y_value = new_val;
             }
             if (is_swept[i]) {
                 ImGui::SameLine();
@@ -7066,11 +7099,16 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         // pipeline drainer). snap_x/snap_y — значения узлов от ucuda_node_value (та же функция,
         // что у ядра), поэтому пишем их round-trip форматом: стоявший здесь %.6g ронял точность
         // до 6 цифр, и портрет по клику считался рядом с пикселем, а не в нём.
-        if (!s.axis_x_over_var && s.axis_x_par_index >= 0 &&
+        // Проверка over_h обязательна: при свипе по шагу over_var == false (выбор
+        // "dt (h)" в комбо гасит его), par_index остаётся от прежнего выбора, и без
+        // этого условия значение ШАГА писалось в посторонний параметр. Сам шаг
+        // подставляется в конфиги из fix_x/fix_y при запуске (pin_swept_h в
+        // custom_session.cpp, pin_fixed_h в app_model.cpp), отдельного поля тут не надо.
+        if (!s.axis_x_over_var && !s.axis_x_over_h && s.axis_x_par_index >= 0 &&
             s.axis_x_par_index < (int)cs.params.size()) {
             s.param_values[cs.params[s.axis_x_par_index]] = fmt_num_shortest(snap_x);
         }
-        if (!s.axis_y_over_var && s.axis_y_par_index >= 0 &&
+        if (!s.axis_y_over_var && !s.axis_y_over_h && s.axis_y_par_index >= 0 &&
             s.axis_y_par_index < (int)cs.params.size()) {
             s.param_values[cs.params[s.axis_y_par_index]] = fmt_num_shortest(snap_y);
         }

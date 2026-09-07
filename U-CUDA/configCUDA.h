@@ -1,5 +1,18 @@
 ﻿#pragma once
+// math_constants.h нужен только за CUDART_*-макросами, а их в проекте не
+// использует никто, поэтому подключаем его лишь там, где он заведомо доступен
+// без лишних ключей — в offline-сборке nvcc. Двум другим потребителям этого
+// заголовка он ломал бы жизнь:
+//   NVRTC        — требует -I CUDA_PATH\include; параметрический движок такую
+//                  опцию подаёт, а фазовый портрет (nvrtc_engine.cpp) собирает
+//                  исходник вообще без -I;
+//   голый cl.exe — так собирается DLL пользовательской КРС (krs_cpu.cpp),
+//                  и тащить туда CUDA-пути ради неиспользуемых макросов незачем.
+// Обе стороны получают из этого файла numb, pi, AMOUNTOFX и ucmplx — то есть
+// одинаковую среду для тела схемы.
+#if defined(__CUDACC__) && !defined(__CUDACC_RTC__)
 #include <math_constants.h>
+#endif
 
 typedef double numb;
 
@@ -34,9 +47,6 @@ constexpr int REGIME_OSCILLATION =  1;
 constexpr bool doCalculatePeaks = 1;
 #endif
 
-// data[startDataIndex + i] = xDataMultiplier * (x[writableVar]);
-constexpr numb xDataMultiplier = 1.0;
-
 // --- Parabolic interpolation of Peaks and InterPeaks
 // 1 -- Yes
 // 0 -- No
@@ -57,16 +67,6 @@ constexpr bool continuation_bif1D = 0;
 #ifndef par_or_var
 constexpr int par_or_var = 1;
 #endif
-
-// CHOOSE LIN OR LOG variable/parameter distribution
-// 1 -- lin; [Xmin,Xmax] or [Xmin,Xmax,Ymin,Ymax]
-// 0 -- log; [log10(Xmin)
-constexpr bool LINEAR_OR_LOG_DISTRIB = 1;
-
-// CHOOSE AVG OR LOG10(AVG) ANALYSIS
-// 1 -- avg peak analysis;
-// 0 -- log10(avg peak) analysis
-constexpr bool lin_or_log = 0;
 
 // FAST SYNCHRO knobs (NVRTC-overridable)
 // Wrapped в #ifndef чтобы NVRTC-template мог переопределить через #define
@@ -228,6 +228,140 @@ constexpr numb euler = 2.7182818284590452353602874713527;
 #ifndef __CUDACC_RTC__
 #include <math.h>
 #endif
+
+// ---------- Комплексная арифметика (схемы с комплексными шагами) ----------
+//
+// Нужна ровно одной схеме — Complex CD (codegen.cpp::scheme_complex_cd), где
+// h1 = s*h + i*h*sqrt(3)/6 и h2 = (1-s)*h - i*h*sqrt(3)/6: шаг целиком
+// считается в C, наружу пишется Re. Тип живёт здесь, а не в отдельном
+// заголовке, потому что
+// configCUDA.h уже копируется post-build'ом в kernels/ — он виден NVRTC,
+// обычной nvcc-сборке и host-коду. Последнее принципиально: CPU-интегратор
+// (integrator.cpp::step_complex_cd) обязан считать ТЕМИ ЖЕ формулами, что и
+// ядро, иначе CPU- и GPU-траектории разойдутся, как это уже было с log10/pow
+// (см. ucuda_node_log10_d ниже).
+//
+// Готовые библиотеки не подошли: std::complex host-only (NVRTC не подтянет
+// <complex>), cuComplex.h — C-API без операторов и без трансцендентных функций
+// (кодген печатает инфиксные выражения), cuda::std::complex и thrust::complex
+// тянут libcudacxx, который NVRTC здесь не находит — ровно поэтому шаблоны в
+// kernels/ перехватывают curand_kernel.h.
+//
+// Конструктор из numb — ЯВНЫЙ, смешанные операции покрыты отдельными
+// перегрузками. Неявное приведение сделало бы ucmplx кандидатом в КАЖДОМ
+// выражении вида double+double во всех TU, куда попадает этот заголовок
+// (встроенный оператор выиграет, но лишний кандидат в overload set — источник
+// неожиданных неоднозначностей). Побочный плюс: чисто вещественные
+// подвыражения (a[1] * 2.0) остаются вещественными и не платят за комплексное
+// умножение.
+struct ucmplx {
+    numb re, im;
+    UCUDA_HD ucmplx() : re(0), im(0) {}
+    UCUDA_HD explicit ucmplx(numb r) : re(r), im(0) {}
+    UCUDA_HD ucmplx(numb r, numb i) : re(r), im(i) {}
+};
+
+UCUDA_HD inline ucmplx operator-(ucmplx a) { return ucmplx(-a.re, -a.im); }
+UCUDA_HD inline ucmplx operator+(ucmplx a, ucmplx b) { return ucmplx(a.re + b.re, a.im + b.im); }
+UCUDA_HD inline ucmplx operator+(ucmplx a, numb b)   { return ucmplx(a.re + b, a.im); }
+UCUDA_HD inline ucmplx operator+(numb a, ucmplx b)   { return ucmplx(a + b.re, b.im); }
+UCUDA_HD inline ucmplx operator-(ucmplx a, ucmplx b) { return ucmplx(a.re - b.re, a.im - b.im); }
+UCUDA_HD inline ucmplx operator-(ucmplx a, numb b)   { return ucmplx(a.re - b, a.im); }
+UCUDA_HD inline ucmplx operator-(numb a, ucmplx b)   { return ucmplx(a - b.re, -b.im); }
+UCUDA_HD inline ucmplx operator*(ucmplx a, ucmplx b) {
+    return ucmplx(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+}
+UCUDA_HD inline ucmplx operator*(ucmplx a, numb b) { return ucmplx(a.re * b, a.im * b); }
+UCUDA_HD inline ucmplx operator*(numb a, ucmplx b) { return ucmplx(a * b.re, a * b.im); }
+// Деление — алгоритм Смита: делим на большую по модулю компоненту знаменателя,
+// поэтому |b|^2 нигде не вычисляется и не переполняется (не схлопывается в 0)
+// там, где сам результат представим. При вещественном знаменателе (b.im == 0)
+// вырождается ровно в два деления a.re/b.re и a.im/b.re, без лишних операций.
+UCUDA_HD inline ucmplx operator/(ucmplx a, ucmplx b) {
+    if (fabs(b.re) >= fabs(b.im)) {
+        const numb r = b.im / b.re, d = b.re + b.im * r;
+        return ucmplx((a.re + a.im * r) / d, (a.im - a.re * r) / d);
+    }
+    const numb r = b.re / b.im, d = b.re * r + b.im;
+    return ucmplx((a.re * r + a.im) / d, (a.im * r - a.re) / d);
+}
+UCUDA_HD inline ucmplx operator/(ucmplx a, numb b) { return ucmplx(a.re / b, a.im / b); }
+UCUDA_HD inline ucmplx operator/(numb a, ucmplx b) { return ucmplx(a, 0) / b; }
+
+UCUDA_HD inline numb ucmplx_abs(ucmplx z) { return hypot(z.re, z.im); }
+UCUDA_HD inline numb ucmplx_arg(ucmplx z) { return atan2(z.im, z.re); }
+
+// Элементарные функции. Имена намеренно совпадают с вещественными: кодген
+// печатает вызов как есть (emit(), case Node::Call), и перегрузка выбирается по
+// типу аргумента. Вещественный вызов внутри этих тел уходит в builtin —
+// explicit-конструктор ucmplx не даёт ucmplx-перегрузке стать кандидатом, так
+// что рекурсии тут нет.
+UCUDA_HD inline ucmplx exp(ucmplx z) {
+    const numb e = exp(z.re);
+    return ucmplx(e * cos(z.im), e * sin(z.im));
+}
+UCUDA_HD inline ucmplx log(ucmplx z)   { return ucmplx(log(ucmplx_abs(z)), ucmplx_arg(z)); }
+UCUDA_HD inline ucmplx log10(ucmplx z) { return log(z) / (numb)2.30258509299404568402; }
+UCUDA_HD inline ucmplx log2(ucmplx z)  { return log(z) / (numb)0.69314718055994530942; }
+// sqrt в устойчивой форме: большая по модулю компонента считается через
+// sqrt((|z| + |re|)/2), меньшая — делением на неё. Прямая формула
+// sqrt((|z| - |re|)/2) теряет значащие разряды на катастрофическом вычитании
+// при |im| << |re| — а в Complex CD мнимые части как раз малы.
+UCUDA_HD inline ucmplx sqrt(ucmplx z) {
+    if (z.re == (numb)0 && z.im == (numb)0) return ucmplx(0, 0);
+    const numb t = sqrt((numb)0.5 * (ucmplx_abs(z) + fabs(z.re)));
+    if (z.re >= (numb)0) return ucmplx(t, (numb)0.5 * z.im / t);
+    return ucmplx((numb)0.5 * fabs(z.im) / t, z.im >= (numb)0 ? t : -t);
+}
+UCUDA_HD inline ucmplx sin(ucmplx z)  { return ucmplx(sin(z.re) * cosh(z.im),  cos(z.re) * sinh(z.im)); }
+UCUDA_HD inline ucmplx cos(ucmplx z)  { return ucmplx(cos(z.re) * cosh(z.im), -sin(z.re) * sinh(z.im)); }
+UCUDA_HD inline ucmplx tan(ucmplx z)  { return sin(z) / cos(z); }
+UCUDA_HD inline ucmplx sinh(ucmplx z) { return ucmplx(sinh(z.re) * cos(z.im), cosh(z.re) * sin(z.im)); }
+UCUDA_HD inline ucmplx cosh(ucmplx z) { return ucmplx(cosh(z.re) * cos(z.im), sinh(z.re) * sin(z.im)); }
+UCUDA_HD inline ucmplx tanh(ucmplx z) { return sinh(z) / cosh(z); }
+UCUDA_HD inline ucmplx asin(ucmplx z) {
+    const ucmplx i(0, 1);
+    return -i * log(i * z + sqrt(ucmplx(1, 0) - z * z));
+}
+UCUDA_HD inline ucmplx acos(ucmplx z) { return ucmplx(1.57079632679489661923, 0) - asin(z); }
+UCUDA_HD inline ucmplx atan(ucmplx z) {
+    const ucmplx i(0, 1);
+    return (i * (numb)0.5) * (log(ucmplx(1, 0) - i * z) - log(ucmplx(1, 0) + i * z));
+}
+// Целые небольшие степени — повторным умножением: точнее exp(p*log z) и не
+// уводит на главную ветвь при отрицательном Re z. Тот же приём, что в
+// codegen::emit для вещественного pow с показателем 2..4.
+UCUDA_HD inline ucmplx pow(ucmplx z, numb p) {
+    const int n = (int)p;
+    if ((numb)n == p && n >= -8 && n <= 8) {
+        ucmplx r(1, 0);
+        const int k = n < 0 ? -n : n;
+        for (int j = 0; j < k; ++j) r = r * z;
+        return n < 0 ? (ucmplx(1, 0) / r) : r;
+    }
+    if (z.re == (numb)0 && z.im == (numb)0) return ucmplx(p == (numb)0 ? 1 : 0, 0);
+    return exp(log(z) * p);
+}
+UCUDA_HD inline ucmplx pow(ucmplx z, ucmplx w) {
+    if (w.im == (numb)0) return pow(z, w.re);
+    if (z.re == (numb)0 && z.im == (numb)0) return ucmplx(0, 0);
+    return exp(w * log(z));
+}
+UCUDA_HD inline ucmplx pow(numb b, ucmplx w) { return pow(ucmplx(b, 0), w); }
+// При нулевой мнимой части — ровно вещественный cbrt (в т.ч. отрицательный
+// корень из отрицательного числа), иначе главная ветвь z^(1/3). Ветвление
+// намеренное: вещественный cbrt(-8) = -2 не является главным значением, и без
+// этой ветки схема меняла бы результат на системах с кубическим корнем.
+UCUDA_HD inline ucmplx cbrt(ucmplx z) {
+    if (z.im == (numb)0) return ucmplx(cbrt(z.re), 0);
+    return exp(log(z) / (numb)3.0);
+}
+// Модуль. Как и вещественный fabs, функция не аналитическая; при im == 0
+// совпадает с fabs(x). Комплексных аналогов fmod/atan2 здесь нет намеренно —
+// codegen отказывается генерировать Complex CD для систем, где они встречаются
+// (cd_check_complex_safe), с внятным сообщением вместо ошибки NVRTC.
+UCUDA_HD inline ucmplx fabs(ucmplx z) { return ucmplx(ucmplx_abs(z), 0); }
+UCUDA_HD inline ucmplx abs(ucmplx z)  { return fabs(z); }
 
 // Линейная сетка: узел k из nPts на [lo, hi], inclusive по обоим концам.
 // Вырожденные случаи повторяют прежний getValueByIdx (nPts == 1 -> hi): это то,

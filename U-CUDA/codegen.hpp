@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include <string>
 #include <vector>
+#include "configCUDA.h"   // ucmplx — состояние комплексных схем (см. eval_complex)
 
 // Описание динамической системы для кодгена.
 //   vars   — переменные состояния, маппятся на X[0..N-1]
@@ -18,7 +19,18 @@ struct System {
 // DOPRI78 — Dormand-Prince 8(7), 13-стадийный embedded метод (см. scheme_dopri78
 // в codegen.cpp). Сейчас используется только 8-й порядок (b[0]); 7-й порядок (z)
 // тоже считается — резерв под будущий адаптивный шаг по |y-z|.
-enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD };
+// ComplexCD — та же композиция, что CD, но с комплексными полушагами:
+// h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6, где s = a[0] — тот же
+// коэффициент симметрии, что у CD (дефолт 0.5). h1 + h2 = h при любом s; при
+// s = 1/2 полушаги комплексно-сопряжены. Шаг целиком считается в комплексной
+// арифметике (ucmplx), наружу пишется Re.
+// ComplexCD4 — композиция ДВУХ симметричных CD (s = 1/2) с комплексными
+// шагами gamma*h и conj(gamma)*h, gamma = 1/2 + i*sqrt(3)/6. Условия
+// alpha+beta = 1 и alpha^3+beta^3 = 0 гасят h³-член, h⁴ по сопряжённой
+// симметрии мнимый и уходит с Re — глобальный порядок 4 (замерено 4.00 на
+// Лоренце и Рёсслере). Требует s = 1/2: иначе внутренний CD несимметричен и
+// порядок падает до первого.
+enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4 };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
@@ -68,6 +80,11 @@ public:
     //   a     — параметры со сдвигом [>= params.size()+1], a[0] не используется
     //   deriv — выход [dim]
     void eval(const double* X, const double* a, double* deriv) const;
+
+    // То же самое и по тому же байткоду, но в комплексной арифметике —
+    // для схем с комплексными коэффициентами (Complex CD). Параметры a[]
+    // остаются вещественными: комплексных значений в них нет.
+    void eval_complex(const ucmplx* X, const double* a, ucmplx* deriv) const;
 
 private:
     struct Impl;
