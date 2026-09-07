@@ -334,6 +334,11 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // with integrator.cpp::step_cd so that CPU and GPU trajectories match.
     constexpr int CD_ITERS = 4;
 
+    // Complex CD: imaginary part of the half-step coefficients, sqrt(3)/6.
+    // h1 = h*(0.5 + i*CCD_IMAG), h2 = conj(h1). Mirrored in
+    // integrator.cpp::step_complex_cd — the CPU path must use the same value.
+    constexpr double CCD_IMAG = 0.28867513459481288225;
+
     bool pn_contains_var(const PN& n, const std::string& v) {
         if (!n) return false;
         switch (n->kind) {
@@ -455,6 +460,21 @@ namespace { // внутренняя линковка: всё ниже не ви�
         std::ostringstream o; emit(n, nm, o); return o.str();
     }
 
+    // Complex CD only: fmod and atan2 have no complex counterpart (both are
+    // defined through the sign/magnitude of REAL arguments), so configCUDA.h
+    // deliberately provides no ucmplx overload for them. Catch them here, at
+    // codegen time, so the user gets the reason instead of an NVRTC template
+    // error from the middle of a generated kernel.
+    void cd_check_complex_safe(const PN& n) {
+        if (!n) return;
+        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2"))
+            throw std::runtime_error("Complex CD: функция " + n->name +
+                " не определена в комплексной арифметике — выбери другую схему");
+        cd_check_complex_safe(n->a);
+        cd_check_complex_safe(n->b);
+        for (const auto& c : n->args) cd_check_complex_safe(c);
+    }
+
     // Схемы
     std::string scheme_euler(const System& s) {
         int N = s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
@@ -566,28 +586,88 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // Extraction, unlike the previous regex pipeline, walks the AST directly
     // so parenthesised sub-expressions, numeric/compound coefficients and
     // repeated linear-in-v terms are handled uniformly.
-    std::string scheme_cd(const System& s) {
+    //
+    // complex_mode == false -> classic CD, output unchanged.
+    // complex_mode == true  -> Complex CD: same composition, same linear
+    // extraction, same iteration fallback, but the half-steps carry an
+    // imaginary part: h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,
+    // with s = a[0], the same symmetry slot CD uses (default 0.5). The whole
+    // step runs over a local ucmplx Z[] copied from X[] on entry; only Re Z[i]
+    // goes back into X[i], so everything outside calculateDiscreteModel stays
+    // real and untouched. The imaginary part is NOT carried into the next
+    // step: it lives inside one step only.
+    //
+    // Order stays 2 at s = 1/2, same as CD -- the gain is in the error
+    // constant, not the order. With g1 = 1/2 + i*sqrt(3)/6, g2 = conj(g1): the
+    // h^2 term of the composition carries g1^2 - g2^2 = i*sqrt(3)/3, i.e. it
+    // is purely imaginary and Re drops it; the h^3 term keeps g1*g2 = 1/3,
+    // which is real and survives. Measured against an RK4 reference
+    // (h = 1e-6): Lorenz -- 2.00, error ~2.4x below CD at equal h; pendulum
+    // with sin -- 2.00, ~7x below CD. Per-step cost is roughly 3x the real CD.
+    // Away from s = 1/2 that h^2 factor picks up a real part (2s - 1), which Re
+    // no longer removes, and the method drops to first order -- exactly what
+    // real CD does for s != 1/2. So s is an experiment knob, not a free
+    // parameter: 0.5 is the value the scheme is built around.
+    //
+    // CdKind::Cx4 -- Complex CD4, the same CD block emitted TWICE with the
+    // complex coefficients moved one level up: pass 1 runs the whole symmetric
+    // CD with step gamma*h, pass 2 with conj(gamma)*h, gamma = 1/2 + i*sqrt(3)/6.
+    // That is the order-4 construction: a symmetric method (s = 1/2 makes the CD
+    // block self-adjoint, so its expansion has only odd powers) composed with
+    // alpha + beta = 1 and alpha^3 + beta^3 = 0; those two conditions have
+    // exactly gamma, conj(gamma) as their solution. The h^3 term dies by the
+    // second condition, h^4 is imaginary by the conjugate symmetry and goes with
+    // Re, so the first surviving real term is h^5 -> global order 4 in two
+    // sub-steps instead of the three a real triple jump needs.
+    // Measured (reference DOPRI78 h = 1e-3, converged to ~1e-14): order 4.00 on
+    // both Rossler (T = 10) and Lorenz (T = 2); at equal h the error sits within
+    // ~1.3x of RK4 either way, at ~2.7x the operation count (205 vs 76 for a
+    // 3D system). As with CD itself, s != 1/2 breaks the symmetry of the inner
+    // block and drops the whole thing to first order.
+    enum class CdKind { Real, Cx, Cx4 };
+
+    std::string scheme_cd_common(const System& s, CdKind kind) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
         if (N < 2) throw std::runtime_error("CD method requires N >= 2");
 
-        NameMap nm = build_namemap(s, "X");
+        const bool cx = (kind != CdKind::Real);
+        // State array the generated expressions read from: X[] for the real
+        // scheme (in-place, as before), Z[] for the complex ones.
+        const char* stv = cx ? "Z" : "X";
+        const char* sty = cx ? "ucmplx" : "numb";
+
+        NameMap nm = build_namemap(s, stv);
         std::vector<PN> rhs_ast(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
             rhs_ast[i] = p.parse();
         }
+        if (cx)
+            for (int i = 0; i < N; ++i) cd_check_complex_safe(rhs_ast[i]);
 
         std::ostringstream o;
-        o << "    numb h1 = h * a[0];\n";
-        o << "    numb h2 = h * (1 - a[0]);\n";
-
-        // Phi_{h1}: explicit half-step, forward order. Each X[i] update sees
-        // the just-written values of X[0..i-1] (Euler-Cromer coupling).
-        for (int i = 0; i < N; ++i)
-            o << "    X[" << i << "] = X[" << i << "] + h1 * ("
-              << emit_to_str(rhs_ast[i], nm) << ");\n";
+        if (cx) {
+            o << "    ucmplx Z[" << N << "];\n";
+            for (int i = 0; i < N; ++i)
+                o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
+        }
+        if (kind == CdKind::Real) {
+            o << "    numb h1 = h * a[0];\n";
+            o << "    numb h2 = h * (1 - a[0]);\n";
+        }
+        else if (kind == CdKind::Cx) {
+            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+        }
+        else {
+            // gamma*h and conj(gamma)*h; s splits each of them inside its pass.
+            o << "    ucmplx g  = ucmplx(0.5 * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx gc = ucmplx(0.5 * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx h1 = g * a[0];\n";
+            o << "    ucmplx h2 = g * (1 - a[0]);\n";
+        }
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order.
         // Wrap a subterm in parentheses only when its top-level operator binds
@@ -620,9 +700,21 @@ namespace { // внутренняя линковка: всё ниже не ви�
         auto mul_h2 = [&](const PN& factor, const std::string& factor_c) {
             return pn_is_one(factor) ? std::string("h2") : "h2 * " + factor_c;
         };
+
+        // Один проход CD целиком: явный полушаг h1 вперёд, неявный h2 назад.
+        // Complex CD4 зовёт его дважды с разными h1/h2, поэтому имена временных
+        // переменных неявной ветки получают суффикс — иначе второй проход
+        // переобъявил бы x0_cd в той же области видимости.
+        auto emit_pass = [&](const char* sfx) {
+        // Phi_{h1}: explicit half-step, forward order. Each X[i] update sees
+        // the just-written values of X[0..i-1] (Euler-Cromer coupling).
+        for (int i = 0; i < N; ++i)
+            o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + h1 * ("
+              << emit_to_str(rhs_ast[i], nm) << ");\n";
+
         for (int i = N - 1; i >= 0; --i) {
             const std::string& v = s.vars[i];
-            std::string x = "X[" + std::to_string(i) + "]";
+            std::string x = stv + ("[" + std::to_string(i) + "]");
             PN coef, rem;
             bool linear = cd_try_extract_linear(rhs_ast[i], v, coef, rem);
 
@@ -656,48 +748,103 @@ namespace { // внутренняя линковка: всё ниже не ви�
                 // v enters non-linearly -> fixed-point iterations from X_saved.
                 std::string rhs_c = emit_to_str(rhs_ast[i], nm);
                 bool w = needs_paren_after_mul(rhs_ast[i]);
-                std::string saved = "x" + std::to_string(i) + "_cd";
-                o << "    numb " << saved << " = " << x << ";\n";
+                std::string saved = "x" + std::to_string(i) + "_cd" + sfx;
+                o << "    " << sty << " " << saved << " = " << x << ";\n";
                 for (int k = 0; k < CD_ITERS; ++k)
                     o << "    " << x << " = " << saved
                       << " + h2 * " << wrap(rhs_c, w) << ";\n";
             }
         }
+        };  // emit_pass
+
+        emit_pass("");
+        if (kind == CdKind::Cx4) {
+            o << "    h1 = gc * a[0];\n";
+            o << "    h2 = gc * (1 - a[0]);\n";
+            emit_pass("_b");
+        }
+
+        // Наружу — только действительная часть: X[] вещественный и на входе, и
+        // на выходе, поэтому вся обвязка (ядра, LLE/LS, бассейны, рендер) о
+        // комплексности не знает.
+        if (cx)
+            for (int i = 0; i < N; ++i)
+                o << "    X[" << i << "] = Z[" << i << "].re;\n";
 
         return o.str();
     }
 
+    std::string scheme_cd(const System& s)          { return scheme_cd_common(s, CdKind::Real); }
+    std::string scheme_complex_cd(const System& s)  { return scheme_cd_common(s, CdKind::Cx); }
+    std::string scheme_complex_cd4(const System& s) { return scheme_cd_common(s, CdKind::Cx4); }
+
     // CPU-visible pseudo-code path: mirrors integrator.cpp::step_cd exactly
     // (every variable uses CD_ITERS simple iterations, no analytic branch), so
     // the CPU debug view prints the algorithm the CPU integrator actually runs.
-    std::string scheme_cd_iter_only(const System& s) {
+    std::string scheme_cd_iter_only(const System& s, CdKind kind) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
         if (N < 2) throw std::runtime_error("CD method requires N >= 2");
 
-        NameMap nm = build_namemap(s, "X");
+        const bool cx = (kind != CdKind::Real);
+        const char* stv = cx ? "Z" : "X";
+        const char* sty = cx ? "ucmplx" : "numb";
+
+        NameMap nm = build_namemap(s, stv);
         std::vector<std::string> rhs_c(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
             PN ast = p.parse();
+            if (cx) cd_check_complex_safe(ast);
             rhs_c[i] = emit_to_str(ast, nm);
         }
 
         std::ostringstream o;
-        o << "    numb h1 = h * a[0];\n";
-        o << "    numb h2 = h * (1 - a[0]);\n";
+        if (cx) {
+            o << "    ucmplx Z[" << N << "];\n";
+            for (int i = 0; i < N; ++i)
+                o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
+        }
+        if (kind == CdKind::Real) {
+            o << "    numb h1 = h * a[0];\n";
+            o << "    numb h2 = h * (1 - a[0]);\n";
+        }
+        else if (kind == CdKind::Cx) {
+            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+        }
+        else {
+            o << "    ucmplx g  = ucmplx(0.5 * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx gc = ucmplx(0.5 * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << "    ucmplx h1 = g * a[0];\n";
+            o << "    ucmplx h2 = g * (1 - a[0]);\n";
+        }
 
+        auto emit_pass = [&](const char* sfx) {
         for (int i = 0; i < N; ++i)
-            o << "    X[" << i << "] = X[" << i << "] + h1 * (" << rhs_c[i] << ");\n";
+            o << "    " << stv << "[" << i << "] = " << stv << "[" << i
+              << "] + h1 * (" << rhs_c[i] << ");\n";
 
         for (int i = N - 1; i >= 0; --i) {
-            std::string x = "X[" + std::to_string(i) + "]";
-            std::string saved = "x" + std::to_string(i) + "_cd";
-            o << "    numb " << saved << " = " << x << ";\n";
+            std::string x = stv + ("[" + std::to_string(i) + "]");
+            std::string saved = "x" + std::to_string(i) + "_cd" + sfx;
+            o << "    " << sty << " " << saved << " = " << x << ";\n";
             for (int k = 0; k < CD_ITERS; ++k)
                 o << "    " << x << " = " << saved << " + h2 * (" << rhs_c[i] << ");\n";
         }
+        };  // emit_pass
+
+        emit_pass("");
+        if (kind == CdKind::Cx4) {
+            o << "    h1 = gc * a[0];\n";
+            o << "    h2 = gc * (1 - a[0]);\n";
+            emit_pass("_b");
+        }
+
+        if (cx)
+            for (int i = 0; i < N; ++i)
+                o << "    X[" << i << "] = Z[" << i << "].re;\n";
 
         return o.str();
     }
@@ -787,20 +934,50 @@ namespace { // внутренняя линковка: всё ниже не ви�
         } return 0;
     }
 
+    // Комплексные версии — те же id, те же формулы, что и в device-коде: обе
+    // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
+    // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
+    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: система с
+    // ними отсекается в cd_check_complex_safe ещё на кодгене.
+    ucmplx apply_func1(int fid, ucmplx x) {
+        switch (fid) {
+        case F_SIN:return sin(x); case F_COS:return cos(x); case F_TAN:return tan(x);
+        case F_ASIN:return asin(x); case F_ACOS:return acos(x); case F_ATAN:return atan(x);
+        case F_SINH:return sinh(x); case F_COSH:return cosh(x); case F_TANH:return tanh(x);
+        case F_EXP:return exp(x); case F_LOG:return log(x); case F_LOG2:return log2(x);
+        case F_LOG10:return log10(x); case F_SQRT:return sqrt(x); case F_CBRT:return cbrt(x);
+        case F_FABS:return fabs(x);
+        } return ucmplx(0, 0);
+    }
+    ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {
+        switch (fid) {
+        case F_POW:return pow(a, b);
+        } return ucmplx(0, 0);
+    }
+
+    // Степень отдельной функцией: у double это std::pow, у ucmplx — перегрузка
+    // из configCUDA.h (со спрямлением целых показателей). Нужна, чтобы
+    // run_program остался одним шаблоном на оба типа состояния.
+    double  op_pow(double a, double b) { return std::pow(a, b); }
+    ucmplx  op_pow(ucmplx a, ucmplx b) { return pow(a, b); }
+
     // Выполнить программу на стеке. a — параметры со сдвигом (a[0] reserved).
-    double run_program(const std::vector<Instr>& prog, const double* X, const double* a,
-        double* stack) {
+    // T — тип состояния: double для обычных схем, ucmplx для Complex CD.
+    // Параметры a[] в обоих случаях вещественные и поднимаются в T на push'е.
+    template <class T>
+    T run_program(const std::vector<Instr>& prog, const T* X, const double* a,
+        T* stack) {
         int sp = 0;
         for (const Instr& in : prog) {
             switch (in.op) {
-            case OP_PUSH_CONST: stack[sp++] = in.val; break;
+            case OP_PUSH_CONST: stack[sp++] = T(in.val); break;
             case OP_PUSH_VAR:   stack[sp++] = X[in.idx]; break;
-            case OP_PUSH_PARAM: stack[sp++] = a[1 + in.idx]; break; // сдвиг: a[0] reserved
+            case OP_PUSH_PARAM: stack[sp++] = T(a[1 + in.idx]); break; // сдвиг: a[0] reserved
             case OP_ADD: stack[sp - 2] = stack[sp - 2] + stack[sp - 1]; --sp; break;
             case OP_SUB: stack[sp - 2] = stack[sp - 2] - stack[sp - 1]; --sp; break;
             case OP_MUL: stack[sp - 2] = stack[sp - 2] * stack[sp - 1]; --sp; break;
             case OP_DIV: stack[sp - 2] = stack[sp - 2] / stack[sp - 1]; --sp; break;
-            case OP_POW: stack[sp - 2] = std::pow(stack[sp - 2], stack[sp - 1]); --sp; break;
+            case OP_POW: stack[sp - 2] = op_pow(stack[sp - 2], stack[sp - 1]); --sp; break;
             case OP_NEG: stack[sp - 1] = -stack[sp - 1]; break;
             case OP_FUNC1: stack[sp - 1] = apply_func1(in.idx, stack[sp - 1]); break;
             case OP_FUNC2: stack[sp - 2] = apply_func2(in.idx, stack[sp - 2], stack[sp - 1]); --sp; break;
@@ -817,6 +994,11 @@ struct SystemEvaluator::Impl {
     std::vector<std::vector<Instr>> programs; // по одной на уравнение
     int max_stack = 16;                        // глубина стека (с запасом)
     mutable std::vector<double> stack;
+    // Отдельный стек под комплексный проход: eval и eval_complex не зовутся
+    // одновременно (обе — из шага одного интегратора), но держать один буфер
+    // на два типа нельзя. Аллоцируется по требованию — обычные схемы за него
+    // не платят.
+    mutable std::vector<ucmplx> stack_c;
 };
 
 SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
@@ -855,6 +1037,14 @@ void SystemEvaluator::eval(const double* X, const double* a, double* deriv) cons
         deriv[i] = run_program(impl_->programs[i], X, a, st);
 }
 
+void SystemEvaluator::eval_complex(const ucmplx* X, const double* a, ucmplx* deriv) const {
+    if ((int)impl_->stack_c.size() < impl_->max_stack)
+        impl_->stack_c.resize(impl_->max_stack);
+    ucmplx* st = impl_->stack_c.data();
+    for (int i = 0; i < impl_->dim; ++i)
+        deriv[i] = run_program(impl_->programs[i], X, a, st);
+}
+
 // Публичная функция
 std::string codegen_scheme(const System& s, Scheme sch) {
     switch (sch) {
@@ -864,6 +1054,8 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::RK4:              return scheme_rk4(s);
     case Scheme::DOPRI78:          return scheme_dopri78(s);
     case Scheme::CD:               return scheme_cd(s);
+    case Scheme::ComplexCD:        return scheme_complex_cd(s);
+    case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
     }
     throw std::runtime_error("unknown scheme");
 }
@@ -874,6 +1066,8 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "RK4")               return Scheme::RK4;
     if (name == "DOPRI78")           return Scheme::DOPRI78;
     if (name == "CD")                return Scheme::CD;
+    if (name == "Complex CD")        return Scheme::ComplexCD;
+    if (name == "Complex CD4")       return Scheme::ComplexCD4;
     return Scheme::Euler;
 }
 
@@ -882,7 +1076,9 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     // and the resulting algorithm matches the codegen output (same expression, same operation order),
     // so we just return codegen_scheme. Only CD has a genuinely different CPU algorithm — 4 simple
     // iterations per variable instead of the analytic linear solve used on GPU.
-    if (sch == Scheme::CD) return scheme_cd_iter_only(s);
+    if (sch == Scheme::CD)         return scheme_cd_iter_only(s, CdKind::Real);
+    if (sch == Scheme::ComplexCD)  return scheme_cd_iter_only(s, CdKind::Cx);
+    if (sch == Scheme::ComplexCD4) return scheme_cd_iter_only(s, CdKind::Cx4);
     return codegen_scheme(s, sch);
 }
 

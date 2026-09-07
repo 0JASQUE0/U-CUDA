@@ -133,8 +133,14 @@ public:
     bool scheme_rk4 = false;
     bool scheme_dopri78 = false;
     bool scheme_cd = false;
+    // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
+    // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
+    bool scheme_ccd = false;
+    // Complex CD4: два прохода CD с шагами gamma*h и conj(gamma)*h — порядок 4.
+    // Требует s = 0.5 (иначе внутренний CD несимметричен и порядок падает до 1).
+    bool scheme_ccd4 = false;
 
-    // Коэффициент симметрии s для CD-метода (передаётся в kernel как a[0]).
+    // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
     std::string symmetry_s = "0.5";
 
     // Пользовательские именованные КРС (выбираются в scheme combo сессий
@@ -467,6 +473,8 @@ public:
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
                 { scheme_cd,       "CD",                Scheme::CD },
+                { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
             };
             bool any = false;
             for (const auto& it : items) {

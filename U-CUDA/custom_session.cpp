@@ -92,6 +92,32 @@ EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s) {
     return e;
 }
 
+namespace {
+
+// Ось свипа может быть не параметром и не начальным условием, а ШАГОМ. Тогда
+// drill-down по карте (или крестик на 1D-срезе) задаёт именно h, и брать его
+// для запуска из общего поля h_text нельзя: расчёт пошёл бы не в той точке, по
+// которой кликнули. Для 1D-срезов это делает pin_fixed_h в app_model.cpp, а
+// Phase/TimeDomain и Basins строятся здесь — раньше они молча оставались на
+// базовом шаге.
+//
+// Параметры сюда попадают сами: их пиннит в s.param_values обработчик клика по
+// карте. Начальные условия для Phase намеренно не трогаем (см. комментарий в
+// apply_shared_to_phase — набор НУ принадлежит самой сессии).
+//
+// Ось берём ЭФФЕКТИВНУЮ — ту же, по которой пиннит остальной 1D-конвейер
+// (pin_axis в gui.cpp), поэтому смысл fix_x/fix_y везде один и тот же. По h
+// может свипаться только одна ось (движок кодирует её одним hSweepAxis), так
+// что порядок проверок ниже неоднозначности не создаёт.
+void pin_swept_h(const CustomTabSharedConfig& s, std::string& h_text) {
+    const EffectiveSweep esx = effective_sweep_x(s);
+    const EffectiveSweep esy = effective_sweep_y(s);
+    if (esx.over_h && s.fix_x_value > 0.0)      h_text = fmt_num_shortest(s.fix_x_value);
+    else if (esy.over_h && s.fix_y_value > 0.0) h_text = fmt_num_shortest(s.fix_y_value);
+}
+
+} // namespace
+
 // apply_shared_to_* — one function per (type, mode) combination.
 
 void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c) {
@@ -266,6 +292,7 @@ void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession&
     ph.sim_time   = s.t_max_text;
     ph.skip_time  = s.transient_text;
     ph.param_values = s.param_values;
+    pin_swept_h(s, ph.step_h);
     if (ph.ic_sets.empty()) {
         InitialConditionSet ic;
         ic.label = "IC 1";
@@ -276,6 +303,7 @@ void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession&
 void apply_shared_to_basins(const CustomTabSharedConfig& s, BasinsConfig& c) {
     copy_integrator_and_state(s, c);
     copy_prescaller(s, c);
+    pin_swept_h(s, c.h_text);   // drill-down по оси-шагу, см. pin_swept_h
     // axis_x_var/axis_y_var are IC-space, edited in the Basins detail panel.
     // Shared param_values (with fix_x/fix_y overrides for the L2D axes)
     // are applied by the queue driver, which knows the parameter names.

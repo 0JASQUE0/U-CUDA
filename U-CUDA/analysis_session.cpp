@@ -474,6 +474,8 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "RK4")               return Scheme::RK4;
     if (s == "DOPRI78")           return Scheme::DOPRI78;
     if (s == "CD")                return Scheme::CD;
+    if (s == "Complex CD")        return Scheme::ComplexCD;
+    if (s == "Complex CD4")       return Scheme::ComplexCD4;
     return Scheme::Euler;
 }
 

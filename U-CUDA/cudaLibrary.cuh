@@ -238,7 +238,7 @@ __global__ void calculateDiscreteModelCUDA(
 	const numb	transientTime = 0,        // raw transient time; only read when hSweepAxis != -1
 	const numb	tMax = 0,                 // raw computing time; only read when hSweepAxis != -1
 	int*			actualIterations = nullptr, // per-thread actual sample count written to `data` (worst-case-sized buffer); read by peakFinderCUDA
-	const int		logAxisMask = 0);         // bit i = axis slot i (X=0,Y=1) is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
+	const int		logAxisMask = 0);         // bit i = axis slot i (X=0,Y=1) is log-distributed
 
 // Ядро: траектории ансамбля при свипе по шагу интегрирования.
 // transientTime здесь в единицах времени, а не в шагах.
@@ -418,7 +418,7 @@ __global__ void LLEKernelCUDA(
 	numb*			resultArray = nullptr,
 	const int		hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
 	const numb	transientTime = 0,   // raw transient time; only read when hSweepAxis != -1
-	const int		logAxisMask = 0);    // bit i = axis slot i is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
+	const int		logAxisMask = 0);    // bit i = axis slot i is log-distributed
 
 // Ядро LLE, свип по начальным условиям.
 __global__ void LLEKernelICCUDA(
@@ -469,7 +469,7 @@ __global__ void LSKernelCUDA(
 	numb* resultArray = nullptr,
 	const int hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
 	const numb transientTime = 0,  // raw transient time; only read when hSweepAxis != -1
-	const int logAxisMask = 0);    // bit i = axis slot i is log-distributed; supersedes LINEAR_OR_LOG_DISTRIB
+	const int logAxisMask = 0);    // bit i = axis slot i is log-distributed
 
 __global__ void LSKernelICCUDA(
 	const int nPts,

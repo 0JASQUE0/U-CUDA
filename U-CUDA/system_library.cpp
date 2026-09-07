@@ -143,6 +143,8 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_rk4", r.scheme_rk4);
     kvbool(o, "scheme_dopri78", r.scheme_dopri78);
     kvbool(o, "scheme_cd", r.scheme_cd);
+    kvbool(o, "scheme_ccd", r.scheme_ccd);
+    kvbool(o, "scheme_ccd4", r.scheme_ccd4);
     kv(o, "symmetry_s", r.symmetry_s);
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
@@ -179,6 +181,8 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_rk4") r.scheme_rk4 = p.parse_bool();
         else if (key == "scheme_dopri78") r.scheme_dopri78 = p.parse_bool();
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
+        else if (key == "scheme_ccd") r.scheme_ccd = p.parse_bool();
+        else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();
         else if (key == "custom_schemes") {

@@ -7,7 +7,7 @@
 // Расширяемый набор схем интегрирования поверх SystemEvaluator.
 // Добавление новой схемы = добавить enum + одну функцию шага в .cpp,
 // не трогая расчёт траектории и остальные схемы.
-enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD };
+enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4 };
 
 IntScheme int_scheme_from_string(const std::string& s);
 
