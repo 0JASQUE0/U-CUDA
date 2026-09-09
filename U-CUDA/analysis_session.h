@@ -606,7 +606,9 @@ struct Dft1DConfig {
     // Требует freq_lo/hi > 0 (валидатор отказывает иначе).
     bool        freq_log_scale = false;
     // Оконная функция перед DFT: 0=None (rectangular), 1=Hanning (default),
-    // 2=Hamming — см. parametric_engine.cpp::build_window.
+    // 2=Hamming, 3=Blackman, 4=Blackman-Harris — см.
+    // parametric_engine.cpp::cpu_build_window. Значение сохраняется в JSON
+    // числом, поэтому новые окна дописываются только в конец списка.
     int         window_type = 1;
 
     // Интегрирование — см. BifurcationDiagramConfig.

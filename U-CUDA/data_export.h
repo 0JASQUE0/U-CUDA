@@ -74,7 +74,8 @@ struct Dft1DSnapshot {
     int    n_freq = 0;
     double freq_lo = 0.0;
     double freq_hi = 0.0;
-    int    window_type = 1;   // 0=None, 1=Hanning, 2=Hamming — см. Dft1DRequest::window_type
+    int    window_type = 1;   // 0=None, 1=Hanning, 2=Hamming, 3=Blackman,
+                              // 4=Blackman-Harris — см. Dft1DRequest::window_type
 };
 
 struct LLE1DSnapshot {

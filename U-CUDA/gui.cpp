@@ -4362,7 +4362,9 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         InputNumStr("Freq hi", c.freq_hi_text, kFieldW);
         ImGui::Checkbox("Log scale (Y)##dft_freq_log", &c.freq_log_scale);
         if (c.freq_log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-        static const char* windows[] = { "None", "Hanning", "Hamming" };
+        // Порядок = window_type (см. cpu_build_window). Дописывать только в
+        // конец: значение уходит числом в JSON сессии.
+        static const char* windows[] = { "None", "Hanning", "Hamming", "Blackman", "Blackman-Harris" };
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
     }

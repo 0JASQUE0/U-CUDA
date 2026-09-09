@@ -129,7 +129,9 @@ void write_dft1d_config(std::ofstream& out, const Dft1DSnapshot& s)
     out << "start value = " << s.range_lo << ", stop value = " << s.range_hi << "\n";
     out << "n_freq = " << s.n_freq << "\n";
     out << "freq_lo = " << s.freq_lo << ", freq_hi = " << s.freq_hi << "\n";
-    const char* win_name = s.window_type == 0 ? "None" : s.window_type == 2 ? "Hamming" : "Hanning";
+    static const char* kWinNames[] = { "None", "Hanning", "Hamming", "Blackman", "Blackman-Harris" };
+    const char* win_name = (s.window_type >= 0 && s.window_type < (int)(sizeof(kWinNames) / sizeof(kWinNames[0])))
+                         ? kWinNames[s.window_type] : "Hanning";
     out << "window = " << win_name << "\n";
     write_fmad_line(out, s.gpu_fmad);
 }

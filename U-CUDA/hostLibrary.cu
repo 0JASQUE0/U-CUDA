@@ -4259,10 +4259,24 @@ __host__ void bifurcation_DFT_1D(
 	// Выделяем память в GPU
 
 	const numb gamma = (numb)2.0 * pi / (numb)(amountOfPointsInBlock - 1);
+	numb windowSum = (numb)0;
 	for (int n = 0; n < amountOfPointsInBlock; ++n) {
 		//h_window[n] = (numb)0.53836 - (numb)0.46164 * cos(gamma * n ); // Hamming
 		h_window[n] = (numb)0.5 * ((numb)1.0 - cos(gamma * n)); // Hanning
+		//h_window[n] = (numb)0.42 - (numb)0.5 * cos(gamma * n) + (numb)0.08 * cos(2 * gamma * n); // Blackman
+		//h_window[n] = (numb)0.35875 - (numb)0.48829 * cos(gamma * n) + (numb)0.14128 * cos(2 * gamma * n) - (numb)0.01168 * cos(3 * gamma * n); // Blackman-Harris
 		//h_window[n] = (numb)1.0;
+		windowSum += h_window[n];
+	}
+	// Нормировка на единичное среднее: DFT_custom делит сумму на длину блока, а
+	// не на sum(w), поэтому без этого абсолютная амплитуда спектра зависит от
+	// того, какая из строк выше раскомментирована (для Hanning занижена вдвое).
+	// UI-путь (parametric_engine.cpp::cpu_build_window) нормирует так же —
+	// иначе Debug и Release давали бы разный масштаб для одной системы.
+	if (windowSum > (numb)0) {
+		const numb windowMean = windowSum / (numb)amountOfPointsInBlock;
+		for (int n = 0; n < amountOfPointsInBlock; ++n)
+			h_window[n] /= windowMean;
 	}
 
 	gpuErrorCheck(cudaMalloc((void**)&d_data, nPtsLimiter * amountOfPointsInBlock * sizeof(numb)));
