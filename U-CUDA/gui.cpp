@@ -4375,6 +4375,30 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Mode", &c.display_mode, modes, IM_ARRAYSIZE(modes));
         ImGui::Checkbox("Normalize?", &c.normalize);
+        // Шкала и её порог осмысленны только для power/amplitude — на phase (радианы) гасим оба.
+        ImGui::BeginDisabled(c.display_mode == 2);
+        ImGui::Checkbox("dB scale", &c.db_scale);
+        if (c.display_mode != 2) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("В дБ power и amplitude совпадают тождественно:\n"
+                                  "20*log10(sqrt(P)) = 10*log10(P).\n"
+                                  "Различаются они только в линейной шкале —\n"
+                                  "мощность давит слабые пики квадратично.");
+        }
+        ImGui::BeginDisabled(!c.db_scale);
+        InputNumStr("dB floor", c.db_floor_text, kFieldW);
+        ImGui::EndDisabled();
+        if (c.display_mode != 2 && c.db_scale) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Нижняя граница логарифмической шкалы.\n"
+                                  "Всё, что слабее, прижимается к этому значению —\n"
+                                  "иначе нулевая ячейка дала бы -inf.");
+        }
+        ImGui::EndDisabled();
     }
 
     // Integration (collapsible)
@@ -4552,9 +4576,12 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         // Лениво (пере)строим display_cache, когда расходится с текущими
         // настройками — не каждый кадр. Та же staleness-схема, что и у
         // colored_1d_cache в draw_bifurcation_plot.
+        const double db_floor = parse_num(c.db_floor_text, -120.0);
         bool stale = c.display_built_from    != c.data_generation
                   || c.display_cache_mode      != c.display_mode
-                  || c.display_cache_normalize != c.normalize;
+                  || c.display_cache_normalize != c.normalize
+                  || c.display_cache_db_floor  != db_floor
+                  || c.display_cache_db_scale  != c.db_scale;
         if (stale) {
             size_t plane_size = (size_t)nfreq * (size_t)npts;
             // freq-major/param-minor (idx = f*n_pts+pt) — конвенция
@@ -4581,12 +4608,20 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
                     double av = std::fabs(v);
                     if (av > colmax) colmax = av;
                 }
+                // dB-масштаб только для power/amplitude и только если включён; phase всегда
+                // остаётся в радианах. Коэффициент разный: power — величина мощности (10*log10,
+                // как в референсном MATLAB-скрипте), amplitude — sqrt от неё, то есть 20*log10.
+                // С одним коэффициентом на оба режима amplitude показывал ровно половину
+                // децибел от power для тех же данных.
+                const bool   to_db = c.db_scale && c.display_mode != 2;
+                const double db_k  = (c.display_mode == 1) ? 20.0 : 10.0;
+                // Порог задаём в линейной шкале, чтобы log10(0) вообще не считался:
+                // 10^(floor/k) — ровно то значение, которое даст floor после лога.
+                const double lin_floor = std::pow(10.0, db_floor / db_k);
                 for (int f = 0; f < nfreq; ++f) {
                     double v = col[(size_t)f];
                     if (c.normalize && colmax > 0.0) v /= colmax;
-                    // dB-масштаб как в референсном MATLAB-скрипте (10*log10) —
-                    // только для power/amplitude; phase остаётся в радианах.
-                    if (c.display_mode != 2) v = 10.0 * std::log10(std::max(v, 1e-12));
+                    if (to_db) v = db_k * std::log10(std::max(v, lin_floor));
                     c.display_cache[(size_t)f * (size_t)npts + (size_t)pt] = v;
                     if (v < vmin) vmin = v;
                     if (v > vmax) vmax = v;
@@ -4597,6 +4632,8 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
             c.display_built_from      = c.data_generation;
             c.display_cache_mode      = c.display_mode;
             c.display_cache_normalize = c.normalize;
+            c.display_cache_db_floor  = db_floor;
+            c.display_cache_db_scale  = c.db_scale;
             ++c.display_cache_gen;
         }
 
@@ -4605,6 +4642,10 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         hc.x_axis.log_scale = c.log_scale;
         hc.y_axis.name = "Frequency";
         hc.y_axis.log_scale = c.freq_log_scale;
+        // Неколебательные точки (result.flags[pt] <= 0) уходят в кэш как sentinel и рисуются
+        // чёрным, а не тёмно-серым по умолчанию: на шкале в дБ они иначе читаются как «сигнал
+        // на уровне пола», хотя спектра там не считали вовсе.
+        hc.nodata_color[0] = hc.nodata_color[1] = hc.nodata_color[2] = 0.0f;
 
         bool fit = c.fit_request;
         if (fit) c.fit_request = false;
