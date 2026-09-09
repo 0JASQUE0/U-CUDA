@@ -795,7 +795,12 @@ static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "freq_lo_text")        c.freq_lo_text        = p.str();
     else if (key == "freq_hi_text")        c.freq_hi_text        = p.str();
     else if (key == "freq_log_scale")      c.freq_log_scale      = p.boolean();
-    else if (key == "window_type")         c.window_type         = std::stoi(p.str_or_num());
+    else if (key == "window_type") {
+        // Клампим: сессия могла прийти из сборки с другим набором окон, а
+        // ImGui::Combo с индексом вне списка рисует пустую строку.
+        const int wt = std::stoi(p.str_or_num());
+        c.window_type = (wt >= 0 && wt <= 4) ? wt : 1;
+    }
     else if (key == "h_text")              c.h_text              = p.str();
     else if (key == "t_max_text")          c.t_max_text          = p.str();
     else if (key == "transient_text")      c.transient_text      = p.str();

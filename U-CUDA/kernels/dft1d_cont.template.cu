@@ -55,14 +55,32 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 
 #include "cudaLibrary.cu"
 
-// Window value at sample n of a block of `len` samples.
-// 0 = rectangular, 1 = Hanning (default), 2 = Hamming. Mirrors build_window /
-// cpu_build_window on the host.
+// Window value at sample n of a block of `len` samples. Every type is a cosine
+// sum w(n) = a0 - a1*cos(g) + a2*cos(2g) - a3*cos(3g), g = 2*pi*n/(len-1):
+// 0 = rectangular, 1 = Hanning (default), 2 = Hamming, 3 = Blackman,
+// 4 = Blackman-Harris. Mirrors cpu_build_window on the host, including the
+// scaling to unit mean -- the DFT below divides by blockLen and not by sum(w),
+// so without it the absolute scale of the spectrum would depend on which
+// window is selected. sum(cos(k*g)) over n = 0..len-1 equals 1 for k = 1,2,3,
+// hence the closed-form mean a0 - (a1 - a2 + a3)/len (the host sums the
+// weights directly; the two agree to rounding for any usable block length).
 __device__ __forceinline__ numb dft_window(int n, int len, int window_type) {
-    if (window_type == 0) return (numb)1.0;
-    const numb gamma = (numb)2.0 * (numb)pi / (numb)(len - 1);
-    if (window_type == 2) return (numb)0.53836 - (numb)0.46164 * cos(gamma * (numb)n);
-    return (numb)0.5 * ((numb)1.0 - cos(gamma * (numb)n));
+    numb a0, a1, a2, a3;
+    switch (window_type) {
+        case 1:  a0 = (numb)0.5;     a1 = (numb)0.5;     a2 = (numb)0.0;     a3 = (numb)0.0;     break;
+        case 2:  a0 = (numb)0.53836; a1 = (numb)0.46164; a2 = (numb)0.0;     a3 = (numb)0.0;     break;
+        case 3:  a0 = (numb)0.42;    a1 = (numb)0.5;     a2 = (numb)0.08;    a3 = (numb)0.0;     break;
+        case 4:  a0 = (numb)0.35875; a1 = (numb)0.48829; a2 = (numb)0.14128; a3 = (numb)0.01168; break;
+        default: return (numb)1.0;   // 0 = rectangular и любое неизвестное значение
+    }
+    if (len < 2) return (numb)1.0;
+    // cos(2g), cos(3g) через кратные углы: один cos на сэмпл вместо трёх.
+    const numb c1 = cos((numb)2.0 * (numb)pi / (numb)(len - 1) * (numb)n);
+    const numb c2 = (numb)2.0 * c1 * c1 - (numb)1.0;
+    const numb c3 = ((numb)4.0 * c1 * c1 - (numb)3.0) * c1;
+    const numb w    = a0 - a1 * c1 + a2 * c2 - a3 * c3;
+    const numb mean = a0 - (a1 - a2 + a3) / (numb)len;
+    return (mean > (numb)0) ? w / mean : w;
 }
 
 // Single-thread kernel, launched with gridDim = blockDim = 1.

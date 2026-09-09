@@ -892,17 +892,56 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     return res;
 }
 
-// Оконная функция для DFT — та же, что build_window в Impl (0=None,
-// 1=Hanning, 2=Hamming). Дублируется здесь, потому что при h-свипе длина блока
-// своя в каждой точке и окно приходится строить внутри цикла.
+// Оконная функция для DFT. Все варианты — косинусные суммы
+//   w(n) = a0 - a1*cos(g) + a2*cos(2g) - a3*cos(3g),   g = 2*pi*n/(N-1),
+// так что таблицы коэффициентов хватает на все типы:
+//   0 = None (rectangular)
+//   1 = Hanning (default)        -31 дБ, спад -18 дБ/окт
+//   2 = Hamming                  -43 дБ, спад  -6 дБ/окт
+//   3 = Blackman                 -58 дБ, спад -18 дБ/окт
+//   4 = Blackman-Harris (4 чл.)  -92 дБ, спад  -6 дБ/окт
+// Уровень боковых лепестков — это и есть динамический диапазон: на Hanning'е
+// субгармоники слабее -31 дБ тонут в утечке от основной частоты, что в каскаде
+// удвоений периода отрезает всё после третьего-четвёртого удвоения.
+//
+// Окно нормируется на единичное среднее. Все четыре пути DFT (DFT_custom,
+// cpu_dft_block и оба template-ядра) делят сумму на длину блока, а не на
+// sum(w), поэтому без нормировки абсолютная амплитуда спектра зависела бы от
+// выбора окна — когерентное усиление тут 1.0 / 0.5 / 0.54 / 0.42 / 0.36.
+// Форма спектра от нормировки не зависит.
+//
+// Дублируется в dft_window (dft1d_cont.template.cu) и dft_hsweep_window
+// (dft1d_hsweep.template.cu): при h-свипе и в continuation-режиме длина блока
+// своя в каждой точке, и окно приходится строить прямо на GPU.
 void cpu_build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
     out.resize((size_t)sizeOfBlock);
-    if (window_type == 0) { std::fill(out.begin(), out.end(), (numb)1); return; }
+    if (window_type <= 0 || window_type > 4 || sizeOfBlock < 2) {
+        std::fill(out.begin(), out.end(), (numb)1);
+        return;
+    }
+    static const double kCoef[5][4] = {
+        { 1.0,     0.0,     0.0,     0.0     },   // 0 = None (сюда не доходим)
+        { 0.5,     0.5,     0.0,     0.0     },   // 1 = Hanning
+        { 0.53836, 0.46164, 0.0,     0.0     },   // 2 = Hamming
+        { 0.42,    0.5,     0.08,    0.0     },   // 3 = Blackman
+        { 0.35875, 0.48829, 0.14128, 0.01168 },   // 4 = Blackman-Harris
+    };
+    const double* c = kCoef[window_type];
     const numb gamma = (numb)2.0 * (numb)kPi / (numb)(sizeOfBlock - 1);
-    if (window_type == 2)
-        for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] = (numb)0.53836 - (numb)0.46164 * std::cos(gamma * (numb)n);
-    else
-        for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] = (numb)0.5 * ((numb)1.0 - std::cos(gamma * (numb)n));
+    numb sum = (numb)0;
+    for (int n = 0; n < sizeOfBlock; ++n) {
+        // cos(2g) и cos(3g) через кратные углы, а не тремя вызовами cos:
+        // так же считает GPU-версия, иначе пути разошлись бы в последнем бите.
+        const numb c1 = std::cos(gamma * (numb)n);
+        const numb c2 = (numb)2.0 * c1 * c1 - (numb)1.0;
+        const numb c3 = ((numb)4.0 * c1 * c1 - (numb)3.0) * c1;
+        const numb w  = (numb)c[0] - (numb)c[1] * c1 + (numb)c[2] * c2 - (numb)c[3] * c3;
+        out[(size_t)n] = w;
+        sum += w;
+    }
+    const numb mean = sum / (numb)sizeOfBlock;
+    if (mean > (numb)0)
+        for (int n = 0; n < sizeOfBlock; ++n) out[(size_t)n] /= mean;
 }
 
 // Порт DFT_custom (cudaLibrary.cu) на один блок. Рекуррентный поворот вектора (cos_n, sin_n)
@@ -4495,25 +4534,11 @@ struct ParametricEngine::Impl {
     }
 
     // Общая для classical/continuation: строит оконную функцию длиной sizeOfBlock. DFT_custom
-    // принимает готовое окно аргументом и НЕ считает его сам. Три формулы совпадают с теми, что в
-    // hostLibrary.cu::bifurcation_DFT_1D лежат как взаимоисключающие альтернативы:
-    //   0 = None (rectangular, h_window[n] = 1.0)
-    //   1 = Hanning (default — активная строка в hostLibrary.cu)
-    //   2 = Hamming (закомментированная строка там же)
+    // принимает готовое окно аргументом и НЕ считает его сам. Формулы и нумерация типов — в
+    // cpu_build_window выше (была отдельная копия тех же формул; после добавления Blackman и
+    // Blackman-Harris держать две копии в одном файле смысла нет).
     static void build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
-        out.resize((size_t)sizeOfBlock);
-        if (window_type == 0) {
-            std::fill(out.begin(), out.end(), (numb)1);
-            return;
-        }
-        const numb gamma = (numb)2.0 * (numb)pi / (numb)(sizeOfBlock - 1);
-        if (window_type == 2) {
-            for (int n = 0; n < sizeOfBlock; ++n)
-                out[(size_t)n] = (numb)0.53836 - (numb)0.46164 * std::cos(gamma * (numb)n);
-        } else {
-            for (int n = 0; n < sizeOfBlock; ++n)
-                out[(size_t)n] = (numb)0.5 * ((numb)1.0 - std::cos(gamma * (numb)n));
-        }
+        cpu_build_window(out, sizeOfBlock, window_type);
     }
 
     // run_dft1d_classical — порт classical-ветки bifurcation_DFT_1D. Реюзает

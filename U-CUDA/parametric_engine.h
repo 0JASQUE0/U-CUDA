@@ -246,10 +246,11 @@ struct Dft1DRequest {
     // Требует freq_lo>0 и freq_hi>0 (валидатор отказывает иначе).
     bool   freq_log_scale = false;
 
-    // Оконная функция, применяемая к сэмплам перед DFT (см. build_window в
-    // parametric_engine.cpp — те же 3 формулы, что закомментированы в
-    // hostLibrary.cu::bifurcation_DFT_1D): 0=None (rectangular), 1=Hanning
-    // (default, совпадает с текущим поведением hostLibrary.cu), 2=Hamming.
+    // Оконная функция, применяемая к сэмплам перед DFT (см. cpu_build_window в
+    // parametric_engine.cpp): 0=None (rectangular), 1=Hanning (default,
+    // совпадает с активной строкой в hostLibrary.cu::bifurcation_DFT_1D),
+    // 2=Hamming, 3=Blackman, 4=Blackman-Harris. Окно нормируется на единичное
+    // среднее, поэтому абсолютная амплитуда спектра не зависит от выбора окна.
     int window_type = 1;
 
     // Если не пусто — engine пишет <path>_config.csv / _AkCOS.csv / _BkSIN.csv
