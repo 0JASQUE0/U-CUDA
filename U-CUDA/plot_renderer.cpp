@@ -268,6 +268,7 @@ uniform float u_vmax;
 uniform int   u_colormap;
 uniform int   u_discrete_n;  // 0 = continuous, N>0 = quantize t into N bands
 uniform int   u_reverse;     // 1 = t := 1-t before colormap sampling
+uniform vec3  u_nodata;      // цвет спец-значений (>=1e30/NaN/Inf), см. draw_heatmap
 uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
 out vec4 frag_color;
@@ -282,7 +283,7 @@ void main() {
     }
     float v = texture(u_tex, uv).r;
     if (v >= 1.0e30 || isnan(v) || isinf(v)) {
-        frag_color = vec4(0.12, 0.12, 0.14, 1.0);
+        frag_color = vec4(u_nodata, 1.0);
         return;
     }
     float range = u_vmax - u_vmin;
@@ -454,6 +455,7 @@ void PlotRenderer::compile_shaders() {
             loc_heatmap_uv_scale_ = glGetUniformLocation(program_heatmap_, "u_uv_scale");
             loc_heatmap_discrete_n_ = glGetUniformLocation(program_heatmap_, "u_discrete_n");
             loc_heatmap_reverse_   = glGetUniformLocation(program_heatmap_, "u_reverse");
+            loc_heatmap_nodata_    = glGetUniformLocation(program_heatmap_, "u_nodata");
         }
     }
     if (vs2)  glDeleteShader(vs2);
@@ -599,7 +601,8 @@ void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
 void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                                 float uv_off_x, float uv_off_y,
                                 float uv_scale_x, float uv_scale_y,
-                                int n_discrete, bool reverse) {
+                                int n_discrete, bool reverse,
+                                const float* nodata_rgb) {
     if (!program_heatmap_ || !tex) return;
     if (!heatmap_vbo_) {
         // Fullscreen triangle-strip: 4 точки × (pos.xy, uv.xy). Текстурные
@@ -633,6 +636,11 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     if (loc_heatmap_uv_scale_ >= 0) glUniform2f(loc_heatmap_uv_scale_, uv_scale_x, uv_scale_y);
     if (loc_heatmap_discrete_n_ >= 0) glUniform1i(loc_heatmap_discrete_n_, n_discrete);
     if (loc_heatmap_reverse_  >= 0) glUniform1i(loc_heatmap_reverse_, reverse ? 1 : 0);
+    if (loc_heatmap_nodata_   >= 0) {
+        static const float kDefaultNoData[3] = { 0.12f, 0.12f, 0.14f };
+        const float* nd = nodata_rgb ? nodata_rgb : kDefaultNoData;
+        glUniform3f(loc_heatmap_nodata_, nd[0], nd[1], nd[2]);
+    }
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, heatmap_vbo_);

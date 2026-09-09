@@ -629,6 +629,15 @@ struct Dft1DConfig {
     // (по параметру) на её максимум по частоте, см. draw_dft1d_plot.
     int         display_mode = 0;
     bool        normalize    = true;
+    // Логарифмическая шкала для power/amplitude. В дБ эти два режима тождественны
+    // (20*log10(sqrt(P)) == 10*log10(P)) и различаются только здесь, в линейной шкале: мощность
+    // давит слабые пики квадратично, амплитуда — нет. На phase не влияет.
+    bool        db_scale = true;
+    // Нижний порог шкалы в дБ. Power/amplitude уходят в лог перед отрисовкой, и без порога
+    // нулевая ячейка дала бы -inf; всё, что ниже, прижимается к этому значению. Раньше порог был
+    // зашит как max(v,1e-12), то есть ровно -120 дБ, и задавал нижний край цветовой шкалы
+    // независимо от данных. На phase (display_mode==2) не влияет — там радианы, а не дБ.
+    std::string db_floor_text = "-120";
 
     Dft1DResult result;
     bool        last_run_ok = false;
@@ -651,6 +660,8 @@ struct Dft1DConfig {
     int         display_built_from = -1;      // data_generation, из которого построен кэш
     int         display_cache_mode      = -1;
     bool        display_cache_normalize = false;
+    double      display_cache_db_floor  = 0.0;   // распарсенный db_floor_text, из которого построен кэш
+    bool        display_cache_db_scale  = true;
 };
 
 struct Dft1DAnalysisSession {

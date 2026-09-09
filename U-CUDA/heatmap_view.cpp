@@ -364,7 +364,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     }
     renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
-                          n_disc, reverse_colormap);
+                          n_disc, reverse_colormap, nodata_color);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в

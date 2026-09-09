@@ -770,6 +770,8 @@ static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "\"param_values\":";       jmap(o, c.param_values);       o << ",";
     o << "\"display_mode\":"       << c.display_mode             << ",";
     o << "\"normalize\":"          << (c.normalize ? "true" : "false") << ",";
+    o << "\"db_scale\":"           << (c.db_scale ? "true" : "false") << ",";
+    o << "\"db_floor_text\":";      jstr(o, c.db_floor_text);      o << ",";
     o << "\"colormap_idx\":"       << c.colormap_idx;
     o << "}";
 }
@@ -812,6 +814,8 @@ static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "param_values")        c.param_values        = p.map_ss();
     else if (key == "display_mode")        c.display_mode        = std::stoi(p.str_or_num());
     else if (key == "normalize")           c.normalize           = p.boolean();
+    else if (key == "db_scale")            c.db_scale            = p.boolean();
+    else if (key == "db_floor_text")       c.db_floor_text       = p.str();
     else if (key == "colormap_idx")        c.colormap_idx        = std::stoi(p.str_or_num());
     else return false;
     return true;
