@@ -192,6 +192,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="plot_renderer.h" />
     <ClInclude Include="plot_view_2d.h" />
     <ClInclude Include="plot_view_3d.h" />
+    <ClInclude Include="rqa.h" />
     <ClInclude Include="session_io.h" />
     <ClInclude Include="stb_image_write.h" />
     <ClInclude Include="sysparse.hpp" />

@@ -184,8 +184,43 @@ struct PhaseRunInputs {
     // in-kernel transient loop so the resumed chunk starts recording immediately.
     bool                              skip_transient = true;
     std::vector<std::vector<double>>  ic_override;   // [ic][coord]; empty → use ic_sets text
+    // RQA-расчёты, запрошенные окнами проекций. Уже дедуплицированы по (ic, cfg).
+    std::vector<RqaJob>               rqa_jobs;
 };
 } // namespace
+
+bool make_rqa_job(const Projection& pr, RqaJob& out)
+{
+    if (pr.type != ProjType::RecurrencePlot) return false;
+    if (pr.rqa_source == rqa::Source::None)  return false;
+
+    out = RqaJob();
+    out.ic = pr.rqa_ic;
+    rqa::Config& c = out.cfg;
+    c.source   = pr.rqa_source;
+    c.var      = pr.rqa_var;
+    c.m        = (int)parse_val(pr.rqa_m_text,   3.0);
+    c.tau      = (int)parse_val(pr.rqa_tau_text, 1.0);
+    c.norm     = pr.rqa_norm;
+    c.eps_mode = pr.rqa_eps_mode;
+    c.eps      = (numb)parse_val(pr.rqa_eps_text,      0.1);
+    c.eps_frac = (numb)parse_val(pr.rqa_eps_frac_text, 0.1);
+    // Поле RR в UI — проценты, а Config::target_rr — доля.
+    c.target_rr = (numb)(parse_val(pr.rqa_rr_text, 5.0) / 100.0);
+    c.theiler  = (int)parse_val(pr.rqa_theiler_text, 1.0);
+    c.l_min    = (int)parse_val(pr.rqa_lmin_text,    2.0);
+    c.v_min    = (int)parse_val(pr.rqa_vmin_text,    2.0);
+    c.points   = (int)parse_val(pr.rqa_points_text,  2048.0);
+    c.network_measures = pr.rqa_network;
+    return true;
+}
+
+const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job)
+{
+    for (const RqaOutcome& o : res.rqa_out)
+        if (o.job == job) return &o.res;
+    return nullptr;
+}
 
 // Чистая функция: входы → AnalysisResult. Не трогает session, поэтому её
 // безопасно звать с любого потока.
@@ -343,6 +378,19 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             result.features[k][(size_t)dim] = find_peaks_host(series, h * (double)stride);
         }
 
+        // RQA по этой траектории — ДО прореживания и до move(traj) ниже. Считаем по полному
+        // ряду с шагом h: decimator задуман как настройка отрисовки, и наследовать его здесь
+        // значило бы молча менять частоту дискретизации, от которой RQA зависит напрямую.
+        // Прореживание до Config::points делает сам rqa::compute и возвращает честный dt.
+        for (const RqaJob& job : in.rqa_jobs) {
+            if (job.ic != k) continue;
+            RqaOutcome o;
+            o.job = job;
+            if (traj.empty()) o.res.error = "RQA: trajectory diverged";
+            else rqa::compute(traj, h, job.cfg, o.res);
+            result.rqa_out.push_back(std::move(o));
+        }
+
         std::vector<std::vector<double>> dtraj;
         if (dec <= 1) dtraj = std::move(traj);
         else {
@@ -427,6 +475,21 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
         s.continuation_state.size() == s.ic_sets.size()) {
         in.ic_override    = s.continuation_state;
         in.skip_transient = false;
+    }
+
+    // RQA-задачи из открытых окон типа RecurrencePlot. Дедуп по (ic, cfg): два окна с одинаковыми
+    // настройками (например «то же, но бинарный вид») обязаны стоить один расчёт, а не два.
+    // Проверки на "окно закрыто" тут нет намеренно: крестик окна проекции УДАЛЯЕТ проекцию
+    // (pr_to_remove в draw_projection_windows), состояния "есть, но закрыта" не существует —
+    // Projection::open остался от старой схемы и никем не читается.
+    for (const Projection& pr : s.projections) {
+        if (s.continuation_active && !pr.rqa_in_continuation) continue;
+        RqaJob job;
+        if (!make_rqa_job(pr, job)) continue;
+        if (job.ic < 0 || job.ic >= (int)s.ic_sets.size()) continue;
+        bool dup = false;
+        for (const RqaJob& have : in.rqa_jobs) if (have == job) { dup = true; break; }
+        if (!dup) in.rqa_jobs.push_back(job);
     }
     return in;
 }

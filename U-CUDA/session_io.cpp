@@ -81,6 +81,65 @@ namespace {
         }
     };
 
+
+// ---- RQA-поля проекции ----
+// Пишутся ТОЛЬКО когда источник реально выбран (rqa_source != None). Иначе файлы всех
+// существующих сессий распухли бы на 17 ключей в каждой проекции ради настроек, которых нет.
+// Читателю ключи не обязательны: неизвестные глотает skip_value, отсутствующие остаются на
+// дефолтах Projection — поэтому старые сессии грузятся без единой правки.
+void write_rqa_fields(std::ostringstream& o, const Projection& p) {
+    if (p.rqa_source == rqa::Source::None) return;
+    o << ",\"rq_src\":" << (int)p.rqa_source
+      << ",\"rq_ic\":" << p.rqa_ic
+      << ",\"rq_var\":" << p.rqa_var
+      << ",\"rq_norm\":" << (int)p.rqa_norm
+      << ",\"rq_em\":" << (int)p.rqa_eps_mode
+      << ",\"rq_net\":" << (p.rqa_network ? "true" : "false")
+      << ",\"rq_cont\":" << (p.rqa_in_continuation ? "true" : "false")
+      << ",\"rq_vm\":" << p.rqa_view_mode
+      << ",\"rq_cmap\":" << p.rqa_colormap
+      << ",\"rq_rev\":" << (p.rqa_reverse_cmap ? "true" : "false")
+      << ",\"rq_as\":" << (p.rqa_autoscale ? "true" : "false");
+    o << ",\"rq_cbmin\":"; jstr(o, p.rqa_cbar_vmin_text);
+    o << ",\"rq_cbmax\":"; jstr(o, p.rqa_cbar_vmax_text);
+    o << ",\"rq_m\":"; jstr(o, p.rqa_m_text);
+    o << ",\"rq_tau\":"; jstr(o, p.rqa_tau_text);
+    o << ",\"rq_eps\":"; jstr(o, p.rqa_eps_text);
+    o << ",\"rq_ef\":"; jstr(o, p.rqa_eps_frac_text);
+    o << ",\"rq_rr\":"; jstr(o, p.rqa_rr_text);
+    o << ",\"rq_th\":"; jstr(o, p.rqa_theiler_text);
+    o << ",\"rq_lmin\":"; jstr(o, p.rqa_lmin_text);
+    o << ",\"rq_vmin\":"; jstr(o, p.rqa_vmin_text);
+    o << ",\"rq_pts\":"; jstr(o, p.rqa_points_text);
+}
+
+// true, если ключ был RQA-шный и уже разобран.
+bool read_rqa_field(const std::string& k, JP& p, Projection& pr) {
+    if (k == "rq_src")       pr.rqa_source   = (rqa::Source)std::stoi(p.str_or_num());
+    else if (k == "rq_ic")   pr.rqa_ic       = std::stoi(p.str_or_num());
+    else if (k == "rq_var")  pr.rqa_var      = std::stoi(p.str_or_num());
+    else if (k == "rq_norm") pr.rqa_norm     = (rqa::Norm)std::stoi(p.str_or_num());
+    else if (k == "rq_em")   pr.rqa_eps_mode = (rqa::EpsMode)std::stoi(p.str_or_num());
+    else if (k == "rq_net")  pr.rqa_network  = p.boolean();
+    else if (k == "rq_cont") pr.rqa_in_continuation = p.boolean();
+    else if (k == "rq_vm")   pr.rqa_view_mode = std::stoi(p.str_or_num());
+    else if (k == "rq_cmap") pr.rqa_colormap  = std::stoi(p.str_or_num());
+    else if (k == "rq_rev")  pr.rqa_reverse_cmap = p.boolean();
+    else if (k == "rq_as")   pr.rqa_autoscale = p.boolean();
+    else if (k == "rq_cbmin") pr.rqa_cbar_vmin_text = p.str_or_num();
+    else if (k == "rq_cbmax") pr.rqa_cbar_vmax_text = p.str_or_num();
+    else if (k == "rq_m")    pr.rqa_m_text    = p.str_or_num();
+    else if (k == "rq_tau")  pr.rqa_tau_text  = p.str_or_num();
+    else if (k == "rq_eps")  pr.rqa_eps_text  = p.str_or_num();
+    else if (k == "rq_ef")   pr.rqa_eps_frac_text = p.str_or_num();
+    else if (k == "rq_rr")   pr.rqa_rr_text   = p.str_or_num();
+    else if (k == "rq_th")   pr.rqa_theiler_text = p.str_or_num();
+    else if (k == "rq_lmin") pr.rqa_lmin_text = p.str_or_num();
+    else if (k == "rq_vmin") pr.rqa_vmin_text = p.str_or_num();
+    else if (k == "rq_pts")  pr.rqa_points_text = p.str_or_num();
+    else return false;
+    return true;
+}
 } // namespace
 
 std::string session_to_json(const PhaseAnalysisSession& s) {
@@ -118,6 +177,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
         o << "]}";
@@ -192,6 +252,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
                                 p.expect('[');
                                 if (!p.opt(']')) { while (true) { pr.show_var.push_back(p.boolean()); if (p.opt(','))continue; p.expect(']'); break; } }
                             }
+                            else if (read_rqa_field(k, p, pr)) {}
                             else p.skip_value();
                             if (p.opt(',')) continue;
                             p.expect('}'); break;
@@ -898,6 +959,7 @@ static void write_basins_phase_projections(std::ostringstream& o,
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v) o << ","; o << (p.show_var[v] ? "true" : "false"); }
         o << "]}";
@@ -927,6 +989,7 @@ static void read_basins_phase_projections(JP& p, std::vector<Projection>& out) {
                 p.expect('[');
                 if (!p.opt(']')) { while (true) { pr.show_var.push_back(p.boolean()); if (p.opt(','))continue; p.expect(']'); break; } }
             }
+            else if (read_rqa_field(k, p, pr)) {}
             else p.skip_value();
             if (p.opt(',')) continue;
             p.expect('}'); break;

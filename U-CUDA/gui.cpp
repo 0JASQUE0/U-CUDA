@@ -2032,7 +2032,8 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         // тип проекции
         ImGui::SetNextItemWidth(110);
         // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
-        const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram" };
+        const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram",
+                                 "Recurrence plot" };
         int t = (int)pr.type;
         if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
             pr.type = (ProjType)t; s.fit_request = true;
@@ -2083,6 +2084,41 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             }
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs interval)");
+        }
+        else if (pr.type == ProjType::RecurrencePlot) {
+            // Здесь только то, без чего окно вообще не знает, что считать: чья траектория и из
+            // чего строить вектор состояния. Остальные 13 параметров — в самом окне проекции,
+            // по кнопке "RQA settings": в строку списка они не влезают и не должны.
+            ImGui::Text("IC:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(85);
+            const char* icprev = (pr.rqa_ic >= 0 && pr.rqa_ic < (int)s.ic_sets.size())
+                ? s.ic_sets[pr.rqa_ic].label.c_str() : "-";
+            if (ImGui::BeginCombo("##rqic", icprev)) {
+                for (int k = 0; k < (int)s.ic_sets.size(); ++k)
+                    if (ImGui::Selectable(s.ic_sets[k].label.c_str(), pr.rqa_ic == k)) {
+                        pr.rqa_ic = k; changed = true;
+                    }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            // Порядок обязан совпадать с rqa::Source (пишется в сессию как int). Нулевой пункт —
+            // "не выбрано": дефолта у источника нет намеренно, см. комментарий в Projection.
+            const char* snames[] = { "choose source...", "Full state vector", "Delay embedding" };
+            ImGui::SetNextItemWidth(140);
+            int si = (int)pr.rqa_source;
+            if (ImGui::Combo("##rqsrc", &si, snames, IM_ARRAYSIZE(snames))) {
+                pr.rqa_source = (rqa::Source)si; changed = true;
+            }
+            if (pr.rqa_source == rqa::Source::Embedding) {
+                ImGui::SameLine(); ImGui::Text("var:"); ImGui::SameLine();
+                ImGui::SetNextItemWidth(55);
+                const int nv = (int)s.vars.size();
+                if (ImGui::BeginCombo("##rqvar", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0].c_str())) {
+                    for (int k = 0; k < nv; ++k)
+                        if (ImGui::Selectable(s.vars[k].c_str(), pr.rqa_var == k)) { pr.rqa_var = k; changed = true; }
+                    ImGui::EndCombo();
+                }
+            }
         }
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
@@ -2249,6 +2285,8 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     else {
         do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_recompute = true;
+        // Правки RQA приходят из окон проекций — другая функция GUI, свой кадр (см. rqa_dirty).
+        if (s.rqa_dirty) { changed = true; s.rqa_dirty = false; }
         if (s.auto_recompute && changed) do_recompute = true;
     }
     if (do_recompute) {
@@ -2771,6 +2809,275 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
+            // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
+            // (см. rqa::compute в hostLibrary.cu); здесь только показ. Переключение
+            // Distance <-> Recurrence GPU не трогает: бинарная матрица получается порогом по
+            // уже посчитанной dist, поэтому оно мгновенное.
+            else if (pr.type == ProjType::RecurrencePlot) {
+                if (!pr.viewrp) {
+                    pr.viewrp = std::make_unique<HeatmapView>();
+                    // Тот же приём, что у get_or_create_heatmap: сохранённый в проекции выбор
+                    // имеет приоритет, -1 отдаёт дефолт. Общий model.heatmap_colormap сюда не
+                    // тянем — он шарится Bif/LLE/LS, и RQA к ним не привязана (как и Basins).
+                    pr.viewrp->colormap =
+                        (HeatmapColormap)colormap_id_or(pr.rqa_colormap, (int)kDefaultColormap);
+                    pr.viewrp->reverse_colormap = pr.rqa_reverse_cmap;
+                    pr.viewrp->autoscale         = pr.rqa_autoscale;
+                    pr.viewrp->manual_vmin_text  = pr.rqa_cbar_vmin_text;
+                    pr.viewrp->manual_vmax_text  = pr.rqa_cbar_vmax_text;
+                }
+
+                // "(?)" с тултипом — в gui.cpp нет общего HelpMarker'а, идиома тут
+                // IsItemHovered + SetTooltip (см. подсказки к схемам КРС и к шкале дБ).
+                auto hint = [](const char* t) {
+                    ImGui::SameLine(); ImGui::TextDisabled("(?)");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t);
+                };
+
+                RqaJob job;
+                const bool have_job = make_rqa_job(pr, job);
+                const rqa::Result* rq = have_job ? find_rqa(res, job) : nullptr;
+
+                // ---------------- toolbar ----------------
+                ImGui::SetNextItemWidth(150);
+                const char* vmnames[] = { "Distance matrix", "Recurrence plot" };
+                ImGui::Combo("##rqvm", &pr.rqa_view_mode, vmnames, IM_ARRAYSIZE(vmnames));
+                ImGui::SameLine();
+                if (ImGui::Button("RQA settings...")) ImGui::OpenPopup("rqa_cfg");
+                ImGui::SameLine();
+                if (!have_job) {
+                    ImGui::TextDisabled("%s", "choose a state-vector source in the Projections list");
+                }
+                else if (!rq) {
+                    // Через "%s": TextDisabled принимает формат, и текст сюда приходит переменной.
+                    ImGui::TextDisabled("%s", s.in_flight ? "computing..."
+                                                          : "no result for these settings - press Recompute");
+                }
+                else if (!rq->ok) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", rq->error.c_str());
+                }
+                else {
+                    // n и dt печатаются всегда: ряд прорежен до n точек, и длины линий ниже —
+                    // В ОТСЧЁТАХ этой выборки, а не в секундах.
+                    ImGui::Text("n=%d   dt=%.4g s   eps=%.5g   RR=%.3f%%",
+                                rq->n, rq->dt, rq->eps_used, 100.0 * rq->metrics.RR);
+                }
+
+                // ---------------- параметры ----------------
+                if (ImGui::BeginPopup("rqa_cfg")) {
+                    bool ch = false;
+                    ImGui::SeparatorText("Embedding");
+                    const char* snames[] = { "choose source...", "Full state vector", "Delay embedding" };
+                    ImGui::SetNextItemWidth(180);
+                    int si = (int)pr.rqa_source;
+                    if (ImGui::Combo("source", &si, snames, IM_ARRAYSIZE(snames))) {
+                        pr.rqa_source = (rqa::Source)si; ch = true;
+                    }
+                    if (pr.rqa_source == rqa::Source::Embedding) {
+                        const int nv = (int)s.vars.size();
+                        ImGui::SetNextItemWidth(180);
+                        if (ImGui::BeginCombo("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0].c_str())) {
+                            for (int k = 0; k < nv; ++k)
+                                if (ImGui::Selectable(s.vars[k].c_str(), pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
+                            ImGui::EndCombo();
+                        }
+                        ch |= InputNumStr("m (dimension)", pr.rqa_m_text, 100.0f);
+                        ch |= InputNumStr("tau (samples)", pr.rqa_tau_text, 100.0f);
+                    }
+
+                    ImGui::SeparatorText("Threshold");
+                    const char* nnames[] = { "Euclidean (L2)", "Maximum (Linf)", "Manhattan (L1)" };
+                    ImGui::SetNextItemWidth(180);
+                    int ni = (int)pr.rqa_norm;
+                    if (ImGui::Combo("norm", &ni, nnames, IM_ARRAYSIZE(nnames))) { pr.rqa_norm = (rqa::Norm)ni; ch = true; }
+                    const char* enames[] = { "absolute", "fraction of max distance",
+                                             "fraction of sigma", "target recurrence rate" };
+                    ImGui::SetNextItemWidth(180);
+                    int ei = (int)pr.rqa_eps_mode;
+                    if (ImGui::Combo("eps mode", &ei, enames, IM_ARRAYSIZE(enames))) { pr.rqa_eps_mode = (rqa::EpsMode)ei; ch = true; }
+                    if (pr.rqa_eps_mode == rqa::EpsMode::Absolute)
+                        ch |= InputNumStr("eps", pr.rqa_eps_text, 100.0f);
+                    else if (pr.rqa_eps_mode == rqa::EpsMode::TargetRR)
+                        ch |= InputNumStr("target RR, %", pr.rqa_rr_text, 100.0f);
+                    else
+                        ch |= InputNumStr("fraction", pr.rqa_eps_frac_text, 100.0f);
+
+                    ImGui::SeparatorText("Colors");
+                    // Отдельно от `ch`: цвет — это про отрисовку, пересчитывать из-за него RQA
+                    // незачем (и в continuation это был бы лишний кадр GPU на каждый клик).
+                    int cmap_idx = (int)pr.viewrp->colormap;
+                    if (colormap_combo("colormap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
+                        pr.viewrp->colormap = (HeatmapColormap)cmap_idx;
+                        pr.rqa_colormap = cmap_idx;
+                    }
+                    ImGui::Checkbox("reverse colormap", &pr.viewrp->reverse_colormap);
+                    hint("Инвертирует шкалу. Для матрицы расстояний это переключает, каким концом "
+                         "шкалы читается близость точек; для бинарной — какой уровень тёмный.");
+
+                    ImGui::Checkbox("autoscale color", &pr.viewrp->autoscale);
+                    hint("Включено: шкала берётся из данных — 0..max(D) для матрицы расстояний и "
+                         "0..1 для бинарной. Выключено: границы задаются вручную полями ниже.\n"
+                         "Ручной диапазон полезен, чтобы сравнивать две матрицы по одной шкале, но "
+                         "на бинарном виде он ломает соответствие уровней 0/1 полосам colorbar'а.");
+                    if (!pr.viewrp->autoscale) {
+                        // Ровно как в draw_heatmap_toolbar: текст парсится каждый кадр, значение
+                        // кладётся в float-поля вью (parse_ratio_or понимает и дроби вида 1/3).
+                        InputNumStr("vmin", pr.viewrp->manual_vmin_text, 100.0f);
+                        pr.viewrp->manual_vmin =
+                            (float)parse_ratio_or(pr.viewrp->manual_vmin_text, pr.viewrp->manual_vmin);
+                        InputNumStr("vmax", pr.viewrp->manual_vmax_text, 100.0f);
+                        pr.viewrp->manual_vmax =
+                            (float)parse_ratio_or(pr.viewrp->manual_vmax_text, pr.viewrp->manual_vmax);
+                    }
+
+                    ImGui::SeparatorText("Lines");
+                    ch |= InputNumStr("Theiler window", pr.rqa_theiler_text, 100.0f);
+                    hint("Пары с |i-j| <= w исключаются полностью. Для потоков "
+                        "обязательно: без окна соседние по времени точки дают ложные диагонали и завышают DET/LAM.");
+                    ch |= InputNumStr("l_min", pr.rqa_lmin_text, 100.0f);
+                    ch |= InputNumStr("v_min", pr.rqa_vmin_text, 100.0f);
+
+                    ImGui::SeparatorText("Sampling");
+                    ch |= InputNumStr("RP points (n)", pr.rqa_points_text, 100.0f);
+                    hint("Сторона матрицы. Траектория равномерно прореживается до n точек; метрики "
+                        "считаются по ТОЙ ЖЕ матрице, что нарисована. Потолок 4096 (4096^2 doubles = "
+                        "134 МБ и на GPU, и в памяти хоста).\n"
+                        "Замеры на RTX: 512 ~ 3 мс, 1024 ~ 6 мс, 2048 ~ 20 мс, 4096 ~ 70 мс.");
+                    ch |= ImGui::Checkbox("network measures (clustering, transitivity)", &pr.rqa_network);
+                    hint("Подсчёт треугольников сети рекуррентности: O(RR*n^3). Замеры: +30 мс на "
+                        "n=2048, +85 мс на n=4096 сверх обычного расчёта. Поэтому по умолчанию выключено.");
+                    ch |= ImGui::Checkbox("compute in continuation mode", &pr.rqa_in_continuation);
+                    hint("В continuation кадр идёт раз в ~50 мс, а RQA на n=2048 стоит ~20 мс из них "
+                        "(на 4096 — 70 мс, то есть кадр уже не выдерживается). Если не укладывается, снимите "
+                        "галочку: траектории продолжат считаться, RQA замрёт до обычного Recompute.");
+
+                    if (ch) s.rqa_dirty = true;
+                    ImGui::EndPopup();
+                }
+
+                // Инверсию можно переключить и из right-click меню хитмапы, поэтому её текущее
+                // состояние забираем из вью, а не наоборот (см. комментарий у rqa_reverse_cmap).
+                pr.rqa_reverse_cmap = pr.viewrp->reverse_colormap;
+                pr.rqa_autoscale    = pr.viewrp->autoscale;
+                pr.rqa_cbar_vmin_text = pr.viewrp->manual_vmin_text;
+                pr.rqa_cbar_vmax_text = pr.viewrp->manual_vmax_text;
+
+                if (!rq || !rq->ok) {
+                    ImGui::TextDisabled("No RQA data.");
+                }
+                else {
+                    // ---------------- метрики ----------------
+                    // NaN печатается прочерком, а не нулём: "линий такой длины не нашлось" и
+                    // "линии есть, но метрика равна нулю" — разные утверждения.
+                    if (ImGui::CollapsingHeader("Metrics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        const rqa::Metrics& M = rq->metrics;
+                        struct Row { const char* name; double val; const char* tip; };
+                        const Row rows[] = {
+                            { "RR",     M.RR,     "Recurrence rate: доля рекуррентных пар вне окна Тейлера" },
+                            { "DET",    M.DET,    "Determinism: доля точек, лежащих на диагоналях длины >= l_min" },
+                            { "L",      M.L,      "Средняя длина диагональной линии, в отсчётах" },
+                            { "L_max",  M.L_max,  "Самая длинная диагональ (без LOI), в отсчётах" },
+                            { "DIV",    M.DIV,    "1 / L_max" },
+                            { "ENTR",   M.ENTR,   "Энтропия Шеннона распределения диагоналей, нат" },
+                            { "RATIO",  M.RATIO,  "DET / RR" },
+                            { "LAM",    M.LAM,    "Laminarity: доля точек на вертикалях длины >= v_min" },
+                            { "TT",     M.TT,     "Trapping time: средняя вертикаль, в отсчётах" },
+                            { "V_max",  M.V_max,  "Самая длинная вертикаль, в отсчётах" },
+                            { "V_ENTR", M.V_ENTR, "Энтропия распределения вертикалей, нат" },
+                            { "TREND",  M.TREND,  "Наклон линейной регрессии RR по номеру диагонали (RR на отсчёт)" },
+                            { "T1",     M.T1,     "Время возврата 1-го рода, в отсчётах" },
+                            { "T2",     M.T2,     "Время возврата 2-го рода (по началам вертикальных блоков)" },
+                            { "W",      M.W,      "Средняя длина белой вертикали, в отсчётах" },
+                            { "W_max",  M.W_max,  "Самая длинная белая вертикаль, в отсчётах" },
+                            { "RTE",    M.RTE,    "Recurrence time entropy, нормирована на [0,1]" },
+                        };
+                        if (ImGui::BeginTable("rqa_metrics", 6,
+                                ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+                            for (int r = 0; r < IM_ARRAYSIZE(rows); ++r) {
+                                if (r % 3 == 0) ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextDisabled("%s", rows[r].name);
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rows[r].tip);
+                                ImGui::TableNextColumn();
+                                if (std::isnan(rows[r].val)) ImGui::TextDisabled("--");
+                                else ImGui::Text("%.5g", rows[r].val);
+                            }
+                            if (M.network_valid) {
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("C");
+                                ImGui::TableNextColumn();
+                                if (std::isnan(M.clustering)) ImGui::TextDisabled("--");
+                                else ImGui::Text("%.5g", M.clustering);
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("Trans");
+                                ImGui::TableNextColumn();
+                                if (std::isnan(M.transitivity)) ImGui::TextDisabled("--");
+                                else ImGui::Text("%.5g", M.transitivity);
+                            }
+                            ImGui::EndTable();
+                        }
+                    }
+
+                    // ---------------- сама матрица ----------------
+                    const int n = rq->n;
+                    const double* values = rq->dist.data();
+                    double vlo = 0.0, vhi = rq->dist_max;
+
+                    if (pr.rqa_view_mode == 1) {
+                        // Бинарная матрица строится порогом по dist и кэшируется в проекции:
+                        // GPU для смены режима не нужен. Ключ кэша — data_generation: любое новое
+                        // значение dist приходит только вместе с новым расчётом.
+                        if (pr.rqa_binary_gen != s.data_generation ||
+                            pr.rqa_binary.size() != rq->dist.size()) {
+                            pr.rqa_binary.resize(rq->dist.size());
+                            for (size_t t = 0; t < rq->dist.size(); ++t)
+                                pr.rqa_binary[t] = (rq->dist[t] <= rq->eps_used) ? 1.0 : 0.0;
+                            pr.rqa_binary_gen = s.data_generation;
+                        }
+                        values = pr.rqa_binary.data();
+                        vlo = 0.0; vhi = 1.0;
+                    }
+
+                    // discrete форсим ТОЛЬКО в кадр смены режима: иначе каждый кадр затирался бы
+                    // ручной toggle "Discrete colorbar" из right-click меню HeatmapView.
+                    if (pr.rqa_view_mode_applied != pr.rqa_view_mode) {
+                        pr.viewrp->discrete = (pr.rqa_view_mode == 1);
+                        pr.viewrp->discrete_levels = (pr.rqa_view_mode == 1) ? 2 : 0;
+                        pr.viewrp->discrete_levels_text = (pr.rqa_view_mode == 1) ? "2" : "0";
+                        pr.rqa_view_mode_applied = pr.rqa_view_mode;
+                    }
+
+                    pr.viewrp->x_axis.name = "t_j, s";
+                    pr.viewrp->y_axis.name = "t_i, s";
+                    // Свой экспорт вместо phase_popup_extras: из этого окна нужны матрица и
+                    // метрики, а не траектории. Траекторный экспорт оставлен вторым пунктом —
+                    // он тут тоже осмыслен (RQA считалась именно по ним).
+                    pr.viewrp->popup_extras = [&res, &cb, phase_busy, rq, &job]() {
+                        if (ImGui::MenuItem("Export RQA...", nullptr, false, !phase_busy)) {
+                            if (cb.pick_save_file_csv) {
+                                const std::string path = cb.pick_save_file_csv();
+                                if (!path.empty())
+                                    data_export::export_rqa(*rq, job.cfg, job.ic, res.snapshot, path);
+                            }
+                        }
+                        const bool has_traj = res.ok && !res.trajectories.empty();
+                        draw_export_menu_item(!has_traj || phase_busy, cb, [&res](const std::string& p) {
+                            data_export::export_phase(res, res.snapshot, p);
+                        });
+                    };
+
+                    // Режим входит в data_generation: при переключении Distance <-> Recurrence
+                    // текстуру надо перезалить, хотя расчёт тот же.
+                    const int data_gen = s.data_generation * 2 + pr.rqa_view_mode;
+
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    pr.viewrp->render(renderer, origin, avail,
+                                      (i ^ owner_id_delta) ^ 0x5251A0, data_gen,
+                                      n, n, values,
+                                      rq->t0, rq->t1, rq->t0, rq->t1,
+                                      vlo, vhi, s.fit_request);
                 }
             }
             else if (pr.type == ProjType::Phase3D) {

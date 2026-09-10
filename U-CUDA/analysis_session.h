@@ -11,6 +11,8 @@
 #include <deque>
 #include "plot_view_2d.h"
 #include "plot_view_3d.h"
+#include "heatmap_view.h"
+#include "rqa.h"
 #include <memory>
 
 // Одно начальное условие: имя (для легенды) + значения по переменным.
@@ -32,7 +34,10 @@ enum class ProjType {
     // ровно та пара, которую 2D-бифуркация отдаёт в DBSCAN, поэтому по ней видно, на что реально
     // смотрит кластеризация периода. Порядок в enum = порядок в комбо-боксе и в сохранённых
     // сессиях (пишется как int) — добавлять только в конец.
-    FeatureDiagram
+    FeatureDiagram,
+    // Recurrence plot + RQA. Рисуется HeatmapView'ом, а не Plot2DView: данные — скалярное поле
+    // n x n, ровно то, что он и умеет (colormap, colorbar, rect-zoom, tooltip, экспорт).
+    RecurrencePlot
 };
 
 struct Projection {
@@ -57,6 +62,65 @@ struct Projection {
     std::unique_ptr<Plot3DView> view3d;
     int prev_ax = -1, prev_ay = -1;
 
+    // ---------------------------- RQA (ProjType::RecurrencePlot) ----------------------------
+    // Числовые поля — строками, как во всём остальном GUI (InputNumStr + digit_step_callback,
+    // где шагает разряд под курсором). Парсятся один раз в snapshot_phase.
+    //
+    // Дефолта у источника НЕТ намеренно (rqa::Source::None): для ОДУ честнее полный вектор
+    // состояния, в публикациях по RQA принят эмбеддинг Такенса, и молчаливый выбор за
+    // пользователя врал бы о методе. Пока не выбрано — окно просит выбрать и ничего не считает.
+    rqa::Source  rqa_source = rqa::Source::None;
+    int          rqa_ic     = 0;   // по какой траектории считать (индекс в ic_sets)
+    int          rqa_var    = 0;   // переменная для эмбеддинга
+    std::string  rqa_m_text   = "3";
+    std::string  rqa_tau_text = "1";
+    rqa::Norm    rqa_norm     = rqa::Norm::Euclidean;
+    rqa::EpsMode rqa_eps_mode = rqa::EpsMode::TargetRR;
+    std::string  rqa_eps_text      = "0.1";   // Absolute
+    std::string  rqa_eps_frac_text = "0.1";   // FracMaxDist / FracStd
+    std::string  rqa_rr_text       = "5";     // TargetRR, В ПРОЦЕНТАХ (так их и пишут в статьях)
+    std::string  rqa_theiler_text  = "1";
+    std::string  rqa_lmin_text     = "2";
+    std::string  rqa_vmin_text     = "2";
+    std::string  rqa_points_text   = "2048";  // сторона матрицы; потолок — kRqaMaxPoints
+    bool         rqa_network       = false;   // clustering/transitivity: O(RR*n^3), по умолчанию нет
+    // Считать ли RQA в continuation-режиме. Там кадр идёт раз в 50 мс, а RQA на 2048 точках
+    // столько не стоит — но при большой матрице бюджет пробивается, и тогда это выключают.
+    bool         rqa_in_continuation = true;
+    // 0 = матрица расстояний (непрерывная шкала), 1 = матрица рекуррентности (бинарная).
+    // Переключение НЕ трогает GPU: бинарная строится порогом по уже посчитанной dist.
+    int          rqa_view_mode = 0;
+    // Выбранный colormap, -1 = не выбирали (тогда HeatmapView берёт kDefaultColormap). Хранится
+    // в проекции и пишется в сессию — так же, как colormap_idx у бифуркационных конфигов, и в
+    // отличие от сессионных toggle'ов самого HeatmapView (swap_axes, reverse_colormap).
+    int          rqa_colormap = -1;
+    // Инверсия шкалы. Живёт тут, а не только в HeatmapView (где это сессионный toggle), потому
+    // что её же показывает попап RQA settings — а настройка в попапе обязана переживать
+    // сохранение сессии. Значение применяется к вью при СОЗДАНИИ и зеркалится обратно каждый
+    // кадр: тот же флаг переключается ещё и из right-click меню самой хитмапы, и форсить его
+    // каждый кадр значило бы сделать тот чекбокс мёртвым.
+    bool         rqa_reverse_cmap = false;
+    // Диапазон цветовой шкалы. autoscale = true — берётся из данных (0..max расстояния, либо
+    // 0..1 у бинарной матрицы); false — вручную из полей ниже. Персистится по той же причине,
+    // что и rqa_reverse_cmap: показано в попапе settings, значит обязано пережить сохранение.
+    // Границы — строками, как все числовые поля GUI (InputNumStr с шагом разряда по стрелкам).
+    // Имена с префиксом cbar_ не случайны: rqa_vmin_text выше — это v_min, МИНИМАЛЬНАЯ ДЛИНА
+    // вертикальной линии, совсем другая величина. Первая попытка назвать эти поля vmin/vmax
+    // столкнулась с ней и в структуре, и в ключах сессии.
+    bool         rqa_autoscale = true;
+    std::string  rqa_cbar_vmin_text = "0";
+    std::string  rqa_cbar_vmax_text = "1";
+    // Последний режим, под который уже выставлены discrete/levels во вью. Нужен, чтобы форсить
+    // их ТОЛЬКО при переключении: иначе каждый кадр затирался бы ручной toggle "Discrete
+    // colorbar" из right-click меню HeatmapView.
+    int          rqa_view_mode_applied = -1;
+
+    std::unique_ptr<HeatmapView> viewrp;
+    // Кэш бинарной матрицы. Живёт в проекции, а не в результате: у двух окон с одним конфигом
+    // режимы показа независимы. Заполняется лениво — только когда реально включён режим 1.
+    std::vector<double> rqa_binary;
+    int                 rqa_binary_gen = -1;
+
     Projection() = default;
     Projection(Projection&&) = default;
     Projection& operator=(Projection&&) = default;
@@ -71,6 +135,22 @@ struct Projection {
 struct FeaturePoints {
     std::vector<double> peaks;
     std::vector<double> intervals;
+};
+
+// Один запрошенный RQA-расчёт: конфиг + чья траектория. Собирается в snapshot_phase по всем
+// открытым проекциям типа RecurrencePlot и дедуплицируется — два окна с одинаковыми
+// настройками считаются один раз.
+struct RqaJob {
+    int         ic = 0;
+    rqa::Config cfg;
+};
+inline bool operator==(const RqaJob& a, const RqaJob& b) { return a.ic == b.ic && a.cfg == b.cfg; }
+
+// Результат по одному job'у. Хранится ВМЕСТЕ с job'ом, чтобы GUI искал своё по конфигу, а не по
+// индексу: индексы разъезжаются, если пользователь добавил/удалил окно, пока шёл расчёт.
+struct RqaOutcome {
+    RqaJob      job;
+    rqa::Result res;
 };
 
 // Результат расчёта: по одной траектории на каждое НУ.
@@ -92,11 +172,24 @@ struct AnalysisResult {
     std::string error;
     int generation = 0;
 
+    // RQA по проекциям типа RecurrencePlot. Пусто, если таких проекций нет или расчёт был
+    // пропущен (continuation при снятой галочке). Внутри каждого — своя матрица n*n doubles,
+    // поэтому список короткий по построению (дедуп по конфигу).
+    std::vector<RqaOutcome> rqa_out;
+
     // Snapshot of the inputs that produced this trajectory set — used by
     // right-click "Export data..." in the GUI to write the same scheme/IC
     // metadata into <path>_config.csv that drove the compute.
     data_export::PhaseSnapshot snapshot;
 };
+
+// Найти результат под конкретный job. nullptr, если такого расчёта в результате нет
+// (конфиг поменяли после Run, или расчёт пропустили).
+const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job);
+
+// Собрать RqaJob из проекции: разбор текстовых полей + перевод RR из процентов в долю.
+// Возвращает false, если проекция не RecurrencePlot или источник ещё не выбран.
+bool make_rqa_job(const Projection& pr, RqaJob& out);
 
 // Сессия анализа фазовых портретов: общие параметры системы +
 // список НУ + список проекций. Параметры общие на все проекции.
@@ -158,6 +251,11 @@ struct PhaseAnalysisSession {
 
     // последний результат расчёта
     AnalysisResult result;
+
+    // Настройки RQA правятся в окне проекции, а кнопка Recompute и флаг auto_recompute живут
+    // в панели слева — это разные функции GUI. Флаг переносит "что-то поменяли" из окна в панель,
+    // которая на следующем кадре подмешает его в свой `changed`.
+    bool rqa_dirty = false;
 
     // запрос автоскейла осей после пересчёта (взводится в recompute,
     // сбрасывается в GUI после применения)
