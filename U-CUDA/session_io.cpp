@@ -59,9 +59,12 @@ namespace {
             if (i < s.size())++i; return o;
         }
         bool boolean() { ws(); if (s.compare(i, 4, "true") == 0) { i += 4; return true; } if (s.compare(i, 5, "false") == 0) { i += 5; return false; } throw std::runtime_error("expected bool"); }
-        // читает число (целое/дробное) и возвращает как строку
+        // читает число (целое/дробное) и возвращает как строку; строку в кавычках — тоже,
+        // иначе на "0.1" курсор застревает на кавычке, парсер видит не ',' и не '}' и
+        // объявляет битым весь файл сессии.
         std::string str_or_num() {
-            ws(); size_t st = i; if (i < s.size() && (s[i] == '-' || s[i] == '+'))++i;
+            ws(); if (i < s.size() && s[i] == '"') return str();
+            size_t st = i; if (i < s.size() && (s[i] == '-' || s[i] == '+'))++i;
             while (i < s.size() && (std::isdigit((unsigned char)s[i]) || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '-' || s[i] == '+'))++i;
             return s.substr(st, i - st);
         }
@@ -126,17 +129,17 @@ bool read_rqa_field(const std::string& k, JP& p, Projection& pr) {
     else if (k == "rq_cmap") pr.rqa_colormap  = std::stoi(p.str_or_num());
     else if (k == "rq_rev")  pr.rqa_reverse_cmap = p.boolean();
     else if (k == "rq_as")   pr.rqa_autoscale = p.boolean();
-    else if (k == "rq_cbmin") pr.rqa_cbar_vmin_text = p.str_or_num();
-    else if (k == "rq_cbmax") pr.rqa_cbar_vmax_text = p.str_or_num();
-    else if (k == "rq_m")    pr.rqa_m_text    = p.str_or_num();
-    else if (k == "rq_tau")  pr.rqa_tau_text  = p.str_or_num();
-    else if (k == "rq_eps")  pr.rqa_eps_text  = p.str_or_num();
-    else if (k == "rq_ef")   pr.rqa_eps_frac_text = p.str_or_num();
-    else if (k == "rq_rr")   pr.rqa_rr_text   = p.str_or_num();
-    else if (k == "rq_th")   pr.rqa_theiler_text = p.str_or_num();
-    else if (k == "rq_lmin") pr.rqa_lmin_text = p.str_or_num();
-    else if (k == "rq_vmin") pr.rqa_vmin_text = p.str_or_num();
-    else if (k == "rq_pts")  pr.rqa_points_text = p.str_or_num();
+    else if (k == "rq_cbmin") pr.rqa_cbar_vmin_text = p.str();
+    else if (k == "rq_cbmax") pr.rqa_cbar_vmax_text = p.str();
+    else if (k == "rq_m")    pr.rqa_m_text    = p.str();
+    else if (k == "rq_tau")  pr.rqa_tau_text  = p.str();
+    else if (k == "rq_eps")  pr.rqa_eps_text  = p.str();
+    else if (k == "rq_ef")   pr.rqa_eps_frac_text = p.str();
+    else if (k == "rq_rr")   pr.rqa_rr_text   = p.str();
+    else if (k == "rq_th")   pr.rqa_theiler_text = p.str();
+    else if (k == "rq_lmin") pr.rqa_lmin_text = p.str();
+    else if (k == "rq_vmin") pr.rqa_vmin_text = p.str();
+    else if (k == "rq_pts")  pr.rqa_points_text = p.str();
     else return false;
     return true;
 }
