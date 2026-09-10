@@ -12,6 +12,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include "rqa.h"   // rqa::Result / rqa::Config для export_rqa
 
 // Forward declarations of result types defined in parametric_engine.h. The
 // .cpp pulls in the full header; consumers of this header that only need the
@@ -348,6 +349,15 @@ bool export_fastsync(const FastSyncResult&   res, const std::string& path);
 // fresh here. <path>_config.csv carries scheme + params + ICs + integration
 // settings; <path> (single IC) or <path>_ic0.csv/_ic1.csv/... (multi-IC)
 // carries one row per step with columns "t, x0, x1, ..., xN-1".
+// RQA. Пишет ТРИ файла:
+//   <path>              — матрица РАССТОЯНИЙ n x n (не бинарная: она восстанавливается порогом
+//                         eps, который лежит в _config.csv, а обратно из бинарной ничего не
+//                         восстановить — экспорт должен быть без потерь);
+//   <path>_config.csv   — параметры фазового расчёта + все настройки RQA и фактические n/dt/eps;
+//   <path>_rqa.csv      — таблица метрик "имя, значение" (NaN пишется как nan).
+bool export_rqa(const rqa::Result& r, const rqa::Config& cfg, int ic,
+                const PhaseSnapshot& snapshot, const std::string& path);
+
 bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
                   const std::string& path);
 

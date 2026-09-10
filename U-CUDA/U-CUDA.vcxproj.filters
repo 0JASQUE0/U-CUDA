@@ -153,6 +153,9 @@
     <ClInclude Include="analysis_session.h">
       <Filter>Compute</Filter>
     </ClInclude>
+    <ClInclude Include="rqa.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
     <ClInclude Include="num_parse.h">
       <Filter>Compute</Filter>
     </ClInclude>

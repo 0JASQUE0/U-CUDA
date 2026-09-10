@@ -741,6 +741,105 @@ static void write_phase_trajectory(std::ofstream& out,
     }
 }
 
+// RQA
+
+static const char* rqa_source_name(rqa::Source s)
+{
+    switch (s) {
+    case rqa::Source::StateVector: return "full state vector";
+    case rqa::Source::Embedding:   return "delay embedding";
+    default:                       return "none";
+    }
+}
+
+static const char* rqa_norm_name(rqa::Norm n)
+{
+    switch (n) {
+    case rqa::Norm::Maximum:   return "maximum (Linf)";
+    case rqa::Norm::Manhattan: return "manhattan (L1)";
+    default:                   return "euclidean (L2)";
+    }
+}
+
+static const char* rqa_eps_mode_name(rqa::EpsMode m)
+{
+    switch (m) {
+    case rqa::EpsMode::FracMaxDist: return "fraction of max distance";
+    case rqa::EpsMode::FracStd:     return "fraction of sigma";
+    case rqa::EpsMode::TargetRR:    return "target recurrence rate";
+    default:                        return "absolute";
+    }
+}
+
+bool export_rqa(const rqa::Result& r, const rqa::Config& cfg, int ic,
+                const PhaseSnapshot& snapshot, const std::string& path)
+{
+    if (!r.ok) return false;
+
+    {
+        std::ofstream cfgf(path + "_config.csv");
+        if (!cfgf.is_open()) return false;
+        write_phase_config(cfgf, snapshot);
+        cfgf << std::setprecision(set_precision);
+        cfgf << "RQA\n";
+        cfgf << "initial condition index = " << ic << "\n";
+        cfgf << "source = " << rqa_source_name(cfg.source) << "\n";
+        if (cfg.source == rqa::Source::Embedding) {
+            const std::string vn = (cfg.var >= 0 && cfg.var < (int)snapshot.vars.size())
+                                 ? snapshot.vars[(std::size_t)cfg.var] : std::string("?");
+            cfgf << "embedding variable = " << vn << "\n";
+            cfgf << "m = " << cfg.m << "\ntau = " << cfg.tau << " samples\n";
+        }
+        cfgf << "norm = " << rqa_norm_name(cfg.norm) << "\n";
+        cfgf << "eps mode = " << rqa_eps_mode_name(cfg.eps_mode) << "\n";
+        cfgf << "eps used = " << r.eps_used << "\n";
+        cfgf << "max distance = " << r.dist_max << "\n";
+        cfgf << "theiler window = " << cfg.theiler << "\n";
+        cfgf << "l_min = " << cfg.l_min << "\nv_min = " << cfg.v_min << "\n";
+        // n — сколько точек реально пошло в матрицу (после прореживания до Config::points),
+        // dt — шаг между ними. Длины линий в _rqa.csv измеряются В ЭТИХ отсчётах.
+        cfgf << "n = " << r.n << " (requested up to " << cfg.points << ")\n";
+        cfgf << "dt = " << r.dt << "\n";
+        cfgf << "time span = " << r.t0 << " .. " << r.t1 << "\n";
+        cfgf << "network measures = " << (cfg.network_measures ? "yes" : "no") << "\n";
+    }
+
+    {
+        std::ofstream m(path + "_rqa.csv");
+        if (!m.is_open()) return false;
+        m << std::setprecision(set_precision);
+        m << "metric, value\n";
+        const rqa::Metrics& M = r.metrics;
+        m << "RR, "     << M.RR     << "\n";
+        m << "DET, "    << M.DET    << "\n";
+        m << "L, "      << M.L      << "\n";
+        m << "L_max, "  << M.L_max  << "\n";
+        m << "DIV, "    << M.DIV    << "\n";
+        m << "ENTR, "   << M.ENTR   << "\n";
+        m << "RATIO, "  << M.RATIO  << "\n";
+        m << "LAM, "    << M.LAM    << "\n";
+        m << "TT, "     << M.TT     << "\n";
+        m << "V_max, "  << M.V_max  << "\n";
+        m << "V_ENTR, " << M.V_ENTR << "\n";
+        m << "TREND, "  << M.TREND  << "\n";
+        m << "T1, "     << M.T1     << "\n";
+        m << "T2, "     << M.T2     << "\n";
+        m << "W, "      << M.W      << "\n";
+        m << "W_max, "  << M.W_max  << "\n";
+        m << "RTE, "    << M.RTE    << "\n";
+        if (M.network_valid) {
+            m << "clustering, "   << M.clustering   << "\n";
+            m << "transitivity, " << M.transitivity << "\n";
+        }
+    }
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+    write_grid(out, r.n, r.dist.data());
+    return true;
+}
+
 bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
                   const std::string& path)
 {
