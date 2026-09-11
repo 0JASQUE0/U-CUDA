@@ -1976,8 +1976,15 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         // Toggle only arms the mode — the loop starts on the next Recompute so
         // enabling continuation never launches a compute on its own.
         // Unticking mid-run stops the loop (mirrors the Stop button).
+        // Uncheck = reset: stop the loop and drop elapsed/peaks. Stop button preserves them.
         if (ImGui::Checkbox("Continuation (live)", &s.continuation_mode)) {
-            if (!s.continuation_mode) s.continuation_active = false;
+            if (!s.continuation_mode) {
+                s.continuation_active  = false;
+                s.continuation_paused  = false;
+                s.continuation_elapsed = 0.0;
+                s.continuation_peaks.clear();
+                ++s.continuation_peaks_gen;
+            }
         }
         ImGui::SameLine();
         ImGui::Text("Frame delay (ms):"); ImGui::SameLine();
@@ -2033,7 +2040,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::SetNextItemWidth(110);
         // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
         const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram",
-                                 "Recurrence plot" };
+                                 "Recurrence plot", "Continuation diagram" };
         int t = (int)pr.type;
         if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
             pr.type = (ProjType)t; s.fit_request = true;
@@ -2142,6 +2149,29 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                     if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_z == k)) { pr.axis_z = k; s.fit_request = true; }
                 ImGui::EndCombo();
             }
+        }
+        else if (pr.type == ProjType::ContinuationDiagram) {
+            const int nv = (int)s.vars.size();
+            const bool cont_is_combo = (nv >= 2 && pr.axis_x == nv);
+            const std::string preview = s.vars.empty()
+                ? std::string("-")
+                : (cont_is_combo ? combo_var_label(s.vars)
+                                 : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
+
+            ImGui::Text("var:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(cont_is_combo ? 170.0f : 55.0f);
+            if (ImGui::BeginCombo("##pcv", preview.c_str())) {
+                for (int k = 0; k < nv; ++k)
+                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                if (nv >= 2) {
+                    ImGui::Separator();
+                    const std::string lbl = combo_var_label(s.vars);
+                    if (ImGui::Selectable(lbl.c_str(), cont_is_combo)) { pr.axis_x = nv; s.fit_request = true; }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(peak vs time)");
         }
         else { // TimeDomain — галочки переменных
             // Слотов на один больше числа переменных: последний — комбинация
@@ -2268,12 +2298,25 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         // Stop supersedes Recomputing... — the loop is expected to keep an
         // async in flight most of the time, and hiding Stop behind it would
         // trap the user until a chunk finishes.
+        const float avail_w = ImGui::GetContentRegionAvail().x;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float half_w  = (avail_w - spacing) * 0.5f;
+        if (s.continuation_paused) {
+            if (ImGui::Button("Resume (continuation)", ImVec2(half_w, 0))) {
+                s.continuation_paused     = false;
+                s.continuation_last_frame = std::chrono::steady_clock::now();
+            }
+        } else {
+            if (ImGui::Button("Pause (continuation)", ImVec2(half_w, 0)))
+                s.continuation_paused = true;
+        }
+        ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.28f, 0.28f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.50f, 0.15f, 0.15f, 1.0f));
         if (ImGui::Button("Stop (continuation)", ImVec2(-1, 0))) {
             s.continuation_active = false;
-            s.continuation_mode   = false;
+            s.continuation_paused = false;
         }
         ImGui::PopStyleColor(3);
     }
@@ -2289,14 +2332,20 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (s.rqa_dirty) { changed = true; s.rqa_dirty = false; }
         if (s.auto_recompute && changed) do_recompute = true;
     }
+    if (s.continuation_mode)
+        ImGui::TextDisabled("Simulated: %.3f s", s.continuation_elapsed);
     if (do_recompute) {
         // Fresh manual Run resets continuation seed even if the mode is on,
         // so a user tweak (params/IC/method) always starts from the edited IC.
         if (s.continuation_mode) {
             s.continuation_active      = true;
+            s.continuation_paused      = false;
             s.continuation_first_frame = true;
             s.continuation_state.clear();
             s.continuation_last_frame  = std::chrono::steady_clock::now();
+            s.continuation_elapsed = 0.0;
+            s.continuation_peaks.clear();
+            ++s.continuation_peaks_gen;
         }
         s.recompute_async();
     }
@@ -3153,6 +3202,86 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view3d->popup_extras = phase_popup_extras;
                     pr.view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, s.fit_request);
+                }
+            }
+            else if (pr.type == ProjType::ContinuationDiagram) {
+                const int av = pr.axis_x;
+                if (s.continuation_peaks.empty()) {
+                    ImGui::TextDisabled("No data. Enable Continuation (live) and press Recompute.");
+                }
+                else {
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+
+                    const int nv_ax = (int)s.vars.size();
+                    std::string ax_name;
+                    if (s.vars.empty())                     ax_name = "x";
+                    else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
+                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+
+                    pr.view2d->x_axis.name = "t, s";
+                    pr.view2d->y_axis.name = "peak " + ax_name;
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = true;
+                    pr.view2d->legend_ignore_series_alpha = true;
+
+                    draw_style_toolbar("Custom point style", "contdiag", pr.custom_line_style,
+                        [&pr]() {
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Point size##contdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##contdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            return ch;
+                        });
+                    pr.view2d->imdraw_lines = false;
+
+                    std::vector<PlotSeriesInput> series_in;
+                    series_in.reserve(s.continuation_peaks.size());
+                    std::vector<bool> init_vis(s.continuation_peaks.size(), true);
+                    std::vector<bool> glob_vis(s.continuation_peaks.size(), true);
+
+                    size_t total_pts = 0;
+                    for (size_t k = 0; k < s.continuation_peaks.size(); ++k) {
+                        const auto& per_var = s.continuation_peaks[k];
+                        const float* pts = nullptr;
+                        int          np  = 0;
+                        if (av >= 0 && av < (int)per_var.size()) {
+                            const auto& buf = per_var[(size_t)av];
+                            pts = buf.empty() ? nullptr : buf.data();
+                            np  = (int)(buf.size() / 2);
+                            total_pts += (size_t)np;
+                        }
+
+                        std::string lab = (k < res.labels.size()) ? res.labels[k]
+                                                                  : ("IC " + std::to_string(k + 1));
+                        if (s.legend_show_ic && k < res.ic_text.size())
+                            lab = ic_legend_text(res, k);
+
+                        PlotSeriesInput si;
+                        si.points   = pts;
+                        si.n_points = np;
+                        si.color    = ic_base_color((int)k);
+                        if (pr.custom_line_style) si.color.w = pr.alpha;
+                        si.points_override = 1;
+                        si.point_marker    = (int)PointMarker::Circle;
+                        si.point_size_px   = pr.custom_line_style ? pr.line_width : 3.0f;
+                        si.label = lab;
+                        series_in.push_back(si);
+
+                        glob_vis[k] = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        init_vis[k] = true;
+                    }
+
+                    if (total_pts == 0)
+                        ImGui::TextDisabled("Waiting for peaks... (adjust transient / peak thresholds if needed).");
+
+                    int data_gen = s.continuation_peaks_gen * 100 + av;
+
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    pr.view2d->popup_extras = phase_popup_extras;
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, s.fit_request);
                 }
             }
@@ -8749,7 +8878,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // no separate thread, no wakeup while the previous chunk is still async.
     {
         auto& ps = model.phase_session;
-        if (ps.continuation_active && !ps.in_flight) {
+        if (ps.continuation_active && !ps.continuation_paused && !ps.in_flight) {
             const auto  now      = std::chrono::steady_clock::now();
             const double delay_ms = std::max(0.0, parse_num(ps.continuation_delay_ms, 50.0));
             const auto  due      = ps.continuation_last_frame +

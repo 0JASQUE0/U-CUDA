@@ -428,11 +428,16 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     result.snapshot.t_max     = tsim;
     result.snapshot.t_skip    = tskip;
     result.snapshot.decimator = dec;
+    // Snapshot IC from the user's panel text — not ic_flat, which continuation overwrites
+    // with the previous chunk's final X[] so the legend would flicker every frame.
     result.snapshot.ic_flat.assign(N, std::vector<double>(dim, 0.0));
     result.snapshot.ic_labels.reserve(N);
     for (int k = 0; k < N; ++k) {
-        for (int i = 0; i < dim; ++i)
-            result.snapshot.ic_flat[k][i] = ic_flat[(size_t)k * dim + i];
+        const auto& ic = in.ic_sets[k];
+        for (int i = 0; i < dim; ++i) {
+            auto it = ic.values.find(in.vars[i]);
+            result.snapshot.ic_flat[k][i] = parse_val(it != ic.values.end() ? it->second : "", 0.0);
+        }
         result.snapshot.ic_labels.push_back(in.ic_sets[k].label);
     }
 
@@ -524,6 +529,40 @@ bool PhaseAnalysisSession::poll() {
     // adopt on success so a divergent frame doesn't corrupt the seed.
     if (continuation_active && result.ok &&
         result.final_states.size() == ic_sets.size()) {
+        const double chunk_t = result.snapshot.t_max;
+        const double base    = continuation_elapsed;
+        continuation_elapsed += chunk_t;
+
+        const int N = (int)ic_sets.size();
+        if ((int)continuation_peaks.size() != N) continuation_peaks.assign((size_t)N, {});
+        for (int k = 0; k < N && k < (int)result.features.size(); ++k) {
+            auto& per_var_out = continuation_peaks[(size_t)k];
+            const auto& per_var_in = result.features[(size_t)k];
+            if (per_var_out.size() != per_var_in.size())
+                per_var_out.assign(per_var_in.size(), {});
+            for (size_t v = 0; v < per_var_in.size(); ++v) {
+                const FeaturePoints& fp = per_var_in[v];
+                std::vector<float>& buf = per_var_out[v];
+                double cumt = base;
+                const size_t n = fp.peaks.size() < fp.intervals.size()
+                               ? fp.peaks.size() : fp.intervals.size();
+                buf.reserve(buf.size() + n * 2);
+                for (size_t p = 0; p < n; ++p) {
+                    if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p])) continue;
+                    cumt += fp.intervals[p];
+                    buf.push_back((float)cumt);
+                    buf.push_back((float)fp.peaks[p]);
+                }
+                const size_t cap_pairs = (size_t)std::max(1, continuation_peaks_cap);
+                const size_t cur_pairs = buf.size() / 2;
+                if (cur_pairs > cap_pairs) {
+                    const size_t drop_pairs = cur_pairs - cap_pairs;
+                    buf.erase(buf.begin(), buf.begin() + (std::ptrdiff_t)(drop_pairs * 2));
+                }
+            }
+        }
+        ++continuation_peaks_gen;
+
         continuation_state       = std::move(result.final_states);
         continuation_first_frame = false;
     }

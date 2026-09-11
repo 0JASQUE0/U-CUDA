@@ -37,7 +37,9 @@ enum class ProjType {
     FeatureDiagram,
     // Recurrence plot + RQA. Рисуется HeatmapView'ом, а не Plot2DView: данные — скалярное поле
     // n x n, ровно то, что он и умеет (colormap, colorbar, rect-zoom, tooltip, экспорт).
-    RecurrencePlot
+    RecurrencePlot,
+    // Continuation diagram: scatter of peak values vs absolute simulated time.
+    ContinuationDiagram
 };
 
 struct Projection {
@@ -225,9 +227,17 @@ struct PhaseAnalysisSession {
     // Runtime: separate from continuation_mode so a load never resurrects a
     // running loop. GUI sets active = mode on Start, back to false on Stop.
     bool continuation_active      = false;
+    bool continuation_paused      = false;        // freezes the timer; state/elapsed preserved
     bool continuation_first_frame = true;         // apply skip_time on frame 0 only
     std::vector<std::vector<double>> continuation_state;  // [ic][coord] carried across frames
     std::chrono::steady_clock::time_point continuation_last_frame;
+
+    // Accumulated recorded time (seconds) since continuation started; not persisted.
+    double continuation_elapsed = 0.0;
+    // [ic][var] xy-pairs: X = global time, Y = peak. Fed to ProjType::ContinuationDiagram.
+    std::vector<std::vector<std::vector<float>>> continuation_peaks;
+    int continuation_peaks_cap = 200000;   // pairs per (ic, var); oldest drop on overflow
+    int continuation_peaks_gen = 0;        // bumped on every accumulation → Plot2DView reuploads
 
     // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.
     System sys;                        // правые части и т.д.
