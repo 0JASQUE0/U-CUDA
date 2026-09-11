@@ -317,6 +317,7 @@ void CustomSession::load_from_record(const SystemRecord& r,
     vars   = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     // Hard-reset shared to struct defaults BEFORE seeding from the record. Previously we overrode
     // only a subset of fields (scheme, symmetry, h, ICs, param_values, default sweep indices), and

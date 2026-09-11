@@ -129,12 +129,26 @@ void PhaseAnalysisSession::remove_projection(int i) {
     }
 }
 
+std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
+    std::vector<std::string> out;
+    if (r.scheme_euler)    out.emplace_back("Euler");
+    if (r.scheme_cromer)   out.emplace_back("Euler-Cromer");
+    if (r.scheme_midpoint) out.emplace_back("Explicit Midpoint");
+    if (r.scheme_rk4)      out.emplace_back("RK4");
+    if (r.scheme_dopri78)  out.emplace_back("DOPRI78");
+    if (r.scheme_cd)       out.emplace_back("CD");
+    if (r.scheme_ccd)      out.emplace_back("Complex CD");
+    if (r.scheme_ccd4)     out.emplace_back("Complex CD4");
+    return out;
+}
+
 void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
     const std::vector<std::string>& params_) {
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
     step_h = r.step_h.empty() ? "0.01" : r.step_h;
     symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
     sim_time = "50";
@@ -640,6 +654,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     // Сбрасываем список БД и создаём один дефолтный с настройками из record.
     diagrams.clear();
@@ -965,6 +980,7 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     curves.clear();
     LLECurveConfig c;
@@ -1261,6 +1277,7 @@ void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     Dft1DConfig c;
     c.label = "DFT 1";
@@ -1469,6 +1486,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     BasinsConfig c;
     c.label = "Basins 1";
@@ -2174,6 +2192,7 @@ void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     FastSyncConfig c;
     c.label = "FastSync 1";
@@ -2397,6 +2416,7 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     vars = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
 
     curves.clear();
     LSCurveConfig c;

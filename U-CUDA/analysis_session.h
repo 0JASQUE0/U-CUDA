@@ -2,6 +2,10 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+
+// Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
+// Empty when nothing is ticked; combo callers fall back to "show all built-ins".
+std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -205,6 +209,8 @@ struct PhaseAnalysisSession {
     // Пользовательские КРС из текущей системы (копия из SystemRecord).
     // Доступны в scheme combo вместе с built-in именами.
     std::vector<CustomScheme> custom_schemes;
+    // Enabled built-in schemes for this system; empty = combo shows all built-ins.
+    std::vector<std::string> enabled_builtin_schemes;
 
     // общие параметры системы (строки, "" = не задано/0)
     std::map<std::string, std::string> param_values; // param -> значение
@@ -469,6 +475,7 @@ struct BifurcationAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     // Список бифуркационных диаграмм. После load_from_record содержит как
@@ -633,6 +640,7 @@ struct LLEAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     std::vector<LLECurveConfig> curves;
@@ -777,6 +785,7 @@ struct Dft1DAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     std::vector<Dft1DConfig> configs;
@@ -1012,6 +1021,7 @@ struct BasinsAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     // Список Basins-конфигов. После load_from_record содержит как минимум
@@ -1198,6 +1208,7 @@ struct FastSyncAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     std::vector<FastSyncConfig> configs;
@@ -1328,6 +1339,7 @@ struct LyapunovSpectrumAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
     std::vector<LSCurveConfig> curves;
