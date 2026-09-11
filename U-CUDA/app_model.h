@@ -155,6 +155,13 @@ public:
     bool use_aux_funcs = false;
     std::string func_defs_text;
 
+    // Editor heights (px) for Library multiline inputs. Per-session only.
+    float latex_editor_h = 90.0f;
+    float plain_editor_h = 90.0f;
+    float funcs_editor_h = 60.0f;
+    float gen_code_editor_h = 220.0f;
+    std::map<std::string, float> custom_scheme_editor_h;   // keyed by scheme name
+
     // метаданные для библиотеки
     std::string name;
     std::string note;

@@ -128,6 +128,29 @@ static bool InputTextMultilineStr(const char* label, std::string& str, const ImV
     if (changed) str = buf.data();
     return changed;
 }
+
+// Drag handle below a multiline input; drags along Y and clamps `height`.
+static void draw_resize_handle(const char* id, float& height,
+                               float min_h = 40.0f, float max_h = 1200.0f) {
+    // InvisibleButton refuses non-positive dimensions — resolve -1 to the actual width.
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::InvisibleButton(id, ImVec2(w > 1.0f ? w : 1.0f, 8.0f));
+    const bool active  = ImGui::IsItemActive();
+    const bool hovered = ImGui::IsItemHovered();
+    if (active) {
+        height += ImGui::GetIO().MouseDelta.y;
+        if (height < min_h) height = min_h;
+        if (height > max_h) height = max_h;
+    }
+    if (hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    const ImVec2 pmin = ImGui::GetItemRectMin();
+    const ImVec2 pmax = ImGui::GetItemRectMax();
+    const ImU32 col = ImGui::GetColorU32(active  ? ImGuiCol_SeparatorActive
+                                       : hovered ? ImGuiCol_SeparatorHovered
+                                                 : ImGuiCol_Separator);
+    const float y = (pmin.y + pmax.y) * 0.5f;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(pmin.x, y), ImVec2(pmax.x, y), col, 3.0f);
+}
 static bool InputTextStr(const char* label, std::string& str, float width = 0.0f) {
     std::vector<char>& buf = input_scratch(str, 1024);
     if (width > 0) ImGui::SetNextItemWidth(width);
@@ -386,17 +409,28 @@ static const char* const kBuiltinSchemeNames[] = {
 // Возвращает true, если пользователь выбрал схему в этом кадре.
 static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::vector<CustomScheme>& custom_schemes,
-                              const std::function<void(const std::string&)>& on_pick = {}) {
+                              const std::function<void(const std::string&)>& on_pick = {},
+                              const std::vector<std::string>* enabled_builtins = nullptr) {
     bool picked = false;
     auto choose = [&](const std::string& nm) {
         scheme = nm;
         if (on_pick) on_pick(nm);
         picked = true;
     };
+    // enabled_builtins empty/null = no filter. Currently-selected built-in stays visible
+    // even if not enabled, so sessions saved with a now-disabled scheme aren't stranded.
+    const bool filter = enabled_builtins && !enabled_builtins->empty();
+    auto is_enabled = [&](const char* m) {
+        if (!filter) return true;
+        for (const auto& n : *enabled_builtins) if (n == m) return true;
+        return false;
+    };
     ImGui::SetNextItemWidth(kComboW);
     if (ImGui::BeginCombo(label, scheme.c_str())) {
-        for (const char* m : kBuiltinSchemeNames)
+        for (const char* m : kBuiltinSchemeNames) {
+            if (!is_enabled(m) && scheme != m) continue;
             if (ImGui::Selectable(m, scheme == m)) choose(m);
+        }
         if (!custom_schemes.empty()) ImGui::Separator();
         for (const auto& cs : custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(), scheme == cs.name))
@@ -1332,7 +1366,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     // поле ввода
     if (model.mode == InputMode::Image || model.mode == InputMode::Latex) {
         ImGui::Text("LaTeX (editable - fix OCR errors here):");
-        InputTextMultilineStr("##latex", model.latex_text, ImVec2(-1, 90));
+        InputTextMultilineStr("##latex", model.latex_text, ImVec2(-1, model.latex_editor_h));
+        draw_resize_handle("##latex_resize", model.latex_editor_h);
         if (ImGui::CollapsingHeader("LaTeX format examples")) {
             ImGui::TextDisabled(
                 "Each equation on its own line, LHS must have a derivative:\n"
@@ -1343,7 +1378,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     }
     else {
         ImGui::Text("Equations (plain syntax):");
-        InputTextMultilineStr("##plain", model.plain_text, ImVec2(-1, 90));
+        InputTextMultilineStr("##plain", model.plain_text, ImVec2(-1, model.plain_editor_h));
+        draw_resize_handle("##plain_resize", model.plain_editor_h);
         if (ImGui::CollapsingHeader("Plain format examples")) {
             ImGui::TextDisabled(
                 "  \\dot{x} = sigma*(y - x) \\\\\n  \\dot{y} = x*(rho - z) - y\n"
@@ -1357,7 +1393,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Checkbox("Use auxiliary functions", &model.use_aux_funcs);
     if (model.use_aux_funcs) {
         ImGui::Text("Function definitions (one per line, e.g. h(x) = m_1 x + ...):");
-        InputTextMultilineStr("##funcs", model.func_defs_text, ImVec2(-1, 60));
+        InputTextMultilineStr("##funcs", model.func_defs_text, ImVec2(-1, model.funcs_editor_h));
+        draw_resize_handle("##funcs_resize", model.funcs_editor_h);
         if (ImGui::CollapsingHeader("Auxiliary function examples")) {
             ImGui::TextDisabled(
                 "h(x) = m_1 x + \\frac{1}{2}(m_0-m_1)(|x+1| - |x-1|)\n"
@@ -1423,20 +1460,20 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Checkbox("CD", &model.scheme_cd); ImGui::SameLine();
     ImGui::Checkbox("Complex CD", &model.scheme_ccd);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("CD с комплексными полушагами:\n"
+        ImGui::SetTooltip("CD with complex half-steps:\n"
                           "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
-                          "s = a[0] — тот же коэффициент симметрии, что у CD.\n"
-                          "Шаг считается в комплексных числах, наружу идёт Re.\n"
-                          "При s = 0.5 (дефолт) полушаги сопряжены и порядок 2.");
+                          "s = a[0] is the same symmetry coefficient as in CD.\n"
+                          "The step is evaluated in complex arithmetic; only Re is kept.\n"
+                          "At s = 0.5 (default) the half-steps are conjugate and order is 2.");
     ImGui::SameLine();
     ImGui::Checkbox("Complex CD4", &model.scheme_ccd4);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Композиция ДВУХ симметричных CD с комплексными шагами:\n"
-                          "проход 1 — шаг gamma*h, проход 2 — conj(gamma)*h,\n"
-                          "gamma = 1/2 + i*sqrt(3)/6. Re берётся один раз в конце.\n"
-                          "Порядок 4 (замерено 4.00 на Лоренце и Рёсслере).\n"
-                          "Требует s = a[0] = 0.5: при других s внутренний CD\n"
-                          "несимметричен и порядок падает до первого.");
+        ImGui::SetTooltip("Composition of TWO symmetric CDs with complex steps:\n"
+                          "pass 1 uses step gamma*h, pass 2 uses conj(gamma)*h,\n"
+                          "gamma = 1/2 + i*sqrt(3)/6. Re is taken once at the end.\n"
+                          "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
+                          "Requires s = a[0] = 0.5: for other s the inner CD is\n"
+                          "asymmetric and the order drops to first.");
 
     // Custom KRS schemes (raw C/CUDA код вместо codegen)
     ImGui::Spacing();
@@ -1459,7 +1496,10 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) to_delete = i;
             std::string body_label = "##cs_body_" + std::to_string(i);
-            InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, 100));
+            float& body_h = model.custom_scheme_editor_h.try_emplace(cs.name, 100.0f).first->second;
+            InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, body_h));
+            const std::string resize_id = "##cs_body_resize_" + std::to_string(i);
+            draw_resize_handle(resize_id.c_str(), body_h);
             // Проверка обращений X[k] / a[k] с константным индексом против
             // размерности ТЕКУЩЕЙ системы. Статическая и живая — тела короткие,
             // проход по строке стоит копейки. Пока система не распознана
@@ -1533,7 +1573,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         }
         ImGui::InputTextMultiline("##code",
             (char*)model.generated_code.c_str(), model.generated_code.size() + 1,
-            ImVec2(-1, 220), ImGuiInputTextFlags_ReadOnly);
+            ImVec2(-1, model.gen_code_editor_h), ImGuiInputTextFlags_ReadOnly);
+        draw_resize_handle("##code_resize", model.gen_code_editor_h);
     }
 }
 
@@ -1928,7 +1969,8 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     // метод моделирования + пользовательские схемы из системы
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
-                                 [&s](const std::string&) { s.regenerate_krs(); });
+                                 [&s](const std::string&) { s.regenerate_krs(); },
+                                 &s.enabled_builtin_schemes);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
@@ -3343,7 +3385,7 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -3969,7 +4011,7 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -4257,7 +4299,7 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -4764,7 +4806,7 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -5465,7 +5507,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -6047,7 +6089,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -6832,7 +6874,8 @@ void draw_shared_config(CustomSession& cs,
             phase.regenerate_krs();
             // Custom КРС в Custom-вкладке считаются только на GPU.
             if (is_custom_scheme(nm, custom_schemes)) phase.use_gpu = true;
-        });
+        },
+        &cs.enabled_builtin_schemes);
 
     // Integration group — mirrors the "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is

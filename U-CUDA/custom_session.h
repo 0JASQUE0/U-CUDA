@@ -215,6 +215,7 @@ struct CustomSession {
     std::vector<std::string> params;
     System                   sys;
     std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
     std::string              loaded_system_name;
 
     CustomTabSharedConfig shared;

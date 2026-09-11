@@ -333,6 +333,22 @@ void AppModel::propagate_to_sessions() {
     custom_session.phase_session.custom_schemes  = custom_schemes;
     custom_session.basins_session.custom_schemes = custom_schemes;
 
+    // Mirror enabled built-in schemes from the current model into every session.
+    const std::vector<std::string> enabled_now = enabled_builtins_from_record(to_record());
+    phase_session.enabled_builtin_schemes       = enabled_now;
+    bifurcation_session.enabled_builtin_schemes = enabled_now;
+    lle_session.enabled_builtin_schemes         = enabled_now;
+    ls_session.enabled_builtin_schemes          = enabled_now;
+    dft1d_session.enabled_builtin_schemes       = enabled_now;
+    basins_session.enabled_builtin_schemes      = enabled_now;
+    fastsync_session.enabled_builtin_schemes    = enabled_now;
+    custom_session.enabled_builtin_schemes                = enabled_now;
+    custom_session.bif_session.enabled_builtin_schemes    = enabled_now;
+    custom_session.lle_session.enabled_builtin_schemes    = enabled_now;
+    custom_session.ls_session.enabled_builtin_schemes     = enabled_now;
+    custom_session.phase_session.enabled_builtin_schemes  = enabled_now;
+    custom_session.basins_session.enabled_builtin_schemes = enabled_now;
+
     // sys обновляем для built-in схем (Euler/RK4/...): они используют
     // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
     // в Library поправили, без этой пересборки старый sys остаётся в сессиях
