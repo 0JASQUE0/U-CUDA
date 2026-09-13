@@ -8,6 +8,16 @@
 #include "sysparse.hpp"
 #include <stdexcept>
 
+// Newton knobs are UI strings; parse them here, once, on the way into System.
+// Out-of-range or unparseable input falls back to the defaults rather than
+// producing a scheme body that cannot converge.
+static void apply_newton_settings(System& s, bool full, const std::string& tol,
+                                  const std::string& iters) {
+    s.newton_full = full;
+    try { double v = std::stod(tol);      if (v > 0.0) s.newton_tol = v; }       catch (...) {}
+    try { int    v = std::stoi(iters);    if (v > 0)   s.newton_max_iters = v; } catch (...) {}
+}
+
 // Строит System из текущего режима ввода и алфавита.
 System AppModel::build_system() const {
     std::vector<std::string> alpha = parse_alphabet();
@@ -21,7 +31,9 @@ System AppModel::build_system() const {
         // и после OCR, и при ручном вводе LaTeX — многострочный LaTeX-разбор
         if (latex_text.empty()) throw std::runtime_error("LaTeX is empty");
         if (alpha.empty()) throw std::runtime_error("alphabet is empty");
-        return parse_system_from_latex(latex_text, alpha, param_order, funcs);
+        System s = parse_system_from_latex(latex_text, alpha, param_order, funcs);
+        apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
+        return s;
     }
 
     // InputMode::Plain — обычный синтаксис. Пока разбираем его тем же многострочным путём, что и
@@ -29,7 +41,9 @@ System AppModel::build_system() const {
     // часто срабатывает (x*(r-z) и т.п.).
     if (plain_text.empty()) throw std::runtime_error("equations are empty");
     if (alpha.empty()) throw std::runtime_error("alphabet is empty");
-    return parse_system_from_latex(plain_text, alpha, param_order, funcs);
+    System s = parse_system_from_latex(plain_text, alpha, param_order, funcs);
+    apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
+    return s;
 }
 
 // Парсит систему, обновляет списки символов и синхронизирует словари значений.
@@ -128,6 +142,11 @@ SystemRecord AppModel::to_record() const {
     r.scheme_cd = scheme_cd;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
+    r.scheme_ieuler = scheme_ieuler;
+    r.scheme_imidpoint = scheme_imidpoint;
+    r.newton_full = newton_full;
+    r.newton_tol = newton_tol;
+    r.newton_max_iters = newton_max_iters;
     r.symmetry_s = symmetry_s;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
@@ -159,6 +178,11 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_cd = r.scheme_cd;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
+    scheme_ieuler = r.scheme_ieuler;
+    scheme_imidpoint = r.scheme_imidpoint;
+    newton_full = r.newton_full;
+    newton_tol = r.newton_tol;
+    newton_max_iters = r.newton_max_iters;
     symmetry_s = r.symmetry_s;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
@@ -171,7 +195,7 @@ void AppModel::from_record(const SystemRecord& r) {
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
     if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
-        || scheme_cd || scheme_ccd || scheme_ccd4)
+        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint)
         generate();
 }
 
@@ -190,8 +214,11 @@ void AppModel::clear() {
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
-        = scheme_cd = scheme_ccd = scheme_ccd4 = false;
+        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint = false;
     symmetry_s = "0.5";
+    newton_full = false;
+    newton_tol = "1e-10";
+    newton_max_iters = "8";
     step_h.clear();
     init_conditions.clear();
     param_values.clear();

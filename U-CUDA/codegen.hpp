@@ -13,6 +13,16 @@ struct System {
     std::vector<std::string> params;
     std::vector<std::string> rhs;
     bool latex = false;
+
+    // Newton knobs for the implicit schemes. They live here (and not in every
+    // per-analysis config) because AppModel::build_system() is the single System
+    // factory and its result is copied into every session, so codegen sees them
+    // without touching analysis_session.h / session_io.cpp.
+    // newton_full: false = Jacobian and LU once per step at the predictor
+    // (modified Newton), true = rebuilt every iteration (full Newton).
+    bool   newton_full      = false;
+    double newton_tol       = 1e-10;
+    int    newton_max_iters = 8;
 };
 
 // Конечно-разностные схемы интегрирования.
@@ -30,7 +40,14 @@ struct System {
 // симметрии мнимый и уходит с Re — глобальный порядок 4 (замерено 4.00 на
 // Лоренце и Рёсслере). Требует s = 1/2: иначе внутренний CD несимметричен и
 // порядок падает до первого.
-enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4 };
+// ImplicitEuler / ImplicitMidpoint — the only A-stable methods here, and the only
+// ones that solve the FULL coupled system per step (CD is diagonally implicit: it
+// solves each equation for its own variable and never sees the cross terms).
+// Both run Newton on a symbolically differentiated Jacobian; see scheme_implicit_common
+// in codegen.cpp. ImplicitMidpoint solves for the stage value Y = (X + X_next)/2,
+// which makes it the same code as ImplicitEuler with h -> h/2 plus a final X = 2Y - X.
+enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
+                    ImplicitEuler, ImplicitMidpoint };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
@@ -80,6 +97,20 @@ public:
     //   a     — параметры со сдвигом [>= params.size()+1], a[0] не используется
     //   deriv — выход [dim]
     void eval(const double* X, const double* a, double* deriv) const;
+
+    // False when the system has no symbolic derivative (floor/ceil/fmod): explicit
+    // schemes still work, the implicit ones must refuse. eval_jacobian then zeroes J.
+    bool has_jacobian() const;
+
+    // Jacobian J[i*dim + j] = df_i/dx_j (X, a), row-major [dim*dim]. Same symbolic
+    // derivatives the GPU scheme emits, so the CPU integrator runs the same algorithm.
+    void eval_jacobian(const double* X, const double* a, double* J) const;
+
+    // Newton settings carried over from the System this evaluator was built from —
+    // exposed here so computePhasePortraitCPU needs no extra parameters.
+    bool   newton_full() const;
+    double newton_tol() const;
+    int    newton_max_iters() const;
 
     // То же самое и по тому же байткоду, но в комплексной арифметике —
     // для схем с комплексными коэффициентами (Complex CD). Параметры a[]

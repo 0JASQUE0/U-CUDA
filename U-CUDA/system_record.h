@@ -43,6 +43,17 @@ struct SystemRecord {
     bool scheme_cd       = false;
     bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
+    bool scheme_ieuler   = false;   // Implicit Euler (Ньютон по символьному якобиану)
+    bool scheme_imidpoint = false;  // Implicit Midpoint (то же, стадия Y = (X + X_next)/2)
+
+    // Настройки Ньютона для двух неявных схем. Живут на уровне системы, а не
+    // конфига анализа: AppModel::build_system() — единственная фабрика System,
+    // и её результат копируется во все сессии, так что кодген видит их сам.
+    // newton_full: false = якобиан и LU один раз за шаг (модифицированный Ньютон),
+    // true = пересчёт на каждой итерации (полный Ньютон).
+    bool        newton_full      = false;
+    std::string newton_tol       = "1e-10";
+    std::string newton_max_iters = "8";
 
     // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
     // 0.5 = классический симметричный CD. Читается схемами "CD" и "Complex CD"
