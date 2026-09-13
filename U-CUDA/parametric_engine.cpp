@@ -1392,6 +1392,7 @@ struct ParametricEngine::Impl {
         CUmodule    module      = nullptr;
         CUfunction  kernel_traj = nullptr;  // calculateDiscreteModelCUDA
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
+        CUfunction  kernel_fused = nullptr; // calculateDiscreteModelPeaksCUDA
         CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d classical branch)
     };
     CachedModule cached;          // bif1d kernels (traj + peak + dft)
@@ -1526,6 +1527,7 @@ struct ParametricEngine::Impl {
             cached.module = nullptr;
             cached.kernel_traj = nullptr;
             cached.kernel_peak = nullptr;
+            cached.kernel_fused = nullptr;
             cached.kernel_dft = nullptr;
             cached.key.clear();
         }
@@ -1807,7 +1809,8 @@ struct ParametricEngine::Impl {
                           { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                             { "{{KRS_BODY}}",    krs_body },
                             { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom" },
+                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom",
+                            "calculateDiscreteModelPeaksCUDA" },
                           mod, mg, err))
             return false;
 
@@ -1815,6 +1818,7 @@ struct ParametricEngine::Impl {
         if (!module_fn(mod, mg[0], cached.kernel_traj, err)) { release_module(); return false; }
         if (!module_fn(mod, mg[1], cached.kernel_peak, err)) { release_module(); return false; }
         if (!module_fn(mod, mg[2], cached.kernel_dft,  err)) { release_module(); return false; }
+        if (!module_fn(mod, mg[3], cached.kernel_fused, err)) { release_module(); return false; }
 
         cached.key = key;
         return true;
@@ -1959,13 +1963,20 @@ struct ParametricEngine::Impl {
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
+        // Пики живут в собственных коротких строках, а не в буферах длиной
+        // в траекторию — см. run_bif2d. Для 1D это важнее, чем для 2D: здесь оба
+        // буфера пиков едут на хост целиком каждый чанк (2D возвращал по int на ячейку).
+        const size_t peakStride   = (size_t)amountOfPointsInBlock < (size_t)max_amount_of_peaks + 1
+                                  ? (size_t)amountOfPointsInBlock
+                                  : (size_t)max_amount_of_peaks + 1;
+        const int    peakCapacity = (int)peakStride;
+
         // Memory budget (порт строк 202-244 NL)
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
         size_t memPerSystem =
-            3 * (size_t)amountOfPointsInBlock * sizeof(numb) +  // d_data, d_outPeaks, d_timeOfPeaks
-            2 * sizeof(numb) +                                  // d_meanFreq, d_medianFreq (зарезервировано)
+            2 * peakStride * sizeof(numb) +                     // d_outPeaks, d_timeOfPeaks
             sizeof(int);                                          // d_amountOfPeaks
         size_t memConstants =
             2 * sizeof(numb) +
@@ -1990,12 +2001,11 @@ struct ParametricEngine::Impl {
         // Host buffers (порт строк 257-264 NL)
         // h_data/h_meanFreq/h_medianFreq/h_localX/h_localValues нужны только для
         // continuation_bif1D и mean/median — мы их не используем.
-        std::vector<numb> h_outPeaks   (nPtsLimiter * (size_t)amountOfPointsInBlock);
-        std::vector<numb> h_timeOfPeaks(nPtsLimiter * (size_t)amountOfPointsInBlock);
+        std::vector<numb> h_outPeaks   (nPtsLimiter * peakStride);
+        std::vector<numb> h_timeOfPeaks(nPtsLimiter * peakStride);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
 
         // Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq)
-        numb* d_data              = nullptr;
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
         numb* d_initialConditions = nullptr;
@@ -2003,10 +2013,8 @@ struct ParametricEngine::Impl {
         int*    d_amountOfPeaks     = nullptr;
         numb* d_outPeaks          = nullptr;
         numb* d_timeOfPeaks       = nullptr;
-        int*    d_actualIterations  = nullptr;
 
         auto cleanup = [&]() {
-            if (d_data)              cudaFree(d_data);
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -2014,7 +2022,6 @@ struct ParametricEngine::Impl {
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
             if (d_outPeaks)          cudaFree(d_outPeaks);
             if (d_timeOfPeaks)       cudaFree(d_timeOfPeaks);
-            if (d_actualIterations)  cudaFree(d_actualIterations);
         };
 
         // [ADAPT] gpuErrorCheck → BIF_CHECK: пишем в res.error и выходим с cleanup
@@ -2041,15 +2048,13 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BIF_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
         BIF_CHECK(cudaMalloc((void**)&d_ranges,            2 * sizeof(numb)),                                          "cudaMalloc d_ranges");
         BIF_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  1 * sizeof(int)),                                             "cudaMalloc d_indicesOfMutVars");
         BIF_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),          "cudaMalloc d_initialConditions");
         BIF_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                     "cudaMalloc d_values");
-        BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_outPeaks");
-        BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_timeOfPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_outPeaks");
+        BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
-        BIF_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_actualIterations");
 
         // H2D констант (порт строк 314-319 NL)
         BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
@@ -2088,7 +2093,7 @@ struct ParametricEngine::Impl {
 
         // результат-аккумулятор (для GUI)
         res.n_pts        = nPts;
-        res.record_steps = amountOfPointsInBlock;
+        res.record_steps = (int)peakStride;   // ёмкость строки пиков, а не длина траектории
         res.flags.assign(nPts, 0);
         res.bifurcation_points.assign(nPts, {});
         res.peak_times.assign(nPts, {});
@@ -2104,11 +2109,10 @@ struct ParametricEngine::Impl {
             int blockSize = 32;
             int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
-            // [ADAPT] <<<>>> → cuLaunchKernel.
-            // continuation_bif1D == 0 ветка (classical). Continuation отключена.
+            // [ADAPT] <<<>>> → cuLaunchKernel. Траектория и поиск пиков — одно
+            // ядро, то же, что у run_bif2d. Continuation отключена.
             int    nPts_int                  = nPts;
             int    nPtsLimiter_int           = (int)nPtsLimiter;
-            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension                 = 1;
@@ -2124,71 +2128,36 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
+            size_t peakStride_arg            = peakStride;
+            int    peakCapacity_arg          = peakCapacity;
+            int*   d_cancel_arg              = nullptr;   // сигналы пока по чанкам
+            int*   d_progress_arg            = nullptr;
+            int    progressStride_arg        = 0;
 
-            void* args_traj[] = {
-                &nPts_int,
-                &nPtsLimiter_int,
-                &sizeOfBlock_s,
-                &amountOfCalculatedPoints,
-                &amountOfPointsForSkip_s,
-                &dimension,
-                &d_ranges,
-                &h_arg,
-                &d_indicesOfMutVars,
-                &d_initialConditions,
-                &amountOfInitialConditions_int,
-                &d_values,
-                &amountOfValues_int,
-                &amountOfIterations_arg,
-                &preScaller_int,
-                &writableVar_int,
-                &maxValue_arg,
-                &d_data,
-                &d_amountOfPeaks,
-                &par_or_var_arg,
-                &hSweepAxis_arg,
-                &transientTime_arg,
-                &tMax_arg,
-                &d_actualIterations,
-                &logAxisMask_arg
+            void* args_fused[] = {
+                &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s, &dimension, &d_ranges, &h_arg,
+                &d_indicesOfMutVars, &d_initialConditions, &amountOfInitialConditions_int,
+                &d_values, &amountOfValues_int, &amountOfIterations_arg,
+                &preScaller_int, &writableVar_int, &maxValue_arg,
+                &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
+                &par_or_var_arg, &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
+                &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
 
-            BIF_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
+            BIF_CHECK_CU(cuLaunchKernel(cached.kernel_fused,
                                         gridSize, 1, 1, blockSize, 1, 1,
-                                        shared, nullptr, args_traj, nullptr),
-                         "cuLaunchKernel(traj)");
-            BIF_CHECK(cudaDeviceSynchronize(), "sync after traj");
-
-            // peakFinderCUDA
-            numb timeStep_arg = h * (double)preScaller;
-            // 1D still keeps peaks in the trajectory buffers: 0/0 = legacy layout,
-            // uncapped scan. Passed explicitly -- driver API ignores the defaults.
-            size_t peakStride_arg   = 0;
-            int    peakCapacity_arg = 0;
-            void* args_peak[] = {
-                &d_data,
-                &sizeOfBlock_s,
-                &nPtsLimiter_int,
-                &d_amountOfPeaks,
-                &d_outPeaks,
-                &d_timeOfPeaks,
-                &timeStep_arg,
-                &d_actualIterations,
-                &peakStride_arg,
-                &peakCapacity_arg
-            };
-            BIF_CHECK_CU(cuLaunchKernel(cached.kernel_peak,
-                                        gridSize, 1, 1, blockSize, 1, 1,
-                                        0, nullptr, args_peak, nullptr),
-                         "cuLaunchKernel(peak)");
-            BIF_CHECK(cudaDeviceSynchronize(), "sync after peak");
+                                        shared, nullptr, args_fused, nullptr),
+                         "cuLaunchKernel(bif1d traj+peaks)");
+            BIF_CHECK(cudaDeviceSynchronize(), "sync after traj+peaks");
 
             // D2H (порт строк 538-540 NL)
-            BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
+            BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
             BIF_CHECK(cudaMemcpy(h_amountOfPeaks.data(),  d_amountOfPeaks,  nPtsLimiter * sizeof(int),                                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
-            BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+            BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
             BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
             // CSV + аккумуляция результата (порт строк 574-608 NL)
@@ -2204,16 +2173,15 @@ struct ParametricEngine::Impl {
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
                 int    npeaks     = h_amountOfPeaks[k];
 
-                // h-свип: peakFinderCUDA умножает разности индексов на ОДИН h (у kernel'а он общий
-                // на запуск), а у каждой точки шаг свой — при свипе по h это param_val. Межпиковый
-                // интервал линеен по h, поэтому точная поправка — домножить на отношение шагов;
-                // значения самих пиков от h не зависят и не правятся.
-                const double time_scale = req.sweep_over_h ? (param_val / h) : 1.0;
+                // Поправки на h-свип здесь больше нет. Раньше peakFinderCUDA получал общий
+                // на запуск h, и хост домножал времена на param_val/h; слитое ядро
+                // сразу масштабирует интервалы шагом своей точки, и вторая поправка
+                // применилась бы дважды (см. commit-message к слиянию ядер bif2d).
 
                 int n = npeaks;
-                if (n > amountOfPointsInBlock) n = amountOfPointsInBlock;
-                const numb* peakRow = h_outPeaks.data()    + k * (size_t)amountOfPointsInBlock;
-                const numb* timeRow = h_timeOfPeaks.data() + k * (size_t)amountOfPointsInBlock;
+                if (n > (int)peakStride) n = (int)peakStride;
+                const numb* peakRow = h_outPeaks.data()    + k * peakStride;
+                const numb* timeRow = h_timeOfPeaks.data() + k * peakStride;
 
                 // Экспорт и результат работают в double — расширяем numb-ряды
                 // здесь, один раз, и переиспользуем для CSV и для памяти.
@@ -2221,8 +2189,6 @@ struct ParametricEngine::Impl {
                 if (n > 0) {
                     widePeaks.assign(peakRow, peakRow + n);
                     scaledTimes.assign(timeRow, timeRow + n);
-                    if (time_scale != 1.0)
-                        for (double& v : scaledTimes) v *= time_scale;
                 }
 
                 if (out.is_open())
