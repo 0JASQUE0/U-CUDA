@@ -741,6 +741,68 @@ static void write_phase_trajectory(std::ofstream& out,
     }
 }
 
+// Метка НУ переименовывается пользователем и попадает в шапку CSV, поэтому из
+// неё надо убрать всё, что разорвало бы строку или столбец: запятую и перевод
+// строки. Пустая метка заменяется на порядковый номер — безымянных столбцов в
+// шапке быть не должно.
+static std::string phase_ic_tag(const PhaseSnapshot& s, std::size_t k)
+{
+    std::string tag = (k < s.ic_labels.size()) ? s.ic_labels[k] : std::string{};
+    for (char& c : tag)
+        if (c == ',' || c == '\n' || c == '\r') c = ';';
+    // Обрезка краевых пробелов: метка вроде " IC 2" иначе дала бы "x [ IC 2]".
+    const std::size_t b = tag.find_first_not_of(" \t");
+    const std::size_t e = tag.find_last_not_of(" \t");
+    tag = (b == std::string::npos) ? std::string{} : tag.substr(b, e - b + 1);
+    if (tag.empty()) tag = "IC " + std::to_string(k + 1);
+    return tag;
+}
+
+// Все НУ в ОДНОМ файле: колонка t, затем блок столбцов на каждое НУ. Раньше
+// каждое НУ уезжало в свой <path>_icN.csv, и дальнейшая обработка упиралась в
+// склейку десятка файлов. Заголовок столбца — "<var> [<метка НУ>]", то есть
+// блоки различаются по суффиксу, а не по позиции в строке.
+//
+// Шаг по времени у всех траекторий общий (один h, один decimator), но длины
+// сравниваются честно: если какая-то траектория короче, её ячейки в хвостовых
+// строках остаются ПУСТЫМИ, а не нулевыми — ноль здесь был бы неотличим от
+// настоящей координаты.
+static void write_phase_trajectories_wide(std::ofstream& out,
+                                          const PhaseSnapshot& snapshot,
+                                          const std::vector<std::vector<std::vector<double>>>& trajs,
+                                          double dt)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+
+    const std::size_t n_ic  = trajs.size();
+    const std::size_t n_var = snapshot.vars.size();
+
+    out << "t";
+    for (std::size_t k = 0; k < n_ic; ++k) {
+        const std::string tag = phase_ic_tag(snapshot, k);
+        for (std::size_t v = 0; v < n_var; ++v)
+            out << ", " << snapshot.vars[v] << " [" << tag << "]";
+    }
+    out << '\n';
+
+    std::size_t n_rows = 0;
+    for (const auto& t : trajs)
+        if (t.size() > n_rows) n_rows = t.size();
+
+    for (std::size_t i = 0; i < n_rows; ++i) {
+        out << static_cast<double>(i) * dt;
+        for (std::size_t k = 0; k < n_ic; ++k) {
+            const auto& traj = trajs[k];
+            for (std::size_t v = 0; v < n_var; ++v) {
+                out << ", ";
+                if (i < traj.size() && v < traj[i].size()) out << traj[i][v];
+            }
+        }
+        out << '\n';
+    }
+}
+
 // RQA
 
 static const char* rqa_source_name(rqa::Source s)
@@ -865,21 +927,18 @@ bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
         return true;
     }
 
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+
     if (n_ic == 1) {
-        std::ofstream out(path);
-        if (!out.is_open()) return false;
+        // Одно НУ — шапка без суффикса ("t, x, y, z"), ровно как раньше:
+        // разделять на блоки нечего, а этот формат читают внешние скрипты.
         write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt);
         return true;
     }
 
-    // Multiple ICs → suffix files _ic0.csv, _ic1.csv, ... mirroring the
-    // sibling pattern used by Basins (_1.csv, _2.csv, ...).
-    for (std::size_t k = 0; k < n_ic; ++k) {
-        std::string p = path + "_ic" + std::to_string(k) + ".csv";
-        std::ofstream out(p);
-        if (!out.is_open()) return false;
-        write_phase_trajectory(out, snapshot.vars, res.trajectories[k], dt);
-    }
+    // Несколько НУ — в этот же файл, блоком столбцов на каждое.
+    write_phase_trajectories_wide(out, snapshot, res.trajectories, dt);
     return true;
 }
 
