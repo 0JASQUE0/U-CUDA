@@ -884,6 +884,13 @@ struct PeakStream
 	numb   anchorTime;    // time (in samples) of the current anchor peak
 	bool   haveAnchor;
 
+	// Running sums over emitted peaks and intervals. Every basin feature
+	// (avg / rms / stdev) is a function of these, so that path needs no peak
+	// arrays at all -- and `last` is the one sample it still needs, for the
+	// fixed-point case avgPeakFinderCUDA read from the end of the trajectory.
+	numb   sumP, sumP2, sumI, sumI2;
+	numb   last;
+
 	__device__ __host__ void init(numb* peaks, numb* times, size_t base,
 		numb step, size_t len, int cap)
 	{
@@ -892,6 +899,8 @@ struct PeakStream
 		w0 = w1 = w2 = (numb)0;
 		n = 0; nextI = 2; walking = false; done = false;
 		raw = 0; emitted = 0; anchorTime = (numb)0; haveAnchor = false;
+		sumP = sumP2 = sumI = sumI2 = (numb)0;
+		last = (numb)0;
 	}
 
 	// Inter-peak interval filter, live. The batch version anchors on the FIRST
@@ -910,6 +919,10 @@ struct PeakStream
 		if (emitted < max_amount_of_peaks) {
 			if (outPeaks != nullptr)    outPeaks[peakBase + emitted]    = value;
 			if (timeOfPeaks != nullptr) timeOfPeaks[peakBase + emitted] = delta;
+			// Same cap the batch path applied: avgPeakFinderCUDA summed exactly the
+			// peaks that made it into the array and into the clamped count.
+			sumP += value;   sumP2 += value * value;
+			sumI += delta;   sumI2 += delta * delta;
 		}
 		++emitted;
 		anchorTime = time;
@@ -942,6 +955,7 @@ struct PeakStream
 	// Feed one trajectory sample.
 	__device__ __host__ void push(numb x)
 	{
+		last = x;   // before the done check: the scan stops short of the block end
 		if (done) return;
 
 		w0 = w1; w1 = w2; w2 = x;
@@ -1280,6 +1294,17 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
+// Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
+// с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
+// свою долю, и бар застрял бы не дойдя до ста.
+__device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int progressStride,
+	size_t totalSteps, int ticks)
+{
+	if (progressCounter == nullptr || progressStride <= 0) return;
+	const int expected = (int)(totalSteps / (size_t)progressStride);
+	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+}
+
 // ucudaSetupSweepPoint -- which point of the sweep this thread is, extracted so
 // that the trajectory kernel and its fused (trajectory-free) sibling cannot
 // drift apart. The node values, the log axes and the dt-sweep bookkeeping are
@@ -1381,7 +1406,10 @@ __global__ void calculateDiscreteModelCUDA(
 	const numb	transientTime,
 	const numb	tMax,
 	int*			actualIterations,
-	const int		logAxisMask)
+	const int		logAxisMask,
+	const volatile int* cancelFlag,
+	int*			progressCounter,
+	const int		progressStride)
 {
 	// Общая память в рамках одного блока
 	// Строение памяти (per-thread slice, шаг ucuda_shared_stride):
@@ -1414,25 +1442,30 @@ __global__ void calculateDiscreteModelCUDA(
 		// as "no data for this point", so no separate NaN-fill is needed here.
 		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
 		if (actualIterations != nullptr)     actualIterations[idx] = 0;
+		ucudaProgressTopUp(progressCounter, progressStride, amountOfPointsForSkip + amountOfIterations, 0);
 		return;
 	}
 	if (actualIterations != nullptr) actualIterations[idx] = (int)iters_local;
 
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
+	int ticks = 0;
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
-		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1);
+		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1,
+		cancelFlag, progressCounter, progressStride, &ticks);
 
 	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
-			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1);
+			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1,
+			cancelFlag, progressCounter, progressStride, &ticks);
 
 	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
 	if (maxValueCheckerArray != nullptr) {
 		maxValueCheckerArray[idx] = flag;
 	}
+	ucudaProgressTopUp(progressCounter, progressStride, skip_local + iters_local, ticks);
 	//delete[] localX;
 	//delete[] localValues;
 	return;
@@ -2665,7 +2698,10 @@ __global__ void LLEKernelCUDA(
 	numb*			resultArray,
 	const int		hSweepAxis,
 	const numb	transientTime,
-	const int		logAxisMask)
+	const int		logAxisMask,
+	const volatile int* cancelFlag,
+	int*			progressCounter,
+	const int		progressStride)
 {
 	extern __shared__ numb s[];
 	numb* x = s + threadIdx.x * amountOfInitialConditions;
@@ -2736,10 +2772,18 @@ __global__ void LLEKernelCUDA(
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Тики считаем только по ведущей траектории x: возмущённая y идёт
+	// тем же числом шагов, и считать её значило бы удвоить ожидаемый итог.
+	// Отмена же передаётся в оба цикла.
+	int ticks = 0;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * (size_t)amountOfNTPoints;
+
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
 		resultArray[idx] = 999;
+		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
 
@@ -2791,17 +2835,21 @@ __global__ void LLEKernelCUDA(
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, progressCounter, progressStride, &ticks);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 
-		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, nullptr, 0, nullptr);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 
@@ -2838,6 +2886,7 @@ __global__ void LLEKernelCUDA(
 	}
 
 	resultArray[idx] = result / tMax;
+	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
 // Всё что ниже остаётся отрезано от NVRTC — engine эти kernel'ы не зовёт,
@@ -3156,7 +3205,10 @@ __global__ void LSKernelCUDA(
 	numb* resultArray,
 	const int hSweepAxis,
 	const numb transientTime,
-	const int logAxisMask)
+	const int logAxisMask,
+	const volatile int* cancelFlag,
+	int* progressCounter,
+	const int progressStride)
 {
 	extern __shared__ numb s[];
 
@@ -3262,10 +3314,17 @@ __global__ void LSKernelCUDA(
 		}
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Тики — только по ведущей траектории (как в LLEKernelCUDA): N копий
+	// делают столько же шагов каждая, и счёт по ним раздул бы ожидаемый итог.
+	int ticks = 0;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * amountOfNTPoints;
+
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
 
@@ -3284,16 +3343,20 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < sizeOfBlock; ++i)
 	{
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, progressCounter, progressStride, &ticks);
 		if (flag == 0) {
 			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 		for (int j = 0; j < amountOfInitialConditions; ++j)
 		{
-			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+				1, cancelFlag, nullptr, 0, nullptr);
 			if (flag == 0) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+				ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 				return;
 			}
 		}
@@ -3323,6 +3386,7 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
+	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
 // Всё что ниже снова под гардом — engine не зовёт, потенциально хост-only.
@@ -3579,6 +3643,132 @@ numb compute_basin_feature(int feat,
 		case BF_LOG_STDEV_PEAKS:      return std_p > 0 ? log10(std_p) : (numb)-999;
 		case BF_LOG_STDEV_INTERVALS:  return std_i > 0 ? log10(std_i) : (numb)-999;
 		default:                      return (numb)-999;
+	}
+}
+
+// calculateDiscreteModelAvgPeaksCUDA -- calculateDiscreteModelCUDA fused with
+// avgPeakFinderCUDA for basins of attraction. Same sweep point (shared
+// ucudaSetupSweepPoint), same integrator, same REGIME_* semantics and the same
+// sentinel values on the output.
+//
+// Basins asked for two buffers the length of the trajectory per cell (data and
+// intervals) and returned two numbers from them. Every feature is a function of
+// the running sums PeakStream already keeps, so neither buffer is needed: the
+// cell integrates, accumulates, and writes its two features.
+//
+// hSweepAxis / logAxisMask are fixed at -1 / 0: BasinsRequest has no such
+// fields, and run_basins passed exactly these constants to the split path.
+__global__ void calculateDiscreteModelAvgPeaksCUDA(
+	const int		nPts,
+	const int		nPtsLimiter,
+	const size_t	amountOfCalculatedPoints,
+	const size_t	amountOfPointsForSkip,
+	const int		dimension,
+	numb* __restrict__			ranges,
+	const numb		h,
+	int* __restrict__			indicesOfMutVars,
+	numb* __restrict__			initialConditions,
+	const int		amountOfInitialConditions,
+	const numb* __restrict__	values,
+	const int		amountOfValues,
+	const size_t	amountOfIterations,
+	const int		preScaller,
+	const int		writableVar,
+	const numb		maxValue,
+	numb*			outAvgPeaks,
+	numb*			AvgTimeOfPeaks,
+	int*			systemCheker,
+	const bool		Par_or_Var,
+	const numb		transientTime,
+	const numb		tMax,
+	const int		feature1,
+	const int		feature2,
+	const numb		mult1,
+	const numb		mult2,
+	const volatile int* cancelFlag,
+	int*			progressCounter,
+	const int		progressStride)
+{
+	extern __shared__ numb s[];
+	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
+	numb* localX = s + ( threadIdx.x * sharedStride );
+	numb* localValues = localX + amountOfInitialConditions;
+
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	if (idx >= nPtsLimiter)
+		return;
+
+	int    ticks = 0;
+	numb   h_local;
+	size_t skip_local;
+	size_t iters_local;
+	if (!ucudaSetupSweepPoint(nPts, amountOfCalculatedPoints, idx, dimension, ranges, h,
+			indicesOfMutVars, initialConditions, amountOfInitialConditions,
+			values, amountOfValues, -1, 0,
+			transientTime, tMax, preScaller,
+			amountOfPointsForSkip, amountOfIterations,
+			localX, localValues, h_local, skip_local, iters_local)) {
+		if (systemCheker != nullptr) systemCheker[idx] = REGIME_UNBOUND;
+		outAvgPeaks[idx]    = 999;
+		AvgTimeOfPeaks[idx] = 999;
+		if (progressCounter != nullptr && progressStride > 0)
+			atomicAdd(progressCounter, (int)((amountOfPointsForSkip + amountOfIterations) / (size_t)progressStride));
+		return;
+	}
+
+	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
+		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
+		cancelFlag, progressCounter, progressStride, &ticks);
+
+	PeakStream peaks;
+	peaks.init(nullptr, nullptr, 0, h * (numb)preScaller, iters_local, 0);
+
+	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
+		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
+			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
+			cancelFlag, progressCounter, progressStride, &ticks);
+
+	if (systemCheker != nullptr) systemCheker[idx] = flag;
+
+	if (flag == REGIME_UNBOUND) {
+		outAvgPeaks[idx]    = 999;
+		AvgTimeOfPeaks[idx] = 999;
+	}
+	else if (flag == REGIME_FIXED_POINT) {
+		// Батч-версия брала последний сэмпл траектории; стрим держит его в last.
+		outAvgPeaks[idx]    = peaks.last;
+		AvgTimeOfPeaks[idx] = -1.0;
+	}
+	else {
+		const int amountOfPeaks = peaks.count();
+		if (amountOfPeaks <= 0) {
+			outAvgPeaks[idx]    = -999;
+			AvgTimeOfPeaks[idx] = -1.0;
+		}
+		else {
+			// Суммы копились в том же порядке, что и в батч-цикле, поэтому
+			// результат совпадает побитово. feature_needs здесь не нужен:
+			// считать все шесть статистик один раз на ячейку дешевле, чем
+			// ветвиться, а неиспользуемые compute_basin_feature игнорирует.
+			const numb inv_n  = (numb)1.0 / (numb)amountOfPeaks;
+			const numb mean_p = peaks.sumP * inv_n;
+			const numb mean_i = peaks.sumI * inv_n;
+			const numb rms_p  = sqrt(peaks.sumP2 * inv_n);
+			const numb rms_i  = sqrt(peaks.sumI2 * inv_n);
+			const numb var_p  = peaks.sumP2 * inv_n - mean_p * mean_p;
+			const numb var_i  = peaks.sumI2 * inv_n - mean_i * mean_i;
+			const numb std_p  = sqrt(var_p < 0 ? (numb)0 : var_p);
+			const numb std_i  = sqrt(var_i < 0 ? (numb)0 : var_i);
+
+			outAvgPeaks[idx]    = mult1 * compute_basin_feature(feature1, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
+			AvgTimeOfPeaks[idx] = mult2 * compute_basin_feature(feature2, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
+		}
+	}
+
+	if (progressCounter != nullptr && progressStride > 0) {
+		const size_t totalSteps = skip_local + iters_local;
+		const int expected = (int)(totalSteps / (size_t)progressStride);
+		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
 
