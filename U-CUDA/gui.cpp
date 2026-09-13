@@ -389,7 +389,7 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
 // имён пользовательских схем.
 static const char* const kBuiltinSchemeNames[] = {
     "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD",
-    "Complex CD", "Complex CD4"
+    "Complex CD", "Complex CD4", "Implicit Euler", "Implicit Midpoint"
 };
 
 // Имена для ImGui::Combo, которому нужен массив const char*. Указатели живут,
@@ -1449,9 +1449,11 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // методы
     ImGui::Text("Schemes to generate:");
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = true;
+    // scheme_ccd4 used to be missing from both buttons, so Complex CD4 was neither
+    // selected nor cleared by them.
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = false;
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = false;
     ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
@@ -1474,6 +1476,45 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                           "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
                           "Requires s = a[0] = 0.5: for other s the inner CD is\n"
                           "asymmetric and the order drops to first.");
+
+    ImGui::Checkbox("Implicit Euler", &model.scheme_ieuler);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("X_next = X + h*f(X_next), solved by Newton on a\n"
+                          "symbolically differentiated Jacobian.\n"
+                          "Order 1, L-stable: unlike the explicit schemes it stays\n"
+                          "bounded on stiff systems at steps where RK4 diverges.\n"
+                          "Needs a differentiable RHS (no floor/ceil/fmod).");
+    ImGui::SameLine();
+    ImGui::Checkbox("Implicit Midpoint", &model.scheme_imidpoint);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Solved for the stage Y = (X + X_next)/2:\n"
+                          "Y = X + (h/2)*f(Y), then X_next = 2*Y - X.\n"
+                          "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
+                          "and symplectic. Same Newton solver as Implicit Euler.");
+
+    // Настройки Ньютона — общие для обеих неявных схем, поэтому живут здесь,
+    // на уровне системы, а не в конфиге каждого анализа.
+    if (model.scheme_ieuler || model.scheme_imidpoint) {
+        ImGui::Spacing();
+        ImGui::Text("Newton solver:");
+        int jac_mode = model.newton_full ? 1 : 0;
+        ImGui::SetNextItemWidth(kFieldW * 2.0f);
+        if (ImGui::Combo("jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0"))
+            model.newton_full = (jac_mode == 1);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("modified: Jacobian and LU reused across iterations and\n"
+                              "refreshed when the correction stops shrinking.\n"
+                              "Cheaper on GPU and the right default.\n"
+                              "full: rebuilt every iteration. Quadratic convergence,\n"
+                              "most robust at large h, ~k times the cost.");
+        InputNumStr("tolerance", model.newton_tol, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Newton stops once ||dX|| falls below this.");
+        InputNumStr("max iterations", model.newton_max_iters, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Hard cap on Newton passes per step. 2-3 is typical\n"
+                              "from the explicit-Euler predictor.");
+    }
 
     // Custom KRS schemes (raw C/CUDA код вместо codegen)
     ImGui::Spacing();

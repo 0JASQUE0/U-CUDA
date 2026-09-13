@@ -1,5 +1,6 @@
 ﻿#include "integrator.h"
 #include <cmath>
+#include <algorithm>   // std::swap in the implicit-scheme LU
 
 IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return IntScheme::EulerCromer;
@@ -9,6 +10,8 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "CD")                return IntScheme::CD;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
+    if (s == "Implicit Euler")    return IntScheme::ImplicitEuler;
+    if (s == "Implicit Midpoint") return IntScheme::ImplicitMidpoint;
     return IntScheme::Euler;
 }
 
@@ -224,6 +227,109 @@ bool run_trajectory(StepOnce do_step, const State* X, int n,
     return true;
 }
 
+// ---------- Implicit Euler / Implicit Midpoint ----------
+//
+// Mirror of codegen.cpp::scheme_implicit_common: same predictor, same Newton
+// variants, same LU with partial pivoting, same loop order. The GPU emits this as
+// unrolled text and the CPU walks the same symbolic Jacobian through the bytecode
+// interpreter, so both run one algorithm (as with Euler/RK4, and unlike CD, where
+// the CPU deliberately skips the analytic branch).
+//
+// ImplicitEuler:    F(Xn) = Xn - X - h*f(Xn) = 0,      X_next = Xn
+// ImplicitMidpoint: solved for the stage Y = (X + X_next)/2,
+//                   F(Y)  = Y - X - (h/2)*f(Y) = 0,    X_next = 2*Y - X
+
+// LU factorisation in place, partial pivoting. Returns false on a singular pivot.
+bool lu_factor(double* Am, int* piv, int n) {
+    for (int k = 0; k < n; ++k) {
+        int p = k;
+        double mx = std::fabs(Am[k * n + k]);
+        for (int r = k + 1; r < n; ++r) {
+            double av = std::fabs(Am[r * n + k]);
+            if (av > mx) { mx = av; p = r; }
+        }
+        piv[k] = p;
+        if (p != k)
+            for (int c = 0; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
+        const double d = Am[k * n + k];
+        if (std::fabs(d) < 1e-30) return false;
+        for (int r = k + 1; r < n; ++r) {
+            const double m = Am[r * n + k] / d;
+            Am[r * n + k] = m;
+            for (int c = k + 1; c < n; ++c) Am[r * n + c] -= m * Am[k * n + c];
+        }
+    }
+    return true;
+}
+
+// Solves LU * x = b in place over b.
+void lu_solve(const double* Am, const int* piv, double* b, int n) {
+    for (int k = 0; k < n; ++k) {
+        const int p = piv[k];
+        if (p != k) std::swap(b[k], b[p]);
+        for (int r = k + 1; r < n; ++r) b[r] -= Am[r * n + k] * b[k];
+    }
+    for (int k = n - 1; k >= 0; --k) {
+        for (int c = k + 1; c < n; ++c) b[k] -= Am[k * n + c] * b[c];
+        b[k] /= Am[k * n + k];
+    }
+}
+
+// hc = h for Implicit Euler, h/2 for Implicit Midpoint; the caller applies the
+// write-back that tells them apart.
+void newton_stage(const SystemEvaluator& ev, const double* X, const double* a,
+                  double hc, int n, double* Xn, double* Fv, double* Am, int* piv,
+                  double* kbuf) {
+    ev.eval(X, a, kbuf);
+    for (int i = 0; i < n; ++i) Xn[i] = X[i] + hc * kbuf[i];   // explicit-Euler predictor
+
+    const bool   full  = ev.newton_full();
+    const double tol   = ev.newton_tol() > 0.0 ? ev.newton_tol() : 1e-10;
+    const int    maxit = ev.newton_max_iters() > 0 ? ev.newton_max_iters() : 1;
+
+    auto build = [&]() {
+        ev.eval_jacobian(Xn, a, Am);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                Am[i * n + j] = (i == j ? 1.0 : 0.0) - hc * Am[i * n + j];
+        return lu_factor(Am, piv, n);
+    };
+
+    bool ok = true, refresh = true;
+    double prevn = 1e300;
+    for (int it = 0; it < maxit; ++it) {
+        if (refresh) { ok = build(); refresh = false; }
+        // Singular pivot leaves the step on the predictor rather than dividing
+        // through and turning the trajectory into nan - same choice as the
+        // generated code.
+        if (!ok) break;
+        ev.eval(Xn, a, kbuf);
+        for (int i = 0; i < n; ++i) Fv[i] = Xn[i] - X[i] - hc * kbuf[i];
+        lu_solve(Am, piv, Fv, n);
+        double nrm = 0.0;
+        for (int i = 0; i < n; ++i) { Xn[i] -= Fv[i]; nrm += Fv[i] * Fv[i]; }
+        if (nrm < tol * tol) break;
+        // nrm and prevn are SQUARED norms, so 0.25 is the 0.5 contraction factor.
+        // Without the refresh a frozen Jacobian diverges outright on a stiff
+        // nonlinear system (measured on Van der Pol, mu = 100, h >= 0.01).
+        if (full || nrm > 0.25 * prevn) refresh = true;
+        prevn = nrm;
+    }
+}
+void step_implicit_euler(const SystemEvaluator& ev, double* X, const double* a,
+                         double h, int n, double* Xn, double* Fv, double* Am,
+                         int* piv, double* kbuf) {
+    newton_stage(ev, X, a, h, n, Xn, Fv, Am, piv, kbuf);
+    for (int i = 0; i < n; ++i) X[i] = Xn[i];
+}
+
+void step_implicit_midpoint(const SystemEvaluator& ev, double* X, const double* a,
+                            double h, int n, double* Xn, double* Fv, double* Am,
+                            int* piv, double* kbuf) {
+    newton_stage(ev, X, a, 0.5 * h, n, Xn, Fv, Am, piv, kbuf);
+    for (int i = 0; i < n; ++i) X[i] = 2.0 * Xn[i] - X[i];   // Xn is the stage value
+}
+
 } // namespace
 
 bool computePhasePortraitCPU(
@@ -246,6 +352,16 @@ bool computePhasePortraitCPU(
     // пустых вектора, без аллокаций.
     std::vector<ucmplx> Zc, Kc;
     if (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4) { Zc.resize(n); Kc.resize(n); }
+    // Newton workspace, allocated only for the two implicit schemes.
+    std::vector<double> Xn, Fv, Am;
+    std::vector<int> piv;
+    const bool implicit = (scheme == IntScheme::ImplicitEuler || scheme == IntScheme::ImplicitMidpoint);
+    if (implicit) {
+        // Without a symbolic Jacobian (floor/ceil/fmod in the RHS) Newton has nothing
+        // to solve with; fail loudly instead of silently degrading to fixed-point.
+        if (!ev.has_jacobian()) return false;
+        Xn.resize(n); Fv.resize(n); Am.resize((size_t)n * n); piv.resize(n);
+    }
 
     auto do_step = [&]() {
         switch (scheme) {
@@ -257,6 +373,8 @@ bool computePhasePortraitCPU(
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
+        case IntScheme::ImplicitEuler:    step_implicit_euler(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
+        case IntScheme::ImplicitMidpoint: step_implicit_midpoint(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         }
     };
 

@@ -139,6 +139,15 @@ public:
     // Complex CD4: два прохода CD с шагами gamma*h и conj(gamma)*h — порядок 4.
     // Требует s = 0.5 (иначе внутренний CD несимметричен и порядок падает до 1).
     bool scheme_ccd4 = false;
+    // Неявные схемы: Ньютон по символьному якобиану, решается ВСЯ связанная
+    // система (в отличие от CD, диагонально-неявного). Отсюда A-устойчивость.
+    bool scheme_ieuler = false;
+    bool scheme_imidpoint = false;
+
+    // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
+    bool        newton_full      = false;
+    std::string newton_tol       = "1e-10";
+    std::string newton_max_iters = "8";
 
     // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
     std::string symmetry_s = "0.5";
@@ -482,6 +491,8 @@ public:
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
                 { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
+                { scheme_ieuler,   "Implicit Euler",    Scheme::ImplicitEuler },
+                { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
             };
             bool any = false;
             for (const auto& it : items) {

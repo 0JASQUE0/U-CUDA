@@ -475,6 +475,165 @@ namespace { // внутренняя линковка: всё ниже не ви�
         for (const auto& c : n->args) cd_check_complex_safe(c);
     }
 
+    // ---------- Symbolic differentiation (implicit schemes) ----------
+    //
+    // d/dv over the same 9-kind AST the rest of codegen uses. Everything is built
+    // through the pn_* peephole constructors above so that x*0, x*1 and -(-x) fold
+    // on the way out -- without that a 3x3 Jacobian prints as unreadable noise.
+    // pn_add / pn_sub deliberately do NOT fold (the CD emitter depends on their exact
+    // shape), so zero-folding for the chain rule lives in the jd_* wrappers instead.
+
+    constexpr double JD_LN2  = 0.69314718055994530942;
+    constexpr double JD_LN10 = 2.30258509299404568402;
+
+    PN pn_call1(const char* f, PN u) {
+        auto n = mk(Node::Call); n->name = f; n->args.push_back(std::move(u)); return n;
+    }
+    PN pn_call2(const char* f, PN u, PN w) {
+        auto n = mk(Node::Call); n->name = f;
+        n->args.push_back(std::move(u)); n->args.push_back(std::move(w)); return n;
+    }
+    PN pn_pow(PN a, PN b) {
+        // a^0 -> 1 and a^1 -> a, so the power rule never leaves pow(x, 1.0) behind
+        if (b && b->kind == Node::Num) {
+            if (b->num == 0.0) return pn_num(1);
+            if (b->num == 1.0) return a;
+        }
+        auto n = mk(Node::Pow); n->a = std::move(a); n->b = std::move(b); return n;
+    }
+    PN jd_add(PN a, PN b) {
+        if (pn_is_zero(a)) return b;
+        if (pn_is_zero(b)) return a;
+        return pn_add(std::move(a), std::move(b));
+    }
+    PN jd_sub(PN a, PN b) {
+        if (pn_is_zero(b)) return a;
+        if (pn_is_zero(a)) return pn_neg(std::move(b));
+        return pn_sub(std::move(a), std::move(b));
+    }
+
+    PN pn_diff(const PN& n, const std::string& v);
+
+    PN pn_diff_call(const PN& n, const std::string& v) {
+        const std::string& f = n->name;
+        // pow / atan2 / fmod are the only binary calls the parser produces
+        if (f == "pow") {
+            if (n->args.size() != 2) throw std::runtime_error("jacobian: pow needs 2 args");
+            return pn_diff(pn_pow(n->args[0], n->args[1]), v);
+        }
+        if (f == "atan2") {
+            if (n->args.size() != 2) throw std::runtime_error("jacobian: atan2 needs 2 args");
+            const PN& u = n->args[0]; const PN& w = n->args[1];
+            PN num = jd_sub(pn_mul(w, pn_diff(u, v)), pn_mul(u, pn_diff(w, v)));
+            if (pn_is_zero(num)) return pn_num(0);
+            return pn_div(num, pn_add(pn_mul(u, u), pn_mul(w, w)));
+        }
+        if (n->args.size() != 1) throw std::runtime_error("jacobian: " + f + " needs 1 arg");
+        const PN& u = n->args[0];
+        PN du = pn_diff(u, v);
+        if (pn_is_zero(du)) return pn_num(0);
+
+        PN g;  // outer derivative, d f / d u
+        if      (f == "sin")   g = pn_call1("cos", u);
+        else if (f == "cos")   g = pn_neg(pn_call1("sin", u));
+        else if (f == "tan")   g = pn_div(pn_num(1), pn_mul(pn_call1("cos", u), pn_call1("cos", u)));
+        else if (f == "asin")  g = pn_div(pn_num(1), pn_call1("sqrt", pn_sub(pn_num(1), pn_mul(u, u))));
+        else if (f == "acos")  g = pn_neg(pn_div(pn_num(1), pn_call1("sqrt", pn_sub(pn_num(1), pn_mul(u, u)))));
+        else if (f == "atan")  g = pn_div(pn_num(1), pn_add(pn_num(1), pn_mul(u, u)));
+        else if (f == "sinh")  g = pn_call1("cosh", u);
+        else if (f == "cosh")  g = pn_call1("sinh", u);
+        else if (f == "tanh")  g = pn_sub(pn_num(1), pn_mul(pn_call1("tanh", u), pn_call1("tanh", u)));
+        else if (f == "exp")   g = pn_call1("exp", u);
+        else if (f == "log")   g = pn_div(pn_num(1), u);
+        else if (f == "log2")  g = pn_div(pn_num(1), pn_mul(u, pn_num(JD_LN2)));
+        else if (f == "log10") g = pn_div(pn_num(1), pn_mul(u, pn_num(JD_LN10)));
+        else if (f == "sqrt")  g = pn_div(pn_num(1), pn_mul(pn_num(2), pn_call1("sqrt", u)));
+        else if (f == "cbrt")  g = pn_div(pn_num(1), pn_mul(pn_num(3), pn_mul(pn_call1("cbrt", u), pn_call1("cbrt", u))));
+        // sysparse rewrites every |...| as fabs(), so the Chua-family piecewise systems
+        // in this project hang on this line. copysign rather than the device-side sign():
+        // it is a builtin for nvcc, NVRTC and MSVC alike, so the same emitted text
+        // compiles on every codegen consumer with no extra header. At u == 0 fabs has no
+        // derivative anyway -- copysign(1,-0.0) is -1 there, sign(0) would be 0.
+        else if (f == "fabs" || f == "abs") g = pn_call2("copysign", pn_num(1), u);
+        else throw std::runtime_error("jacobian: no derivative for function " + f);
+
+        return pn_mul(g, du);
+    }
+
+    PN pn_diff(const PN& n, const std::string& v) {
+        if (!n) return pn_num(0);
+        switch (n->kind) {
+        case Node::Num: return pn_num(0);
+        // params are Sym as well, and correctly differentiate to 0
+        case Node::Sym: return pn_num(n->name == v ? 1.0 : 0.0);
+        case Node::Neg: {
+            PN d = pn_diff(n->a, v);
+            return pn_is_zero(d) ? pn_num(0) : pn_neg(d);
+        }
+        case Node::Add: return jd_add(pn_diff(n->a, v), pn_diff(n->b, v));
+        case Node::Sub: return jd_sub(pn_diff(n->a, v), pn_diff(n->b, v));
+        case Node::Mul: return jd_add(pn_mul(pn_diff(n->a, v), n->b),
+                                      pn_mul(n->a, pn_diff(n->b, v)));
+        case Node::Div: {
+            PN da = pn_diff(n->a, v), db = pn_diff(n->b, v);
+            // v-free denominator is the common case; skip the quotient rule there
+            if (pn_is_zero(db)) return pn_is_zero(da) ? pn_num(0) : pn_div(da, n->b);
+            PN num = jd_sub(pn_mul(da, n->b), pn_mul(n->a, db));
+            if (pn_is_zero(num)) return pn_num(0);
+            return pn_div(num, pn_mul(n->b, n->b));
+        }
+        case Node::Pow: {
+            PN da = pn_diff(n->a, v), db = pn_diff(n->b, v);
+            if (pn_is_zero(da) && pn_is_zero(db)) return pn_num(0);
+            if (pn_is_zero(db)) {
+                // Power rule whenever the exponent is v-free (literal OR parameter).
+                // The general form below needs log(a), undefined for a < 0, and
+                // negative bases are ordinary here.
+                PN em1 = (n->b->kind == Node::Num) ? pn_num(n->b->num - 1.0)
+                                                   : pn_sub(n->b, pn_num(1));
+                return pn_mul(pn_mul(n->b, pn_pow(n->a, em1)), da);
+            }
+            // general: a^b * (db*log(a) + b*da/a)
+            PN t1 = pn_mul(db, pn_call1("log", n->a));
+            PN t2 = pn_is_zero(da) ? pn_num(0) : pn_div(pn_mul(n->b, da), n->a);
+            return pn_mul(pn_pow(n->a, n->b), jd_add(t1, t2));
+        }
+        case Node::Call: return pn_diff_call(n, v);
+        }
+        return pn_num(0);
+    }
+
+    // Same role as cd_check_complex_safe: refuse at codegen time, with a readable
+    // reason, instead of letting NVRTC fail inside a generated kernel. These three
+    // parse fine but have no usable derivative (0 almost everywhere / undefined).
+    void jac_check_differentiable(const PN& n) {
+        if (!n) return;
+        if (n->kind == Node::Call &&
+            (n->name == "fmod" || n->name == "floor" || n->name == "ceil"))
+            throw std::runtime_error("Implicit scheme: function " + n->name +
+                " is not differentiable, no Jacobian can be built -- pick an explicit scheme");
+        jac_check_differentiable(n->a);
+        jac_check_differentiable(n->b);
+        for (const auto& c : n->args) jac_check_differentiable(c);
+    }
+
+    // Jacobian entries as C strings, row-major: out[i*N + j] = d f_i / d vars[j],
+    // emitted over state array st. Counterpart of rhs_over above.
+    std::vector<std::string> jac_over(const System& s, const std::string& st) {
+        if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+        const int N = (int)s.vars.size();
+        NameMap nm = build_namemap(s, st);
+        std::vector<std::string> out((size_t)N * N);
+        for (int i = 0; i < N; ++i) {
+            Parser p(s.rhs[i], s.latex);
+            PN ast = p.parse();
+            jac_check_differentiable(ast);
+            for (int j = 0; j < N; ++j)
+                out[(size_t)i * N + j] = emit_to_str(pn_diff(ast, s.vars[j]), nm);
+        }
+        return out;
+    }
+
     // Схемы
     std::string scheme_euler(const System& s) {
         int N = s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
@@ -572,6 +731,163 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "    for (l = 0; l < N; ++l) X[l] = y[l];\n";
         return o.str();
     }
+
+    // ---------- Implicit schemes: Newton on a symbolic Jacobian ----------
+    //
+    // ImplicitEuler:    F(Xn) = Xn - X - h*f(Xn) = 0,       X_next = Xn
+    // ImplicitMidpoint: solved for the stage value Y = (X + X_next)/2,
+    //                   F(Y)  = Y  - X - (h/2)*f(Y) = 0,    X_next = 2*Y - X
+    // so both are the same emitted code with hc = h or h/2, differing only in the
+    // final write-back. Unlike CD, which solves each equation for its own variable
+    // and never sees the cross terms, this solves the FULL coupled system -- that is
+    // what makes the two methods A-stable and worth their cost on stiff problems.
+    //
+    // Newton starts from an explicit-Euler predictor, which lands within O(h^2) of
+    // the root, so 2-3 iterations are typical. System::newton_full picks the variant:
+    //   false -- Jacobian and LU built once per step at the predictor and REUSED
+    //            while the correction keeps shrinking; rebuilt as soon as it does
+    //            not (modified Newton with a refresh). The refresh is not a
+    //            refinement: a permanently frozen Jacobian diverges outright on a
+    //            stiff nonlinear system - measured on Van der Pol at mu = 100,
+    //            where h >= 0.01 blew up without it and reproduces the full-Newton
+    //            answer with it, at about half the Jacobian evaluations.
+    //   true  -- rebuilt every iteration (full Newton): quadratic convergence and
+    //            the most robust at large h, at roughly k times the cost.
+    // Iteration stops on ||dX||^2 < tol^2 or after newton_max_iters passes. tol and
+    // the iteration cap are printed as literals, so they land in krs_body and thus in
+    // the NVRTC cache key by themselves -- no extra placeholder, no manual eviction.
+    //
+    // The Gauss/LU solver is printed INTO the body instead of being shared from a
+    // header, on purpose: the phase-portrait path hand-assembles its NVRTC source in
+    // nvrtc_engine.cpp and pulls in configCUDA.h only when the body mentions ucmplx,
+    // so a header helper would simply not be found there. DOPRI78 inlines its Butcher
+    // tables for the same reason. Cost: numb Am[N*N] in local memory per thread --
+    // 72 bytes at the usual N = 3, growing as N^2.
+    enum class ImplicitKind { Euler, Midpoint };
+
+    std::string scheme_implicit_common(const System& s, ImplicitKind kind) {
+        if (s.vars.size() != s.rhs.size())
+            throw std::runtime_error("vars/rhs size mismatch");
+        const int N = (int)s.vars.size();
+
+        auto f0 = rhs_over(s, "X");    // predictor, evaluated at the old state
+        auto fn = rhs_over(s, "Xn");   // residual, evaluated at the Newton iterate
+        auto Jn = jac_over(s, "Xn");   // Jacobian, same point as the residual
+
+        const bool   full  = s.newton_full;
+        const double tol   = s.newton_tol > 0.0 ? s.newton_tol : 1e-10;
+        const int    maxit = s.newton_max_iters > 0 ? s.newton_max_iters : 1;
+
+        std::ostringstream o;
+        o << "    numb Xn[" << N << "];\n";
+        o << "    numb Fv[" << N << "];\n";
+        o << "    numb Am[" << N * N << "];\n";
+        o << "    int  piv[" << N << "];\n";
+        o << "    const int  ndim = " << N << ";\n";
+        o << "    const numb hc = "
+          << (kind == ImplicitKind::Euler ? "h" : "(0.5 * h)") << ";\n";
+        o << "    const numb ntol = " << fmtnum(tol) << ";\n";
+        o << "    int it, ik, ir, ic, ip, sing, refresh;\n";
+        o << "    numb mx, av, dgn, mlt, nrm, prevn;\n";
+
+        // Predictor: explicit Euler over the same hc, so the Newton start is already
+        // second-order accurate for the midpoint variant.
+        o << "\n    /* predictor: explicit Euler */\n";
+        for (int i = 0; i < N; ++i)
+            o << "    Xn[" << i << "] = X[" << i << "] + hc * (" << f0[i] << ");\n";
+
+        o << "\n    sing = 0; refresh = 1; prevn = 1e300;\n";
+        o << "    for (it = 0; it < " << maxit << "; it++) {\n";
+
+        // One emission of the Jacobian + LU, entered on iteration 0 and again
+        // whenever `refresh` is set below. Full Newton sets it every iteration;
+        // modified Newton only when the frozen matrix stops contracting.
+        o << "        if (refresh) {\n";
+        o << "            /* Am = I - hc * J(Xn) */\n";
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                const std::string& d = Jn[(size_t)i * N + j];
+                o << "            Am[" << (i * N + j) << "] = ";
+                if (d == "0.0") o << (i == j ? "1.0" : "0.0") << ";\n";
+                else if (i == j) o << "1.0 - hc * (" << d << ");\n";
+                else             o << "-hc * (" << d << ");\n";
+            }
+        }
+        o << "            /* LU with partial pivoting */\n";
+        o << "            for (ik = 0; ik < ndim; ik++) {\n";
+        o << "                ip = ik; mx = fabs(Am[ik * ndim + ik]);\n";
+        o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
+        o << "                    av = fabs(Am[ir * ndim + ik]);\n";
+        o << "                    if (av > mx) { mx = av; ip = ir; }\n";
+        o << "                }\n";
+        o << "                piv[ik] = ip;\n";
+        o << "                if (ip != ik)\n";
+        o << "                    for (ic = 0; ic < ndim; ic++) {\n";
+        o << "                        mlt = Am[ik * ndim + ic];\n";
+        o << "                        Am[ik * ndim + ic] = Am[ip * ndim + ic];\n";
+        o << "                        Am[ip * ndim + ic] = mlt;\n";
+        o << "                    }\n";
+        o << "                dgn = Am[ik * ndim + ik];\n";
+        // Singular pivot: flag and bail instead of dividing. Nudging the pivot
+        // would only turn the correction into inf and then nan, killing a
+        // trajectory that is otherwise alive; leaving the step on the predictor
+        // costs one order locally and nothing globally.
+        o << "                if (fabs(dgn) < 1e-30) { sing = 1; break; }\n";
+        o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
+        o << "                    mlt = Am[ir * ndim + ik] / dgn;\n";
+        o << "                    Am[ir * ndim + ik] = mlt;\n";
+        o << "                    for (ic = ik + 1; ic < ndim; ic++)\n";
+        o << "                        Am[ir * ndim + ic] -= mlt * Am[ik * ndim + ic];\n";
+        o << "                }\n";
+        o << "            }\n";
+        o << "            refresh = 0;\n";
+        o << "        }\n";
+        o << "        if (sing) break;\n";
+
+        o << "        /* residual F(Xn) = Xn - X - hc * f(Xn) */\n";
+        for (int i = 0; i < N; ++i)
+            o << "        Fv[" << i << "] = Xn[" << i << "] - X[" << i
+              << "] - hc * (" << fn[i] << ");\n";
+        o << "        /* solve Am * dX = Fv in place */\n";
+        o << "        for (ik = 0; ik < ndim; ik++) {\n";
+        o << "            ip = piv[ik];\n";
+        o << "            if (ip != ik) { mlt = Fv[ik]; Fv[ik] = Fv[ip]; Fv[ip] = mlt; }\n";
+        o << "            for (ir = ik + 1; ir < ndim; ir++)\n";
+        o << "                Fv[ir] -= Am[ir * ndim + ik] * Fv[ik];\n";
+        o << "        }\n";
+        o << "        for (ik = ndim - 1; ik >= 0; ik--) {\n";
+        o << "            for (ic = ik + 1; ic < ndim; ic++)\n";
+        o << "                Fv[ik] -= Am[ik * ndim + ic] * Fv[ic];\n";
+        o << "            Fv[ik] /= Am[ik * ndim + ik];\n";
+        o << "        }\n";
+        o << "        nrm = 0.0;\n";
+        for (int i = 0; i < N; ++i)
+            o << "        Xn[" << i << "] -= Fv[" << i << "]; nrm += Fv[" << i
+              << "] * Fv[" << i << "];\n";
+        o << "        if (nrm < ntol * ntol) break;\n";
+        if (full)
+            o << "        refresh = 1;\n";
+        else
+            // nrm and prevn are SQUARED norms, so 0.25 is the 0.5 contraction
+            // factor. Without this a frozen Jacobian diverges outright on a stiff
+            // nonlinear system (measured on Van der Pol, mu = 100, h >= 0.01);
+            // refreshing recovers the full-Newton answer at half the Jacobians.
+            o << "        if (nrm > 0.25 * prevn) refresh = 1;\n";
+        o << "        prevn = nrm;\n";
+        o << "    }\n\n";
+
+        if (kind == ImplicitKind::Euler)
+            for (int i = 0; i < N; ++i)
+                o << "    X[" << i << "] = Xn[" << i << "];\n";
+        else
+            // Xn holds the stage value Y; recover the endpoint from it.
+            for (int i = 0; i < N; ++i)
+                o << "    X[" << i << "] = 2.0 * Xn[" << i << "] - X[" << i << "];\n";
+
+        return o.str();
+    }
+    std::string scheme_implicit_euler(const System& s)    { return scheme_implicit_common(s, ImplicitKind::Euler); }
+    std::string scheme_implicit_midpoint(const System& s) { return scheme_implicit_common(s, ImplicitKind::Midpoint); }
 
     // CD: Composition D-method (diagonally-implicit symplectic composition).
     // Theory (PDF chapter 1.1): Psi_{h,s} = Phi_{h1} o Phi*_{h2} with
@@ -862,7 +1178,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
         F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
         F_SINH, F_COSH, F_TANH, F_EXP, F_LOG, F_LOG2, F_LOG10,
         F_SQRT, F_CBRT, F_FABS,
-        F_POW = 100, F_ATAN2, F_FMOD
+        // F_COPYSIGN is emitted only by pn_diff (derivative of fabs); the user-facing
+        // parser does not accept it, so it is absent from known_funcs().
+        F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN
     };
     struct Instr { int op; int idx; double val; };
 
@@ -874,6 +1192,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         if (nm == "log10")return F_LOG10; if (nm == "sqrt")return F_SQRT; if (nm == "cbrt")return F_CBRT;
         if (nm == "fabs" || nm == "abs")return F_FABS;
         if (nm == "pow")return F_POW; if (nm == "atan2")return F_ATAN2; if (nm == "fmod")return F_FMOD;
+        if (nm == "copysign")return F_COPYSIGN;
         throw std::runtime_error("eval: unknown function " + nm);
     }
 
@@ -931,6 +1250,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
     double apply_func2(int fid, double a, double b) {
         switch (fid) {
         case F_POW:return std::pow(a, b); case F_ATAN2:return std::atan2(a, b); case F_FMOD:return std::fmod(a, b);
+        case F_COPYSIGN:return std::copysign(a, b);
         } return 0;
     }
 
@@ -992,6 +1312,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
 struct SystemEvaluator::Impl {
     int dim = 0;
     std::vector<std::vector<Instr>> programs; // по одной на уравнение
+    // Jacobian, row-major dim*dim, from the same symbolic derivatives the GPU
+    // schemes emit. Empty when the system has no derivative (floor/ceil/fmod) --
+    // that must not break explicit schemes, which never ask for it.
+    std::vector<std::vector<Instr>> jac_programs;
+    bool   newton_full = false;
+    double newton_tol = 1e-10;
+    int    newton_max_iters = 8;
     int max_stack = 16;                        // глубина стека (с запасом)
     mutable std::vector<double> stack;
     // Отдельный стек под комплексный проход: eval и eval_complex не зовутся
@@ -1021,6 +1348,33 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
         int depth = (int)impl_->programs[i].size() + 4;
         if (depth > maxdepth) maxdepth = depth;
     }
+    // Jacobian programs. Built eagerly (N*N tiny programs, negligible at the usual
+    // N = 3) but tolerantly: a non-differentiable system must still work with the
+    // explicit schemes, so failure leaves jac_programs empty and is reported by
+    // has_jacobian() rather than thrown here.
+    try {
+        std::vector<std::vector<Instr>> jp((size_t)impl_->dim * impl_->dim);
+        for (int i = 0; i < impl_->dim; ++i) {
+            Parser p(sys.rhs[i], sys.latex);
+            PN ast = p.parse();
+            jac_check_differentiable(ast);
+            for (int j = 0; j < impl_->dim; ++j) {
+                ByteCompiler bc{ jp[(size_t)i * impl_->dim + j], var_index, param_index };
+                bc.compile(pn_diff(ast, sys.vars[j]));
+                int depth = (int)jp[(size_t)i * impl_->dim + j].size() + 4;
+                if (depth > maxdepth) maxdepth = depth;
+            }
+        }
+        impl_->jac_programs = std::move(jp);
+    }
+    catch (const std::exception&) {
+        impl_->jac_programs.clear();
+    }
+
+    impl_->newton_full      = sys.newton_full;
+    impl_->newton_tol       = sys.newton_tol;
+    impl_->newton_max_iters = sys.newton_max_iters;
+
     impl_->max_stack = maxdepth;
     impl_->stack.resize(maxdepth);
 }
@@ -1036,6 +1390,23 @@ void SystemEvaluator::eval(const double* X, const double* a, double* deriv) cons
     for (int i = 0; i < impl_->dim; ++i)
         deriv[i] = run_program(impl_->programs[i], X, a, st);
 }
+
+bool SystemEvaluator::has_jacobian() const { return !impl_->jac_programs.empty(); }
+
+void SystemEvaluator::eval_jacobian(const double* X, const double* a, double* J) const {
+    const int n = impl_->dim;
+    if (impl_->jac_programs.empty()) {
+        for (int k = 0; k < n * n; ++k) J[k] = 0.0;
+        return;
+    }
+    double* st = impl_->stack.data();
+    for (int k = 0; k < n * n; ++k)
+        J[k] = run_program(impl_->jac_programs[(size_t)k], X, a, st);
+}
+
+bool   SystemEvaluator::newton_full() const      { return impl_->newton_full; }
+double SystemEvaluator::newton_tol() const       { return impl_->newton_tol; }
+int    SystemEvaluator::newton_max_iters() const { return impl_->newton_max_iters; }
 
 void SystemEvaluator::eval_complex(const ucmplx* X, const double* a, ucmplx* deriv) const {
     if ((int)impl_->stack_c.size() < impl_->max_stack)
@@ -1056,6 +1427,8 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::CD:               return scheme_cd(s);
     case Scheme::ComplexCD:        return scheme_complex_cd(s);
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
+    case Scheme::ImplicitEuler:    return scheme_implicit_euler(s);
+    case Scheme::ImplicitMidpoint: return scheme_implicit_midpoint(s);
     }
     throw std::runtime_error("unknown scheme");
 }
@@ -1068,6 +1441,8 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "CD")                return Scheme::CD;
     if (name == "Complex CD")        return Scheme::ComplexCD;
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
+    if (name == "Implicit Euler")    return Scheme::ImplicitEuler;
+    if (name == "Implicit Midpoint") return Scheme::ImplicitMidpoint;
     return Scheme::Euler;
 }
 
