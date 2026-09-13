@@ -64,6 +64,9 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 //                     the per-point step counts are recomputed from h.
 //   logScale  != 0 -> points are distributed logarithmically over [lo, hi].
 //   result[j]      -- lambda for point j, or NaN when the point did not survive.
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
 extern "C" __global__ void lle1dContinuationKernel(
     int nPts,
     numb lo,
@@ -82,7 +85,9 @@ extern "C" __global__ void lle1dContinuationKernel(
     numb transientTime,
     numb eps,
     numb maxValue,
-    numb* result)
+    numb* result,
+    const volatile int* cancelFlag,
+    int*  progressCounter)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -108,6 +113,8 @@ extern "C" __global__ void lle1dContinuationKernel(
     const int nBlocks = (int)(tMax / NT);   // h-independent
 
     for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
         const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
 

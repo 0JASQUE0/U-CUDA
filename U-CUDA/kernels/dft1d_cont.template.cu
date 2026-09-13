@@ -87,6 +87,9 @@ __device__ __forceinline__ numb dft_window(int n, int len, int window_type) {
 //   d_data -- scratch for ONE block, length maxPointsInBlock.
 //   AkCOS/BkSIN -- [nPts * nFreq], param-major / freq-minor (as elsewhere).
 //   flags[j] -- 1 ok, -1 unusable (diverged transient or collapse to a point).
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
 extern "C" __global__ void dft1dContinuationKernel(
     int nPts,
     numb lo,
@@ -114,7 +117,9 @@ extern "C" __global__ void dft1dContinuationKernel(
     numb* d_data,
     numb* AkCOS,
     numb* BkSIN,
-    int*  flags)
+    int*  flags,
+    const volatile int* cancelFlag,
+    int*  progressCounter)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -127,6 +132,8 @@ extern "C" __global__ void dft1dContinuationKernel(
     const int  RESET_INTERVAL = 1000;
 
     for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
         const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
 

@@ -3895,10 +3895,12 @@ struct ParametricEngine::Impl {
         numb* d_baseValues = nullptr;
         numb* d_baseX      = nullptr;
         numb* d_result     = nullptr;
+        RunSignals sig;   // однопоточное ядро: тик на точку
         auto cleanup = [&]() {
             if (d_baseValues) cudaFree(d_baseValues);
             if (d_baseX)      cudaFree(d_baseX);
             if (d_result)     cudaFree(d_result);
+            sig.release();
         };
         #define LC_CHECK(call, where) do { cudaError_t _e = (call); \
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
@@ -3924,19 +3926,28 @@ struct ParametricEngine::Impl {
         numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
         numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
 
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        int* d_cancel_arg   = sig.cancelArg();
+        int* d_progress_arg = sig.progressArg();
         void* args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
             &mutParamIdx_arg, &d_baseValues, &amountOfValues_arg,
             &d_baseX, &amountOfX_arg,
             &h_arg, &NT_arg, &tMax_arg, &transientTime_arg,
             &eps_arg, &maxValue_arg, &d_result
+            ,&d_cancel_arg, &d_progress_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
         }
         LC_CHECK_CU(cuLaunchKernel(cached_lle_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
                     "cuLaunchKernel(lle cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
         LC_CHECK(cudaDeviceSynchronize(), "sync after lle cont");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
 
         std::vector<numb> host((size_t)nPts);
         LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -3975,10 +3986,12 @@ struct ParametricEngine::Impl {
         numb* d_baseValues = nullptr;
         numb* d_baseX      = nullptr;
         numb* d_result     = nullptr;
+        RunSignals sig;   // однопоточное ядро: тик на точку
         auto cleanup = [&]() {
             if (d_baseValues) cudaFree(d_baseValues);
             if (d_baseX)      cudaFree(d_baseX);
             if (d_result)     cudaFree(d_result);
+            sig.release();
         };
         #define SC_CHECK(call, where) do { cudaError_t _e = (call); \
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
@@ -4004,19 +4017,28 @@ struct ParametricEngine::Impl {
         numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
         numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
 
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        int* d_cancel_arg   = sig.cancelArg();
+        int* d_progress_arg = sig.progressArg();
         void* args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
             &mutParamIdx_arg, &d_baseValues, &amountOfValues_arg,
             &d_baseX, &amountOfX_arg,
             &h_arg, &NT_arg, &tMax_arg, &transientTime_arg,
             &eps_arg, &maxValue_arg, &d_result
+            ,&d_cancel_arg, &d_progress_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
         }
         SC_CHECK_CU(cuLaunchKernel(cached_ls_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
                     "cuLaunchKernel(ls cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
         SC_CHECK(cudaDeviceSynchronize(), "sync after ls cont");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
 
         std::vector<numb> host((size_t)nPts * N);
         SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -4075,6 +4097,7 @@ struct ParametricEngine::Impl {
         numb* d_baseValues = nullptr; numb* d_baseX = nullptr;
         numb* d_data = nullptr; numb* d_ak = nullptr; numb* d_bk = nullptr;
         int*    d_flags = nullptr;
+        RunSignals sig;   // однопоточное ядро: тик на точку
         auto cleanup = [&]() {
             if (d_baseValues) cudaFree(d_baseValues);
             if (d_baseX)      cudaFree(d_baseX);
@@ -4082,6 +4105,7 @@ struct ParametricEngine::Impl {
             if (d_ak)         cudaFree(d_ak);
             if (d_bk)         cudaFree(d_bk);
             if (d_flags)      cudaFree(d_flags);
+            sig.release();
         };
         #define DC_CHECK(call, where) do { cudaError_t _e = (call); \
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
@@ -4118,6 +4142,9 @@ struct ParametricEngine::Impl {
         int    windowType_arg = req.window_type;
         int    maxBlock_arg = maxPointsInBlock;
 
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        int* d_cancel_arg   = sig.cancelArg();
+        int* d_progress_arg = sig.progressArg();
         void* args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg,
             &mutParamIdx_arg, &d_baseValues, &amountOfValues_arg,
@@ -4126,13 +4153,19 @@ struct ParametricEngine::Impl {
             &preScaller_arg, &writableVar_arg, &maxValue_arg,
             &nFreq_arg, &freqLo_arg, &freqHi_arg, &logFreqAxis_arg, &windowType_arg,
             &maxBlock_arg, &d_data, &d_ak, &d_bk, &d_flags
+            ,&d_cancel_arg, &d_progress_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
         }
         DC_CHECK_CU(cuLaunchKernel(cached_dft_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
                     "cuLaunchKernel(dft cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
         DC_CHECK(cudaDeviceSynchronize(), "sync after dft cont");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
 
         std::vector<numb> ak_host(freqCells), bk_host(freqCells);
         res.flags.assign(nPts, 0);
@@ -4474,6 +4507,7 @@ struct ParametricEngine::Impl {
         numb* d_timeOfPeaks= nullptr;
         int*    d_actualIterations = nullptr;
 
+        RunSignals sig;   // однопоточное ядро: тик на точку
         auto cleanup = [&]() {
             if (d_data)       cudaFree(d_data);
             if (d_baseValues) cudaFree(d_baseValues);
@@ -4482,6 +4516,7 @@ struct ParametricEngine::Impl {
             if (d_outPeaks)   cudaFree(d_outPeaks);
             if (d_timeOfPeaks)cudaFree(d_timeOfPeaks);
             if (d_actualIterations) cudaFree(d_actualIterations);
+            sig.release();
         };
         #define C_CHECK(call, where) do { cudaError_t _e = (call); \
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
@@ -4534,6 +4569,9 @@ struct ParametricEngine::Impl {
         int    writableVar_arg       = req.writable_var;
         numb maxValue_arg          = req.max_value;
 
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        int* d_cancel_arg   = sig.cancelArg();
+        int* d_progress_arg = sig.progressArg();
         void* cont_args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg,
             &logScale_arg, &sweepIsH_arg, &mutParamIdx_arg,
@@ -4542,7 +4580,8 @@ struct ParametricEngine::Impl {
             &h_arg, &tMax_arg, &transientTime_arg,
             &sizeOfBlock_arg, &preScaller_arg,
             &writableVar_arg, &maxValue_arg,
-            &d_data, &d_amountOfPeaks, &d_actualIterations
+            &d_data, &d_amountOfPeaks, &d_actualIterations,
+            &d_cancel_arg, &d_progress_arg
         };
         C_CANCEL_CHECK();
         // Continuation is monolithic: progress jumps 0 -> 0.5 around the sweep
@@ -4551,7 +4590,12 @@ struct ParametricEngine::Impl {
         C_CHECK_CU(cuLaunchKernel(cached_cont.kernel_cont,
                                   1, 1, 1, 1, 1, 1, 0, nullptr, cont_args, nullptr),
                    "cuLaunchKernel(cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // Launch peakFinderCUDA на полученные данные
@@ -5104,6 +5148,7 @@ struct ParametricEngine::Impl {
         numb* d_rangesFreq = nullptr;
         numb* d_window     = nullptr;
 
+        RunSignals sig;   // однопоточное ядро: тик на точку
         auto cleanup = [&]() {
             if (d_data)       cudaFree(d_data);
             if (d_baseValues) cudaFree(d_baseValues);
@@ -5113,6 +5158,7 @@ struct ParametricEngine::Impl {
             if (d_BkSIN)      cudaFree(d_BkSIN);
             if (d_rangesFreq) cudaFree(d_rangesFreq);
             if (d_window)     cudaFree(d_window);
+            sig.release();
         };
         #define DFTC_CHECK(call, where) do { cudaError_t _e = (call); \
             if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
@@ -5170,6 +5216,9 @@ struct ParametricEngine::Impl {
         numb maxValue_arg          = req.max_value;
         int*   d_actualIterations    = nullptr;
 
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        int* d_cancel_arg   = sig.cancelArg();
+        int* d_progress_arg = sig.progressArg();
         void* cont_args[] = {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg,
             &logScale_arg, &sweepIsH_arg, &mutParamIdx_arg,
@@ -5178,13 +5227,19 @@ struct ParametricEngine::Impl {
             &h_arg, &tMax_arg, &transientTime_arg,
             &sizeOfBlock_arg, &preScaller_arg,
             &writableVar_arg, &maxValue_arg,
-            &d_data, &d_amountOfPeaks, &d_actualIterations
+            &d_data, &d_amountOfPeaks, &d_actualIterations,
+            &d_cancel_arg, &d_progress_arg
         };
         DFTC_CANCEL_CHECK();
         DFTC_CHECK_CU(cuLaunchKernel(cached_cont.kernel_cont,
                                   1, 1, 1, 1, 1, 1, 0, nullptr, cont_args, nullptr),
                    "cuLaunchKernel(cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks
@@ -5503,10 +5558,9 @@ struct ParametricEngine::Impl {
         // и выбран так, чтобы ячейка отчиталась около 64 раз за всю работу:
         // этого хватает для гладкого бара и не создаёт давки на одном адресе.
         const size_t stepsPerCell = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
-        int progressStride = (int)(stepsPerCell / 64);
-        progressStride -= progressStride % CHECK_INTERVAL;
-        if (progressStride < CHECK_INTERVAL) progressStride = CHECK_INTERVAL;
-        const size_t ticksPerCell = stepsPerCell / (size_t)progressStride;
+        const int    progressStride = progress_stride_for(stepsPerCell);
+        const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
+        const double ticksTotal     = (double)total_cells * ticksPerCell;
 
         // host buffers
         std::vector<int> h_dbscanResult(nPtsLimiter);
@@ -5521,14 +5575,7 @@ struct ParametricEngine::Impl {
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
-        // Оба сигнала живут в mapped-памяти хоста: h_signals[0] = отмена,
-        // h_signals[1] = тики прогресса. Держать их в памяти устройства нельзя:
-        // чтобы их прочитать, нужен был бы cudaMemcpy, а на WDDM любая копия во время
-        // работы ядра встаёт за ним в очередь и блокирует хост до конца счёта
-        // (замерено: цикл опроса делал РОВНО ОДНУ итерацию). Через mapped-память
-        // хост читает и пишет обычными load/store, без вызовов CUDA вообще.
-        int*    h_signals           = nullptr;   // mapped host page
-        int*    d_signals           = nullptr;   // её же device-проекция
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
         // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
@@ -5546,7 +5593,7 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
-            if (h_signals)           cuMemFreeHost(h_signals);
+            sig.release();
             if (stream)              cuStreamDestroy(stream);
         };
 
@@ -5581,10 +5628,7 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
-        BIF2D_CHECK_CU(cuMemHostAlloc((void**)&h_signals, 2 * sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP), "cuMemHostAlloc signals");
-        BIF2D_CHECK_CU(cuMemHostGetDevicePointer((CUdeviceptr*)&d_signals, h_signals, 0), "cuMemHostGetDevicePointer");
-        h_signals[0] = 0;   // cancel
-        h_signals[1] = 0;   // progress ticks
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -5667,8 +5711,9 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
             size_t peakStride_arg            = peakStride;
-            int*   d_cancel_arg              = d_signals;
-            int*   d_progress_arg            = d_signals + 1;
+            int*   d_cancel_arg              = sig.cancelArg();
+            int*   d_progress_arg            = sig.progressArg();
+            int    progressStride_arg        = progressStride;
             int    peakCapacity_arg          = peakCapacity;
 
             void* args_fused[] = {
@@ -5700,9 +5745,9 @@ struct ParametricEngine::Impl {
                 &peakCapacity_arg,
                 &d_cancel_arg,
                 &d_progress_arg,
-                &progressStride
+                &progressStride_arg
             };
-            h_signals[1] = 0;   // тики этого чанка
+            sig.resetTicks();
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5741,33 +5786,9 @@ struct ParametricEngine::Impl {
             // D2H: только d_dbscanResult (число кластеров = период).
             // Async on the same stream + single sync — keeps the GPU continuously
             // loaded across the whole chunk instead of inserting 3 sync gaps.
-            // Опрос вместо блокирующей синхронизации. В теле цикла не должно быть
-            // ни одного вызова CUDA, кроме cudaStreamQuery — см. комментарий
-            // к h_signals выше.
-            {
-                const double doneBefore   = (double)(originalNPtsLimiter * iter) * (double)ticksPerCell;
-                const double ticksTotal   = (double)total_cells * (double)ticksPerCell;
-                volatile int* sig = h_signals;   // обычные load/store, никакого CUDA в цикле
-                bool cancelSent = false;
-                for (;;) {
-                    cudaError_t q = cudaStreamQuery(stream);
-                    if (q == cudaSuccess) break;
-                    if (q != cudaErrorNotReady) {
-                        res.error = std::string("CUDA stream query: ") + cudaGetErrorString(q);
-                        cleanup(); return res;
-                    }
-                    if (req.progress) {
-                        double frac = (doneBefore + (double)sig[1]) / ticksTotal;
-                        if (frac > 1.0) frac = 1.0;
-                        req.progress->store((float)frac, std::memory_order_relaxed);
-                    }
-                    if (!cancelSent && req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-                        sig[0] = 1;          // ядро увидит его в ближайшей проверке CHECK_INTERVAL
-                        cancelSent = true;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-                }
-            }
+            if (!wait_with_signals(stream, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerCell,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
             BIF2D_CANCEL_CHECK();
 

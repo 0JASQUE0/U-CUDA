@@ -64,6 +64,9 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 //   worst case (smallest h), and the real per-point length is reported through
 //   d_actualIterations so peakFinderCUDA only scans the valid prefix.
 // logScale != 0 -- points are distributed logarithmically over [lo, hi].
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
 extern "C" __global__ void bifurcation1dContinuationKernel(
     int nPts,
     numb lo,
@@ -85,7 +88,9 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
     numb maxValue,
     numb* d_data,
     int*  d_amountOfPeaks,
-    int*  d_actualIterations)
+    int*  d_actualIterations,
+    const volatile int* cancelFlag,
+    int*  progressCounter)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -97,6 +102,8 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
     numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Значение узла continuation-цепочки — общая с host'ом функция
         // (ucuda_node_value_cont в configCUDA.h). Прежняя арифметика сохранена
         // внутри неё дословно, значения не меняются; здесь была одна из трёх

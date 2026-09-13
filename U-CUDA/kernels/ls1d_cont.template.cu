@@ -54,6 +54,9 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 
 // Single-thread kernel, launched with gridDim = blockDim = 1.
 // result[j * amountOfX + k] -- k-th exponent at point j, NaN if the point died.
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
 extern "C" __global__ void ls1dContinuationKernel(
     int nPts,
     numb lo,
@@ -72,7 +75,9 @@ extern "C" __global__ void ls1dContinuationKernel(
     numb transientTime,
     numb eps,
     numb maxValue,
-    numb* result)
+    numb* result,
+    const volatile int* cancelFlag,
+    int*  progressCounter)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -106,6 +111,8 @@ extern "C" __global__ void ls1dContinuationKernel(
     const int nBlocks = (int)(tMax / NT);
 
     for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
         const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
 
