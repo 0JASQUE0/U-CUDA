@@ -77,7 +77,9 @@ extern "C" __global__ void fillFSMasterTrajectory(
     const numb* X0,
     const size_t amountOfPointsForSkip,
     const int amountOfPoints,
-    numb* timeDomain)
+    numb* timeDomain,
+    const volatile int* cancelFlag,
+    int*  progressCounter)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     numb X[AMOUNTOFX];
@@ -91,6 +93,9 @@ extern "C" __global__ void fillFSMasterTrajectory(
 
     // Save full state at every integration step.
     for (int i = 0; i < amountOfPoints; ++i) {
+        // Тик — точка окна мастера: ядро однопоточное, давки на атомике нет.
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         for (int j = 0; j < AMOUNTOFX; ++j)
             timeDomain[(size_t)i * AMOUNTOFX + j] = X[j];
         calculateDiscreteModelforFastSynchro(X, X, zeros, values, h, 1);

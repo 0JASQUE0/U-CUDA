@@ -69,7 +69,9 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		icRandomOffset = 0,
 	const numb		icEps = 0,
 	const unsigned long long icSeed = 0,
-	const int		gsWarmup = 0);
+	const int		gsWarmup = 0,
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr);
 
 // swapRole: 0 = grid varies master IC (legacy default — initialConditions
 // overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
@@ -119,7 +121,11 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	int		icRandomOffset = 0,
 	numb	icEps = 0,
 	unsigned long long icSeed = 0,
-	int		gsWarmup = 0);
+	int		gsWarmup = 0,
+	// Сигналы прогресса и отмены; через cuLaunchKernel дефолты не подставляются.
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr,
+	const int progressStride = 0);
 
 // Показатель сжатия ошибки за цикл вперёд-назад по схеме Беннеттина
 // (error_estim 7). Возвращает log10 ρ за цикл; определение — в cudaLibrary.cu
@@ -155,7 +161,11 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const int startDataIndex,
 	const int writeStep = 1,
 	const numb icEps = 0,
-	const int gsWarmup = 0);
+	const int gsWarmup = 0,
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr,
+	const int progressStride = 0,
+	int* ticksReported = nullptr);
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb* Xs,
@@ -173,7 +183,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb icEps = 0,
 	const unsigned long long icSeed = 0,
 	const unsigned long long icCell = 0,
-	const int gsWarmup = 0);
+	const int gsWarmup = 0,
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr);
 
 // Один шаг дискретной модели: новое состояние пишется обратно в x.
 __device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);

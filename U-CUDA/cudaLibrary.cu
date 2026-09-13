@@ -422,6 +422,17 @@ numb fsRandSymmetric(unsigned long long seed, unsigned long long cell, int comp)
 	return (numb)2 * u - (numb)1;
 }
 
+// Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
+// с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
+// свою долю, и бар застрял бы не дойдя до ста.
+__device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int progressStride,
+	size_t totalSteps, int ticks)
+{
+	if (progressCounter == nullptr || progressStride <= 0) return;
+	const int expected = (int)(totalSteps / (size_t)progressStride);
+	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+}
+
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -451,7 +462,10 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int    icRandomOffset,
 	const numb   icEps,
 	const unsigned long long icSeed,
-	const int    gsWarmup)
+	const int    gsWarmup,
+	const volatile int* cancelFlag,
+	int* progressCounter,
+	const int progressStride)
 {
 	// Общая память в рамках одного блока
 	// Строение памяти:
@@ -568,10 +582,13 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 
 	// Возврат здесь — не REGIME_*, а RMS ошибки синхронизации (numb).
 	// NaN означает, что ячейка разлетелась (по maxValue или по nan/inf).
+	int ticks = 0;
 	const numb fsError = loopCalculateDiscreteModelForFastSynchro_2(localX, localSlave, localValues, h, amountOfIterations,
-		amountOfInitialConditions, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock, 1, icEps, gsWarmup);
+		amountOfInitialConditions, maxValue, iterOfSynchr, kForward, kBackward, data, idx * sizeOfBlock, 1, icEps, gsWarmup,
+		cancelFlag, progressCounter, progressStride, &ticks);
 
 	FastSynchroError[idx] = fsError;
+	ucudaProgressTopUp(progressCounter, progressStride, (size_t)amountOfIterations, ticks);
 	if (maxValueCheckerArray != nullptr)
 		maxValueCheckerArray[idx] = (isnan(fsError) || isinf(fsError)) ? -1 : 0;
 
@@ -595,8 +612,13 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	const int startDataIndex,
 	const int writeStep,
 	const numb icEps,
-	const int gsWarmup)
+	const int gsWarmup,
+	const volatile int* cancelFlag,
+	int* progressCounter,
+	const int progressStride,
+	int* ticksReported)
 {
+	size_t sinceReport = 0;
 	//numb* Xm = new numb[amountOfX];
 	//numb* Xs = new numb[amountOfX];
 	//numb* arrayZeros = new numb[amountOfX];
@@ -647,6 +669,22 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	}
 	if (type_of_synch == 0) {
 		for (int i = 1; i < amountOfIterations; i++) {
+			// Та же схема, что и в loopCalculateDiscreteModel_int: раз в CHECK_INTERVAL шагов.
+			if ((i % CHECK_INTERVAL) == 0) {
+				if (progressCounter != nullptr && progressStride > 0) {
+					sinceReport += CHECK_INTERVAL;
+					if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+						atomicAdd(progressCounter, 1);
+#endif
+						if (ticksReported != nullptr) ++(*ticksReported);
+						sinceReport = 0;
+					}
+				}
+				// Отмена отдаёт тот же sentinel, что и разлёт: результат
+				// отменённого прогона хост выбрасывает целиком.
+				if (cancelFlag != nullptr && *cancelFlag != 0) return fsDivergedError();
+			}
 			calculateDiscreteModelforFastSynchro(Xm, arrayZeros, arrayZeros, values, h, 1);
 
 			// Разлёт master'а на пред-проходе: дальше в fwd/bwd циклах Xm
@@ -1293,17 +1331,6 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 }
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
-
-// Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
-// с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
-// свою долю, и бар застрял бы не дойдя до ста.
-__device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int progressStride,
-	size_t totalSteps, int ticks)
-{
-	if (progressCounter == nullptr || progressStride <= 0) return;
-	const int expected = (int)(totalSteps / (size_t)progressStride);
-	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
-}
 
 // ucudaSetupSweepPoint -- which point of the sweep this thread is, extracted so
 // that the trajectory kernel and its fused (trajectory-free) sibling cannot
@@ -4012,10 +4039,16 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		icRandomOffset,
 	const numb		icEps,
 	const unsigned long long icSeed,
-	const int		gsWarmup)
+	const int		gsWarmup,
+	const volatile int* cancelFlag,
+	int* progressCounter)
 {
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
+	// Тиков здесь нет: на поток приходится один вызов, делить его нечем.
+	// Отмена проверяется один раз на входе — для случая, когда флаг
+	// подняли пока ядро стояло в очереди за предыдущим.
+	if (cancelFlag != nullptr && *cancelFlag != 0) return;
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
@@ -4040,7 +4073,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		icSeed,										 //const unsigned long long icSeed
 		(unsigned long long)idx,					 //const unsigned long long icCell
 		gsWarmup									 //const int gsWarmup
-	);
+	,
+		cancelFlag, progressCounter);
 	return;
 }
 
@@ -4060,7 +4094,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb icEps,
 	const unsigned long long icSeed,
 	const unsigned long long icCell,
-	const int gsWarmup)
+	const int gsWarmup,
+	const volatile int* cancelFlag,
+	int* progressCounter)
 {
 	// error_estim 7 — Беннеттин поверх того же цикла вперёд-назад; окно мастера
 	// залито заранее (fillFSMasterTrajectory). Только unidirectional — см.
@@ -4123,6 +4159,10 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	}
 
 	for (int m = 0; m < iterOfSynchr; ++m) {
+		// Тик — цикл синхронизации, а не шаг интегрирования: время живёт
+		// именно в проходах вперёд-назад, а не в заполнении окна.
+		if (cancelFlag != nullptr && *cancelFlag != 0) return fsDivergedError();
+		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 
 		for (int j = 0; j < amountOfX; j++)
 			K_local[j] = K_Forward[j];
