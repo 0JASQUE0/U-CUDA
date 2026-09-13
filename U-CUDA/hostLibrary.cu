@@ -358,7 +358,7 @@ __host__ void bifurcation1D(
 
 			// CUDA функция для расчета траектории систем
 
-			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
+			calculateDiscreteModelCUDA << <gridSize, blockSize, ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
 					nPtsLimiter,
 					amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
@@ -1057,7 +1057,7 @@ __host__ void bifurcation2D(
 		gridSize = (nPtsLimiter + blockSize - 1) / blockSize;	// Расчет размера сетки ( формула является аналогом ceil() )
 
 		// CUDA функция для расчета траектории систем
-		size_t sharedMemNeeded = (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize;
+		size_t sharedMemNeeded = ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize;
 		if (sharedMemNeeded > 48 * 1024) {
 			fprintf(stderr, "WARNING: Shared memory per block (%zu) exceeds limit (48KB). Reduce blockSize.\n", sharedMemNeeded);
 		}
@@ -1676,7 +1676,7 @@ __host__ void neuronClasterization2D(
 
 		// CUDA функция для расчета траектории систем
 
-		calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
+		calculateDiscreteModelCUDA << <gridSize, blockSize, ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
 				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
@@ -2967,7 +2967,7 @@ __host__ void basinsOfAttraction(
 
 		// CUDA функция для расчета траектории систем
 
-			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
+			calculateDiscreteModelCUDA << <gridSize, blockSize, ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize >> >
 			(	nPts,						// Общее разрешение диаграммы - nPts
 				nPtsLimiter,
 				amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 
@@ -3643,7 +3643,7 @@ __host__ void TimeDomainCalculation(
 
 		// CUDA функция для расчета траектории систем
 
-		calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize >> >
+		calculateDiscreteModelCUDA << <gridSize, blockSize, ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize >> >
 		//calculateDiscreteModelCUDA_rand << <gridSize, blockSize >> >
 			(	
 				nPts,
@@ -4374,7 +4374,7 @@ __host__ void bifurcation_DFT_1D(
 
 			// CUDA функция для расчета траектории систем
 
-			calculateDiscreteModelCUDA << <gridSize, blockSize, (amountOfInitialConditions + amountOfValues) * sizeof(numb)* blockSize >> >
+			calculateDiscreteModelCUDA << <gridSize, blockSize, ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize >> >
 				(nPts,						// Общее разрешение диаграммы - nPts
 					nPtsLimiter,
 					amountOfPointsInBlock,		// Количество точек в одной системе ( tMax / h / preScaller ) 

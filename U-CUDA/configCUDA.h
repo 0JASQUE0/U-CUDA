@@ -229,6 +229,18 @@ constexpr numb euler = 2.7182818284590452353602874713527;
 #include <math.h>
 #endif
 
+// Shared-memory stride (in numb) of one thread's {X[], a[]} slice in
+// calculateDiscreteModelCUDA. Padded to an odd number of 64-bit words: with an
+// even stride every thread of a half-warp lands on the same bank pair, so the
+// integrator's hottest access (X[] and a[] on every RHS evaluation) serialises
+// 2- to 8-way. Host and kernel MUST agree — the launch's dynamic shared size is
+// computed from this.
+UCUDA_HD inline int ucuda_shared_stride(int amountOfX, int amountOfValues)
+{
+	const int s = amountOfX + amountOfValues;
+	return (s & 1) ? s : s + 1;
+}
+
 // ---------- Комплексная арифметика (схемы с комплексными шагами) ----------
 //
 // Нужна ровно одной схеме — Complex CD (codegen.cpp::scheme_complex_cd), где

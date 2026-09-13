@@ -2155,7 +2155,7 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg
             };
 
-            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
+            unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
 
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -2165,6 +2165,10 @@ struct ParametricEngine::Impl {
 
             // peakFinderCUDA
             numb timeStep_arg = h * (double)preScaller;
+            // 1D still keeps peaks in the trajectory buffers: 0/0 = legacy layout,
+            // uncapped scan. Passed explicitly -- driver API ignores the defaults.
+            size_t peakStride_arg   = 0;
+            int    peakCapacity_arg = 0;
             void* args_peak[] = {
                 &d_data,
                 &sizeOfBlock_s,
@@ -2173,7 +2177,9 @@ struct ParametricEngine::Impl {
                 &d_outPeaks,
                 &d_timeOfPeaks,
                 &timeStep_arg,
-                &d_actualIterations
+                &d_actualIterations,
+                &peakStride_arg,
+                &peakCapacity_arg
             };
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_peak,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -4434,10 +4440,15 @@ struct ParametricEngine::Impl {
         // h-свипе она своя, буфер выделен под худший случай). Раньше аргумент не передавался вовсе:
         // cuLaunchKernel читал 8-й слот за концом peak_args[], kernel получал мусорный указатель и
         // разыменовывал его — "illegal memory access" сразу после peak-kernel'а.
+        // 9-й и 10-й параметры peakFinderCUDA (peakStride/peakCapacity): 0/0 = legacy-раскладка.
+        // Передаём явно по той же причине, что и actualIterations выше.
+        size_t peakStride_arg   = 0;
+        int    peakCapacity_arg = 0;
         void* peak_args[] = {
             &d_data, &sizeOfBlock_s, &nBlocks,
             &d_amountOfPeaks, &d_outPeaks, &d_timeOfPeaks, &timeStep,
-            &d_actualIterations
+            &d_actualIterations,
+            &peakStride_arg, &peakCapacity_arg
         };
         int    peakBlock = 32;
         int    peakGrid  = (nPts + peakBlock - 1) / peakBlock;
@@ -4819,7 +4830,7 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg
             };
 
-            unsigned int shared = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
+            unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
 
             DFT_CHECK_CU(cuLaunchKernel(cached.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
@@ -5291,6 +5302,9 @@ struct ParametricEngine::Impl {
 
         constexpr int  blockSize_setup          = 32;
         constexpr int  set_precision            = 15;
+        // Launch width. 32 = один варп на блок, а потолок по числу блоков на SM
+        // режет занятость примерно вдвое. blockSize_setup остаётся полом бюджета.
+        constexpr int  blockSize_launch         = 128;
 
         // dt-sweep: буфер должен вмещать худший случай (минимальный h в
         // диапазоне h-оси) -- см. run_bif1d.
@@ -5301,13 +5315,28 @@ struct ParametricEngine::Impl {
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
 
+        // Буферы пиков больше НЕ длиной в траекторию: peakFinder всё равно отдаёт
+        // не больше max_amount_of_peaks. "+1" — стадия межпиковых интервалов съедает
+        // один пик, поэтому для полной строки нужно max_amount_of_peaks + 1 сырых.
+        // При eps_interPeak_delta == 0 (дефолт) результат бит-в-бит такой же, как
+        // у прежнего неограниченного скана (сжатие сдвигает ряд ровно на 1).
+        const size_t peakStride    = (size_t)amountOfPointsInBlock < (size_t)max_amount_of_peaks + 1
+                                   ? (size_t)amountOfPointsInBlock
+                                   : (size_t)max_amount_of_peaks + 1;
+        // dbscan держит в своей строке и метки кластеров, и стек обхода (см. dbscan()).
+        const size_t helpfulStride = 2 * peakStride;
+        const int    peakCapacity  = (int)peakStride;
+
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
         // Memory budget — порт hostLibrary.cu:930-950.
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * 3 * sizeof(numb) + 2 * sizeof(int);
+        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * sizeof(numb)   // d_data
+                                + peakStride * 2 * sizeof(numb)                  // d_outPeaks + d_intervals
+                                + helpfulStride * sizeof(numb)                   // d_helpfulArray
+                                + 2 * sizeof(int);                               // d_amountOfPeaks + d_dbscanResult
         size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
         if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
 
@@ -5330,6 +5359,7 @@ struct ParametricEngine::Impl {
         numb* d_initialConditions = nullptr;
         numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
+        numb* d_outPeaks          = nullptr;
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
@@ -5348,6 +5378,7 @@ struct ParametricEngine::Impl {
             if (d_initialConditions) cudaFree(d_initialConditions);
             if (d_values)            cudaFree(d_values);
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            if (d_outPeaks)          cudaFree(d_outPeaks);
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
@@ -5383,8 +5414,9 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),           "cudaMalloc d_initialConditions");
         BIF2D_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                      "cudaMalloc d_values");
         BIF2D_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
-        BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_intervals");
-        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_helpfulArray");
+        BIF2D_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_outPeaks");
+        BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
+        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         BIF2D_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_actualIterations");
 
@@ -5441,7 +5473,12 @@ struct ParametricEngine::Impl {
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            int blockSize = blockSize_setup;
+            // 48 KB shared — потолок блока без opt-in: широкая система (много X и a[])
+            // при 128 потоках в него не влезет, и запуск упадёт на CUDA_ERROR_INVALID_VALUE.
+            const size_t sharedPerThread = (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb);
+            int blockSize = blockSize_launch;
+            while (blockSize > blockSize_setup && sharedPerThread * (size_t)blockSize > 48u * 1024u)
+                blockSize /= 2;
             int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // 1. calculateDiscreteModelCUDA (dimension=2)
@@ -5491,24 +5528,30 @@ struct ParametricEngine::Impl {
                 &d_actualIterations,
                 &logAxisMask_arg
             };
-            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
+            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           shared_traj, stream, args_traj, nullptr),
                            "cuLaunchKernel(bif2d traj)");
 
-            // 2. peakFinderCUDA — d_data передаётся и как data, и как outPeaks (in-place).
+            // 2. peakFinderCUDA. Пики теперь в отдельном коротком буфере, а не
+            // in-place поверх траектории: при peakStride != sizeOfBlock строка пиков потока k
+            // легла бы поверх траектории соседа, который ещё сканируется.
             // Same stream as traj → automatic ordering, no explicit sync needed.
             numb timeStep_arg = h * (double)preScaller;
+            size_t peakStride_arg   = peakStride;
+            int    peakCapacity_arg = peakCapacity;
             void* args_peak[] = {
                 &d_data,
                 &sizeOfBlock_s,
                 &nPtsLimiter_int,
                 &d_amountOfPeaks,
-                &d_data,        // outPeaks — in-place поверх траектории
+                &d_outPeaks,
                 &d_intervals,
                 &timeStep_arg,
-                &d_actualIterations
+                &d_actualIterations,
+                &peakStride_arg,
+                &peakCapacity_arg
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_peak,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5521,8 +5564,9 @@ struct ParametricEngine::Impl {
             numb eps_arg      = eps_dbscan;
             numb mult_pk_arg  = mult_peak_arg;
             numb mult_int_arg = mult_interval_arg;
+            size_t helpfulStride_arg = helpfulStride;
             void* args_dbscan[] = {
-                &d_data,
+                &d_outPeaks,          // кластеризуем пики, а не сырую траекторию
                 &sizeOfBlock_s,
                 &nPtsLimiter_int,
                 &d_amountOfPeaks,
@@ -5531,7 +5575,9 @@ struct ParametricEngine::Impl {
                 &eps_arg,
                 &d_dbscanResult,
                 &mult_pk_arg,
-                &mult_int_arg
+                &mult_int_arg,
+                &peakStride_arg,
+                &helpfulStride_arg
             };
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5890,7 +5936,7 @@ struct ParametricEngine::Impl {
                 &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
                 &d_actualIterations, &logAxisMask_arg
             };
-            unsigned int shared_traj = (unsigned int)((amountOfInitialConditions + amountOfValues) * sizeof(numb) * blockSize);
+            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
             BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_traj,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared_traj, nullptr, args_traj, nullptr),

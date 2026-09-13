@@ -331,8 +331,11 @@ __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const 
 __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataIndex,
 	const size_t amountOfPoints);
 
+// peakStartIndex/peakCapacity отвязывают буфер пиков от длины траектории: (size_t)-1 +
+// 0 — legacy-поведение (пики лежат в той же раскладке, скан не ограничен).
 __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex, const size_t amountOfPoints,
-	numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h=0.0025);
+	numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h=0.0025,
+	const size_t peakStartIndex = (size_t)-1, const int peakCapacity = 0);
 
 __device__ __host__ void MeanAndMedianFreq(const int idx, const int startDataIndex, int amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq);
 
@@ -347,9 +350,13 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks);
 
+// ВНИМАНИЕ: через driver API (cuLaunchKernel) дефолты НЕ подставляются —
+// массив аргументов обязан содержать все 10 параметров (как у dbscanCUDA ниже).
 __global__ void peakFinderCUDA( numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks = nullptr, numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h = 0.0025,
-	const int* actualIterations = nullptr ); // per-thread valid prefix of `data`; nullptr = always scan full sizeOfBlock
+	const int* actualIterations = nullptr, // per-thread valid prefix of `data`; nullptr = always scan full sizeOfBlock
+	const size_t peakStride = 0,           // 0 = peaks share the `data` layout (stride sizeOfBlock)
+	const int peakCapacity = 0 );          // 0 = scan is not capped
 
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq);
@@ -381,17 +388,19 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2);
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
 	const int idx, const numb eps, int* outData,
-	const numb multPeak = mult_peak, const numb multInterval = mult_interval);
+	const numb multPeak = mult_peak, const numb multInterval = mult_interval,
+	const size_t helpfulStartIndex = (size_t)-1);
 
 // Ядро DBSCAN, блок на траекторию; смысл аргументов см. у dbscan выше.
 // Дефолты множителей = константы configCUDA.h: <<<>>>-вызовы без этих
 // аргументов (hostLibrary.cu) сохраняют прежнее поведение. ВНИМАНИЕ: при
 // запуске через driver API (cuLaunchKernel в parametric_engine.cpp) значения
 // по умолчанию не подставляются — там массив аргументов обязан содержать все
-// 10 параметров.
+// 12 параметров.
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray, const numb eps, int* outData,
-	const numb multPeak = mult_peak, const numb multInterval = mult_interval);
+	const numb multPeak = mult_peak, const numb multInterval = mult_interval,
+	const size_t peakStride = 0, const size_t helpfulStride = 0);
 
 // Ядро LLE (старший показатель Ляпунова).
 __global__ void LLEKernelCUDA(

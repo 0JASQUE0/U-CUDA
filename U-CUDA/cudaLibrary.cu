@@ -1061,13 +1061,16 @@ __global__ void calculateDiscreteModelCUDA(
 	const int		logAxisMask)
 {
 	// Общая память в рамках одного блока
-	// Строение памяти:
-	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
+	// Строение памяти (per-thread slice, шаг ucuda_shared_stride):
+	// {localX_0..localX_n, localValues_0..localValues_m, [pad], следуюший поток...}
 
 	extern __shared__ numb s[];
 	//////// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
-	numb* localX = s + ( threadIdx.x * amountOfInitialConditions );
-	numb* localValues = s + ( blockDim.x * amountOfInitialConditions ) + ( threadIdx.x * amountOfValues );
+	// Odd stride keeps both arrays bank-conflict-free; the launch allocates
+	// exactly ucuda_shared_stride * blockDim.x numb's (see configCUDA.h).
+	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
+	numb* localX = s + ( threadIdx.x * sharedStride );
+	numb* localValues = localX + amountOfInitialConditions;
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1559,8 +1562,16 @@ __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataInde
 }
 
 __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
-	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h)
+	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h,
+	const size_t peakStartIndex, const int peakCapacity)
 {
+	// Peaks may live in buffers whose per-thread stride is NOT sizeOfBlock (the
+	// 2D path sizes them by max_amount_of_peaks instead of by trajectory length).
+	// (size_t)-1 = legacy, peaks share the data layout.
+	const size_t peakBase = (peakStartIndex == (size_t)-1) ? startDataIndex : peakStartIndex;
+	// 0 = unbounded scan (legacy). Otherwise the raw scan stops at peakCapacity,
+	// which is what keeps the writes inside a short peak buffer.
+	const int peakCap = peakCapacity;
 
 	if (doCalculatePeaks) {
 		// Переменная для хранения найденных пиков
@@ -1569,6 +1580,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 		// Начинаем просматривать заданных интервал на наличие пиков
 		for (size_t i = startDataIndex + 2; i < startDataIndex + amountOfPoints - 2; ++i)
 		{
+			if (peakCap > 0 && amountOfPeaks >= peakCap) break;
 			// Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) )
 			if (data[i] - data[i - 1] > eps_peak_delta && data[i] > peak_threshold && data[i] >= data[i + 1]) //
 			{
@@ -1592,16 +1604,16 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 							if (fabs(denom) > 1e-12) {
 								delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
 							}
-							outPeaks[startDataIndex + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
-							timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
+							outPeaks[peakBase + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
+							timeOfPeaks[peakBase + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
 						}
 						else {
 							// Если массик outPeaks не пуст, то делаем запись
 							if (outPeaks != nullptr)
-								outPeaks[startDataIndex + amountOfPeaks] = data[j]; //data[j];
+								outPeaks[peakBase + amountOfPeaks] = data[j]; //data[j];
 							// Если массик timeOfPeaks не пуст, то делаем запись
 							if (timeOfPeaks != nullptr)
-								timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
+								timeOfPeaks[peakBase + amountOfPeaks] = (numb)(j - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(i - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = trunc( ( (numb)j + (numb)i ) / (numb)2 );	// Выбираем индекс посередине между j и i
 
@@ -1622,20 +1634,20 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 		// один индекс влево + Δt между соседями, amountOfPeaks -= 1.
 		if (amountOfPeaks > 1) {
 			int  writeIdx   = 0;                             // индекс записи результата
-			numb anchorTime = timeOfPeaks[startDataIndex];   // время (в индексах) опорного пика
+			numb anchorTime = timeOfPeaks[peakBase];         // время (в индексах) опорного пика
 
 			for (size_t i = 1; i < amountOfPeaks; ++i) {
 				// Абсолютное время текущего пика читаем ДО любой записи —
 				// writeIdx всегда <= i, поэтому запись затирает уже прочитанное.
-				const numb currentTime = timeOfPeaks[startDataIndex + i];
+				const numb currentTime = timeOfPeaks[peakBase + i];
 				const numb delta = (currentTime - anchorTime) * h;
 
 				if (delta >= eps_interPeak_delta) {
 					// Записываем ВТОРОЙ пик пары (текущий) и интервал до него.
 					if (outPeaks != nullptr)
-						outPeaks[startDataIndex + writeIdx] = outPeaks[startDataIndex + i];
+						outPeaks[peakBase + writeIdx] = outPeaks[peakBase + i];
 					if (timeOfPeaks != nullptr)
-						timeOfPeaks[startDataIndex + writeIdx] = delta;
+						timeOfPeaks[peakBase + writeIdx] = delta;
 
 					++writeIdx;
 					anchorTime = currentTime;   // текущий пик — новая опора
@@ -1657,14 +1669,16 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 		if (amountOfPeaks >= max_amount_of_peaks)
 			amountOfPeaks = max_amount_of_peaks;
+		if (peakCap > 0 && amountOfPeaks > peakCap)
+			amountOfPeaks = peakCap;
 
 		for (size_t i = 0; i < amountOfPeaks; ++i)
 		{
 			if (outPeaks != nullptr)
-				outPeaks[startDataIndex + i] = data[startDataIndex + i];
+				outPeaks[peakBase + i] = data[startDataIndex + i];
 
 			if (timeOfPeaks != nullptr)
-				timeOfPeaks[startDataIndex + i] = 0;
+				timeOfPeaks[peakBase + i] = 0;
 
 		}
 		return amountOfPeaks - 1;
@@ -1675,7 +1689,8 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 // Нахождение пиков в "data" массиве в многопоточном режиме
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations)
+	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
+	const size_t peakStride, const int peakCapacity)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1708,7 +1723,14 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		if (a < scanLen) scanLen = a;
 	}
 
-	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, scanLen, outPeaks, timeOfPeaks, h );
+	// peakStride == 0 -- peaks share the trajectory layout (legacy 1D path).
+	// Otherwise outPeaks/timeOfPeaks are short per-thread rows of peakStride
+	// entries and the scan stops at peakCapacity so it cannot run past the row.
+	const size_t peakBase = (peakStride != 0) ? (size_t)idx * peakStride
+	                                          : (size_t)idx * sizeOfBlock;
+
+	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, scanLen, outPeaks, timeOfPeaks, h,
+		peakBase, peakCapacity );
 	return;
 }
 
@@ -2103,8 +2125,12 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
 	const int idx, const numb eps, int* outData,
-	const numb multPeak, const numb multInterval)
+	const numb multPeak, const numb multInterval, const size_t helpfulStartIndex)
 {
+	// helpfulArray may have its own per-thread stride: the peak buffers are
+	// sized by max_amount_of_peaks in the 2D path, the scratch needs twice that
+	// (labels + traversal stack). (size_t)-1 = legacy, shares startDataIndex.
+	const size_t hBase = (helpfulStartIndex == (size_t)-1) ? startDataIndex : helpfulStartIndex;
 	// Если пиков 0 или 1 - даже не обрабатываем эти случаи
 
 	if (amountOfPeaks == -1)
@@ -2121,7 +2147,7 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 	int cluster = 0;
 
-	for (size_t i = startDataIndex; i < startDataIndex + sizeOfHelpfulArray; ++i) {
+	for (size_t i = hBase; i < hBase + sizeOfHelpfulArray; ++i) {
 		helpfulArray[i] = 0;
 	}
 
@@ -2157,25 +2183,25 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	// неотличим от пустой ячейки. Пока пиков мало, расхождение маскировалось;
 	// на режимах с большим их числом количество кластеров выходило произвольным.
 	for (int i = 0; i < amountOfPeaks; i++) {
-		if (helpfulArray[startDataIndex + i] != 0) continue;   // уже в кластере
+		if (helpfulArray[hBase + i] != 0) continue;   // уже в кластере
 
 		++cluster;
-		helpfulArray[startDataIndex + i] = cluster;
+		helpfulArray[hBase + i] = cluster;
 
 		int sp  = 0;    // глубина стека
 		int cur = i;    // точка, соседей которой разворачиваем
 		for (;;) {
 			for (int k = 0; k < amountOfPeaks - 1; k++) {
-				if (cur == k || helpfulArray[startDataIndex + k] != 0) continue;
+				if (cur == k || helpfulArray[hBase + k] != 0) continue;
 				if (distance(data[startDataIndex + cur], intervals[startDataIndex + cur],
 					data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
-					helpfulArray[startDataIndex + k] = cluster;
+					helpfulArray[hBase + k] = cluster;
 					if (sp < stackCap)
-						helpfulArray[startDataIndex + amountOfPeaks + sp++] = (numb)k;
+						helpfulArray[hBase + amountOfPeaks + sp++] = (numb)k;
 				}
 			}
 			if (sp == 0) break;
-			cur = (int)helpfulArray[startDataIndex + amountOfPeaks + --sp];
+			cur = (int)helpfulArray[hBase + amountOfPeaks + --sp];
 		}
 	}
 
@@ -2192,7 +2218,8 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData,
-	const numb multPeak, const numb multInterval)
+	const numb multPeak, const numb multInterval,
+	const size_t peakStride, const size_t helpfulStride)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -2214,7 +2241,11 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 	}
 
 	// --- Применяем алгоритм dbscan к каждой системе
-	outData[idx] = dbscan(data, intervals, helpfulArray, idx * sizeOfBlock, amountOfPeaks[idx], sizeOfBlock, idx, eps, outData, multPeak, multInterval);
+	// Strides of 0 mean "peaks live in the trajectory buffers" (legacy).
+	const size_t pStride = (peakStride    != 0) ? peakStride    : sizeOfBlock;
+	const size_t hStride = (helpfulStride != 0) ? helpfulStride : sizeOfBlock;
+
+	outData[idx] = dbscan(data, intervals, helpfulArray, idx * pStride, amountOfPeaks[idx], (int)hStride, idx, eps, outData, multPeak, multInterval, idx * hStride);
 }
 
 // ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
