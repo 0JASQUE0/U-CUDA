@@ -838,6 +838,162 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	return fsDivergedError();   // недостижимо: все error_estim разобраны выше
 }
 
+// ---------------------------------------------------------------------------
+// PeakStream -- sample-by-sample equivalent of peakFinder().
+//
+// peakFinder() needs the whole trajectory resident in global memory, and THAT
+// buffer is what caps how many sweep points fit on the GPU at once (see the
+// budget in run_bif2d). PeakStream consumes the same samples as the integrator
+// produces them, so the trajectory never has to be stored.
+//
+// Equivalence with the batch version is the whole point -- the diagram must not
+// move when the buffer goes away -- so the correspondence is spelled out here:
+//
+//   batch                                   stream
+//   outer loop index i (from 2, i < L-2)    j_or_i = n-1, gated by nextI
+//   inner plateau walk over j               `walking` state, same window test
+//   i = j + 1; break;  then ++i             nextI = j + 2
+//   second pass: inter-peak interval filter emitInterval(), anchor carried live
+//
+// Index convention is the batch one: samples numbered from 0 inside the block,
+// a peak at sample j is reported at time (j - 1), samples 0..1 are history only,
+// and the last sample is never examined (the batch bound is i < L-2 and it
+// reads x[j+1]).
+//
+// The one batch path with no stream analogue is an inner loop that runs off the
+// end of the block: there the batch resumes its outer loop from the stale i.
+// That cannot produce another peak -- exhaustion means the tail is non-increasing
+// with steps <= eps_peak_delta, so no later i can satisfy x[i]-x[i-1] > eps --
+// so the stream just stops.
+struct PeakStream
+{
+	numb*  outPeaks;
+	numb*  timeOfPeaks;
+	size_t peakBase;
+	numb   sampleStep;    // time between consecutive samples (preScaller included)
+	size_t scanLen;       // block length the batch version would have scanned
+	int    capacity;      // cap on RAW peaks; 0 = uncapped (peakFinder's peakCapacity)
+
+	numb   w0, w1, w2;    // rolling window x[n-2], x[n-1], x[n]
+	size_t n;             // samples consumed
+	size_t nextI;         // smallest outer index still to be tested
+	bool   walking;       // inside a plateau walk
+	bool   done;          // capacity reached or tail exhausted
+	int    raw;           // raw peaks seen
+	int    emitted;       // peaks written after the interval filter
+	numb   anchorTime;    // time (in samples) of the current anchor peak
+	bool   haveAnchor;
+
+	__device__ __host__ void init(numb* peaks, numb* times, size_t base,
+		numb step, size_t len, int cap)
+	{
+		outPeaks = peaks; timeOfPeaks = times; peakBase = base;
+		sampleStep = step; scanLen = len; capacity = cap;
+		w0 = w1 = w2 = (numb)0;
+		n = 0; nextI = 2; walking = false; done = false;
+		raw = 0; emitted = 0; anchorTime = (numb)0; haveAnchor = false;
+	}
+
+	// Inter-peak interval filter, live. The batch version anchors on the FIRST
+	// raw peak and never emits it, measuring every interval from the last
+	// emitted peak -- hence haveAnchor.
+	__device__ __host__ void emitInterval(numb value, numb time)
+	{
+		if (!haveAnchor) { anchorTime = time; haveAnchor = true; return; }
+
+		const numb delta = (time - anchorTime) * sampleStep;
+		if (delta < eps_interPeak_delta) return;
+
+		// The batch version clamps its count to max_amount_of_peaks at the very
+		// end; capping the writes here is the same thing for every consumer,
+		// which only ever reads the first `count` entries.
+		if (emitted < max_amount_of_peaks) {
+			if (outPeaks != nullptr)    outPeaks[peakBase + emitted]    = value;
+			if (timeOfPeaks != nullptr) timeOfPeaks[peakBase + emitted] = delta;
+		}
+		++emitted;
+		anchorTime = time;
+	}
+
+	// Peak confirmed at sample j, window (w0, w1, w2) = x[j-1], x[j], x[j+1].
+	__device__ __host__ void recordPeak(size_t j)
+	{
+		numb value, time;
+		if (doInterpolatePeaks) {
+			const numb denom = w0 - (numb)2.0 * w1 + w2;
+			numb delta = 0.0;
+			if (fabs(denom) > 1e-12)
+				delta = 0.5 * (w0 - w2) / denom;
+			value = w1 - 0.25 * (w0 - w2) * delta;
+			time  = (numb)(j - 1) + delta;
+		}
+		else {
+			value = w1;
+			time  = (numb)(j - 1);
+		}
+
+		emitInterval(value, time);
+		++raw;
+		// Batch checks the cap at the top of the outer loop, i.e. after the
+		// record -- so raw peaks never exceed peakCapacity.
+		if (capacity > 0 && raw >= capacity) done = true;
+	}
+
+	// Feed one trajectory sample.
+	__device__ __host__ void push(numb x)
+	{
+		if (done) return;
+
+		w0 = w1; w1 = w2; w2 = x;
+		const size_t idxSample = n;   // index of the sample just pushed
+		++n;
+		if (idxSample < 2) return;    // history only; batch starts at i = 2
+
+		const size_t j = idxSample - 1;          // outer i, or the walk's j
+		if (scanLen < 3 || j + 2 >= scanLen) { done = true; return; }  // batch bound: j < L-2
+
+		if (!walking) {
+			if (j < nextI) return;
+			if (!(w1 - w0 > eps_peak_delta && w1 > peak_threshold && w1 >= w2))
+				return;
+			walking = true;   // batch enters the inner loop with j = i
+		}
+
+		// Inner-loop body at j.
+		if (w1 < w2) {                       // rise -> it was not a peak
+			walking = false; nextI = j + 2; return;
+		}
+		if (w1 - w2 > eps_peak_delta) {      // fall -> peak at j
+			recordPeak(j);
+			walking = false; nextI = j + 2; return;
+		}
+		// plateau: keep walking
+	}
+
+	// Value peakFinder() would have returned.
+	__device__ __host__ int count() const
+	{
+		return (emitted >= max_amount_of_peaks) ? max_amount_of_peaks : emitted;
+	}
+
+	// doCalculatePeaks == 0: the batch version copies raw samples instead of
+	// peaks and returns count - 1. Kept here so the fused kernel covers both
+	// settings of the knob (the engine injects it as a #define).
+	__device__ __host__ void pushRaw(numb x)
+	{
+		int limit = (int)((scanLen < (size_t)max_amount_of_peaks) ? scanLen : (size_t)max_amount_of_peaks);
+		if (capacity > 0 && limit > capacity) limit = capacity;
+		if (raw < limit) {
+			if (outPeaks != nullptr)    outPeaks[peakBase + raw]    = x;
+			if (timeOfPeaks != nullptr) timeOfPeaks[peakBase + raw] = 0;
+			++raw;
+		}
+		emitted = raw;
+	}
+
+	__device__ __host__ int countRaw() const { return raw - 1; }
+};
+
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data, 
@@ -883,11 +1039,13 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
-	const size_t startDataIndex, const int writeStep)
+	const size_t startDataIndex, const int writeStep,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
 {
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
 	numb checker;
+	size_t sinceReport = 0;
 
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	for (size_t i = 0; i < amountOfIterations; ++i)
@@ -925,6 +1083,19 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 			calculateDiscreteModel(x, values, h);
 
 		if (i % CHECK_INTERVAL == 0) {
+			if (progressCounter != nullptr && progressStride > 0) {
+				sinceReport += CHECK_INTERVAL;
+				if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+					atomicAdd(progressCounter, 1);
+#endif
+					if (ticksReported != nullptr) ++(*ticksReported);
+					sinceReport = 0;
+				}
+			}
+			// Cancel отдаёт REGIME_UNBOUND: результат отменённого прогона
+			// хост всё равно выбрасывает, нового кода режима заводить не стали.
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 			checker = 0;
 			//#pragma unroll
 			for (int j = 0; j < AMOUNTOFX; ++j) {
@@ -991,6 +1162,82 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	return 1;
 }
 
+// loopCalculateDiscreteModelPeaks_int -- sibling of loopCalculateDiscreteModel_int
+// that feeds each sample to a PeakStream instead of storing it. Everything else
+// (preScaller, the CHECK_INTERVAL divergence test, the trailing fixed-point
+// check) is the same code path, so the returned REGIME_* is the same too.
+__device__ __host__ int loopCalculateDiscreteModelPeaks_int(
+	numb* x, const numb* values,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
+	int writableVar, const numb maxValue, PeakStream& peaks,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+{
+	numb xPrev[AMOUNTOFX];
+	numb checker;
+	size_t sinceReport = 0;
+
+	for (size_t i = 0; i < amountOfIterations; ++i)
+	{
+		// Тот же сэмпл, что записался бы в data[] (см. loopCalculateDiscreteModel_int).
+		numb sample;
+		if (writableVar < 0) {
+			if constexpr (AMOUNTOFX >= 3)
+				sample = x[0] + pi*x[1] + euler*x[2];
+			else if constexpr (AMOUNTOFX == 2)
+				sample = x[0] + pi*x[1];
+			else
+				sample = x[0];
+		} else {
+			sample = x[writableVar];
+		}
+
+		if (doCalculatePeaks) peaks.push(sample);
+		else                  peaks.pushRaw(sample);
+
+		for (int j = 0; j < preScaller; ++j)
+			calculateDiscreteModel(x, values, h);
+
+		if (i % CHECK_INTERVAL == 0) {
+			if (progressCounter != nullptr && progressStride > 0) {
+				sinceReport += CHECK_INTERVAL;
+				if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+					atomicAdd(progressCounter, 1);
+#endif
+					if (ticksReported != nullptr) ++(*ticksReported);
+					sinceReport = 0;
+				}
+			}
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			checker = 0;
+			for (int j = 0; j < AMOUNTOFX; ++j)
+				checker = checker + abs(x[j]);
+
+			if (isnan(checker) || isinf(checker))
+				return 0;
+
+			if (maxValue != 0)
+				if (abs(checker) > maxValue)
+					return 0;
+		}
+	}
+
+	for (int j = 0; j < AMOUNTOFX; ++j)
+		xPrev[j] = x[j];
+
+	for (int j = 0; j < preScaller; ++j)
+		calculateDiscreteModel(x, values, h);
+
+	numb tempResult = 0;
+	for (int j = 0; j < AMOUNTOFX; ++j)
+		tempResult += abs(x[j] - xPrev[j]);
+
+	if (abs(tempResult) < eps_fixed_point)
+		return -1;
+
+	return 1;
+}
+
 __global__ void distributedCalculateDiscreteModelCUDA(
 	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
@@ -1033,6 +1280,82 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
+// ucudaSetupSweepPoint -- which point of the sweep this thread is, extracted so
+// that the trajectory kernel and its fused (trajectory-free) sibling cannot
+// drift apart. The node values, the log axes and the dt-sweep bookkeeping are
+// the delicate part; configCUDA.h already documents what happens when one
+// formula gets copied by hand into several places.
+//
+// Returns false if the point is degenerate (h <= 0) and must be skipped.
+__device__ __forceinline__ bool ucudaSetupSweepPoint(
+	const int nPts, const size_t amountOfCalculatedPoints, const int idx,
+	const int dimension, const numb* ranges, const numb h,
+	const int* indicesOfMutVars,
+	const numb* initialConditions, const int amountOfInitialConditions,
+	const numb* values, const int amountOfValues,
+	const int hSweepAxis, const int logAxisMask,
+	const numb transientTime, const numb tMax, const int preScaller,
+	const size_t amountOfPointsForSkip, const size_t amountOfIterations,
+	numb* localX, numb* localValues,
+	numb& h_local, size_t& skip_local, size_t& iters_local)
+{
+	// Per-thread h override for a dt-sweep axis; falls back to the uniform
+	// launch-wide h otherwise (identical to the pre-dt-sweep behaviour).
+	h_local = h;
+	if (hSweepAxis == 0)
+		h_local = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+	else if (hSweepAxis == 1)
+		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+
+	if (h_local <= 0)
+		return false;
+
+	// Buffers are sized for the worst case (smallest h in the swept range ->
+	// most steps) when hSweepAxis != -1; the actual per-thread step counts are
+	// recomputed here from h_local.
+	skip_local  = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local)             : amountOfPointsForSkip;
+	iters_local = (hSweepAxis != -1) ? (size_t)ceil(tMax / h_local / (numb)preScaller)   : amountOfIterations;
+	if (iters_local > amountOfIterations) iters_local = amountOfIterations;  // defensive clamp to the allocated buffer
+
+	// Определяем localX[] начальными условиями
+	#pragma unroll
+	for ( int i = 0; i < AMOUNTOFX; ++i )
+		localX[i] = initialConditions[i];
+
+	// Определяем localValues[] начальными параметрами
+	for (int i = 0; i < amountOfValues; ++i)
+		localValues[i] = values[i];
+
+	// Меняем значение изменяемых параметров на результат функции getValueByIdx
+	if (par_or_var == 1) {
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localValues[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                          : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
+	}
+	else if (par_or_var == 0) {
+		for (int i = 0; i < dimension; ++i) {
+			if (i == hSweepAxis) continue;
+			bool isLog = (logAxisMask >> i) & 1;
+			localX[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			                                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+		}
+	}
+	else if (par_or_var == 2) {
+		// Host never combines mixed param/IC (par_or_var==2) with an h-axis in
+		// the same request (see run_bif2d) -- this branch is unaffected.
+		localX[indicesOfMutVars[0]]      = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
+		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
+		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
+	}
+	return true;
+}
+
 __global__ void calculateDiscreteModelCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -1061,83 +1384,39 @@ __global__ void calculateDiscreteModelCUDA(
 	const int		logAxisMask)
 {
 	// Общая память в рамках одного блока
-	// Строение памяти:
-	// {localX_0, localX_1, localX_2, ..., localValues_0, localValues_1, ..., следуюший поток...}
+	// Строение памяти (per-thread slice, шаг ucuda_shared_stride):
+	// {localX_0..localX_n, localValues_0..localValues_m, [pad], следуюший поток...}
 
 	extern __shared__ numb s[];
 	//////// --- В каждом потоке создаем указатель на параметры и переменные, чтобы работать с ними как с массивами ---
-	numb* localX = s + ( threadIdx.x * amountOfInitialConditions );
-	numb* localValues = s + ( blockDim.x * amountOfInitialConditions ) + ( threadIdx.x * amountOfValues );
+	// Odd stride keeps both arrays bank-conflict-free; the launch allocates
+	// exactly ucuda_shared_stride * blockDim.x numb's (see configCUDA.h).
+	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
+	numb* localX = s + ( threadIdx.x * sharedStride );
+	numb* localValues = localX + amountOfInitialConditions;
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (idx >= nPtsLimiter)		// Если существует поток с большим индексом, чем требуется - сразу завершаем его
 		return;
 
-	// Per-thread h override for a dt-sweep axis; falls back to the uniform
-	// launch-wide h otherwise (identical to the pre-dt-sweep behaviour).
-	numb h_local = h;
-	if (hSweepAxis == 0)
-		h_local = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
-		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-	else if (hSweepAxis == 1)
-		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
-		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
-
-	// Degenerate/zero step: skip entirely, same as an unbound/diverged solution
-	// (flag=-1) -- downstream (peakFinderCUDA, host unpack) already treats -1
-	// as "no data for this point", so no separate NaN-fill is needed here.
-	if (h_local <= 0) {
+	numb   h_local;
+	size_t skip_local;
+	size_t iters_local;
+	if (!ucudaSetupSweepPoint(nPts, amountOfCalculatedPoints, idx, dimension, ranges, h,
+			indicesOfMutVars, initialConditions, amountOfInitialConditions,
+			values, amountOfValues, hSweepAxis, logAxisMask,
+			transientTime, tMax, preScaller,
+			amountOfPointsForSkip, amountOfIterations,
+			localX, localValues, h_local, skip_local, iters_local)) {
+		// Degenerate/zero step: skip entirely, same as an unbound/diverged solution
+		// (flag=-1) -- downstream (peakFinderCUDA, host unpack) already treats -1
+		// as "no data for this point", so no separate NaN-fill is needed here.
 		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
 		if (actualIterations != nullptr)     actualIterations[idx] = 0;
 		return;
 	}
-
-	// `data`/`outPeaks` are sized for the worst case (smallest h in the swept
-	// range -> most steps) when hSweepAxis != -1; sizeOfBlock/amountOfIterations
-	// stay the uniform (worst-case) allocation, while the actual per-thread
-	// step counts are recomputed here from h_local and reported via
-	// actualIterations so peakFinderCUDA only scans the valid prefix.
-	size_t skip_local  = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local)             : amountOfPointsForSkip;
-	size_t iters_local = (hSweepAxis != -1) ? (size_t)ceil(tMax / h_local / (numb)preScaller)   : amountOfIterations;
-	if (iters_local > amountOfIterations) iters_local = amountOfIterations;  // defensive clamp to the allocated buffer
 	if (actualIterations != nullptr) actualIterations[idx] = (int)iters_local;
-
-	// Определяем localX[] начальными условиями
-	#pragma unroll
-	for ( int i = 0; i < AMOUNTOFX; ++i )
-		localX[i] = initialConditions[i];
-
-	// Определяем localValues[] начальными параметрами
-	for (int i = 0; i < amountOfValues; ++i)
-		localValues[i] = values[i];
-
-	// Меняем значение изменяемых параметров на результат функции getValueByIdx
-
-	if (par_or_var == 1) {
-		for (int i = 0; i < dimension; ++i) {
-			if (i == hSweepAxis) continue;
-			bool isLog = (logAxisMask >> i) & 1;
-			localValues[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
-			                                          : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-		}
-	}
-	else if (par_or_var == 0) {
-		for (int i = 0; i < dimension; ++i) {
-			if (i == hSweepAxis) continue;
-			bool isLog = (logAxisMask >> i) & 1;
-			localX[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
-			                                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
-		}
-	}
-	else if (par_or_var == 2) {
-		// Host never combines mixed param/IC (par_or_var==2) with an h-axis in
-		// the same request (see run_bif2d) -- this branch is unaffected.
-		localX[indicesOfMutVars[0]]      = ((logAxisMask >> 0) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0)
-		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[0], ranges[1], 0);
-		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
-		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
-	}
 
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
@@ -1157,6 +1436,110 @@ __global__ void calculateDiscreteModelCUDA(
 	//delete[] localX;
 	//delete[] localValues;
 	return;
+}
+
+// calculateDiscreteModelPeaksCUDA -- calculateDiscreteModelCUDA fused with
+// peakFinderCUDA. Same sweep point (shared ucudaSetupSweepPoint), same
+// integrator, same REGIME_* semantics; the difference is that the trajectory is
+// consumed by a PeakStream as it is produced instead of being written to a
+// per-thread block of global memory. That block is the term that dominated the
+// 2D memory budget, so dropping it is what lets the whole grid run at once.
+//
+// Inter-peak intervals are scaled by h_local, not by the launch-wide h the
+// split path could only pass: under a dt-sweep every point has its own step.
+__global__ void calculateDiscreteModelPeaksCUDA(
+	const int		nPts,
+	const int		nPtsLimiter,
+	const size_t	amountOfCalculatedPoints,
+	const size_t	amountOfPointsForSkip,
+	const int		dimension,
+	numb* __restrict__			ranges,
+	const numb		h,
+	int* __restrict__			indicesOfMutVars,
+	numb* __restrict__			initialConditions,
+	const int		amountOfInitialConditions,
+	const numb* __restrict__	values,
+	const int		amountOfValues,
+	const size_t	amountOfIterations,
+	const int		preScaller,
+	const int		writableVar,
+	const numb		maxValue,
+	numb*			outPeaks,
+	numb*			timeOfPeaks,
+	int*			maxValueCheckerArray,
+	const bool		Par_or_Var,
+	const int		hSweepAxis,
+	const numb		transientTime,
+	const numb		tMax,
+	const int		logAxisMask,
+	const size_t	peakStride,
+	const int		peakCapacity,
+	const volatile int* cancelFlag,   // device-side, polled once per CHECK_INTERVAL steps
+	int*			progressCounter,  // device-side; one atomic per progressStride steps of work
+	const int		progressStride)   // 0 = не считать прогресс
+{
+	extern __shared__ numb s[];
+	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
+	numb* localX = s + ( threadIdx.x * sharedStride );
+	numb* localValues = localX + amountOfInitialConditions;
+
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	if (idx >= nPtsLimiter)
+		return;
+
+	int    ticks = 0;   // сколько эта ячейка уже отчитала
+	numb   h_local;
+	size_t skip_local;
+	size_t iters_local;
+	if (!ucudaSetupSweepPoint(nPts, amountOfCalculatedPoints, idx, dimension, ranges, h,
+			indicesOfMutVars, initialConditions, amountOfInitialConditions,
+			values, amountOfValues, hSweepAxis, logAxisMask,
+			transientTime, tMax, preScaller,
+			amountOfPointsForSkip, amountOfIterations,
+			localX, localValues, h_local, skip_local, iters_local)) {
+		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
+		if (progressCounter != nullptr && progressStride > 0)
+			atomicAdd(progressCounter, (int)((amountOfPointsForSkip + amountOfIterations) / (size_t)progressStride));
+		return;
+	}
+
+	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
+		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
+		cancelFlag, progressCounter, progressStride, &ticks);
+
+	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
+		PeakStream peaks;
+		peaks.init(outPeaks, timeOfPeaks, (size_t)idx * peakStride,
+			h_local * (numb)preScaller, iters_local, peakCapacity);
+
+		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
+			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
+			cancelFlag, progressCounter, progressStride, &ticks);
+
+		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
+		// only replaces OSCILLATION with the peak count -- same rule here.
+		if (flag == REGIME_OSCILLATION) {
+			if (maxValueCheckerArray != nullptr)
+				maxValueCheckerArray[idx] = doCalculatePeaks ? peaks.count() : peaks.countRaw();
+			// Добивка до ожидаемого числа тиков — см. тот же блок ниже.
+			if (progressCounter != nullptr && progressStride > 0) {
+				const size_t totalSteps = skip_local + iters_local;
+				const int expected = (int)(totalSteps / (size_t)progressStride);
+				if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+			}
+			return;
+		}
+	}
+
+	if (maxValueCheckerArray != nullptr)
+		maxValueCheckerArray[idx] = flag;
+	// Добивка до ожидаемого числа тиков: ячейка, упавшая в расходимость
+	// на первом шагу, иначе недосчитала бы свою долю, и бар застрял бы.
+	if (progressCounter != nullptr && progressStride > 0) {
+		const size_t totalSteps = skip_local + iters_local;
+		const int expected = (int)(totalSteps / (size_t)progressStride);
+		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+	}
 }
 
 __global__ void calculateDiscreteModelCUDA_H(
@@ -1559,8 +1942,16 @@ __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataInde
 }
 
 __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
-	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h)
+	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h,
+	const size_t peakStartIndex, const int peakCapacity)
 {
+	// Peaks may live in buffers whose per-thread stride is NOT sizeOfBlock (the
+	// 2D path sizes them by max_amount_of_peaks instead of by trajectory length).
+	// (size_t)-1 = legacy, peaks share the data layout.
+	const size_t peakBase = (peakStartIndex == (size_t)-1) ? startDataIndex : peakStartIndex;
+	// 0 = unbounded scan (legacy). Otherwise the raw scan stops at peakCapacity,
+	// which is what keeps the writes inside a short peak buffer.
+	const int peakCap = peakCapacity;
 
 	if (doCalculatePeaks) {
 		// Переменная для хранения найденных пиков
@@ -1569,6 +1960,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 		// Начинаем просматривать заданных интервал на наличие пиков
 		for (size_t i = startDataIndex + 2; i < startDataIndex + amountOfPoints - 2; ++i)
 		{
+			if (peakCap > 0 && amountOfPeaks >= peakCap) break;
 			// Если текущая точка больше предыдущей и больше ИЛИ РАВНА следующей, то... ( не факт, что это пик ( например: 2 3 3 4 ) )
 			if (data[i] - data[i - 1] > eps_peak_delta && data[i] > peak_threshold && data[i] >= data[i + 1]) //
 			{
@@ -1592,16 +1984,16 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 							if (fabs(denom) > 1e-12) {
 								delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
 							}
-							outPeaks[startDataIndex + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
-							timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
+							outPeaks[peakBase + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
+							timeOfPeaks[peakBase + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
 						}
 						else {
 							// Если массик outPeaks не пуст, то делаем запись
 							if (outPeaks != nullptr)
-								outPeaks[startDataIndex + amountOfPeaks] = data[j]; //data[j];
+								outPeaks[peakBase + amountOfPeaks] = data[j]; //data[j];
 							// Если массик timeOfPeaks не пуст, то делаем запись
 							if (timeOfPeaks != nullptr)
-								timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(j - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
+								timeOfPeaks[peakBase + amountOfPeaks] = (numb)(j - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = (numb)(i - startDataIndex - 1);	// (numb)(j - startDataIndex - 1);
 							//timeOfPeaks[startDataIndex + amountOfPeaks] = trunc( ( (numb)j + (numb)i ) / (numb)2 );	// Выбираем индекс посередине между j и i
 
@@ -1622,20 +2014,20 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 		// один индекс влево + Δt между соседями, amountOfPeaks -= 1.
 		if (amountOfPeaks > 1) {
 			int  writeIdx   = 0;                             // индекс записи результата
-			numb anchorTime = timeOfPeaks[startDataIndex];   // время (в индексах) опорного пика
+			numb anchorTime = timeOfPeaks[peakBase];         // время (в индексах) опорного пика
 
 			for (size_t i = 1; i < amountOfPeaks; ++i) {
 				// Абсолютное время текущего пика читаем ДО любой записи —
 				// writeIdx всегда <= i, поэтому запись затирает уже прочитанное.
-				const numb currentTime = timeOfPeaks[startDataIndex + i];
+				const numb currentTime = timeOfPeaks[peakBase + i];
 				const numb delta = (currentTime - anchorTime) * h;
 
 				if (delta >= eps_interPeak_delta) {
 					// Записываем ВТОРОЙ пик пары (текущий) и интервал до него.
 					if (outPeaks != nullptr)
-						outPeaks[startDataIndex + writeIdx] = outPeaks[startDataIndex + i];
+						outPeaks[peakBase + writeIdx] = outPeaks[peakBase + i];
 					if (timeOfPeaks != nullptr)
-						timeOfPeaks[startDataIndex + writeIdx] = delta;
+						timeOfPeaks[peakBase + writeIdx] = delta;
 
 					++writeIdx;
 					anchorTime = currentTime;   // текущий пик — новая опора
@@ -1657,14 +2049,16 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 		if (amountOfPeaks >= max_amount_of_peaks)
 			amountOfPeaks = max_amount_of_peaks;
+		if (peakCap > 0 && amountOfPeaks > peakCap)
+			amountOfPeaks = peakCap;
 
 		for (size_t i = 0; i < amountOfPeaks; ++i)
 		{
 			if (outPeaks != nullptr)
-				outPeaks[startDataIndex + i] = data[startDataIndex + i];
+				outPeaks[peakBase + i] = data[startDataIndex + i];
 
 			if (timeOfPeaks != nullptr)
-				timeOfPeaks[startDataIndex + i] = 0;
+				timeOfPeaks[peakBase + i] = 0;
 
 		}
 		return amountOfPeaks - 1;
@@ -1675,7 +2069,8 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 // Нахождение пиков в "data" массиве в многопоточном режиме
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
-	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations)
+	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
+	const size_t peakStride, const int peakCapacity)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1708,7 +2103,14 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		if (a < scanLen) scanLen = a;
 	}
 
-	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, scanLen, outPeaks, timeOfPeaks, h );
+	// peakStride == 0 -- peaks share the trajectory layout (legacy 1D path).
+	// Otherwise outPeaks/timeOfPeaks are short per-thread rows of peakStride
+	// entries and the scan stops at peakCapacity so it cannot run past the row.
+	const size_t peakBase = (peakStride != 0) ? (size_t)idx * peakStride
+	                                          : (size_t)idx * sizeOfBlock;
+
+	amountOfPeaks[idx] = peakFinder( data, (size_t)idx * sizeOfBlock, scanLen, outPeaks, timeOfPeaks, h,
+		peakBase, peakCapacity );
 	return;
 }
 
@@ -2103,8 +2505,12 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
 	const int idx, const numb eps, int* outData,
-	const numb multPeak, const numb multInterval)
+	const numb multPeak, const numb multInterval, const size_t helpfulStartIndex)
 {
+	// helpfulArray may have its own per-thread stride: the peak buffers are
+	// sized by max_amount_of_peaks in the 2D path, the scratch needs twice that
+	// (labels + traversal stack). (size_t)-1 = legacy, shares startDataIndex.
+	const size_t hBase = (helpfulStartIndex == (size_t)-1) ? startDataIndex : helpfulStartIndex;
 	// Если пиков 0 или 1 - даже не обрабатываем эти случаи
 
 	if (amountOfPeaks == -1)
@@ -2121,7 +2527,7 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 	int cluster = 0;
 
-	for (size_t i = startDataIndex; i < startDataIndex + sizeOfHelpfulArray; ++i) {
+	for (size_t i = hBase; i < hBase + sizeOfHelpfulArray; ++i) {
 		helpfulArray[i] = 0;
 	}
 
@@ -2157,25 +2563,25 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	// неотличим от пустой ячейки. Пока пиков мало, расхождение маскировалось;
 	// на режимах с большим их числом количество кластеров выходило произвольным.
 	for (int i = 0; i < amountOfPeaks; i++) {
-		if (helpfulArray[startDataIndex + i] != 0) continue;   // уже в кластере
+		if (helpfulArray[hBase + i] != 0) continue;   // уже в кластере
 
 		++cluster;
-		helpfulArray[startDataIndex + i] = cluster;
+		helpfulArray[hBase + i] = cluster;
 
 		int sp  = 0;    // глубина стека
 		int cur = i;    // точка, соседей которой разворачиваем
 		for (;;) {
 			for (int k = 0; k < amountOfPeaks - 1; k++) {
-				if (cur == k || helpfulArray[startDataIndex + k] != 0) continue;
+				if (cur == k || helpfulArray[hBase + k] != 0) continue;
 				if (distance(data[startDataIndex + cur], intervals[startDataIndex + cur],
 					data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
-					helpfulArray[startDataIndex + k] = cluster;
+					helpfulArray[hBase + k] = cluster;
 					if (sp < stackCap)
-						helpfulArray[startDataIndex + amountOfPeaks + sp++] = (numb)k;
+						helpfulArray[hBase + amountOfPeaks + sp++] = (numb)k;
 				}
 			}
 			if (sp == 0) break;
-			cur = (int)helpfulArray[startDataIndex + amountOfPeaks + --sp];
+			cur = (int)helpfulArray[hBase + amountOfPeaks + --sp];
 		}
 	}
 
@@ -2192,7 +2598,8 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData,
-	const numb multPeak, const numb multInterval)
+	const numb multPeak, const numb multInterval,
+	const size_t peakStride, const size_t helpfulStride)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -2214,7 +2621,11 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 	}
 
 	// --- Применяем алгоритм dbscan к каждой системе
-	outData[idx] = dbscan(data, intervals, helpfulArray, idx * sizeOfBlock, amountOfPeaks[idx], sizeOfBlock, idx, eps, outData, multPeak, multInterval);
+	// Strides of 0 mean "peaks live in the trajectory buffers" (legacy).
+	const size_t pStride = (peakStride    != 0) ? peakStride    : sizeOfBlock;
+	const size_t hStride = (helpfulStride != 0) ? helpfulStride : sizeOfBlock;
+
+	outData[idx] = dbscan(data, intervals, helpfulArray, idx * pStride, amountOfPeaks[idx], (int)hStride, idx, eps, outData, multPeak, multInterval, idx * hStride);
 }
 
 // ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
