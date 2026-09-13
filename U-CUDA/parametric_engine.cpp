@@ -2420,9 +2420,12 @@ struct ParametricEngine::Impl {
 
         // Memory budget — мирор NonLinAnal LLE1D:2291-2299 (консервативно).
         size_t freeMemory = 0;
-        if (!gpu_free_budget(0.5, freeMemory)) return fail("cudaMemGetInfo failed");
+        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
+        // На точку реально выделяется ТОЛЬКО d_lleResult (одно numb): траектория
+        // не хранится, ядро зовёт цикл интегрирования с data = nullptr. Прежняя
+        // формула делила память на длину блока, которой здесь нет.
+        size_t nPtsLimiter = freeMemory / sizeof(numb);
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)  nPtsLimiter = (size_t)nPts;
         size_t originalNPtsLimiter = nPtsLimiter;
@@ -2825,9 +2828,12 @@ struct ParametricEngine::Impl {
 
         // Memory budget — мирор NonLinAnal LLE2D (hostLibrary.cu:2535-2547).
         size_t freeMemory = 0;
-        if (!gpu_free_budget(0.5, freeMemory)) return fail("cudaMemGetInfo failed");
+        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (size_t)amountOfPointsInBlock);
+        // На точку реально выделяется ТОЛЬКО d_lleResult (одно numb): траектория
+        // не хранится, ядро зовёт цикл интегрирования с data = nullptr. Прежняя
+        // формула делила память на длину блока, которой здесь нет.
+        size_t nPtsLimiter = freeMemory / sizeof(numb);
         if (nPtsLimiter == 0)                  nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)         nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
@@ -3182,9 +3188,12 @@ struct ParametricEngine::Impl {
         // Memory budget — мирор NonLinAnal LS1D:2719-2727 (агрессивно делит /16,
         // т.к. per-system memory ~ N).
         size_t freeMemory = 0;
-        if (!gpu_free_budget(1.0 / 16.0, freeMemory)) return fail("cudaMemGetInfo failed");
+        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)amountOfInitialConditions;
+        // На точку реально выделяется ТОЛЬКО d_lsResult (N numb): траектория
+        // не хранится. Прежняя формула умножала это на длину блока и брала
+        // 1/16 свободной памяти — вместе это резало чанк без причины.
+        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfInitialConditions;
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
@@ -3558,9 +3567,12 @@ struct ParametricEngine::Impl {
         // Memory budget — мирор run_ls_1d (агрессивно делит /16, т.к. per-system
         // память ~N). total_cells заменяет nPts.
         size_t freeMemory = 0;
-        if (!gpu_free_budget(1.0 / 16.0, freeMemory)) return fail("cudaMemGetInfo failed");
+        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfPointsInBlock * (size_t)N;
+        // На точку реально выделяется ТОЛЬКО d_lsResult (N numb): траектория
+        // не хранится. Прежняя формула умножала это на длину блока и брала
+        // 1/16 свободной памяти — вместе это резало чанк без причины.
+        size_t perSystemBytes = sizeof(numb) * (size_t)N;
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)             nPtsLimiter = (size_t)blockSize_setup;
@@ -5922,20 +5934,10 @@ struct ParametricEngine::Impl {
 
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
-        // По памяти чанк больше ничем не ограничен: буферы, росшие вместе
-        // с ним (d_data и d_intervals), ушли вместе с траекторией, а выходные
-        // массивы выделяются на всю сетку сразу. Нарезка осталась только
-        // ради гранулярности прогресса и Cancel (опрашиваются раз в чанк); нижняя
-        // граница — два "заполнения GPU", где пропускная способность выходит
-        // на полку. Уйдёт, когда бассейны перейдут на mapped-сигналы, как run_bif2d.
-        int smCount = 0, maxThreadsPerSm = 0;
-        cuDeviceGetAttribute(&smCount,         CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,        device);
-        cuDeviceGetAttribute(&maxThreadsPerSm, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, device);
-        size_t gpuFill = 2 * (size_t)smCount * (size_t)maxThreadsPerSm;
-        if (gpuFill == 0) gpuFill = 65536;
-        size_t nPtsLimiter = total_cells / 32;
-        if (nPtsLimiter < gpuFill)         nPtsLimiter = gpuFill;
-        if (nPtsLimiter > total_cells)     nPtsLimiter = total_cells;
+        // По памяти чанк ничем не ограничен: буферы, росшие вместе с ним,
+        // ушли вместе с траекторией, а выходные массивы выделяются на всю сетку.
+        size_t nPtsLimiter = total_cells;
+
         size_t originalNPtsLimiter = nPtsLimiter;
 
         numb* d_ranges            = nullptr;
