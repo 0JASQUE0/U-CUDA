@@ -240,6 +240,23 @@ __global__ void calculateDiscreteModelCUDA(
 	int*			actualIterations = nullptr, // per-thread actual sample count written to `data` (worst-case-sized buffer); read by peakFinderCUDA
 	const int		logAxisMask = 0);         // bit i = axis slot i (X=0,Y=1) is log-distributed
 
+// calculateDiscreteModelCUDA + peakFinderCUDA в одном ядре: траектория не
+// хранится, сэмплы сразу уходят в PeakStream (см. cudaLibrary.cu). На выходе
+// maxValueCheckerArray[] — то же, что после пары traj+peak: REGIME_* либо число пиков.
+__global__ void calculateDiscreteModelPeaksCUDA(
+	const int nPts, const int nPtsLimiter,
+	const size_t amountOfCalculatedPoints, const size_t amountOfPointsForSkip,
+	const int dimension, numb* __restrict__ ranges, const numb h,
+	int* __restrict__ indicesOfMutVars,
+	numb* __restrict__ initialConditions, const int amountOfInitialConditions,
+	const numb* __restrict__ values, const int amountOfValues,
+	const size_t amountOfIterations, const int preScaller, const int writableVar,
+	const numb maxValue,
+	numb* outPeaks, numb* timeOfPeaks, int* maxValueCheckerArray,
+	const bool Par_or_Var, const int hSweepAxis,
+	const numb transientTime, const numb tMax, const int logAxisMask,
+	const size_t peakStride, const int peakCapacity);
+
 // Ядро: траектории ансамбля при свипе по шагу интегрирования.
 // transientTime здесь в единицах времени, а не в шагах.
 __global__ void calculateDiscreteModelCUDA_H(

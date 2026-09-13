@@ -1444,12 +1444,12 @@ struct ParametricEngine::Impl {
     CachedSimpleContModule cached_dft_hsweep; // dft1dHSweepKernel
 
     // Bif-2D — отдельный шаблон (bifurcation2d.template.cu), три kernel'а:
-    // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
+    // calculateDiscreteModelPeaksCUDA + dbscanCUDA. Траектория больше не хранится,
+    // поэтому traj и peak — одно ядро (см. PeakStream в cudaLibrary.cu).
     struct CachedBif2dModule {
         std::string  key;
         CUmodule     module        = nullptr;
-        CUfunction   kernel_traj   = nullptr;   // calculateDiscreteModelCUDA
-        CUfunction   kernel_peak   = nullptr;   // peakFinderCUDA
+        CUfunction   kernel_fused  = nullptr;   // calculateDiscreteModelPeaksCUDA
         CUfunction   kernel_dbscan = nullptr;   // dbscanCUDA
     };
     CachedBif2dModule cached_bif2d;
@@ -1591,8 +1591,7 @@ struct ParametricEngine::Impl {
         if (cached_bif2d.module) {
             cuModuleUnload(cached_bif2d.module);
             cached_bif2d.module        = nullptr;
-            cached_bif2d.kernel_traj   = nullptr;
-            cached_bif2d.kernel_peak   = nullptr;
+            cached_bif2d.kernel_fused  = nullptr;
             cached_bif2d.kernel_dbscan = nullptr;
             cached_bif2d.key.clear();
         }
@@ -5124,8 +5123,8 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // compile_bif2d_if_needed — шаблон bifurcation2d.template.cu, три kernel'а:
-    // calculateDiscreteModelCUDA + peakFinderCUDA + dbscanCUDA.
+    // compile_bif2d_if_needed — шаблон bifurcation2d.template.cu, два kernel'а:
+    // calculateDiscreteModelPeaksCUDA + dbscanCUDA.
     // Cache key: ":bif2d:" + par_or_var.
     bool compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
                                  int par_or_var, std::string& err) {
@@ -5142,14 +5141,13 @@ struct ParametricEngine::Impl {
                           { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                             { "{{KRS_BODY}}",    krs_body },
                             { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "dbscanCUDA" },
+                          { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA" },
                           mod, mg, err))
             return false;
 
         cached_bif2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_bif2d.kernel_traj,   err)) { release_bif2d_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_bif2d.kernel_peak,   err)) { release_bif2d_module(); return false; }
-        if (!module_fn(mod, mg[2], cached_bif2d.kernel_dbscan, err)) { release_bif2d_module(); return false; }
+        if (!module_fn(mod, mg[0], cached_bif2d.kernel_fused,  err)) { release_bif2d_module(); return false; }
+        if (!module_fn(mod, mg[1], cached_bif2d.kernel_dbscan, err)) { release_bif2d_module(); return false; }
 
         cached_bif2d.key = key;
         return true;
@@ -5333,8 +5331,10 @@ struct ParametricEngine::Impl {
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
-        size_t baseMemPerSystem = (size_t)amountOfPointsInBlock * sizeof(numb)   // d_data
-                                + peakStride * 2 * sizeof(numb)                  // d_outPeaks + d_intervals
+        // Бюджет больше не зависит от длины траектории вообще: сэмплы
+        // потребляются на лету (PeakStream), в памяти остаются только пики.
+        // tMax/h теперь влияет на время счёта, но не на число ячеек в чанке.
+        size_t baseMemPerSystem = peakStride * 2 * sizeof(numb)                  // d_outPeaks + d_intervals
                                 + helpfulStride * sizeof(numb)                   // d_helpfulArray
                                 + 2 * sizeof(int);                               // d_amountOfPeaks + d_dbscanResult
         size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
@@ -5353,7 +5353,6 @@ struct ParametricEngine::Impl {
         std::vector<int> h_dbscanResult(nPtsLimiter);
 
         // device buffers
-        numb* d_data              = nullptr;
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
         numb* d_initialConditions = nullptr;
@@ -5363,7 +5362,6 @@ struct ParametricEngine::Impl {
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
-        int*    d_actualIterations  = nullptr;
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
         // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
@@ -5372,7 +5370,6 @@ struct ParametricEngine::Impl {
         CUstream stream = nullptr;
 
         auto cleanup = [&]() {
-            if (d_data)              cudaFree(d_data);
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -5382,7 +5379,6 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
-            if (d_actualIterations)  cudaFree(d_actualIterations);
             if (stream)              cuStreamDestroy(stream);
         };
 
@@ -5408,7 +5404,6 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BIF2D_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
         BIF2D_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                           "cudaMalloc d_ranges");
         BIF2D_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
         BIF2D_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),           "cudaMalloc d_initialConditions");
@@ -5418,7 +5413,6 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
-        BIF2D_CHECK(cudaMalloc((void**)&d_actualIterations,  nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_actualIterations");
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -5481,10 +5475,10 @@ struct ParametricEngine::Impl {
                 blockSize /= 2;
             int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
 
-            // 1. calculateDiscreteModelCUDA (dimension=2)
+            // 1. calculateDiscreteModelPeaksCUDA (dimension=2): интегрирование и поиск
+            // пиков в одном ядре — траектория никуда не пишется.
             int    nPts_int                  = nPts;
             int    nPtsLimiter_int           = (int)cur_limiter;
-            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension_arg             = 2;
@@ -5500,11 +5494,12 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
+            size_t peakStride_arg            = peakStride;
+            int    peakCapacity_arg          = peakCapacity;
 
-            void* args_traj[] = {
+            void* args_fused[] = {
                 &nPts_int,
                 &nPtsLimiter_int,
-                &sizeOfBlock_s,
                 &amountOfCalculatedPoints,
                 &amountOfPointsForSkip_s,
                 &dimension_arg,
@@ -5519,44 +5514,22 @@ struct ParametricEngine::Impl {
                 &preScaller_int,
                 &writableVar_int,
                 &maxValue_arg,
-                &d_data,
+                &d_outPeaks,
+                &d_intervals,
                 &d_amountOfPeaks,
                 &par_or_var_arg,
                 &hSweepAxis_arg,
                 &transientTime_arg,
                 &tMax_arg,
-                &d_actualIterations,
-                &logAxisMask_arg
-            };
-            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
-            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_traj,
-                                          gridSize, 1, 1, blockSize, 1, 1,
-                                          shared_traj, stream, args_traj, nullptr),
-                           "cuLaunchKernel(bif2d traj)");
-
-            // 2. peakFinderCUDA. Пики теперь в отдельном коротком буфере, а не
-            // in-place поверх траектории: при peakStride != sizeOfBlock строка пиков потока k
-            // легла бы поверх траектории соседа, который ещё сканируется.
-            // Same stream as traj → automatic ordering, no explicit sync needed.
-            numb timeStep_arg = h * (double)preScaller;
-            size_t peakStride_arg   = peakStride;
-            int    peakCapacity_arg = peakCapacity;
-            void* args_peak[] = {
-                &d_data,
-                &sizeOfBlock_s,
-                &nPtsLimiter_int,
-                &d_amountOfPeaks,
-                &d_outPeaks,
-                &d_intervals,
-                &timeStep_arg,
-                &d_actualIterations,
+                &logAxisMask_arg,
                 &peakStride_arg,
                 &peakCapacity_arg
             };
-            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_peak,
+            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
-                                          0, stream, args_peak, nullptr),
-                           "cuLaunchKernel(bif2d peak)");
+                                          shared_traj, stream, args_fused, nullptr),
+                           "cuLaunchKernel(bif2d traj+peaks)");
 
             // 3. dbscanCUDA — same stream, ordered after peak.
             // Множители осей признаков передаём явно: при запуске через driver
@@ -5565,6 +5538,9 @@ struct ParametricEngine::Impl {
             numb mult_pk_arg  = mult_peak_arg;
             numb mult_int_arg = mult_interval_arg;
             size_t helpfulStride_arg = helpfulStride;
+            // sizeOfBlock у dbscanCUDA остаётся ради legacy-вызовов; здесь раскладку
+            // задают peakStride/helpfulStride, и этот аргумент не читается.
+            size_t sizeOfBlock_s = peakStride;
             void* args_dbscan[] = {
                 &d_outPeaks,          // кластеризуем пики, а не сырую траекторию
                 &sizeOfBlock_s,
