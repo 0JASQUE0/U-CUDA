@@ -383,11 +383,22 @@ int main() {
     };
 
     while (!glfwWindowShouldClose(window)) {
+        // Все сессии, чей счёт идёт на GPU. Custom-вкладка держит свои расчёты
+        // в ОТДЕЛЬНЫХ под-сессиях (custom_session.bif_session и т.д.), а не в
+        // model.bifurcation_session, поэтому её надо спрашивать отдельно:
+        // иначе при запуске из Custom троттлинг ниже не включался, окно
+        // рисовалось на полных ~60 FPS и отнимало GPU у ядра — один и тот же
+        // расчёт из Custom и из Parametric заметно расходился по времени.
+        // Тот же недосмотр был у 1D DFT и Fast Synchro: их сессии тоже
+        // появились после того, как троттлинг был написан.
         bool compute_in_flight =
             model.bifurcation_session.in_flight ||
             model.lle_session.in_flight ||
             model.ls_session.in_flight ||
-            model.basins_session.in_flight;
+            model.basins_session.in_flight ||
+            model.dft1d_session.in_flight ||
+            model.fastsync_session.in_flight ||
+            model.custom_session.any_in_flight();
         // During heavy compute throttle the main loop: glfwWaitEventsTimeout
         // blocks the thread up to 100 ms unless an input event arrives. Drops
         // render rate from ~60 FPS to ~10 FPS, freeing GPU and CPU for CUDA
