@@ -189,12 +189,15 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 	const int writeStep = 1);
 
 //__device__ __host__ int loopCalculateDiscreteModel_int(
+// cancelFlag: device-side stop signal, читается раз в CHECK_INTERVAL шагов;
+// nullptr = прежнее поведение.
 __device__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX =3, const int preScaller = 0,
 	const int writableVar = 0, const numb maxValue = 0,
 	numb* data = nullptr, const size_t startDataIndex = 0,
-	const int writeStep = 1);
+	const int writeStep = 1, const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr, int progressStride = 0, int* ticksReported = nullptr);
 
 // Ядро: ансамбль систем, разнесённых по шагу интегрирования (hSpecial).
 // amountOfThreads - размер ансамбля.
@@ -255,7 +258,8 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	numb* outPeaks, numb* timeOfPeaks, int* maxValueCheckerArray,
 	const bool Par_or_Var, const int hSweepAxis,
 	const numb transientTime, const numb tMax, const int logAxisMask,
-	const size_t peakStride, const int peakCapacity);
+	const size_t peakStride, const int peakCapacity,
+	const volatile int* cancelFlag, int* progressCounter, const int progressStride);
 
 // Ядро: траектории ансамбля при свипе по шагу интегрирования.
 // transientTime здесь в единицах времени, а не в шагах.

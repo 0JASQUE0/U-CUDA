@@ -22,6 +22,7 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 // Глобальный PeakConfig — единственный источник истины для GUI-настраиваемых knobs
@@ -5347,7 +5348,20 @@ struct ParametricEngine::Impl {
         // run_bif1d: ядра сами отсекают лишние потоки, а при числе ячеек сетки < 32 округление
         // давало 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
         if (nPtsLimiter == 0) return fail("сетка пуста (n_pts должно быть > 0)");
+
         size_t originalNPtsLimiter = nPtsLimiter;
+
+        // Прогресс считается по СЧЁТУ, а не по готовым ячейкам: все ячейки
+        // делают одну и ту же работу и финишируют пачкой, так что счётчик
+        // готовых ячеек при сетке в одну волну прыгал бы сразу с 0 на 100%.
+        // Шаг кратен CHECK_INTERVAL (тики ставятся в уже существующей проверке)
+        // и выбран так, чтобы ячейка отчиталась около 64 раз за всю работу:
+        // этого хватает для гладкого бара и не создаёт давки на одном адресе.
+        const size_t stepsPerCell = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        int progressStride = (int)(stepsPerCell / 64);
+        progressStride -= progressStride % CHECK_INTERVAL;
+        if (progressStride < CHECK_INTERVAL) progressStride = CHECK_INTERVAL;
+        const size_t ticksPerCell = stepsPerCell / (size_t)progressStride;
 
         // host buffers
         std::vector<int> h_dbscanResult(nPtsLimiter);
@@ -5362,12 +5376,16 @@ struct ParametricEngine::Impl {
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
+        int*    d_cancel            = nullptr;   // device-side stop signal for the kernel
+        int*    d_progress          = nullptr;   // cells finished in the current chunk
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
         // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
         // downclock between launches; on the same stream kernels are ordered
         // implicitly and the GPU stays under continuous load.
         CUstream stream = nullptr;
+        // Второй поток нужен, чтобы читать счётчик и писать флаг, пока основной считает.
+        cudaStream_t pollStream = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -5379,7 +5397,10 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_cancel)            cudaFree(d_cancel);
+            if (d_progress)          cudaFree(d_progress);
             if (stream)              cuStreamDestroy(stream);
+            if (pollStream)          cudaStreamDestroy(pollStream);
         };
 
         #define BIF2D_CHECK(call, where) do { \
@@ -5413,6 +5434,9 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        BIF2D_CHECK(cudaMalloc((void**)&d_cancel,            sizeof(int)),                                                 "cudaMalloc d_cancel");
+        BIF2D_CHECK(cudaMalloc((void**)&d_progress,          sizeof(int)),                                                 "cudaMalloc d_progress");
+        BIF2D_CHECK(cudaMemset(d_cancel, 0, sizeof(int)), "memset d_cancel");
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -5421,6 +5445,7 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         BIF2D_CHECK_CU(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
+        BIF2D_CHECK(cudaStreamCreateWithFlags(&pollStream, cudaStreamNonBlocking), "cudaStreamCreate poll");
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
@@ -5523,8 +5548,12 @@ struct ParametricEngine::Impl {
                 &tMax_arg,
                 &logAxisMask_arg,
                 &peakStride_arg,
-                &peakCapacity_arg
+                &peakCapacity_arg,
+                &d_cancel,
+                &d_progress,
+                &progressStride
             };
+            BIF2D_CHECK(cudaMemsetAsync(d_progress, 0, sizeof(int), stream), "memset d_progress");
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5563,11 +5592,49 @@ struct ParametricEngine::Impl {
             // D2H: только d_dbscanResult (число кластеров = период).
             // Async on the same stream + single sync — keeps the GPU continuously
             // loaded across the whole chunk instead of inserting 3 sync gaps.
-            BIF2D_CHECK(cudaMemcpyAsync(h_dbscanResult.data(), d_dbscanResult,
-                                        cur_limiter * sizeof(int),
-                                        cudaMemcpyDeviceToHost, stream),
-                        "memcpy h_dbscanResult");
+            // Вместо блокирующей синхронизации — опрос: без него и прогресс,
+            // и Cancel ходят раз в чанк, т.е. десятки секунд. Счётчик и флаг лежат
+            // в памяти устройства, а не в mapped-памяти хоста: атомик из ядра по шине
+            // PCIe стоил бы дороже всего, что он считает.
+            {
+                const double doneBefore   = (double)(originalNPtsLimiter * iter) * (double)ticksPerCell;
+                const double ticksTotal   = (double)total_cells * (double)ticksPerCell;
+                int  h_done = 0;
+                bool cancelSent = false;
+                for (;;) {
+                    cudaError_t q = cudaStreamQuery(stream);
+                    if (q == cudaSuccess) break;
+                    if (q != cudaErrorNotReady) {
+                        res.error = std::string("CUDA stream query: ") + cudaGetErrorString(q);
+                        cleanup(); return res;
+                    }
+                    if (cudaMemcpyAsync(&h_done, d_progress, sizeof(int),
+                                        cudaMemcpyDeviceToHost, pollStream) == cudaSuccess &&
+                        cudaStreamSynchronize(pollStream) == cudaSuccess && req.progress) {
+                        double frac = (doneBefore + (double)h_done) / ticksTotal;
+                        if (frac > 1.0) frac = 1.0;
+                        req.progress->store((float)frac, std::memory_order_relaxed);
+                    }
+                    if (!cancelSent && req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+                        const int one = 1;
+                        cudaMemcpyAsync(d_cancel, &one, sizeof(int), cudaMemcpyHostToDevice, pollStream);
+                        cudaStreamSynchronize(pollStream);
+                        cancelSent = true;   // ядро дойдёт до конца само, досчитав остаток до CHECK_INTERVAL
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                }
+            }
             BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
+            BIF2D_CANCEL_CHECK();
+
+            // Копируем ПОСЛЕ опроса, а не до него: device -> pageable копирование
+            // асинхронным не бывает (h_dbscanResult — std::vector), драйвер возвращает
+            // управление лишь после завершения копии, т.е. всей очереди потока. Стоя
+            // перед циклом, оно блокировало хост до конца ядра, и цикл не выполнялся
+            // ни разу — ни прогресса, ни отмены.
+            BIF2D_CHECK(cudaMemcpy(h_dbscanResult.data(), d_dbscanResult,
+                                   cur_limiter * sizeof(int), cudaMemcpyDeviceToHost),
+                        "memcpy h_dbscanResult");
 
             for (size_t k = 0; k < cur_limiter; ++k) {
                 size_t kernel_idx = originalNPtsLimiter * iter + k;

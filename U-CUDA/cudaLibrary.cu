@@ -1039,11 +1039,13 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb* x, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
-	const size_t startDataIndex, const int writeStep)
+	const size_t startDataIndex, const int writeStep,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
 {
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
 	numb checker;
+	size_t sinceReport = 0;
 
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	for (size_t i = 0; i < amountOfIterations; ++i)
@@ -1081,6 +1083,19 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 			calculateDiscreteModel(x, values, h);
 
 		if (i % CHECK_INTERVAL == 0) {
+			if (progressCounter != nullptr && progressStride > 0) {
+				sinceReport += CHECK_INTERVAL;
+				if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+					atomicAdd(progressCounter, 1);
+#endif
+					if (ticksReported != nullptr) ++(*ticksReported);
+					sinceReport = 0;
+				}
+			}
+			// Cancel отдаёт REGIME_UNBOUND: результат отменённого прогона
+			// хост всё равно выбрасывает, нового кода режима заводить не стали.
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 			checker = 0;
 			//#pragma unroll
 			for (int j = 0; j < AMOUNTOFX; ++j) {
@@ -1154,10 +1169,12 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	numb* x, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
-	int writableVar, const numb maxValue, PeakStream& peaks)
+	int writableVar, const numb maxValue, PeakStream& peaks,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
 {
 	numb xPrev[AMOUNTOFX];
 	numb checker;
+	size_t sinceReport = 0;
 
 	for (size_t i = 0; i < amountOfIterations; ++i)
 	{
@@ -1181,6 +1198,17 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 			calculateDiscreteModel(x, values, h);
 
 		if (i % CHECK_INTERVAL == 0) {
+			if (progressCounter != nullptr && progressStride > 0) {
+				sinceReport += CHECK_INTERVAL;
+				if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+					atomicAdd(progressCounter, 1);
+#endif
+					if (ticksReported != nullptr) ++(*ticksReported);
+					sinceReport = 0;
+				}
+			}
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 			checker = 0;
 			for (int j = 0; j < AMOUNTOFX; ++j)
 				checker = checker + abs(x[j]);
@@ -1445,7 +1473,10 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	const numb		tMax,
 	const int		logAxisMask,
 	const size_t	peakStride,
-	const int		peakCapacity)
+	const int		peakCapacity,
+	const volatile int* cancelFlag,   // device-side, polled once per CHECK_INTERVAL steps
+	int*			progressCounter,  // device-side; one atomic per progressStride steps of work
+	const int		progressStride)   // 0 = не считать прогресс
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -1456,6 +1487,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	if (idx >= nPtsLimiter)
 		return;
 
+	int    ticks = 0;   // сколько эта ячейка уже отчитала
 	numb   h_local;
 	size_t skip_local;
 	size_t iters_local;
@@ -1466,11 +1498,14 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 			amountOfPointsForSkip, amountOfIterations,
 			localX, localValues, h_local, skip_local, iters_local)) {
 		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
+		if (progressCounter != nullptr && progressStride > 0)
+			atomicAdd(progressCounter, (int)((amountOfPointsForSkip + amountOfIterations) / (size_t)progressStride));
 		return;
 	}
 
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
-		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1);
+		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
+		cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
@@ -1478,19 +1513,33 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 			h_local * (numb)preScaller, iters_local, peakCapacity);
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
-			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks);
+			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
+			cancelFlag, progressCounter, progressStride, &ticks);
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
 		if (flag == REGIME_OSCILLATION) {
 			if (maxValueCheckerArray != nullptr)
 				maxValueCheckerArray[idx] = doCalculatePeaks ? peaks.count() : peaks.countRaw();
+			// Добивка до ожидаемого числа тиков — см. тот же блок ниже.
+			if (progressCounter != nullptr && progressStride > 0) {
+				const size_t totalSteps = skip_local + iters_local;
+				const int expected = (int)(totalSteps / (size_t)progressStride);
+				if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+			}
 			return;
 		}
 	}
 
 	if (maxValueCheckerArray != nullptr)
 		maxValueCheckerArray[idx] = flag;
+	// Добивка до ожидаемого числа тиков: ячейка, упавшая в расходимость
+	// на первом шагу, иначе недосчитала бы свою долю, и бар застрял бы.
+	if (progressCounter != nullptr && progressStride > 0) {
+		const size_t totalSteps = skip_local + iters_local;
+		const int expected = (int)(totalSteps / (size_t)progressStride);
+		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+	}
 }
 
 __global__ void calculateDiscreteModelCUDA_H(
