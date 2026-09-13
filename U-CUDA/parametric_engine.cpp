@@ -5376,16 +5376,20 @@ struct ParametricEngine::Impl {
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
-        int*    d_cancel            = nullptr;   // device-side stop signal for the kernel
-        int*    d_progress          = nullptr;   // cells finished in the current chunk
+        // Оба сигнала живут в mapped-памяти хоста: h_signals[0] = отмена,
+        // h_signals[1] = тики прогресса. Держать их в памяти устройства нельзя:
+        // чтобы их прочитать, нужен был бы cudaMemcpy, а на WDDM любая копия во время
+        // работы ядра встаёт за ним в очередь и блокирует хост до конца счёта
+        // (замерено: цикл опроса делал РОВНО ОДНУ итерацию). Через mapped-память
+        // хост читает и пишет обычными load/store, без вызовов CUDA вообще.
+        int*    h_signals           = nullptr;   // mapped host page
+        int*    d_signals           = nullptr;   // её же device-проекция
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
         // per-kernel cudaDeviceSynchronize, which on Windows/WDDM lets the GPU
         // downclock between launches; on the same stream kernels are ordered
         // implicitly and the GPU stays under continuous load.
         CUstream stream = nullptr;
-        // Второй поток нужен, чтобы читать счётчик и писать флаг, пока основной считает.
-        cudaStream_t pollStream = nullptr;
 
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
@@ -5397,10 +5401,8 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
-            if (d_cancel)            cudaFree(d_cancel);
-            if (d_progress)          cudaFree(d_progress);
+            if (h_signals)           cuMemFreeHost(h_signals);
             if (stream)              cuStreamDestroy(stream);
-            if (pollStream)          cudaStreamDestroy(pollStream);
         };
 
         #define BIF2D_CHECK(call, where) do { \
@@ -5434,9 +5436,10 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
-        BIF2D_CHECK(cudaMalloc((void**)&d_cancel,            sizeof(int)),                                                 "cudaMalloc d_cancel");
-        BIF2D_CHECK(cudaMalloc((void**)&d_progress,          sizeof(int)),                                                 "cudaMalloc d_progress");
-        BIF2D_CHECK(cudaMemset(d_cancel, 0, sizeof(int)), "memset d_cancel");
+        BIF2D_CHECK_CU(cuMemHostAlloc((void**)&h_signals, 2 * sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP), "cuMemHostAlloc signals");
+        BIF2D_CHECK_CU(cuMemHostGetDevicePointer((CUdeviceptr*)&d_signals, h_signals, 0), "cuMemHostGetDevicePointer");
+        h_signals[0] = 0;   // cancel
+        h_signals[1] = 0;   // progress ticks
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -5445,7 +5448,6 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
         BIF2D_CHECK_CU(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
-        BIF2D_CHECK(cudaStreamCreateWithFlags(&pollStream, cudaStreamNonBlocking), "cudaStreamCreate poll");
 
         size_t amountOfIteration = (size_t)std::ceil((double)total_cells / (double)nPtsLimiter);
 
@@ -5520,6 +5522,8 @@ struct ParametricEngine::Impl {
             numb tMax_arg                  = tMax;
             int    logAxisMask_arg           = logAxisMask;
             size_t peakStride_arg            = peakStride;
+            int*   d_cancel_arg              = d_signals;
+            int*   d_progress_arg            = d_signals + 1;
             int    peakCapacity_arg          = peakCapacity;
 
             void* args_fused[] = {
@@ -5549,11 +5553,11 @@ struct ParametricEngine::Impl {
                 &logAxisMask_arg,
                 &peakStride_arg,
                 &peakCapacity_arg,
-                &d_cancel,
-                &d_progress,
+                &d_cancel_arg,
+                &d_progress_arg,
                 &progressStride
             };
-            BIF2D_CHECK(cudaMemsetAsync(d_progress, 0, sizeof(int), stream), "memset d_progress");
+            h_signals[1] = 0;   // тики этого чанка
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
@@ -5592,14 +5596,13 @@ struct ParametricEngine::Impl {
             // D2H: только d_dbscanResult (число кластеров = период).
             // Async on the same stream + single sync — keeps the GPU continuously
             // loaded across the whole chunk instead of inserting 3 sync gaps.
-            // Вместо блокирующей синхронизации — опрос: без него и прогресс,
-            // и Cancel ходят раз в чанк, т.е. десятки секунд. Счётчик и флаг лежат
-            // в памяти устройства, а не в mapped-памяти хоста: атомик из ядра по шине
-            // PCIe стоил бы дороже всего, что он считает.
+            // Опрос вместо блокирующей синхронизации. В теле цикла не должно быть
+            // ни одного вызова CUDA, кроме cudaStreamQuery — см. комментарий
+            // к h_signals выше.
             {
                 const double doneBefore   = (double)(originalNPtsLimiter * iter) * (double)ticksPerCell;
                 const double ticksTotal   = (double)total_cells * (double)ticksPerCell;
-                int  h_done = 0;
+                volatile int* sig = h_signals;   // обычные load/store, никакого CUDA в цикле
                 bool cancelSent = false;
                 for (;;) {
                     cudaError_t q = cudaStreamQuery(stream);
@@ -5608,18 +5611,14 @@ struct ParametricEngine::Impl {
                         res.error = std::string("CUDA stream query: ") + cudaGetErrorString(q);
                         cleanup(); return res;
                     }
-                    if (cudaMemcpyAsync(&h_done, d_progress, sizeof(int),
-                                        cudaMemcpyDeviceToHost, pollStream) == cudaSuccess &&
-                        cudaStreamSynchronize(pollStream) == cudaSuccess && req.progress) {
-                        double frac = (doneBefore + (double)h_done) / ticksTotal;
+                    if (req.progress) {
+                        double frac = (doneBefore + (double)sig[1]) / ticksTotal;
                         if (frac > 1.0) frac = 1.0;
                         req.progress->store((float)frac, std::memory_order_relaxed);
                     }
                     if (!cancelSent && req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-                        const int one = 1;
-                        cudaMemcpyAsync(d_cancel, &one, sizeof(int), cudaMemcpyHostToDevice, pollStream);
-                        cudaStreamSynchronize(pollStream);
-                        cancelSent = true;   // ядро дойдёт до конца само, досчитав остаток до CHECK_INTERVAL
+                        sig[0] = 1;          // ядро увидит его в ближайшей проверке CHECK_INTERVAL
+                        cancelSent = true;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(16));
                 }
