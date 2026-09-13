@@ -6706,6 +6706,7 @@ struct ParametricEngine::Impl {
             numb* d_Xs = nullptr;   numb* d_X0 = nullptr;
             numb* d_values = nullptr;
             numb* d_kF = nullptr;   numb* d_kB = nullptr;
+            RunSignals sig;   // прогресс и отмена в mapped-памяти
             #define FS_CHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS0_FAIL; } } while(0)
 
             size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(numb);
@@ -6717,6 +6718,7 @@ struct ParametricEngine::Impl {
             FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(numb)), "cudaMalloc d_values");
             FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kF");
             FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kB");
+            if (!sig.alloc(err)) goto FS0_FAIL;
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -6734,16 +6736,23 @@ struct ParametricEngine::Impl {
                 numb  h_arg     = req.h;
                 size_t  skip_arg  = amountOfPointsForSkip;
                 int     pts_arg   = traj_len_pts;
+                int* d_cancel_arg   = sig.cancelArg();
+                int* d_progress_arg = sig.progressArg();
+                sig.resetTicks();
                 void* args_fill[] = {
-                    &d_values, &h_arg, &d_X0, &skip_arg, &pts_arg, &d_timeDomain
+                    &d_values, &h_arg, &d_X0, &skip_arg, &pts_arg, &d_timeDomain,
+                    &d_cancel_arg, &d_progress_arg
                 };
                 CUresult r = cuLaunchKernel(cached_fs_attr.kernel_fs_fill,
                                             1, 1, 1, 1, 1, 1,
                                             0, nullptr, args_fill, nullptr);
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_attr fill): " + cu_err(r); goto FS0_FAIL; }
+                // Заполнение окна мастера идёт в один поток и занимает
+                // основную часть прогона, поэтому отдаём ему весь бар.
+                if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                       0.0, (double)pts_arg, err)) goto FS0_FAIL;
                 cudaDeviceSynchronize();
             }
-            if (req.progress) req.progress->store(0.5f);
 
             // Шаг 2: calculateDiscreteModelforFastSynchroCUDA — nPts threads, читает
             // timeDomain, пишет d_output[idx] = ошибка синхронизации на точке idx.
@@ -6763,6 +6772,7 @@ struct ParametricEngine::Impl {
                 unsigned long long icSeed_arg = req.ic_seed;
                 int    gsWarmup_i         = req.gs_warmup;
 
+                int* d_cancel_arg = sig.cancelArg();
                 void* args_fs[] = {
                     &nPts_int, &nPtsLimiter_int, &amountOfNTPoints_i, &h_arg,
                     &d_Xs, &amountOfIC_int,
@@ -6770,7 +6780,8 @@ struct ParametricEngine::Impl {
                     &iterOfSynchr_i, &amountOfValues_i, &amountOfNTPoints_i,
                     &maxValue_arg,
                     &d_timeDomain, &d_output, &preScaller_i,
-                    &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i
+                    &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i,
+                    &d_cancel_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
@@ -6778,9 +6789,10 @@ struct ParametricEngine::Impl {
                                             gridSize, 1, 1, blockSize, 1, 1,
                                             0, nullptr, args_fs, nullptr);
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_attr): " + cu_err(r); goto FS0_FAIL; }
+                if (!wait_with_signals(0, sig, req.cancel, nullptr, 0.0, 0.0, err)) goto FS0_FAIL;
                 cudaDeviceSynchronize();
             }
-            if (req.progress) req.progress->store(0.95f);
+            if (req.progress) req.progress->store(1.0f);
 
             // Шаг 3: D2H — trajectory + errors. timeDomain хранит RAW точки
             // (без decimator'а); для визуализации выбираем точки с шагом preScaller.
@@ -6843,6 +6855,7 @@ struct ParametricEngine::Impl {
             res.ok = true;
             return res;
             FS0_FAIL:
+            sig.release();
                 if (d_timeDomain) cudaFree(d_timeDomain);
                 if (d_output)     cudaFree(d_output);
                 if (d_Xs)         cudaFree(d_Xs);
@@ -6903,6 +6916,7 @@ struct ParametricEngine::Impl {
             size_t nPtsLimiter = freeMemory / perCellBytes;
             if (nPtsLimiter == 0) nPtsLimiter = 32;
             if (nPtsLimiter > total_cells) nPtsLimiter = total_cells;
+            RunSignals sig;   // прогресс и отмена в mapped-памяти
             const size_t originalNPtsLimiter = nPtsLimiter;
 
             numb* d_data    = nullptr; numb* d_ranges = nullptr;
@@ -6922,6 +6936,13 @@ struct ParametricEngine::Impl {
             FS_GCHECK(cudaMalloc((void**)&d_kB,      amountOfIC_int * sizeof(numb)),     "cudaMalloc d_kB");
             FS_GCHECK(cudaMalloc((void**)&d_helpful, nPtsLimiter * sizeof(int)),           "cudaMalloc d_helpful");
             FS_GCHECK(cudaMalloc((void**)&d_fs_err,  total_cells * sizeof(numb)),         "cudaMalloc d_fs_err");
+            // Тики ставит цикл заполнения окна мастера — это amountOfPointsInBlock
+            // шагов на ячейку; проходы вперёд-назад после него не тикают, поэтому
+            // бар доходит до ста на хвосте чанка и ждёт там.
+            if (!sig.alloc(err)) goto FS1_FAIL;
+            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
+            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
+            const double ticksTotal     = (double)total_cells * ticksPerCell;
 
             {
                 numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
@@ -6972,6 +6993,10 @@ struct ParametricEngine::Impl {
                 unsigned long long icSeed_arg    = req.ic_seed;
                 int    gsWarmup_int              = req.gs_warmup;
 
+                int*   d_cancel_arg       = sig.cancelArg();
+                int*   d_progress_arg     = sig.progressArg();
+                int    progressStride_arg = progressStride;
+                sig.resetTicks();
                 void* args_grid[] = {
                     &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_int, &amountOfCalculatedPoints,
                     &dimension_arg, &d_ranges, &h_arg, &d_idx_mv,
@@ -6982,6 +7007,7 @@ struct ParametricEngine::Impl {
                     &d_data, &d_helpful, &d_fs_err_chunk,
                     &swap_role_int, &skip_master_arg, &skip_slave_arg,
                     &icRandom_int, &icEps_arg, &icSeed_arg, &gsWarmup_int
+                    ,&d_cancel_arg, &d_progress_arg, &progressStride_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
@@ -6995,6 +7021,9 @@ struct ParametricEngine::Impl {
                                             gridSize, 1, 1, blockSize, 1, 1,
                                             shared_grid, nullptr, args_grid, nullptr);
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_grid): " + cu_err(r); goto FS1_FAIL; }
+                if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                       (double)(originalNPtsLimiter * i) * ticksPerCell,
+                                       ticksTotal, err)) goto FS1_FAIL;
                 cudaDeviceSynchronize();
 
                 // Диверг-флаги чанка: ядро пишет -1 в разлетевшиеся ячейки и 0
@@ -7008,7 +7037,6 @@ struct ParametricEngine::Impl {
                     }
                 }
 
-                if (req.progress) req.progress->store((float)(i + 1) / (float)amountOfIteration);
                 if (req.cancel && req.cancel->load()) { res.cancelled = true; goto FS1_CLEANUP; }
             }
 
@@ -7052,6 +7080,7 @@ struct ParametricEngine::Impl {
             }
 
             FS1_CLEANUP:
+            sig.release();
             cudaFree(d_data); cudaFree(d_ranges); cudaFree(d_idx_mv);
             cudaFree(d_ic_m); cudaFree(d_ic_s); cudaFree(d_values);
             cudaFree(d_kF); cudaFree(d_kB); cudaFree(d_helpful); cudaFree(d_fs_err);
@@ -7060,6 +7089,7 @@ struct ParametricEngine::Impl {
             return res;
 
             FS1_FAIL:
+            sig.release();
             if (d_data)    cudaFree(d_data);
             if (d_ranges)  cudaFree(d_ranges);
             if (d_idx_mv)  cudaFree(d_idx_mv);
