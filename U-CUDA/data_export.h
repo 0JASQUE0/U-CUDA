@@ -347,8 +347,15 @@ bool export_fastsync(const FastSyncResult&   res, const std::string& path);
 
 // Phase / TimeSeries — there is no engine-side CSV; the format is defined
 // fresh here. <path>_config.csv carries scheme + params + ICs + integration
-// settings; <path> (single IC) or <path>_ic0.csv/_ic1.csv/... (multi-IC)
-// carries one row per step with columns "t, x0, x1, ..., xN-1".
+// settings; <path> carries one row per step, ALL initial conditions side by
+// side in that single file:
+//   1 IC  — "t, x0, x1, ..., xN-1" (unchanged; external scripts read it);
+//   K ICs — "t" then one block of N columns per IC, headed
+//           "<var> [<IC label>]" (label commas/newlines folded to ';',
+//           an empty label falls back to "IC <k+1>").
+// Trajectories shorter than the longest one leave their trailing cells empty
+// rather than zero-filled. Раньше на K НУ писалось K отдельных файлов
+// <path>_ic0.csv/_ic1.csv/..., что заставляло склеивать их вручную.
 // RQA. Пишет ТРИ файла:
 //   <path>              — матрица РАССТОЯНИЙ n x n (не бинарная: она восстанавливается порогом
 //                         eps, который лежит в _config.csv, а обратно из бинарной ничего не
