@@ -9095,9 +9095,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     else {
         // Nothing in flight — pick the session whose last run finished most
-        // recently (across the 4 cancellable ones) and show persistent info.
+        // recently (across the cancellable ones) and show persistent info.
+        // Под-сессии Custom-вкладки живут отдельно от одноимённых сессий
+        // Parametric/Basins и тоже обязаны сюда попадать: без них после счёта
+        // в Custom плашка показывала время ПРОШЛОГО запуска из Parametric.
+        // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
+        // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[5] = {
+        DoneCand candidates[9] = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -9118,6 +9123,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               &model.basins_session.last_run_label,
               model.basins_session.last_run_succeeded,
               model.basins_session.last_run_seconds },
+            { BusyKind::Custom, cus.bif_session.last_run_completed_at,
+              &cus.bif_session.last_run_label,
+              cus.bif_session.last_run_succeeded,
+              cus.bif_session.last_run_seconds },
+            { BusyKind::Custom, cus.lle_session.last_run_completed_at,
+              &cus.lle_session.last_run_label,
+              cus.lle_session.last_run_succeeded,
+              cus.lle_session.last_run_seconds },
+            { BusyKind::Custom, cus.ls_session.last_run_completed_at,
+              &cus.ls_session.last_run_label,
+              cus.ls_session.last_run_succeeded,
+              cus.ls_session.last_run_seconds },
+            { BusyKind::Custom, cus.basins_session.last_run_completed_at,
+              &cus.basins_session.last_run_label,
+              cus.basins_session.last_run_succeeded,
+              cus.basins_session.last_run_seconds },
         };
         const DoneCand* best = nullptr;
         for (const auto& c : candidates) {
