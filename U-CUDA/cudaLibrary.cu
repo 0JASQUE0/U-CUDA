@@ -1294,6 +1294,17 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
+// Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
+// с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
+// свою долю, и бар застрял бы не дойдя до ста.
+__device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int progressStride,
+	size_t totalSteps, int ticks)
+{
+	if (progressCounter == nullptr || progressStride <= 0) return;
+	const int expected = (int)(totalSteps / (size_t)progressStride);
+	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
+}
+
 // ucudaSetupSweepPoint -- which point of the sweep this thread is, extracted so
 // that the trajectory kernel and its fused (trajectory-free) sibling cannot
 // drift apart. The node values, the log axes and the dt-sweep bookkeeping are
@@ -1395,7 +1406,10 @@ __global__ void calculateDiscreteModelCUDA(
 	const numb	transientTime,
 	const numb	tMax,
 	int*			actualIterations,
-	const int		logAxisMask)
+	const int		logAxisMask,
+	const volatile int* cancelFlag,
+	int*			progressCounter,
+	const int		progressStride)
 {
 	// Общая память в рамках одного блока
 	// Строение памяти (per-thread slice, шаг ucuda_shared_stride):
@@ -1428,25 +1442,30 @@ __global__ void calculateDiscreteModelCUDA(
 		// as "no data for this point", so no separate NaN-fill is needed here.
 		if (maxValueCheckerArray != nullptr) maxValueCheckerArray[idx] = -1;
 		if (actualIterations != nullptr)     actualIterations[idx] = 0;
+		ucudaProgressTopUp(progressCounter, progressStride, amountOfPointsForSkip + amountOfIterations, 0);
 		return;
 	}
 	if (actualIterations != nullptr) actualIterations[idx] = (int)iters_local;
 
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
+	int ticks = 0;
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
-		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1);
+		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1,
+		cancelFlag, progressCounter, progressStride, &ticks);
 
 	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
-			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1);
+			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1,
+			cancelFlag, progressCounter, progressStride, &ticks);
 
 	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
 	if (maxValueCheckerArray != nullptr) {
 		maxValueCheckerArray[idx] = flag;
 	}
+	ucudaProgressTopUp(progressCounter, progressStride, skip_local + iters_local, ticks);
 	//delete[] localX;
 	//delete[] localValues;
 	return;
@@ -2679,7 +2698,10 @@ __global__ void LLEKernelCUDA(
 	numb*			resultArray,
 	const int		hSweepAxis,
 	const numb	transientTime,
-	const int		logAxisMask)
+	const int		logAxisMask,
+	const volatile int* cancelFlag,
+	int*			progressCounter,
+	const int		progressStride)
 {
 	extern __shared__ numb s[];
 	numb* x = s + threadIdx.x * amountOfInitialConditions;
@@ -2750,10 +2772,18 @@ __global__ void LLEKernelCUDA(
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Тики считаем только по ведущей траектории x: возмущённая y идёт
+	// тем же числом шагов, и считать её значило бы удвоить ожидаемый итог.
+	// Отмена же передаётся в оба цикла.
+	int ticks = 0;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * (size_t)amountOfNTPoints;
+
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
 		resultArray[idx] = 999;
+		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
 
@@ -2805,17 +2835,21 @@ __global__ void LLEKernelCUDA(
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, progressCounter, progressStride, &ticks);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 
-		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, nullptr, 0, nullptr);
 
 		if (flag == 0) {
 			resultArray[idx] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 
@@ -2852,6 +2886,7 @@ __global__ void LLEKernelCUDA(
 	}
 
 	resultArray[idx] = result / tMax;
+	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
 // Всё что ниже остаётся отрезано от NVRTC — engine эти kernel'ы не зовёт,
@@ -3170,7 +3205,10 @@ __global__ void LSKernelCUDA(
 	numb* resultArray,
 	const int hSweepAxis,
 	const numb transientTime,
-	const int logAxisMask)
+	const int logAxisMask,
+	const volatile int* cancelFlag,
+	int* progressCounter,
+	const int progressStride)
 {
 	extern __shared__ numb s[];
 
@@ -3276,10 +3314,17 @@ __global__ void LSKernelCUDA(
 		}
 	}
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Тики — только по ведущей траектории (как в LLEKernelCUDA): N копий
+	// делают столько же шагов каждая, и счёт по ним раздул бы ожидаемый итог.
+	int ticks = 0;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * amountOfNTPoints;
+
+	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
 
@@ -3298,16 +3343,20 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < sizeOfBlock; ++i)
 	{
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			1, cancelFlag, progressCounter, progressStride, &ticks);
 		if (flag == 0) {
 			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
 		for (int j = 0; j < amountOfInitialConditions; ++j)
 		{
-			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+				1, cancelFlag, nullptr, 0, nullptr);
 			if (flag == 0) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+				ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 				return;
 			}
 		}
@@ -3337,6 +3386,7 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
+	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
 // Всё что ниже снова под гардом — engine не зовёт, потенциально хост-only.

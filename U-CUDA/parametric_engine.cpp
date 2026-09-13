@@ -1359,6 +1359,74 @@ struct ParametricEngine::Impl {
     int        cc_major = 0;
     int        cc_minor = 0;
 
+    // Сигнальная страница расчёта: [0] — запрос отмены, [1] — тики прогресса.
+    //
+    // Mapped host memory, а НЕ память устройства. На WDDM любой cudaMemcpy,
+    // выданный пока работает ядро, встаёт за ним в очередь и блокирует хост:
+    // цикл опроса делал ровно одну итерацию, и ни прогресс, ни Cancel не
+    // работали. Через mapped-страницу хост читает и пишет обычными load/store,
+    // без единого вызова CUDA.
+    struct RunSignals {
+        int* host = nullptr;   // страница на хосте
+        int* dev  = nullptr;   // её же device-проекция для ядра
+
+        bool alloc(std::string& err) {
+            CUresult r = cuMemHostAlloc((void**)&host, 2 * sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP);
+            if (r != CUDA_SUCCESS) { err = "cuMemHostAlloc(signals): " + cu_err(r); return false; }
+            r = cuMemHostGetDevicePointer((CUdeviceptr*)&dev, host, 0);
+            if (r != CUDA_SUCCESS) { err = "cuMemHostGetDevicePointer: " + cu_err(r); release(); return false; }
+            host[0] = 0; host[1] = 0;
+            return true;
+        }
+        void release()          { if (host) { cuMemFreeHost(host); host = nullptr; dev = nullptr; } }
+        int* cancelArg()  const { return dev; }
+        int* progressArg()const { return dev ? dev + 1 : nullptr; }
+        void resetTicks()       { if (host) ((volatile int*)host)[1] = 0; }
+        int  ticks()      const { return host ? ((volatile int*)host)[1] : 0; }
+        void raiseCancel()      { if (host) ((volatile int*)host)[0] = 1; }
+    };
+
+    // Шаг тика прогресса. Кратен CHECK_INTERVAL, потому что тики ставятся в уже
+    // существующей проверке расходимости, и подобран так, чтобы точка отчиталась
+    // около 64 раз за свою работу: этого хватает на гладкий бар и не создаёт
+    // давки на одном адресе.
+    static int progress_stride_for(size_t stepsPerPoint) {
+        int s = (int)(stepsPerPoint / 64);
+        s -= s % kCheckInterval;
+        if (s < kCheckInterval) s = kCheckInterval;
+        return s;
+    }
+
+    // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
+    // и передавая Cancel в ядро. В теле цикла не должно быть вызовов CUDA, кроме
+    // cudaStreamQuery — см. комментарий к RunSignals.
+    bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
+                           const std::shared_ptr<std::atomic<bool>>& cancel,
+                           const std::shared_ptr<std::atomic<float>>& progress,
+                           double ticksBefore, double ticksTotal, std::string& err) const
+    {
+        bool cancelSent = false;
+        for (;;) {
+            cudaError_t q = cudaStreamQuery(stream);
+            if (q == cudaSuccess) break;
+            if (q != cudaErrorNotReady) {
+                err = std::string("CUDA stream query: ") + cudaGetErrorString(q);
+                return false;
+            }
+            if (progress && ticksTotal > 0.0) {
+                double f = (ticksBefore + (double)sig.ticks()) / ticksTotal;
+                if (f > 1.0) f = 1.0;
+                progress->store((float)f, std::memory_order_relaxed);
+            }
+            if (!cancelSent && cancel && cancel->load(std::memory_order_relaxed)) {
+                sig.raiseCancel();
+                cancelSent = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        return true;
+    }
+
     // Закэшированные тексты NonLinAnal headers (читаются один раз)
     std::string src_cudaLibrary_cu;
     std::string src_cudaLibrary_cuh;
@@ -2011,6 +2079,7 @@ struct ParametricEngine::Impl {
         numb* d_initialConditions = nullptr;
         numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
+        RunSignals sig;                       // прогресс и отмена в mapped-памяти
         numb* d_outPeaks          = nullptr;
         numb* d_timeOfPeaks       = nullptr;
 
@@ -2020,6 +2089,7 @@ struct ParametricEngine::Impl {
             if (d_initialConditions) cudaFree(d_initialConditions);
             if (d_values)            cudaFree(d_values);
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
+            sig.release();
             if (d_outPeaks)          cudaFree(d_outPeaks);
             if (d_timeOfPeaks)       cudaFree(d_timeOfPeaks);
         };
@@ -2055,6 +2125,11 @@ struct ParametricEngine::Impl {
         BIF_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_outPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)nPts * ticksPerPoint;
 
         // H2D констант (порт строк 314-319 NL)
         BIF_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
@@ -2130,9 +2205,10 @@ struct ParametricEngine::Impl {
             int    logAxisMask_arg           = logAxisMask;
             size_t peakStride_arg            = peakStride;
             int    peakCapacity_arg          = peakCapacity;
-            int*   d_cancel_arg              = nullptr;   // сигналы пока по чанкам
-            int*   d_progress_arg            = nullptr;
-            int    progressStride_arg        = 0;
+            int*   d_cancel_arg              = sig.cancelArg();
+            int*   d_progress_arg            = sig.progressArg();
+            int    progressStride_arg        = progressStride;
+            sig.resetTicks();
 
             void* args_fused[] = {
                 &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints,
@@ -2152,7 +2228,11 @@ struct ParametricEngine::Impl {
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args_fused, nullptr),
                          "cuLaunchKernel(bif1d traj+peaks)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after traj+peaks");
+            BIF_CANCEL_CHECK();
 
             // D2H (порт строк 538-540 NL)
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
@@ -2355,6 +2435,7 @@ struct ParametricEngine::Impl {
         numb* d_values            = nullptr;
         numb* d_lleResult         = nullptr;
 
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
@@ -2362,6 +2443,7 @@ struct ParametricEngine::Impl {
             if (d_values)            cudaFree(d_values);
             if (d_lleResult)         cudaFree(d_lleResult);
         };
+            sig.release();
 
         #define LLE_CHECK(call, where) do { \
             cudaError_t _e = (call); \
@@ -2390,6 +2472,13 @@ struct ParametricEngine::Impl {
         LLE_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),"cudaMalloc d_initialConditions");
         LLE_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
         LLE_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(numb)),                      "cudaMalloc d_lleResult");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
+        // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)nPts * ticksPerPoint;
 
         LLE_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LLE_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  1 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -2460,6 +2549,11 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
+            int*   d_cancel_arg       = sig.cancelArg();
+            int*   d_progress_arg     = sig.progressArg();
+            int    progressStride_arg = progressStride;
+            sig.resetTicks();
+
             void* args[] = {
                 &nPts_arg,
                 &nPtsLimiter_arg,
@@ -2484,7 +2578,8 @@ struct ParametricEngine::Impl {
                 &d_lleResult,
                 &hSweepAxis_arg,
                 &transientTime_arg,
-                &logAxisMask_arg
+                &logAxisMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             // Shared = (3 * amountOfIC + amountOfValues) * sizeof(numb) * blockSize
@@ -2495,6 +2590,9 @@ struct ParametricEngine::Impl {
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args, nullptr),
                          "cuLaunchKernel(lle)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             LLE_CHECK(cudaDeviceSynchronize(), "sync after lle");
 
             LLE_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, nPtsLimiter * sizeof(numb), cudaMemcpyDeviceToHost),
@@ -2742,6 +2840,7 @@ struct ParametricEngine::Impl {
         numb* d_values            = nullptr;
         numb* d_lleResult         = nullptr;
 
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
@@ -2749,6 +2848,7 @@ struct ParametricEngine::Impl {
             if (d_values)            cudaFree(d_values);
             if (d_lleResult)         cudaFree(d_lleResult);
         };
+            sig.release();
 
         #define LLE2_CHECK(call, where) do { \
             cudaError_t _e = (call); \
@@ -2777,6 +2877,13 @@ struct ParametricEngine::Impl {
         LLE2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),"cudaMalloc d_initialConditions");
         LLE2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
         LLE2_CHECK(cudaMalloc((void**)&d_lleResult,         nPtsLimiter * sizeof(numb)),                      "cudaMalloc d_lleResult");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
+        // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)total_cells * ticksPerPoint;
 
         LLE2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LLE2_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -2858,6 +2965,11 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
+            int*   d_cancel_arg       = sig.cancelArg();
+            int*   d_progress_arg     = sig.progressArg();
+            int    progressStride_arg = progressStride;
+            sig.resetTicks();
+
             void* args[] = {
                 &nPts_arg,
                 &nPtsLimiter_arg,
@@ -2882,7 +2994,8 @@ struct ParametricEngine::Impl {
                 &d_lleResult,
                 &hSweepAxis_arg,
                 &transientTime_arg,
-                &logAxisMask_arg
+                &logAxisMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
@@ -2892,6 +3005,9 @@ struct ParametricEngine::Impl {
                                          gridSize, 1, 1, blockSize, 1, 1,
                                          shared, nullptr, args, nullptr),
                           "cuLaunchKernel(lle2d)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             LLE2_CHECK(cudaDeviceSynchronize(), "sync after lle2d");
 
             LLE2_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, cur_limiter * sizeof(numb), cudaMemcpyDeviceToHost),
@@ -3084,6 +3200,7 @@ struct ParametricEngine::Impl {
         numb* d_values            = nullptr;
         numb* d_lsResult          = nullptr;
 
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
@@ -3091,6 +3208,7 @@ struct ParametricEngine::Impl {
             if (d_values)            cudaFree(d_values);
             if (d_lsResult)          cudaFree(d_lsResult);
         };
+            sig.release();
 
         #define LS_CHECK(call, where) do { \
             cudaError_t _e = (call); \
@@ -3119,6 +3237,13 @@ struct ParametricEngine::Impl {
         LS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),                          "cudaMalloc d_initialConditions");
         LS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                                     "cudaMalloc d_values");
         LS_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)amountOfInitialConditions * sizeof(numb)),            "cudaMalloc d_lsResult");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
+        // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)nPts * ticksPerPoint;
 
         LS_CHECK(cudaMemcpy(d_ranges,            ranges,            2 * sizeof(numb),                                 cudaMemcpyHostToDevice), "memcpy d_ranges");
         LS_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  1 * sizeof(int),                                    cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -3190,13 +3315,19 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
+            int*   d_cancel_arg       = sig.cancelArg();
+            int*   d_progress_arg     = sig.progressArg();
+            int    progressStride_arg = progressStride;
+            sig.resetTicks();
+
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
                 &amountOfCalculatedPoints, &amountOfPointsForSkip_arg, &dimension_arg,
                 &d_ranges, &h_arg, &eps_arg, &d_indicesOfMutVars, &d_initialConditions,
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
-                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg
+                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             // Shared = (3N + 2N² + nValues) * sizeof(numb) * blockSize
@@ -3209,6 +3340,9 @@ struct ParametricEngine::Impl {
                                        gridSize, 1, 1, blockSize, 1, 1,
                                        shared, nullptr, args, nullptr),
                         "cuLaunchKernel(ls)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             LS_CHECK(cudaDeviceSynchronize(), "sync after ls");
 
             LS_CHECK(cudaMemcpy(h_lsResult.data(), d_lsResult,
@@ -3442,6 +3576,7 @@ struct ParametricEngine::Impl {
         numb* d_values            = nullptr;
         numb* d_lsResult          = nullptr;
 
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         auto cleanup = [&]() {
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
@@ -3449,6 +3584,7 @@ struct ParametricEngine::Impl {
             if (d_values)            cudaFree(d_values);
             if (d_lsResult)          cudaFree(d_lsResult);
         };
+            sig.release();
 
         #define LS2_CHECK(call, where) do { \
             cudaError_t _e = (call); \
@@ -3477,6 +3613,13 @@ struct ParametricEngine::Impl {
         LS2_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)N * sizeof(numb)),                        "cudaMalloc d_initialConditions");
         LS2_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),           "cudaMalloc d_values");
         LS2_CHECK(cudaMalloc((void**)&d_lsResult,          nPtsLimiter * (size_t)N * sizeof(numb)),          "cudaMalloc d_lsResult");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
+        // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)total_cells * ticksPerPoint;
 
         LS2_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                       cudaMemcpyHostToDevice), "memcpy d_ranges");
         LS2_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                          cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -3555,13 +3698,19 @@ struct ParametricEngine::Impl {
             numb transientTime_arg         = transientTime;
             int    logAxisMask_arg           = logAxisMask;
 
+            int*   d_cancel_arg       = sig.cancelArg();
+            int*   d_progress_arg     = sig.progressArg();
+            int    progressStride_arg = progressStride;
+            sig.resetTicks();
+
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
                 &amountOfCalculatedPoints, &amountOfPointsForSkip_arg, &dimension_arg,
                 &d_ranges, &h_arg, &eps_arg, &d_indicesOfMutVars, &d_initialConditions,
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
-                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg
+                &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             unsigned int shared = (unsigned int)((3 * N + 2 * N * N + amountOfValues)
@@ -3571,6 +3720,9 @@ struct ParametricEngine::Impl {
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args, nullptr),
                          "cuLaunchKernel(ls2d)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             LS2_CHECK(cudaDeviceSynchronize(), "sync after ls2d");
 
             LS2_CHECK(cudaMemcpy(h_lsResult.data(), d_lsResult,
@@ -4635,6 +4787,7 @@ struct ParametricEngine::Impl {
         numb* d_BkSIN             = nullptr;
         numb* d_window            = nullptr;
 
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         auto cleanup = [&]() {
             if (d_data)              cudaFree(d_data);
             if (d_ranges)            cudaFree(d_ranges);
@@ -4647,6 +4800,7 @@ struct ParametricEngine::Impl {
             if (d_BkSIN)             cudaFree(d_BkSIN);
             if (d_window)            cudaFree(d_window);
         };
+            sig.release();
 
         #define DFT_CHECK(call, where) do { \
             cudaError_t _e = (call); \
@@ -4680,6 +4834,11 @@ struct ParametricEngine::Impl {
         DFT_CHECK(cudaMalloc((void**)&d_AkCOS,             nPtsLimiter * (size_t)nFreq * sizeof(numb)),                "cudaMalloc d_AkCOS");
         DFT_CHECK(cudaMalloc((void**)&d_BkSIN,             nPtsLimiter * (size_t)nFreq * sizeof(numb)),                "cudaMalloc d_BkSIN");
         DFT_CHECK(cudaMalloc((void**)&d_window,            (size_t)amountOfPointsInBlock * sizeof(numb)),             "cudaMalloc d_window");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const int    progressStride = progress_stride_for(stepsPerPoint);
+        const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
+        const double ticksTotal     = (double)nPts * ticksPerPoint;
 
         DFT_CHECK(cudaMemcpy(d_ranges,            ranges,             2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_ranges");
         DFT_CHECK(cudaMemcpy(d_rangesFreq,        rangesFreq,         2 * sizeof(numb),                                cudaMemcpyHostToDevice), "memcpy d_rangesFreq");
@@ -4766,6 +4925,11 @@ struct ParametricEngine::Impl {
             // Лог-сетка по оси параметра — бит 0 (в 1D ось одна), как в run_bif1d.
             int    logAxisMask_arg           = req.log_scale ? 1 : 0;
 
+            int*   d_cancel_arg       = sig.cancelArg();
+            int*   d_progress_arg     = sig.progressArg();
+            int    progressStride_arg = progressStride;
+            sig.resetTicks();
+
             void* args_traj[] = {
                 &nPts_int,
                 &nPtsLimiter_int,
@@ -4791,7 +4955,8 @@ struct ParametricEngine::Impl {
                 &transientTime_arg,
                 &tMax_arg,
                 &d_actualIterations,
-                &logAxisMask_arg
+                &logAxisMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
 
             unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
@@ -4800,7 +4965,11 @@ struct ParametricEngine::Impl {
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args_traj, nullptr),
                          "cuLaunchKernel(traj)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerPoint,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
+            DFT_CANCEL_CHECK();
 
             // DFT_custom(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
             // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
@@ -5776,6 +5945,7 @@ struct ParametricEngine::Impl {
         int*    d_amountOfPeaks     = nullptr;
         int*    d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
+        RunSignals sig;   // прогресс и отмена в mapped-памяти
         numb* d_avgPeaks          = nullptr;
         numb* d_avgIntervals      = nullptr;
         int*    d_amountOfNeighbors = nullptr;
@@ -5790,6 +5960,7 @@ struct ParametricEngine::Impl {
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            sig.release();
             if (d_avgPeaks)          cudaFree(d_avgPeaks);
             if (d_avgIntervals)      cudaFree(d_avgIntervals);
             if (d_amountOfNeighbors) cudaFree(d_amountOfNeighbors);
@@ -5826,6 +5997,11 @@ struct ParametricEngine::Impl {
         BAS_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
         BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
         BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+        const size_t stepsPerCell   = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const int    progressStride = progress_stride_for(stepsPerCell);
+        const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
+        const double ticksTotal     = (double)total_cells * ticksPerCell;
         BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)),                                 "cudaMalloc d_avgPeaks");
         BAS_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)),                                 "cudaMalloc d_avgIntervals");
         BAS_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                                                  "cudaMalloc d_amountOfNeighbors");
@@ -5924,9 +6100,10 @@ struct ParametricEngine::Impl {
             numb mult1_v      = req.mult1;
             numb mult2_v      = req.mult2;
             // Сигналы пока выключены: прогресс и Cancel у бассейнов ещё по чанкам.
-            int*   d_cancel_arg              = nullptr;
-            int*   d_progress_arg            = nullptr;
-            int    progressStride_arg        = 0;
+            int*   d_cancel_arg              = sig.cancelArg();
+            int*   d_progress_arg            = sig.progressArg();
+            int    progressStride_arg        = progressStride;
+            sig.resetTicks();
 
             // Offset-указатели: чанк пишет в свою часть общей сетки.
             int*  d_helpful_chunk    = d_helpfulArray  + iter * originalNPtsLimiter;
@@ -5949,7 +6126,11 @@ struct ParametricEngine::Impl {
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared_traj, nullptr, args_basins, nullptr),
                          "cuLaunchKernel(basins traj+features)");
+            if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerCell,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
             BAS_CHECK(cudaDeviceSynchronize(), "sync after traj+features");
+            BAS_CANCEL_CHECK();
         }
 
         // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan)

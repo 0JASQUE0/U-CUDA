@@ -241,7 +241,12 @@ __global__ void calculateDiscreteModelCUDA(
 	const numb	transientTime = 0,        // raw transient time; only read when hSweepAxis != -1
 	const numb	tMax = 0,                 // raw computing time; only read when hSweepAxis != -1
 	int*			actualIterations = nullptr, // per-thread actual sample count written to `data` (worst-case-sized buffer); read by peakFinderCUDA
-	const int		logAxisMask = 0);         // bit i = axis slot i (X=0,Y=1) is log-distributed
+	const int		logAxisMask = 0,         // bit i = axis slot i (X=0,Y=1) is log-distributed
+	// Сигналы прогресса и отмены; nullptr/0 — прежнее поведение.
+	// ВНИМАНИЕ: через cuLaunchKernel дефолты не подставляются.
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr,
+	const int progressStride = 0);
 
 // calculateDiscreteModelCUDA + peakFinderCUDA в одном ядре: траектория не
 // хранится, сэмплы сразу уходят в PeakStream (см. cudaLibrary.cu). На выходе
@@ -448,7 +453,12 @@ __global__ void LLEKernelCUDA(
 	numb*			resultArray = nullptr,
 	const int		hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
 	const numb	transientTime = 0,   // raw transient time; only read when hSweepAxis != -1
-	const int		logAxisMask = 0);    // bit i = axis slot i is log-distributed
+	const int		logAxisMask = 0,    // bit i = axis slot i is log-distributed
+	// Сигналы прогресса и отмены; nullptr/0 — прежнее поведение.
+	// ВНИМАНИЕ: через cuLaunchKernel дефолты не подставляются.
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr,
+	const int progressStride = 0);
 
 // Ядро LLE, свип по начальным условиям.
 __global__ void LLEKernelICCUDA(
@@ -499,7 +509,12 @@ __global__ void LSKernelCUDA(
 	numb* resultArray = nullptr,
 	const int hSweepAxis = -1,     // -1 = off, 0 = X axis sweeps h, 1 = Y axis sweeps h
 	const numb transientTime = 0,  // raw transient time; only read when hSweepAxis != -1
-	const int logAxisMask = 0);    // bit i = axis slot i is log-distributed
+	const int logAxisMask = 0,    // bit i = axis slot i is log-distributed
+	// Сигналы прогресса и отмены; nullptr/0 — прежнее поведение.
+	// ВНИМАНИЕ: через cuLaunchKernel дефолты не подставляются.
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr,
+	const int progressStride = 0);
 
 __global__ void LSKernelICCUDA(
 	const int nPts,
