@@ -70,7 +70,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const numb		icEps = 0,
 	const unsigned long long icSeed = 0,
 	const int		gsWarmup = 0,
-	const volatile int* cancelFlag = nullptr);
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr);
 
 // swapRole: 0 = grid varies master IC (legacy default — initialConditions
 // overridden per cell, initialConditionsSlave fixed); 1 = grid varies slave IC
@@ -182,7 +183,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb icEps = 0,
 	const unsigned long long icSeed = 0,
 	const unsigned long long icCell = 0,
-	const int gsWarmup = 0);
+	const int gsWarmup = 0,
+	const volatile int* cancelFlag = nullptr,
+	int* progressCounter = nullptr);
 
 // Один шаг дискретной модели: новое состояние пишется обратно в x.
 __device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);

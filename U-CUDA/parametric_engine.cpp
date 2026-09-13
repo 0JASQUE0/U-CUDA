@@ -6719,6 +6719,16 @@ struct ParametricEngine::Impl {
             FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kF");
             FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kB");
             if (!sig.alloc(err)) goto FS0_FAIL;
+            // Бар делится между двумя фазами по их доле работы. Заполнение
+            // окна идёт в один поток и стоит skip + pts шагов; проходы вперёд-назад
+            // идут параллельно по точкам, так что по времени это 2 * iterOfSynchr * pts.
+            // Первая версия отдавала весь бар первой фазе — он доходил до 90%
+            // и там вставал.
+            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
+            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
+            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
+            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
+            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -6750,7 +6760,7 @@ struct ParametricEngine::Impl {
                 // Заполнение окна мастера идёт в один поток и занимает
                 // основную часть прогона, поэтому отдаём ему весь бар.
                 if (!wait_with_signals(0, sig, req.cancel, req.progress,
-                                       0.0, (double)pts_arg, err)) goto FS0_FAIL;
+                                       0.0, fsT1 * fsW / (fsW1 > 0 ? fsW1 : 1.0), err)) goto FS0_FAIL;
                 cudaDeviceSynchronize();
             }
 
@@ -6772,7 +6782,8 @@ struct ParametricEngine::Impl {
                 unsigned long long icSeed_arg = req.ic_seed;
                 int    gsWarmup_i         = req.gs_warmup;
 
-                int* d_cancel_arg = sig.cancelArg();
+                int* d_cancel_arg   = sig.cancelArg();
+                int* d_progress_arg = sig.progressArg();
                 void* args_fs[] = {
                     &nPts_int, &nPtsLimiter_int, &amountOfNTPoints_i, &h_arg,
                     &d_Xs, &amountOfIC_int,
@@ -6781,7 +6792,7 @@ struct ParametricEngine::Impl {
                     &maxValue_arg,
                     &d_timeDomain, &d_output, &preScaller_i,
                     &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i,
-                    &d_cancel_arg
+                    &d_cancel_arg, &d_progress_arg
                 };
                 int blockSize = 32;
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
@@ -6789,7 +6800,10 @@ struct ParametricEngine::Impl {
                                             gridSize, 1, 1, blockSize, 1, 1,
                                             0, nullptr, args_fs, nullptr);
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(fs_attr): " + cu_err(r); goto FS0_FAIL; }
-                if (!wait_with_signals(0, sig, req.cancel, nullptr, 0.0, 0.0, err)) goto FS0_FAIL;
+                sig.resetTicks();
+                if (!wait_with_signals(0, sig, req.cancel, req.progress,
+                                       fsT2 * fsW1 / (fsW2 > 0 ? fsW2 : 1.0),
+                                       fsT2 * fsW  / (fsW2 > 0 ? fsW2 : 1.0), err)) goto FS0_FAIL;
                 cudaDeviceSynchronize();
             }
             if (req.progress) req.progress->store(1.0f);

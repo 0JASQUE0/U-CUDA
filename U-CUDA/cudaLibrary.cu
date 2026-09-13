@@ -4040,7 +4040,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const numb		icEps,
 	const unsigned long long icSeed,
 	const int		gsWarmup,
-	const volatile int* cancelFlag)
+	const volatile int* cancelFlag,
+	int* progressCounter)
 {
 
 	// Вычисляем индекс потока, в котором находимся в даный момент
@@ -4072,7 +4073,8 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		icSeed,										 //const unsigned long long icSeed
 		(unsigned long long)idx,					 //const unsigned long long icCell
 		gsWarmup									 //const int gsWarmup
-	);
+	,
+		cancelFlag, progressCounter);
 	return;
 }
 
@@ -4092,7 +4094,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb icEps,
 	const unsigned long long icSeed,
 	const unsigned long long icCell,
-	const int gsWarmup)
+	const int gsWarmup,
+	const volatile int* cancelFlag,
+	int* progressCounter)
 {
 	// error_estim 7 — Беннеттин поверх того же цикла вперёд-назад; окно мастера
 	// залито заранее (fillFSMasterTrajectory). Только unidirectional — см.
@@ -4155,6 +4159,10 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	}
 
 	for (int m = 0; m < iterOfSynchr; ++m) {
+		// Тик — цикл синхронизации, а не шаг интегрирования: время живёт
+		// именно в проходах вперёд-назад, а не в заполнении окна.
+		if (cancelFlag != nullptr && *cancelFlag != 0) return fsDivergedError();
+		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 
 		for (int j = 0; j < amountOfX; j++)
 			K_local[j] = K_Forward[j];
