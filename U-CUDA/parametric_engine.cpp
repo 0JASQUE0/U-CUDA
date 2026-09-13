@@ -1459,8 +1459,7 @@ struct ParametricEngine::Impl {
     struct CachedBasinsModule {
         std::string  key;
         CUmodule     module                  = nullptr;
-        CUfunction   kernel_traj             = nullptr;  // calculateDiscreteModelCUDA
-        CUfunction   kernel_avg_peak         = nullptr;  // avgPeakFinderCUDA
+        CUfunction   kernel_fused            = nullptr;  // calculateDiscreteModelAvgPeaksCUDA
         CUfunction   kernel_dbscan           = nullptr;  // CUDA_dbscan_kernel
         CUfunction   kernel_search_fixed     = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
         CUfunction   kernel_search_clear     = nullptr;  // CUDA_dbscan_search_clear_points_kernel
@@ -1602,8 +1601,7 @@ struct ParametricEngine::Impl {
         if (cached_basins.module) {
             cuModuleUnload(cached_basins.module);
             cached_basins.module              = nullptr;
-            cached_basins.kernel_traj         = nullptr;
-            cached_basins.kernel_avg_peak     = nullptr;
+            cached_basins.kernel_fused        = nullptr;
             cached_basins.kernel_dbscan       = nullptr;
             cached_basins.kernel_search_fixed = nullptr;
             cached_basins.kernel_search_clear = nullptr;
@@ -5715,8 +5713,7 @@ struct ParametricEngine::Impl {
         if (!build_module(src_template_basins, "basins.cu",
                           { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                             { "{{KRS_BODY}}",    krs_body } },
-                          { "calculateDiscreteModelCUDA",
-                            "avgPeakFinderCUDA",
+                          { "calculateDiscreteModelAvgPeaksCUDA",
                             "CUDA_dbscan_kernel",
                             "CUDA_dbscan_search_fixed_points_kernel",
                             "CUDA_dbscan_search_clear_points_kernel" },
@@ -5724,11 +5721,10 @@ struct ParametricEngine::Impl {
             return false;
 
         cached_basins.module = mod;
-        if (!module_fn(mod, mg[0], cached_basins.kernel_traj,         err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_basins.kernel_avg_peak,     err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[2], cached_basins.kernel_dbscan,       err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[3], cached_basins.kernel_search_fixed, err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[4], cached_basins.kernel_search_clear, err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[0], cached_basins.kernel_fused,        err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[1], cached_basins.kernel_dbscan,       err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[2], cached_basins.kernel_search_fixed, err)) { release_basins_module(); return false; }
+        if (!module_fn(mod, mg[3], cached_basins.kernel_search_clear, err)) { release_basins_module(); return false; }
 
         cached_basins.key = key;
         return true;
@@ -5791,25 +5787,27 @@ struct ParametricEngine::Impl {
 
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
-        // Memory budget — мирор hostLibrary.cu:3269. Per-cell траектория-buffer:
-        // 2 * amountOfPointsInBlock * sizeof(numb) (d_data + d_intervals).
-        size_t freeMemory = 0;
-        if (!gpu_free_budget(0.9, freeMemory)) return fail("cudaMemGetInfo failed");
-
-        size_t perCellBytes = 2 * sizeof(numb) * (size_t)amountOfPointsInBlock;
-        if (perCellBytes == 0) perCellBytes = sizeof(numb);
-        size_t nPtsLimiter = freeMemory / perCellBytes;
-        if (nPtsLimiter == 0)              nPtsLimiter = (size_t)blockSize_setup;
+        // По памяти чанк больше ничем не ограничен: буферы, росшие вместе
+        // с ним (d_data и d_intervals), ушли вместе с траекторией, а выходные
+        // массивы выделяются на всю сетку сразу. Нарезка осталась только
+        // ради гранулярности прогресса и Cancel (опрашиваются раз в чанк); нижняя
+        // граница — два "заполнения GPU", где пропускная способность выходит
+        // на полку. Уйдёт, когда бассейны перейдут на mapped-сигналы, как run_bif2d.
+        int smCount = 0, maxThreadsPerSm = 0;
+        cuDeviceGetAttribute(&smCount,         CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,        device);
+        cuDeviceGetAttribute(&maxThreadsPerSm, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, device);
+        size_t gpuFill = 2 * (size_t)smCount * (size_t)maxThreadsPerSm;
+        if (gpuFill == 0) gpuFill = 65536;
+        size_t nPtsLimiter = total_cells / 32;
+        if (nPtsLimiter < gpuFill)         nPtsLimiter = gpuFill;
         if (nPtsLimiter > total_cells)     nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
 
-        numb* d_data              = nullptr;
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
         numb* d_initialConditions = nullptr;
         numb* d_values            = nullptr;
         int*    d_amountOfPeaks     = nullptr;
-        numb* d_intervals         = nullptr;
         int*    d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
         numb* d_avgPeaks          = nullptr;
@@ -5819,13 +5817,11 @@ struct ParametricEngine::Impl {
         int*    d_clearIdx          = nullptr;
 
         auto cleanup = [&]() {
-            if (d_data)              cudaFree(d_data);
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
             if (d_values)            cudaFree(d_values);
             if (d_amountOfPeaks)     cudaFree(d_amountOfPeaks);
-            if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
             if (d_avgPeaks)          cudaFree(d_avgPeaks);
@@ -5857,13 +5853,11 @@ struct ParametricEngine::Impl {
             } \
         } while(0)
 
-        BAS_CHECK(cudaMalloc((void**)&d_data,              nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_data");
         BAS_CHECK(cudaMalloc((void**)&d_ranges,            4 * sizeof(numb)),                                           "cudaMalloc d_ranges");
         BAS_CHECK(cudaMalloc((void**)&d_indicesOfMutVars,  2 * sizeof(int)),                                              "cudaMalloc d_indicesOfMutVars");
         BAS_CHECK(cudaMalloc((void**)&d_initialConditions, (size_t)amountOfInitialConditions * sizeof(numb)),           "cudaMalloc d_initialConditions");
         BAS_CHECK(cudaMalloc((void**)&d_values,            (size_t)amountOfValues * sizeof(numb)),                      "cudaMalloc d_values");
         BAS_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
-        BAS_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * (size_t)amountOfPointsInBlock * sizeof(numb)), "cudaMalloc d_intervals");
         BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
         BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)),                                 "cudaMalloc d_avgPeaks");
@@ -5941,13 +5935,11 @@ struct ParametricEngine::Impl {
             if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
-            // calculateDiscreteModelCUDA — 25 args (см. run_bif1d / run_bif2d). Basins не
-            // выставляет h-свип/лог-ось в BasinsRequest, поэтому здесь они всегда выключены — как и
-            // в run_dft1d_classical. actualIterations допускает nullptr (проверка в cudaLibrary.cu),
-            // и avgPeakFinderCUDA ниже его не читает.
+            // calculateDiscreteModelAvgPeaksCUDA: интегрирование и фичи в одном ядре.
+            // h-свипа и лог-осей у бассейнов нет в запросе вовсе, ядро зашивает их
+            // константами -1 / 0 — ровно тем, что сюда передавалась раздельная пара.
             int    nPts_arg                  = nPts;
             int    nPtsLimiter_int           = (int)cur_limiter;
-            size_t sizeOfBlock_s             = (size_t)amountOfPointsInBlock;
             size_t amountOfCalculatedPoints  = iter * originalNPtsLimiter;
             size_t amountOfPointsForSkip_s   = (size_t)amountOfPointsForSkip;
             int    dimension_arg             = 2;
@@ -5959,66 +5951,39 @@ struct ParametricEngine::Impl {
             int    writableVar_int           = req.writable_var;
             numb maxValue_arg              = maxValue;
             bool   par_or_var_arg            = false;   // compile-time par_or_var=0 в шаблоне
-            int    hSweepAxis_arg            = -1;
             numb transientTime_arg         = transientTime;
             numb tMax_arg                  = tMax;
-            int*   d_actualIterations        = nullptr;
-            int    logAxisMask_arg           = 0;
-
-            // Offset-указатель для helpfulArray (chunk пишет в свою часть глобального массива).
-            int* d_helpful_chunk = d_helpfulArray + iter * originalNPtsLimiter;
-
-            void* args_traj[] = {
-                &nPts_arg, &nPtsLimiter_int, &sizeOfBlock_s, &amountOfCalculatedPoints,
-                &amountOfPointsForSkip_s, &dimension_arg, &d_ranges, &h_arg,
-                &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
-                &d_values, &amountOfValues_int, &amountOfIterations_arg,
-                &preScaller_int, &writableVar_int, &maxValue_arg,
-                &d_data, &d_helpful_chunk, &par_or_var_arg,
-                &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
-                &d_actualIterations, &logAxisMask_arg
-            };
-            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_traj,
-                                        gridSize, 1, 1, blockSize, 1, 1,
-                                        shared_traj, nullptr, args_traj, nullptr),
-                         "cuLaunchKernel(basins traj)");
-            BAS_CHECK(cudaDeviceSynchronize(), "sync after traj");
-
-            // avgPeakFinderCUDA. d_data → outPeaks (in-place); d_intervals → timeOfPeaks.
-            int sizeOfBlock_int = amountOfPointsInBlock;
-            int amountOfBlocks  = (int)cur_limiter;
-            // ОБЯЗАТЕЛЬНО numb, а не double: cuLaunchKernel копирует аргументы побайтово по void*,
-            // не сверяя типы с сигнатурой. Параметр `h` у avgPeakFinderCUDA объявлен как numb,
-            // поэтому при numb=float отсюда уехали бы первые 4 байта double-представления: h=0.01
-            // приходил в ядро как 89128.96, и межпиковые интервалы (разность индексов * h) выходили
-            // порядка 1e6. При numb=double размеры совпадали, и баг не проявлялся.
-            numb h_peak         = (numb)(h * (double)preScaller);
-            numb* d_avg_peak_chunk   = d_avgPeaks     + iter * originalNPtsLimiter;
-            numb* d_avg_interv_chunk = d_avgIntervals + iter * originalNPtsLimiter;
-
-            // feature1/feature2 + mult1/mult2 — выбор пользователя (см.
-            // BasinsConfig). Копируем req-поля в local non-const, чтобы
-            // взять адреса для void*[] (req — const ref).
             int  feature1_int = req.feature1;
             int  feature2_int = req.feature2;
             numb mult1_v      = req.mult1;
             numb mult2_v      = req.mult2;
-            void* args_avg[] = {
-                &d_data, &sizeOfBlock_int, &amountOfBlocks,
-                &d_avg_peak_chunk, &d_avg_interv_chunk,
-                &d_data, &d_intervals,
-                &d_helpful_chunk, &h_peak,
-                &feature1_int, &feature2_int,
-                &mult1_v, &mult2_v
+            // Сигналы пока выключены: прогресс и Cancel у бассейнов ещё по чанкам.
+            int*   d_cancel_arg              = nullptr;
+            int*   d_progress_arg            = nullptr;
+            int    progressStride_arg        = 0;
+
+            // Offset-указатели: чанк пишет в свою часть общей сетки.
+            int*  d_helpful_chunk    = d_helpfulArray  + iter * originalNPtsLimiter;
+            numb* d_avg_peak_chunk   = d_avgPeaks      + iter * originalNPtsLimiter;
+            numb* d_avg_interv_chunk = d_avgIntervals  + iter * originalNPtsLimiter;
+
+            void* args_basins[] = {
+                &nPts_arg, &nPtsLimiter_int, &amountOfCalculatedPoints,
+                &amountOfPointsForSkip_s, &dimension_arg, &d_ranges, &h_arg,
+                &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                &d_values, &amountOfValues_int, &amountOfIterations_arg,
+                &preScaller_int, &writableVar_int, &maxValue_arg,
+                &d_avg_peak_chunk, &d_avg_interv_chunk, &d_helpful_chunk,
+                &par_or_var_arg, &transientTime_arg, &tMax_arg,
+                &feature1_int, &feature2_int, &mult1_v, &mult2_v,
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
-            int avg_blockSize = blockSize_setup;
-            int avg_gridSize  = (int)((cur_limiter + avg_blockSize - 1) / avg_blockSize);
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_avg_peak,
-                                        avg_gridSize, 1, 1, avg_blockSize, 1, 1,
-                                        0, nullptr, args_avg, nullptr),
-                         "cuLaunchKernel(basins avg_peak)");
-            BAS_CHECK(cudaDeviceSynchronize(), "sync after avg_peak");
+            unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_fused,
+                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        shared_traj, nullptr, args_basins, nullptr),
+                         "cuLaunchKernel(basins traj+features)");
+            BAS_CHECK(cudaDeviceSynchronize(), "sync after traj+features");
         }
 
         // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan)
