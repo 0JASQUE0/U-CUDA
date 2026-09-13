@@ -165,13 +165,21 @@ D:\U-CUDA\
 ---
 
 ## 🔄 NVRTC ODE Code Generation Pipeline
-1. User inputs system (LaTeX/plain/OCR) → `sysparse` builds AST
-2. `codegen` emits `.cu` source with device function that computes RHS + required Jacobians (for LLE/LS)
-3. This code is substituted into template from `kernels/<task>.template.cu`
+1. User inputs system (LaTeX/plain/OCR) → `sysparse` normalizes the text and splits it into `System{vars, params, rhs}`. This is string-level work (regex/char scanning): `sysparse` builds **no** AST, and `rhs` are plain strings.
+2. `codegen` parses those strings into its own AST (`Node`/`Parser`, private to the anonymous namespace in `codegen.cpp`) and emits the **body of the integration step** — that is, the body of `calculateDiscreteModel`, and nothing else.
+3. This code is substituted into template from `kernels/<task>.template.cu` at the `{{KRS_BODY}}` placeholder
 4. `nvrtc_engine` compiles, returns `CUfunction`
 5. `parametric_engine` / `phase_portrait_nvrtc` launches kernel, retrieves result into GPU buffers, passes to renderer
 6. Renderer uses the same memory via OpenGL interop—no copies
 7. **Post-Build Event** copies runtime data to `<solution>/x64/{Debug,Release}/` (= `OutDir`): `ocr_server.py`, the whole `kernels/` folder, plus `cudaLibrary.cu`, `cudaLibrary.cuh`, `cudaMacros.cuh` and `configCUDA.h` into `kernels/`—NVRTC picks them up at runtime. Note: `library/` is **not** copied (it is resolved from source at runtime), and neither is `hostLibrary.cuh`.
+
+### Where linearization actually comes from
+**LLE/LS do not use a Jacobian.** They linearize with perturbed clone trajectories plus Gram-Schmidt (`LLEKernelCUDA` / `LSKernelCUDA` in `cudaLibrary.cu`) — the Benettin/Wolf method. No variational equations, no monodromy matrix anywhere.
+
+Symbolic differentiation does exist, but it serves **only the implicit schemes** (`Implicit Euler`, `Implicit Midpoint`): `pn_diff` / `jac_over` in `codegen.cpp` emit an N×N Jacobian into the step body for the Newton solve. For anyone extending it:
+- build results through the `pn_*` peephole constructors, but do **not** make `pn_add`/`pn_sub` fold — the CD emitter depends on their exact shape; zero-folding for the chain rule lives in the `jd_*` wrappers;
+- `d(fabs)` emits `copysign(1,u)`, not the device-side `sign()` — that one is invisible to the phase-portrait NVRTC path, the CPU bytecode and the bare-`cl.exe` KRS path;
+- `floor`/`ceil`/`fmod` are rejected at codegen time (`jac_check_differentiable`).
 
 ---
 
