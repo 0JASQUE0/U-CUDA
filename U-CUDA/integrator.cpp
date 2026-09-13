@@ -295,12 +295,13 @@ void newton_stage(const SystemEvaluator& ev, const double* X, const double* a,
         return lu_factor(Am, piv, n);
     };
 
-    // Singular pivot leaves the step on the predictor rather than dividing through
-    // and turning the trajectory into nan — same choice as the generated code.
-    bool ok = full ? true : build();
-
+    bool ok = true, refresh = true;
+    double prevn = 1e300;
     for (int it = 0; it < maxit; ++it) {
-        if (full) ok = build();
+        if (refresh) { ok = build(); refresh = false; }
+        // Singular pivot leaves the step on the predictor rather than dividing
+        // through and turning the trajectory into nan - same choice as the
+        // generated code.
         if (!ok) break;
         ev.eval(Xn, a, kbuf);
         for (int i = 0; i < n; ++i) Fv[i] = Xn[i] - X[i] - hc * kbuf[i];
@@ -308,9 +309,13 @@ void newton_stage(const SystemEvaluator& ev, const double* X, const double* a,
         double nrm = 0.0;
         for (int i = 0; i < n; ++i) { Xn[i] -= Fv[i]; nrm += Fv[i] * Fv[i]; }
         if (nrm < tol * tol) break;
+        // nrm and prevn are SQUARED norms, so 0.25 is the 0.5 contraction factor.
+        // Without the refresh a frozen Jacobian diverges outright on a stiff
+        // nonlinear system (measured on Van der Pol, mu = 100, h >= 0.01).
+        if (full || nrm > 0.25 * prevn) refresh = true;
+        prevn = nrm;
     }
 }
-
 void step_implicit_euler(const SystemEvaluator& ev, double* X, const double* a,
                          double h, int n, double* Xn, double* Fv, double* Am,
                          int* piv, double* kbuf) {

@@ -18,8 +18,9 @@ struct System {
     // per-analysis config) because AppModel::build_system() is the single System
     // factory and its result is copied into every session, so codegen sees them
     // without touching analysis_session.h / session_io.cpp.
-    // newton_full: false = Jacobian and LU once per step at the predictor
-    // (modified Newton), true = rebuilt every iteration (full Newton).
+    // newton_full: false = modified Newton (Jacobian and LU reused across
+    // iterations, refreshed when the correction stops shrinking), true = full
+    // Newton (rebuilt every iteration).
     bool   newton_full      = false;
     double newton_tol       = 1e-10;
     int    newton_max_iters = 8;

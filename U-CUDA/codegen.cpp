@@ -744,11 +744,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
     //
     // Newton starts from an explicit-Euler predictor, which lands within O(h^2) of
     // the root, so 2-3 iterations are typical. System::newton_full picks the variant:
-    //   false -- Jacobian and LU built ONCE per step, at the predictor (modified
-    //            Newton). Each iteration then costs only a residual and a back
-    //            substitution. Linear convergence, much cheaper per step.
-    //   true  -- both rebuilt every iteration (full Newton): quadratic convergence
-    //            and more robust at large h, at roughly k times the cost.
+    //   false -- Jacobian and LU built once per step at the predictor and REUSED
+    //            while the correction keeps shrinking; rebuilt as soon as it does
+    //            not (modified Newton with a refresh). The refresh is not a
+    //            refinement: a permanently frozen Jacobian diverges outright on a
+    //            stiff nonlinear system - measured on Van der Pol at mu = 100,
+    //            where h >= 0.01 blew up without it and reproduces the full-Newton
+    //            answer with it, at about half the Jacobian evaluations.
+    //   true  -- rebuilt every iteration (full Newton): quadratic convergence and
+    //            the most robust at large h, at roughly k times the cost.
     // Iteration stops on ||dX||^2 < tol^2 or after newton_max_iters passes. tol and
     // the iteration cap are printed as literals, so they land in krs_body and thus in
     // the NVRTC cache key by themselves -- no extra placeholder, no manual eviction.
@@ -783,8 +787,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "    const numb hc = "
           << (kind == ImplicitKind::Euler ? "h" : "(0.5 * h)") << ";\n";
         o << "    const numb ntol = " << fmtnum(tol) << ";\n";
-        o << "    int it, ik, ir, ic, ip, sing;\n";
-        o << "    numb mx, av, dgn, mlt, nrm;\n";
+        o << "    int it, ik, ir, ic, ip, sing, refresh;\n";
+        o << "    numb mx, av, dgn, mlt, nrm, prevn;\n";
 
         // Predictor: explicit Euler over the same hc, so the Newton start is already
         // second-order accurate for the midpoint variant.
@@ -792,54 +796,54 @@ namespace { // внутренняя линковка: всё ниже не ви�
         for (int i = 0; i < N; ++i)
             o << "    Xn[" << i << "] = X[" << i << "] + hc * (" << f0[i] << ");\n";
 
-        // Am = I - hc*J, then LU with partial pivoting. Emitted twice for full
-        // Newton (once before the loop is pointless there) or once for modified.
-        auto emit_jac_lu = [&](const char* ind) {
-            o << ind << "/* Am = I - hc * J(Xn) */\n";
-            for (int i = 0; i < N; ++i) {
-                for (int j = 0; j < N; ++j) {
-                    const std::string& d = Jn[(size_t)i * N + j];
-                    o << ind << "Am[" << (i * N + j) << "] = ";
-                    if (d == "0.0") o << (i == j ? "1.0" : "0.0") << ";\n";
-                    else if (i == j) o << "1.0 - hc * (" << d << ");\n";
-                    else             o << "-hc * (" << d << ");\n";
-                }
+        o << "\n    sing = 0; refresh = 1; prevn = 1e300;\n";
+        o << "    for (it = 0; it < " << maxit << "; it++) {\n";
+
+        // One emission of the Jacobian + LU, entered on iteration 0 and again
+        // whenever `refresh` is set below. Full Newton sets it every iteration;
+        // modified Newton only when the frozen matrix stops contracting.
+        o << "        if (refresh) {\n";
+        o << "            /* Am = I - hc * J(Xn) */\n";
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                const std::string& d = Jn[(size_t)i * N + j];
+                o << "            Am[" << (i * N + j) << "] = ";
+                if (d == "0.0") o << (i == j ? "1.0" : "0.0") << ";\n";
+                else if (i == j) o << "1.0 - hc * (" << d << ");\n";
+                else             o << "-hc * (" << d << ");\n";
             }
-            o << ind << "/* LU with partial pivoting */\n";
-            o << ind << "for (ik = 0; ik < ndim; ik++) {\n";
-            o << ind << "    ip = ik; mx = fabs(Am[ik * ndim + ik]);\n";
-            o << ind << "    for (ir = ik + 1; ir < ndim; ir++) {\n";
-            o << ind << "        av = fabs(Am[ir * ndim + ik]);\n";
-            o << ind << "        if (av > mx) { mx = av; ip = ir; }\n";
-            o << ind << "    }\n";
-            o << ind << "    piv[ik] = ip;\n";
-            o << ind << "    if (ip != ik)\n";
-            o << ind << "        for (ic = 0; ic < ndim; ic++) {\n";
-            o << ind << "            mlt = Am[ik * ndim + ic];\n";
-            o << ind << "            Am[ik * ndim + ic] = Am[ip * ndim + ic];\n";
-            o << ind << "            Am[ip * ndim + ic] = mlt;\n";
-            o << ind << "        }\n";
-            o << ind << "    dgn = Am[ik * ndim + ik];\n";
-            // Singular pivot: flag and bail out instead of dividing. Nudging the
-            // pivot would only turn the correction into inf and then nan, killing a
-            // trajectory that is otherwise alive; leaving the step on the predictor
-            // costs one order locally and nothing globally.
-            o << ind << "    if (fabs(dgn) < 1e-30) { sing = 1; break; }\n";
-            o << ind << "    for (ir = ik + 1; ir < ndim; ir++) {\n";
-            o << ind << "        mlt = Am[ir * ndim + ik] / dgn;\n";
-            o << ind << "        Am[ir * ndim + ik] = mlt;\n";
-            o << ind << "        for (ic = ik + 1; ic < ndim; ic++)\n";
-            o << ind << "            Am[ir * ndim + ic] -= mlt * Am[ik * ndim + ic];\n";
-            o << ind << "    }\n";
-            o << ind << "}\n";
-        };
-
-        o << "\n    sing = 0;\n";
-        if (!full) emit_jac_lu("    ");
-
-        o << "\n    for (it = 0; it < " << maxit << "; it++) {\n";
-        if (full) emit_jac_lu("        ");
+        }
+        o << "            /* LU with partial pivoting */\n";
+        o << "            for (ik = 0; ik < ndim; ik++) {\n";
+        o << "                ip = ik; mx = fabs(Am[ik * ndim + ik]);\n";
+        o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
+        o << "                    av = fabs(Am[ir * ndim + ik]);\n";
+        o << "                    if (av > mx) { mx = av; ip = ir; }\n";
+        o << "                }\n";
+        o << "                piv[ik] = ip;\n";
+        o << "                if (ip != ik)\n";
+        o << "                    for (ic = 0; ic < ndim; ic++) {\n";
+        o << "                        mlt = Am[ik * ndim + ic];\n";
+        o << "                        Am[ik * ndim + ic] = Am[ip * ndim + ic];\n";
+        o << "                        Am[ip * ndim + ic] = mlt;\n";
+        o << "                    }\n";
+        o << "                dgn = Am[ik * ndim + ik];\n";
+        // Singular pivot: flag and bail instead of dividing. Nudging the pivot
+        // would only turn the correction into inf and then nan, killing a
+        // trajectory that is otherwise alive; leaving the step on the predictor
+        // costs one order locally and nothing globally.
+        o << "                if (fabs(dgn) < 1e-30) { sing = 1; break; }\n";
+        o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
+        o << "                    mlt = Am[ir * ndim + ik] / dgn;\n";
+        o << "                    Am[ir * ndim + ik] = mlt;\n";
+        o << "                    for (ic = ik + 1; ic < ndim; ic++)\n";
+        o << "                        Am[ir * ndim + ic] -= mlt * Am[ik * ndim + ic];\n";
+        o << "                }\n";
+        o << "            }\n";
+        o << "            refresh = 0;\n";
+        o << "        }\n";
         o << "        if (sing) break;\n";
+
         o << "        /* residual F(Xn) = Xn - X - hc * f(Xn) */\n";
         for (int i = 0; i < N; ++i)
             o << "        Fv[" << i << "] = Xn[" << i << "] - X[" << i
@@ -861,6 +865,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "        Xn[" << i << "] -= Fv[" << i << "]; nrm += Fv[" << i
               << "] * Fv[" << i << "];\n";
         o << "        if (nrm < ntol * ntol) break;\n";
+        if (full)
+            o << "        refresh = 1;\n";
+        else
+            // nrm and prevn are SQUARED norms, so 0.25 is the 0.5 contraction
+            // factor. Without this a frozen Jacobian diverges outright on a stiff
+            // nonlinear system (measured on Van der Pol, mu = 100, h >= 0.01);
+            // refreshing recovers the full-Newton answer at half the Jacobians.
+            o << "        if (nrm > 0.25 * prevn) refresh = 1;\n";
+        o << "        prevn = nrm;\n";
         o << "    }\n\n";
 
         if (kind == ImplicitKind::Euler)
@@ -873,7 +886,6 @@ namespace { // внутренняя линковка: всё ниже не ви�
 
         return o.str();
     }
-
     std::string scheme_implicit_euler(const System& s)    { return scheme_implicit_common(s, ImplicitKind::Euler); }
     std::string scheme_implicit_midpoint(const System& s) { return scheme_implicit_common(s, ImplicitKind::Midpoint); }
 

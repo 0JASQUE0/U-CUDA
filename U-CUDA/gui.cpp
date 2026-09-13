@@ -1502,10 +1502,11 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         if (ImGui::Combo("jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0"))
             model.newton_full = (jac_mode == 1);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("modified: Jacobian and LU built once per step, at the\n"
-                              "predictor. Linear convergence, much cheaper on GPU.\n"
-                              "full: both rebuilt every iteration. Quadratic\n"
-                              "convergence, more robust at large h, ~k times the cost.");
+            ImGui::SetTooltip("modified: Jacobian and LU reused across iterations and\n"
+                              "refreshed when the correction stops shrinking.\n"
+                              "Cheaper on GPU and the right default.\n"
+                              "full: rebuilt every iteration. Quadratic convergence,\n"
+                              "most robust at large h, ~k times the cost.");
         InputNumStr("tolerance", model.newton_tol, kFieldW);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Newton stops once ||dX|| falls below this.");
