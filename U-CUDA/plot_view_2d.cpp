@@ -233,10 +233,28 @@ void Plot2DView::render(PlotRenderer& renderer,
             clamp_hi_x = std::max(x_fit_min, x_fit_max);
             has_bounds_x = true;
         } else if (ok) {
-            double padx = pad_x ? (xmx - xmn) * 0.05 : 0.0;
-            if (pad_x && padx < 1e-9) padx = 1.0;
-            clamp_lo_x = xmn - padx;
-            clamp_hi_x = xmx + padx;
+            // bbox снят с VBO, а на лог-оси там лежит log10(x) (см. заливку
+            // выше). Границы клампа обязаны быть в тех же единицах, что
+            // view_min/view_max, то есть МИРОВЫХ — иначе clamp_view ниже
+            // сравнивает логарифм с мировым значением и переставляет вид в
+            // лог-домен: свежий autofit тут же затирался, ось показывала
+            // -4..-1 вместо 1e-4..0.1, а данные уезжали за край.
+            // Пересчёт повторяет do_autofit операция в операцию, чтобы
+            // только что подогнанный вид ровно совпал с границами и не был
+            // сдвинут на первом же кадре.
+            double lo = (double)xmn, hi = (double)xmx;
+            if (series_xlog_cached) {
+                const double lpad = pad_x ? (hi - lo) * 0.05 : 0.0;
+                lo = std::pow(10.0, lo - lpad);
+                hi = std::pow(10.0, hi + lpad);
+            } else {
+                double padx = pad_x ? (hi - lo) * 0.05 : 0.0;
+                if (pad_x && padx < 1e-9) padx = 1.0;
+                lo -= padx;
+                hi += padx;
+            }
+            clamp_lo_x = lo;
+            clamp_hi_x = hi;
             has_bounds_x = true;
         }
         if (ok) {

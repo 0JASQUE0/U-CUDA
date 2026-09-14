@@ -7078,20 +7078,23 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         return;
     }
 
+    // Вкладки p и «ошибка» рисуют РАЗНЫЕ величины, поэтому у каждой свой вью:
+    // иначе они делят зум, цветовую шкалу и колормапу, а переключение вкладки
+    // выглядит как поехавший масштаб.
+    const int tab = show_err ? 1 : 0;
+
     // ------------------------------- 2D -------------------------------
     if (r.n_pts_y > 1) {
-        auto& slot = hm_map[oid];
+        auto& slot = hm_map[oid * 2 + tab];
         if (!slot) {
             slot = std::make_unique<HeatmapView>();
             slot->colormap = (HeatmapColormap)colormap_id_or(
-                c.colormap_idx[show_err ? 1 : 0], model.heatmap_colormap);
+                c.colormap_idx[tab], model.heatmap_colormap);
         }
         HeatmapView& hv = *slot;
         {
             HeatmapToolbarOpts topts;
-            topts.persist_colormap = [&c, show_err](int cm) {
-                c.colormap_idx[show_err ? 1 : 0] = cm;
-            };
+            topts.persist_colormap = [&c, tab](int cm) { c.colormap_idx[tab] = cm; };
             draw_heatmap_toolbar(hv, topts);
         }
 
@@ -7106,12 +7109,29 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
                              ? std::log10(r.e1[i]) : std::numeric_limits<double>::quiet_NaN();
             vals = &buf;
         }
+        // Диапазон цвета — по ячейкам со статусом OK (движок их и отдаёт в
+        // p_min/p_max и e1_min/e1_max). Ячейки на полке округления и
+        // разошедшиеся из шкалы исключены намеренно: одна такая растягивает
+        // её так, что вся рабочая область становится одноцветной. Они не
+        // пропадают — просто упираются в край палитры.
         double vmin = 0.0, vmax = 0.0;
-        bool first = true;
-        for (double v : *vals) {
-            if (!std::isfinite(v)) continue;
-            if (first) { vmin = vmax = v; first = false; }
-            else { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+        if (show_err) {
+            vmin = (r.e1_min > 0.0) ? std::log10(r.e1_min) : 0.0;
+            vmax = (r.e1_max > 0.0) ? std::log10(r.e1_max) : 0.0;
+        } else {
+            vmin = r.p_min;
+            vmax = r.p_max;
+        }
+        if (!(vmax > vmin)) {
+            // Чистых ячеек не осталось (или все с одним значением) — падаем на
+            // полный диапазон, иначе шкала выродится в точку.
+            bool first = true;
+            for (double v : *vals) {
+                if (!std::isfinite(v)) continue;
+                if (first) { vmin = vmax = v; first = false; }
+                else { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+            }
+            if (!(vmax > vmin)) { vmin -= 0.5; vmax += 0.5; }
         }
 
         hv.x_axis.name = s.axis_target_label(c.axis_x_target);
@@ -7125,8 +7145,8 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         ImVec2 avail  = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hv.render(*renderer, origin, avail,
-                  /*owner_id*/ 0x0BDE0000 + oid,
-                  c.data_generation * 2 + (show_err ? 1 : 0),
+                  /*owner_id*/ 0x0BDE0000 + oid * 2 + tab,
+                  c.data_generation * 2 + tab,
                   r.n_pts_x, r.n_pts_y, vals->data(),
                   r.axis_x.lo, r.axis_x.hi, r.axis_y.lo, r.axis_y.hi,
                   vmin, vmax, fit);
@@ -7134,11 +7154,15 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
     }
 
     // ------------------------------- 1D -------------------------------
-    auto& vslot = curve_map[oid];
+    auto& vslot = curve_map[oid * 2 + tab];
     if (!vslot) {
         vslot = std::make_unique<Plot2DView>();
         vslot->imdraw_lines = true;
         vslot->show_zero_x  = false;
+        // Линия y = 0 осмысленна только на графике порядка: ниже неё разности
+        // перестали сокращаться. В логарифме ошибки нуль — это E = 1, рисовать
+        // его незачем.
+        vslot->show_zero_y  = !show_err;
     }
     Plot2DView& view = *vslot;
 
@@ -7172,6 +7196,25 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
     view.y_axis.name = show_err ? (ylog ? "log10 E" : "E") : "p";
     view.x_axis.log_scale = c.plot_x_log;
     view.points_mode = false;
+
+    // Явный X-диапазон по всему свипу — как у Bif/LLE/LS. Нужен не только
+    // ради того, чтобы ось охватывала весь прогон, даже когда часть узлов
+    // отфильтрована: без него Plot2DView берёт границы клампа из bbox VBO, а
+    // там на лог-оси лежит log10(x). На лог-оси считаем только по
+    // положительным узлам — неположительный в логарифме невыразим, и такие
+    // точки в серию ниже всё равно не попадают.
+    {
+        double xlo = 0.0, xhi = 0.0;
+        bool got = false;
+        for (double v : r.axis_x_vals) {
+            if (c.plot_x_log && !(v > 0.0)) continue;
+            if (!got) { xlo = xhi = v; got = true; }
+            else { if (v < xlo) xlo = v; if (v > xhi) xhi = v; }
+        }
+        view.x_fit_use_explicit = got && (xhi > xlo);
+        view.x_fit_min = xlo;
+        view.x_fit_max = xhi;
+    }
 
     static std::vector<float> buf_a, buf_b, buf_ref;
     buf_a.clear(); buf_b.clear(); buf_ref.clear();
@@ -7236,16 +7279,20 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         if (n_ref > 0) add(buf_ref, n_ref, "nominal", ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
     }
 
+    // Сигнатура рисуемой величины: новые данные, смена масштаба любой оси,
+    // включение второй кривой. Служит и поколением для перезаливки VBO, и
+    // триггером autofit — вид обязан пересчитаться, потому что log10 E и E
+    // отличаются на четырнадцать порядков, а p от них обоих.
+    const int sig = c.data_generation * 8
+                  + (c.plot_x_log ? 4 : 0) + (ylog ? 2 : 0) + (c.show_e2 ? 1 : 0);
     bool fit = c.fit_request;
-    if (fit) c.fit_request = false;
-    // Хэш поколения учитывает и таб, и все переключатели масштаба: без этого
-    // Plot2DView оставил бы в VBO прежние координаты.
-    const int gen = ((c.data_generation * 8 + (show_err ? 4 : 0))
-                     + (c.plot_x_log ? 2 : 0) + (ylog ? 1 : 0)) * 2 + (c.show_e2 ? 1 : 0);
+    if (c.plot_sig[tab] != sig) { fit = true; c.plot_sig[tab] = sig; }
+    if (c.fit_request) c.fit_request = false;
 
     ImVec2 avail  = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
-    view.render(*renderer, origin, avail, /*owner_id*/ 0x0BDE1000 + oid, gen,
+    view.render(*renderer, origin, avail,
+                /*owner_id*/ 0x0BDE1000 + oid * 2 + tab, sig,
                 series, init_vis, glob_vis, fit);
 }
 
@@ -9645,6 +9692,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::RadioButton("Order", &mode, (int)AppModel::AppMode::Order); ImGui::SameLine();
     ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
 
+    // Правый край ряда вкладок, в координатах окна. Нужен системному комбо
+    // ниже: оно центрируется, но не должно наезжать на вкладки. Снимаем
+    // ИМЕННО ЗДЕСЬ, а не в самом комбо, потому что между ними рисуется
+    // индикатор занятости — тот уводит курсор к правому краю окна, и
+    // измеренный там "конец вкладок" выталкивал бы комбо за край экрана
+    // на всё время расчёта.
+    const float mode_tabs_end_x = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x
+                                + ImGui::GetScrollX();
+
     // Битый файл сессии. Висит до следующей УСПЕШНОЙ загрузки, а не до конца
     // кадра: иначе сообщение о том, что настройки не восстановились, мелькнуло
     // бы один раз при старте и пропало. Раньше эта ошибка не показывалась
@@ -9918,13 +9974,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
         // Центрируем, но не левее конца ряда вкладок: с добавлением Order ряд
         // дорос до ширины, на которой жёсткий центр наезжал на "Settings".
-        // SameLine() ставит курсор сразу за последним виджетом — от него и
-        // отталкиваемся, поэтому следующая вкладка раскладку тоже не сломает,
-        // а на широком окне комбо остаётся ровно по центру, как раньше.
-        ImGui::SameLine();
-        const float after_tabs = ImGui::GetCursorPosX() + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+        // Край ряда снят выше (mode_tabs_end_x) — здесь курсор уже сдвинут
+        // индикатором занятости к правому краю окна и мерить по нему нельзя.
+        const float after_tabs = mode_tabs_end_x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
         float cx = (ImGui::GetWindowSize().x - combo_w) * 0.5f;
         if (cx < after_tabs) cx = after_tabs;
+        ImGui::SameLine();
         ImGui::SetCursorPosX(cx);
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
