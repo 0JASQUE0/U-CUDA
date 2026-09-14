@@ -7507,6 +7507,13 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
             break;
         }
+        case AppModel::AppMode::Order: {
+            // Своего _last_order.json у вкладки пока нет, поэтому только
+            // пересборка сессии из записи библиотеки: сетка осей, схема и
+            // значения приходят из дефолтов новой системы.
+            model.start_order_analysis();
+            break;
+        }
         case AppModel::AppMode::Library:
         case AppModel::AppMode::Settings:
         default:
