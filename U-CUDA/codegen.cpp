@@ -889,6 +889,84 @@ namespace { // внутренняя линковка: всё ниже не ви�
     std::string scheme_implicit_euler(const System& s)    { return scheme_implicit_common(s, ImplicitKind::Euler); }
     std::string scheme_implicit_midpoint(const System& s) { return scheme_implicit_common(s, ImplicitKind::Midpoint); }
 
+    // Общий кирпич диагонально-неявного полушага: одно уравнение
+    // X[i] = X_saved + hs * f_i(X), решённое относительно своей переменной.
+    // Им пользуются Phi* в CD (hs = h2, обратный порядок) и стадия SIMP
+    // (hs = h1, прямой порядок) — сам способ решения у них общий.
+    //
+    // Wrap a subterm in parentheses only when its top-level operator binds
+    // less tightly than '*'/'/' (i.e. Add or Sub); otherwise emit it raw so
+    // that `h2 * X[0] * X[1]` stays a left-associative multiplication chain
+    // instead of turning into `h2 * (X[0] * X[1])`. Under FMA both forms
+    // are algebraically equal but not bit-identical, and a chaotic system
+    // (Lorenz, Rossler, ...) amplifies that ULP-level split over ~10^3-10^4
+    // steps into visibly different trajectories.
+    bool needs_paren_after_mul(const PN& n) {
+        return n && (n->kind == Node::Add || n->kind == Node::Sub);
+    }
+    std::string wrap_paren(const std::string& s, bool w) {
+        return w ? "(" + s + ")" : s;
+    }
+    // Absorb a leading minus of a rem/coef into the operator sign: peel one
+    // Neg or a negative Num off the node, so that `- h2 * -a[1]` and
+    // `+ h2 * -a[1]` come out as `+ h2 * a[1]` and `- h2 * a[1]` -- the
+    // shape a person would write by hand, and one less negation for the
+    // compiler to chase. Returns the sign character to emit before "h2 * ".
+    char peel_sign(PN& n, char pos, char neg) {
+        if (!n) return pos;
+        if (n->kind == Node::Neg) { n = n->a; return neg; }
+        if (n->kind == Node::Num && n->num < 0.0) { n = pn_num(-n->num); return neg; }
+        return pos;
+    }
+    // "h2 * factor" -> "h2" when factor == 1 (post-peel-sign), same reason
+    // as the pn_mul(x, Num(1)) fold: the multiplication reads like noise
+    // both to a human and to the peephole compiler expects.
+    std::string mul_step(const PN& factor, const std::string& factor_c, const char* hs) {
+        return pn_is_one(factor) ? std::string(hs) : hs + (" * " + factor_c);
+    }
+    // saved — имя временной под X_saved в итерационной ветке: у Complex CD4 два
+    // прохода живут в одной области видимости, поэтому имя приходит снаружи.
+    void emit_diag_implicit_eq(std::ostringstream& o, const PN& rhs_ast,
+                               const std::string& v, const std::string& x,
+                               const NameMap& nm, const char* hs, const char* sty,
+                               const std::string& saved) {
+        PN coef, rem;
+        const bool linear = cd_try_extract_linear(rhs_ast, v, coef, rem);
+
+        if (linear && pn_is_zero(coef)) {
+            // v absent from f_i -> explicit one-shot update.
+            char sgn = peel_sign(rem, '+', '-');
+            std::string rem_c = wrap_paren(emit_to_str(rem, nm), needs_paren_after_mul(rem));
+            o << "    " << x << " = " << x
+              << " " << sgn << " " << mul_step(rem, rem_c, hs) << ";\n";
+        }
+        else if (linear) {
+            // Denominator: 1 (- | +) hs * |coef|.
+            char dsgn = peel_sign(coef, '-', '+');
+            std::string coef_c = wrap_paren(emit_to_str(coef, nm), needs_paren_after_mul(coef));
+            if (pn_is_zero(rem))
+                o << "    " << x << " = " << x
+                  << " / (1 " << dsgn << " " << mul_step(coef, coef_c, hs) << ");\n";
+            else {
+                // Numerator: X_saved (+ | -) hs * |rem|.
+                char nsgn = peel_sign(rem, '+', '-');
+                std::string rem_c = wrap_paren(emit_to_str(rem, nm), needs_paren_after_mul(rem));
+                o << "    " << x << " = (" << x
+                  << " " << nsgn << " " << mul_step(rem, rem_c, hs)
+                  << ") / (1 " << dsgn << " " << mul_step(coef, coef_c, hs) << ");\n";
+            }
+        }
+        else {
+            // v enters non-linearly -> fixed-point iterations from X_saved.
+            std::string rhs_c = emit_to_str(rhs_ast, nm);
+            bool w = needs_paren_after_mul(rhs_ast);
+            o << "    " << sty << " " << saved << " = " << x << ";\n";
+            for (int k = 0; k < CD_ITERS; ++k)
+                o << "    " << x << " = " << saved
+                  << " + " << hs << " * " << wrap_paren(rhs_c, w) << ";\n";
+        }
+    }
+
     // CD: Composition D-method (diagonally-implicit symplectic composition).
     // Theory (PDF chapter 1.1): Psi_{h,s} = Phi_{h1} o Phi*_{h2} with
     // h1 = h*s and h2 = h*(1 - s), s = a[0] symmetry coefficient. Phi is an
@@ -985,37 +1063,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    ucmplx h2 = g * (1 - a[0]);\n";
         }
 
-        // Phi*_{h2}: diagonally-implicit half-step, reverse order.
-        // Wrap a subterm in parentheses only when its top-level operator binds
-        // less tightly than '*'/'/' (i.e. Add or Sub); otherwise emit it raw so
-        // that `h2 * X[0] * X[1]` stays a left-associative multiplication chain
-        // instead of turning into `h2 * (X[0] * X[1])`. Under FMA both forms
-        // are algebraically equal but not bit-identical, and a chaotic system
-        // (Lorenz, Rossler, ...) amplifies that ULP-level split over ~10^3-10^4
-        // steps into visibly different trajectories.
-        auto needs_paren_after_mul = [](const PN& n) {
-            return n && (n->kind == Node::Add || n->kind == Node::Sub);
-        };
-        auto wrap = [](const std::string& s, bool w) {
-            return w ? "(" + s + ")" : s;
-        };
-        // Absorb a leading minus of a rem/coef into the operator sign: peel one
-        // Neg or a negative Num off the node, so that `- h2 * -a[1]` and
-        // `+ h2 * -a[1]` come out as `+ h2 * a[1]` and `- h2 * a[1]` -- the
-        // shape a person would write by hand, and one less negation for the
-        // compiler to chase. Returns the sign character to emit before "h2 * ".
-        auto peel_sign = [](PN& n, char pos, char neg) -> char {
-            if (!n) return pos;
-            if (n->kind == Node::Neg) { n = n->a; return neg; }
-            if (n->kind == Node::Num && n->num < 0.0) { n = pn_num(-n->num); return neg; }
-            return pos;
-        };
-        // "h2 * factor" -> "h2" when factor == 1 (post-peel-sign), same reason
-        // as the pn_mul(x, Num(1)) fold: the multiplication reads like noise
-        // both to a human and to the peephole compiler expects.
-        auto mul_h2 = [&](const PN& factor, const std::string& factor_c) {
-            return pn_is_one(factor) ? std::string("h2") : "h2 * " + factor_c;
-        };
+        // Phi*_{h2}: diagonally-implicit half-step, reverse order. Сам разбор
+        // уравнения — в emit_diag_implicit_eq выше: стадия SIMP гоняет тот же
+        // код с h1 и в прямом порядке.
 
         // Один проход CD целиком: явный полушаг h1 вперёд, неявный h2 назад.
         // Complex CD4 зовёт его дважды с разными h1/h2, поэтому имена временных
@@ -1028,49 +1078,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + h1 * ("
               << emit_to_str(rhs_ast[i], nm) << ");\n";
 
-        for (int i = N - 1; i >= 0; --i) {
-            const std::string& v = s.vars[i];
-            std::string x = stv + ("[" + std::to_string(i) + "]");
-            PN coef, rem;
-            bool linear = cd_try_extract_linear(rhs_ast[i], v, coef, rem);
-
-            if (linear && pn_is_zero(coef)) {
-                // v absent from f_i -> explicit one-shot update.
-                char sgn = peel_sign(rem, '+', '-');
-                std::string rem_c = wrap(emit_to_str(rem, nm),
-                                         needs_paren_after_mul(rem));
-                o << "    " << x << " = " << x
-                  << " " << sgn << " " << mul_h2(rem, rem_c) << ";\n";
-            }
-            else if (linear) {
-                // Denominator: 1 (- | +) h2 * |coef|.
-                char dsgn = peel_sign(coef, '-', '+');
-                std::string coef_c = wrap(emit_to_str(coef, nm),
-                                          needs_paren_after_mul(coef));
-                if (pn_is_zero(rem))
-                    o << "    " << x << " = " << x
-                      << " / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
-                else {
-                    // Numerator: X_saved (+ | -) h2 * |rem|.
-                    char nsgn = peel_sign(rem, '+', '-');
-                    std::string rem_c = wrap(emit_to_str(rem, nm),
-                                             needs_paren_after_mul(rem));
-                    o << "    " << x << " = (" << x
-                      << " " << nsgn << " " << mul_h2(rem, rem_c)
-                      << ") / (1 " << dsgn << " " << mul_h2(coef, coef_c) << ");\n";
-                }
-            }
-            else {
-                // v enters non-linearly -> fixed-point iterations from X_saved.
-                std::string rhs_c = emit_to_str(rhs_ast[i], nm);
-                bool w = needs_paren_after_mul(rhs_ast[i]);
-                std::string saved = "x" + std::to_string(i) + "_cd" + sfx;
-                o << "    " << sty << " " << saved << " = " << x << ";\n";
-                for (int k = 0; k < CD_ITERS; ++k)
-                    o << "    " << x << " = " << saved
-                      << " + h2 * " << wrap(rhs_c, w) << ";\n";
-            }
-        }
+        for (int i = N - 1; i >= 0; --i)
+            emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
+                                  stv + ("[" + std::to_string(i) + "]"), nm,
+                                  "h2", sty, "x" + std::to_string(i) + "_cd" + sfx);
         };  // emit_pass
 
         emit_pass("");
@@ -1094,75 +1105,118 @@ namespace { // внутренняя линковка: всё ниже не ви�
     std::string scheme_complex_cd(const System& s)  { return scheme_cd_common(s, CdKind::Cx); }
     std::string scheme_complex_cd4(const System& s) { return scheme_cd_common(s, CdKind::Cx4); }
 
-    // CPU-visible pseudo-code path: mirrors integrator.cpp::step_cd exactly
-    // (every variable uses CD_ITERS simple iterations, no analytic branch), so
-    // the CPU debug view prints the algorithm the CPU integrator actually runs.
-    std::string scheme_cd_iter_only(const System& s, CdKind kind) {
+    // SEMP / SIMP — методы средней точки, у которых СТАДИЯ считается
+    // последовательно по компонентам (Гаусс-Зейдель) вместо полной неявной
+    // системы Implicit Midpoint:
+    //
+    //   X1 = X                                  — база для корректора
+    //   стадия, шаг h1 = s*h, прямой порядок, in-place по X:
+    //     SEMP: X[i] = X[i] + h1 * f_i(X)       — явно, i-е уравнение уже видит
+    //           новые X[0..i-1] (связка как у Euler-Cromer);
+    //     SIMP: X[i] = X_saved + h1 * f_i(X)    — решено относительно своей
+    //           переменной, той же аналитикой/итерациями, что Phi* в CD.
+    //   корректор — полный шаг от X1, все уравнения читают стадию:
+    //     X1[i] = X1[i] + h * f_i(X);  затем X = X1.
+    //
+    // Порядок 2 достигается ТОЛЬКО при s = 1/2: разложение даёт
+    // X_next = X + h*F + s*h^2*F'F против h^2/2*F'F у точного решения, так что
+    // при s != 1/2 обе схемы падают до первого — ровно как CD. Перестановка
+    // аргументов и диагональная неявность порядок не портят: стадия
+    // возмущается на O(h^2), а входит в корректор с множителем h, то есть
+    // локально это O(h^3).
+    // Замерено на эмитируемом коде (эталон RK4 h = 1e-6, s = 0.5): Rossler
+    // T = 10 — 2.00 у обеих схем, ошибка примерно вчетверо ниже, чем у явной
+    // средней точки при равном h; Lorenz T = 2 — 2.00 у обеих, причём SEMP на
+    // этой системе точнее SIMP примерно на порядок. При s = 0.3 обе дают 1.00.
+    std::string scheme_semi_midpoint(const System& s, bool implicit_stage) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
-        if (N < 2) throw std::runtime_error("CD method requires N >= 2");
 
-        const bool cx = (kind != CdKind::Real);
-        const char* stv = cx ? "Z" : "X";
-        const char* sty = cx ? "ucmplx" : "numb";
-
-        NameMap nm = build_namemap(s, stv);
-        std::vector<std::string> rhs_c(N);
+        NameMap nm = build_namemap(s, "X");
+        std::vector<PN> rhs_ast(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
-            PN ast = p.parse();
-            if (cx) cd_check_complex_safe(ast);
-            rhs_c[i] = emit_to_str(ast, nm);
+            rhs_ast[i] = p.parse();
         }
 
         std::ostringstream o;
-        if (cx) {
-            o << "    ucmplx Z[" << N << "];\n";
-            for (int i = 0; i < N; ++i)
-                o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
-        }
-        if (kind == CdKind::Real) {
-            o << "    numb h1 = h * a[0];\n";
-            o << "    numb h2 = h * (1 - a[0]);\n";
-        }
-        else if (kind == CdKind::Cx) {
-            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
-        }
-        else {
-            o << "    ucmplx g  = ucmplx(0.5 * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx gc = ucmplx(0.5 * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx h1 = g * a[0];\n";
-            o << "    ucmplx h2 = g * (1 - a[0]);\n";
-        }
-
-        auto emit_pass = [&](const char* sfx) {
+        o << "    numb X1[" << N << "];\n";
+        o << "    numb h1 = h * a[0];\n";
         for (int i = 0; i < N; ++i)
-            o << "    " << stv << "[" << i << "] = " << stv << "[" << i
-              << "] + h1 * (" << rhs_c[i] << ");\n";
+            o << "    X1[" << i << "] = X[" << i << "];\n";
 
-        for (int i = N - 1; i >= 0; --i) {
-            std::string x = stv + ("[" + std::to_string(i) + "]");
-            std::string saved = "x" + std::to_string(i) + "_cd" + sfx;
-            o << "    " << sty << " " << saved << " = " << x << ";\n";
-            for (int k = 0; k < CD_ITERS; ++k)
-                o << "    " << x << " = " << saved << " + h2 * (" << rhs_c[i] << ");\n";
-        }
-        };  // emit_pass
-
-        emit_pass("");
-        if (kind == CdKind::Cx4) {
-            o << "    h1 = gc * a[0];\n";
-            o << "    h2 = gc * (1 - a[0]);\n";
-            emit_pass("_b");
+        for (int i = 0; i < N; ++i) {
+            const std::string x = "X[" + std::to_string(i) + "]";
+            const std::string saved = "x" + std::to_string(i) + "_si";
+            if (!implicit_stage)
+                o << "    " << x << " = " << x << " + h1 * ("
+                  << emit_to_str(rhs_ast[i], nm) << ");\n";
+            else
+                emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i], x, nm,
+                                      "h1", "numb", saved);
         }
 
-        if (cx)
-            for (int i = 0; i < N; ++i)
-                o << "    X[" << i << "] = Z[" << i << "].re;\n";
-
+        for (int i = 0; i < N; ++i)
+            o << "    X1[" << i << "] = X1[" << i << "] + h * ("
+              << emit_to_str(rhs_ast[i], nm) << ");\n";
+        for (int i = 0; i < N; ++i)
+            o << "    X[" << i << "] = X1[" << i << "];\n";
         return o.str();
+    }
+    std::string scheme_semp(const System& s) { return scheme_semi_midpoint(s, false); }
+    std::string scheme_simp(const System& s) { return scheme_semi_midpoint(s, true); }
+
+    // D — диагонально-неявный метод первого порядка, он же Phi* из CD и он же
+    // стадия SIMP, взятая как самостоятельный шаг:
+    //   для i = 0..N-1:  X[i] = X_saved + h * f_i(X),
+    // решённое относительно своей переменной (аналитически, если f_i линейна по
+    // ней, иначе CD_ITERS простых итераций), в прямом порядке — i-е уравнение
+    // уже видит новые X[0..i-1]. Диагонально-неявный близнец Euler-Cromer:
+    // та же связка по компонентам, но каждое уравнение решается, а не считается.
+    // Перекрёстные члены (как и у CD) в решение не входят — это НЕ полный
+    // неявный Эйлер, здесь нет ни якобиана, ни Ньютона.
+    // Коэффициент симметрии a[0] не используется: шаг не делится пополам.
+    // Замерено (эталон RK4 h = 1e-6): Rossler T = 10 — 1.00, Lorenz T = 2 — 1.00.
+    std::string scheme_d(const System& s) {
+        if (s.vars.size() != s.rhs.size())
+            throw std::runtime_error("vars/rhs size mismatch");
+        int N = (int)s.vars.size();
+
+        NameMap nm = build_namemap(s, "X");
+        std::ostringstream o;
+        for (int i = 0; i < N; ++i) {
+            Parser p(s.rhs[i], s.latex);
+            PN ast = p.parse();
+            const std::string x = "X[" + std::to_string(i) + "]";
+            const std::string saved = "x" + std::to_string(i) + "_d";
+            emit_diag_implicit_eq(o, ast, s.vars[i], x, nm, "h", "numb", saved);
+        }
+        return o.str();
+    }
+
+    // Имя-маркер множителя шага в AST (опкод OP_PUSH_STEP ниже). Парсер такое
+    // имя выдать не может — символы систем это идентификаторы, — поэтому
+    // столкновение с переменной или параметром исключено.
+    const char* const kStepSym = "@h";
+
+    // Собирает выражение "hs * expr" в ТОЙ ЖЕ группировке, в какой его получит
+    // компилятор из текста, который печатает emit_diag_implicit_eq. mul_step
+    // выводит "hs * " + текст множителя, а скобки вокруг множителя ставятся
+    // только при Add/Sub сверху (needs_paren_after_mul), поэтому "hs * a * b"
+    // разбирается как ((hs*a)*b): множитель шага заходит в САМЫЙ ЛЕВЫЙ конец
+    // цепочки умножений и делений. Интерпретатор, посчитав hs*(a*b), разошёлся
+    // бы с GPU на последний бит — в хаотической системе это видно уже через
+    // тысячу шагов, ровно как с --fmad.
+    PN pn_mul_step(const PN& e) {
+        if (e && (e->kind == Node::Mul || e->kind == Node::Div)) {
+            PN n = mk(e->kind);
+            n->a = pn_mul_step(e->a);
+            n->b = e->b;
+            return n;
+        }
+        PN step = mk(Node::Sym); step->name = kStepSym;
+        return pn_mul(std::move(step), e);
     }
 
     // Байткод-интерпретатор (для CPU-расчёта без компиляции)
@@ -1171,7 +1225,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
     enum OpCode : int {
         OP_PUSH_CONST, OP_PUSH_VAR, OP_PUSH_PARAM,
         OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW, OP_NEG,
-        OP_FUNC1, OP_FUNC2
+        OP_FUNC1, OP_FUNC2,
+        OP_PUSH_STEP   // множитель шага (h, h1, h2) — приходит в run_program
     };
     // id функций (унарные < 100, бинарные >= 100)
     enum FuncId : int {
@@ -1207,6 +1262,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             switch (n->kind) {
             case Node::Num: out.push_back({ OP_PUSH_CONST, 0, n->num }); break;
             case Node::Sym: {
+                if (n->name == kStepSym) { out.push_back({ OP_PUSH_STEP,0,0 }); break; }
                 auto v = var_index.find(n->name);
                 if (v != var_index.end()) { out.push_back({ OP_PUSH_VAR, v->second, 0 }); break; }
                 auto p = param_index.find(n->name);
@@ -1286,13 +1342,14 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // Параметры a[] в обоих случаях вещественные и поднимаются в T на push'е.
     template <class T>
     T run_program(const std::vector<Instr>& prog, const T* X, const double* a,
-        T* stack) {
+        T* stack, T step = T(0)) {
         int sp = 0;
         for (const Instr& in : prog) {
             switch (in.op) {
             case OP_PUSH_CONST: stack[sp++] = T(in.val); break;
             case OP_PUSH_VAR:   stack[sp++] = X[in.idx]; break;
             case OP_PUSH_PARAM: stack[sp++] = T(a[1 + in.idx]); break; // сдвиг: a[0] reserved
+            case OP_PUSH_STEP:  stack[sp++] = step; break;
             case OP_ADD: stack[sp - 2] = stack[sp - 2] + stack[sp - 1]; --sp; break;
             case OP_SUB: stack[sp - 2] = stack[sp - 2] - stack[sp - 1]; --sp; break;
             case OP_MUL: stack[sp - 2] = stack[sp - 2] * stack[sp - 1]; --sp; break;
@@ -1316,6 +1373,17 @@ struct SystemEvaluator::Impl {
     // schemes emit. Empty when the system has no derivative (floor/ceil/fmod) --
     // that must not break explicit schemes, which never ask for it.
     std::vector<std::vector<Instr>> jac_programs;
+    // Диагональное разложение f_i = coef_i * x_i + rem_i для схем, решающих
+    // каждое уравнение относительно своей переменной (CD, SIMP, D). Строится
+    // тем же cd_try_extract_linear, что и GPU-ветка, поэтому решение "линейно
+    // / нелинейно" у CPU и GPU совпадает по построению. diag_linear[i] == 0 —
+    // разложения нет, программы пустые, шаг уходит на итерации.
+    std::vector<char> diag_linear;
+    // Знак, вынесенный из coef/rem наружу (peel_sign в кодогене): программы
+    // считают hs * |rem| и hs * |coef|, а знак попадает в оператор формулы.
+    // Побитово это нейтрально — смена знака в IEEE точна.
+    std::vector<char> diag_rem_neg, diag_coef_neg;
+    std::vector<std::vector<Instr>> diag_coef, diag_rem;
     bool   newton_full = false;
     double newton_tol = 1e-10;
     int    newton_max_iters = 8;
@@ -1338,6 +1406,11 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
     for (size_t j = 0; j < sys.params.size(); ++j) param_index[sys.params[j]] = (int)j;
     // парсим и компилируем каждое уравнение
     impl_->programs.resize(impl_->dim);
+    impl_->diag_linear.assign((size_t)impl_->dim, 0);
+    impl_->diag_rem_neg.assign((size_t)impl_->dim, 0);
+    impl_->diag_coef_neg.assign((size_t)impl_->dim, 0);
+    impl_->diag_coef.resize(impl_->dim);
+    impl_->diag_rem.resize(impl_->dim);
     int maxdepth = 8;
     for (int i = 0; i < impl_->dim; ++i) {
         Parser p(sys.rhs[i], sys.latex);
@@ -1347,6 +1420,24 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
         // оценка глубины стека: число push не превышает длину программы
         int depth = (int)impl_->programs[i].size() + 4;
         if (depth > maxdepth) maxdepth = depth;
+
+        // Разложение по своей переменной — для диагонально-неявных схем.
+        PN coef, rem;
+        if (cd_try_extract_linear(ast, sys.vars[i], coef, rem)) {
+            // Зеркалим emit_diag_implicit_eq вплоть до формы выражения: сперва
+            // тот же вынос знака, затем тот же порядок умножений.
+            impl_->diag_rem_neg[(size_t)i]  = (peel_sign(rem,  '+', '-') == '-');
+            impl_->diag_coef_neg[(size_t)i] = (peel_sign(coef, '-', '+') == '+');
+            ByteCompiler bcc{ impl_->diag_coef[i], var_index, param_index };
+            bcc.compile(pn_mul_step(coef));
+            ByteCompiler bcr{ impl_->diag_rem[i], var_index, param_index };
+            bcr.compile(pn_mul_step(rem));
+            impl_->diag_linear[(size_t)i] = 1;
+            for (const auto* prog : { &impl_->diag_coef[i], &impl_->diag_rem[i] }) {
+                int d = (int)prog->size() + 4;
+                if (d > maxdepth) maxdepth = d;
+            }
+        }
     }
     // Jacobian programs. Built eagerly (N*N tiny programs, negligible at the usual
     // N = 3) but tolerantly: a non-differentiable system must still work with the
@@ -1408,6 +1499,34 @@ bool   SystemEvaluator::newton_full() const      { return impl_->newton_full; }
 double SystemEvaluator::newton_tol() const       { return impl_->newton_tol; }
 int    SystemEvaluator::newton_max_iters() const { return impl_->newton_max_iters; }
 
+// Сборка результата повторяет emit_diag_implicit_eq оператор в оператор:
+//   X[i] = (X[i] <+|-> hs*|rem|) / (1 <-|+> hs*|coef|).
+// Случаи coef == 0 и rem == 0 отдельно не разбираются: на GPU они лишь убирают
+// из текста деление на 1 и прибавление нуля, а это побитово тождественные
+// операции (деление на 1.0 и сложение с 0.0 в IEEE точны).
+bool SystemEvaluator::solve_diag_implicit(int i, double* X, const double* a, double hs) const {
+    if (i < 0 || i >= impl_->dim || !impl_->diag_linear[(size_t)i]) return false;
+    double* st = impl_->stack.data();
+    const double num = run_program(impl_->diag_rem[(size_t)i],  X, a, st, hs);
+    const double den = run_program(impl_->diag_coef[(size_t)i], X, a, st, hs);
+    X[i] = (impl_->diag_rem_neg[(size_t)i]  ? X[i] - num : X[i] + num)
+         / (impl_->diag_coef_neg[(size_t)i] ? 1 + den    : 1 - den);
+    return true;
+}
+
+bool SystemEvaluator::solve_diag_implicit_complex(int i, ucmplx* Z, const double* a,
+                                                  ucmplx hs) const {
+    if (i < 0 || i >= impl_->dim || !impl_->diag_linear[(size_t)i]) return false;
+    if ((int)impl_->stack_c.size() < impl_->max_stack)
+        impl_->stack_c.resize(impl_->max_stack);
+    ucmplx* st = impl_->stack_c.data();
+    const ucmplx num = run_program(impl_->diag_rem[(size_t)i],  Z, a, st, hs);
+    const ucmplx den = run_program(impl_->diag_coef[(size_t)i], Z, a, st, hs);
+    Z[i] = (impl_->diag_rem_neg[(size_t)i]  ? Z[i] - num : Z[i] + num)
+         / (impl_->diag_coef_neg[(size_t)i] ? 1 + den    : 1 - den);
+    return true;
+}
+
 void SystemEvaluator::eval_complex(const ucmplx* X, const double* a, ucmplx* deriv) const {
     if ((int)impl_->stack_c.size() < impl_->max_stack)
         impl_->stack_c.resize(impl_->max_stack);
@@ -1429,6 +1548,9 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
     case Scheme::ImplicitEuler:    return scheme_implicit_euler(s);
     case Scheme::ImplicitMidpoint: return scheme_implicit_midpoint(s);
+    case Scheme::SEMP:             return scheme_semp(s);
+    case Scheme::SIMP:             return scheme_simp(s);
+    case Scheme::D:                return scheme_d(s);
     }
     throw std::runtime_error("unknown scheme");
 }
@@ -1443,17 +1565,20 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
     if (name == "Implicit Euler")    return Scheme::ImplicitEuler;
     if (name == "Implicit Midpoint") return Scheme::ImplicitMidpoint;
+    if (name == "SEMP")              return Scheme::SEMP;
+    if (name == "SIMP")              return Scheme::SIMP;
+    if (name == "D")                 return Scheme::D;
     return Scheme::Euler;
 }
 
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
-    // For non-CD schemes the CPU integrator evaluates the same AST through a bytecode interpreter,
-    // and the resulting algorithm matches the codegen output (same expression, same operation order),
-    // so we just return codegen_scheme. Only CD has a genuinely different CPU algorithm — 4 simple
-    // iterations per variable instead of the analytic linear solve used on GPU.
-    if (sch == Scheme::CD)         return scheme_cd_iter_only(s, CdKind::Real);
-    if (sch == Scheme::ComplexCD)  return scheme_cd_iter_only(s, CdKind::Cx);
-    if (sch == Scheme::ComplexCD4) return scheme_cd_iter_only(s, CdKind::Cx4);
+    // Одна форма на оба пути. CPU-интегратор считает тот же AST через
+    // байткод-интерпретатор, а диагонально-неявные схемы (CD, Complex CD, SIMP,
+    // D) решают каждое уравнение той же аналитической формулой — коэффициенты
+    // даёт SystemEvaluator::solve_diag_implicit, построенный тем же
+    // cd_try_extract_linear, что и кодоген. Итерации остаются только там, где
+    // их эмитит и GPU: уравнение нелинейно по своей переменной.
+    // Расхождение возможно лишь в группировке FMA у компилятора.
     return codegen_scheme(s, sch);
 }
 

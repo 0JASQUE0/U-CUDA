@@ -147,6 +147,9 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
     kvbool(o, "scheme_ieuler", r.scheme_ieuler);
     kvbool(o, "scheme_imidpoint", r.scheme_imidpoint);
+    kvbool(o, "scheme_semp", r.scheme_semp);
+    kvbool(o, "scheme_simp", r.scheme_simp);
+    kvbool(o, "scheme_d", r.scheme_dmethod);
     kvbool(o, "newton_full", r.newton_full);
     kv(o, "newton_tol", r.newton_tol);
     kv(o, "newton_max_iters", r.newton_max_iters);
@@ -190,6 +193,9 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
         else if (key == "scheme_ieuler") r.scheme_ieuler = p.parse_bool();
         else if (key == "scheme_imidpoint") r.scheme_imidpoint = p.parse_bool();
+        else if (key == "scheme_semp") r.scheme_semp = p.parse_bool();
+        else if (key == "scheme_simp") r.scheme_simp = p.parse_bool();
+        else if (key == "scheme_d") r.scheme_dmethod = p.parse_bool();
         else if (key == "newton_full") r.newton_full = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();

@@ -47,19 +47,30 @@ struct System {
 // Both run Newton on a symbolically differentiated Jacobian; see scheme_implicit_common
 // in codegen.cpp. ImplicitMidpoint solves for the stage value Y = (X + X_next)/2,
 // which makes it the same code as ImplicitEuler with h -> h/2 plus a final X = 2Y - X.
+// SEMP / SIMP — методы средней точки с последовательной (Гаусс-Зейдель)
+// стадией на полушаге h1 = s*h, s = a[0] (тот же слот симметрии, что у CD):
+// SEMP считает стадию явно, SIMP — диагонально-неявно (каждое уравнение решено
+// относительно своей переменной, как Phi* в CD). Корректор у обеих один:
+// полный шаг h от исходного состояния по значениям стадии. Порядок 2 только
+// при s = 1/2, см. scheme_semi_midpoint в codegen.cpp.
+// D — диагонально-неявный метод первого порядка: стадия SIMP (она же Phi* из CD)
+// как самостоятельный шаг, но на полный h. Прямой порядок по компонентам,
+// каждое уравнение решается относительно своей переменной; a[0] не читает.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                    ImplicitEuler, ImplicitMidpoint };
+                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
 std::string codegen_scheme(const System& s, Scheme sch);
 
 // Emits a human-readable C-code mirror of what the CPU integrator
-// (integrator.cpp::step_*) actually computes. For Euler/RK4/etc this matches
-// codegen_scheme bit-for-bit (same AST is evaluated either way). For CD it
-// differs: GPU uses analytic solving for linear-in-var components, CPU uses
-// 4 simple iterations for every variable — this function returns the CPU form
-// so users can compare the two side by side in the debug panel.
+// (integrator.cpp::step_*) actually computes. Now identical to codegen_scheme
+// for every scheme: the CPU path evaluates the same AST, and for the
+// diagonally-implicit ones (CD, Complex CD, SIMP, D) it solves each equation
+// with the same analytic formula, via SystemEvaluator::solve_diag_implicit, falling
+// back to iterations exactly where the GPU emits them. Kept as the single place
+// the debug panel asks for the CPU form, and as the place to express a future
+// divergence between the two paths.
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 
 // Maps UI scheme name ("Euler" / "RK4" / "CD" / ...) to the Scheme enum.
@@ -112,6 +123,17 @@ public:
     bool   newton_full() const;
     double newton_tol() const;
     int    newton_max_iters() const;
+
+    // Решает i-е уравнение диагонально-неявного полушага относительно своей
+    // переменной: X[i] = X[i] + hs * f_i(X), где f_i = coef*x_i + rem и ни coef,
+    // ни rem от x_i не зависят. Разложение то же, что кодоген делает над AST
+    // для CD / Complex CD / SIMP / D (cd_try_extract_linear), и формула
+    // собрана так, чтобы повторить эмитируемый текст операция в операцию —
+    // включая порядок умножений и вынос знака.
+    // Возвращает false, если f_i нелинейна по своей переменной: тогда шаг
+    // обязан откатиться на простые итерации, ровно как это делает GPU.
+    bool solve_diag_implicit(int i, double* X, const double* a, double hs) const;
+    bool solve_diag_implicit_complex(int i, ucmplx* Z, const double* a, ucmplx hs) const;
 
     // То же самое и по тому же байткоду, но в комплексной арифметике —
     // для схем с комплексными коэффициентами (Complex CD). Параметры a[]

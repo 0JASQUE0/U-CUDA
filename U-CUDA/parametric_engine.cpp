@@ -326,7 +326,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
     if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
-    if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+    if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                                                               return fail("param_index вне диапазона");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
                                                               return fail("writable_var вне диапазона");
@@ -728,7 +728,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
     if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
-    if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+    if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                                                               return fail("param_index вне диапазона");
     if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
     if (req.h <= 0.0)           return fail("h должно быть > 0");
@@ -1037,7 +1037,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
     if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
-    if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+    if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                                                               return fail("param_index вне диапазона");
     if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
     if (req.h <= 0.0)           return fail("h должно быть > 0");
@@ -1221,7 +1221,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
     if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
     if (!req.sweep_over_h && !req.sweep_over_var &&
-        (req.param_index <= 0 || req.param_index >= (int)req.base_values.size()))
+        (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
                                                               return fail("param_index вне диапазона");
     if (req.sweep_over_var &&
         (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
@@ -1948,7 +1948,7 @@ struct ParametricEngine::Impl {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
-            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+            if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index вне диапазона");
         }
         // writable_var == -1 — sentinel "combination of first vars" (порт MATLAB
@@ -2350,7 +2350,7 @@ struct ParametricEngine::Impl {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
-            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+            if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index вне диапазона");
         }
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
@@ -2694,7 +2694,7 @@ struct ParametricEngine::Impl {
         // Дополнительно нужен swap_xy: если X=param, Y=IC, передаём в kernel с
         // X↔Y и потом транспонируем результат на хосте.
         auto check_param = [&](int p1based) -> bool {
-            return p1based > 0 && p1based < (int)req.base_values.size();
+            return p1based >= 0 && p1based < (int)req.base_values.size();
         };
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
@@ -3122,7 +3122,7 @@ struct ParametricEngine::Impl {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
-            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+            if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index вне диапазона");
         }
         if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
@@ -3444,7 +3444,7 @@ struct ParametricEngine::Impl {
 
         // par_or_var + swap_xy: точная копия логики из run_lle_2d.
         auto check_param = [&](int p1based) -> bool {
-            return p1based > 0 && p1based < (int)req.base_values.size();
+            return p1based >= 0 && p1based < (int)req.base_values.size();
         };
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
@@ -4471,7 +4471,7 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
-        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+        if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                                                                      return fail("param_index вне диапазона");
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
@@ -4741,7 +4741,7 @@ struct ParametricEngine::Impl {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index вне диапазона");
         } else {
-            if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+            if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index вне диапазона");
         }
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int
@@ -5105,7 +5105,7 @@ struct ParametricEngine::Impl {
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
         if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
-        if (req.param_index <= 0 || req.param_index >= (int)req.base_values.size())
+        if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                                                                      return fail("param_index вне диапазона");
         // writable_var == -1 — sentinel "combination" (см. run_bif1d_continuation).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
@@ -5377,7 +5377,7 @@ struct ParametricEngine::Impl {
 
         // par_or_var + swap_xy (та же логика что у run_lle_2d)
         auto check_param = [&](int p1based) -> bool {
-            return p1based > 0 && p1based < (int)req.base_values.size();
+            return p1based >= 0 && p1based < (int)req.base_values.size();
         };
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;

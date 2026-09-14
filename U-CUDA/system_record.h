@@ -45,6 +45,9 @@ struct SystemRecord {
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
     bool scheme_ieuler   = false;   // Implicit Euler (Ньютон по символьному якобиану)
     bool scheme_imidpoint = false;  // Implicit Midpoint (то же, стадия Y = (X + X_next)/2)
+    bool scheme_semp     = false;   // SEMP (средняя точка, явная стадия на h1 = s*h)
+    bool scheme_simp     = false;   // SIMP (то же, стадия диагонально-неявная)
+    bool scheme_dmethod  = false;   // D (диагонально-неявный шаг на полный h)
 
     // Настройки Ньютона для двух неявных схем. Живут на уровне системы, а не
     // конфига анализа: AppModel::build_system() — единственная фабрика System,

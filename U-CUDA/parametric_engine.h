@@ -106,6 +106,10 @@ struct Bifurcation1DRequest {
     // param_index — 1-based индекс в base_values (a[0] зарезервирован). При sweep_over_var = true
     // (par_or_var = 0) свип идёт по начальному условию: var_sweep_index — 0-based индекс в
     // initial_conditions.
+    // param_index == 0 — свип по самому a[0], коэффициенту симметрии s (его читают
+    // CD / Complex CD / Complex CD4 / SEMP / SIMP). Отдельного флага для этого нет:
+    // слот a[0] ничем не отличается от остальных, поэтому валидаторы просто
+    // пропускают 0 (раньше он отвергался как "зарезервированный").
     int  param_index    = 0;
     bool sweep_over_var = false;
     int  var_sweep_index = 0;

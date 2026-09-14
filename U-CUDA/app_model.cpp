@@ -144,6 +144,9 @@ SystemRecord AppModel::to_record() const {
     r.scheme_ccd4 = scheme_ccd4;
     r.scheme_ieuler = scheme_ieuler;
     r.scheme_imidpoint = scheme_imidpoint;
+    r.scheme_semp = scheme_semp;
+    r.scheme_simp = scheme_simp;
+    r.scheme_dmethod = scheme_dmethod;
     r.newton_full = newton_full;
     r.newton_tol = newton_tol;
     r.newton_max_iters = newton_max_iters;
@@ -180,6 +183,9 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_ccd4 = r.scheme_ccd4;
     scheme_ieuler = r.scheme_ieuler;
     scheme_imidpoint = r.scheme_imidpoint;
+    scheme_semp = r.scheme_semp;
+    scheme_simp = r.scheme_simp;
+    scheme_dmethod = r.scheme_dmethod;
     newton_full = r.newton_full;
     newton_tol = r.newton_tol;
     newton_max_iters = r.newton_max_iters;
@@ -195,7 +201,8 @@ void AppModel::from_record(const SystemRecord& r) {
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
     if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
-        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint)
+        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint
+        || scheme_semp || scheme_simp || scheme_dmethod)
         generate();
 }
 
@@ -214,7 +221,8 @@ void AppModel::clear() {
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
-        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint = false;
+        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint
+        = scheme_semp = scheme_simp = scheme_dmethod = false;
     symmetry_s = "0.5";
     newton_full = false;
     newton_tol = "1e-10";

@@ -12,6 +12,9 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
     if (s == "Implicit Euler")    return IntScheme::ImplicitEuler;
     if (s == "Implicit Midpoint") return IntScheme::ImplicitMidpoint;
+    if (s == "SEMP")              return IntScheme::SEMP;
+    if (s == "SIMP")              return IntScheme::SIMP;
+    if (s == "D")                 return IntScheme::D;
     return IntScheme::Euler;
 }
 
@@ -106,12 +109,45 @@ void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double 
     for (int l = 0; l < n; ++l) X[l] += h * X2[l];
 }
 
+// Число простых итераций в фолбэке диагонально-неявных схем. Должно совпадать
+// с CD_ITERS в codegen.cpp: обе ветки обязаны делать одинаковое число проходов,
+// иначе CPU и GPU разойдутся ровно там, где разложить уравнение не удалось.
+constexpr int CD_ITERS = 4;
+
+// Одно уравнение диагонально-неявного полушага: X[i] = X_saved + hs * f_i(X),
+// решённое относительно СВОЕЙ переменной.
+// Если f_i линейна по x_i, SystemEvaluator::solve_diag_implicit решает её той
+// же формулой и в том же порядке операций, что эмитит emit_diag_implicit_eq для
+// GPU. Иначе — CD_ITERS простых итераций, тот же фолбэк, что и на GPU. Решение
+// "линейно / нелинейно" принимает один и тот же cd_try_extract_linear, поэтому
+// разойтись пути не могут; остаточная разница — только FMA-контракция, которой
+// на GPU управляет настройка --fmad.
+void solve_diag_implicit(const SystemEvaluator& ev, double* X, const double* a,
+                         double hs, int i, double* k1) {
+    if (ev.solve_diag_implicit(i, X, a, hs)) return;
+    const double saved = X[i];
+    for (int it = 0; it < CD_ITERS; ++it) {
+        ev.eval(X, a, k1);
+        X[i] = saved + hs * k1[i];
+    }
+}
+
+// То же самое в комплексной арифметике — для Complex CD / CD4. Байткод один и
+// тот же, меняется только тип состояния (см. run_program).
+void solve_diag_implicit_cx(const SystemEvaluator& ev, ucmplx* Z, const double* a,
+                            ucmplx hs, int i, ucmplx* k1) {
+    if (ev.solve_diag_implicit_complex(i, Z, a, hs)) return;
+    const ucmplx saved = Z[i];
+    for (int it = 0; it < CD_ITERS; ++it) {
+        ev.eval_complex(Z, a, k1);
+        Z[i] = saved + hs * k1[i];
+    }
+}
+
 // CD (Composition D-method): h1 = h*a[0], h2 = h*(1-a[0]).
 // Полу-шаг 1 (явный, прямой порядок): для каждой i обновляем X[i] += h1*f_i(X).
-// Полу-шаг 2 (неявный, обратный порядок): для каждой i (от n-1 к 0)
-// 4 простые итерации: X[i] = saved + h2 * f_i(X). Это упрощение GPU-кодгена,
-// где для линейной по var компоненты есть аналитическое решение; на CPU мы
-// единообразно используем итерации (упрощает код, точность достаточная).
+// Полу-шаг 2 (неявный, обратный порядок): для каждой i (от n-1 к 0) решаем
+// уравнение относительно X[i] — см. solve_diag_implicit.
 void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
              int n, double* k1) {
     const double s = a[0];
@@ -123,14 +159,9 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
         ev.eval(X, a, k1);
         X[i] += h1 * k1[i];
     }
-    // Φ*_h2: неявный полушаг, обратный порядок, 4 итерации.
-    for (int i = n - 1; i >= 0; --i) {
-        double saved = X[i];
-        for (int it = 0; it < 4; ++it) {
-            ev.eval(X, a, k1);
-            X[i] = saved + h2 * k1[i];
-        }
-    }
+    // Φ*_h2: неявный полушаг, обратный порядок.
+    for (int i = n - 1; i >= 0; --i)
+        solve_diag_implicit(ev, X, a, h2, i, k1);
 }
 
 // Complex CD: та же композиция, что step_cd, но полушаги комплексные —
@@ -161,14 +192,9 @@ static void complex_cd_pass(const SystemEvaluator& ev, const double* a, int n,
         ev.eval_complex(Z, a, k1);
         Z[i] = Z[i] + h1 * k1[i];
     }
-    // Φ*_h2: неявный полушаг, обратный порядок, 4 итерации.
-    for (int i = n - 1; i >= 0; --i) {
-        const ucmplx saved = Z[i];
-        for (int it = 0; it < 4; ++it) {
-            ev.eval_complex(Z, a, k1);
-            Z[i] = saved + h2 * k1[i];
-        }
-    }
+    // Φ*_h2: неявный полушаг, обратный порядок.
+    for (int i = n - 1; i >= 0; --i)
+        solve_diag_implicit_cx(ev, Z, a, h2, i, k1);
 }
 
 void step_complex_cd(const SystemEvaluator& ev, const double* a, double h, int n,
@@ -232,8 +258,8 @@ bool run_trajectory(StepOnce do_step, const State* X, int n,
 // Mirror of codegen.cpp::scheme_implicit_common: same predictor, same Newton
 // variants, same LU with partial pivoting, same loop order. The GPU emits this as
 // unrolled text and the CPU walks the same symbolic Jacobian through the bytecode
-// interpreter, so both run one algorithm (as with Euler/RK4, and unlike CD, where
-// the CPU deliberately skips the analytic branch).
+// interpreter, so both run one algorithm -- as now with every other scheme,
+// CD and the diagonally-implicit family included.
 //
 // ImplicitEuler:    F(Xn) = Xn - X - h*f(Xn) = 0,      X_next = Xn
 // ImplicitMidpoint: solved for the stage Y = (X + X_next)/2,
@@ -330,6 +356,37 @@ void step_implicit_midpoint(const SystemEvaluator& ev, double* X, const double* 
     for (int i = 0; i < n; ++i) X[i] = 2.0 * Xn[i] - X[i];   // Xn is the stage value
 }
 
+// SEMP / SIMP (см. scheme_semi_midpoint в codegen.cpp). Стадия — полушаг
+// h1 = h*a[0] последовательно по компонентам, в прямом порядке, in-place по X:
+// у SEMP явно, у SIMP каждое уравнение решается относительно своей переменной.
+// Корректор — полный шаг h от сохранённого состояния, все компоненты читают
+// одну и ту же стадию, поэтому здесь хватает одного eval.
+void step_semi_midpoint(const SystemEvaluator& ev, double* X, const double* a, double h,
+                        int n, bool implicit_stage, double* k1, double* saved) {
+    const double h1 = h * a[0];
+    for (int i = 0; i < n; ++i) saved[i] = X[i];
+
+    for (int i = 0; i < n; ++i) {
+        if (!implicit_stage) {
+            ev.eval(X, a, k1);
+            X[i] += h1 * k1[i];
+        }
+        else
+            solve_diag_implicit(ev, X, a, h1, i, k1);
+    }
+
+    ev.eval(X, a, k1);
+    for (int i = 0; i < n; ++i) X[i] = saved[i] + h * k1[i];
+}
+
+// D (см. scheme_d в codegen.cpp): диагонально-неявный шаг на полный h, прямой
+// порядок.
+void step_d(const SystemEvaluator& ev, double* X, const double* a, double h,
+            int n, double* k1) {
+    for (int i = 0; i < n; ++i)
+        solve_diag_implicit(ev, X, a, h, i, k1);
+}
+
 } // namespace
 
 bool computePhasePortraitCPU(
@@ -375,6 +432,9 @@ bool computePhasePortraitCPU(
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ImplicitEuler:    step_implicit_euler(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         case IntScheme::ImplicitMidpoint: step_implicit_midpoint(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
+        case IntScheme::SEMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ false, k1.data(), tmp.data()); break;
+        case IntScheme::SIMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ true,  k1.data(), tmp.data()); break;
+        case IntScheme::D:                step_d(ev, X.data(), a, h, n, k1.data()); break;
         }
     };
 
