@@ -925,6 +925,105 @@ struct FastSyncResult {
     data_export::FastSyncSnapshot snapshot;
 };
 
+// ---------------------------------------------------------------------------
+// Order — оценка порядка точности схемы (вкладка Order, kernels/order.template.cu).
+//
+// Оценщик — Эйткен/Ричардсон по ТРЁМ решениям одной задачи шагами h, h/2, h/4,
+// сравниваемым на грубой сетке (прореживание 2 и 4):
+//   E1 = max|y_h - y_h/2|,  E2 = max|y_h/2 - y_h/4|,  p = log2(E1/E2).
+// Опорное решение не нужно: при y_h = y* + C h^p отношение равно ровно 2^p.
+// Вариант «обе разности мерить против h/4» даёт log2(2^p + 1) — смещение
+// +0.58 на p=1 и +0.32 на p=2, то есть ровно там, где схемы и исследуются.
+//
+// Одна и та же структура обслуживает все три диаграммы вкладки; различает их
+// только выбор осей:
+//   p(h)             — axis_x = H,   axis_y = None
+//   p(параметр)      — axis_x = Value, axis_y = None
+//   p(пар1, пар2)    — обе оси Value (или одна H — это тоже работает)
+
+enum class OrderAxisKind {
+    None  = 0,
+    H     = 1,   // свип по шагу интегрирования
+    Value = 2,   // свип по элементу a[]: index 0 = symmetry s, 1..M = параметры системы
+};
+
+struct OrderAxis {
+    OrderAxisKind kind  = OrderAxisKind::None;
+    int           index = 0;        // для kind == Value: индекс в a[]
+    double        lo    = 1.0e-4;
+    double        hi    = 1.0e-1;
+    bool          log_scale = false;
+    int           n_pts = 200;
+};
+
+struct OrderRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;   // [amountOfX]
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    OrderAxis axis_x;
+    OrderAxis axis_y;                         // kind == None -> одномерная диаграмма
+
+    double h       = 0.01;    // базовый шаг, когда ни одна ось не свипует h
+    double t_max   = 10.0;
+
+    // Подгонять h к t_max/N с целым N. Без этого число шагов = floor(t_max/h),
+    // фактическое конечное время «плавает» от узла к узлу, и на кривую ошибки
+    // садится паразитный вклад O(h) — он забивает всё, что имеет порядок > 1.
+    bool snap_steps = true;
+
+    // Сравнивать только в конечной точке, а не максимум по всей траектории.
+    bool endpoint_only = false;
+
+    double max_value = 1.0e6;
+
+    // See Bifurcation1DRequest::cancel / ::progress.
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+// Коды в OrderResult::status. p/E1/E2 пишутся ВСЕГДА, кроме Diverged: полка
+// округления и потеря устойчивости — это посчитанные числа, и именно их
+// провалы на диаграмме и есть искомый ответ. NaN здесь значит «не посчитано».
+enum OrderStatus {
+    ORDER_ST_OK          = 0,
+    ORDER_ST_DIVERGED    = 1,   // nan/inf или |X| > max_value
+    ORDER_ST_FLOOR       = 2,   // E2 утонуло в машинной точности решения
+    ORDER_ST_NOCONTRACT  = 3,   // E2 >= E1, то есть p <= 0
+};
+
+struct OrderResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_pts_x = 0;
+    int n_pts_y = 0;            // 1 для одномерной диаграммы
+
+    // Фактические узлы сеток (уже с учётом lin/log) — по ним строятся оси.
+    std::vector<double> axis_x_vals;
+    std::vector<double> axis_y_vals;
+
+    OrderAxis axis_x, axis_y;
+
+    // Всё размера n_pts_x * n_pts_y, row-major (iy*n_pts_x + ix).
+    std::vector<double> p;        // оценка порядка
+    std::vector<double> e1;       // max|y_h - y_h/2|
+    std::vector<double> e2;       // max|y_h/2 - y_h/4|
+    std::vector<double> h_eff;    // фактический шаг ячейки (после snap)
+    std::vector<int>    status;
+
+    int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;
+
+    // Диапазоны по ячейкам со status == OK — для autoscale осей/колорбара.
+    // Ячейки floor/nocontract в них НЕ входят: иначе одна вылетевшая точка
+    // растягивает шкалу так, что полка перестаёт читаться.
+    double p_min = 0.0,  p_max = 0.0;
+    double e1_min = 0.0, e1_max = 0.0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -966,6 +1065,10 @@ public:
 
     // Fast Synchro — режим выбирается через req.mode (0 = traj, 1 = grid).
     FastSyncResult run_fastsync(const FastSyncRequest& req);
+
+    // Order — оценка порядка точности (Эйткен/Ричардсон на тройке h, h/2, h/4).
+    // Один вызов обслуживает и 1D-диаграмму, и 2D-карту: различает их axis_y.kind.
+    OrderResult run_order(const OrderRequest& req);
 
 private:
     struct Impl;

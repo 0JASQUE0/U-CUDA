@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -131,6 +131,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
   <ItemGroup>
     <ClCompile Include="analysis_session.cpp" />
     <ClCompile Include="custom_session.cpp" />
+    <ClCompile Include="order_session.cpp" />
     <ClCompile Include="app_main.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp17</LanguageStandard>
@@ -166,6 +167,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
   <ItemGroup>
     <ClInclude Include="analysis_session.h" />
     <ClInclude Include="custom_session.h" />
+    <ClInclude Include="order_session.h" />
     <ClInclude Include="app_config.h" />
     <ClInclude Include="app_model.h" />
     <ClInclude Include="codegen.hpp" />

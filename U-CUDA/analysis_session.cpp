@@ -655,7 +655,7 @@ void PhaseAnalysisSession::regenerate_krs() {
 // приоритет над built-in, что блокируется в System tab), иначе генерирует
 // через codegen_scheme. Чистая функция — зовётся при сборке Request в
 // момент Run (не персистится). Переиспользуется bifurcation и LLE.
-static std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                           const System& sys,
                                           const std::string& scheme) {
     for (const auto& cs : custom_schemes) {

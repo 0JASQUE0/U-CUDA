@@ -304,6 +304,19 @@ bool AppModel::start_basins_analysis() {
     return true;
 }
 
+bool AppModel::start_order_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    order_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        order_session.sys = built;
+    }
+    catch (...) {}
+    order_session.loaded_system_name = name;
+    return true;
+}
+
 bool AppModel::start_fastsync_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
