@@ -143,6 +143,14 @@ public:
     // система (в отличие от CD, диагонально-неявного). Отсюда A-устойчивость.
     bool scheme_ieuler = false;
     bool scheme_imidpoint = false;
+    // SEMP / SIMP: средняя точка с последовательной стадией на полушаге
+    // h1 = s*h (s = a[0], слот CD). У SEMP стадия явная, у SIMP —
+    // диагонально-неявная. Порядок 2 только при s = 0.5.
+    bool scheme_semp = false;
+    bool scheme_simp = false;
+    // D: та же диагонально-неявная стадия, но как самостоятельный шаг на
+    // полный h — метод первого порядка, a[0] не читает.
+    bool scheme_dmethod = false;
 
     // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
     bool        newton_full      = false;
@@ -482,17 +490,21 @@ public:
             System sys = build_system();
             std::string out;
             struct Item { bool on; const char* name; Scheme s; };
+            // Порядок — как в UI: по порядку точности (1, 2, 4, 8).
             const Item items[] = {
                 { scheme_euler,    "Euler",             Scheme::Euler },
                 { scheme_cromer,   "Euler-Cromer",      Scheme::EulerCromer },
+                { scheme_dmethod,  "D",                 Scheme::D },
+                { scheme_ieuler,   "Implicit Euler",    Scheme::ImplicitEuler },
                 { scheme_midpoint, "Explicit Midpoint", Scheme::ExplicitMidpoint },
-                { scheme_rk4,      "RK4",               Scheme::RK4 },
-                { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
+                { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_semp,     "SEMP",              Scheme::SEMP },
+                { scheme_simp,     "SIMP",              Scheme::SIMP },
+                { scheme_rk4,      "RK4",               Scheme::RK4 },
                 { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
-                { scheme_ieuler,   "Implicit Euler",    Scheme::ImplicitEuler },
-                { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
+                { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
             };
             bool any = false;
             for (const auto& it : items) {

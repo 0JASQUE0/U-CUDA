@@ -205,14 +205,16 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 }
 
 // Читает ли схема коэффициент симметрии a[0] — от этого зависит, показывать ли
-// поле symmetry в конфигах. Встроенных таких две: CD (h1 = s*h, h2 = (1-s)*h) и
-// Complex CD (то же деление шага, плюс мнимая часть ±h*sqrt(3)/6). Один
-// предикат на весь файл: раньше проверка была выписана четырьмя копиями
+// поле symmetry в конфигах и пункт "s (a[0])" в выборе цели свипа. Встроенных
+// таких пять: CD (h1 = s*h, h2 = (1-s)*h), оба Complex CD (то же деление шага,
+// плюс мнимая часть ±h*sqrt(3)/6) и SEMP/SIMP (стадия на полушаге h1 = s*h).
+// Один предикат на весь файл: раньше проверка была выписана четырьмя копиями
 // `scheme == "CD" || custom_scheme_uses_symmetry(...)`, и добавление схемы
 // требовало не забыть все четыре.
 [[nodiscard]] static bool scheme_uses_symmetry(const std::string& scheme_name,
                                          const std::vector<CustomScheme>& custom_schemes) {
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+        || scheme_name == "SEMP" || scheme_name == "SIMP"
         || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
 }
 
@@ -233,7 +235,10 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
         if (var_idx >= 0 && var_idx < (int)vars.size()) return vars[var_idx] + " (IC)";
         return "var";
     }
-    if (param_idx >= 0 && param_idx < (int)params.size()) return params[param_idx];
+    // -1 — цель "s": коэффициент симметрии живёт в a[0], а не в списке
+    // параметров системы, поэтому имени для него в params[] нет.
+    if (param_idx < 0) return "s";
+    if (param_idx < (int)params.size()) return params[param_idx];
     return "param";
 }
 
@@ -387,9 +392,25 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
 // Встроенные схемы интегрирования. Один список на весь файл: раньше этот же
 // массив был выписан восемью копиями плюс девятой — для проверки конфликта
 // имён пользовательских схем.
-static const char* const kBuiltinSchemeNames[] = {
-    "Euler", "Euler-Cromer", "Explicit Midpoint", "RK4", "DOPRI78", "CD",
-    "Complex CD", "Complex CD4", "Implicit Euler", "Implicit Midpoint"
+// order — порядок точности: по нему схемы сгруппированы и в комбо, и в
+// чекбоксах System tab, поэтому таблица отсортирована по нему и порядок строк
+// здесь = порядок в UI. У CD, Complex CD, SEMP и SIMP заявленный порядок
+// достигается только при s = a[0] = 0.5 (см. codegen.cpp).
+struct BuiltinScheme { const char* name; int order; };
+static const BuiltinScheme kBuiltinSchemes[] = {
+    { "Euler",             1 },
+    { "Euler-Cromer",      1 },
+    { "D",                 1 },
+    { "Implicit Euler",    1 },
+    { "Explicit Midpoint", 2 },
+    { "Implicit Midpoint", 2 },
+    { "CD",                2 },
+    { "Complex CD",        2 },
+    { "SEMP",              2 },
+    { "SIMP",              2 },
+    { "RK4",               4 },
+    { "Complex CD4",       4 },
+    { "DOPRI78",           8 },
 };
 
 // Имена для ImGui::Combo, которому нужен массив const char*. Указатели живут,
@@ -427,9 +448,16 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
     };
     ImGui::SetNextItemWidth(kComboW);
     if (ImGui::BeginCombo(label, scheme.c_str())) {
-        for (const char* m : kBuiltinSchemeNames) {
-            if (!is_enabled(m) && scheme != m) continue;
-            if (ImGui::Selectable(m, scheme == m)) choose(m);
+        // Заголовок порядка печатаем лениво — перед ПЕРВОЙ видимой схемой
+        // группы, иначе отфильтрованная группа оставила бы пустую шапку.
+        int shown_order = 0;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!is_enabled(b.name) && scheme != b.name) continue;
+            if (b.order != shown_order) {
+                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                shown_order = b.order;
+            }
+            if (ImGui::Selectable(b.name, scheme == b.name)) choose(b.name);
         }
         if (!custom_schemes.empty()) ImGui::Separator();
         for (const auto& cs : custom_schemes)
@@ -453,6 +481,13 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
 //
 // note_when_empty — показывать ли подсказку вместо комбо, когда в системе нет ни параметров,
 // ни переменных (так делают вкладки; Custom рисует комбо всегда).
+//
+// allow_s — показывать ли пункт "s (a[0])", свип по коэффициенту симметрии. Он
+// имеет смысл только у схем, которые a[0] читают (CD / Complex CD / Complex CD4 /
+// SEMP / SIMP и custom с a[0] в теле — см. scheme_uses_symmetry), иначе свип шёл
+// бы по значению, которого КРС не видит, и дал бы плоскую картинку. Выбор
+// кодируется par_index = -1: в a[] это слот 0, поэтому отдельного флага (в
+// отличие от over_h) не нужно — движок свипует a[0] как любой другой параметр.
 static void draw_sweep_target_combo(const char* label,
                                     const std::vector<std::string>& params,
                                     const std::vector<std::string>& vars,
@@ -460,19 +495,24 @@ static void draw_sweep_target_combo(const char* label,
                                     bool& over_h,
                                     bool* other_over_h = nullptr,
                                     bool note_when_empty = false,
-                                    float width = kComboW) {
+                                    float width = kComboW,
+                                    bool allow_s = false) {
     if (params.empty() && vars.empty() && note_when_empty) {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
         return;
     }
     // Кламп индексов: сохранённая сессия могла прийти от системы с другим
-    // числом переменных/параметров.
-    if (par_index < 0 || par_index >= (int)params.size()) par_index = 0;
+    // числом переменных/параметров. Отрицательный par_index — не мусор, а цель
+    // "s"; сбрасываем его только там, где схема a[0] не читает (или сессия
+    // пришла от схемы, которая читала).
+    if (par_index < 0 && !allow_s) par_index = 0;
+    if (par_index >= (int)params.size()) par_index = 0;
     if (var_index < 0 || var_index >= (int)vars.size())   var_index = 0;
 
     const std::string preview =
           over_h                      ? std::string("dt (h)")
         : (over_var && !vars.empty()) ? (vars[var_index] + " (IC)")
+        : (par_index < 0)             ? std::string("s (a[0])")
         : (!params.empty())           ? params[par_index]
                                       : std::string("?");
     ImGui::SetNextItemWidth(width);
@@ -492,6 +532,12 @@ static void draw_sweep_target_combo(const char* label,
         }
     }
 
+    if (allow_s) {
+        ImGui::Separator();
+        if (ImGui::Selectable("s (a[0])", !over_var && !over_h && par_index < 0)) {
+            par_index = -1; over_var = false; over_h = false;
+        }
+    }
     ImGui::Separator();
     if (ImGui::Selectable("dt (h)", over_h)) {
         over_h = true; over_var = false;
@@ -978,7 +1024,9 @@ static void configure_sweep_x_axis(Plot2DView& view,
     view.x_fit_max = x_fit_hi;
     view.x_axis.log_scale = shared_log && !log_mismatch;
 
-    if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)params.size())
+    if (shared_kind == 0 && shared_idx < 0)
+        view.x_axis.name = "s";
+    else if (shared_kind == 0 && shared_idx >= 0 && shared_idx < (int)params.size())
         view.x_axis.name = params[shared_idx];
     else if (shared_kind == 1 && shared_idx >= 0 && shared_idx < (int)vars.size())
         view.x_axis.name = vars[shared_idx] + " (IC)";
@@ -1451,14 +1499,45 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Text("Schemes to generate:");
     // scheme_ccd4 used to be missing from both buttons, so Complex CD4 was neither
     // selected nor cleared by them.
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = true;
+    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = model.scheme_semp = model.scheme_simp = model.scheme_dmethod = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = false;
+    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = model.scheme_semp = model.scheme_simp = model.scheme_dmethod = false;
+
+    // Схемы сгруппированы по порядку точности — тот же порядок, что в комбо
+    // выбора схемы (kBuiltinSchemes) и в списке генерации (AppModel::generate).
+    // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
+    // s = a[0] = 0.5; при других s все четыре падают до первого.
+    ImGui::SeparatorText("Order 1");
     ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
     ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
+    ImGui::Checkbox("D", &model.scheme_dmethod);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Diagonally-implicit first-order method: the stage of SIMP\n"
+                          "(and the Phi* half-step of CD) taken as a step of its own,\n"
+                          "on the full h. X[i] = X + h*f_i(X) is solved for its own\n"
+                          "variable (analytically when linear in it, 4 fixed-point\n"
+                          "iterations otherwise), forward order, so each equation\n"
+                          "already sees the new X[0..i-1].\n"
+                          "The diagonally-implicit twin of Euler-Cromer: no Jacobian,\n"
+                          "no Newton, and cross terms stay outside the solve.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Implicit Euler", &model.scheme_ieuler);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("X_next = X + h*f(X_next), solved by Newton on a\n"
+                          "symbolically differentiated Jacobian.\n"
+                          "Order 1, L-stable: unlike the explicit schemes it stays\n"
+                          "bounded on stiff systems at steps where RK4 diverges.\n"
+                          "Needs a differentiable RHS (no floor/ceil/fmod).");
+
+    ImGui::SeparatorText("Order 2");
     ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
-    ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
-    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78); ImGui::SameLine();
+    ImGui::Checkbox("Implicit Midpoint", &model.scheme_imidpoint);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Solved for the stage Y = (X + X_next)/2:\n"
+                          "Y = X + (h/2)*f(Y), then X_next = 2*Y - X.\n"
+                          "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
+                          "and symplectic. Same Newton solver as Implicit Euler.");
+    ImGui::SameLine();
     ImGui::Checkbox("CD", &model.scheme_cd); ImGui::SameLine();
     ImGui::Checkbox("Complex CD", &model.scheme_ccd);
     if (ImGui::IsItemHovered())
@@ -1468,6 +1547,25 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                           "The step is evaluated in complex arithmetic; only Re is kept.\n"
                           "At s = 0.5 (default) the half-steps are conjugate and order is 2.");
     ImGui::SameLine();
+    ImGui::Checkbox("SEMP", &model.scheme_semp);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Semi-explicit midpoint. Stage: X~[i] = X[i] + h1*f_i(X),\n"
+                          "component by component in forward order (each equation\n"
+                          "already sees the new X[0..i-1]), h1 = s*h. Corrector:\n"
+                          "X_next = X + h*f(X~). Two RHS passes, nothing to solve.\n"
+                          "Order 2 at s = a[0] = 0.5 only: the expansion carries\n"
+                          "s*h^2*F'F against h^2/2*F'F, so other s give order 1.");
+    ImGui::SameLine();
+    ImGui::Checkbox("SIMP", &model.scheme_simp);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Semi-implicit midpoint. Same corrector as SEMP, but the\n"
+                          "stage is diagonally implicit: each equation is solved for\n"
+                          "its own variable (analytically when linear in it, 4 fixed-\n"
+                          "point iterations otherwise), exactly as Phi* does in CD.\n"
+                          "No Jacobian, no Newton. Order 2 at s = a[0] = 0.5 only.");
+
+    ImGui::SeparatorText("Order 4");
+    ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
     ImGui::Checkbox("Complex CD4", &model.scheme_ccd4);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Composition of TWO symmetric CDs with complex steps:\n"
@@ -1477,20 +1575,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                           "Requires s = a[0] = 0.5: for other s the inner CD is\n"
                           "asymmetric and the order drops to first.");
 
-    ImGui::Checkbox("Implicit Euler", &model.scheme_ieuler);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("X_next = X + h*f(X_next), solved by Newton on a\n"
-                          "symbolically differentiated Jacobian.\n"
-                          "Order 1, L-stable: unlike the explicit schemes it stays\n"
-                          "bounded on stiff systems at steps where RK4 diverges.\n"
-                          "Needs a differentiable RHS (no floor/ceil/fmod).");
-    ImGui::SameLine();
-    ImGui::Checkbox("Implicit Midpoint", &model.scheme_imidpoint);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Solved for the stage Y = (X + X_next)/2:\n"
-                          "Y = X + (h/2)*f(Y), then X_next = 2*Y - X.\n"
-                          "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
-                          "and symplectic. Same Newton solver as Implicit Euler.");
+    ImGui::SeparatorText("Order 8");
+    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78);
 
     // Настройки Ньютона — общие для обеих неявных схем, поэтому живут здесь,
     // на уровне системы, а не в конфиге каждого анализа.
@@ -1561,13 +1647,13 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         if (to_delete >= 0) model.custom_schemes.erase(model.custom_schemes.begin() + to_delete);
 
         // блокируем добавление с уже существующим/built-in именем
-        // (список встроенных — общий kBuiltinSchemeNames, см. верх файла)
+        // (список встроенных — общий kBuiltinSchemes, см. верх файла)
         if (ImGui::Button("+ Add custom scheme")) {
             // подобрать уникальное имя "Custom N"
             int n = (int)model.custom_schemes.size() + 1;
             std::string candidate;
             auto name_clash = [&](const std::string& nm) {
-                for (const char* b : kBuiltinSchemeNames) if (nm == b) return true;
+                for (const auto& b : kBuiltinSchemes) if (nm == b.name) return true;
                 for (const auto& cs : model.custom_schemes) if (cs.name == nm) return true;
                 return false;
             };
@@ -1578,8 +1664,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // подсветка конфликтов
         for (const auto& cs : model.custom_schemes) {
-            for (const char* b : kBuiltinSchemeNames) {
-                if (cs.name == b) {
+            for (const auto& b : kBuiltinSchemes) {
+                if (cs.name == b.name) {
                     ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
                         "  '%s' conflicts with a built-in scheme name; rename it.",
                         cs.name.c_str());
@@ -2316,8 +2402,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::InputTextMultiline("##krs_gpu", buf_gpu.data(), buf_gpu.size(),
             ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
 
-        // CPU equivalent: identical to GPU for Euler/RK4/etc; for CD it's the
-        // 4-simple-iterations form that integrator.cpp::step_cd actually runs.
+        // CPU equivalent: identical to GPU for every scheme — the CPU integrator
+        // evaluates the same AST, and the diagonally-implicit ones solve each
+        // equation with the same analytic formula (SystemEvaluator::solve_diag_implicit).
         ImGui::SeparatorText("KRS (CPU equivalent)");
         // Кодогенерация — не для каждого кадра: панель открыта, а ImGui
         // перерисовывает её 60 раз в секунду. Кэшируем по паре (схема, тело
@@ -2332,17 +2419,15 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                 cpu_cache_body = "(generation failed)";
             }
             if (cpu_cache_body.empty())
-                cpu_cache_body = "(empty — same as GPU for non-CD schemes)";
+                cpu_cache_body = "(empty)";
             cpu_cache_key = cpu_key;
         }
         std::vector<char>& buf_cpu = input_scratch(cpu_cache_body, 1);
         ImGui::InputTextMultiline("##krs_cpu", buf_cpu.data(), buf_cpu.size(),
             ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
-        if (s.scheme != "CD" && s.scheme != "Complex CD" && s.scheme != "Complex CD4")
-            ImGui::TextDisabled("(for %s CPU and GPU evaluate the same AST — texts match)", s.scheme.c_str());
-        else
-            ImGui::TextDisabled("(for %s: GPU uses analytic solve for linear vars; CPU always uses 4 iterations)",
-                                s.scheme.c_str());
+        ImGui::TextDisabled("(CPU and GPU run the same algorithm — texts match; the\n"
+                            "diagonally-implicit schemes solve linear-in-var equations\n"
+                            "analytically on both paths and iterate on both where they can't)");
 
         ImGui::SeparatorText("Parsed inputs (double, %.17g)");
         // Панель показывает ИМЕННО то, что увидит движок, поэтому обязана
@@ -3439,7 +3524,8 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                             bd.param_index, bd.sweep_over_var, bd.var_sweep_index,
                             bd.sweep_over_h,
                             bd.mode_2d ? &bd.sweep_over_h_2 : nullptr,
-                            /*note_when_empty*/ true);
+                            /*note_when_empty*/ true, kComboW,
+                            scheme_uses_symmetry(bd.scheme, s.custom_schemes));
     InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW);
     InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
@@ -3463,7 +3549,9 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         if (!s.params.empty() || !s.vars.empty())
             draw_sweep_target_combo("Sweep Y", s.params, s.vars,
                                     bd.param_index_2, bd.sweep_over_var_2, bd.var_sweep_index_2,
-                                    bd.sweep_over_h_2, &bd.sweep_over_h);
+                                    bd.sweep_over_h_2, &bd.sweep_over_h,
+                                    /*note_when_empty*/ false, kComboW,
+                                    scheme_uses_symmetry(bd.scheme, s.custom_schemes));
         InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW);
         InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, kFieldW);
         ImGui::Checkbox("Log scale##bd_log2", &bd.log_scale_2);
@@ -4060,7 +4148,8 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                             c.param_index, c.sweep_over_var, c.var_sweep_index,
                             c.sweep_over_h,
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
-                            /*note_when_empty*/ true);
+                            /*note_when_empty*/ true, kComboW,
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
     InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##lle_log", &c.log_scale);
@@ -4080,7 +4169,9 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         if (!s.params.empty() || !s.vars.empty())
             draw_sweep_target_combo("Sweep Y", s.params, s.vars,
                                     c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
-                                    c.sweep_over_h_2, &c.sweep_over_h);
+                                    c.sweep_over_h_2, &c.sweep_over_h,
+                                    /*note_when_empty*/ false, kComboW,
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes));
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW);
         InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW);
         ImGui::Checkbox("Log scale##lle_log2", &c.log_scale_2);
@@ -4348,7 +4439,8 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
                             c.param_index, c.sweep_over_var, c.var_sweep_index,
                             c.sweep_over_h,
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
-                            /*note_when_empty*/ true);
+                            /*note_when_empty*/ true, kComboW,
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
     InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##ls_log", &c.log_scale);
@@ -4366,7 +4458,9 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         if (!s.params.empty() || !s.vars.empty())
             draw_sweep_target_combo("Sweep Y", s.params, s.vars,
                                     c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
-                                    c.sweep_over_h_2, &c.sweep_over_h);
+                                    c.sweep_over_h_2, &c.sweep_over_h,
+                                    /*note_when_empty*/ false, kComboW,
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes));
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW);
         InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW);
         ImGui::Checkbox("Log scale##ls_log2", &c.log_scale_2);
@@ -4856,7 +4950,8 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     draw_sweep_target_combo("Sweep", s.params, s.vars,
                             c.param_index, c.sweep_over_var, c.var_sweep_index,
                             c.sweep_over_h, nullptr,
-                            /*note_when_empty*/ true);
+                            /*note_when_empty*/ true, kComboW,
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
     InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##dft_log", &c.log_scale);
@@ -7033,7 +7128,8 @@ void draw_level2d_detail(CustomSession& cs) {
     draw_sweep_target_combo("##ax", cs.params, cs.vars,
                             c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index,
                             c.axis_x_over_h, &c.axis_y_over_h,
-                            /*note_when_empty*/ false, 120.0f);
+                            /*note_when_empty*/ false, 120.0f,
+                            scheme_uses_symmetry(c.scheme, cs.custom_schemes));
     InputNumStr("lo##ax", c.axis_x_lo_text, kFieldW);
     InputNumStr("hi##ax", c.axis_x_hi_text, kFieldW);
     // Log-сетка по оси. Свойство оси, поэтому X-срез Level 1D наследует его
@@ -7045,7 +7141,8 @@ void draw_level2d_detail(CustomSession& cs) {
     draw_sweep_target_combo("##ay", cs.params, cs.vars,
                             c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index,
                             c.axis_y_over_h, &c.axis_x_over_h,
-                            /*note_when_empty*/ false, 120.0f);
+                            /*note_when_empty*/ false, 120.0f,
+                            scheme_uses_symmetry(c.scheme, cs.custom_schemes));
     InputNumStr("lo##ay", c.axis_y_lo_text, kFieldW);
     InputNumStr("hi##ay", c.axis_y_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##ay_log", &c.axis_y_log);
@@ -7133,7 +7230,8 @@ void draw_level1d_detail(CustomSession& cs) {
         draw_sweep_target_combo((std::string("##") + tag + "p").c_str(),
                                 cs.params, cs.vars, par, ov, vi, oh,
                                 inheriting ? &other_copy : other_oh,
-                                /*note_when_empty*/ false, 120.0f);
+                                /*note_when_empty*/ false, 120.0f,
+                                scheme_uses_symmetry(c.scheme, cs.custom_schemes));
         InputNumStr((std::string("lo##") + tag).c_str(), lo, kFieldW);
         InputNumStr((std::string("hi##") + tag).c_str(), hi, kFieldW);
         ImGui::Checkbox((std::string("Log scale##") + tag + "log").c_str(), &lg);
