@@ -302,11 +302,18 @@ int main() {
             model.tick_precision = app_cfg.tick_precision;
         model.dark_theme = app_cfg.dark_theme;
 
+        // Маски видимости из Settings: какие вкладки показывать в верхнем ряду
+        // и какие встроенные схемы предлагать в "Schemes to generate".
+        // Ставим ДО восстановления last_app_mode — draw_gui уведёт в Library,
+        // если сохранённая вкладка теперь скрыта.
+        model.hidden_tabs    = app_cfg.hidden_tabs;
+        model.hidden_schemes = app_cfg.hidden_schemes;
+
         // Restore last-used AppMode. Clamp to the valid enum range so a
         // future rename/reorder of AppMode doesn't crash the app on an old
-        // config file. Kept in sync with app_model.h::AppMode (8 entries).
-        constexpr int kAppModeCount = 8;
-        if (app_cfg.last_app_mode >= 0 && app_cfg.last_app_mode < kAppModeCount)
+        // config file. Счётчик живёт в самом enum'е (AppModel::kAppModeCount):
+        // литерал здесь отстал на Order и гасил его восстановление.
+        if (app_cfg.last_app_mode >= 0 && app_cfg.last_app_mode < AppModel::kAppModeCount)
             model.app_mode = (AppModel::AppMode)app_cfg.last_app_mode;
 
         // Restore last-loaded system: if the name still exists in the library,
