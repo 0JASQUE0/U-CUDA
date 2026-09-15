@@ -48,6 +48,7 @@ struct SystemRecord {
     bool scheme_semp     = false;   // SEMP (средняя точка, явная стадия на h1 = s*h)
     bool scheme_simp     = false;   // SIMP (то же, стадия диагонально-неявная)
     bool scheme_dmethod  = false;   // D (диагонально-неявный шаг на полный h)
+    bool scheme_cieuler  = false;   // Complex Implicit Euler (два неявных Эйлера, tau = h*(1±i)/2)
 
     // Настройки Ньютона для двух неявных схем. Живут на уровне системы, а не
     // конфига анализа: AppModel::build_system() — единственная фабрика System,

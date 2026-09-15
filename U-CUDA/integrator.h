@@ -8,7 +8,7 @@
 // Добавление новой схемы = добавить enum + одну функцию шага в .cpp,
 // не трогая расчёт траектории и остальные схемы.
 enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D };
+                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler };
 
 IntScheme int_scheme_from_string(const std::string& s);
 

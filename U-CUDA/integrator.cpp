@@ -15,6 +15,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "SEMP")              return IntScheme::SEMP;
     if (s == "SIMP")              return IntScheme::SIMP;
     if (s == "D")                 return IntScheme::D;
+    if (s == "Complex Implicit Euler") return IntScheme::ComplexIEuler;
     return IntScheme::Euler;
 }
 
@@ -181,6 +182,9 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
 // итерации для каждой переменной (GPU-кодген для линейных по var компонент
 // решает уравнение точно — расхождение то же, что и у вещественного CD).
 constexpr double CCD_IMAG = 0.28867513459481288225;  // sqrt(3)/6, как в codegen.cpp
+// Мнимая часть полушага Complex Implicit Euler, зеркало CIE_IMAG в codegen.cpp.
+// Не настройка: 1/2 — единственное значение, гасящее h^2-член композиции.
+constexpr double CIE_IMAG = 0.5;
 
 // Один проход CD в комплексной арифметике: явный полушаг h1 вперёд, неявный h2
 // назад. Complex CD зовёт его один раз, Complex CD4 — дважды с сопряжёнными
@@ -342,6 +346,98 @@ void newton_stage(const SystemEvaluator& ev, const double* X, const double* a,
         prevn = nrm;
     }
 }
+// --- Комплексные близнецы LU и ньютона: нужны Complex Implicit Euler, где
+// комплексен и шаг, и состояние. Алгоритм слово в слово повторяет
+// вещественные версии выше (и то, что эмитит кодоген), отличаются только тип
+// и модуль для выбора ведущего элемента.
+
+bool lu_factor_cx(ucmplx* Am, int* piv, int n) {
+    for (int k = 0; k < n; ++k) {
+        int p = k;
+        double mx = ucmplx_abs(Am[k * n + k]);
+        for (int r = k + 1; r < n; ++r) {
+            double av = ucmplx_abs(Am[r * n + k]);
+            if (av > mx) { mx = av; p = r; }
+        }
+        piv[k] = p;
+        if (p != k)
+            for (int c = 0; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
+        const ucmplx d = Am[k * n + k];
+        if (ucmplx_abs(d) < 1e-30) return false;
+        for (int r = k + 1; r < n; ++r) {
+            const ucmplx m = Am[r * n + k] / d;
+            Am[r * n + k] = m;
+            for (int c = k + 1; c < n; ++c) Am[r * n + c] = Am[r * n + c] - m * Am[k * n + c];
+        }
+    }
+    return true;
+}
+
+void lu_solve_cx(const ucmplx* Am, const int* piv, ucmplx* b, int n) {
+    for (int k = 0; k < n; ++k) {
+        const int p = piv[k];
+        if (p != k) std::swap(b[k], b[p]);
+        for (int r = k + 1; r < n; ++r) b[r] = b[r] - Am[r * n + k] * b[k];
+    }
+    for (int k = n - 1; k >= 0; --k) {
+        for (int c = k + 1; c < n; ++c) b[k] = b[k] - Am[k * n + c] * b[c];
+        b[k] = b[k] / Am[k * n + k];
+    }
+}
+
+// Один неявный полушаг с комплексным hc: Z <- решение Zn - Z - hc*f(Zn) = 0.
+void newton_stage_cx(const SystemEvaluator& ev, const double* a, ucmplx hc, int n,
+                     ucmplx* Z, ucmplx* Zn, ucmplx* Fv, ucmplx* Am, int* piv,
+                     ucmplx* kbuf) {
+    ev.eval_complex(Z, a, kbuf);
+    for (int i = 0; i < n; ++i) Zn[i] = Z[i] + hc * kbuf[i];   // explicit-Euler predictor
+
+    const bool   full  = ev.newton_full();
+    const double tol   = ev.newton_tol() > 0.0 ? ev.newton_tol() : 1e-10;
+    const int    maxit = ev.newton_max_iters() > 0 ? ev.newton_max_iters() : 1;
+
+    auto build = [&]() {
+        ev.eval_jacobian_complex(Zn, a, Am);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                Am[i * n + j] = ucmplx(i == j ? 1.0 : 0.0, 0.0) - hc * Am[i * n + j];
+        return lu_factor_cx(Am, piv, n);
+    };
+
+    bool ok = true, refresh = true;
+    double prevn = 1e300;
+    for (int it = 0; it < maxit; ++it) {
+        if (refresh) { ok = build(); refresh = false; }
+        if (!ok) break;   // вырожденный пивот — оставляем шаг на предикторе
+        ev.eval_complex(Zn, a, kbuf);
+        for (int i = 0; i < n; ++i) Fv[i] = Zn[i] - Z[i] - hc * kbuf[i];
+        lu_solve_cx(Am, piv, Fv, n);
+        double nrm = 0.0;
+        for (int i = 0; i < n; ++i) {
+            Zn[i] = Zn[i] - Fv[i];
+            nrm += Fv[i].re * Fv[i].re + Fv[i].im * Fv[i].im;
+        }
+        if (nrm < tol * tol) break;
+        if (full || nrm > 0.25 * prevn) refresh = true;
+        prevn = nrm;
+    }
+    for (int i = 0; i < n; ++i) Z[i] = Zn[i];
+}
+
+// Complex Implicit Euler: два неявных Эйлера подряд с сопряжёнными шагами
+// tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0]. tau1 + tau2 = h при
+// любом s, но tau1^2 + tau2^2 = 0 (и порядок 2) только при s = 1/2 — см.
+// комментарий к Scheme в codegen.hpp.
+void step_complex_ieuler(const SystemEvaluator& ev, const double* a, double h, int n,
+                         double* X, ucmplx* Z, ucmplx* Zn, ucmplx* Fv, ucmplx* Am,
+                         int* piv, ucmplx* kbuf) {
+    const double s = a[0];
+    for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
+    newton_stage_cx(ev, a, ucmplx(s * h,          h * CIE_IMAG),  n, Z, Zn, Fv, Am, piv, kbuf);
+    newton_stage_cx(ev, a, ucmplx((1.0 - s) * h, -h * CIE_IMAG),  n, Z, Zn, Fv, Am, piv, kbuf);
+    for (int i = 0; i < n; ++i) X[i] = Z[i].re;
+}
+
 void step_implicit_euler(const SystemEvaluator& ev, double* X, const double* a,
                          double h, int n, double* Xn, double* Fv, double* Am,
                          int* piv, double* kbuf) {
@@ -408,17 +504,23 @@ bool computePhasePortraitCPU(
     // Комплексные буферы нужны только Complex CD — для остальных схем это два
     // пустых вектора, без аллокаций.
     std::vector<ucmplx> Zc, Kc;
-    if (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4) { Zc.resize(n); Kc.resize(n); }
-    // Newton workspace, allocated only for the two implicit schemes.
+    const bool cx_state = (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4
+                           || scheme == IntScheme::ComplexIEuler);
+    if (cx_state) { Zc.resize(n); Kc.resize(n); }
+    // Newton workspace, allocated only for the implicit schemes.
     std::vector<double> Xn, Fv, Am;
     std::vector<int> piv;
+    std::vector<ucmplx> Znc, Fvc, Amc;   // то же для комплексного ньютона
     const bool implicit = (scheme == IntScheme::ImplicitEuler || scheme == IntScheme::ImplicitMidpoint);
-    if (implicit) {
+    const bool implicit_cx = (scheme == IntScheme::ComplexIEuler);
+    if (implicit || implicit_cx) {
         // Without a symbolic Jacobian (floor/ceil/fmod in the RHS) Newton has nothing
         // to solve with; fail loudly instead of silently degrading to fixed-point.
         if (!ev.has_jacobian()) return false;
-        Xn.resize(n); Fv.resize(n); Am.resize((size_t)n * n); piv.resize(n);
+        piv.resize(n);
     }
+    if (implicit)    { Xn.resize(n);  Fv.resize(n);  Am.resize((size_t)n * n); }
+    if (implicit_cx) { Znc.resize(n); Fvc.resize(n); Amc.resize((size_t)n * n); }
 
     auto do_step = [&]() {
         switch (scheme) {
@@ -435,6 +537,9 @@ bool computePhasePortraitCPU(
         case IntScheme::SEMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ false, k1.data(), tmp.data()); break;
         case IntScheme::SIMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ true,  k1.data(), tmp.data()); break;
         case IntScheme::D:                step_d(ev, X.data(), a, h, n, k1.data()); break;
+        case IntScheme::ComplexIEuler:    step_complex_ieuler(ev, a, h, n, X.data(), Zc.data(),
+                                                              Znc.data(), Fvc.data(), Amc.data(),
+                                                              piv.data(), Kc.data()); break;
         }
     };
 

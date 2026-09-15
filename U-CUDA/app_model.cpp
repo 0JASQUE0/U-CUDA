@@ -147,6 +147,7 @@ SystemRecord AppModel::to_record() const {
     r.scheme_semp = scheme_semp;
     r.scheme_simp = scheme_simp;
     r.scheme_dmethod = scheme_dmethod;
+    r.scheme_cieuler = scheme_cieuler;
     r.newton_full = newton_full;
     r.newton_tol = newton_tol;
     r.newton_max_iters = newton_max_iters;
@@ -186,6 +187,7 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_semp = r.scheme_semp;
     scheme_simp = r.scheme_simp;
     scheme_dmethod = r.scheme_dmethod;
+    scheme_cieuler = r.scheme_cieuler;
     newton_full = r.newton_full;
     newton_tol = r.newton_tol;
     newton_max_iters = r.newton_max_iters;
@@ -202,7 +204,7 @@ void AppModel::from_record(const SystemRecord& r) {
     generated_code.clear();
     if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
         || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint
-        || scheme_semp || scheme_simp || scheme_dmethod)
+        || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler)
         generate();
 }
 
@@ -222,7 +224,7 @@ void AppModel::clear() {
     mode = InputMode::Image;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
         = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint
-        = scheme_semp = scheme_simp = scheme_dmethod = false;
+        = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler = false;
     symmetry_s = "0.5";
     newton_full = false;
     newton_tol = "1e-10";
@@ -301,6 +303,19 @@ bool AppModel::start_basins_analysis() {
     }
     catch (...) {}
     basins_session.loaded_system_name = name;
+    return true;
+}
+
+bool AppModel::start_order_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    order_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        order_session.sys = built;
+    }
+    catch (...) {}
+    order_session.loaded_system_name = name;
     return true;
 }
 

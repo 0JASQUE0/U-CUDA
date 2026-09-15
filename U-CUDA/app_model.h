@@ -5,6 +5,7 @@
 #include "system_record.h"
 #include "analysis_session.h"
 #include "custom_session.h"
+#include "order_session.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -151,6 +152,10 @@ public:
     // D: та же диагонально-неявная стадия, но как самостоятельный шаг на
     // полный h — метод первого порядка, a[0] не читает.
     bool scheme_dmethod = false;
+    // Complex Implicit Euler: композиция двух неявных Эйлеров с сопряжёнными
+    // комплексными шагами tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0].
+    // Порядок 2 только при s = 0.5 — коэффициенты вынуждены, см. codegen.hpp.
+    bool scheme_cieuler = false;
 
     // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
     bool        newton_full      = false;
@@ -215,7 +220,10 @@ public:
     // режим приложения и сессия анализа (слой 2)
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
     // бассейны притяжения или настройки.
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings };
+    // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
+    // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
+    // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order };
     AppMode app_mode = AppMode::Library;
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -238,6 +246,9 @@ public:
 
     // Fast Synchro — отдельный AppMode (anti-synchro analysis на attractor / IC grid).
     FastSyncAnalysisSession    fastsync_session;
+
+    // Order — оценка порядка точности схемы (p по Эйткену/Ричардсону).
+    OrderAnalysisSession       order_session;
 
     // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
     // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
@@ -427,6 +438,7 @@ public:
     bool start_dft1d_analysis();
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
+    bool start_order_analysis();
     bool start_fastsync_analysis();
     // Initialise the Custom pipeline: seeds shared config from the record and
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
@@ -500,6 +512,7 @@ public:
                 { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },
                 { scheme_semp,     "SEMP",              Scheme::SEMP },
                 { scheme_simp,     "SIMP",              Scheme::SIMP },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },

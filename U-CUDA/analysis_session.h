@@ -6,6 +6,15 @@
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
 std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
+
+// Тело calculateDiscreteModel для выбранной схемы: сперва ищется среди
+// пользовательских КРС по имени, иначе генерируется кодогеном. Пустая строка =
+// нет валидной системы или схема не разобралась. Живёт здесь, а не в
+// analysis_session.cpp приватно, потому что тем же путём КРС резолвит
+// order_session.cpp.
+std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                   const System& sys,
+                                   const std::string& scheme);
 #include <atomic>
 #include <chrono>
 #include <future>

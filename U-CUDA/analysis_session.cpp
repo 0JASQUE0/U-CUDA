@@ -151,6 +151,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_imidpoint) out.emplace_back("Implicit Midpoint");
     if (r.scheme_cd)       out.emplace_back("CD");
     if (r.scheme_ccd)      out.emplace_back("Complex CD");
+    if (r.scheme_cieuler)  out.emplace_back("Complex Implicit Euler");
     if (r.scheme_semp)     out.emplace_back("SEMP");
     if (r.scheme_simp)     out.emplace_back("SIMP");
     if (r.scheme_rk4)      out.emplace_back("RK4");
@@ -614,6 +615,7 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "SEMP")              return Scheme::SEMP;
     if (s == "SIMP")              return Scheme::SIMP;
     if (s == "D")                 return Scheme::D;
+    if (s == "Complex Implicit Euler") return Scheme::ComplexIEuler;
     return Scheme::Euler;
 }
 
@@ -655,7 +657,7 @@ void PhaseAnalysisSession::regenerate_krs() {
 // приоритет над built-in, что блокируется в System tab), иначе генерирует
 // через codegen_scheme. Чистая функция — зовётся при сборке Request в
 // момент Run (не персистится). Переиспользуется bifurcation и LLE.
-static std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                           const System& sys,
                                           const std::string& scheme) {
     for (const auto& cs : custom_schemes) {

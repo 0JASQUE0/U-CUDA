@@ -763,38 +763,102 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // so a header helper would simply not be found there. DOPRI78 inlines its Butcher
     // tables for the same reason. Cost: numb Am[N*N] in local memory per thread --
     // 72 bytes at the usual N = 3, growing as N^2.
-    enum class ImplicitKind { Euler, Midpoint };
+    // ImplicitKind::ComplexEuler — Complex Implicit Euler (см. комментарий к
+    // Scheme в codegen.hpp): тот же ньютоновский блок, но прогоняется ДВАЖДЫ,
+    // с tau1 = h*(a[0] + i*CIE_IMAG) и tau2 = h*(1 - a[0] - i*CIE_IMAG), и вся
+    // арифметика комплексная. Общий код с вещественными схемами не ради
+    // экономии строк: разъехавшись, две копии ньютона начали бы давать разные
+    // ответы на одной и той же задаче, и это заметили бы не сразу.
+    enum class ImplicitKind { Euler, Midpoint, ComplexEuler };
+
+    // Мнимая часть полушага Complex Implicit Euler. Не настройка: 1/2 —
+    // единственное значение, при котором tau1^2 + tau2^2 = 0 (см. codegen.hpp).
+    constexpr double CIE_IMAG = 0.5;
 
     std::string scheme_implicit_common(const System& s, ImplicitKind kind) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         const int N = (int)s.vars.size();
 
-        auto f0 = rhs_over(s, "X");    // predictor, evaluated at the old state
-        auto fn = rhs_over(s, "Xn");   // residual, evaluated at the Newton iterate
-        auto Jn = jac_over(s, "Xn");   // Jacobian, same point as the residual
+        const bool  cx  = (kind == ImplicitKind::ComplexEuler);
+        // Массивы состояния, из которых читают сгенерированные выражения:
+        // X/Xn у вещественных схем (как было), Z/Zn у комплексной.
+        const char* stv = cx ? "Z"  : "X";
+        const char* stn = cx ? "Zn" : "Xn";
+        const char* sty = cx ? "ucmplx" : "numb";
+
+        auto f0 = rhs_over(s, stv);    // predictor, evaluated at the old state
+        auto fn = rhs_over(s, stn);    // residual, evaluated at the Newton iterate
+        auto Jn = jac_over(s, stn);    // Jacobian, same point as the residual
+
+        if (cx) {
+            // Те же запреты, что у Complex CD: у fabs/floor/fmod нет
+            // аналитического продолжения в комплексную плоскость, и шаг с
+            // мнимой частью по ним считать нечем.
+            for (int i = 0; i < N; ++i) {
+                Parser p(s.rhs[i], s.latex);
+                cd_check_complex_safe(p.parse());
+            }
+        }
 
         const bool   full  = s.newton_full;
         const double tol   = s.newton_tol > 0.0 ? s.newton_tol : 1e-10;
         const int    maxit = s.newton_max_iters > 0 ? s.newton_max_iters : 1;
 
+        // Компаунд-операторов у ucmplx нет (см. configCUDA.h), поэтому в
+        // комплексном режиме печатаем развёрнутую форму. У вещественных схем
+        // текст обязан остаться ПОБАЙТОВО прежним: он уходит в ключ кэша PTX
+        // и в отладочную панель как «что считает CPU».
+        auto sub_eq = [cx](const std::string& lhs, const std::string& rhs) {
+            return cx ? (lhs + " = " + lhs + " - " + rhs + ";")
+                      : (lhs + " -= " + rhs + ";");
+        };
+        auto div_eq = [cx](const std::string& lhs, const std::string& rhs) {
+            return cx ? (lhs + " = " + lhs + " / " + rhs + ";")
+                      : (lhs + " /= " + rhs + ";");
+        };
+        // Вещественный литерал в матрицу: у ucmplx конструктор из numb ЯВНЫЙ,
+        // так что Am[k] = 1.0 в комплексном режиме просто не скомпилируется.
+        auto lit = [cx](const char* v) {
+            return cx ? ("ucmplx(" + std::string(v) + ", 0.0)") : std::string(v);
+        };
+        const std::string absf = cx ? "ucmplx_abs" : "fabs";
+
         std::ostringstream o;
-        o << "    numb Xn[" << N << "];\n";
-        o << "    numb Fv[" << N << "];\n";
-        o << "    numb Am[" << N * N << "];\n";
+        if (cx) {
+            o << "    ucmplx Z[" << N << "];\n";
+            for (int i = 0; i < N; ++i)
+                o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
+        }
+        o << "    " << sty << " " << stn << "[" << N << "];\n";
+        o << "    " << sty << " Fv[" << N << "];\n";
+        o << "    " << sty << " Am[" << N * N << "];\n";
         o << "    int  piv[" << N << "];\n";
         o << "    const int  ndim = " << N << ";\n";
-        o << "    const numb hc = "
-          << (kind == ImplicitKind::Euler ? "h" : "(0.5 * h)") << ";\n";
+        if (cx)
+            // Переприсваивается между проходами, поэтому не const.
+            o << "    ucmplx hc = ucmplx(a[0] * h, h * " << fmtnum(CIE_IMAG) << ");\n";
+        else
+            o << "    const numb hc = "
+              << (kind == ImplicitKind::Euler ? "h" : "(0.5 * h)") << ";\n";
         o << "    const numb ntol = " << fmtnum(tol) << ";\n";
         o << "    int it, ik, ir, ic, ip, sing, refresh;\n";
-        o << "    numb mx, av, dgn, mlt, nrm, prevn;\n";
+        if (cx) {
+            o << "    numb mx, av, nrm, prevn;\n";
+            o << "    ucmplx dgn, mlt;\n";
+        } else {
+            o << "    numb mx, av, dgn, mlt, nrm, prevn;\n";
+        }
 
+        // Один ньютоновский проход целиком. У вещественных схем печатается
+        // один раз, у комплексной — дважды, с разными tau (см. ниже).
+        auto emit_pass = [&]() {
         // Predictor: explicit Euler over the same hc, so the Newton start is already
         // second-order accurate for the midpoint variant.
         o << "\n    /* predictor: explicit Euler */\n";
         for (int i = 0; i < N; ++i)
-            o << "    Xn[" << i << "] = X[" << i << "] + hc * (" << f0[i] << ");\n";
+            o << "    " << stn << "[" << i << "] = " << stv << "[" << i
+              << "] + hc * (" << f0[i] << ");\n";
 
         o << "\n    sing = 0; refresh = 1; prevn = 1e300;\n";
         o << "    for (it = 0; it < " << maxit << "; it++) {\n";
@@ -803,21 +867,21 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // whenever `refresh` is set below. Full Newton sets it every iteration;
         // modified Newton only when the frozen matrix stops contracting.
         o << "        if (refresh) {\n";
-        o << "            /* Am = I - hc * J(Xn) */\n";
+        o << "            /* Am = I - hc * J(" << stn << ") */\n";
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < N; ++j) {
                 const std::string& d = Jn[(size_t)i * N + j];
                 o << "            Am[" << (i * N + j) << "] = ";
-                if (d == "0.0") o << (i == j ? "1.0" : "0.0") << ";\n";
+                if (d == "0.0") o << lit(i == j ? "1.0" : "0.0") << ";\n";
                 else if (i == j) o << "1.0 - hc * (" << d << ");\n";
                 else             o << "-hc * (" << d << ");\n";
             }
         }
         o << "            /* LU with partial pivoting */\n";
         o << "            for (ik = 0; ik < ndim; ik++) {\n";
-        o << "                ip = ik; mx = fabs(Am[ik * ndim + ik]);\n";
+        o << "                ip = ik; mx = " << absf << "(Am[ik * ndim + ik]);\n";
         o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
-        o << "                    av = fabs(Am[ir * ndim + ik]);\n";
+        o << "                    av = " << absf << "(Am[ir * ndim + ik]);\n";
         o << "                    if (av > mx) { mx = av; ip = ir; }\n";
         o << "                }\n";
         o << "                piv[ik] = ip;\n";
@@ -832,38 +896,47 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // would only turn the correction into inf and then nan, killing a
         // trajectory that is otherwise alive; leaving the step on the predictor
         // costs one order locally and nothing globally.
-        o << "                if (fabs(dgn) < 1e-30) { sing = 1; break; }\n";
+        o << "                if (" << absf << "(dgn) < 1e-30) { sing = 1; break; }\n";
         o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
         o << "                    mlt = Am[ir * ndim + ik] / dgn;\n";
         o << "                    Am[ir * ndim + ik] = mlt;\n";
         o << "                    for (ic = ik + 1; ic < ndim; ic++)\n";
-        o << "                        Am[ir * ndim + ic] -= mlt * Am[ik * ndim + ic];\n";
+        o << "                        " << sub_eq("Am[ir * ndim + ic]", "mlt * Am[ik * ndim + ic]") << "\n";
         o << "                }\n";
         o << "            }\n";
         o << "            refresh = 0;\n";
         o << "        }\n";
         o << "        if (sing) break;\n";
 
-        o << "        /* residual F(Xn) = Xn - X - hc * f(Xn) */\n";
+        o << "        /* residual F(" << stn << ") = " << stn << " - " << stv
+          << " - hc * f(" << stn << ") */\n";
         for (int i = 0; i < N; ++i)
-            o << "        Fv[" << i << "] = Xn[" << i << "] - X[" << i
+            o << "        Fv[" << i << "] = " << stn << "[" << i << "] - " << stv << "[" << i
               << "] - hc * (" << fn[i] << ");\n";
         o << "        /* solve Am * dX = Fv in place */\n";
         o << "        for (ik = 0; ik < ndim; ik++) {\n";
         o << "            ip = piv[ik];\n";
         o << "            if (ip != ik) { mlt = Fv[ik]; Fv[ik] = Fv[ip]; Fv[ip] = mlt; }\n";
         o << "            for (ir = ik + 1; ir < ndim; ir++)\n";
-        o << "                Fv[ir] -= Am[ir * ndim + ik] * Fv[ik];\n";
+        o << "                " << sub_eq("Fv[ir]", "Am[ir * ndim + ik] * Fv[ik]") << "\n";
         o << "        }\n";
         o << "        for (ik = ndim - 1; ik >= 0; ik--) {\n";
         o << "            for (ic = ik + 1; ic < ndim; ic++)\n";
-        o << "                Fv[ik] -= Am[ik * ndim + ic] * Fv[ic];\n";
-        o << "            Fv[ik] /= Am[ik * ndim + ik];\n";
+        o << "                " << sub_eq("Fv[ik]", "Am[ik * ndim + ic] * Fv[ic]") << "\n";
+        o << "            " << div_eq("Fv[ik]", "Am[ik * ndim + ik]") << "\n";
         o << "        }\n";
         o << "        nrm = 0.0;\n";
-        for (int i = 0; i < N; ++i)
-            o << "        Xn[" << i << "] -= Fv[" << i << "]; nrm += Fv[" << i
-              << "] * Fv[" << i << "];\n";
+        for (int i = 0; i < N; ++i) {
+            if (cx)
+                // |dX|^2 в комплексном случае — по модулю, а не по квадрату
+                // самого числа: Fv[i]*Fv[i] у комплексного не вещественно.
+                o << "        Zn[" << i << "] = Zn[" << i << "] - Fv[" << i << "];"
+                  << " nrm += Fv[" << i << "].re * Fv[" << i << "].re + Fv[" << i
+                  << "].im * Fv[" << i << "].im;\n";
+            else
+                o << "        Xn[" << i << "] -= Fv[" << i << "]; nrm += Fv[" << i
+                  << "] * Fv[" << i << "];\n";
+        }
         o << "        if (nrm < ntol * ntol) break;\n";
         if (full)
             o << "        refresh = 1;\n";
@@ -879,15 +952,36 @@ namespace { // внутренняя линковка: всё ниже не ви�
         if (kind == ImplicitKind::Euler)
             for (int i = 0; i < N; ++i)
                 o << "    X[" << i << "] = Xn[" << i << "];\n";
-        else
+        else if (kind == ImplicitKind::Midpoint)
             // Xn holds the stage value Y; recover the endpoint from it.
             for (int i = 0; i < N; ++i)
                 o << "    X[" << i << "] = 2.0 * Xn[" << i << "] - X[" << i << "];\n";
+        else
+            // Комплексный проход кладёт результат обратно в Z: второй проход
+            // стартует с него, а после второго Re Z уходит в X.
+            for (int i = 0; i < N; ++i)
+                o << "    Z[" << i << "] = Zn[" << i << "];\n";
+        };  // emit_pass
+
+        emit_pass();
+        if (cx) {
+            // Второй полушаг — сопряжённый: tau2 = h*(1 - a[0]) - i*h*CIE_IMAG.
+            // tau1 + tau2 = h при любом a[0], но h^2-член гасится только при
+            // a[0] = 1/2, и только там метод второго порядка.
+            o << "\n    hc = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CIE_IMAG) << ");\n";
+            emit_pass();
+            // Наружу — только Re, как у Complex CD: всё вокруг
+            // calculateDiscreteModel остаётся вещественным.
+            o << "\n";
+            for (int i = 0; i < N; ++i)
+                o << "    X[" << i << "] = Z[" << i << "].re;\n";
+        }
 
         return o.str();
     }
     std::string scheme_implicit_euler(const System& s)    { return scheme_implicit_common(s, ImplicitKind::Euler); }
     std::string scheme_implicit_midpoint(const System& s) { return scheme_implicit_common(s, ImplicitKind::Midpoint); }
+    std::string scheme_complex_ieuler(const System& s)    { return scheme_implicit_common(s, ImplicitKind::ComplexEuler); }
 
     // Общий кирпич диагонально-неявного полушага: одно уравнение
     // X[i] = X_saved + hs * f_i(X), решённое относительно своей переменной.
@@ -1495,6 +1589,19 @@ void SystemEvaluator::eval_jacobian(const double* X, const double* a, double* J)
         J[k] = run_program(impl_->jac_programs[(size_t)k], X, a, st);
 }
 
+void SystemEvaluator::eval_jacobian_complex(const ucmplx* Z, const double* a, ucmplx* J) const {
+    const int n = impl_->dim;
+    if (impl_->jac_programs.empty()) {
+        for (int k = 0; k < n * n; ++k) J[k] = ucmplx(0.0, 0.0);
+        return;
+    }
+    if ((int)impl_->stack_c.size() < impl_->max_stack)
+        impl_->stack_c.resize(impl_->max_stack);
+    ucmplx* st = impl_->stack_c.data();
+    for (int k = 0; k < n * n; ++k)
+        J[k] = run_program(impl_->jac_programs[(size_t)k], Z, a, st);
+}
+
 bool   SystemEvaluator::newton_full() const      { return impl_->newton_full; }
 double SystemEvaluator::newton_tol() const       { return impl_->newton_tol; }
 int    SystemEvaluator::newton_max_iters() const { return impl_->newton_max_iters; }
@@ -1551,6 +1658,7 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::SEMP:             return scheme_semp(s);
     case Scheme::SIMP:             return scheme_simp(s);
     case Scheme::D:                return scheme_d(s);
+    case Scheme::ComplexIEuler:    return scheme_complex_ieuler(s);
     }
     throw std::runtime_error("unknown scheme");
 }
@@ -1568,6 +1676,7 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "SEMP")              return Scheme::SEMP;
     if (name == "SIMP")              return Scheme::SIMP;
     if (name == "D")                 return Scheme::D;
+    if (name == "Complex Implicit Euler") return Scheme::ComplexIEuler;
     return Scheme::Euler;
 }
 
