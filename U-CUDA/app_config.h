@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <string>
+#include <vector>
 #include "parametric_engine.h"   // PeakConfig
 
 // Глобальные настройки приложения, не привязанные к конкретной системе или
@@ -59,6 +60,20 @@ struct AppConfig {
     // пороги режимов). Дефолты структуры = значения из configCUDA.h, поэтому
     // отсутствие полей в JSON воспроизводит поведение до появления настройки.
     PeakConfig peak;
+
+    // Вкладки верхнего ряда, СКРЫТЫЕ пользователем (Settings -> Tabs).
+    // Элементы — стабильные идентификаторы режимов ("Analysis", "Parametric",
+    // "Dft1D", "Basins", "FastSync", "Custom", "Order"); Library и Settings
+    // скрыть нельзя и в списке не появляются. Храним именно скрытые, а не
+    // видимые: отсутствие ключа (конфиг от старой версии) = ничего не скрыто,
+    // т.е. прежнее поведение, и новая вкладка появляется видимой сама.
+    std::vector<std::string> hidden_tabs;
+
+    // Встроенные схемы, СКРЫТЫЕ из списка "Schemes to generate" (Settings ->
+    // Integration schemes). Элементы — имена из kBuiltinSchemes в gui.cpp
+    // ("RK4", "Complex CD4", ...). Логика та же, что у hidden_tabs: пусто =
+    // показываем все.
+    std::vector<std::string> hidden_schemes;
 
     // FMA-контракция во ВСЕХ NVRTC-сборках (см. set_nvrtc_fmad). true = дефолт
     // NVRTC; старые конфиги без этого ключа читаются как true, т.е. поведение

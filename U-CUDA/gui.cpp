@@ -329,7 +329,11 @@ static void refresh_auto_labels(AppModel& model) {
     return parse_num_int(v, def);
 }
 
-static bool InputNumStr(const char* label, std::string& str, float width = 0.0f) {
+// ctx_menu — контекстное меню поля (ПКМ). Вызывается СРАЗУ после InputText:
+// ниже может встать предупреждение о невалидном числе, и BeginPopupContextItem
+// внутри колбэка привязался бы к нему, а не к самому полю.
+static bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
+                        const std::function<void()>& ctx_menu = {}) {
     std::vector<char>& buf = input_scratch(str, 1024);
     if (width > 0) ImGui::SetNextItemWidth(width);
     // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_input_callback.
@@ -338,6 +342,7 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f)
         ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
         digit_step_input_callback);
     if (changed) str = buf.data();
+    if (ctx_menu) ctx_menu();
 
     // Inline-предупреждение, если содержимое не парсится как число.
     // Default из engine'а (0) всё равно применится, но пользователю
@@ -390,6 +395,173 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
 // ImGui-идентификаторы передаются строкой снаружи и побайтово совпадают с прежними —
 // раскладка imgui.ini и состояние вкладок сохраняются.
 
+// Откат последней массовой команды + отметка времени для подписи в шапке
+// (модель про ImGui не знает, поэтому GetTime проставляется здесь).
+static void do_undo(AppModel& m) {
+    if (m.undo_last()) m.undo_note_time = ImGui::GetTime();
+}
+
+static void do_redo(AppModel& m) {
+    if (m.redo_last()) m.undo_note_time = ImGui::GetTime();
+}
+
+// Пункты "Undo/Redo: ..." в контекстных меню. Дублируют хоткеи сознательно: те
+// работают только вне поля ввода (внутри InputText своя отмена у ImGui), и без
+// видимых пунктов это выглядело бы как "иногда работает". Стек свой у каждой
+// вкладки, поэтому показывается ровно то, что откатится ЗДЕСЬ.
+static void draw_undo_menu_item(AppModel* m) {
+    if (!m) return;
+    const std::string* u = m->undo_top();
+    const std::string* r = m->redo_top();
+    if (!u && !r) return;
+    ImGui::Separator();
+    if (u) {
+        const std::string lbl = "Undo: " + *u;
+        if (ImGui::MenuItem(lbl.c_str(), "Ctrl+Z")) do_undo(*m);
+    }
+    if (r) {
+        const std::string lbl = "Redo: " + *r;
+        if (ImGui::MenuItem(lbl.c_str(), "Ctrl+Shift+Z")) do_redo(*m);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ПКМ по числовому полю (и по комбо схемы / цели свипа) настроек.
+// Три адресата на выбор, от узкого к широкому:
+//   * все конфиги ТОГО ЖЕ типа, что и правящийся ("все Bifurcation 1D") —
+//     обычно нужен именно он: диаграммы одного типа сравнивают между собой, и
+//     разъехавшийся у одной из них шаг или время счёта делает сравнение ложью;
+//   * отмеченные галочками в подменю — когда типа мало или он слишком широк;
+//   * активный конфиг каждой вкладки — прежнее поведение, оставлено как есть.
+// Во всех трёх случаях команда уходит в стек отмены одной записью.
+static void field_apply_all_menu(AppModel* model, BroadcastField f,
+                                 const std::string& name, const std::string& label,
+                                 const std::string& value) {
+    if (!model) return;
+    // ID popup'а обязан быть свой у каждого поля: в блоке Integration шесть
+    // полей лежат на ОДНОМ уровне ID-стека, и общий идентификатор склеил бы
+    // их меню в одно.
+    const std::string popup_id = "##apply_all_" + label + name;
+    if (!ImGui::BeginPopupContextItem(popup_id.c_str())) return;
+    ImGui::TextDisabled("%s = %s", label.c_str(), value.c_str());
+    ImGui::Separator();
+
+    // Сухой прогон: сколько конфигов реально РАЗОЙДЁТСЯ с этим значением.
+    // Показываем числом, но НЕ гасим по нему команду: серый пункт читается как
+    // подпись, и "0 differ" выглядит как сломанная рассылка, хотя на деле все
+    // цели уже с этим значением.
+    auto differ_count = [&](const std::vector<BroadcastTarget>* only) {
+        return model->broadcast_field(f, name, value, /*apply*/false, label, only, "");
+    };
+    // Применяет и кладёт отчёт в шапку: адресаты бывают не открыты, и без
+    // строки сверху "применилось" неотличимо от "ничего не произошло".
+    auto apply_now = [&](const std::vector<BroadcastTarget>* only, const std::string& note) {
+        const int n = model->broadcast_field(f, name, value, /*apply*/true, label, only, note);
+        model->undo_note = n > 0
+            ? ("Applied: " + label + " = " + value + " -> " + note)
+            : ("Nothing to apply: " + note + " already at " + value);
+        model->undo_note_time = ImGui::GetTime();
+    };
+    auto count_and_item = [&](const char* fmt, const std::vector<BroadcastTarget>* only,
+                              const std::string& note) {
+        char lbl[160];
+        std::snprintf(lbl, sizeof(lbl), fmt, differ_count(only));
+        if (ImGui::MenuItem(lbl)) apply_now(only, note);
+    };
+
+    const std::vector<BroadcastTarget> all = model->broadcast_targets(f);
+
+    // 1. Свой тип. Источник берём из панели, которая сейчас рисуется
+    //    (broadcast_source_*): по app_mode его не вывести — вкладка Parametric
+    //    покрывает сразу Bifurcation, LLE и LS.
+    std::vector<BroadcastTarget> same_group;
+    std::string group;
+    for (const auto& t : all)
+        if (t.tab == model->broadcast_source_tab && t.idx == model->broadcast_source_idx) {
+            group = t.group;
+            break;
+        }
+    if (!group.empty()) {
+        for (const auto& t : all)
+            if (t.group == group) same_group.push_back(t);
+    }
+    if (same_group.size() > 1) {
+        char fmt[128];
+        std::snprintf(fmt, sizeof(fmt), "Apply to all %s (%%d differ)", group.c_str());
+        count_and_item(fmt, &same_group, "all " + group);
+    }
+
+    // 2. Выбор галочками. Маска живёт в модели и пересобирается, когда
+    //    сменилось поле или изменился состав целей (диаграмму добавили/закрыли).
+    if (ImGui::BeginMenu("Apply to...")) {
+        // Подпись состава: поле + имена целей по порядку. Меняется состав —
+        // маска собирается заново, а не переезжает на соседние конфиги.
+        std::string sig = std::to_string((int)f);
+        for (const auto& t : all) { sig += '\x1f'; sig += t.label; }
+        if (model->broadcast_pick_sig != sig ||
+            model->broadcast_pick.size() != all.size()) {
+            model->broadcast_pick.assign(all.size(), '0');
+            model->broadcast_pick_sig = sig;
+            // По умолчанию отмечаем свой тип: это и подсказка, что здесь
+            // выбирают, и самый частый набор.
+            for (size_t i = 0; i < all.size(); ++i)
+                if (all[i].group == group) model->broadcast_pick[i] = '1';
+        }
+        if (ImGui::SmallButton("All")) model->broadcast_pick.assign(all.size(), '1');
+        ImGui::SameLine();
+        if (ImGui::SmallButton("None")) model->broadcast_pick.assign(all.size(), '0');
+
+        // Кнопка применения — СВЕРХУ, до списка: галочек бывает под два десятка,
+        // и внизу она уезжает за край экрана. Кнопка, а не пункт меню: пункт в
+        // конце списка читается как подпись, а не как действие.
+        {
+            std::vector<BroadcastTarget> sel;
+            for (size_t i = 0; i < all.size(); ++i)
+                if (model->broadcast_pick[i] == '1') sel.push_back(all[i]);
+            char btn[96];
+            std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
+            if (sel.empty()) ImGui::BeginDisabled();
+            if (ImGui::Button(btn)) {
+                char note[64];
+                std::snprintf(note, sizeof(note), "%d selected", (int)sel.size());
+                apply_now(&sel, note);
+                ImGui::CloseCurrentPopup();
+            }
+            if (sel.empty()) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (sel.empty()) {
+                ImGui::TextDisabled("nothing ticked");
+            } else {
+                const int d = differ_count(&sel);
+                if (d > 0) ImGui::TextDisabled("%d differ", d);
+                else       ImGui::TextDisabled("already at this value");
+            }
+        }
+        ImGui::Separator();
+
+        std::string shown_group;
+        for (size_t i = 0; i < all.size(); ++i) {
+            if (all[i].group != shown_group) {
+                shown_group = all[i].group;
+                ImGui::SeparatorText(shown_group.c_str());
+            }
+            ImGui::PushID((int)i);
+            bool on = (model->broadcast_pick[i] == '1');
+            if (ImGui::Checkbox(all[i].label.c_str(), &on))
+                model->broadcast_pick[i] = on ? '1' : '0';
+            ImGui::PopID();
+        }
+
+        ImGui::EndMenu();
+    }
+
+    // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
+    count_and_item("Apply to all calculation tabs (%d differ)", nullptr, "all tabs");
+
+    draw_undo_menu_item(model);
+    ImGui::EndPopup();
+}
+
 // Встроенные схемы интегрирования. Один список на весь файл: раньше этот же
 // массив был выписан восемью копиями плюс девятой — для проверки конфликта
 // имён пользовательских схем.
@@ -397,22 +569,109 @@ static bool InputNumStrCommit(const char* label, std::string& text, double& valu
 // чекбоксах System tab, поэтому таблица отсортирована по нему и порядок строк
 // здесь = порядок в UI. У CD, Complex CD, SEMP и SIMP заявленный порядок
 // достигается только при s = a[0] = 0.5 (см. codegen.cpp).
-struct BuiltinScheme { const char* name; int order; };
+struct BuiltinScheme {
+    const char* name;
+    int         order;
+    // Флаг "генерировать эту схему" в AppModel. Через него System tab рисует
+    // чекбоксы циклом — раньше список схем был выписан там ещё раз руками, и
+    // Complex Implicit Euler, добавленный только в одну из копий, не попадал
+    // ни под "Select all", ни под "Clear all".
+    bool AppModel::*flag;
+    // Подсказка чекбокса; nullptr — схема говорит сама за себя.
+    const char* tooltip;
+};
 static const BuiltinScheme kBuiltinSchemes[] = {
-    { "Euler",             1 },
-    { "Euler-Cromer",      1 },
-    { "D",                 1 },
-    { "Implicit Euler",    1 },
-    { "Explicit Midpoint", 2 },
-    { "Implicit Midpoint", 2 },
-    { "CD",                2 },
-    { "Complex CD",        2 },
-    { "Complex Implicit Euler", 2 },
-    { "SEMP",              2 },
-    { "SIMP",              2 },
-    { "RK4",               4 },
-    { "Complex CD4",       4 },
-    { "DOPRI78",           8 },
+    { "Euler",                    1, &AppModel::scheme_euler, nullptr },
+    { "Euler-Cromer",             1, &AppModel::scheme_cromer, nullptr },
+    { "D",                        1, &AppModel::scheme_dmethod,
+      "Diagonally-implicit first-order method: the stage of SIMP\n"
+      "(and the Phi* half-step of CD) taken as a step of its own,\n"
+      "on the full h. X[i] = X + h*f_i(X) is solved for its own\n"
+      "variable (analytically when linear in it, 4 fixed-point\n"
+      "iterations otherwise), forward order, so each equation\n"
+      "already sees the new X[0..i-1].\n"
+      "The diagonally-implicit twin of Euler-Cromer: no Jacobian,\n"
+      "no Newton, and cross terms stay outside the solve." },
+    { "Implicit Euler",           1, &AppModel::scheme_ieuler,
+      "X_next = X + h*f(X_next), solved by Newton on a\n"
+      "symbolically differentiated Jacobian.\n"
+      "Order 1, L-stable: unlike the explicit schemes it stays\n"
+      "bounded on stiff systems at steps where RK4 diverges.\n"
+      "Needs a differentiable RHS (no floor/ceil/fmod)." },
+    { "Explicit Midpoint",        2, &AppModel::scheme_midpoint, nullptr },
+    { "Implicit Midpoint",        2, &AppModel::scheme_imidpoint,
+      "Solved for the stage Y = (X + X_next)/2:\n"
+      "Y = X + (h/2)*f(Y), then X_next = 2*Y - X.\n"
+      "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
+      "and symplectic. Same Newton solver as Implicit Euler." },
+    { "CD",                       2, &AppModel::scheme_cd, nullptr },
+    { "Complex CD",               2, &AppModel::scheme_ccd,
+      "CD with complex half-steps:\n"
+      "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
+      "s = a[0] is the same symmetry coefficient as in CD.\n"
+      "The step is evaluated in complex arithmetic; only Re is kept.\n"
+      "At s = 0.5 (default) the half-steps are conjugate and order is 2." },
+    { "Complex Implicit Euler",   2, &AppModel::scheme_cieuler,
+      "Composition of TWO implicit Euler steps with conjugate\n"
+      "complex steps: tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2),\n"
+      "s = a[0], the same symmetry slot as CD. Each half-step is a\n"
+      "full Newton solve on the symbolic Jacobian, in complex\n"
+      "arithmetic; Re is taken once at the end.\n"
+      "The coefficients are forced, not tuned: composing a first-\n"
+      "order method to second order needs tau1 + tau2 = h AND\n"
+      "tau1^2 + tau2^2 = 0, whose only solution is (1 +- i)/2.\n"
+      "Order 2 at s = 0.5 only; elsewhere the h^2 term keeps a real\n"
+      "part that Re does not remove and the order drops to 1." },
+    { "SEMP",                     2, &AppModel::scheme_semp,
+      "Semi-explicit midpoint. Stage: X~[i] = X[i] + h1*f_i(X),\n"
+      "component by component in forward order (each equation\n"
+      "already sees the new X[0..i-1]), h1 = s*h. Corrector:\n"
+      "X_next = X + h*f(X~). Two RHS passes, nothing to solve.\n"
+      "Order 2 at s = a[0] = 0.5 only: the expansion carries\n"
+      "s*h^2*F'F against h^2/2*F'F, so other s give order 1." },
+    { "SIMP",                     2, &AppModel::scheme_simp,
+      "Semi-implicit midpoint. Same corrector as SEMP, but the\n"
+      "stage is diagonally implicit: each equation is solved for\n"
+      "its own variable (analytically when linear in it, 4 fixed-\n"
+      "point iterations otherwise), exactly as Phi* does in CD.\n"
+      "No Jacobian, no Newton. Order 2 at s = a[0] = 0.5 only." },
+    { "RK4",                      4, &AppModel::scheme_rk4, nullptr },
+    { "Complex CD4",              4, &AppModel::scheme_ccd4,
+      "Composition of TWO symmetric CDs with complex steps:\n"
+      "pass 1 uses step gamma*h, pass 2 uses conj(gamma)*h,\n"
+      "gamma = 1/2 + i*sqrt(3)/6. Re is taken once at the end.\n"
+      "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
+      "Requires s = a[0] = 0.5: for other s the inner CD is\n"
+      "asymmetric and the order drops to first." },
+    { "DOPRI78",                  8, &AppModel::scheme_dopri78, nullptr },
+};
+static constexpr int kBuiltinSchemeCount =
+    (int)(sizeof(kBuiltinSchemes) / sizeof(kBuiltinSchemes[0]));
+
+
+// Верхний ряд переключателей режимов. Один список на файл: по нему рисуется
+// сам ряд и чекбоксы видимости в Settings.
+// id — стабильный ключ для AppConfig::hidden_tabs: подпись менять можно, id
+// нет, иначе у всех разъедется сохранённая маска.
+// always = вкладку скрыть нельзя. Таких две: из Library выбирается система (без
+// неё остальные вкладки пусты), а Settings — единственное место, где скрытое
+// возвращается обратно.
+struct ModeTab {
+    const char*       id;
+    const char*       label;
+    AppModel::AppMode mode;
+    bool              always;
+};
+static const ModeTab kModeTabs[] = {
+    { "Library",    "Library",        AppModel::AppMode::Library,    true  },
+    { "Analysis",   "Phase analysis", AppModel::AppMode::Analysis,   false },
+    { "Parametric", "Parametric",     AppModel::AppMode::Parametric, false },
+    { "Dft1D",      "1D DFT",         AppModel::AppMode::Dft1D,      false },
+    { "Basins",     "Basins",         AppModel::AppMode::Basins,     false },
+    { "FastSync",   "Fast Synchro",   AppModel::AppMode::FastSync,   false },
+    { "Custom",     "Custom",         AppModel::AppMode::Custom,     false },
+    { "Order",      "Order",          AppModel::AppMode::Order,      false },
+    { "Settings",   "Settings",       AppModel::AppMode::Settings,   true  },
 };
 
 // Имена для ImGui::Combo, которому нужен массив const char*. Указатели живут,
@@ -430,10 +689,12 @@ static const BuiltinScheme kBuiltinSchemes[] = {
 // on_pick вызывается ПОСЛЕ записи имени в scheme — им пользуются Phase
 // (regenerate_krs) и Custom Shared config (проброс в phase_session).
 // Возвращает true, если пользователь выбрал схему в этом кадре.
+// bc — модель для ПКМ "Apply to all calculation tabs" (nullptr = не предлагать).
 static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::vector<CustomScheme>& custom_schemes,
                               const std::function<void(const std::string&)>& on_pick = {},
-                              const std::vector<std::string>* enabled_builtins = nullptr) {
+                              const std::vector<std::string>* enabled_builtins = nullptr,
+                              AppModel* bc = nullptr) {
     bool picked = false;
     auto choose = [&](const std::string& nm) {
         scheme = nm;
@@ -467,6 +728,9 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                 choose(cs.name);
         ImGui::EndCombo();
     }
+    // Меню вешаем ПОСЛЕ комбо: последним элементом остаётся оно само, и ПКМ
+    // попадает по нему, а не по строке раскрытого списка.
+    field_apply_all_menu(bc, BroadcastField::Scheme, {}, "scheme", scheme);
     return picked;
 }
 
@@ -498,7 +762,9 @@ static void draw_sweep_target_combo(const char* label,
                                     bool* other_over_h = nullptr,
                                     bool note_when_empty = false,
                                     float width = kComboW,
-                                    bool allow_s = false) {
+                                    bool allow_s = false,
+                                    AppModel* bc = nullptr,
+                                    BroadcastField which = BroadcastField::SweepTarget) {
     if (params.empty() && vars.empty() && note_when_empty) {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
         return;
@@ -517,8 +783,15 @@ static void draw_sweep_target_combo(const char* label,
         : (par_index < 0)             ? std::string("s (a[0])")
         : (!params.empty())           ? params[par_index]
                                       : std::string("?");
+    // Значение для ПКМ-рассылки: четыре поля цели одной строкой (см.
+    // encode_sweep_target). Меню вешается на комбо в ОБОИХ случаях — и когда
+    // список раскрыт, и когда нет: оно принадлежит комбо, а не его строкам.
+    auto apply_all_menu = [&]() {
+        field_apply_all_menu(bc, which, {}, label,
+            encode_sweep_target(par_index, over_var, var_index, over_h));
+    };
     ImGui::SetNextItemWidth(width);
-    if (!ImGui::BeginCombo(label, preview.c_str())) return;
+    if (!ImGui::BeginCombo(label, preview.c_str())) { apply_all_menu(); return; }
 
     for (int i = 0; i < (int)params.size(); ++i) {
         const bool sel = !over_var && !over_h && par_index == i;
@@ -546,6 +819,7 @@ static void draw_sweep_target_combo(const char* label,
         if (other_over_h) *other_over_h = false;   // ровно одна ось = h
     }
     ImGui::EndCombo();
+    apply_all_menu();
 }
 
 // Поля секции "Integration". nullptr = поле у этого анализа отсутствует
@@ -560,33 +834,51 @@ struct IntegrationFields {
     std::string* max_value   = nullptr;
 };
 
+// bc — модель для пункта "Apply to all calculation tabs" в ПКМ по полю;
+// nullptr = меню не предлагать.
 static bool draw_integration_block(const char* header,
                                    const std::string& scheme,
                                    const std::vector<CustomScheme>& custom_schemes,
-                                   const IntegrationFields& f) {
+                                   const IntegrationFields& f,
+                                   AppModel* bc = nullptr) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return false;
     bool changed = false;
-    if (f.h) changed |= InputNumStr("h", *f.h, kFieldW);
+    auto menu = [&](BroadcastField kind, const char* label, const std::string& v) {
+        return [bc, kind, label, &v] { field_apply_all_menu(bc, kind, {}, label, v); };
+    };
+    if (f.h) changed |= InputNumStr("h", *f.h, kFieldW,
+                                    menu(BroadcastField::StepH, "h", *f.h));
     if (f.symmetry_s && scheme_uses_symmetry(scheme, custom_schemes))
-        changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW);
-    if (f.t_max)       changed |= InputNumStr("computing time", *f.t_max,       kFieldW);
-    if (f.transient)   changed |= InputNumStr("transient time", *f.transient,   kFieldW);
-    if (f.pre_scaller) changed |= InputNumStr("decimator",      *f.pre_scaller, kFieldW);
-    if (f.max_value)   changed |= InputNumStr("max value",      *f.max_value,   kFieldW);
+        changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW,
+                               menu(BroadcastField::SymmetryS, "symmetry s", *f.symmetry_s));
+    if (f.t_max)       changed |= InputNumStr("computing time", *f.t_max,       kFieldW,
+                               menu(BroadcastField::TMax, "computing time", *f.t_max));
+    if (f.transient)   changed |= InputNumStr("transient time", *f.transient,   kFieldW,
+                               menu(BroadcastField::Transient, "transient time", *f.transient));
+    if (f.pre_scaller) changed |= InputNumStr("decimator",      *f.pre_scaller, kFieldW,
+                               menu(BroadcastField::PreScaller, "decimator", *f.pre_scaller));
+    if (f.max_value)   changed |= InputNumStr("max value",      *f.max_value,   kFieldW,
+                               menu(BroadcastField::MaxValue, "max value", *f.max_value));
     return changed;
 }
 
 // Секции "Initial conditions" и "Parameters" — это один и тот же блок:
 // по числовому полю на каждое имя из списка. Раньше — около дюжины копий.
+// bc / field — см. draw_integration_block: ПКМ по полю предлагает разослать
+// значение по вкладкам. field говорит, чем этот блок является — параметрами
+// или начальными условиями; по заголовку это не определить (он ещё и с ##id).
 static void draw_named_num_fields(const char* header,
                                   const std::vector<std::string>& names,
                                   std::map<std::string, std::string>& values,
-                                  const char* note = nullptr) {
+                                  const char* note = nullptr,
+                                  AppModel* bc = nullptr,
+                                  BroadcastField field = BroadcastField::Param) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (note) ImGui::TextDisabled("%s", note);
     for (const auto& n : names) {
         ImGui::PushID(n.c_str());
-        InputNumStr(n.c_str(), values[n], kFieldW);
+        InputNumStr(n.c_str(), values[n], kFieldW,
+                    [&] { field_apply_all_menu(bc, field, n, n, values[n]); });
         ImGui::PopID();
     }
 }
@@ -621,6 +913,437 @@ static void draw_export_menu_item(bool busy, const GuiCallbacks& cb,
     if (!cb.pick_save_file_csv) return;
     const std::string path = cb.pick_save_file_csv();
     if (!path.empty() && write) write(path);
+}
+
+// ---------------------------------------------------------------------------
+// "Диапазон расчёта из вида" (Ctrl+T / Ctrl+Shift+T).
+//
+// После зума диаграмма показывает интересный кусок, а пересчитать ИМЕННО его
+// можно было только переписав границы свипа руками, считывая их с подписей
+// осей. Эти хелперы кладут видимый диапазон прямо в поля конфига: Ctrl+T — в
+// тот конфиг, по которому построен вид (первая цель), Ctrl+Shift+T — во все
+// конфиги, наложенные в этом окне в тех же осях.
+//
+// Ось, у которой нет входа в расчёте (значение переменной по Y у 1D-диаграммы),
+// описывается нулевыми указателями и просто не трогается.
+// Адреса полей одной цели. Отдельный тип, а не сам ViewRangeTarget, потому что
+// отмена переразрешает их заново (см. relocate ниже), а рекурсивный
+// std::function<ViewRangeTarget()> внутри ViewRangeTarget потребовал бы
+// неполный тип в возвращаемом значении.
+struct ViewRangeSlots {
+    std::string* x_lo = nullptr;
+    std::string* x_hi = nullptr;
+    std::string* y_lo = nullptr;
+    std::string* y_hi = nullptr;
+    bool*        y_manual = nullptr;
+};
+
+struct ViewRangeTarget {
+    std::string  name;                  // подпись в меню, когда целей несколько
+    std::string* x_lo = nullptr;
+    std::string* x_hi = nullptr;
+    std::string* y_lo = nullptr;
+    std::string* y_hi = nullptr;
+    // Необязательный флаг "Y задан вручную" (colored-1D у Bif): без него
+    // записанные ymin/ymax остались бы лежать мёртвым грузом при авто-Y.
+    bool*        y_manual = nullptr;
+    // Тип диаграммы — по нему работает Ctrl+Shift+T. "Parametric 2D" общий у
+    // Bif/LLE/LS: у них совпадает и смысл осей, и кодировка цели свипа, поэтому
+    // приблизив 2D-бифуркацию осмысленно подтянуть 2D LLE и 2D LS. У Basins и
+    // FastSync оси — сетка НУ, у DFT по Y частоты; они в свои типы и попадают.
+    // Пусто у целей, собранных на месте: тип заполняет только общий перечислитель.
+    std::string kind;
+    std::string group;   // подпись для списка галочек: "Bifurcation 2D", ...
+    // Как найти ЭТУ ЖЕ цель потом. Нужно отмене: между Ctrl+T и Ctrl+Z вкладку
+    // диаграммы могут закрыть, вектор конфигов переедет, и указатели выше
+    // повиснут. Лямбда ищет конфиг по индексу и сверяет label; если его больше
+    // нет или на его месте другой — возвращает нули, и откат этого поля просто
+    // не делается. Пусто = цель незаписываемая (см. view_range_bound).
+    std::function<ViewRangeSlots()> relocate;
+};
+
+// Цель Ctrl+T, живущая в векторе конфигов. Живые указатели и relocate строятся
+// из ОДНИХ И ТЕХ ЖЕ указателей на члены — иначе списки полей разошлись бы.
+template <class T>
+[[nodiscard]] static ViewRangeTarget vr_target(std::vector<T>& vec, int idx,
+        std::string T::*x_lo, std::string T::*x_hi,
+        std::string T::*y_lo = nullptr, std::string T::*y_hi = nullptr,
+        bool T::*y_manual = nullptr) {
+    ViewRangeTarget t;
+    if (idx < 0 || idx >= (int)vec.size()) return t;   // цели нет — пустая
+    t.relocate = [&vec, idx, label = vec[(size_t)idx].label,
+                  x_lo, x_hi, y_lo, y_hi, y_manual]() {
+        ViewRangeSlots s;
+        if (idx < 0 || idx >= (int)vec.size()) return s;
+        T& c = vec[(size_t)idx];
+        if (c.label != label) return s;   // на этом индексе уже другой конфиг
+        s.x_lo = &(c.*x_lo); s.x_hi = &(c.*x_hi);
+        if (y_lo)     s.y_lo = &(c.*y_lo);
+        if (y_hi)     s.y_hi = &(c.*y_hi);
+        if (y_manual) s.y_manual = &(c.*y_manual);
+        return s;
+    };
+    const ViewRangeSlots live = t.relocate();
+    t.name     = vec[(size_t)idx].label;
+    t.x_lo     = live.x_lo;
+    t.x_hi     = live.x_hi;
+    t.y_lo     = live.y_lo;
+    t.y_hi     = live.y_hi;
+    t.y_manual = live.y_manual;
+    return t;
+}
+
+// Цель, живущая в объекте с постоянным адресом (Shared config вкладки Custom —
+// член CustomSession, а тот член AppModel). Вектора нет, переезжать нечему,
+// поэтому relocate отдаёт те же указатели.
+[[nodiscard]] static ViewRangeTarget vr_target_fixed(std::string name,
+        std::string* x_lo, std::string* x_hi,
+        std::string* y_lo = nullptr, std::string* y_hi = nullptr) {
+    ViewRangeTarget t;
+    t.name = std::move(name);
+    t.x_lo = x_lo; t.x_hi = x_hi; t.y_lo = y_lo; t.y_hi = y_hi;
+    t.relocate = [x_lo, x_hi, y_lo, y_hi]() {
+        ViewRangeSlots s;
+        s.x_lo = x_lo; s.x_hi = x_hi; s.y_lo = y_lo; s.y_hi = y_hi;
+        return s;
+    };
+    return t;
+}
+
+// Границы вида — произвольные числа после зума. fmt_num_shortest насыпал бы в
+// поле семнадцать цифр, а фиксированный %.6g схлопнул бы узкое окно
+// (1.00000001 .. 1.00000002) в одно и то же число. Берём наименьшую точность,
+// при которой запись расходится со значением меньше чем на миллионную долю
+// ширины окна; при нулевой ширине (вырожденный вид) — round-trip как есть.
+[[nodiscard]] static std::string fmt_view_bound(double v, double span) {
+    const double tol = std::abs(span) * 1e-6;
+    if (tol > 0.0) {
+        char buf[64];
+        for (int prec = 6; prec <= 17; ++prec) {
+            std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
+            if (std::abs(parse_ratio_or(buf, v) - v) <= tol) return std::string(buf);
+        }
+    }
+    return fmt_num_shortest(v);
+}
+
+// swapped — включённый HeatmapView::swap_axes. Вью после свапа живёт в
+// ВИЗУАЛЬНЫХ координатах: x_axis.view_min/max тогда описывают ось ДАННЫХ Y и
+// наоборот (имена осей при этом не свапаются — см. heatmap_view.cpp, шаг 0).
+// Без этой перестановки Ctrl+T на свапнутой карте писал бы диапазоны крест-накрест.
+static void apply_view_range(const ViewRangeTarget& t, const AxisInfo& x, const AxisInfo& y,
+                             bool swapped) {
+    const AxisInfo& ax = swapped ? y : x;   // ось ДАННЫХ X
+    const AxisInfo& ay = swapped ? x : y;   // ось ДАННЫХ Y
+    // invert — только про отрисовку, view_min/view_max остаются упорядоченными;
+    // min/max здесь страховка от конфига, пришедшего из чужой руки.
+    if (t.x_lo && t.x_hi) {
+        const double span = ax.view_max - ax.view_min;
+        const double lo = (std::min)(ax.view_min, ax.view_max);
+        const double hi = (std::max)(ax.view_min, ax.view_max);
+        *t.x_lo = fmt_view_bound(lo, span);
+        *t.x_hi = fmt_view_bound(hi, span);
+    }
+    if (t.y_lo && t.y_hi) {
+        const double span = ay.view_max - ay.view_min;
+        const double lo = (std::min)(ay.view_min, ay.view_max);
+        const double hi = (std::max)(ay.view_min, ay.view_max);
+        *t.y_lo = fmt_view_bound(lo, span);
+        *t.y_hi = fmt_view_bound(hi, span);
+        if (t.y_manual) *t.y_manual = true;
+    }
+}
+
+// Все диаграммы приложения, у которых есть диапазоны свипа. Нужен Ctrl+Shift+T
+// (взять все цели того же типа) и списку галочек в меню диаграммы.
+// Порядок — как во вкладках; на нём же строится маска выбора.
+[[nodiscard]] static std::vector<ViewRangeTarget> all_view_range_targets(AppModel& model) {
+    std::vector<ViewRangeTarget> out;
+    auto add = [&out](ViewRangeTarget t, const char* kind, const std::string& group) {
+        if (!t.relocate || (!t.x_lo && !t.y_lo)) return;   // цель без полей не нужна
+        t.kind  = kind;
+        t.group = group;
+        out.push_back(std::move(t));
+    };
+
+    using B = BifurcationDiagramConfig;
+    auto& bd = model.bifurcation_session.diagrams;
+    for (int i = 0; i < (int)bd.size(); ++i) {
+        if (bd[(size_t)i].mode_2d)
+            add(vr_target(bd, i, &B::param_lo_text, &B::param_hi_text,
+                          &B::param_lo_2_text, &B::param_hi_2_text),
+                "Parametric 2D", "Bifurcation 2D");
+        else if (bd[(size_t)i].colored_1d)
+            // Colored 1D: по Y окно гистограммы, и запись туда включает
+            // ручной режим — ровно как на самой диаграмме.
+            add(vr_target(bd, i, &B::param_lo_text, &B::param_hi_text,
+                          &B::colored_1d_ymin_text, &B::colored_1d_ymax_text,
+                          &B::colored_1d_custom_y),
+                "Parametric 1D", "Bifurcation colored 1D");
+        else
+            add(vr_target(bd, i, &B::param_lo_text, &B::param_hi_text),
+                "Parametric 1D", "Bifurcation 1D");
+    }
+
+    using L = LLECurveConfig;
+    auto& lle = model.lle_session.curves;
+    for (int i = 0; i < (int)lle.size(); ++i) {
+        if (lle[(size_t)i].mode_2d)
+            add(vr_target(lle, i, &L::param_lo_text, &L::param_hi_text,
+                          &L::param_lo_2_text, &L::param_hi_2_text),
+                "Parametric 2D", "LLE 2D");
+        else
+            add(vr_target(lle, i, &L::param_lo_text, &L::param_hi_text),
+                "Parametric 1D", "LLE 1D");
+    }
+
+    using S = LSCurveConfig;
+    auto& ls = model.ls_session.curves;
+    for (int i = 0; i < (int)ls.size(); ++i) {
+        if (ls[(size_t)i].mode_2d)
+            add(vr_target(ls, i, &S::param_lo_text, &S::param_hi_text,
+                          &S::param_lo_2_text, &S::param_hi_2_text),
+                "Parametric 2D", "LS 2D");
+        else
+            add(vr_target(ls, i, &S::param_lo_text, &S::param_hi_text),
+                "Parametric 1D", "LS 1D");
+    }
+
+    // DFT — свой тип: по X свип параметра, а по Y частоты, и подставлять туда
+    // диапазон параметра со второй оси 2D-карты нельзя.
+    using D = Dft1DConfig;
+    auto& dft = model.dft1d_session.configs;
+    for (int i = 0; i < (int)dft.size(); ++i)
+        add(vr_target(dft, i, &D::param_lo_text, &D::param_hi_text,
+                      &D::freq_lo_text, &D::freq_hi_text),
+            "1D DFT", "1D DFT");
+
+    // Basins и FastSync — сетка начальных условий, а не параметрический свип.
+    using BA = BasinsConfig;
+    auto& bas = model.basins_session.configs;
+    for (int i = 0; i < (int)bas.size(); ++i)
+        add(vr_target(bas, i, &BA::axis_x_lo_text, &BA::axis_x_hi_text,
+                      &BA::axis_y_lo_text, &BA::axis_y_hi_text),
+            "IC grid", "Basins");
+
+    using F = FastSyncConfig;
+    auto& fs = model.fastsync_session.configs;
+    for (int i = 0; i < (int)fs.size(); ++i)
+        add(vr_target(fs, i, &F::axis_x_lo_text, &F::axis_x_hi_text,
+                      &F::axis_y_lo_text, &F::axis_y_hi_text),
+            "IC grid", "Fast Synchro");
+
+    using O = OrderConfig;
+    auto& ord = model.order_session.configs;
+    for (int i = 0; i < (int)ord.size(); ++i) {
+        if (ord[(size_t)i].two_d)
+            add(vr_target(ord, i, &O::axis_x_lo_text, &O::axis_x_hi_text,
+                          &O::axis_y_lo_text, &O::axis_y_hi_text),
+                "Order 2D", "Order 2D");
+        else
+            add(vr_target(ord, i, &O::axis_x_lo_text, &O::axis_x_hi_text),
+                "Order 1D", "Order 1D");
+    }
+
+    add(vr_target_fixed("Shared config",
+                        &model.custom_session.shared.axis_x_lo_text,
+                        &model.custom_session.shared.axis_x_hi_text,
+                        &model.custom_session.shared.axis_y_lo_text,
+                        &model.custom_session.shared.axis_y_hi_text),
+        "Custom", "Custom");
+    return out;
+}
+
+// Цели того же типа, что и source. Источник опознаём по АДРЕСУ поля: цель,
+// собранная на месте отрисовки, и цель из общего перечисления указывают на
+// один и тот же конфиг, а сравнивать больше не по чему.
+// Источник в списке идёт первым — Ctrl+T и Ctrl+Shift+T тогда пишут в него одно
+// и то же, а не в разном порядке.
+[[nodiscard]] static std::vector<ViewRangeTarget>
+view_range_same_kind(AppModel& model, const ViewRangeTarget& source) {
+    std::vector<ViewRangeTarget> all = all_view_range_targets(model);
+    std::string kind;
+    for (const auto& t : all)
+        if (t.x_lo && t.x_lo == source.x_lo) { kind = t.kind; break; }
+    std::vector<ViewRangeTarget> out;
+    if (kind.empty()) return out;
+    for (auto& t : all)
+        if (t.kind == kind) {
+            if (t.x_lo == source.x_lo) out.insert(out.begin(), std::move(t));
+            else                       out.push_back(std::move(t));
+        }
+    return out;
+}
+
+// Применяет диапазон к первым count целям ОДНОЙ командой: в стек отмены уходит
+// одна запись на нажатие, а не по одной на каждую диаграмму окна.
+static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size_t count,
+                               const AxisInfo& x, const AxisInfo& y, bool swapped,
+                               AppModel* model) {
+    if (targets.empty()) return;
+    count = (std::min)(count, targets.size());
+
+    // Снимок полей цели. Держим не адреса, а способ найти их заново.
+    struct Snap {
+        std::function<ViewRangeSlots()> relocate;
+        bool has_x = false, has_y = false, has_flag = false;
+        std::string x_lo, x_hi, y_lo, y_hi;
+        bool flag = false;
+    };
+    auto capture = [](const ViewRangeTarget& t) {
+        Snap p;
+        p.relocate = t.relocate;
+        if (t.x_lo && t.x_hi) { p.has_x = true; p.x_lo = *t.x_lo; p.x_hi = *t.x_hi; }
+        if (t.y_lo && t.y_hi) { p.has_y = true; p.y_lo = *t.y_lo; p.y_hi = *t.y_hi; }
+        if (t.y_manual)       { p.has_flag = true; p.flag = *t.y_manual; }
+        return p;
+    };
+    // Отмена и повтор — одна процедура, отличаются только снимком.
+    auto writer = [](std::vector<Snap> snaps) {
+        return [snaps = std::move(snaps)]() {
+            for (const auto& p : snaps) {
+                const ViewRangeSlots s = p.relocate();
+                if (p.has_x && s.x_lo && s.x_hi) { *s.x_lo = p.x_lo; *s.x_hi = p.x_hi; }
+                if (p.has_y && s.y_lo && s.y_hi) { *s.y_lo = p.y_lo; *s.y_hi = p.y_hi; }
+                if (p.has_flag && s.y_manual)    *s.y_manual = p.flag;
+            }
+        };
+    };
+
+    std::vector<Snap> before, after;
+    for (size_t i = 0; i < count; ++i) {
+        const ViewRangeTarget& t = targets[i];
+        Snap p = capture(t);
+        if (p.relocate && (p.has_x || p.has_y)) before.push_back(std::move(p));
+        apply_view_range(t, x, y, swapped);
+    }
+    if (!model || before.empty()) return;
+    // "После" снимаем по тем же целям и уже после записи — так повтор кладёт
+    // ровно то, что команда посчитала, без второго прохода по осям.
+    for (size_t i = 0; i < count; ++i) {
+        Snap p = capture(targets[i]);
+        if (p.relocate && (p.has_x || p.has_y)) after.push_back(std::move(p));
+    }
+
+    std::string what = "calculation range from view";
+    if (count > 1)                     what += " (" + std::to_string((int)count) + " diagrams)";
+    else if (!targets[0].name.empty()) what += " (" + targets[0].name + ")";
+    model->push_undo(std::move(what), writer(std::move(before)), writer(std::move(after)));
+}
+
+[[nodiscard]] static bool view_range_bound(const std::vector<ViewRangeTarget>& targets) {
+    return !targets.empty() && (targets[0].x_lo != nullptr || targets[0].y_lo != nullptr);
+}
+
+// Пункты правого клика. Зовётся из popup_extras, т.е. уже внутри BeginPopup.
+static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
+                                 const AxisInfo& x, const AxisInfo& y,
+                                 bool swapped = false, AppModel* model = nullptr) {
+    if (!view_range_bound(targets)) { draw_undo_menu_item(model); return; }
+    ImGui::Separator();
+    std::string one = "Calculation range from view";
+    if (targets.size() > 1) one += " (" + targets[0].name + ")";
+    if (ImGui::MenuItem(one.c_str(), "Ctrl+T"))
+        run_view_range_cmd(targets, 1, x, y, swapped, model);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Writes the visible axis range into this diagram's sweep\n"
+                          "range fields. Press Run to recompute the zoomed region\n"
+                          "at full resolution.");
+    // Ctrl+Shift+T — все диаграммы ТОГО ЖЕ типа, а не только наложенные в этом
+    // окне: приблизив 2D-бифуркацию, обычно хотят увидеть тот же участок и на
+    // 2D LLE с 2D LS. Набор считается по общему перечислению (см.
+    // view_range_same_kind), поэтому в него попадают и другие окна.
+    if (model) {
+        std::vector<ViewRangeTarget> kin = view_range_same_kind(*model, targets[0]);
+        if (kin.size() > 1) {
+            char lbl[128];
+            std::snprintf(lbl, sizeof(lbl), "Calculation range from view - all %s (%d)",
+                          kin[0].kind.c_str(), (int)kin.size());
+            if (ImGui::MenuItem(lbl, "Ctrl+Shift+T"))
+                run_view_range_cmd(kin, kin.size(), x, y, swapped, model);
+        }
+
+        // Точный выбор галочками — для случаев, когда "тот же тип" не тот набор:
+        // например, подтянуть к 2D-карте ещё и Basins, у которых оси другого
+        // смысла и в автоматический набор они не входят.
+        std::vector<ViewRangeTarget> all = all_view_range_targets(*model);
+        if (!all.empty() && ImGui::BeginMenu("Calculation range to...")) {
+            std::string sig;
+            for (const auto& t : all) { sig += '\x1f'; sig += t.group; sig += t.name; }
+            if (model->vr_pick_sig != sig || model->vr_pick.size() != all.size()) {
+                model->vr_pick.assign(all.size(), '0');
+                model->vr_pick_sig = sig;
+                // По умолчанию отмечаем свой тип: это и подсказка, что здесь
+                // выбирают, и самый частый набор.
+                for (size_t i = 0; i < all.size(); ++i)
+                    for (const auto& k : kin)
+                        if (all[i].x_lo && all[i].x_lo == k.x_lo) model->vr_pick[i] = '1';
+            }
+            if (ImGui::SmallButton("All"))  model->vr_pick.assign(all.size(), '1');
+            ImGui::SameLine();
+            if (ImGui::SmallButton("None")) model->vr_pick.assign(all.size(), '0');
+
+            std::vector<ViewRangeTarget> sel;
+            for (size_t i = 0; i < all.size(); ++i)
+                if (model->vr_pick[i] == '1') sel.push_back(all[i]);
+
+            char btn[96];
+            std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
+            if (sel.empty()) ImGui::BeginDisabled();
+            if (ImGui::Button(btn)) {
+                run_view_range_cmd(sel, sel.size(), x, y, swapped, model);
+                ImGui::CloseCurrentPopup();
+            }
+            if (sel.empty()) ImGui::EndDisabled();
+            ImGui::Separator();
+
+            std::string shown_group;
+            for (size_t i = 0; i < all.size(); ++i) {
+                if (all[i].group != shown_group) {
+                    shown_group = all[i].group;
+                    ImGui::SeparatorText(shown_group.c_str());
+                }
+                ImGui::PushID((int)i);
+                bool on = (model->vr_pick[i] == '1');
+                if (ImGui::Checkbox(all[i].name.c_str(), &on))
+                    model->vr_pick[i] = on ? '1' : '0';
+                ImGui::PopID();
+            }
+            ImGui::EndMenu();
+        }
+    }
+    draw_undo_menu_item(model);
+}
+
+// Горячие клавиши того же действия. active — окно диаграммы под курсором:
+// плотов на экране бывает несколько, и глобальный хоткей (как Ctrl+R у Run)
+// здесь означал бы "перепиши диапазон неизвестно чему".
+static void handle_view_range_keys(const std::vector<ViewRangeTarget>& targets,
+                                   const AxisInfo& x, const AxisInfo& y, bool active,
+                                   bool swapped = false, AppModel* model = nullptr) {
+    if (!active || !view_range_bound(targets)) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    // С Alt не реагируем вовсе: Ctrl+Alt+T — не наше сочетание, и тихо
+    // трактовать его как Ctrl+T значит переписать диапазон по случайному нажатию.
+    if (!io.KeyCtrl || io.KeyAlt || io.WantTextInput) return;
+    if (!ImGui::IsKeyPressed(ImGuiKey_T, false)) return;
+    if (io.KeyShift && model) {
+        // Ctrl+Shift+T — весь тип целиком (см. draw_view_range_menu). Если
+        // источник в общем перечислении не нашёлся, падаем на прежнее
+        // поведение — наложенные в этом окне диаграммы.
+        std::vector<ViewRangeTarget> kin = view_range_same_kind(*model, targets[0]);
+        if (!kin.empty()) { run_view_range_cmd(kin, kin.size(), x, y, swapped, model); return; }
+        run_view_range_cmd(targets, targets.size(), x, y, swapped, model);
+        return;
+    }
+    run_view_range_cmd(targets, io.KeyShift ? targets.size() : 1, x, y, swapped, model);
+}
+
+// Окно диаграммы под курсором — общее условие хоткея выше. Берём именно
+// hover, а не focus: фокус остаётся на панели настроек, откуда зумили колесом.
+[[nodiscard]] static bool plot_window_active() {
+    return ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                  ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 }
 
 // Inline-переименование активной вкладки. Раньше — два ручных char buf[128],
@@ -1499,99 +2222,53 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // методы
     ImGui::Text("Schemes to generate:");
-    // scheme_ccd4 used to be missing from both buttons, so Complex CD4 was neither
-    // selected nor cleared by them.
-    if (ImGui::Button("Select all")) model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = model.scheme_semp = model.scheme_simp = model.scheme_dmethod = true;
+    // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
+    // скрытые в Settings: скрытая схема не должна ни показываться, ни
+    // включаться скопом.
+    auto scheme_shown = [&](const BuiltinScheme& b) { return !model.scheme_hidden(b.name); };
+    if (ImGui::Button("Select all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = true;
     ImGui::SameLine();
-    if (ImGui::Button("Clear all"))  model.scheme_euler = model.scheme_cromer = model.scheme_midpoint = model.scheme_rk4 = model.scheme_dopri78 = model.scheme_cd = model.scheme_ccd = model.scheme_ccd4 = model.scheme_ieuler = model.scheme_imidpoint = model.scheme_semp = model.scheme_simp = model.scheme_dmethod = false;
+    if (ImGui::Button("Clear all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = false;
 
     // Схемы сгруппированы по порядку точности — тот же порядок, что в комбо
-    // выбора схемы (kBuiltinSchemes) и в списке генерации (AppModel::generate).
+    // выбора схемы и в списке генерации (AppModel::generate). Таблица
+    // отсортирована по order, поэтому шапка печатается на его смене, и группа
+    // целиком скрытых схем не оставляет пустого заголовка.
     // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
     // s = a[0] = 0.5; при других s все четыре падают до первого.
-    ImGui::SeparatorText("Order 1");
-    ImGui::Checkbox("Euler", &model.scheme_euler); ImGui::SameLine();
-    ImGui::Checkbox("Euler-Cromer", &model.scheme_cromer); ImGui::SameLine();
-    ImGui::Checkbox("D", &model.scheme_dmethod);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Diagonally-implicit first-order method: the stage of SIMP\n"
-                          "(and the Phi* half-step of CD) taken as a step of its own,\n"
-                          "on the full h. X[i] = X + h*f_i(X) is solved for its own\n"
-                          "variable (analytically when linear in it, 4 fixed-point\n"
-                          "iterations otherwise), forward order, so each equation\n"
-                          "already sees the new X[0..i-1].\n"
-                          "The diagonally-implicit twin of Euler-Cromer: no Jacobian,\n"
-                          "no Newton, and cross terms stay outside the solve.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Implicit Euler", &model.scheme_ieuler);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("X_next = X + h*f(X_next), solved by Newton on a\n"
-                          "symbolically differentiated Jacobian.\n"
-                          "Order 1, L-stable: unlike the explicit schemes it stays\n"
-                          "bounded on stiff systems at steps where RK4 diverges.\n"
-                          "Needs a differentiable RHS (no floor/ceil/fmod).");
+    {
+        int  shown_order   = 0;
+        bool first_in_line = true;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!scheme_shown(b)) continue;
+            if (b.order != shown_order) {
+                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                shown_order   = b.order;
+                first_in_line = true;
+            }
+            if (!first_in_line) ImGui::SameLine();
+            first_in_line = false;
+            ImGui::Checkbox(b.name, &(model.*b.flag));
+            if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+        }
+    }
 
-    ImGui::SeparatorText("Order 2");
-    ImGui::Checkbox("Explicit Midpoint", &model.scheme_midpoint); ImGui::SameLine();
-    ImGui::Checkbox("Implicit Midpoint", &model.scheme_imidpoint);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Solved for the stage Y = (X + X_next)/2:\n"
-                          "Y = X + (h/2)*f(Y), then X_next = 2*Y - X.\n"
-                          "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
-                          "and symplectic. Same Newton solver as Implicit Euler.");
-    ImGui::SameLine();
-    ImGui::Checkbox("CD", &model.scheme_cd); ImGui::SameLine();
-    ImGui::Checkbox("Complex CD", &model.scheme_ccd);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("CD with complex half-steps:\n"
-                          "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
-                          "s = a[0] is the same symmetry coefficient as in CD.\n"
-                          "The step is evaluated in complex arithmetic; only Re is kept.\n"
-                          "At s = 0.5 (default) the half-steps are conjugate and order is 2.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Complex Implicit Euler", &model.scheme_cieuler);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Composition of TWO implicit Euler steps with conjugate\n"
-                          "complex steps: tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2),\n"
-                          "s = a[0], the same symmetry slot as CD. Each half-step is a\n"
-                          "full Newton solve on the symbolic Jacobian, in complex\n"
-                          "arithmetic; Re is taken once at the end.\n"
-                          "The coefficients are forced, not tuned: composing a first-\n"
-                          "order method to second order needs tau1 + tau2 = h AND\n"
-                          "tau1^2 + tau2^2 = 0, whose only solution is (1 +- i)/2.\n"
-                          "Order 2 at s = 0.5 only; elsewhere the h^2 term keeps a real\n"
-                          "part that Re does not remove and the order drops to 1.");
-    ImGui::SameLine();
-    ImGui::Checkbox("SEMP", &model.scheme_semp);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Semi-explicit midpoint. Stage: X~[i] = X[i] + h1*f_i(X),\n"
-                          "component by component in forward order (each equation\n"
-                          "already sees the new X[0..i-1]), h1 = s*h. Corrector:\n"
-                          "X_next = X + h*f(X~). Two RHS passes, nothing to solve.\n"
-                          "Order 2 at s = a[0] = 0.5 only: the expansion carries\n"
-                          "s*h^2*F'F against h^2/2*F'F, so other s give order 1.");
-    ImGui::SameLine();
-    ImGui::Checkbox("SIMP", &model.scheme_simp);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Semi-implicit midpoint. Same corrector as SEMP, but the\n"
-                          "stage is diagonally implicit: each equation is solved for\n"
-                          "its own variable (analytically when linear in it, 4 fixed-\n"
-                          "point iterations otherwise), exactly as Phi* does in CD.\n"
-                          "No Jacobian, no Newton. Order 2 at s = a[0] = 0.5 only.");
-
-    ImGui::SeparatorText("Order 4");
-    ImGui::Checkbox("RK4", &model.scheme_rk4); ImGui::SameLine();
-    ImGui::Checkbox("Complex CD4", &model.scheme_ccd4);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Composition of TWO symmetric CDs with complex steps:\n"
-                          "pass 1 uses step gamma*h, pass 2 uses conj(gamma)*h,\n"
-                          "gamma = 1/2 + i*sqrt(3)/6. Re is taken once at the end.\n"
-                          "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
-                          "Requires s = a[0] = 0.5: for other s the inner CD is\n"
-                          "asymmetric and the order drops to first.");
-
-    ImGui::SeparatorText("Order 8");
-    ImGui::Checkbox("DOPRI78", &model.scheme_dopri78);
+    // Маска из Settings — фильтр интерфейса, флаги системы она не трогает.
+    // Поэтому скрытая схема может остаться включённой у системы, и Generate
+    // её выпустит, хотя чекбокса рядом уже нет — об этом надо сказать прямо.
+    {
+        std::string hidden_on;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!model.scheme_hidden(b.name) || !(model.*b.flag)) continue;
+            if (!hidden_on.empty()) hidden_on += ", ";
+            hidden_on += b.name;
+        }
+        if (!hidden_on.empty())
+            ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s",
+                                hidden_on.c_str());
+    }
 
     // Настройки Ньютона — общие для обеих неявных схем, поэтому живут здесь,
     // на уровне системы, а не в конфиге каждого анализа.
@@ -2064,6 +2741,9 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 
     ImGui::Separator();
 
+    // Редактор рисует System tab по буферу-черновику, а маска схем глобальная
+    // и живёт в основной модели — иначе в редакторе показались бы скрытые схемы.
+    buf.hidden_schemes = model.hidden_schemes;
     if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
             draw_system_tab(buf, cb);
@@ -2097,7 +2777,15 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 // Analysis-tab передаёт model.from_record + start_phase_analysis, Custom-tab nullptr
 // (там перезагружаются из System tab или Run pipeline).
 static void draw_phase_controls(PhaseAnalysisSession& s,
-                                std::function<void()> on_reset_defaults) {
+                                std::function<void()> on_reset_defaults,
+                                AppModel* bc = nullptr) {
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    // В Custom эту же панель рисует уровень 3, и источником там остаётся
+    // Custom: его Shared config и есть то, что уйдёт в расчёт.
+    if (bc && on_reset_defaults) {
+        bc->broadcast_source_tab = BroadcastTab::Phase;
+        bc->broadcast_source_idx = 0;
+    }
     bool changed = false;
 
     ImGui::Text("Phase portrait analysis");
@@ -2112,7 +2800,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
                                  [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes);
+                                 &s.enabled_builtin_schemes, bc);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
@@ -3517,8 +4205,11 @@ static void draw_writable_var_combo(const std::vector<std::string>& vars,
 // Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
 // Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
 // нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
-static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
+static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int idx) {
     BifurcationDiagramConfig& bd = s.diagrams[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Bifurcation;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", bd.label))
@@ -3526,7 +4217,8 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -3540,9 +4232,14 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                             bd.sweep_over_h,
                             bd.mode_2d ? &bd.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(bd.scheme, s.custom_schemes));
-    InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW);
-    InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(bd.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget);
+    InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text); });
+    InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text); });
     ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
     if (bd.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
@@ -3566,9 +4263,14 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                                     bd.param_index_2, bd.sweep_over_var_2, bd.var_sweep_index_2,
                                     bd.sweep_over_h_2, &bd.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
-                                    scheme_uses_symmetry(bd.scheme, s.custom_schemes));
-        InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW);
-        InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, kFieldW);
+                                    scheme_uses_symmetry(bd.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2);
+        InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text); });
+        InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text); });
         ImGui::Checkbox("Log scale##bd_log2", &bd.log_scale_2);
         if (bd.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         InputNumStr("DBSCAN eps", bd.eps_dbscan_text, kFieldW);
@@ -3586,7 +4288,9 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
 
     // Variable + resolution + inter-peaks
     draw_writable_var_combo(s.vars, bd.writable_var, "Writable var##bd_wv");
-    InputNumStr("Resolution", bd.n_pts_text, kFieldW);
+    InputNumStr("Resolution", bd.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", bd.n_pts_text); });
     if (!bd.mode_2d)
         if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
             bd.fit_request = true;
@@ -3619,11 +4323,13 @@ static void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
         f.max_value   = &bd.max_value_text;
-        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f, &model);
     }
 
-    draw_named_num_fields("Initial conditions##bd_ic", s.vars,   bd.initial_conditions);
-    draw_named_num_fields("Parameters##bd_par",        s.params, bd.param_values);
+    draw_named_num_fields("Initial conditions##bd_ic", s.vars,   bd.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##bd_par",        s.params, bd.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##bd_csv", "Save to file", bd.csv_save_enabled,
                           "##csv_path", bd.csv_output_path,
                           "Path is kept even when save is off. Also writes <path>_config.csv.");
@@ -3674,7 +4380,7 @@ static void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
         "##bd_tabs", "bd_tab_", (int)s.diagrams.size(),
         s.in_flight, s.running_diagram_index,
         [&s](int i) { return s.diagrams[i].label; },
-        [&s](int i) { draw_diagram_controls(s, i); },
+        [&model, &s](int i) { draw_diagram_controls(model, s, i); },
         [&s]() { s.add_diagram(); },
         s.request_select_diagram);
     s.request_select_diagram = -1;   // запрос потреблён этим кадром
@@ -3821,10 +4527,15 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             if (fit) bdact.fit_request_2d = false;
 
             const bool bd_busy = s.in_flight && s.is_2d_run && idx == s.running_diagram_index;
-            hb.popup_extras = [&bdact, &cb, bd_busy]() {
+            // Ctrl+T: обе оси карты — это и есть диапазоны свипа.
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text,   &BifurcationDiagramConfig::param_hi_text,
+                &BifurcationDiagramConfig::param_lo_2_text, &BifurcationDiagramConfig::param_hi_2_text) };
+            hb.popup_extras = [&bdact, &cb, bd_busy, &vrt, &model, &hb]() {
                 draw_export_menu_item(bd_busy, cb, [&bdact](const std::string& p) {
                     data_export::export_bif2d(bdact.result_2d, p);
                 });
+                draw_view_range_menu(vrt, hb.x_axis, hb.y_axis, hb.swap_axes, &model);
             };
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -3837,6 +4548,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                       bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
                       bdact.result_2d.min_val, bdact.result_2d.max_val,
                       fit);
+            handle_view_range_keys(vrt, hb.x_axis, hb.y_axis, plot_window_active(),
+                               hb.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -3972,10 +4685,18 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             if (fit) bdact.fit_request = false;
 
             const bool c1d_busy = s.in_flight && !s.is_2d_run && idx == s.running_diagram_index;
-            hc.popup_extras = [&bdact, &cb, c1d_busy]() {
+            // Ctrl+T: X — диапазон свипа, Y — окно гистограммы плотности.
+            // Запись в ymin/ymax сама включает custom_y (см. ViewRangeTarget),
+            // иначе значения легли бы мимо: при авто-Y их никто не читает.
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text,        &BifurcationDiagramConfig::param_hi_text,
+                &BifurcationDiagramConfig::colored_1d_ymin_text, &BifurcationDiagramConfig::colored_1d_ymax_text,
+                &BifurcationDiagramConfig::colored_1d_custom_y) };
+            hc.popup_extras = [&bdact, &cb, c1d_busy, &vrt, &model, &hc]() {
                 draw_export_menu_item(c1d_busy, cb, [&bdact](const std::string& p) {
                     data_export::export_bif1d(bdact.result, p);
                 });
+                draw_view_range_menu(vrt, hc.x_axis, hc.y_axis, hc.swap_axes, &model);
             };
 
             // Тот же lo/hi/reverse-разбор, что и у классического scatter'а
@@ -3998,6 +4719,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                       ylo, yhi,
                       bdact.colored_1d_cache_vmin, bdact.colored_1d_cache_vmax,
                       fit);
+            handle_view_range_keys(vrt, hc.x_axis, hc.y_axis, plot_window_active(),
+                               hc.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -4116,13 +4839,24 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     // Right-click "Export data..." for the bifurcation 1D line plot. The
     // submenu lists every diagram in the session that has a finished run
     // (not just this window's members — export isn't scoped to a window).
-    view.popup_extras = [&s, &cb]() {
+    // Ctrl+T: по X идёт свип, по Y — значение переменной, входа в расчёте у
+    // него нет, поэтому Y-пара остаётся нулевой. Целей столько же, сколько
+    // диаграмм в окне; первая (она же фокусная — по ней берутся snap-сетка и
+    // стиль точек) достаётся Ctrl+T, все — Ctrl+Shift+T.
+    std::vector<ViewRangeTarget> vrt;
+    for (int idx : win.members)
+        if (idx >= 0 && idx < (int)s.diagrams.size())
+            vrt.push_back(vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text, &BifurcationDiagramConfig::param_hi_text));
+
+    view.popup_extras = [&s, &cb, &vrt, &model, &view]() {
         draw_export_submenu("bd", (int)s.diagrams.size(),
             [&s](int i) { return s.diagrams[i].label; },
             [&s](int i) { return s.diagrams[i].last_run_ok; },
             [&s](int i) { return s.in_flight && i == s.running_diagram_index; },
             [&s](int i, const std::string& p) { data_export::export_bif1d(s.diagrams[i].result, p); },
             cb);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
     };
 
     // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_first_member).
@@ -4141,21 +4875,26 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
 
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE0F1D, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
 }
 
 // LLE: контролы (per-curve в табе) + line-plot λ(param)
 
 // Контролы одной LLE-кривой. Возвращает true, если пользователь нажал Run
 // для этой кривой.
-static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
+static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
     LLECurveConfig& c = s.curves[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::LLE;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -4164,12 +4903,19 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                             c.sweep_over_h,
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
     ImGui::Checkbox("Log scale##lle_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-    InputNumStr("Resolution", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
 
     draw_continuation_device_block(c, "lle", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
@@ -4186,9 +4932,14 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                                     c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
-                                    scheme_uses_symmetry(c.scheme, s.custom_schemes));
-        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW);
-        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW);
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text); });
         ImGui::Checkbox("Log scale##lle_log2", &c.log_scale_2);
         if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
@@ -4205,7 +4956,7 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
-        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f, &model);
     }
 
     // LLE (Wolf/Benettin) (collapsible)
@@ -4216,8 +4967,10 @@ static void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                             "between renormalizations (in time units).");
     }
 
-    draw_named_num_fields("Initial conditions##lle_ic", s.vars,   c.initial_conditions);
-    draw_named_num_fields("Parameters##lle_par",        s.params, c.param_values);
+    draw_named_num_fields("Initial conditions##lle_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##lle_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##lle_csv", "Save to file", c.csv_save_enabled,
                           "##lle_csv_path", c.csv_output_path,
                           "Path is kept even when save is off. Also writes <path>_config.csv.");
@@ -4256,7 +5009,7 @@ static void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
         "##lle_tabs", "lle_tab_", (int)s.curves.size(),
         s.in_flight, s.running_curve_index,
         [&s](int i) { return s.curves[i].label; },
-        [&s](int i) { draw_lle_curve_controls(s, i); },
+        [&model, &s](int i) { draw_lle_curve_controls(model, s, i); },
         [&s]() { s.add_curve(); });
     if (tabs.active    >= 0) s.active_curve_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_lle_curve(tabs.to_remove);
@@ -4323,10 +5076,15 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             if (fit) cact.fit_request_2d = false;
 
             const bool busy = s.in_flight && s.is_2d_run && idx == s.running_curve_index;
-            heatmap.popup_extras = [&cact, &cb, busy]() {
+            // Ctrl+T: обе оси карты — диапазоны свипа (см. Bif 2D).
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.curves, idx,
+                &LLECurveConfig::param_lo_text,   &LLECurveConfig::param_hi_text,
+                &LLECurveConfig::param_lo_2_text, &LLECurveConfig::param_hi_2_text) };
+            heatmap.popup_extras = [&cact, &cb, busy, &vrt, &model, &heatmap]() {
                 draw_export_menu_item(busy, cb, [&cact](const std::string& p) {
                     data_export::export_lle2d(cact.result_2d, p);
                 });
+                draw_view_range_menu(vrt, heatmap.x_axis, heatmap.y_axis, heatmap.swap_axes, &model);
             };
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -4339,6 +5097,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
                            cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
                            cact.result_2d.min_val, cact.result_2d.max_val,
                            fit);
+            handle_view_range_keys(vrt, heatmap.x_axis, heatmap.y_axis, plot_window_active(),
+                               heatmap.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -4417,13 +5177,21 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
         if (c.fit_request) { any_fit = true; c.fit_request = false; }
     }
 
-    view.popup_extras = [&s, &cb]() {
+    // Ctrl+T: по Y идёт сам показатель, входа в расчёте у него нет (см. Bif 1D).
+    std::vector<ViewRangeTarget> vrt;
+    for (int idx : win.members)
+        if (idx >= 0 && idx < (int)s.curves.size())
+            vrt.push_back(vr_target(s.curves, idx,
+                &LLECurveConfig::param_lo_text, &LLECurveConfig::param_hi_text));
+
+    view.popup_extras = [&s, &cb, &vrt, &model, &view]() {
         draw_export_submenu("lle", (int)s.curves.size(),
             [&s](int i) { return s.curves[i].label; },
             [&s](int i) { return s.curves[i].last_run_ok; },
             [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
             [&s](int i, const std::string& p) { data_export::export_lle1d(s.curves[i].result, p); },
             cb);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
     };
 
     // Snap X к узлам первой кривой этого окна (см. apply_snap_x_from_first_member).
@@ -4433,20 +5201,25 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE11E5, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
 }
 
 // LS: контролы (per-curve в табе) + line-plot λ_k(param), N экспонент
 // на один спектр-«прогон». UX зеркало LLE.
 
-static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) {
+static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s, int idx) {
     LSCurveConfig& c = s.curves[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::LS;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -4455,12 +5228,19 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
                             c.sweep_over_h,
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
     ImGui::Checkbox("Log scale##ls_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-    InputNumStr("Resolution", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
 
     draw_continuation_device_block(c, "ls", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
@@ -4475,9 +5255,14 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
                                     c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
-                                    scheme_uses_symmetry(c.scheme, s.custom_schemes));
-        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW);
-        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW);
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text); });
         ImGui::Checkbox("Log scale##ls_log2", &c.log_scale_2);
         if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).\nAll N exponents computed; switch in plot window.");
@@ -4494,7 +5279,7 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
-        draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f, &model);
     }
 
     // LS (Wolf/Benettin + Gram-Schmidt) (collapsible)
@@ -4505,8 +5290,10 @@ static void draw_ls_curve_controls(LyapunovSpectrumAnalysisSession& s, int idx) 
                             "between renormalizations (in time units).");
     }
 
-    draw_named_num_fields("Initial conditions##ls_ic", s.vars,   c.initial_conditions);
-    draw_named_num_fields("Parameters##ls_par",        s.params, c.param_values);
+    draw_named_num_fields("Initial conditions##ls_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##ls_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##ls_csv", "Save to file", c.csv_save_enabled,
                           "##ls_csv_path", c.csv_output_path,
                           "Path is kept even when save is off. Also writes <path>_config.csv.");
@@ -4543,7 +5330,7 @@ static void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
         "##ls_tabs", "ls_tab_", (int)s.curves.size(),
         s.in_flight, s.running_curve_index,
         [&s](int i) { return s.curves[i].label; },
-        [&s](int i) { draw_ls_curve_controls(s, i); },
+        [&model, &s](int i) { draw_ls_curve_controls(model, s, i); },
         [&s]() { s.add_curve(); });
     if (tabs.active    >= 0) s.active_curve_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_ls_curve(tabs.to_remove);
@@ -4631,10 +5418,15 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                              plane_ptr, vmin, vmax, gen);
 
             const bool busy = s.in_flight && s.is_2d_run && idx == s.running_curve_index;
-            heatmap_ls.popup_extras = [&cact, &cb, busy]() {
+            // Ctrl+T: обе оси карты — диапазоны свипа (см. Bif 2D).
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.curves, idx,
+                &LSCurveConfig::param_lo_text,   &LSCurveConfig::param_hi_text,
+                &LSCurveConfig::param_lo_2_text, &LSCurveConfig::param_hi_2_text) };
+            heatmap_ls.popup_extras = [&cact, &cb, busy, &vrt, &model, &heatmap_ls]() {
                 draw_export_menu_item(busy, cb, [&cact](const std::string& p) {
                     data_export::export_ls2d(cact.result_2d, p);
                 });
+                draw_view_range_menu(vrt, heatmap_ls.x_axis, heatmap_ls.y_axis, heatmap_ls.swap_axes, &model);
             };
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -4647,6 +5439,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                               cact.result_2d.param_lo_2, cact.result_2d.param_hi_2,
                               vmin, vmax,
                               fit);
+            handle_view_range_keys(vrt, heatmap_ls.x_axis, heatmap_ls.y_axis,
+                                   plot_window_active(), heatmap_ls.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -4743,13 +5537,21 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         if (c.fit_request) { any_fit = true; c.fit_request = false; }
     }
 
-    view.popup_extras = [&s, &cb]() {
+    // Ctrl+T: по Y идут показатели спектра, входа в расчёте у них нет.
+    std::vector<ViewRangeTarget> vrt;
+    for (int idx : win.members)
+        if (idx >= 0 && idx < (int)s.curves.size())
+            vrt.push_back(vr_target(s.curves, idx,
+                &LSCurveConfig::param_lo_text, &LSCurveConfig::param_hi_text));
+
+    view.popup_extras = [&s, &cb, &vrt, &model, &view]() {
         draw_export_submenu("ls", (int)s.curves.size(),
             [&s](int i) { return s.curves[i].label; },
             [&s](int i) { return s.curves[i].last_run_ok; },
             [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
             [&s](int i, const std::string& p) { data_export::export_ls1d(s.curves[i].result, p); },
             cb);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
     };
 
     // Snap X к узлам первой LS-кривой этого окна (см. apply_snap_x_from_first_member).
@@ -4759,6 +5561,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(renderer, origin, avail, /*owner_id*/ 0x15A1E0, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
 }
 
 // Parametric plot windows — shared setup-row helper. The row (Label | Type | Members... | X)
@@ -4947,8 +5750,11 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
 // draw_basins_controls) + dynamic Plot windows (mirrors draw_parametric_
 // controls' manager + draw_bifurcation_plot's colored_1d heatmap toolbar).
 
-static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
+static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int idx) {
     Dft1DConfig& c = s.configs[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Dft1D;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", c.label))
@@ -4956,7 +5762,8 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -4966,9 +5773,14 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
                             c.param_index, c.sweep_over_var, c.var_sweep_index,
                             c.sweep_over_h, nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
     ImGui::Checkbox("Log scale##dft_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
@@ -4979,7 +5791,9 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
 
     // Variable + Resolution X
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##dft_wv");
-    InputNumStr("Resolution X", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution X", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution X", c.n_pts_text); });
     ImGui::Separator();
 
     // ----- Resolution Y / Frequency range (обязательные поля для rangesFreq;
@@ -5039,11 +5853,13 @@ static void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f, &model);
     }
 
-    draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions);
-    draw_named_num_fields("Parameters##dft_par",        s.params, c.param_values);
+    draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##dft_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##dft_csv", "Save to file", c.csv_save_enabled,
                           "##dft_csv_path", c.csv_output_path,
                           "Writes <path>_config.csv, _AkCOS.csv, _BkSIN.csv.");
@@ -5103,7 +5919,7 @@ static void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
 
-    draw_dft1d_diagram_controls(s, s.active_config_index);
+    draw_dft1d_diagram_controls(model, s, s.active_config_index);
 
     // Plot windows: dynamic list, mirrors Parametric's manager section
     // No Type combo needed (DFT1D has only one display kind); "Members..."
@@ -5280,10 +6096,16 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         if (fit) c.fit_request = false;
 
         const bool busy = s.in_flight && idx == s.running_config_index;
-        hc.popup_extras = [&c, &cb, busy]() {
+        // Ctrl+T: X — свип параметра, Y — окно частот, которое DFT реально
+        // считает (freq_lo/hi уходят в запрос, а не режут готовую картинку).
+        const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, idx,
+            &Dft1DConfig::param_lo_text, &Dft1DConfig::param_hi_text,
+            &Dft1DConfig::freq_lo_text,  &Dft1DConfig::freq_hi_text) };
+        hc.popup_extras = [&c, &cb, busy, &vrt, &model, &hc]() {
             draw_export_menu_item(busy, cb, [&c](const std::string& p) {
                 data_export::export_dft1d(c.result, p);
             });
+            draw_view_range_menu(vrt, hc.x_axis, hc.y_axis, hc.swap_axes, &model);
         };
 
         double lo = c.result.param_lo, hi = c.result.param_hi;
@@ -5301,6 +6123,8 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
                   c.result.freq_lo, c.result.freq_hi,
                   c.display_cache_vmin, c.display_cache_vmax,
                   fit);
+        handle_view_range_keys(vrt, hc.x_axis, hc.y_axis, plot_window_active(),
+                               hc.swap_axes, &model);
         ImGui::PopID();
     }
 }
@@ -5606,6 +6430,9 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
 
 static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Basins;
+    model.broadcast_source_idx = s.active_config_index;
 
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
@@ -5658,7 +6485,8 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -5680,7 +6508,9 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     } else {
         ImGui::TextDisabled("No variables (load a system first)");
     }
-    InputNumStr("Resolution", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
 
     // Writable var (для peak finder)
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##bas_wv");
@@ -5696,7 +6526,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration", c.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration", c.scheme, s.custom_schemes, f, &model);
     }
 
     // Features (DBSCAN axes + plot data) (collapsible)
@@ -5739,8 +6569,10 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
 
     draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
-                          "Values for non-axis variables.");
-    draw_named_num_fields("Parameters", s.params, c.param_values);
+                          "Values for non-axis variables.",
+                          &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters", s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
 
     // Phase portraits from basins (collapsible)
     // Отдельные окна 2D / Time domain по одной представительной точке из
@@ -5846,10 +6678,22 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             }
         });
     };
-    hm_basins_v.popup_extras = basins_export_extras;
-    hm_avgpk_v.popup_extras  = basins_export_extras;
-    hm_avgint_v.popup_extras = basins_export_extras;
-    hm_states_v.popup_extras = basins_export_extras;
+    // Ctrl+T: у четырёх карт обе оси — сетка начальных условий, то есть прямо
+    // поля расчёта. Scatter живёт в пространстве фич (avgPeak, avgInterval) и
+    // диапазонов расчёта по своим осям не имеет — ему только экспорт.
+    const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, s.active_config_index,
+        &BasinsConfig::axis_x_lo_text, &BasinsConfig::axis_x_hi_text,
+        &BasinsConfig::axis_y_lo_text, &BasinsConfig::axis_y_hi_text) };
+    auto grid_extras = [&](HeatmapView& hv) {
+        return [&basins_export_extras, &vrt, &model, &hv]() {
+            basins_export_extras();
+            draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
+        };
+    };
+    hm_basins_v.popup_extras = grid_extras(hm_basins_v);
+    hm_avgpk_v.popup_extras  = grid_extras(hm_avgpk_v);
+    hm_avgint_v.popup_extras = grid_extras(hm_avgint_v);
+    hm_states_v.popup_extras = grid_extras(hm_states_v);
     scatter_v.popup_extras   = basins_export_extras;
 
     // Inner tab-bar — переключение по 5 видам.
@@ -5965,6 +6809,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
+        handle_view_range_keys(vrt, hm_basins_v.x_axis, hm_basins_v.y_axis, plot_window_active(),
+                               hm_basins_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 1) {
         hm_avgpk_v.x_axis.name = ax_x;
@@ -5974,6 +6820,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
                          n, n, c.result.avg_peaks.data(),
                          xlo, xhi, ylo, yhi,
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
+        handle_view_range_keys(vrt, hm_avgpk_v.x_axis, hm_avgpk_v.y_axis, plot_window_active(),
+                               hm_avgpk_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 2) {
         hm_avgint_v.x_axis.name = ax_x;
@@ -5983,6 +6831,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
                           n, n, c.result.avg_intervals.data(),
                           xlo, xhi, ylo, yhi,
                           c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
+        handle_view_range_keys(vrt, hm_avgint_v.x_axis, hm_avgint_v.y_axis, plot_window_active(),
+                               hm_avgint_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 3) {
         // States: рисуем helpful_array КАК ЕСТЬ, в канонических REGIME_*
@@ -6000,6 +6850,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           -1.0, 1.0, fit);
+        handle_view_range_keys(vrt, hm_states_v.x_axis, hm_states_v.y_axis, plot_window_active(),
+                               hm_states_v.swap_axes, &model);
         // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
         ImGui::TextDisabled("Levels: -1 = FixedPoint, 0 = Unbound, 1 = Oscillation");
     }
@@ -6172,6 +7024,9 @@ static void basins_phase_tick(AppModel& model) {
 // Mode 0 = On Attractor (trajectory + per-point error); Mode 1 = On Grid.
 static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     FastSyncAnalysisSession& s = model.fastsync_session;
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::FastSync;
+    model.broadcast_source_idx = s.active_config_index;
 
     // Source of truth для custom-схем — AppModel (редактируются в Library).
     // load_from_record() сохраняет снапшот ОДНОКРАТНО при входе в режим, поэтому
@@ -6240,7 +7095,8 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -6262,7 +7118,9 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo(axis_role_y, &c.axis_y_var, items.data(), (int)items.size());
         InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
         InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
-        InputNumStr("Resolution", c.n_pts_text, kFieldW);
+        InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
         // Какую сторону перебирать по сетке: master IC (legacy default) или slave IC.
         ImGui::Checkbox("Vary slave IC (master fixed)##fs_gridswap", &c.grid_swap_master_slave);
         ImGui::TextDisabled("Off: grid sweeps master IC, slave fixed. On: grid sweeps slave IC, master fixed.");
@@ -6381,7 +7239,8 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     // Parameters (collapsible, placed under Synchro runtime)
-    draw_named_num_fields("Parameters", s.params, c.param_values);
+    draw_named_num_fields("Parameters", s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
 
     // Парные сворачиваемые секции: клик по любому заголовку сворачивает обе половины.
     // Общее состояние навязывается каждому заголовку через SetNextItemOpen каждый кадр,
@@ -6753,10 +7612,16 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         h.y_axis.name = var_name(c.result.axis_y_var) + "(0)";
         const bool fs_busy = s.in_flight &&
                              s.active_config_index == s.running_config_index;
-        h.popup_extras = [&c, &cb, fs_busy]() {
+        // Ctrl+T: обе оси карты — сетка начальных условий (см. Basins).
+        const std::vector<ViewRangeTarget> vrt = {
+            vr_target(s.configs, s.active_config_index,
+                      &FastSyncConfig::axis_x_lo_text, &FastSyncConfig::axis_x_hi_text,
+                      &FastSyncConfig::axis_y_lo_text, &FastSyncConfig::axis_y_hi_text) };
+        h.popup_extras = [&c, &cb, fs_busy, &vrt, &model, &h]() {
             draw_export_menu_item(fs_busy, cb, [&c](const std::string& p) {
                 data_export::export_fastsync(c.result, p);
             });
+            draw_view_range_menu(vrt, h.x_axis, h.y_axis, h.swap_axes, &model);
         };
         h.render(*renderer, origin, avail,
                  /*owner_id*/ (int)base_oid, c.data_generation,
@@ -6766,6 +7631,8 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
                  c.result.axis_y_lo, c.result.axis_y_hi,
                  c.result.min_val, c.result.max_val,
                  fit);
+        handle_view_range_keys(vrt, h.x_axis, h.y_axis, plot_window_active(),
+                               h.swap_axes, &model);
     }
 }
 
@@ -6933,6 +7800,9 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
 
 static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     OrderAnalysisSession& s = model.order_session;
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Order;
+    model.broadcast_source_idx = s.active_config_index;
     if (s.configs.empty()) {
         ImGui::TextDisabled("Система не загружена. Выбери систему в списке сверху.");
         return;
@@ -6988,7 +7858,8 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     // ---- Интегрирование ----
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
-        draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
+        draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                          &model);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
         const bool h_swept = (c.axis_x_target == kOrderTargetH)
@@ -7038,12 +7909,14 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "обе оси свипают одно и то же");
     }
 
-    draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions);
+    draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
     draw_named_num_fields("Parameters", s.params, c.param_values,
         "Параметры МЕТОДА (для композиционных схем) объявляй здесь же обычными "
         "параметрами системы: в правых частях их можно не использовать, "
         "а тело кастомной КРС читает их как a[k]. В селекторе оси они "
-        "появятся наравне с остальными.");
+        "появятся наравне с остальными.",
+        &model, BroadcastField::Param);
 
     if (!c.last_error.empty())
         draw_error_box("##order_err", c.last_error);
@@ -7157,6 +8030,13 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         bool fit = c.fit_request;
         if (fit) c.fit_request = false;
 
+        // Ctrl+T: обе оси карты — диапазоны свипа (по умолчанию X — сам шаг h).
+        const std::vector<ViewRangeTarget> vrt = {
+            vr_target(s.configs, s.active_config_index,
+                      &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text,
+                      &OrderConfig::axis_y_lo_text, &OrderConfig::axis_y_hi_text) };
+        hv.popup_extras = [&vrt, &model, &hv]() { draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model); };
+
         ImVec2 avail  = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hv.render(*renderer, origin, avail,
@@ -7165,6 +8045,8 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
                   r.n_pts_x, r.n_pts_y, vals->data(),
                   r.axis_x.lo, r.axis_x.hi, r.axis_y.lo, r.axis_y.hi,
                   vmin, vmax, fit);
+        handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
+                               hv.swap_axes, &model);
         return;
     }
 
@@ -7304,11 +8186,21 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
     if (c.plot_sig[tab] != sig) { fit = true; c.plot_sig[tab] = sig; }
     if (c.fit_request) c.fit_request = false;
 
+    // Ctrl+T: по X идёт свип, по Y — p либо сама ошибка, входа в расчёте у них
+    // нет. Ось X остаётся в мировых координатах даже при лог-шкале (её делает
+    // Plot2DView), поэтому границы вида пишутся в поля как есть; Y здесь
+    // логарифмируется руками, и это ещё одна причина его не трогать.
+    const std::vector<ViewRangeTarget> vrt = {
+        vr_target(s.configs, s.active_config_index,
+                  &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text) };
+    view.popup_extras = [&vrt, &model, &view]() { draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model); };
+
     ImVec2 avail  = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(*renderer, origin, avail,
                 /*owner_id*/ 0x0BDE1000 + oid * 2 + tab, sig,
                 series, init_vis, glob_vis, fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
 }
 
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
@@ -7555,8 +8447,11 @@ namespace {
 
 // Shared config panel
 
-void draw_shared_config(CustomSession& cs,
+void draw_shared_config(AppModel& model, CustomSession& cs,
                         const std::vector<CustomScheme>& custom_schemes) {
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Custom;
+    model.broadcast_source_idx = 0;
     auto& c      = cs.shared;
     const auto& vars   = cs.vars;
     const auto& params = cs.params;
@@ -7574,7 +8469,7 @@ void draw_shared_config(CustomSession& cs,
             // Custom КРС в Custom-вкладке считаются только на GPU.
             if (is_custom_scheme(nm, custom_schemes)) phase.use_gpu = true;
         },
-        &cs.enabled_builtin_schemes);
+        &cs.enabled_builtin_schemes, &model);
 
     // Integration group — mirrors the "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is
@@ -7604,7 +8499,8 @@ void draw_shared_config(CustomSession& cs,
     // Initial conditions — one InputNumStr per line, matching draw_diagram_controls.
     // Not propagated to Phase: phase.ic_sets is multi-IC (mulistability) and
     // is edited in the L3 Phase panel; the shared IC block drives BD/LLE/LS/Basins.
-    draw_named_num_fields("Initial conditions##custom_ic", vars, c.initial_conditions);
+    draw_named_num_fields("Initial conditions##custom_ic", vars, c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
 
     // Parameters — same per-line layout; skip disable for params that are
     // swept on any enabled level (they get their values from the sweep).
@@ -7676,7 +8572,9 @@ void draw_shared_config(CustomSession& cs,
 
 // Level 2D detail
 
-void draw_level2d_detail(CustomSession& cs) {
+void draw_level2d_detail(AppModel& model, CustomSession& cs) {
+    model.broadcast_source_tab = BroadcastTab::Custom;
+    model.broadcast_source_idx = 0;
     auto& c = cs.shared;
     // Header title carries the level name — no SeparatorText here.
 
@@ -7692,9 +8590,14 @@ void draw_level2d_detail(CustomSession& cs) {
                             c.axis_x_par_index, c.axis_x_over_var, c.axis_x_var_index,
                             c.axis_x_over_h, &c.axis_y_over_h,
                             /*note_when_empty*/ false, 120.0f,
-                            scheme_uses_symmetry(c.scheme, cs.custom_schemes));
-    InputNumStr("lo##ax", c.axis_x_lo_text, kFieldW);
-    InputNumStr("hi##ax", c.axis_x_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, cs.custom_schemes),
+                            &model, BroadcastField::SweepTarget);
+    InputNumStr("lo##ax", c.axis_x_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                          "sweep lo", c.axis_x_lo_text); });
+    InputNumStr("hi##ax", c.axis_x_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                          "sweep hi", c.axis_x_hi_text); });
     // Log-сетка по оси. Свойство оси, поэтому X-срез Level 1D наследует его
     // вместе с par/lo/hi (см. EffectiveSweep::log_scale).
     ImGui::Checkbox("Log scale##ax_log", &c.axis_x_log);
@@ -7705,7 +8608,8 @@ void draw_level2d_detail(CustomSession& cs) {
                             c.axis_y_par_index, c.axis_y_over_var, c.axis_y_var_index,
                             c.axis_y_over_h, &c.axis_x_over_h,
                             /*note_when_empty*/ false, 120.0f,
-                            scheme_uses_symmetry(c.scheme, cs.custom_schemes));
+                            scheme_uses_symmetry(c.scheme, cs.custom_schemes),
+                            &model, BroadcastField::SweepTarget2);
     InputNumStr("lo##ay", c.axis_y_lo_text, kFieldW);
     InputNumStr("hi##ay", c.axis_y_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##ay_log", &c.axis_y_log);
@@ -7995,7 +8899,9 @@ void draw_level1d_detail(CustomSession& cs) {
 
 // Level 3 detail
 
-void draw_level3_detail(CustomSession& cs) {
+void draw_level3_detail(AppModel& model, CustomSession& cs) {
+    model.broadcast_source_tab = BroadcastTab::Custom;
+    model.broadcast_source_idx = 0;
     auto& c = cs.shared;
     // Header title carries the level name — no SeparatorText here.
     ImGui::RadioButton("Phase + Time-domain", &c.level3_kind, 0); ImGui::SameLine();
@@ -8010,7 +8916,7 @@ void draw_level3_detail(CustomSession& cs) {
         // everything lives inside the pipeline's L3 config (no separate top-level window). The
         // Analysis tab uses the same helper with model.phase_session; here we pass Custom's own
         // isolated cs.phase_session.
-        draw_phase_controls(cs.phase_session, nullptr);
+        draw_phase_controls(cs.phase_session, nullptr, &model);
     } else {
         // Basins sub-panel: IC-space axes + features. All of scheme/h/t_max/
         // etc. come from shared; DBSCAN eps stays per-config.
@@ -8164,7 +9070,7 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     // Shared config panel — always visible at the top.
-    draw_shared_config(cs, cs.custom_schemes);
+    draw_shared_config(model, cs, cs.custom_schemes);
 
     ImGui::Separator();
 
@@ -8274,13 +9180,13 @@ static void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
 
     level_header(0, "##en_l2d", c.level_2d_enabled, "Level 2D - Bif / LLE / LS",
                  level2_running, level2_hasres, /*default_open=*/true,
-                 [&](){ draw_level2d_detail(cs); });
+                 [&](){ draw_level2d_detail(model, cs); });
     level_header(1, "##en_l1d", c.level_1d_enabled, "Level 1D - slices",
                  level1_running, level1_hasres, /*default_open=*/false,
                  [&](){ draw_level1d_detail(cs); });
     level_header(2, "##en_l3", c.level_phase_enabled, l3_title,
                  level3_running, level3_hasres, /*default_open=*/false,
-                 [&](){ draw_level3_detail(cs); });
+                 [&](){ draw_level3_detail(model, cs); });
 }
 
 // Custom-tab plot windows: minimal renderer for the pipeline output. Full-featured versions
@@ -9001,7 +9907,14 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 const bool ls_busy = (i == 2) && cs.ls_session.in_flight
                                      && cs.ls_session.is_2d_run
                                      && cs.ls_session.running_curve_index == 0;
-                hv.popup_extras = [i, &cs, &cb, bd_busy, lle_busy, ls_busy]() {
+                // Ctrl+T: цель — ОБЩИЙ config вкладки, а не конфиг подсессии.
+                // Подсессии всё равно пересобираются из него срезами
+                // apply_shared_to_* на каждом Run, и запись в них пропала бы.
+                const std::vector<ViewRangeTarget> vrt = {
+                    vr_target_fixed("Shared config",
+                        &cs.shared.axis_x_lo_text, &cs.shared.axis_x_hi_text,
+                        &cs.shared.axis_y_lo_text, &cs.shared.axis_y_hi_text) };
+                hv.popup_extras = [i, &cs, &cb, bd_busy, lle_busy, ls_busy, &vrt, &model, &hv]() {
                     const bool busy = bd_busy || lle_busy || ls_busy;
                     draw_export_menu_item(busy, cb, [i, &cs](const std::string& path) {
                         if      (i == 0 && !cs.bif_session.diagrams.empty())
@@ -9011,6 +9924,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         else if (i == 2 && !cs.ls_session.curves.empty())
                             data_export::export_ls2d(cs.ls_session.curves[0].result_2d, path);
                     });
+                    draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
                 };
 
                 // Route through LS-specific plane/vmin/vmax if the user
@@ -9031,6 +9945,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                           slots[i].lo_y, slots[i].hi_y,
                           vmin_use, vmax_use,
                           /*fit_request*/ false);
+                handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
+                               hv.swap_axes, &model);
                 ImGui::PopID();
             }
         }
@@ -9361,7 +10277,14 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
 
         // Right-click "Export data..." — паритет с Parametric, где он есть у
         // всех 1D-графиков. В Custom его не было ни на одном из 6 слотов.
-        view.popup_extras = [i, &lslots, &cs, &cb]() {
+        // Ctrl+T: срез идёт по своей оси общего config'а (слот 1 — X, 2 — Y),
+        // по Y — сама считаемая величина, входа в расчёте у неё нет.
+        const bool  vr_slice_is_x = (lslots[i].cfg_idx == 1);
+        const std::vector<ViewRangeTarget> vrt = { vr_target_fixed(
+            vr_slice_is_x ? "Shared config (X slice)" : "Shared config (Y slice)",
+            vr_slice_is_x ? &cs.shared.sweep_x_lo_text : &cs.shared.sweep_y_lo_text,
+            vr_slice_is_x ? &cs.shared.sweep_x_hi_text : &cs.shared.sweep_y_hi_text) };
+        view.popup_extras = [i, &lslots, &cs, &cb, &vrt, &model, &view]() {
             const bool busy = (lslots[i].kind == L1Kind::Bif) ? cs.bif_session.in_flight
                             : (lslots[i].kind == L1Kind::LLE) ? cs.lle_session.in_flight
                                                               : cs.ls_session.in_flight;
@@ -9378,6 +10301,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         data_export::export_ls1d(cs.ls_session.curves[ci].result, path);
                 }
             });
+            draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
         };
 
         // Autofit whenever the underlying result changed (bif/lle/ls each
@@ -9400,6 +10324,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                     /*owner_id*/ (0xC10000 + i) ^ sys_owner_delta,
                     series_gen,
                     series_in, init_vis, glob_vis, fit);
+        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
         ImGui::PopID();
         ImGui::End();
     }
@@ -9702,17 +10627,40 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
 
-    // переключатель режимов
+    // Ctrl+Z / Ctrl+Shift+Z — отмена и повтор МАССОВЫХ команд: "Calculation
+    // range from view" (Ctrl+T / Ctrl+Shift+T) и "Apply to all calculation tabs".
+    // Обычные правки полей в стек не идут. Стек свой у каждой вкладки, и
+    // работают хоткеи по ОТКРЫТОЙ (см. AppModel::undo_stacks).
+    // Условие !WantTextInput принципиально: внутри активного InputText Ctrl+Z —
+    // это undo самого ImGui (stb_textedit, 99 шагов), и перехват здесь сломал бы
+    // набор текста. Alt исключён, чтобы не срабатывать на Ctrl+Alt+Z.
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && !io.KeyAlt && !io.WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+            if (io.KeyShift) do_redo(model);
+            else             do_undo(model);
+        }
+    }
+
+    // переключатель режимов. Скрытые в Settings вкладки пропускаем; SameLine
+    // ставится ПЕРЕД кнопкой, иначе скрытая оставляла бы разрыв в ряду.
+    // Если активной оказалась скрытая вкладка (маску принесли из конфига или
+    // правкой файла) — уводим в Library: рисовать её содержимое без кнопки
+    // в ряду значит запереть пользователя в режиме, из которого не видно выхода.
+    for (const auto& t : kModeTabs)
+        if (!t.always && t.mode == model.app_mode && model.tab_hidden(t.id))
+            model.app_mode = AppModel::AppMode::Library;
     int mode = (int)model.app_mode;
-    ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
-    ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
-    ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
-    ImGui::RadioButton("1D DFT", &mode, (int)AppModel::AppMode::Dft1D); ImGui::SameLine();
-    ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
-    ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
-    ImGui::RadioButton("Custom", &mode, (int)AppModel::AppMode::Custom); ImGui::SameLine();
-    ImGui::RadioButton("Order", &mode, (int)AppModel::AppMode::Order); ImGui::SameLine();
-    ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
+    {
+        bool first_tab = true;
+        for (const auto& t : kModeTabs) {
+            if (!t.always && model.tab_hidden(t.id)) continue;
+            if (!first_tab) ImGui::SameLine();
+            first_tab = false;
+            ImGui::RadioButton(t.label, &mode, (int)t.mode);
+        }
+    }
 
     // Правый край ряда вкладок, в координатах окна. Нужен системному комбо
     // ниже: оно центрируется, но не должно наезжать на вкладки. Снимаем
@@ -9735,6 +10683,18 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::SetTooltip("The saved session file could not be parsed and was ignored.\n"
                               "Settings from the system record are in use instead.\n"
                               "Running an analysis and switching systems will overwrite the file.");
+    }
+
+    // Что сделал последний Ctrl+Z / Ctrl+Shift+Z. Держим несколько секунд:
+    // "Apply to all calculation tabs" правит и невидимые сейчас вкладки, и без
+    // строки в шапке откат выглядел бы как "ничего не произошло".
+    if (!model.undo_note.empty()) {
+        if (ImGui::GetTime() - model.undo_note_time > 4.0) {
+            model.undo_note.clear();
+        } else {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", model.undo_note.c_str());
+        }
     }
 
     // Индикатор компьюта — справа по границе окна, виден во всех режимах. Layout:
@@ -10172,7 +11132,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     model.from_record(lib.load(model.loaded_name));   // reference from disk
                     model.start_phase_analysis();
                 }
-            });
+            }, &model);
         }
         ImGui::End();
         draw_projection_windows(model.phase_session, cb);
@@ -10259,6 +11219,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
+            cfg.hidden_tabs            = m.hidden_tabs;
+            cfg.hidden_schemes         = m.hidden_schemes;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
 
@@ -10328,6 +11290,70 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 persist_settings(model);
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
+
+            // Видимость вкладок и схем. Обе маски — чисто интерфейсные: на
+            // расчёты, сохранённые сессии и system.json они не влияют, только
+            // убирают лишнее из виду. Живут в _app_config.json, одна на
+            // приложение, как и остальные настройки этой вкладки.
+            ImGui::Separator();
+            ImGui::Text("Tabs");
+            ImGui::TextDisabled("Which analysis tabs appear in the top row. Library and");
+            ImGui::TextDisabled("Settings are always shown. Hiding a tab does not touch its");
+            ImGui::TextDisabled("sessions: ticking it back brings everything as it was.");
+            for (const auto& t : kModeTabs) {
+                if (t.always) continue;
+                bool on = !model.tab_hidden(t.id);
+                ImGui::PushID(t.id);
+                if (ImGui::Checkbox(t.label, &on)) {
+                    AppModel::set_name_hidden(model.hidden_tabs, t.id, !on);
+                    persist_settings(model);
+                }
+                ImGui::PopID();
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Integration schemes");
+            ImGui::TextDisabled("Which built-in schemes are offered in \"Schemes to generate\"");
+            ImGui::TextDisabled("on the System tab. Unticking one only hides the checkbox:");
+            ImGui::TextDisabled("a system that already has the scheme enabled keeps generating");
+            ImGui::TextDisabled("it, and the System tab says so.");
+            {
+                auto set_all_schemes = [&](bool shown) {
+                    for (const auto& b : kBuiltinSchemes)
+                        AppModel::set_name_hidden(model.hidden_schemes, b.name, !shown);
+                    persist_settings(model);
+                };
+                if (ImGui::Button("Show all##schemes")) set_all_schemes(true);
+                ImGui::SameLine();
+                if (ImGui::Button("Hide all##schemes")) set_all_schemes(false);
+                ImGui::SameLine();
+                int n_on = 0;
+                for (const auto& b : kBuiltinSchemes)
+                    if (!model.scheme_hidden(b.name)) ++n_on;
+                ImGui::Text("%d / %d shown", n_on, kBuiltinSchemeCount);
+
+                // Раскладка — как в System tab: группа порядка одной строкой,
+                // чтобы список читался теми же блоками, что и там.
+                int  shown_order   = 0;
+                bool first_in_line = true;
+                for (const auto& b : kBuiltinSchemes) {
+                    if (b.order != shown_order) {
+                        ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                        shown_order   = b.order;
+                        first_in_line = true;
+                    }
+                    if (!first_in_line) ImGui::SameLine();
+                    first_in_line = false;
+                    bool on = !model.scheme_hidden(b.name);
+                    ImGui::PushID(b.name);
+                    if (ImGui::Checkbox(b.name, &on)) {
+                        AppModel::set_name_hidden(model.hidden_schemes, b.name, !on);
+                        persist_settings(model);
+                    }
+                    ImGui::PopID();
+                    if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+                }
+            }
 
             // Colormaps: какие из 200 карт slanCM показывать в пикере.
             // Держать в combo все 200 неудобно, поэтому набор набирается

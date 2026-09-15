@@ -15,6 +15,7 @@
 #include <atomic>
 #include <deque>
 #include <regex>
+#include <algorithm>
 
 // Функция-распознаватель: PNG-байты -> LaTeX. Внедряется снаружи,
 // чтобы модель не зависела от OcrClient напрямую (и была тестируема).
@@ -107,6 +108,66 @@ struct PendingScreenshot {
     bool  active = false;
     int   frames_left = 0;
     float min_x = 0, min_y = 0, max_x = 0, max_y = 0; // экранные координаты ImGui
+};
+
+// Поле настроек, которое ПКМ по нему умеет разослать по вкладкам
+// (см. AppModel::broadcast_field). Имя параметра/переменной передаётся
+// отдельной строкой — в enum'е ему места нет.
+enum class BroadcastField {
+    Param,          // значение параметра по имени
+    InitCondition,  // начальное условие по имени переменной
+    StepH,
+    SymmetryS,
+    TMax,           // computing time
+    Transient,      // transient time
+    PreScaller,     // decimator
+    MaxValue,
+    Scheme,         // численный метод
+    // Свип. Первая ось есть у Bif / LLE / LS / DFT и у оси X общего config'а
+    // Custom'а; вторая — только там, где есть 2D-режим. У Basins и FastSync
+    // оси сетки — это начальные условия, а не параметрический свип, и у Order
+    // своя кодировка цели, поэтому они эти поля пропускают.
+    SweepLo,  SweepHi,
+    SweepLo2, SweepHi2,
+    SweepTarget,  SweepTarget2,   // что свипуется: параметр / НУ / шаг
+    Resolution,     // число узлов свипа; у Basins/FastSync — сторона сетки
+};
+
+// Расчётные вкладки в том порядке, в котором их обходит рассылка. Живёт в
+// заголовке, потому что адресом цели (вкладка + индекс конфига) оперирует и UI:
+// в меню можно выбрать, в какие именно конфиги применять.
+enum class BroadcastTab {
+    Phase, Bifurcation, LLE, LS, Dft1D, Basins, FastSync, Custom, Order
+};
+
+// Одна цель рассылки — КОНКРЕТНЫЙ конфиг конкретной вкладки, а не вкладка
+// целиком: диаграмм в одной вкладке много, и "применить ко всем Bifurcation 1D"
+// адресует именно их.
+struct BroadcastTarget {
+    BroadcastTab tab = BroadcastTab::Phase;
+    int          idx = 0;     // индекс конфига; у Phase и Custom он один, idx = 0
+    std::string  label;       // подпись конфига: "BD 1", "LLE 2", ...
+    std::string  group;       // тип: "Bifurcation 1D", "LLE 2D", "Basins", ...
+};
+
+// Цель свипа одной оси в том виде, в каком её рассылает broadcast_field:
+// "par:<i>" — параметр, "var:<i>" — начальное условие, "h" — шаг, "s" —
+// коэффициент симметрии a[0]. Четыре поля описывают ОДНО решение
+// пользователя, и по строковому интерфейсу рассылки они обязаны ехать
+// вместе — половина применённой цели это не цель. Нужна и UI (ПКМ по комбо
+// свипа передаёт сюда текущий выбор), и самой рассылке.
+std::string encode_sweep_target(int par_index, bool over_var, int var_index, bool over_h);
+
+// Одна запись стека отмены. restore самодостаточен и БЕЗОПАСЕН к перестройке
+// вкладок: он захватывает сессии (это члены AppModel, они не переезжают) плюс
+// ИНДЕКСЫ конфигов, а адреса полей переразрешает в момент отката — векторы
+// конфигов съезжают, когда диаграмму добавляют или закрывают. Там же
+// сверяется label конфига: если на записанном индексе оказался другой, поле
+// пропускается, а не переписывается вслепую.
+struct UndoRecord {
+    std::string           description;   // что откатится — видно в меню
+    std::function<void()> undo;
+    std::function<void()> redo;
 };
 
 // Модель приложения: всё состояние + логика. НЕ знает про ImGui.
@@ -225,6 +286,30 @@ public:
     // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
     enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order };
     AppMode app_mode = AppMode::Library;
+
+    // Число элементов AppMode. Нужно для клампа last_app_mode из конфига:
+    // литерал в app_main.cpp отставал от enum'а (стоял 8 при девяти режимах,
+    // из-за чего Order не восстанавливался на старте).
+    static constexpr int kAppModeCount = 9;
+
+    // Настройки видимости из Settings. Зеркалят AppConfig::hidden_tabs /
+    // hidden_schemes: СКРЫТЫЕ идентификаторы вкладок (kModeTabs в gui.cpp) и
+    // имена встроенных схем (kBuiltinSchemes там же). Храним скрытые, а не
+    // видимые, поэтому пустой список = показываем всё, и новая вкладка/схема
+    // появляется видимой даже у тех, у кого конфиг уже записан.
+    std::vector<std::string> hidden_tabs;
+    std::vector<std::string> hidden_schemes;
+
+    static bool name_hidden(const std::vector<std::string>& v, const std::string& n) {
+        return std::find(v.begin(), v.end(), n) != v.end();
+    }
+    static void set_name_hidden(std::vector<std::string>& v, const std::string& n, bool hidden) {
+        auto it = std::find(v.begin(), v.end(), n);
+        if (hidden && it == v.end()) v.push_back(n);
+        else if (!hidden && it != v.end()) v.erase(it);
+    }
+    bool tab_hidden(const std::string& id) const { return name_hidden(hidden_tabs, id); }
+    bool scheme_hidden(const std::string& name) const { return name_hidden(hidden_schemes, name); }
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
     PhaseAnalysisSession phase_session;
@@ -450,6 +535,97 @@ public:
     // без переоткрытия вкладки. Phase'у дополнительно сбрасывается krs_code, чтобы regenerate_krs
     // пересчитался от актуального cs.body / sys.
     void propagate_to_sessions();
+
+    // Кладёт value в одноимённое поле АКТИВНОГО конфига каждой расчётной
+    // вкладки: Phase, Bifurcation, LLE, LS, DFT, Basins, FastSync, Custom
+    // (общий Shared config) и Order. Соседние конфиги ВНУТРИ вкладки не
+    // трогает — разные диаграммы одной вкладки на то и заведены, чтобы
+    // отличаться.
+    // name — имя параметра (Param) или переменной (InitCondition), для
+    // остальных полей игнорируется. Вкладка, у которой такого поля нет
+    // (у FastSync нет НУ, у Order — transient'а и decimator'а), пропускается
+    // молча.
+    // apply = false — сухой прогон: ничего не пишет. Возвращает число полей,
+    // расходящихся с value (при apply = true — сколько изменил). Меню
+    // показывает это число: соседние вкладки не открыты, и без него неясно,
+    // сделала команда что-нибудь или нет.
+    // label — человекочитаемое имя поля ("h", "computing time", "sigma").
+    // Идёт только в подпись записи отмены: у безымянных полей name пустой, и
+    // без label в меню Ctrl+Z стояло бы "0.01 applied to all tabs".
+    //
+    // only — куда писать. nullptr = активный конфиг КАЖДОЙ вкладки (прежнее
+    // поведение). Непустой список = ровно эти конфиги: все того же типа либо
+    // отмеченные галочками — решает вызывающий. scope_note уходит в подпись
+    // отмены, чтобы "sigma = 10 -> all Bifurcation 1D" отличалось от "-> all tabs".
+    int broadcast_field(BroadcastField f, const std::string& name,
+                        const std::string& value, bool apply,
+                        const std::string& label = {},
+                        const std::vector<BroadcastTarget>* only = nullptr,
+                        const std::string& scope_note = "all tabs");
+
+    // Все конфиги, у которых ЕСТЬ поле f. Порядок — по вкладкам, внутри вкладки
+    // по индексу; на нём же строятся маска выбора и подписи в меню.
+    [[nodiscard]] std::vector<BroadcastTarget> broadcast_targets(BroadcastField f);
+
+    // Какой конфиг редактирует открытая сейчас панель настроек. Ставит сама
+    // панель в начале отрисовки; ПКМ-рассылка берёт отсюда тип ("все
+    // Bifurcation 1D") и саму исходную цель. Через app_mode это не выводится:
+    // вкладка Parametric покрывает сразу Bifurcation, LLE и LS.
+    BroadcastTab broadcast_source_tab = BroadcastTab::Phase;
+    int          broadcast_source_idx = 0;
+
+    // Состояние выпадающего списка "Apply to...": галочки по broadcast_targets().
+    // Живёт в модели, а не в static внутри draw — immediate-mode UI своё
+    // состояние между кадрами не держит (см. CLAUDE.md).
+    std::vector<char> broadcast_pick;
+    // Подпись СОСТАВА списка, для которого собрана маска (поле + склейка имён
+    // целей). Сравнивать один размер нельзя: добавив одну диаграмму и закрыв
+    // другую, получаем прежнюю длину при другом составе — и галочки молча
+    // указывают не на те конфиги.
+    std::string       broadcast_pick_sig;
+
+    // То же для списка "Calculation range to..." в меню диаграммы: галочки по
+    // общему перечислению целей Ctrl+T.
+    std::vector<char> vr_pick;
+    std::string       vr_pick_sig;
+
+    // ---- Отмена массовых команд -------------------------------------------
+    // Сюда попадают ровно две команды: "Calculation range from view" (Ctrl+T /
+    // Ctrl+Alt+T) и "Apply to all calculation tabs". Обе пишут разом в
+    // несколько полей, и вернуть прежнее руками = перенабрать по всем вкладкам.
+    // Обычные правки полей в стек НЕ идут: внутри активного InputText свой
+    // undo у ImGui (stb_textedit), и вторая механика на той же клавише только
+    // мешала бы. Поэтому и хоткей снаружи ловится лишь тогда, когда фокуса в
+    // поле нет.
+    static constexpr size_t kUndoDepth = 200;
+
+    // Стек на КАЖДУЮ вкладку: Ctrl+Z в Parametric не должен трогать то, что
+    // сделали в Basins. Команда попадает в стек вкладки, ОТКРЫТОЙ в момент её
+    // выполнения (app_mode), — включая "Apply to all calculation tabs": та
+    // пишет во все вкладки, но принадлежит той, где её вызвали, и отменяется
+    // оттуда же целиком.
+    std::map<AppMode, std::deque<UndoRecord>> undo_stacks;
+    std::map<AppMode, std::deque<UndoRecord>> redo_stacks;
+
+    // Подпись последнего отката/повтора + момент времени (ImGui::GetTime) —
+    // шапка показывает её пару секунд. Без этого Ctrl+Z вслепую страшнее, чем
+    // его отсутствие: вкладка, которую откатили, может быть сейчас не видна.
+    std::string undo_note;
+    double      undo_note_time = 0.0;
+
+    // redo может быть пустым (команда без обратного хода) — тогда запись
+    // отменяется, но не повторяется.
+    void push_undo(std::string description, std::function<void()> undo,
+                   std::function<void()> redo);
+
+    // Откат / повтор в ТЕКУЩЕЙ вкладке. false = соответствующий стек пуст.
+    bool undo_last();
+    bool redo_last();
+
+    // Описания того, что сделает следующий Ctrl+Z / Ctrl+Shift+Z в текущей
+    // вкладке, или nullptr (стек пуст).
+    [[nodiscard]] const std::string* undo_top() const;
+    [[nodiscard]] const std::string* redo_top() const;
 
     // результат генерации
     std::string generated_code;    // итоговый код всех выбранных схем
