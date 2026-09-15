@@ -462,11 +462,15 @@ static void field_apply_all_menu(AppModel* model, BroadcastField f,
             : ("Nothing to apply: " + note + " already at " + value);
         model->undo_note_time = ImGui::GetTime();
     };
-    auto count_and_item = [&](const char* fmt, const std::vector<BroadcastTarget>* only,
+    // Подпись склеиваем, а НЕ прогоняем вторым проходом через printf: в шаблон
+    // подставляется имя группы, и попади в него '%', результат стал бы
+    // спецификацией формата с несуществующим аргументом. Сегодня имена — жёсткие
+    // литералы из group_of, но держать это на соглашении незачем.
+    auto count_and_item = [&](const std::string& title,
+                              const std::vector<BroadcastTarget>* only,
                               const std::string& note) {
-        char lbl[160];
-        std::snprintf(lbl, sizeof(lbl), fmt, differ_count(only));
-        if (ImGui::MenuItem(lbl)) apply_now(only, note);
+        const std::string lbl = title + " (" + std::to_string(differ_count(only)) + " differ)";
+        if (ImGui::MenuItem(lbl.c_str())) apply_now(only, note);
     };
 
     const std::vector<BroadcastTarget> all = model->broadcast_targets(f);
@@ -485,11 +489,8 @@ static void field_apply_all_menu(AppModel* model, BroadcastField f,
         for (const auto& t : all)
             if (t.group == group) same_group.push_back(t);
     }
-    if (same_group.size() > 1) {
-        char fmt[128];
-        std::snprintf(fmt, sizeof(fmt), "Apply to all %s (%%d differ)", group.c_str());
-        count_and_item(fmt, &same_group, "all " + group);
-    }
+    if (same_group.size() > 1)
+        count_and_item("Apply to all " + group, &same_group, "all " + group);
 
     // 2. Выбор галочками. Маска живёт в модели и пересобирается, когда
     //    сменилось поле или изменился состав целей (диаграмму добавили/закрыли).
@@ -547,8 +548,10 @@ static void field_apply_all_menu(AppModel* model, BroadcastField f,
             }
             ImGui::PushID((int)i);
             bool on = (model->broadcast_pick[i] == '1');
-            if (ImGui::Checkbox(all[i].label.c_str(), &on))
+            if (ImGui::Checkbox("##pick", &on))
                 model->broadcast_pick[i] = on ? '1' : '0';
+            ImGui::SameLine();
+            ImGui::TextUnformatted(all[i].label.c_str());
             ImGui::PopID();
         }
 
@@ -556,7 +559,7 @@ static void field_apply_all_menu(AppModel* model, BroadcastField f,
     }
 
     // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
-    count_and_item("Apply to all calculation tabs (%d differ)", nullptr, "all tabs");
+    count_and_item("Apply to all calculation tabs", nullptr, "all tabs");
 
     draw_undo_menu_item(model);
     ImGui::EndPopup();
@@ -1241,7 +1244,12 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
     for (size_t i = 0; i < count; ++i) {
         const ViewRangeTarget& t = targets[i];
         Snap p = capture(t);
-        if (p.relocate && (p.has_x || p.has_y)) before.push_back(std::move(p));
+        // Пишем ТОЛЬКО то, что умеем вернуть: цель без relocate откатить нечем,
+        // и запись в неё была бы дырой в отмене — поля изменились, а Ctrl+Z про
+        // них не знает. Сегодня такие цели не появляются (обе фабрики relocate
+        // ставят), но инвариант лучше держать кодом, чем соглашением.
+        if (!p.relocate || (!p.has_x && !p.has_y)) continue;
+        before.push_back(std::move(p));
         apply_view_values(t, vals);
     }
     if (!model || before.empty()) return;
@@ -1255,7 +1263,12 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
     std::string what = std::string("calculation range from ") + vals.source;
     if (count > 1)                     what += " (" + std::to_string((int)count) + " diagrams)";
     else if (!targets[0].name.empty()) what += " (" + targets[0].name + ")";
-    model->push_undo(std::move(what), writer(std::move(before)), writer(std::move(after)));
+    model->push_undo(what, writer(std::move(before)), writer(std::move(after)));
+    // Отчёт в шапку — как у рассылки полей. Команда правит и диаграммы в других
+    // окнах, которые сейчас не видны, и без строки это неотличимо от "ничего не
+    // произошло".
+    model->undo_note = "Applied: " + what;
+    model->undo_note_time = ImGui::GetTime();
 }
 
 [[nodiscard]] static bool view_range_bound(const std::vector<ViewRangeTarget>& targets) {
@@ -1287,7 +1300,7 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
             // не вид: поля только что откатили, картинка осталась зумленной, и
             // разослать "из вида" значило бы отменить отмену. Пишем это прямо
             // в пункте меню — угадывать источник пользователь не должен.
-            const bool from_fields = model->undo_just_happened;
+            const bool from_fields = model->undo_just_happened();
             char lbl[160];
             std::snprintf(lbl, sizeof(lbl), "Calculation range from %s - all %s (%d)",
                           from_fields ? "fields" : "view",
@@ -1331,7 +1344,7 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
             std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
             if (sel.empty()) ImGui::BeginDisabled();
             if (ImGui::Button(btn)) {
-                const ViewRangeValues v = model->undo_just_happened
+                const ViewRangeValues v = model->undo_just_happened()
                                         ? values_from_target(targets[0])
                                         : values_from_axes(x, y, swapped);
                 run_view_range_cmd(sel, sel.size(), v, model);
@@ -1348,8 +1361,10 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
                 }
                 ImGui::PushID((int)i);
                 bool on = (model->vr_pick[i] == '1');
-                if (ImGui::Checkbox(all[i].name.c_str(), &on))
+                if (ImGui::Checkbox("##pick", &on))
                     model->vr_pick[i] = on ? '1' : '0';
+                ImGui::SameLine();
+                ImGui::TextUnformatted(all[i].name.c_str());
                 ImGui::PopID();
             }
             ImGui::EndMenu();
@@ -1377,7 +1392,7 @@ static void handle_view_range_keys(const std::vector<ViewRangeTarget>& targets,
         std::vector<ViewRangeTarget> kin = view_range_same_kind(*model, targets[0]);
         const std::vector<ViewRangeTarget>& dst = kin.empty() ? targets : kin;
         // Сразу после отката источник — поля, а не вид (см. меню).
-        const ViewRangeValues v = model->undo_just_happened
+        const ViewRangeValues v = model->undo_just_happened()
                                 ? values_from_target(dst[0])
                                 : values_from_axes(x, y, swapped);
         run_view_range_cmd(dst, dst.size(), v, model);
