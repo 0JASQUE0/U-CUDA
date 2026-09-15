@@ -60,7 +60,30 @@ std::atomic<bool> g_nvrtc_fmad{ true };
 void set_nvrtc_fmad(bool enabled) { g_nvrtc_fmad.store(enabled, std::memory_order_relaxed); }
 bool get_nvrtc_fmad()             { return g_nvrtc_fmad.load(std::memory_order_relaxed); }
 
+// Ширина блока запуска (см. parametric_engine.h). Тоже atomic и по той же причине: одно
+// int-поле, читателю нужен только свежий снимок. В hash_key НЕ входит — на PTX не влияет.
 namespace {
+std::atomic<int> g_gpu_block_size{ kGpuBlockSizeDefault };
+}  // namespace
+
+void set_gpu_block_size(int threads) {
+    g_gpu_block_size.store(clamp_gpu_block_size(threads), std::memory_order_relaxed);
+}
+int get_gpu_block_size() { return g_gpu_block_size.load(std::memory_order_relaxed); }
+
+namespace {
+// Ширина блока, ужатая под бюджет динамической shared-памяти этого запуска. 48 КБ — потолок
+// на блок без opt-in (cudaFuncAttributeMaxDynamicSharedMemorySize); широкая система (много X
+// и a[]) при 128 потоках в него не влезет, и cuLaunchKernel вернёт CUDA_ERROR_INVALID_VALUE.
+// Делим пополам, а не вычитаем: кратность варпу обязана сохраниться.
+// sharedPerThread == 0 (ядро без динамической shared) — настройка применяется как есть.
+int launch_block_size(size_t sharedPerThread) {
+    int b = get_gpu_block_size();
+    while (b > kGpuBlockSizeMin && sharedPerThread * (size_t)b > 48u * 1024u)
+        b /= 2;
+    return b;
+}
+
 // Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
 // живёт дольше вызова.
 const char* nvrtc_fmad_opt() {
@@ -1406,17 +1429,27 @@ struct ParametricEngine::Impl {
                            double ticksBefore, double ticksTotal, std::string& err) const
     {
         bool cancelSent = false;
+        // Публикуем долю и ДО первого опроса, и ПЕРЕД выходом. Раньше обновление стояло
+        // только в середине цикла, между «не готово» и сном, из-за чего:
+        //   - значение, выставленное вызывающим перед запуском, висело до первого сна,
+        //   - а если stream успевал закончиться до первого опроса, цикл выходил по
+        //     `break` вообще ни разу не обновив прогресс, и на баре до конца чанка
+        //     оставалось предыдущее значение.
+        // Пока чанк считался секундами, оба окна были незаметны; после ускорения dbscan
+        // (в 20-100 раз) чанки стали короткими, и стыки полезли наружу.
+        auto publish = [&]() {
+            if (!progress || ticksTotal <= 0.0) return;
+            double f = (ticksBefore + (double)sig.ticks()) / ticksTotal;
+            if (f > 1.0) f = 1.0;
+            progress->store((float)f, std::memory_order_relaxed);
+        };
         for (;;) {
+            publish();
             cudaError_t q = cudaStreamQuery(stream);
-            if (q == cudaSuccess) break;
+            if (q == cudaSuccess) { publish(); break; }
             if (q != cudaErrorNotReady) {
                 err = std::string("CUDA stream query: ") + cudaGetErrorString(q);
                 return false;
-            }
-            if (progress && ticksTotal > 0.0) {
-                double f = (ticksBefore + (double)sig.ticks()) / ticksTotal;
-                if (f > 1.0) f = 1.0;
-                progress->store((float)f, std::memory_order_relaxed);
             }
             if (!cancelSent && cancel && cancel->load(std::memory_order_relaxed)) {
                 sig.raiseCancel();
@@ -2199,12 +2232,15 @@ struct ParametricEngine::Impl {
         // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             // последний чанк может быть меньше
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            int blockSize = 32;
+            // Ширина блока — настройка (Settings -> GPU launch), ужатая под shared этого ядра.
+            int blockSize = launch_block_size(
+                (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb));
             int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             // [ADAPT] <<<>>> → cuLaunchKernel. Траектория и поиск пиков — одно
@@ -2544,14 +2580,19 @@ struct ParametricEngine::Impl {
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             LLE_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            // blockSize по формуле NonLinAnal (hostLibrary.cu:2419), cap=32
-            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
+            // blockSize по формуле NonLinAnal (hostLibrary.cu:2419). Верхний cap теперь не 32,
+            // а настройка (Settings -> GPU launch); формула остаётся вторым потолком — при
+            // широкой системе она даёт МЕНЬШЕ варпа, и терять эту защиту нельзя.
+            const size_t sharedPerThread = (size_t)(3 * amountOfInitialConditions + amountOfValues) * sizeof(numb);
+            int blockSize = (int)std::ceil((1024.0 * 32.0) / (double)sharedPerThread);
             if (blockSize < 1) blockSize = 1;
-            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap) blockSize = blockSizeCap;
             int gridSize = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             // Аргументы LLEKernelCUDA (cudaLibrary.cu:2379)
@@ -2962,14 +3003,18 @@ struct ParametricEngine::Impl {
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             LLE2_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            int blockSize = (int)std::ceil((1024.0 * 32.0) / ((double)(3 * amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
+            // Cap — настройка, формула остаётся вторым потолком (см. run_lle_1d).
+            const size_t sharedPerThread = (size_t)(3 * amountOfInitialConditions + amountOfValues) * sizeof(numb);
+            int blockSize = (int)std::ceil((1024.0 * 32.0) / (double)sharedPerThread);
             if (blockSize < 1) blockSize = 1;
-            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap) blockSize = blockSizeCap;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // Аргументы LLEKernelCUDA — те же 21 параметр, что и в LLE1D,
@@ -3314,16 +3359,20 @@ struct ParametricEngine::Impl {
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             LS_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            // blockSize: 32K shared / per-thread, cap=32 (порт LS1D:2821-2824)
-            int blockSizeMax = (int)(32000 / ((double)(3 * amountOfInitialConditions
+            // blockSize: 32K shared / per-thread (порт LS1D:2821-2824). Cap — настройка
+            // (Settings -> GPU launch); формула остаётся вторым потолком, см. run_lle_1d.
+            const size_t sharedPerThread = (size_t)(3 * amountOfInitialConditions
                                 + 2 * amountOfInitialConditions * amountOfInitialConditions
-                                + amountOfValues) * (double)sizeof(numb)));
+                                + amountOfValues) * sizeof(numb);
+            int blockSizeMax = (int)(32000 / (double)sharedPerThread);
             int blockSize = blockSizeMax;
-            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap) blockSize = blockSizeCap;
             if (blockSize < 1)               blockSize = 1;
             int gridSize = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
@@ -3700,16 +3749,18 @@ struct ParametricEngine::Impl {
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             LS2_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            // blockSize: тот же расчёт что в run_ls_1d (32K shared / per-thread).
-            int blockSizeMax = (int)(32000 / ((double)(3 * N + 2 * N * N + amountOfValues)
-                                              * (double)sizeof(numb)));
+            // blockSize: тот же расчёт что в run_ls_1d (32K shared / per-thread), cap — настройка.
+            const size_t sharedPerThread = (size_t)(3 * N + 2 * N * N + amountOfValues) * sizeof(numb);
+            int blockSizeMax = (int)(32000 / (double)sharedPerThread);
             int blockSize = blockSizeMax;
-            if (blockSize > blockSize_setup) blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap) blockSize = blockSizeCap;
             if (blockSize < 1)               blockSize = 1;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
@@ -4403,7 +4454,8 @@ struct ParametricEngine::Impl {
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            const int blockSize = 32;
+            // Ядро h-свипа динамическую shared не берёт (launch с 0) — настройка идёт как есть.
+            const int blockSize = launch_block_size(0);
             const int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             int    nPts_arg                 = nPts;
@@ -4970,11 +5022,15 @@ struct ParametricEngine::Impl {
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             DFT_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            int blockSize = 32;
+            // Обе стадии (траектория и DFT_custom) запускаются одной шириной, поэтому режем её
+            // по shared более требовательной из них — траектории.
+            int blockSize = launch_block_size(
+                (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb));
             int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             int    nPts_int                  = nPts;
@@ -5524,9 +5580,9 @@ struct ParametricEngine::Impl {
 
         constexpr int  blockSize_setup          = 32;
         constexpr int  set_precision            = 15;
-        // Launch width. 32 = один варп на блок, а потолок по числу блоков на SM
-        // режет занятость примерно вдвое. blockSize_setup остаётся полом бюджета.
-        constexpr int  blockSize_launch         = 128;
+        // Ширина запуска переехала в настройку (Settings -> GPU launch, launch_block_size).
+        // Локальное 128 здесь было прототипом этой идеи; замер показал, что на крупной 2D-сетке
+        // ширина безразлична (+-7%), а на мелкой 128 проигрывает — дефолт поэтому 32.
 
         // dt-sweep: буфер должен вмещать худший случай (минимальный h в
         // диапазоне h-оси) -- см. run_bif1d.
@@ -5701,17 +5757,17 @@ struct ParametricEngine::Impl {
         // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF2D_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            // 48 KB shared — потолок блока без opt-in: широкая система (много X и a[])
-            // при 128 потоках в него не влезет, и запуск упадёт на CUDA_ERROR_INVALID_VALUE.
+            // Ширина блока — настройка, ужатая под 48 KB shared на блок (launch_block_size):
+            // широкая система (много X и a[]) при 128 потоках в потолок не влезет, и запуск
+            // упал бы на CUDA_ERROR_INVALID_VALUE.
             const size_t sharedPerThread = (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb);
-            int blockSize = blockSize_launch;
-            while (blockSize > blockSize_setup && sharedPerThread * (size_t)blockSize > 48u * 1024u)
-                blockSize /= 2;
+            int blockSize = launch_block_size(sharedPerThread);
             int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // 1. calculateDiscreteModelPeaksCUDA (dimension=2): интегрирование и поиск
@@ -5967,7 +6023,8 @@ struct ParametricEngine::Impl {
         const double eps_dbscan                 = req.eps_dbscan;
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
-        constexpr int blockSize_setup = 32;
+        // blockSize_setup здесь больше нет: ширина запуска берётся из настройки
+        // (launch_block_size), а полом бюджета памяти у бассейнов он не служил.
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
@@ -6112,15 +6169,19 @@ struct ParametricEngine::Impl {
         if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BAS_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), clamp blockSize_setup
-            int blockSize = (int)std::ceil((1024.0 * 48.0) / ((double)(amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
+            // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), cap — настройка
+            // (Settings -> GPU launch); формула остаётся вторым потолком, см. run_lle_1d.
+            const size_t sharedPerThread = (size_t)(amountOfInitialConditions + amountOfValues) * sizeof(numb);
+            int blockSize = (int)std::ceil((1024.0 * 48.0) / (double)sharedPerThread);
             if (blockSize < 1)                blockSize = 1;
-            if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap)     blockSize = blockSizeCap;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // calculateDiscreteModelAvgPeaksCUDA: интегрирование и фичи в одном ядре.
@@ -6179,8 +6240,9 @@ struct ParametricEngine::Impl {
             BAS_CANCEL_CHECK();
         }
 
-        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan)
-        int blockSize_db = blockSize_setup;
+        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan).
+        // Динамической shared у dbscan-ядер нет — настройка идёт как есть.
+        int blockSize_db = launch_block_size(0);
         int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
         int amountOfData_int = (int)total_cells;
 
@@ -6395,7 +6457,7 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
 
-        constexpr int blockSize_setup = 32;
+        // Ширина запуска dbscan-ядер — из настройки (launch_block_size ниже).
         const double eps_dbscan = req.eps_dbscan;
 
         int*    d_helpfulArray      = nullptr;
@@ -6452,7 +6514,7 @@ struct ParametricEngine::Impl {
         BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
         BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        const int blockSize_db = blockSize_setup;
+        const int blockSize_db = launch_block_size(0);   // dbscan-ядра без динамической shared
         const int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
         const int amountOfData_int = (int)total_cells;
 
@@ -7127,7 +7189,7 @@ struct ParametricEngine::Impl {
                     &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i,
                     &d_cancel_arg, &d_progress_arg
                 };
-                int blockSize = 32;
+                int blockSize = launch_block_size(0);   // fs_attr без динамической shared
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
                 CUresult r = cuLaunchKernel(cached_fs_attr.kernel_fs_traj,
                                             gridSize, 1, 1, blockSize, 1, 1,
@@ -7356,7 +7418,7 @@ struct ParametricEngine::Impl {
                     &icRandom_int, &icEps_arg, &icSeed_arg, &gsWarmup_int
                     ,&d_cancel_arg, &d_progress_arg, &progressStride_arg
                 };
-                int blockSize = 32;
+                int blockSize = launch_block_size((size_t)(amountOfIC_int + amountOfValues_int) * sizeof(numb));
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
                 // Shared memory: kernel объявляет `extern __shared__ numb s[]` и кладёт туда
                 // localX[amountOfIC] + localValues[amountOfValues] на поток, т.е. blockSize × (IC +

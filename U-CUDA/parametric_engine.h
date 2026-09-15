@@ -76,6 +76,42 @@ uint64_t   peak_config_epoch();
 void set_nvrtc_fmad(bool enabled);
 bool get_nvrtc_fmad();
 
+// Ширина блока запуска (threads/block) для расчётных ядер. В отличие от PeakConfig и --fmad,
+// на PTX не влияет вовсе — это только аргумент cuLaunchKernel, поэтому смена значения НЕ
+// инвалидирует кэши модулей и применяется со следующего Run без перекомпиляции.
+//
+// Зачем настройка, а не константа: оптимум зависит от карты (число SM, регистров на SM) и от
+// размера сетки, а замерить это можно только на месте. Ширина НЕ влияет на результат счёта —
+// только на скорость.
+//
+// Значение — ЗАПРОС, а не приказ: каждый запуск дополнительно режет его под свой бюджет
+// динамической shared-памяти (launch_block_size в parametric_engine.cpp), иначе широкая
+// система не влезла бы в 48 КБ на блок и запуск падал бы на CUDA_ERROR_INVALID_VALUE.
+constexpr int kGpuBlockSizeMin     = 32;
+constexpr int kGpuBlockSizeMax     = 1024;
+// 32 — измеренный оптимум, а не наследство. Замер (RTX 2060 sm_75, 30 SM, Рёсслер RK4,
+// LLE/LS/слитая бифуркация, сетки 1e3..6.4e4 точек, ширины 32..256):
+//   - на КРУПНОЙ сетке (>= 6.4e4) все ширины в пределах +-7%, то есть безразличны;
+//   - на МЕЛКОЙ (1e3) широкий блок проигрывает до 2.5x: сетка из nPts/block блоков просто
+//     не покрывает 30 SM (при 256 это 4 блока на 30 мультипроцессоров);
+//   - потолок занятости здесь задают РЕГИСТРЫ (76-85 на поток -> ~26 варпов/SM), а не лимит
+//     блоков на SM, поэтому расширение блока и не может ничего выиграть.
+// Менять имеет смысл на другой карте — для того настройка и выведена в Settings.
+constexpr int kGpuBlockSizeDefault = 32;
+
+// Приводит к кратному варпу и в допустимый диапазон. Вызывать после любого внешнего ввода
+// (виджет Settings, _app_config.json) — set_gpu_block_size делает это сам.
+inline int clamp_gpu_block_size(int threads) {
+    threads = (threads / 32) * 32;
+    if (threads < kGpuBlockSizeMin) threads = kGpuBlockSizeMin;
+    if (threads > kGpuBlockSizeMax) threads = kGpuBlockSizeMax;
+    return threads;
+}
+
+// Потокобезопасны: пишет UI-поток (Settings), читают worker'ы при запуске ядер.
+void set_gpu_block_size(int threads);
+int  get_gpu_block_size();
+
 // Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point, 0 = unbound,
 // 1 = oscillation. Контракт flags[] по типам расчёта:
 //   Bif1D / Bif2D / DFT  — СЫРОЙ выход peakFinder / DBSCAN: -1 = FP, 0 = unbound,

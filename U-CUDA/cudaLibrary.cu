@@ -2561,6 +2561,76 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 	return sqrt(dx*dx + dy*dy);
 }
 
+// КВАДРАТ расстояния — для сравнения с порогом, где корень не нужен.
+// Единственный потребитель — внутренний цикл dbscan(): там это сравнение выполняется
+// O(P^2) раз на ячейку, а numb = double, и на потребительских картах FP64-sqrt идёт
+// по 1/32 от FP32. Замер (RTX 2060, Рёсслер, сетка 96x96, ~366 пиков на ячейку):
+// один только отказ от корня даёт 1.41x всему ядру dbscan.
+//
+// Сравнение `d*d < eps*eps` эквивалентно `sqrt(d*d) < eps` математически, но не
+// побитово: на самой границе, где расстояние отличается от eps в последнем разряде,
+// округление sqrt может решить иначе. На замере (>10^9 сравнений, оба режима —
+// и mult_interval = 0, и 2D с mult_interval = 4) число кластеров совпало во всех
+// ячейках. eps здесь и так пользовательский допуск, а не физическая константа.
+__device__ __host__ __forceinline__ numb distance2(numb x1, numb y1, numb x2, numb y2)
+{
+	const numb dx = x2 - x1;
+	const numb dy = y2 - y1;
+	return dx*dx + dy*dy;
+}
+
+// Просеивание вниз для ucuda_heapsort.
+__device__ __host__ __forceinline__ void ucuda_sift_down(numb* a, int root, int n)
+{
+	for (;;) {
+		int child = 2 * root + 1;
+		if (child >= n) break;
+		if (child + 1 < n && a[child] < a[child + 1]) ++child;
+		if (!(a[root] < a[child])) break;
+		const numb t = a[root]; a[root] = a[child]; a[child] = t;
+		root = child;
+	}
+}
+
+// Пирамидальная сортировка по возрастанию. Выбрана из-за трёх свойств, каждое из
+// которых здесь обязательно: на месте (лишней памяти на поток нет), гарантированные
+// O(n log n) БЕЗ худшего случая (в отличие от быстрой сортировки: ряд пиков почти
+// упорядочен кусками, и quicksort с наивным опорным съехал бы в O(n^2) — ровно туда,
+// откуда мы уходим), и никакой рекурсии (стек на поток в CUDA дорог).
+__device__ __host__ void ucuda_heapsort(numb* a, int n)
+{
+	for (int start = n / 2 - 1; start >= 0; --start) ucuda_sift_down(a, start, n);
+	for (int end = n - 1; end > 0; --end) {
+		const numb t = a[0]; a[0] = a[end]; a[end] = t;
+		ucuda_sift_down(a, 0, end);
+	}
+}
+
+// Число связных компонент eps-графа для ОДНОМЕРНОГО набора точек.
+//
+// Это не эвристика, а точный ответ той же задачи, что решает общий обход в dbscan():
+// связность там транзитивная и порога minPts нет, то есть кластеры — это компоненты
+// связности графа «расстояние < eps» (одиночная связь). В одномерии такие компоненты
+// это в точности максимальные отрезки отсортированного ряда, внутри которых соседние
+// значения ближе eps. Значит, достаточно отсортировать и посчитать разрывы.
+//
+// Отсюда O(P log P) вместо O(P^2): при P = 2500 это ~56 тысяч операций против
+// 6.25 миллионов.
+//
+// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов.
+// Сравнение `!(gap < eps)` повторяет порог общего пути ровно, включая строгость.
+__device__ __host__ int ucuda_components_1d(const numb* values, numb* scratch,
+	const int amountOfPeaks, const numb eps)
+{
+	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i];
+	ucuda_heapsort(scratch, amountOfPeaks);
+
+	int clusters = 1;
+	for (int i = 1; i < amountOfPeaks; ++i)
+		if (!(scratch[i] - scratch[i - 1] < eps)) ++clusters;
+	return clusters;
+}
+
 // Функция DBSCAN
 __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	const size_t startDataIndex, const int amountOfPeaks, const int sizeOfHelpfulArray,
@@ -2605,11 +2675,32 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
 	}
 
+	// Одномерный случай. Нулевой множитель схлопывает свою ось в константу, и
+	// расстояние вырождается в модуль разности по второй оси — а это задача, которую
+	// ucuda_components_1d решает сортировкой за O(P log P) вместо O(P^2).
+	//
+	// Случай не экзотический, а ДЕФОЛТНЫЙ: mult_interval = 0 в configCUDA.h, то есть
+	// период по умолчанию меряется только по значениям пиков, межпиковый интервал не
+	// участвует. Когда нулевые оба множителя, все точки садятся в начало координат —
+	// ветка отвечает «один кластер», что и есть верный ответ.
+	//
+	// scratch — helpfulArray: обход сюда не заходит, значит метки и стек не нужны, а
+	// места (sizeOfHelpfulArray >= amountOfPeaks) хватает с запасом. Сами буферы пиков
+	// не трогаем: сортируется копия.
+	if (multPeak == 0 || multInterval == 0) {
+		const numb* axis = (multInterval == 0) ? (data + startDataIndex)
+		                                       : (intervals + startDataIndex);
+		return ucuda_components_1d(axis, helpfulArray + hBase, amountOfPeaks, eps);
+	}
+
 	// Ёмкость стека обхода. Пока инвариант про две половины helpfulArray
 	// выполняется, sp < stackCap истинно всегда и проверка ничего не меняет;
 	// если инвариант когда-нибудь сломается, мы потеряем соседа вместо записи
 	// в ячейку соседней системы.
 	const int stackCap = sizeOfHelpfulArray - amountOfPeaks;
+
+	// Порог сравниваем в квадрате — см. distance2.
+	const numb eps2 = eps * eps;
 
 	// Обход: каждая непосещённая точка заводит кластер и разворачивается до
 	// опустошения стека.
@@ -2631,10 +2722,24 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 		int sp  = 0;    // глубина стека
 		int cur = i;    // точка, соседей которой разворачиваем
 		for (;;) {
-			for (int k = 0; k < amountOfPeaks - 1; k++) {
+			// Координаты cur инвариантны по всему внутреннему циклу, но сами по себе из
+			// глобальной памяти не выносятся: data, intervals и helpfulArray — все numb*,
+			// компилятор обязан считать их потенциально алиасящимися, а цикл в helpfulArray
+			// ПИШЕТ. Из-за этого обе координаты перечитывались на каждой итерации — две
+			// лишние загрузки из DRAM на сравнение. Явные локальные копии это снимают
+			// (замер: 1.18x всему ядру dbscan при ~366 пиках на ячейку).
+			const numb curX = data[startDataIndex + cur];
+			const numb curY = intervals[startDataIndex + cur];
+			// k идёт по ВСЕМ пикам. Раньше стояло `k < amountOfPeaks - 1`: последний пик
+			// не мог стать ничьим соседом, всегда заводил собственный кластер, и это
+			// компенсировалось вычитанием единицы из ответа. Компенсация давала верное
+			// число только когда последний пик был изолирован; если он примыкал к уже
+			// найденному кластеру — период завышался на единицу, а если СВЯЗЫВАЛ два
+			// кластера — ещё и мешал им слиться.
+			for (int k = 0; k < amountOfPeaks; k++) {
 				if (cur == k || helpfulArray[hBase + k] != 0) continue;
-				if (distance(data[startDataIndex + cur], intervals[startDataIndex + cur],
-					data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
+				if (distance2(curX, curY,
+					data[startDataIndex + k], intervals[startDataIndex + k]) < eps2) {
 					helpfulArray[hBase + k] = cluster;
 					if (sp < stackCap)
 						helpfulArray[hBase + amountOfPeaks + sp++] = (numb)k;
@@ -2645,12 +2750,9 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 		}
 	}
 
-	// Последний пик из внутренних циклов исключён (k < amountOfPeaks - 1), поэтому
-	// соседом он не становится никогда и на последней итерации всегда заводит
-	// собственный кластер — его и вычитает "- 1". Оставлено как было: это вопрос
-	// к самому алгоритму, а не к очереди. Зато теперь компенсация ТОЧНА: раньше
-	// она была верна лишь тогда, когда обход к этому моменту успевал опустеть.
-	return cluster - 1;
+	// Возвращаем число кластеров как есть. Прежнее "- 1" компенсировало исключение
+	// последнего пика из внутренних циклов; теперь исключения нет, и вычитать нечего.
+	return cluster;
 }
 
 // Глобальная функция DBSCAN

@@ -332,11 +332,13 @@ int main() {
         model.peak = app_cfg.peak;
         clamp_peak_config(model.peak);
         model.nvrtc_fmad = app_cfg.nvrtc_fmad;
+        model.gpu_block_size = clamp_gpu_block_size(app_cfg.gpu_block_size);
     }
     // Пушим до первого Run: движок создаётся лениво, а конфиг глобальный и
     // должен быть актуален уже на самой первой компиляции NVRTC.
     set_peak_config(model.peak);
     set_nvrtc_fmad(model.nvrtc_fmad);
+    set_gpu_block_size(model.gpu_block_size);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
 

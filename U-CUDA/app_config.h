@@ -80,6 +80,10 @@ struct AppConfig {
     // не меняется. Одно значение на приложение — раздельные флаги по типам
     // расчёта вернули бы рассогласование карты и портрета.
     bool nvrtc_fmad = true;
+
+    // Ширина блока запуска CUDA-ядер (см. set_gpu_block_size). На результат не влияет
+    // вообще — только на скорость; конфиг без ключа читается как kGpuBlockSizeDefault.
+    int gpu_block_size = kGpuBlockSizeDefault;
 };
 
 // Загружает `_app_config.json` из `dir` (директория exe). Если файл
