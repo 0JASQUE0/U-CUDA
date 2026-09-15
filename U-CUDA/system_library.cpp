@@ -150,6 +150,7 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_semp", r.scheme_semp);
     kvbool(o, "scheme_simp", r.scheme_simp);
     kvbool(o, "scheme_d", r.scheme_dmethod);
+    kvbool(o, "scheme_cieuler", r.scheme_cieuler);
     kvbool(o, "newton_full", r.newton_full);
     kv(o, "newton_tol", r.newton_tol);
     kv(o, "newton_max_iters", r.newton_max_iters);
@@ -196,6 +197,7 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_semp") r.scheme_semp = p.parse_bool();
         else if (key == "scheme_simp") r.scheme_simp = p.parse_bool();
         else if (key == "scheme_d") r.scheme_dmethod = p.parse_bool();
+        else if (key == "scheme_cieuler") r.scheme_cieuler = p.parse_bool();
         else if (key == "newton_full") r.newton_full = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();

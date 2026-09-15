@@ -152,6 +152,10 @@ public:
     // D: та же диагонально-неявная стадия, но как самостоятельный шаг на
     // полный h — метод первого порядка, a[0] не читает.
     bool scheme_dmethod = false;
+    // Complex Implicit Euler: композиция двух неявных Эйлеров с сопряжёнными
+    // комплексными шагами tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0].
+    // Порядок 2 только при s = 0.5 — коэффициенты вынуждены, см. codegen.hpp.
+    bool scheme_cieuler = false;
 
     // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
     bool        newton_full      = false;
@@ -508,6 +512,7 @@ public:
                 { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },
                 { scheme_semp,     "SEMP",              Scheme::SEMP },
                 { scheme_simp,     "SIMP",              Scheme::SIMP },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },

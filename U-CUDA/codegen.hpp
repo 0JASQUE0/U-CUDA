@@ -56,8 +56,20 @@ struct System {
 // D — диагонально-неявный метод первого порядка: стадия SIMP (она же Phi* из CD)
 // как самостоятельный шаг, но на полный h. Прямой порядок по компонентам,
 // каждое уравнение решается относительно своей переменной; a[0] не читает.
+// Complex Implicit Euler — композиция ДВУХ неявных Эйлеров с сопряжёнными
+// комплексными шагами: tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0]
+// (тот же слот симметрии, что у CD). При s = 1/2 шаги комплексно-сопряжены,
+// tau1 = h*(1+i)/2 и tau2 = conj(tau1).
+// Почему именно эти коэффициенты: композиция метода первого порядка с самим
+// собой поднимается до второго ровно при tau1 + tau2 = h и tau1^2 + tau2^2 = 0.
+// Подставив tau1 = h*u, получаем u^2 + (1-u)^2 = 0, то есть u = (1 +- i)/2 —
+// решение ЕДИНСТВЕННОЕ с точностью до сопряжения, свободных параметров у
+// метода нет. Отклонение s от 1/2 оставляет у h^2-члена вещественную часть
+// (её Re уже не убирает), и порядок падает до первого — ровно как у CD.
+// Шаг целиком считается в ucmplx, наружу пишется Re; мнимая часть живёт
+// внутри одного шага и в следующий не переносится.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D };
+                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
@@ -117,6 +129,11 @@ public:
     // Jacobian J[i*dim + j] = df_i/dx_j (X, a), row-major [dim*dim]. Same symbolic
     // derivatives the GPU scheme emits, so the CPU integrator runs the same algorithm.
     void eval_jacobian(const double* X, const double* a, double* J) const;
+
+    // То же самое по тому же байткоду, но в комплексной арифметике — нужен
+    // Complex Implicit Euler, у которого и состояние, и шаг комплексные.
+    // Параметры a[] остаются вещественными.
+    void eval_jacobian_complex(const ucmplx* Z, const double* a, ucmplx* J) const;
 
     // Newton settings carried over from the System this evaluator was built from —
     // exposed here so computePhasePortraitCPU needs no extra parameters.

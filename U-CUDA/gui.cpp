@@ -214,6 +214,7 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 [[nodiscard]] static bool scheme_uses_symmetry(const std::string& scheme_name,
                                          const std::vector<CustomScheme>& custom_schemes) {
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+        || scheme_name == "Complex Implicit Euler"
         || scheme_name == "SEMP" || scheme_name == "SIMP"
         || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
 }
@@ -406,6 +407,7 @@ static const BuiltinScheme kBuiltinSchemes[] = {
     { "Implicit Midpoint", 2 },
     { "CD",                2 },
     { "Complex CD",        2 },
+    { "Complex Implicit Euler", 2 },
     { "SEMP",              2 },
     { "SIMP",              2 },
     { "RK4",               4 },
@@ -1546,6 +1548,19 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                           "s = a[0] is the same symmetry coefficient as in CD.\n"
                           "The step is evaluated in complex arithmetic; only Re is kept.\n"
                           "At s = 0.5 (default) the half-steps are conjugate and order is 2.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Complex Implicit Euler", &model.scheme_cieuler);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Composition of TWO implicit Euler steps with conjugate\n"
+                          "complex steps: tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2),\n"
+                          "s = a[0], the same symmetry slot as CD. Each half-step is a\n"
+                          "full Newton solve on the symbolic Jacobian, in complex\n"
+                          "arithmetic; Re is taken once at the end.\n"
+                          "The coefficients are forced, not tuned: composing a first-\n"
+                          "order method to second order needs tau1 + tau2 = h AND\n"
+                          "tau1^2 + tau2^2 = 0, whose only solution is (1 +- i)/2.\n"
+                          "Order 2 at s = 0.5 only; elsewhere the h^2 term keeps a real\n"
+                          "part that Re does not remove and the order drops to 1.");
     ImGui::SameLine();
     ImGui::Checkbox("SEMP", &model.scheme_semp);
     if (ImGui::IsItemHovered())
