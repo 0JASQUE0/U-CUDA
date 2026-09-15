@@ -712,6 +712,7 @@ void AppModel::push_undo(std::string description, std::function<void()> undo,
     // Запись держит прежние значения полей, а не всю сессию, поэтому 200 штук
     // на вкладку стоят копейки.
     while (st.size() > kUndoDepth) st.pop_front();
+    undo_just_happened = false;
     // Новая команда обрывает ветку повтора — как в любом редакторе: вернуть
     // отменённое после того, как поверх сделали другое, уже некуда.
     redo_stacks[app_mode].clear();
@@ -739,13 +740,17 @@ bool pop_apply_move(std::map<AppModel::AppMode, std::deque<UndoRecord>>& from,
 } // namespace
 
 bool AppModel::undo_last() {
-    return pop_apply_move(undo_stacks, redo_stacks, app_mode, /*forward*/false,
-                          "Undone", undo_note);
+    const bool ok = pop_apply_move(undo_stacks, redo_stacks, app_mode, /*forward*/false,
+                                   "Undone", undo_note);
+    if (ok) undo_just_happened = true;
+    return ok;
 }
 
 bool AppModel::redo_last() {
-    return pop_apply_move(redo_stacks, undo_stacks, app_mode, /*forward*/true,
-                          "Redone", undo_note);
+    const bool ok = pop_apply_move(redo_stacks, undo_stacks, app_mode, /*forward*/true,
+                                   "Redone", undo_note);
+    if (ok) undo_just_happened = true;
+    return ok;
 }
 
 const std::string* AppModel::undo_top() const {

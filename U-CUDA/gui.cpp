@@ -1027,33 +1027,6 @@ template <class T>
     return fmt_num_shortest(v);
 }
 
-// swapped — включённый HeatmapView::swap_axes. Вью после свапа живёт в
-// ВИЗУАЛЬНЫХ координатах: x_axis.view_min/max тогда описывают ось ДАННЫХ Y и
-// наоборот (имена осей при этом не свапаются — см. heatmap_view.cpp, шаг 0).
-// Без этой перестановки Ctrl+T на свапнутой карте писал бы диапазоны крест-накрест.
-static void apply_view_range(const ViewRangeTarget& t, const AxisInfo& x, const AxisInfo& y,
-                             bool swapped) {
-    const AxisInfo& ax = swapped ? y : x;   // ось ДАННЫХ X
-    const AxisInfo& ay = swapped ? x : y;   // ось ДАННЫХ Y
-    // invert — только про отрисовку, view_min/view_max остаются упорядоченными;
-    // min/max здесь страховка от конфига, пришедшего из чужой руки.
-    if (t.x_lo && t.x_hi) {
-        const double span = ax.view_max - ax.view_min;
-        const double lo = (std::min)(ax.view_min, ax.view_max);
-        const double hi = (std::max)(ax.view_min, ax.view_max);
-        *t.x_lo = fmt_view_bound(lo, span);
-        *t.x_hi = fmt_view_bound(hi, span);
-    }
-    if (t.y_lo && t.y_hi) {
-        const double span = ay.view_max - ay.view_min;
-        const double lo = (std::min)(ay.view_min, ay.view_max);
-        const double hi = (std::max)(ay.view_min, ay.view_max);
-        *t.y_lo = fmt_view_bound(lo, span);
-        *t.y_hi = fmt_view_bound(hi, span);
-        if (t.y_manual) *t.y_manual = true;
-    }
-}
-
 // Все диаграммы приложения, у которых есть диапазоны свипа. Нужен Ctrl+Shift+T
 // (взять все цели того же типа) и списку галочек в меню диаграммы.
 // Порядок — как во вкладках; на нём же строится маска выбора.
@@ -1177,9 +1150,63 @@ view_range_same_kind(AppModel& model, const ViewRangeTarget& source) {
 
 // Применяет диапазон к первым count целям ОДНОЙ командой: в стек отмены уходит
 // одна запись на нажатие, а не по одной на каждую диаграмму окна.
+// Что именно раскладывается по целям. Считается ОДИН раз: у всех целей
+// значения одинаковые, различается только набор полей, куда они лягут.
+struct ViewRangeValues {
+    bool has_x = false; std::string x_lo, x_hi;
+    bool has_y = false; std::string y_lo, y_hi;
+    const char* source = "view";   // для подписи в стеке отмены
+};
+
+// swapped — включённый HeatmapView::swap_axes. Вью после свапа живёт в
+// ВИЗУАЛЬНЫХ координатах: x_axis.view_min/max тогда описывают ось ДАННЫХ Y и
+// наоборот (имена осей при этом не свапаются — см. heatmap_view.cpp, шаг 0).
+// Без этой перестановки на свапнутой карте диапазоны писались бы крест-накрест.
+[[nodiscard]] static ViewRangeValues values_from_axes(const AxisInfo& x, const AxisInfo& y,
+                                                      bool swapped) {
+    const AxisInfo& ax = swapped ? y : x;   // ось ДАННЫХ X
+    const AxisInfo& ay = swapped ? x : y;   // ось ДАННЫХ Y
+    // invert — только про отрисовку, view_min/view_max остаются упорядоченными;
+    // min/max здесь страховка от конфига, пришедшего из чужой руки.
+    ViewRangeValues v;
+    {
+        const double span = ax.view_max - ax.view_min;
+        v.has_x = true;
+        v.x_lo = fmt_view_bound((std::min)(ax.view_min, ax.view_max), span);
+        v.x_hi = fmt_view_bound((std::max)(ax.view_min, ax.view_max), span);
+    }
+    {
+        const double span = ay.view_max - ay.view_min;
+        v.has_y = true;
+        v.y_lo = fmt_view_bound((std::min)(ay.view_min, ay.view_max), span);
+        v.y_hi = fmt_view_bound((std::max)(ay.view_min, ay.view_max), span);
+    }
+    return v;
+}
+
+// Значения ИЗ ПОЛЕЙ цели. Нужно после Ctrl+Z: отмена вернула поля, а картинка
+// осталась зумленной, и рассылка "из вида" затёрла бы только что
+// восстановленное тем, что осталось на экране.
+[[nodiscard]] static ViewRangeValues values_from_target(const ViewRangeTarget& t) {
+    ViewRangeValues v;
+    v.source = "fields";
+    if (t.x_lo && t.x_hi) { v.has_x = true; v.x_lo = *t.x_lo; v.x_hi = *t.x_hi; }
+    if (t.y_lo && t.y_hi) { v.has_y = true; v.y_lo = *t.y_lo; v.y_hi = *t.y_hi; }
+    return v;
+}
+
+// Пишет значения в одну цель. Ось, которой у цели нет, не трогается — так 2D
+// диапазон можно разложить и по 1D-диаграммам, не выдумывая им вторую ось.
+static void apply_view_values(const ViewRangeTarget& t, const ViewRangeValues& v) {
+    if (v.has_x && t.x_lo && t.x_hi) { *t.x_lo = v.x_lo; *t.x_hi = v.x_hi; }
+    if (v.has_y && t.y_lo && t.y_hi) {
+        *t.y_lo = v.y_lo; *t.y_hi = v.y_hi;
+        if (t.y_manual) *t.y_manual = true;
+    }
+}
+
 static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size_t count,
-                               const AxisInfo& x, const AxisInfo& y, bool swapped,
-                               AppModel* model) {
+                               const ViewRangeValues& vals, AppModel* model) {
     if (targets.empty()) return;
     count = (std::min)(count, targets.size());
 
@@ -1215,7 +1242,7 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
         const ViewRangeTarget& t = targets[i];
         Snap p = capture(t);
         if (p.relocate && (p.has_x || p.has_y)) before.push_back(std::move(p));
-        apply_view_range(t, x, y, swapped);
+        apply_view_values(t, vals);
     }
     if (!model || before.empty()) return;
     // "После" снимаем по тем же целям и уже после записи — так повтор кладёт
@@ -1225,7 +1252,7 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
         if (p.relocate && (p.has_x || p.has_y)) after.push_back(std::move(p));
     }
 
-    std::string what = "calculation range from view";
+    std::string what = std::string("calculation range from ") + vals.source;
     if (count > 1)                     what += " (" + std::to_string((int)count) + " diagrams)";
     else if (!targets[0].name.empty()) what += " (" + targets[0].name + ")";
     model->push_undo(std::move(what), writer(std::move(before)), writer(std::move(after)));
@@ -1244,7 +1271,7 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
     std::string one = "Calculation range from view";
     if (targets.size() > 1) one += " (" + targets[0].name + ")";
     if (ImGui::MenuItem(one.c_str(), "Ctrl+T"))
-        run_view_range_cmd(targets, 1, x, y, swapped, model);
+        run_view_range_cmd(targets, 1, values_from_axes(x, y, swapped), model);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Writes the visible axis range into this diagram's sweep\n"
                           "range fields. Press Run to recompute the zoomed region\n"
@@ -1256,11 +1283,24 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
     if (model) {
         std::vector<ViewRangeTarget> kin = view_range_same_kind(*model, targets[0]);
         if (kin.size() > 1) {
-            char lbl[128];
-            std::snprintf(lbl, sizeof(lbl), "Calculation range from view - all %s (%d)",
+            // Сразу после Ctrl+Z / Ctrl+Shift+Z источником становятся ПОЛЯ, а
+            // не вид: поля только что откатили, картинка осталась зумленной, и
+            // разослать "из вида" значило бы отменить отмену. Пишем это прямо
+            // в пункте меню — угадывать источник пользователь не должен.
+            const bool from_fields = model->undo_just_happened;
+            char lbl[160];
+            std::snprintf(lbl, sizeof(lbl), "Calculation range from %s - all %s (%d)",
+                          from_fields ? "fields" : "view",
                           kin[0].kind.c_str(), (int)kin.size());
-            if (ImGui::MenuItem(lbl, "Ctrl+Shift+T"))
-                run_view_range_cmd(kin, kin.size(), x, y, swapped, model);
+            if (ImGui::MenuItem(lbl, "Ctrl+Shift+T")) {
+                const ViewRangeValues v = from_fields ? values_from_target(kin[0])
+                                                      : values_from_axes(x, y, swapped);
+                run_view_range_cmd(kin, kin.size(), v, model);
+            }
+            if (from_fields && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Undo just restored the sweep fields, so this sends\n"
+                                  "THOSE values on. The plot is still zoomed; sending the\n"
+                                  "view instead would undo the undo.");
         }
 
         // Точный выбор галочками — для случаев, когда "тот же тип" не тот набор:
@@ -1291,7 +1331,10 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
             std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
             if (sel.empty()) ImGui::BeginDisabled();
             if (ImGui::Button(btn)) {
-                run_view_range_cmd(sel, sel.size(), x, y, swapped, model);
+                const ViewRangeValues v = model->undo_just_happened
+                                        ? values_from_target(targets[0])
+                                        : values_from_axes(x, y, swapped);
+                run_view_range_cmd(sel, sel.size(), v, model);
                 ImGui::CloseCurrentPopup();
             }
             if (sel.empty()) ImGui::EndDisabled();
@@ -1332,11 +1375,15 @@ static void handle_view_range_keys(const std::vector<ViewRangeTarget>& targets,
         // источник в общем перечислении не нашёлся, падаем на прежнее
         // поведение — наложенные в этом окне диаграммы.
         std::vector<ViewRangeTarget> kin = view_range_same_kind(*model, targets[0]);
-        if (!kin.empty()) { run_view_range_cmd(kin, kin.size(), x, y, swapped, model); return; }
-        run_view_range_cmd(targets, targets.size(), x, y, swapped, model);
+        const std::vector<ViewRangeTarget>& dst = kin.empty() ? targets : kin;
+        // Сразу после отката источник — поля, а не вид (см. меню).
+        const ViewRangeValues v = model->undo_just_happened
+                                ? values_from_target(dst[0])
+                                : values_from_axes(x, y, swapped);
+        run_view_range_cmd(dst, dst.size(), v, model);
         return;
     }
-    run_view_range_cmd(targets, io.KeyShift ? targets.size() : 1, x, y, swapped, model);
+    run_view_range_cmd(targets, 1, values_from_axes(x, y, swapped), model);
 }
 
 // Окно диаграммы под курсором — общее условие хоткея выше. Берём именно
@@ -10685,18 +10732,6 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                               "Running an analysis and switching systems will overwrite the file.");
     }
 
-    // Что сделал последний Ctrl+Z / Ctrl+Shift+Z. Держим несколько секунд:
-    // "Apply to all calculation tabs" правит и невидимые сейчас вкладки, и без
-    // строки в шапке откат выглядел бы как "ничего не произошло".
-    if (!model.undo_note.empty()) {
-        if (ImGui::GetTime() - model.undo_note_time > 4.0) {
-            model.undo_note.clear();
-        } else {
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", model.undo_note.c_str());
-        }
-    }
-
     // Индикатор компьюта — справа по границе окна, виден во всех режимах. Layout:
     // [text] [progress bar] [Stop] для отменяемых сессий, только [text] для phase и для
     // персистентного "Done/Cancelled". Stop заодно осушает parametric_queue и basins_queue,
@@ -10973,6 +11008,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::EndCombo();
         }
         if (any_in_flight) ImGui::EndDisabled();
+
+        // Что сделала последняя массовая команда / Ctrl+Z / Ctrl+Shift+Z.
+        // Держим несколько секунд: "Apply to..." правит и невидимые сейчас
+        // вкладки, и без строки в шапке это неотличимо от "ничего не произошло".
+        //
+        // Рисуем СТРОГО ПОСЛЕ комбо. Раньше строка стояла между рядом вкладок и
+        // комбо и ломала ему раскладку: край ряда (mode_tabs_end_x) снимается
+        // ДО неё, а комбо центрируется абсолютным SetCursorPosX — длинное
+        // сообщение заезжало ровно туда, куда становится комбо. Здесь же оно
+        // занимает свободное место справа и ни на что не влияет.
+        if (!model.undo_note.empty()) {
+            if (ImGui::GetTime() - model.undo_note_time > 4.0) {
+                model.undo_note.clear();
+            } else {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", model.undo_note.c_str());
+            }
+        }
     }
     // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать сессию. Init идёт,
     // когда: 1) система сменилась относительно той, для которой собиралась session; 2) session ещё
