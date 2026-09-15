@@ -11287,6 +11287,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
+            cfg.gpu_block_size         = m.gpu_block_size;
             cfg.hidden_tabs            = m.hidden_tabs;
             cfg.hidden_schemes         = m.hidden_schemes;
             save_app_config(get_exe_dir_with_sep(), cfg);
@@ -11643,6 +11644,34 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 "on fractal basin boundaries they may differ visibly. The value in");
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                 "effect at Run time is written into every exported _config.csv.");
+
+            // GPU launch width. В отличие от FMA и peak-knobs, на результат не влияет вовсе:
+            // это аргумент cuLaunchKernel, а не опция компиляции, поэтому кэши модулей не
+            // инвалидируются и перекомпиляции нет — новое значение действует со следующего Run.
+            ImGui::Separator();
+            ImGui::Text("GPU launch width");
+            ImGui::TextDisabled("Threads per CUDA block. Affects speed only, never the numbers:");
+            ImGui::TextDisabled("kernels are not recompiled, the new value applies on the next Run.");
+
+            // Значения кратны варпу. Ширину сверх этого списка не предлагаем: за 256 занятость
+            // упирается в регистры, а shared-бюджет режет блок обратно (см. launch_block_size).
+            static const int kWidths[]      = { 32, 64, 96, 128, 192, 256 };
+            static const char* kWidthNames[] = { "32 (default)", "64", "96", "128", "192", "256" };
+            int widthIdx = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(kWidths); ++i)
+                if (kWidths[i] == model.gpu_block_size) { widthIdx = i; break; }
+            if (ImGui::Combo("Threads per block##gpu_block_size", &widthIdx, kWidthNames, IM_ARRAYSIZE(kWidthNames))) {
+                model.gpu_block_size = clamp_gpu_block_size(kWidths[widthIdx]);
+                set_gpu_block_size(model.gpu_block_size);
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Measured on a 30-SM Turing card: on large grids every width is");
+            ImGui::TextDisabled("within a few percent, while on small 1D sweeps a wide block");
+            ImGui::TextDisabled("leaves most SMs idle and loses up to 2.5x. Occupancy here is");
+            ImGui::TextDisabled("capped by registers, not by blocks per SM, so 32 is a fine");
+            ImGui::TextDisabled("default -- try wider only on a different GPU.");
+            ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
+            ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
         }
         ImGui::End();
     }

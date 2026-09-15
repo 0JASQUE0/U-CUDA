@@ -427,6 +427,11 @@ public:
     // ключи кэшей модулей в обоих движках (см. parametric_engine.h).
     bool nvrtc_fmad = true;
 
+    // Ширина блока запуска CUDA-ядер. Зеркалит AppConfig::gpu_block_size; Settings после
+    // правки пушит значение в set_gpu_block_size(). На РЕЗУЛЬТАТ не влияет — в отличие от
+    // nvrtc_fmad, кэши модулей не трогает и перекомпиляции не требует.
+    int gpu_block_size = kGpuBlockSizeDefault;
+
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 
