@@ -230,6 +230,7 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     // Отсутствие ключа оставляет дефолт true (= дефолт NVRTC), поэтому конфиг,
     // записанный до появления настройки, читается без изменения поведения.
     parse_bool_field  (body, "nvrtc_fmad",           out.nvrtc_fmad);
+    parse_bool_field  (body, "nvrtc_rdc",            out.nvrtc_rdc);
 
     // Как и nvrtc_fmad: отсутствие ключа оставляет дефолт. Кламп здесь, а не только в UI —
     // значение из файла могло быть поправлено руками (0, 100, 4096).
@@ -273,6 +274,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"hidden_tabs\": \""         << json_escape(join_csv(cfg.hidden_tabs))    << "\",\n";
         f << "  \"hidden_schemes\": \""      << json_escape(join_csv(cfg.hidden_schemes)) << "\",\n";
         f << "  \"nvrtc_fmad\": "           << (cfg.nvrtc_fmad ? "true" : "false") << ",\n";
+        f << "  \"nvrtc_rdc\": "            << (cfg.nvrtc_rdc ? "true" : "false") << ",\n";
         f << "  \"gpu_block_size\": "       << cfg.gpu_block_size << "\n";
         f << "}\n";
         if (!f) return false;

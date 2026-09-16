@@ -67,7 +67,7 @@ bool get_nvrtc_fmad()             { return g_nvrtc_fmad.load(std::memory_order_r
 // поведёт себя не так, как на проверенных: тогда движок собирает всё одной единицей трансляции,
 // как раньше. Хранится атомарно по той же причине, что и fmad.
 namespace {
-std::atomic<bool> g_nvrtc_rdc{ true };
+std::atomic<bool> g_nvrtc_rdc{ false };
 }  // namespace
 
 void set_nvrtc_rdc(bool enabled) { g_nvrtc_rdc.store(enabled, std::memory_order_relaxed); }
