@@ -10,10 +10,12 @@
 #include <windows.h>
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
+#include "module_lru.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -21,6 +23,7 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -114,6 +117,14 @@ bool gpu_free_budget(double reserve, size_t& out_bytes) {
 }  // namespace
 
 namespace {
+
+// par_or_var for a 2D sweep: 1 = both axes are parameters, 0 = both are initial conditions,
+// 2 = mixed. Kept as one helper because run_* and prewarm() must derive the same cache key.
+inline int par_or_var_2d(bool sweep_h_x, bool sweep_h_y, bool sweep_var_x, bool sweep_var_y) {
+    if (sweep_h_x || sweep_h_y) return (sweep_h_x ? sweep_var_y : sweep_var_x) ? 0 : 1;
+    if (sweep_var_x == sweep_var_y) return sweep_var_x ? 0 : 1;
+    return 2;
+}
 
 constexpr int kBlockSize         = 32;     // как в NonLinAnal::bifurcation1D
 constexpr int kMaxAmountOfX      = 32;
@@ -1596,143 +1607,134 @@ struct ParametricEngine::Impl {
     };
     CachedOrderModule cached_order;
 
+    // Every cached_* above is just a view on the active entry of its pool; the pool owns the
+    // modules. One slot per analysis type meant recompiling on every switch back to a scheme that
+    // had already been built minutes ago -- 6 seconds of NVRTC for nothing on an implicit scheme.
+    static constexpr std::size_t kModuleCacheCapacity = 4;
+
+    // Guards the pools and the active slots: background prewarming will make compile_* concurrent.
+    std::recursive_mutex cache_mu;
+
+    ModuleLru<CachedModule>            pool_bif1d     { kModuleCacheCapacity };
+    ModuleLru<CachedLleModule>         pool_lle       { kModuleCacheCapacity };
+    ModuleLru<CachedLleModule>         pool_lle_2d    { kModuleCacheCapacity };
+    ModuleLru<CachedLsModule>          pool_ls        { kModuleCacheCapacity };
+    ModuleLru<CachedLsModule>          pool_ls_2d     { kModuleCacheCapacity };
+    ModuleLru<CachedContModule>        pool_cont      { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_lle_cont  { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_ls_cont   { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_dft_cont  { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_dft_hsweep{ kModuleCacheCapacity };
+    ModuleLru<CachedBif2dModule>       pool_bif2d     { kModuleCacheCapacity };
+    ModuleLru<CachedBasinsModule>      pool_basins    { kModuleCacheCapacity };
+    ModuleLru<CachedFastSyncModule>    pool_fs_attr   { kModuleCacheCapacity };
+    ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
+    ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
+
+    // Activates the module already built for this key, if the pool still holds it.
+    template <class T>
+    bool cache_activate(ModuleLru<T>& pool, const std::string& key, T& active) {
+        if (active.module && active.key == key) return true;
+        return pool.take(key, active);
+    }
+
+    // Prewarm path: park the module in the pool WITHOUT touching the active slot -- a running
+    // task reads that slot from its own thread and must not see it change under it.
+    template <class T>
+    void cache_store(ModuleLru<T>& pool, const T& fresh, const std::string& pinned) {
+        std::vector<T> evicted;
+        pool.insert(fresh, pinned, evicted);
+        for (const T& e : evicted)
+            if (e.module) cuModuleUnload(e.module);
+    }
+
+    // Keys being compiled right now, so two threads asking for the same module (a prewarm and the
+    // Run that overtakes it) do not both pay NVRTC: the second waits and takes the pooled result.
+    std::set<std::string>            in_flight_keys;
+    std::condition_variable_any      compile_done;
+
+    // The shared body of every compile_*_if_needed. `build` does the slow NVRTC work and runs
+    // WITHOUT the lock held; `activate` distinguishes a real Run (needs the module in the active
+    // slot) from a prewarm (pool only).
+    template <class T, class Build>
+    bool compile_into(ModuleLru<T>& pool, const std::string& key, T& active,
+                      bool activate, Build&& build, std::string& err) {
+        std::unique_lock<std::recursive_mutex> lk(cache_mu);
+        for (;;) {
+            if (activate ? cache_activate(pool, key, active) : pool.contains(key)) return true;
+            if (in_flight_keys.insert(key).second) break;   // nobody else is building it: we do
+            // wait() drops ONE level of a recursive_mutex, so compile_* must never be reached
+            // with cache_mu already held -- it would wait here holding the lock and deadlock.
+            compile_done.wait(lk);                          // someone is: take their result
+        }
+        if (!load_sources(err)) {
+            in_flight_keys.erase(key);
+            compile_done.notify_all();
+            return false;
+        }
+
+        T fresh;
+        lk.unlock();
+        const bool ok = build(fresh);   // seconds of NVRTC, lock released
+        lk.lock();
+
+        in_flight_keys.erase(key);
+        compile_done.notify_all();
+        if (!ok) return false;
+        if (activate) cache_publish(pool, fresh, active);
+        else          cache_store(pool, fresh, active.key);
+        return true;
+    }
+
+    // Pins the PREVIOUS active entry while inserting: a running task may still hold its kernels,
+    // and evicting it would unload code from under a live launch.
+    template <class T>
+    void cache_publish(ModuleLru<T>& pool, const T& fresh, T& active) {
+        std::vector<T> evicted;
+        pool.insert(fresh, active.key, evicted);
+        for (const T& e : evicted)
+            if (e.module) cuModuleUnload(e.module);
+        active = fresh;
+    }
+
+    template <class T>
+    void drain_pool(ModuleLru<T>& pool) {
+        for (const T& e : pool.drain())
+            if (e.module) cuModuleUnload(e.module);
+    }
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
-            release_module();
-            release_lle_module();
-            release_lle_2d_module();
-            release_ls_module();
-            release_ls_2d_module();
-            release_cont_module();
-            release_bif2d_module();
-            release_basins_module();
-            release_fs_attr_module();
-            release_fs_grid_module();
-            release_order_module();
+            drain_pool(pool_bif1d);
+            drain_pool(pool_lle);
+            drain_pool(pool_lle_2d);
+            drain_pool(pool_ls);
+            drain_pool(pool_ls_2d);
+            drain_pool(pool_cont);
+            drain_pool(pool_lle_cont);
+            drain_pool(pool_ls_cont);
+            drain_pool(pool_dft_cont);
+            drain_pool(pool_dft_hsweep);
+            drain_pool(pool_bif2d);
+            drain_pool(pool_basins);
+            drain_pool(pool_fs_attr);
+            drain_pool(pool_fs_grid);
+            drain_pool(pool_order);
             cuCtxDestroy(context);
         }
     }
 
-    void release_fs_attr_module() {
-        if (cached_fs_attr.module) {
-            cuModuleUnload(cached_fs_attr.module);
-            cached_fs_attr.module         = nullptr;
-            cached_fs_attr.kernel_fs_fill = nullptr;
-            cached_fs_attr.kernel_fs_traj = nullptr;
-            cached_fs_attr.kernel_fs_grid = nullptr;
-            cached_fs_attr.key.clear();
-        }
-    }
-    void release_fs_grid_module() {
-        if (cached_fs_grid.module) {
-            cuModuleUnload(cached_fs_grid.module);
-            cached_fs_grid.module         = nullptr;
-            cached_fs_grid.kernel_fs_fill = nullptr;
-            cached_fs_grid.kernel_fs_traj = nullptr;
-            cached_fs_grid.kernel_fs_grid = nullptr;
-            cached_fs_grid.key.clear();
-        }
-    }
 
-    void release_order_module() {
-        if (cached_order.module) {
-            cuModuleUnload(cached_order.module);
-            cached_order.module = nullptr;
-            cached_order.kernel = nullptr;
-            cached_order.key.clear();
-        }
-    }
 
-    void release_module() {
-        if (cached.module) {
-            cuModuleUnload(cached.module);
-            cached.module = nullptr;
-            cached.kernel_traj = nullptr;
-            cached.kernel_peak = nullptr;
-            cached.kernel_fused = nullptr;
-            cached.kernel_dft = nullptr;
-            cached.key.clear();
-        }
-    }
 
-    void release_lle_module() {
-        if (cached_lle.module) {
-            cuModuleUnload(cached_lle.module);
-            cached_lle.module = nullptr;
-            cached_lle.kernel_lle = nullptr;
-            cached_lle.key.clear();
-        }
-    }
 
-    void release_lle_2d_module() {
-        if (cached_lle_2d.module) {
-            cuModuleUnload(cached_lle_2d.module);
-            cached_lle_2d.module = nullptr;
-            cached_lle_2d.kernel_lle = nullptr;
-            cached_lle_2d.key.clear();
-        }
-    }
 
-    void release_ls_module() {
-        if (cached_ls.module) {
-            cuModuleUnload(cached_ls.module);
-            cached_ls.module = nullptr;
-            cached_ls.kernel_ls = nullptr;
-            cached_ls.key.clear();
-        }
-    }
 
-    void release_ls_2d_module() {
-        if (cached_ls_2d.module) {
-            cuModuleUnload(cached_ls_2d.module);
-            cached_ls_2d.module = nullptr;
-            cached_ls_2d.kernel_ls = nullptr;
-            cached_ls_2d.key.clear();
-        }
-    }
 
-    void release_simple_cont_module(CachedSimpleContModule& m) {
-        if (m.module) {
-            cuModuleUnload(m.module);
-            m.module = nullptr;
-            m.kernel = nullptr;
-            m.key.clear();
-        }
-    }
 
-    void release_cont_module() {
-        if (cached_cont.module) {
-            cuModuleUnload(cached_cont.module);
-            cached_cont.module = nullptr;
-            cached_cont.kernel_cont = nullptr;
-            cached_cont.kernel_peak = nullptr;
-            cached_cont.kernel_dft = nullptr;
-            cached_cont.key.clear();
-        }
-    }
 
-    void release_bif2d_module() {
-        if (cached_bif2d.module) {
-            cuModuleUnload(cached_bif2d.module);
-            cached_bif2d.module        = nullptr;
-            cached_bif2d.kernel_fused  = nullptr;
-            cached_bif2d.kernel_dbscan = nullptr;
-            cached_bif2d.key.clear();
-        }
-    }
 
-    void release_basins_module() {
-        if (cached_basins.module) {
-            cuModuleUnload(cached_basins.module);
-            cached_basins.module              = nullptr;
-            cached_basins.kernel_fused        = nullptr;
-            cached_basins.kernel_dbscan       = nullptr;
-            cached_basins.kernel_search_fixed = nullptr;
-            cached_basins.kernel_search_clear = nullptr;
-            cached_basins.key.clear();
-        }
-    }
 
     bool ensure_init(std::string& err) {
         if (inited) return true;
@@ -1799,24 +1801,35 @@ struct ParametricEngine::Impl {
     // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
     // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
     // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
-    bool build_module(const std::string& tmpl,
+    // Copy of everything build_module reads, taken under cache_mu. NVRTC then runs unlocked:
+    // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
+    // std::string while another thread assigns it is a race no matter how rare.
+    struct SrcSnapshot {
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h;
+    };
+
+    SrcSnapshot snapshot_sources(const std::string& tmpl) const {
+        return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h };
+    }
+
+    bool build_module(const SrcSnapshot& snap,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
-        std::string src = tmpl;
+        std::string src = snap.tmpl;
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
         // реальный header (по -I path), так и любой повторный inject.
         const char* header_sources[] = {
-            src_cudaLibrary_cu.c_str(),
-            src_cudaLibrary_cuh.c_str(),
-            src_cudaMacros_cuh.c_str(),
-            src_configCUDA_h.c_str(),
+            snap.lib_cu.c_str(),
+            snap.lib_cuh.c_str(),
+            snap.macros_cuh.c_str(),
+            snap.config_h.c_str(),
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
@@ -1911,7 +1924,7 @@ struct ParametricEngine::Impl {
     }
 
     bool compile_if_needed(const std::string& krs_body, int amountOfX,
-                           int par_or_var, std::string& err) {
+                           int par_or_var, std::string& err, bool activate = true) {
         // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
         // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
         // выставляем наш перед NVRTC/CU-вызовами.
@@ -1919,33 +1932,29 @@ struct ParametricEngine::Impl {
         // par_or_var в kernel'е cudaLibrary.cu — compile-time макрос. Поэтому
         // включаем его в hash-key: param-sweep и IC-sweep кешируются отдельно.
         std::string key = hash_key(krs_body, amountOfX) + ":pov" + std::to_string(par_or_var);
-        if (cached.module && cached.key == key) return true;  // cache hit
-        release_module();
+        return compile_into(pool_bif1d, key, cached, activate, [&](CachedModule& fresh) {
+            // DFT_custom уже присутствует в этом же модуле (шаблон #include'ит
+            // cudaLibrary.cu целиком) — регистрируем его тоже, чтобы run_dft_1d
+            // мог переиспользовать этот кэш без отдельной компиляции.
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template), "bifurcation1d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom",
+                                "calculateDiscreteModelPeaksCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        // DFT_custom уже присутствует в этом же модуле (шаблон #include'ит
-        // cudaLibrary.cu целиком) — регистрируем его тоже, чтобы run_dft_1d
-        // мог переиспользовать этот кэш без отдельной компиляции.
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template, "bifurcation1d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom",
-                            "calculateDiscreteModelPeaksCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached.module = mod;
-        if (!module_fn(mod, mg[0], cached.kernel_traj, err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[1], cached.kernel_peak, err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[2], cached.kernel_dft,  err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[3], cached.kernel_fused, err)) { release_module(); return false; }
-
-        cached.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_traj,  err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_peak,  err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[2], fresh.kernel_dft,   err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[3], fresh.kernel_fused, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu. Идея: брать оригинальный код
@@ -2361,31 +2370,27 @@ struct ParametricEngine::Impl {
     // Ключ кэша = hash(krs_body + amountOfX + "lle"), чтобы PTX от bif1d
     // не путался с LLE даже при одной и той же KRS.
     bool compile_lle_if_needed(const std::string& krs_body, int amountOfX,
-                               int par_or_var, std::string& err) {
+                               int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         // par_or_var в kernel — compile-time макрос (см. bif1d). Два PTX-модуля
         // кешируются отдельно: param-sweep и IC-sweep.
         std::string key = hash_key(krs_body, amountOfX) + ":lle:pov" + std::to_string(par_or_var);
-        if (cached_lle.module && cached_lle.key == key) return true;
-        release_lle_module();
+        return compile_into(pool_lle, key, cached_lle, activate, [&](CachedLleModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_lle), "lle1d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "LLEKernelCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_lle, "lle1d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "LLEKernelCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached_lle.module = mod;
-        if (!module_fn(mod, mg[0], cached_lle.kernel_lle, err)) { release_lle_module(); return false; }
-
-        cached_lle.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_lle, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_lle_1d — порт NonLinAnal::LLE1D из hostLibrary.cu, той же diff-friendly стратегией, что
@@ -2708,29 +2713,25 @@ struct ParametricEngine::Impl {
     // (lle2d.template.cu) и в маркере ключа кэша (":lle2d"). Сам kernel
     // (LLEKernelCUDA) — тот же, ловится по тому же имени.
     bool compile_lle_2d_if_needed(const std::string& krs_body, int amountOfX,
-                                  int par_or_var, std::string& err) {
+                                  int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":lle2d:pov" + std::to_string(par_or_var);
-        if (cached_lle_2d.module && cached_lle_2d.key == key) return true;
-        release_lle_2d_module();
+        return compile_into(pool_lle_2d, key, cached_lle_2d, activate, [&](CachedLleModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_lle_2d), "lle2d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "LLEKernelCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_lle_2d, "lle2d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "LLEKernelCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached_lle_2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_lle_2d.kernel_lle, err)) { release_lle_2d_module(); return false; }
-
-        cached_lle_2d.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_lle, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_lle_2d — λ(p1, p2) на квадратной сетке, порт NonLinAnal::LLE2D на NVRTC-engine.
@@ -2789,8 +2790,8 @@ struct ParametricEngine::Impl {
             // swap существует только потому, что ветка par_or_var==2 захардкожена под одну
             // конкретную пару слотов, а здесь par_or_var симметричен по слотам.
             hSweepAxis = req.sweep_over_h ? 0 : 1;
-            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
-            par_or_var = other_is_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
@@ -2816,7 +2817,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
-            par_or_var = req.sweep_over_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
                 if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
@@ -2832,7 +2834,8 @@ struct ParametricEngine::Impl {
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
             // X=IC, Y=param — нативно соответствует ветке par_or_var=2 kernel'а.
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
             if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
             idx_axis_x = req.var_sweep_index;
@@ -2842,7 +2845,8 @@ struct ParametricEngine::Impl {
         } else {
             // X=param, Y=IC — kernel напрямую не поддерживает, свопаем оси
             // под капотом и транспонируем результат при выгрузке.
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
             if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
             // В kernel: ось 1 (IC) = пользовательский Y, ось 2 (param) = X.
@@ -3146,29 +3150,25 @@ struct ParametricEngine::Impl {
 
     // compile_ls_if_needed — третий шаблон. Ключ кэша помечен ":ls".
     bool compile_ls_if_needed(const std::string& krs_body, int amountOfX,
-                              int par_or_var, std::string& err) {
+                              int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls:pov" + std::to_string(par_or_var);
-        if (cached_ls.module && cached_ls.key == key) return true;
-        release_ls_module();
+        return compile_into(pool_ls, key, cached_ls, activate, [&](CachedLsModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_ls), "ls1d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "LSKernelCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_ls, "ls1d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "LSKernelCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached_ls.module = mod;
-        if (!module_fn(mod, mg[0], cached_ls.kernel_ls, err)) { release_ls_module(); return false; }
-
-        cached_ls.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_ls, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_ls_1d — порт NonLinAnal::LS1D той же стратегией, что run_bif1d / run_lle_1d.
@@ -3470,29 +3470,25 @@ struct ParametricEngine::Impl {
     // compile_ls_2d_if_needed — отдельный шаблон ls2d.template.cu, тот же kernel
     // LSKernelCUDA. Ключ кэша помечен ":ls2d:" — изолирован от ":ls:" slot'а.
     bool compile_ls_2d_if_needed(const std::string& krs_body, int amountOfX,
-                                 int par_or_var, std::string& err) {
+                                 int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls2d:pov" + std::to_string(par_or_var);
-        if (cached_ls_2d.module && cached_ls_2d.key == key) return true;
-        release_ls_2d_module();
+        return compile_into(pool_ls_2d, key, cached_ls_2d, activate, [&](CachedLsModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_ls_2d), "ls2d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "LSKernelCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_ls_2d, "ls2d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "LSKernelCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached_ls_2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_ls_2d.kernel_ls, err)) { release_ls_2d_module(); return false; }
-
-        cached_ls_2d.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_ls, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_ls_2d — спектр Ляпунова на сетке n_pts × n_pts: гибрид run_ls_1d (per-system буфер на N
@@ -3540,8 +3536,8 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_h || req.sweep_over_h_2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
             hSweepAxis = req.sweep_over_h ? 0 : 1;
-            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
-            par_or_var = other_is_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
@@ -3565,7 +3561,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
-            par_or_var = req.sweep_over_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
                 if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
@@ -3580,7 +3577,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
             if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
             idx_axis_x = req.var_sweep_index;
@@ -3588,7 +3586,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else {
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
             if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
             idx_axis_x = req.var_sweep_index_2;
@@ -3883,42 +3882,39 @@ struct ParametricEngine::Impl {
     // compile_bif1d_cont_if_needed — отдельный модуль (single-thread sequential
     // continuation kernel + peakFinderCUDA). Cache key с суффиксом :cont.
     bool compile_bif1d_cont_if_needed(const std::string& krs_body, int amountOfX,
-                                      std::string& err) {
+                                      std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":cont";
-        if (cached_cont.module && cached_cont.key == key) return true;
-        release_cont_module();
+        return compile_into(pool_cont, key, cached_cont, activate, [&](CachedContModule& fresh) {
+            // bifurcation1dContinuationKernel — extern "C" (имя не мангается), поэтому в name_exprs
+            // не идёт и берётся из модуля напрямую. peakFinderCUDA и DFT_custom — обычные C++
+            // символы, нужны mangled-варианты; DFT_custom уже в этом модуле (шаблон #include'ит
+            // cudaLibrary.cu целиком) и нужен continuation-ветке run_dft_1d.
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_cont), "bifurcation1d_cont.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body } },
+                              { "peakFinderCUDA", "DFT_custom" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        // bifurcation1dContinuationKernel — extern "C" (имя не мангается), поэтому в name_exprs не
-        // идёт и берётся из модуля напрямую. peakFinderCUDA и DFT_custom — обычные C++ символы,
-        // нужны mangled-варианты; DFT_custom уже в этом модуле (шаблон #include'ит cudaLibrary.cu
-        // целиком) и нужен continuation-ветке run_dft_1d.
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_cont, "bifurcation1d_cont.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body } },
-                          { "peakFinderCUDA", "DFT_custom" },
-                          mod, mg, err))
-            return false;
-
-        cached_cont.module = mod;
-        if (!module_fn(mod, "bifurcation1dContinuationKernel", cached_cont.kernel_cont, err))
-            { release_cont_module(); return false; }
-        if (!module_fn(mod, mg[0], cached_cont.kernel_peak, err)) { release_cont_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_cont.kernel_dft,  err)) { release_cont_module(); return false; }
-
-        cached_cont.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, "bifurcation1dContinuationKernel", fresh.kernel_cont, err))
+                { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[0], fresh.kernel_peak, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_dft,  err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // compile_simple_cont_if_needed — общий компилятор для одноядерных
     // continuation-модулей (LLE и LS). От compile_bif1d_cont_if_needed
     // отличается только тем, что регистрировать mangled-имена не нужно:
     // единственный нужный символ объявлен extern "C".
-    bool compile_simple_cont_if_needed(CachedSimpleContModule& slot,
+    bool compile_simple_cont_if_needed(ModuleLru<CachedSimpleContModule>& pool,
+                                       CachedSimpleContModule& slot,
                                        const std::string& tmpl,
                                        const char* kernel_name,
                                        const char* src_name,
@@ -3927,26 +3923,21 @@ struct ParametricEngine::Impl {
                                        std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + key_suffix;
-        if (slot.module && slot.key == key) return true;
-        release_simple_cont_module(slot);
+        return compile_into(pool, key, slot, true, [&](CachedSimpleContModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
+            if (!build_module(snapshot_sources(tmpl), src_name,
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body } },
+                              {},
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
-        if (!build_module(tmpl, src_name,
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body } },
-                          {},
-                          mod, mg, err))
-            return false;
-
-        slot.module = mod;
-        if (!module_fn(mod, kernel_name, slot.kernel, err)) {
-            release_simple_cont_module(slot); return false;
-        }
-        slot.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, kernel_name, fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_lle1d_continuation_gpu / run_ls1d_continuation_gpu — GPU-двойники
@@ -3960,7 +3951,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_lle_cont, src_template_lle_cont,
+        if (!compile_simple_cont_if_needed(pool_lle_cont, cached_lle_cont, src_template_lle_cont,
                                            "lle1dContinuationKernel", "lle1d_cont.cu", ":llecont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4050,7 +4041,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_ls_cont, src_template_ls_cont,
+        if (!compile_simple_cont_if_needed(pool_ls_cont, cached_ls_cont, src_template_ls_cont,
                                            "ls1dContinuationKernel", "ls1d_cont.cu", ":lscont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4153,7 +4144,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_cont, src_template_dft_cont,
+        if (!compile_simple_cont_if_needed(pool_dft_cont, cached_dft_cont, src_template_dft_cont,
                                            "dft1dContinuationKernel", "dft1d_cont.cu", ":dftcont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4299,7 +4290,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_hsweep, src_template_dft_hsweep,
+        if (!compile_simple_cont_if_needed(pool_dft_hsweep, cached_dft_hsweep, src_template_dft_hsweep,
                                            "dft1dHSweepKernel", "dft1d_hsweep.cu", ":dfthsweep",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -5407,30 +5398,26 @@ struct ParametricEngine::Impl {
     // calculateDiscreteModelPeaksCUDA + dbscanCUDA.
     // Cache key: ":bif2d:" + par_or_var.
     bool compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
-                                 int par_or_var, std::string& err) {
+                                 int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":bif2d:" + std::to_string(par_or_var);
-        if (cached_bif2d.module && cached_bif2d.key == key) return true;
-        release_bif2d_module();
+        return compile_into(pool_bif2d, key, cached_bif2d, activate, [&](CachedBif2dModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_bif2d), "bifurcation2d.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_bif2d, "bifurcation2d.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body },
-                            { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                          { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA" },
-                          mod, mg, err))
-            return false;
-
-        cached_bif2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_bif2d.kernel_fused,  err)) { release_bif2d_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_bif2d.kernel_dbscan, err)) { release_bif2d_module(); return false; }
-
-        cached_bif2d.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_fused,  err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_dbscan, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_bif2d — порт NonLinAnal::bifurcation2D (hostLibrary.cu:898-1724).
@@ -5480,8 +5467,8 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_h || req.sweep_over_h_2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
             hSweepAxis = req.sweep_over_h ? 0 : 1;
-            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
-            par_or_var = other_is_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
@@ -5515,7 +5502,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
-            par_or_var = req.sweep_over_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
                 if (!check_param(req.param_index))   return fail("param_index (ось X) вне диапазона");
                 if (!check_param(req.param_index_2)) return fail("param_index_2 (ось Y) вне диапазона");
@@ -5530,7 +5518,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (ось X) вне диапазона");
             if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
             idx_axis_x = req.var_sweep_index;
@@ -5538,7 +5527,8 @@ struct ParametricEngine::Impl {
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else {
-            par_or_var = 2;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
             if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
             idx_axis_x = req.var_sweep_index_2;
@@ -5947,34 +5937,30 @@ struct ParametricEngine::Impl {
     // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
     // захардкожен в шаблоне, поэтому ключа не требует — только хэш krs_body/amountOfX.
     bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
-                                  std::string& err) {
+                                  std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":basins";
-        if (cached_basins.module && cached_basins.key == key) return true;
-        release_basins_module();
+        return compile_into(pool_basins, key, cached_basins, activate, [&](CachedBasinsModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_basins), "basins.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body } },
+                              { "calculateDiscreteModelAvgPeaksCUDA",
+                                "CUDA_dbscan_kernel",
+                                "CUDA_dbscan_search_fixed_points_kernel",
+                                "CUDA_dbscan_search_clear_points_kernel" },
+                              mod, mg, err))
+                return false;
 
-        if (!load_sources(err)) return false;
-
-        CUmodule mod = nullptr;
-        std::vector<std::string> mg;
-        if (!build_module(src_template_basins, "basins.cu",
-                          { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
-                            { "{{KRS_BODY}}",    krs_body } },
-                          { "calculateDiscreteModelAvgPeaksCUDA",
-                            "CUDA_dbscan_kernel",
-                            "CUDA_dbscan_search_fixed_points_kernel",
-                            "CUDA_dbscan_search_clear_points_kernel" },
-                          mod, mg, err))
-            return false;
-
-        cached_basins.module = mod;
-        if (!module_fn(mod, mg[0], cached_basins.kernel_fused,        err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_basins.kernel_dbscan,       err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[2], cached_basins.kernel_search_fixed, err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[3], cached_basins.kernel_search_clear, err)) { release_basins_module(); return false; }
-
-        cached_basins.key = key;
-        return true;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_fused,        err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_dbscan,       err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[2], fresh.kernel_search_fixed, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[3], fresh.kernel_search_clear, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
     }
 
     // run_basins — порт NonLinAnal::basinsOfAttraction + CUDA_dbscan host-loop (hostLibrary.cu).
@@ -6640,8 +6626,10 @@ struct ParametricEngine::Impl {
                            const std::string& krs_body,
                            int type_of_synch_v, int error_estim_v, double fs_error_trs_v,
                            const std::vector<const char*>& expr_kernels,
+                           ModuleLru<CachedFastSyncModule>& pool,
                            CachedFastSyncModule& slot,
-                           std::string& err)
+                           std::string& err,
+                           bool activate = true)
     {
         cuCtxSetCurrent(context);
         char trs_buf[64];
@@ -6650,70 +6638,110 @@ struct ParametricEngine::Impl {
                         + ":t" + std::to_string(type_of_synch_v)
                         + ":e" + std::to_string(error_estim_v)
                         + ":r" + trs_buf;
-        if (slot.module && slot.key == key) return true;
-        if (slot.module) {
-            cuModuleUnload(slot.module);
-            slot.module = nullptr;
-            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = nullptr;
-            slot.key.clear();
-        }
-        if (!load_sources(err)) return false;
+        return compile_into(pool, key, slot, activate, [&](CachedFastSyncModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> lowered;
+            if (!build_module(snapshot_sources(src_template), "fastsync.cu",
+                              { { "{{AMOUNT_OF_X}}",   std::to_string(amountOfX) },
+                                { "{{TYPE_OF_SYNCH}}", std::to_string(type_of_synch_v) },
+                                { "{{ERROR_ESTIM}}",   std::to_string(error_estim_v) },
+                                { "{{FS_ERROR_TRS}}",  std::string(trs_buf) },
+                                { "{{KRS_BODY}}",      krs_body } },
+                              expr_kernels,
+                              mod, lowered, err))
+                return false;
 
-        CUmodule mod = nullptr;
-        std::vector<std::string> lowered;
-        if (!build_module(src_template, "fastsync.cu",
-                          { { "{{AMOUNT_OF_X}}",   std::to_string(amountOfX) },
-                            { "{{TYPE_OF_SYNCH}}", std::to_string(type_of_synch_v) },
-                            { "{{ERROR_ESTIM}}",   std::to_string(error_estim_v) },
-                            { "{{FS_ERROR_TRS}}",  std::string(trs_buf) },
-                            { "{{KRS_BODY}}",      krs_body } },
-                          expr_kernels,
-                          mod, lowered, err))
-            return false;
+            fresh.key    = key;
+            fresh.module = mod;
 
-        slot.module = mod;
-
-        // Связываем по expr_kernels индексу.
-        for (size_t i = 0; i < expr_kernels.size(); ++i) {
-            CUfunction f = nullptr;
-            if (!module_fn(mod, lowered[i], f, err)) {
-                release_fs_attr_module(); release_fs_grid_module(); return false;
+            // Связываем по expr_kernels индексу.
+            for (size_t i = 0; i < expr_kernels.size(); ++i) {
+                CUfunction f = nullptr;
+                if (!module_fn(mod, lowered[i], f, err)) { cuModuleUnload(mod); return false; }
+                const std::string sym_name = expr_kernels[i];
+                if      (sym_name == "fillFSMasterTrajectory")                   fresh.kernel_fs_fill = f;
+                else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA") fresh.kernel_fs_traj = f;
+                else if (sym_name == "calculateDiscreteModelICCforFastSynchro")  fresh.kernel_fs_grid = f;
             }
-            const std::string sym_name = expr_kernels[i];
-            if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
-            else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
-            else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       slot.kernel_fs_grid = f;
-        }
-        slot.key = key;
-        return true;
+            return true;
+        }, err);
     }
 
-    bool compile_order_module(int amountOfX, int amountOfValues,
+    bool compile_order_module(bool activate, int amountOfX, int amountOfValues,
                               const std::string& krs_body, std::string& err)
     {
         cuCtxSetCurrent(context);
         const std::string key = hash_key(krs_body, amountOfX) + ":order:v"
                               + std::to_string(amountOfValues);
-        if (cached_order.module && cached_order.key == key) return true;
-        release_order_module();
-        if (!load_sources(err)) return false;
+        return compile_into(pool_order, key, cached_order, activate, [&](CachedOrderModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> lowered;
+            // orderEstimateKernel объявлено extern "C" — в name_exprs не нужно.
+            if (!build_module(snapshot_sources(src_template_order), "order.cu",
+                              { { "{{AMOUNT_OF_X}}",      std::to_string(amountOfX) },
+                                { "{{AMOUNT_OF_VALUES}}", std::to_string(amountOfValues) },
+                                { "{{KRS_BODY}}",         krs_body } },
+                              {}, mod, lowered, err))
+                return false;
 
-        CUmodule mod = nullptr;
-        std::vector<std::string> lowered;
-        // orderEstimateKernel объявлено extern "C" — в name_exprs не нужно.
-        if (!build_module(src_template_order, "order.cu",
-                          { { "{{AMOUNT_OF_X}}",      std::to_string(amountOfX) },
-                            { "{{AMOUNT_OF_VALUES}}", std::to_string(amountOfValues) },
-                            { "{{KRS_BODY}}",         krs_body } },
-                          {}, mod, lowered, err))
-            return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, "orderEstimateKernel", fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
 
-        cached_order.module = mod;
-        CUfunction f = nullptr;
-        if (!module_fn(mod, "orderEstimateKernel", f, err)) { release_order_module(); return false; }
-        cached_order.kernel = f;
-        cached_order.key    = key;
-        return true;
+    // prewarm_* — компиляция без расчёта. Ключи считаются ровно так же, как в соответствующем
+    // run_*, иначе прогретый модуль не был бы найден. Ошибки не всплывают: не прогрелось — Run
+    // скомпилирует сам и покажет ошибку уже там.
+    void prewarm_bif1d(const Bifurcation1DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        if (req.continuation && !req.use_cpu) compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err, false);
+        else compile_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+    }
+    void prewarm_bif2d(const Bifurcation2DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_bif2d_if_needed(req.krs_body, req.amountOfX,
+                                par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                              req.sweep_over_var, req.sweep_over_var_2), err, false);
+    }
+    void prewarm_lle1d(const LLE1DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+    }
+    void prewarm_lle2d(const LLE2DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_lle_2d_if_needed(req.krs_body, req.amountOfX,
+                                 par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                               req.sweep_over_var, req.sweep_over_var_2), err, false);
+    }
+    void prewarm_ls1d(const LS1DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+    }
+    void prewarm_ls2d(const LS2DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_ls_2d_if_needed(req.krs_body, req.amountOfX,
+                                par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                              req.sweep_over_var, req.sweep_over_var_2), err, false);
+    }
+    void prewarm_basins(const BasinsRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_basins_if_needed(req.krs_body, req.amountOfX, err, false);
     }
 
     // Узлы одной оси. Лог-сетка требует строго положительных границ: по шагу
@@ -6809,7 +6837,7 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_fastsync
 
-        if (!compile_order_module(req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
 
         // Работа по ячейкам: h ячейки зависит только от той оси, что свипует h.
         auto cell_h = [&](int ix, int iy) -> double {
@@ -7075,7 +7103,7 @@ struct ParametricEngine::Impl {
             };
             if (!compile_fs_module(src_template_fs_attr, ":fs_attr", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_attr, err)) return fail(err);
+                                   exprs, pool_fs_attr, cached_fs_attr, err)) return fail(err);
 
             const int amountOfNTPoints      = (int)(req.window / req.h);
             const int amountOfCTPoints      = (int)(req.t_max / req.h);
@@ -7286,7 +7314,7 @@ struct ParametricEngine::Impl {
             std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_grid, err)) return fail(err);
+                                   exprs, pool_fs_grid, cached_fs_grid, err)) return fail(err);
 
             // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
@@ -7560,3 +7588,11 @@ OrderResult ParametricEngine::run_order(const OrderRequest& req) {
 FastSyncResult ParametricEngine::run_fastsync(const FastSyncRequest& req) {
     return impl_->run_fastsync(req);
 }
+
+void ParametricEngine::prewarm(const Bifurcation1DRequest& req) { impl_->prewarm_bif1d(req); }
+void ParametricEngine::prewarm(const Bifurcation2DRequest& req) { impl_->prewarm_bif2d(req); }
+void ParametricEngine::prewarm(const LLE1DRequest& req)         { impl_->prewarm_lle1d(req); }
+void ParametricEngine::prewarm(const LLE2DRequest& req)         { impl_->prewarm_lle2d(req); }
+void ParametricEngine::prewarm(const LS1DRequest& req)          { impl_->prewarm_ls1d(req); }
+void ParametricEngine::prewarm(const LS2DRequest& req)          { impl_->prewarm_ls2d(req); }
+void ParametricEngine::prewarm(const BasinsRequest& req)        { impl_->prewarm_basins(req); }

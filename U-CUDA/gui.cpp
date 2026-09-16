@@ -10688,6 +10688,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.start_next_in_fastsync_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
+    // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
+    model.poll_parametric_prewarm();
 
     // Ctrl+Z / Ctrl+Shift+Z — отмена и повтор МАССОВЫХ команд: "Calculation
     // range from view" (Ctrl+T / Ctrl+Shift+T) и "Apply to all calculation tabs".

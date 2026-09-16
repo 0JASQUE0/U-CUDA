@@ -17,6 +17,7 @@ std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schem
                                    const std::string& scheme);
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <string>
 #include <vector>
@@ -547,6 +548,12 @@ struct BifurcationAnalysisSession {
     // Async-Run для конкретной БД. Возвращает false если очередь занята.
     bool run_async(ParametricEngine& engine, int diagram_idx);
 
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int diagram_idx) const;
+
+
     // Cooperative cancel of the in-flight run. No-op if nothing is in flight.
     void request_cancel();
 
@@ -686,6 +693,11 @@ struct LLEAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int curve_idx) const;
     void request_cancel();
     bool poll();
 };
@@ -1384,6 +1396,11 @@ struct LyapunovSpectrumAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int curve_idx) const;
     void request_cancel();
     bool poll();
 };
