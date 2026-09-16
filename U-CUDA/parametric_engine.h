@@ -1106,6 +1106,19 @@ public:
     // Один вызов обслуживает и 1D-диаграмму, и 2D-карту: различает их axis_y.kind.
     OrderResult run_order(const OrderRequest& req);
 
+    // Компилирует модуль под этот запрос, ничего не считая: тот же ключ кэша, что возьмёт
+    // соответствующий run_*, поэтому Run потом просто найдёт готовый модуль. Зовётся из фонового
+    // потока, пока пользователь ещё настраивает параметры или пока считается предыдущая задача;
+    // ошибки глотаются (не смогли прогреть — Run скомпилирует сам). Ждать не нужно: если Run
+    // обгонит прогрев того же ключа, он дождётся его результата вместо второй компиляции.
+    void prewarm(const Bifurcation1DRequest& req);
+    void prewarm(const Bifurcation2DRequest& req);
+    void prewarm(const LLE1DRequest& req);
+    void prewarm(const LLE2DRequest& req);
+    void prewarm(const LS1DRequest& req);
+    void prewarm(const LS2DRequest& req);
+    void prewarm(const BasinsRequest& req);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

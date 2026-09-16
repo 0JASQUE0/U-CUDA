@@ -1016,6 +1016,35 @@ void AppModel::sync_peak_text() {
 
 // Cross-analysis batch queue
 
+// Прогрев хвоста очереди. Запросы собираются ЗДЕСЬ, на UI-потоке: фоновому потоку нельзя читать
+// сессии, их правит пользователь.
+void AppModel::prewarm_rest_of_parametric_queue() {
+    if (!parametric_engine || parametric_queue.empty()) return;
+    // Присваивание поверх работающего future заблокировало бы UI-поток в его деструкторе — в этом
+    // случае просто пропускаем: не прогрелось, значит Run скомпилирует сам (см. analysis_session).
+    if (parametric_prewarm_future.valid() &&
+        parametric_prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        return;
+
+    std::vector<std::function<void(ParametricEngine&)>> tasks;
+    for (const ParametricQueueItem& it : parametric_queue) {
+        std::function<void(ParametricEngine&)> t;
+        switch (it.kind) {
+        case ParametricQueueItem::Kind::Bifurcation: t = bifurcation_session.prewarm_task(it.index); break;
+        case ParametricQueueItem::Kind::LLE:         t = lle_session.prewarm_task(it.index);         break;
+        case ParametricQueueItem::Kind::LS:          t = ls_session.prewarm_task(it.index);          break;
+        }
+        if (t) tasks.push_back(std::move(t));
+        if ((int)tasks.size() >= kPrewarmAhead) break;
+    }
+    if (tasks.empty()) return;
+
+    ParametricEngine* eng = parametric_engine.get();
+    parametric_prewarm_future = std::async(std::launch::async, [eng, tasks = std::move(tasks)] {
+        for (const auto& task : tasks) task(*eng);
+    });
+}
+
 bool AppModel::start_next_in_parametric_queue() {
     if (bifurcation_session.in_flight ||
         lle_session.in_flight ||
@@ -1040,7 +1069,7 @@ bool AppModel::start_next_in_parametric_queue() {
                 ok = ls_session.run_async(*parametric_engine, it.index);
             break;
         }
-        if (ok) return true;
+        if (ok) { prewarm_rest_of_parametric_queue(); return true; }
         // ok == false (например, krs пуст / индекс плохой) — last_error
         // выставлен соответствующим run_async; идём дальше.
     }

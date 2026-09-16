@@ -905,6 +905,19 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     }
 }
 
+std::function<void(ParametricEngine&)> BifurcationAnalysisSession::prewarm_task(int diagram_idx) const {
+    if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return {};
+    const BifurcationDiagramConfig& bd = diagrams[diagram_idx];
+    if (bd.mode_2d) {
+        Bifurcation2DRequest req = build_bif2d_request(*this, bd);
+        if (req.krs_body.empty()) return {};
+        return [req](ParametricEngine& e) { e.prewarm(req); };
+    }
+    Bifurcation1DRequest req = build_bif1d_request(*this, bd);
+    if (req.krs_body.empty()) return {};
+    return [req](ParametricEngine& e) { e.prewarm(req); };
+}
+
 bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram_idx) {
     if (in_flight) return false;
     if (diagram_idx < 0 || diagram_idx >= (int)diagrams.size()) return false;
@@ -1199,6 +1212,19 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
         apply_lle1d_result(c, std::move(r));
         return ok;
     }
+}
+
+std::function<void(ParametricEngine&)> LLEAnalysisSession::prewarm_task(int curve_idx) const {
+    if (curve_idx < 0 || curve_idx >= (int)curves.size()) return {};
+    const LLECurveConfig& c = curves[curve_idx];
+    if (c.mode_2d) {
+        LLE2DRequest req = build_lle2d_request(*this, c);
+        if (req.krs_body.empty()) return {};
+        return [req](ParametricEngine& e) { e.prewarm(req); };
+    }
+    LLE1DRequest req = build_lle1d_request(*this, c);
+    if (req.krs_body.empty()) return {};
+    return [req](ParametricEngine& e) { e.prewarm(req); };
 }
 
 bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
@@ -2640,6 +2666,19 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
         apply_ls1d_result(c, std::move(r));
         return ok;
     }
+}
+
+std::function<void(ParametricEngine&)> LyapunovSpectrumAnalysisSession::prewarm_task(int curve_idx) const {
+    if (curve_idx < 0 || curve_idx >= (int)curves.size()) return {};
+    const LSCurveConfig& c = curves[curve_idx];
+    if (c.mode_2d) {
+        LS2DRequest req = build_ls2d_request(*this, c);
+        if (req.krs_body.empty()) return {};
+        return [req](ParametricEngine& e) { e.prewarm(req); };
+    }
+    LS1DRequest req = build_ls1d_request(*this, c);
+    if (req.krs_body.empty()) return {};
+    return [req](ParametricEngine& e) { e.prewarm(req); };
 }
 
 bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {

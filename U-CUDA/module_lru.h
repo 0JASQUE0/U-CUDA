@@ -50,6 +50,12 @@ public:
         }
     }
 
+    // Prewarm asks only whether the module is already there; it must not disturb the order.
+    bool contains(const std::string& key) const {
+        for (const T& e : items_) if (e.key == key) return true;
+        return false;
+    }
+
     // Hands every entry over for unloading and empties the pool.
     std::vector<T> drain() {
         std::vector<T> all;

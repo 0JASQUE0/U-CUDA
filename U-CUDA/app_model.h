@@ -435,6 +435,14 @@ public:
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
 
+    // Фоновая компиляция модулей для ЕЩЁ НЕ ЗАПУЩЕННЫХ элементов очереди: пока текущая задача
+    // занимает GPU, NVRTC занимает свободное ядро CPU, и к своей очереди модуль уже готов.
+    // Объявлено ПОСЛЕ движка: деструктор future блокируется до конца потока, а поток держит
+    // ссылку на движок — значит future должен умереть первым (члены рушатся в обратном порядке).
+    std::future<void> parametric_prewarm_future;
+    static constexpr int kPrewarmAhead = 3;   // ограничение и по CPU, и по ёмкости пулов модулей
+    void prewarm_rest_of_parametric_queue();
+
     // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
     // BD/LLE/LS. start_next_in_parametric_queue() драйнит её серийно (engine один).
     std::deque<ParametricQueueItem> parametric_queue;
