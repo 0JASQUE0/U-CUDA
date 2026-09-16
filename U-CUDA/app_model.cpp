@@ -1016,6 +1016,94 @@ void AppModel::sync_peak_text() {
 
 // Cross-analysis batch queue
 
+namespace {
+
+// Всё, от чего зависит КЛЮЧ кэша модуля, и ничего больше: схема, система, размерность и вид свипа
+// по каждой оси. Диапазоны, число точек, время интегрирования в ключ не входят — поэтому набор
+// чисел в полях прогрев не перезапускает, а переключение схемы перезапускает.
+std::string prewarm_session_id(const System& sys, const std::vector<std::string>& vars,
+                               const std::vector<CustomScheme>& custom_schemes) {
+    std::string joined;
+    for (const std::string& r : sys.rhs) { joined += r; joined += '\x1f'; }
+    // Тело кастомной схемы правится без смены имени, поэтому в идентификатор идёт и оно.
+    for (const CustomScheme& cs : custom_schemes) { joined += cs.name; joined += cs.body; joined += '\x1f'; }
+    return std::to_string(std::hash<std::string>{}(joined)) + ":" + std::to_string(vars.size());
+}
+
+template <class Cfg>
+std::string prewarm_sig(const std::string& session_id, const Cfg& c) {
+    std::string s = session_id;
+    s += '\x1f';
+    s += c.scheme;
+    s += c.mode_2d              ? "|2d" : "|1d";
+    s += c.sweep_over_var       ? 'v' : '-';
+    s += c.sweep_over_h         ? 'h' : '-';
+    s += c.sweep_over_var_2     ? 'V' : '-';
+    s += c.sweep_over_h_2       ? 'H' : '-';
+    s += c.continuation         ? 'c' : '-';
+    s += c.use_gpu              ? 'g' : '-';
+    // Настройки пиков и fmad тоже входят в ключ модуля (см. hash_key в parametric_engine.cpp).
+    s += ":pk" + std::to_string(peak_config_epoch());
+    s += get_nvrtc_fmad() ? ":fm1" : ":fm0";
+    return s;
+}
+
+}  // namespace
+
+// Прогрев ПЕРВОГО запуска. Зовётся каждый кадр рядом с тиками очередей; почти всегда это
+// несколько сравнений строк и выход.
+void AppModel::poll_parametric_prewarm() {
+    // Не соревнуемся с идущим расчётом: пока он считает, хвост очереди греет
+    // prewarm_rest_of_parametric_queue, а лишняя компиляция отняла бы у него CPU.
+    if (bifurcation_session.in_flight || lle_session.in_flight || ls_session.in_flight) return;
+    if (!parametric_queue.empty()) return;
+    if (parametric_prewarm_future.valid() &&
+        parametric_prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        return;
+
+    const auto now = std::chrono::steady_clock::now();
+    std::function<void(ParametricEngine&)> task;
+
+    // Скан одной сессии. Решение «что и когда греть» живёт в PrewarmWatch::pick (prewarm_watch.h),
+    // здесь — только сбор сигнатур и сборка задачи. Задача строится ЗДЕСЬ, на UI-потоке (внутри
+    // codegen), фоновому потоку остаётся NVRTC.
+    auto scan = [&](PrewarmWatch& w, const std::string& session_id,
+                    size_t count, auto&& sig_of, auto&& make_task) {
+        if (task) return;
+        std::vector<std::string> current;
+        current.reserve(count);
+        for (size_t i = 0; i < count; ++i) current.push_back(sig_of(i, session_id));
+        const int idx = w.pick(current, now, std::chrono::milliseconds(400));
+        if (idx < 0) return;
+        auto t = make_task(idx);
+        if (t) task = std::move(t);
+    };
+
+    scan(prewarm_watch_bif,
+         prewarm_session_id(bifurcation_session.sys, bifurcation_session.vars,
+                            bifurcation_session.custom_schemes),
+         bifurcation_session.diagrams.size(),
+         [&](size_t i, const std::string& id) { return prewarm_sig(id, bifurcation_session.diagrams[i]); },
+         [&](int i) { return bifurcation_session.prewarm_task(i); });
+    scan(prewarm_watch_lle,
+         prewarm_session_id(lle_session.sys, lle_session.vars, lle_session.custom_schemes),
+         lle_session.curves.size(),
+         [&](size_t i, const std::string& id) { return prewarm_sig(id, lle_session.curves[i]); },
+         [&](int i) { return lle_session.prewarm_task(i); });
+    scan(prewarm_watch_ls,
+         prewarm_session_id(ls_session.sys, ls_session.vars, ls_session.custom_schemes),
+         ls_session.curves.size(),
+         [&](size_t i, const std::string& id) { return prewarm_sig(id, ls_session.curves[i]); },
+         [&](int i) { return ls_session.prewarm_task(i); });
+
+    if (!task) return;
+    // Движок создаётся тут же: CUDA-контекст он поднимает лениво, уже в фоновом потоке.
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    ParametricEngine* eng = parametric_engine.get();
+    parametric_prewarm_future = std::async(std::launch::async,
+                                           [eng, task = std::move(task)] { task(*eng); });
+}
+
 // Прогрев хвоста очереди. Запросы собираются ЗДЕСЬ, на UI-потоке: фоновому потоку нельзя читать
 // сессии, их правит пользователь.
 void AppModel::prewarm_rest_of_parametric_queue() {

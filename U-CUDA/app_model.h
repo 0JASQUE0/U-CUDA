@@ -6,10 +6,12 @@
 #include "analysis_session.h"
 #include "custom_session.h"
 #include "order_session.h"
+#include "prewarm_watch.h"
 #include <map>
 #include <string>
 #include <vector>
 #include <memory>
+#include <chrono>
 #include <future>
 #include <mutex>
 #include <atomic>
@@ -442,6 +444,12 @@ public:
     std::future<void> parametric_prewarm_future;
     static constexpr int kPrewarmAhead = 3;   // ограничение и по CPU, и по ёмкости пулов модулей
     void prewarm_rest_of_parametric_queue();
+
+    // Прогрев ПЕРВОГО запуска: очередь помогает со второго элемента, а первый Run платит
+    // компиляцию сам. Поэтому следим за настройками, влияющими на ключ модуля (схема, система,
+    // вид свипа по осям), и прогреваем, пока пользователь ещё возится с диапазонами.
+    PrewarmWatch prewarm_watch_bif, prewarm_watch_lle, prewarm_watch_ls;
+    void poll_parametric_prewarm();
 
     // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
     // BD/LLE/LS. start_next_in_parametric_queue() драйнит её серийно (engine один).
