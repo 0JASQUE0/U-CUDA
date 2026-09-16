@@ -63,3 +63,7 @@ vcpkg_installed/
 ucuda-dashboard/
 
 .claudeignore
+
+# CMake and local presets
+build/
+CMakeUserPresets.json

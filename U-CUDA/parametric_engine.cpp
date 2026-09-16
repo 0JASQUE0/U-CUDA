@@ -7,7 +7,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <nvrtc.h>
-#include <windows.h>
+#include "platform_paths.h"
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 
@@ -603,14 +603,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     return res;
 }
 
-std::string exe_dir() {
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0) return ".";
-    std::string p(buf, n);
-    auto pos = p.find_last_of("\\/");
-    return (pos == std::string::npos) ? std::string(".") : p.substr(0, pos);
-}
+std::string exe_dir() { return platform::executable_dir(); }
 
 std::string read_text_file(const std::string& path, std::string& err) {
     std::ifstream f(path, std::ios::binary);
@@ -1729,7 +1722,7 @@ struct ParametricEngine::Impl {
             srcs_peak_epoch  = ep;
             return true;
         }
-        std::string root = exe_dir() + "\\kernels\\";
+        std::string root = exe_dir() + "/kernels/";
         std::string e;
         src_template          = read_text_file(root + "bifurcation1d.template.cu",      e); if (!e.empty()) { err = e; return false; }
         src_template_cont     = read_text_file(root + "bifurcation1d_cont.template.cu", e); if (!e.empty()) { err = e; return false; }
@@ -1811,13 +1804,8 @@ struct ParametricEngine::Impl {
         // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h,
         // curand_kernel.h и т.п.). Берём CUDA_PATH из окружения — его проставляет
         // CUDA Toolkit installer.
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
+        const std::string include_dir = platform::cuda_include_dir();
+        const std::string cuda_include_opt = include_dir.empty() ? "" : "-I" + include_dir;
         if (cuda_include_opt.empty()) {
             err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
                   "(установи CUDA Toolkit или задай CUDA_PATH=...)";
@@ -1825,9 +1813,10 @@ struct ParametricEngine::Impl {
             return false;
         }
 
+        const std::string cccl_include_opt = "-I" + include_dir + "/cccl";
         std::string std_opt = "--std=c++17";
         const char* opts[] = { arch, std_opt.c_str(), "-default-device",
-                               cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+                               cuda_include_opt.c_str(), cccl_include_opt.c_str(), nvrtc_fmad_opt() };
 
         nr = nvrtcCompileProgram(prog, (int)(sizeof(opts) / sizeof(opts[0])), opts);
         if (nr != NVRTC_SUCCESS) {
@@ -7044,6 +7033,11 @@ struct ParametricEngine::Impl {
 
             size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(numb);
             size_t out_bytes  = (size_t)nPts * sizeof(numb);
+            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
+            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
+            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
+            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
+            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
             FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
             FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
             FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_Xs");
@@ -7057,11 +7051,7 @@ struct ParametricEngine::Impl {
             // идут параллельно по точкам, так что по времени это 2 * iterOfSynchr * pts.
             // Первая версия отдавала весь бар первой фазе — он доходил до 90%
             // и там вставал.
-            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
-            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
-            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
-            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
-            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
+
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -7273,6 +7263,10 @@ struct ParametricEngine::Impl {
 
             #define FS_GCHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS1_FAIL; } } while(0)
 
+            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
+            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
+            const double ticksTotal     = (double)total_cells * ticksPerCell;
+            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             FS_GCHECK(cudaMalloc((void**)&d_data,    (size_t)nPtsLimiter * perCellBytes), "cudaMalloc d_data");
             FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(numb)),                  "cudaMalloc d_ranges");
             FS_GCHECK(cudaMalloc((void**)&d_idx_mv,  2 * sizeof(int)),                     "cudaMalloc d_idx_mv");
@@ -7287,9 +7281,7 @@ struct ParametricEngine::Impl {
             // шагов на ячейку; проходы вперёд-назад после него не тикают, поэтому
             // бар доходит до ста на хвосте чанка и ждёт там.
             if (!sig.alloc(err)) goto FS1_FAIL;
-            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
-            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
-            const double ticksTotal     = (double)total_cells * ticksPerCell;
+
 
             {
                 numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
@@ -7312,7 +7304,7 @@ struct ParametricEngine::Impl {
             // fillFSTransientIC с ОДНИМ TT на обоих и только для нефиксируемой IC: свипуемая сторона
             // стартовала сырой, а прогон в один поток на длинных TT ловил TDR.
 
-            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
+
             for (size_t i = 0; i < amountOfIteration; ++i) {
                 size_t cur_limiter = nPtsLimiter;
                 if (i == amountOfIteration - 1) cur_limiter = total_cells - originalNPtsLimiter * i;

@@ -9,7 +9,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-#include <glad\glad.h>
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
 #include "app_model.h"
@@ -20,8 +20,11 @@
 #include "ocr_client_win.h"   // OcrClient + b64encode
 #include "image_source.h"     // copy_framebuffer_rect_to_clipboard
 
-#include <windows.h>
+#include "platform_paths.h"
+#include "platform_posix.h"
+#ifdef _WIN32
 #include <commdlg.h>          // GetOpenFileName
+#endif
 #include <memory>
 #include <string>
 #include <cstdio>
@@ -31,18 +34,12 @@
 
 #pragma comment(lib, "opengl32.lib")
 
-std::string exe_dir() {
-    char buf[MAX_PATH];
-    GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::string p(buf);
-    return p.substr(0, p.find_last_of("\\/"));
-}
+std::string exe_dir() { return platform::executable_dir(); }
 
 static const char* OCR_SCRIPT_NAME = "ocr_server.py";
 
 static bool dir_exists(const std::string& p) {
-    DWORD a = GetFileAttributesA(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    return std::filesystem::is_directory(p);
 }
 
 // Paths returned by resolve_library_paths. `library` is the writable
@@ -70,25 +67,28 @@ struct LibraryPaths {
 static LibraryPaths resolve_library_paths(const std::string& exe_dir_with_sep) {
     LibraryPaths p;
 
-    char env_buf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableA("U_CUDA_LIBRARY", env_buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        p.library = std::string(env_buf, n);
-        p.tmpl    = p.library + "_template";
+    if (const char* env = std::getenv("U_CUDA_LIBRARY"); env && *env) {
+        p.library = env;
+        p.tmpl = p.library + "_template";
         return p;
     }
+#ifdef U_CUDA_SOURCE_DIR
+    p.tmpl = std::string(U_CUDA_SOURCE_DIR) + "/library_template";
+    p.library = std::string(U_CUDA_SOURCE_DIR) + "/library";
+    if (dir_exists(p.tmpl)) return p;
+#endif
 
-    std::string vcx_tmpl = exe_dir_with_sep + "..\\..\\library_template";
+    std::string vcx_tmpl = exe_dir_with_sep + "../../library_template";
     if (dir_exists(vcx_tmpl)) {
         p.tmpl    = vcx_tmpl;
-        p.library = exe_dir_with_sep + "..\\..\\library";
+        p.library = exe_dir_with_sep + "../../library";
         return p;
     }
 
-    std::string sln_tmpl = exe_dir_with_sep + "..\\..\\U-CUDA\\library_template";
+    std::string sln_tmpl = exe_dir_with_sep + "../../U-CUDA/library_template";
     if (dir_exists(sln_tmpl)) {
         p.tmpl    = sln_tmpl;
-        p.library = exe_dir_with_sep + "..\\..\\U-CUDA\\library";
+        p.library = exe_dir_with_sep + "../../U-CUDA/library";
         return p;
     }
 
@@ -120,17 +120,28 @@ static void seed_library_if_missing(const std::string& library_dir,
 //   2) <project_dir>\.venv\Scripts\python.exe (локальное venv проекта)
 //   3) "python" — CreateProcess сам найдёт через PATH
 static std::string resolve_python_exe(const std::string& project_dir) {
-    char env_buf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableA("U_CUDA_PYTHON", env_buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) return std::string(env_buf, n);
-
-    std::string venv_py = project_dir + ".venv\\Scripts\\python.exe";
-    if (GetFileAttributesA(venv_py.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return venv_py;
-
+    if (const char* env = std::getenv("U_CUDA_PYTHON"); env && *env) return env;
+#ifdef _WIN32
+    const char* suffix = ".venv/Scripts/python.exe";
+#else
+    const char* suffix = ".venv/bin/python";
+#endif
+    std::vector<std::filesystem::path> roots = {project_dir};
+#ifdef U_CUDA_SOURCE_DIR
+    roots.emplace_back(std::filesystem::path(U_CUDA_SOURCE_DIR).parent_path());
+#endif
+    for (const auto& root : roots) {
+        auto p = root / suffix;
+        if (std::filesystem::exists(p)) return p.string();
+    }
+#ifdef _WIN32
     return "python";
+#else
+    return "python3";
+#endif
 }
 
+#ifdef _WIN32
 static std::string pick_image_file_win() {
     char filename[MAX_PATH] = "";
     OPENFILENAMEA ofn{};
@@ -158,17 +169,25 @@ static std::string pick_save_csv_file_win() {
     if (GetSaveFileNameA(&ofn)) return std::string(filename);
     return "";
 }
+#else
+static std::string pick_file_linux(bool save) {
+    std::vector<std::string> args = {"zenity", "--file-selection"};
+    if (save) args.insert(args.end(), {"--save", "--confirm-overwrite", "--filename=export.csv", "--file-filter=CSV | *.csv"});
+    else args.push_back("--file-filter=Images | *.png *.jpg *.jpeg *.bmp");
+    std::string out;
+    try {
+        if (platform::run(args, out) != 0) return {};
+        if (!out.empty() && out.back() == '\n') out.pop_back();
+        if (save && !out.empty() && std::filesystem::path(out).extension().empty()) out += ".csv";
+        return out;
+    } catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return {}; }
+}
+static std::string pick_image_file_win() { return pick_file_linux(false); }
+static std::string pick_save_csv_file_win() { return pick_file_linux(true); }
+#endif
 
 static void set_clipboard_win(const std::string& text) {
-    if (!OpenClipboard(nullptr)) return;
-    EmptyClipboard();
-    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
-    if (h) {
-        memcpy(GlobalLock(h), text.c_str(), text.size() + 1);
-        GlobalUnlock(h);
-        SetClipboardData(CF_TEXT, h);
-    }
-    CloseClipboard();
+    glfwSetClipboardString(nullptr, text.c_str());
 }
 
 int main() {
@@ -177,7 +196,7 @@ int main() {
     // library_template\ (git-tracked), а рабочая library\ — per-user, в
     // gitignore. Первый запуск клонирует template → library; дальше UI
     // пишет только в library\, и git-status остаётся чистым.
-    std::string dir = exe_dir() + "\\";
+    std::string dir = exe_dir() + "/";
     //printf("Wait 10s, podnimaetsya server");
     std::string ocr_script = dir + "ocr_server.py";
     LibraryPaths lib_paths = resolve_library_paths(dir);
@@ -349,9 +368,21 @@ int main() {
             cfg.OversampleH = 2;   // TTF выглядит лучше с oversample 2 (типичный
             cfg.OversampleV = 1;   // ImGui-дефолт для AddFontFromFileTTF).
             cfg.PixelSnapH  = false;
-            loaded = io.Fonts->AddFontFromFileTTF(
-                "C:\\Windows\\Fonts\\segoeui.ttf", 15.0f * scale, &cfg,
-                io.Fonts->GetGlyphRangesCyrillic());
+            const char* font_candidates[] = {
+#ifdef _WIN32
+                "C:/Windows/Fonts/segoeui.ttf"
+#else
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/gnu-free/FreeSans.otf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+#endif
+            };
+            for (const char* path : font_candidates) {
+                if (!std::filesystem::is_regular_file(path)) continue;
+                loaded = io.Fonts->AddFontFromFileTTF(path, 15.0f * scale, &cfg,
+                                                    io.Fonts->GetGlyphRangesCyrillic());
+                if (loaded) break;
+            }
         }
         if (!loaded) {
             // ProggyClean — либо явно выбран в Settings, либо segoeui.ttf не нашли.

@@ -2,6 +2,105 @@
 
 Анализ нелинейных динамических систем на CUDA + ImGui. Пользователь задаёт систему ОДУ (LaTeX или текст, можно с фото через OCR), приложение генерирует CUDA-код, интегрирует на GPU и рисует фазовые портреты 2D/3D.
 
+## CMake: Arch Linux и Windows
+
+Общая сборка описана в `CMakeLists.txt`, профили — в `CMakePresets.json`.
+ImGui (docking), ImPlot и ImPlot3D загружаются автоматически в закреплённых версиях.
+GLFW берётся из системы либо собирается из исходников. При первой конфигурации нужен интернет.
+
+В CMake **Debug и Release собирают графическое приложение** `U-CUDA`.
+Старый расчётный сценарий включается отдельно: `-DU_CUDA_BUILD_LEGACY=ON`,
+цель `U-CUDA-legacy`. Исходная сборка через `.sln` также сохранена;
+в ней Debug по-прежнему означает старый сценарий.
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed base-devel cmake ninja cuda glfw gdb zenity wl-clipboard xclip ttf-dejavu
+cmake --preset linux-debug
+cmake --build --preset linux-debug
+ctest --preset linux-debug
+./build/linux-debug/bin/U-CUDA
+```
+
+Для оптимизированной сборки замени `linux-debug` на `linux-release`.
+Профили Arch используют `/opt/cuda/bin/nvcc` и `/usr/bin/g++-15`
+(пакет `gcc15` устанавливается как зависимость CUDA). CUDA 13.3 проверена
+с текущими заголовками Arch; более старый Toolkit может не поддерживать новую glibc.
+Для другого расположения Toolkit/компилятора создай `CMakeUserPresets.json`
+или передай `-DCMAKE_CUDA_COMPILER=... -DCMAKE_CUDA_HOST_COMPILER=... -DCUDAToolkit_ROOT=...`.
+
+На этой рабочей копии дополнительно настроены локальные профили `linux-local`
+и `linux-local-release`: CUDA/GCC и библиотеки лежат в игнорируемом `build/`,
+системная установка для них не нужна. Запуск:
+
+```bash
+cmake --preset linux-local
+cmake --build --preset linux-local
+ctest --preset linux-local
+./build/linux-local133/bin/U-CUDA
+```
+
+Эти локальные профили и Toolkit не входят в Git. Для новой копии используй
+обычную установку Arch выше. `zenity` нужен для файловых диалогов,
+`wl-clipboard` — для PNG в буфере обмена Wayland, `xclip` — для X11.
+Графический запуск требует активной сессии Wayland/X11 и OpenGL 3.3;
+GPU-расчёты требуют работающего драйвера NVIDIA (`nvidia-smi`).
+
+### Windows через CMake
+
+Нужны CMake 3.25+, Git, Visual Studio 2022 с C++ и CUDA Toolkit
+с интеграцией Visual Studio. `CUDA_PATH` должен указывать на Toolkit,
+а `%CUDA_PATH%\bin` — присутствовать в `PATH` для CUDA DLL.
+vcpkg для этого способа не требуется.
+
+```powershell
+cmake --preset windows
+cmake --build --preset windows-debug
+.\build\windows\bin\Debug\U-CUDA.exe
+# Оптимизированная версия:
+cmake --build --preset windows-release
+.\build\windows\bin\Release\U-CUDA.exe
+```
+
+Профили по умолчанию используют CUDA-архитектуру `75` (RTX 2080).
+Для другой видеокарты переопредели `CMAKE_CUDA_ARCHITECTURES` при конфигурации.
+На Windows конфигурация подготовлена, но её сборку следует проверить на Windows:
+Linux-проверки не заменяют проверку MSVC.
+
+### VS Code / Code OSS
+
+1. Открой **корень репозитория**, установи рекомендованные расширения.
+2. Выполни **CMake: Select Configure Preset**: на этой машине `linux-local`,
+   на Arch с системной CUDA `linux-debug`, на Windows `windows`.
+3. Выбери цель запуска **U-CUDA** через **CMake: Set Debug Target**.
+4. **Ctrl+Shift+B** собирает приложение. В панели Run and Debug выбери
+   **U-CUDA (Linux)** или **U-CUDA (Windows)** и нажми **F5**.
+
+Linux использует Native Debug (`webfreak.debug`) и GDB, подсказки — clangd.
+CMake Tools копирует `compile_commands.json` в `build/` для clangd.
+Для Windows-профиля отладки нужен Microsoft C/C++ (`ms-vscode.cpptools`)
+из каталога обычного VS Code; в каталоге Code OSS он может отсутствовать.
+Для отладки устройства CUDA нужен отдельный CUDA-отладчик; F5 здесь отлаживает CPU-код.
+
+Ресурсы `kernels/`, `library_template/` и `ocr_server.py` копируются рядом
+с исполняемым файлом. При работе из исходников пользовательская библиотека
+остаётся в `U-CUDA/library/`. `CUDA_PATH` может переопределить путь к заголовкам
+NVRTC; без него CMake передаёт путь найденного Toolkit.
+
+OCR опционален. На Linux можно создать `.venv` в корне проекта и установить
+зависимости из `requirements.txt`; при необходимости задай `U_CUDA_PYTHON`
+путём к Python с установленным pix2text. Windows-команды ниже относятся
+к исходному способу установки. Без Python-зависимостей приложение запускается,
+но распознавание изображений недоступно.
+
+Тест `platform` проверяет Linux IPC, протокол OCR с тестовым процессом,
+компиляцию и выполнение CPU-схем, ошибки компиляции. `gpu_smoke` проверяет
+NVRTC, траекторию и параметрическую развёртку на GPU; без доступной CUDA
+он помечается как пропущенный.
+
+## Исходная сборка Windows через Visual Studio
+
 ## Обновление существующей копии
 
 Если проект уже клонирован и нужно подтянуть новые правки:
@@ -19,7 +118,7 @@ Remove-Item -Recurse -Force .vs, x64 -ErrorAction SilentlyContinue
 
 ## Системные требования
 
-- **Windows 10/11 x64**
+- **Windows 10/11 x64** (для исходной сборки `.sln`; Linux — см. CMake выше)
 - **Visual Studio 2022** (toolset v143, C++17)
 - **NVIDIA GPU** + **CUDA Toolkit** (см. ниже про версию)
 - **vcpkg** (manifest-режим — зависимости в [vcpkg.json](vcpkg.json))

@@ -4,12 +4,12 @@
 #include <iomanip>
 #include <iostream>
 #include <ctime>
-#include <conio.h>
+
 #include "hostLibrary.cuh"
-#include "windows.h"
+#include "platform_paths.h"
 #include <cstring>
 //#include <string>
-std::string exe_dir() { return "."; }
+std::string exe_dir() { return platform::executable_dir(); }
 //
 //
 //
@@ -4065,6 +4065,6 @@ int main()
 //
 //
 	printf("Time of runnig: %zu ms\n", std::clock() - startTime);
-	getch();
+	std::getchar();
 	return 0;
 }

@@ -1,7 +1,14 @@
 ﻿#include "krs_cpu.h"
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include "platform_posix.h"
+#include <dlfcn.h>
+#include <filesystem>
+#include <fstream>
+#endif
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -112,6 +119,7 @@ std::mutex g_compile_mtx;   // компиляция и запись в кэш �
 // cl.exe пишет локализованные сообщения в OEM-кодировке консоли (для русской
 // локали — CP866). ImGui рисует UTF-8, поэтому без перекодировки текст ошибки
 // в панели превратился бы в кашу.
+#ifdef _WIN32
 std::string oem_to_utf8(const std::string& s) {
     if (s.empty()) return s;
     const int wn = MultiByteToWideChar(CP_OEMCP, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -253,13 +261,25 @@ const std::string& vcvars_path(std::string& why) {
     return s_path;
 }
 
+#endif
+
 } // namespace
 
 bool krs_cpu_backend_available(std::string* why_not) {
+#ifdef _WIN32
     std::string why;
     if (!vcvars_path(why).empty()) return true;
     if (why_not) *why_not = why.empty() ? "компилятор не найден" : why;
     return false;
+#else
+    try {
+        std::string output;
+        const char* cxx = std::getenv("CXX");
+        if (platform::run({cxx && *cxx ? cxx : "c++", "--version"}, output, {}, true) == 0) return true;
+        if (why_not) *why_not = output;
+    } catch (const std::exception& e) { if (why_not) *why_not = e.what(); }
+    return false;
+#endif
 }
 
 // Часть 3. Генерация исходника, компиляция, загрузка
@@ -294,14 +314,15 @@ constexpr int kPreludeVersion = 4;
 // выигрывает, как и в NVRTC-шаблонах.
 std::string make_source(const std::string& body, int amountOfX) {
     std::ostringstream o;
-    o << "#include <cmath>\n"
+    o << "#ifdef _WIN32\n#define UC_EXPORT __declspec(dllexport)\n#else\n#define UC_EXPORT\n#endif\n"
+         "#include <cmath>\n"
          "#include <cstdlib>\n"
          "using std::abs;\n"
          "#define AMOUNTOFX " << amountOfX << "\n"
          "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
-         "extern \"C\" __declspec(dllexport)\n"
+         "extern \"C\" UC_EXPORT\n"
          "void krs_step(numb* X, const numb* a, numb h) {\n"
          // Дальше — код пользователя. #line переводит нумерацию компилятора
          // в координаты ТЕЛА, поэтому "krs(12): error" указывает ровно на
@@ -328,6 +349,7 @@ unsigned long long hash_key(const std::string& body, int nx, int nv) {
 }
 
 std::string cache_dir(unsigned long long key) {
+#ifdef _WIN32
     char tmp[MAX_PATH] = { 0 };
     GetTempPathA(MAX_PATH, tmp);
     char buf[32];
@@ -337,6 +359,17 @@ std::string cache_dir(unsigned long long key) {
     CreateDirectoryA(root.c_str(), nullptr);
     CreateDirectoryA(dir.c_str(),  nullptr);
     return dir;
+#else
+    // Private process directory: never load executable code from a shared /tmp cache.
+    static const std::string root = [] {
+        std::string pattern = (std::filesystem::temp_directory_path() / "u-cuda-krs-XXXXXX").string();
+        if (!mkdtemp(pattern.data())) throw std::runtime_error("cannot create KRS cache");
+        return pattern;
+    }();
+    auto dir = std::filesystem::path(root) / std::to_string(key);
+    std::filesystem::create_directories(dir);
+    return dir.string() + "/";
+#endif
 }
 
 // Разбирает вывод cl.exe. Строки вида
@@ -393,7 +426,11 @@ KrsCpuStep& KrsCpuStep::operator=(KrsCpuStep&& o) noexcept {
 }
 
 void KrsCpuStep::release() {
+#ifdef _WIN32
     if (module_) FreeLibrary((HMODULE)module_);
+#else
+    if (module_) dlclose(module_);
+#endif
     module_ = nullptr;
     fn_     = nullptr;
 }
@@ -407,6 +444,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
     if (!krs_cpu_check_indices(body, amountOfX, amountOfValues, diags))
         return false;
 
+#ifdef _WIN32
     std::string why;
     const std::string vcvars = vcvars_path(why);
     if (vcvars.empty()) {
@@ -475,6 +513,43 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         diags.push_back({ 0, "в собранной DLL нет krs_step" });
         return false;
     }
+#else
+    std::lock_guard<std::mutex> lock(g_compile_mtx);
+    const std::string dir = cache_dir(hash_key(body, amountOfX, amountOfValues));
+    const std::string src = dir + "krs.cpp", dll = dir + "krs.so";
+    if (!std::filesystem::exists(dll)) {
+        std::ofstream file(src);
+        file << make_source(body, amountOfX);
+        file.close();
+        if (!file) { diags.push_back({0, "cannot write " + src}); return false; }
+        const char* cxx = std::getenv("CXX");
+        std::string output;
+        int rc;
+        try {
+            rc = platform::run({cxx && *cxx ? cxx : "c++", "-std=c++17", "-O2", "-shared", "-fPIC",
+                                "-fdiagnostics-color=never", "-I" + exe_dir() + "/kernels", src, "-o", dll},
+                               output, {}, true);
+        } catch (const std::exception& e) { diags.push_back({0, e.what()}); return false; }
+        std::ofstream(dir + "build.log") << output;
+        if (rc != 0) {
+            std::istringstream lines(output);
+            std::string line;
+            while (std::getline(lines, line)) {
+                if (line.find("error:") == std::string::npos) continue;
+                int number = line.rfind("krs:", 0) == 0 ? std::atoi(line.c_str() + 4) : 0;
+                diags.push_back({number, line});
+                if (diags.size() >= 20) break;
+            }
+            if (diags.empty()) diags.push_back({0, output.empty() ? "CPU compiler failed" : output});
+            std::filesystem::remove(dll);
+            return false;
+        }
+    }
+    void* m = dlopen(dll.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!m) { diags.push_back({0, dlerror()}); return false; }
+    auto p = reinterpret_cast<StepFn>(dlsym(m, "krs_step"));
+    if (!p) { diags.push_back({0, "krs_step missing"}); dlclose(m); return false; }
+#endif
     module_ = m;
     fn_     = p;
     return true;

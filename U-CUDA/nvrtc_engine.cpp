@@ -113,7 +113,7 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     const bool needs_complex = krs_body.find("ucmplx") != std::string::npos;
     std::string cfg_header;
     if (needs_complex) {
-        const std::string path = exe_dir() + "\\kernels\\configCUDA.h";
+        const std::string path = exe_dir() + "/kernels/configCUDA.h";
         std::ifstream f(path, std::ios::binary);
         if (!f) NV_FAIL("не найден " + path + " (нужен для схем с комплексными "
                         "коэффициентами; проверь, что kernels\\ скопирован рядом с .exe)");

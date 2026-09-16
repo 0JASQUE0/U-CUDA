@@ -161,9 +161,42 @@ bool copy_framebuffer_rect_to_clipboard(int x0, int y0_top, int x1, int y1_top) 
     return true;
 }
 
-#else // не Windows — заглушка
+#else
+#include "platform_posix.h"
+#include <glad/glad.h>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 std::vector<unsigned char> ClipboardImageSource::get_png() {
-    throw std::runtime_error("clipboard image source: Windows only");
+    std::string output;
+    const bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
+    int rc = platform::run(wayland ? std::vector<std::string>{"wl-paste", "--no-newline", "--type", "image/png"}
+                                  : std::vector<std::string>{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"}, output);
+    if (rc || output.empty()) throw std::runtime_error("No PNG image in clipboard (wl-clipboard/xclip required)");
+    return {output.begin(), output.end()};
 }
-bool copy_framebuffer_rect_to_clipboard(int, int, int, int) { return false; }
+bool copy_framebuffer_rect_to_clipboard(int x0, int y0, int x1, int y1) {
+    GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+    x0 = std::clamp(x0, 0, vp[2]); x1 = std::clamp(x1, 0, vp[2]);
+    y0 = std::clamp(y0, 0, vp[3]); y1 = std::clamp(y1, 0, vp[3]);
+    int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return false;
+    std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x0, vp[3] - y1, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    const size_t stride = static_cast<size_t>(w) * 4;
+    for (int y = 0; y < h / 2; ++y)
+        std::swap_ranges(pixels.begin() + y * stride, pixels.begin() + (y + 1) * stride,
+                         pixels.begin() + (h - 1 - y) * stride);
+    std::string png, output;
+    auto write = [](void* context, void* data, int size) {
+        static_cast<std::string*>(context)->append(static_cast<char*>(data), size);
+    };
+    if (!stbi_write_png_to_func(write, &png, w, h, 4, pixels.data(), static_cast<int>(stride))) return false;
+    try {
+        const bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
+        return platform::run(wayland ? std::vector<std::string>{"wl-copy", "--type", "image/png"}
+                                    : std::vector<std::string>{"xclip", "-selection", "clipboard", "-t", "image/png"}, output, png) == 0;
+    } catch (...) { return false; }
+}
 #endif

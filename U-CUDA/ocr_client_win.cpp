@@ -1,5 +1,6 @@
 ﻿#include "ocr_client_win.h"
 #include <stdexcept>
+#ifdef _WIN32
 #include <windows.h>
 
 static HANDLE H(void* p){ return reinterpret_cast<HANDLE>(p); }
@@ -104,6 +105,38 @@ std::string OcrClient::read_line(){
         rbuf_.append(tmp, n);
     }
 }
+
+#else
+#include "platform_posix.h"
+#include <memory>
+
+OcrClient::OcrClient(const std::string& python_exe, const std::string& script) {
+    auto process = std::make_unique<platform::Process>(std::vector<std::string>{python_exe, script});
+    hProcess_ = process.get();
+    try {
+        const auto ready = read_line();
+        if (ready != "READY") throw std::runtime_error("OCR server: " + ready);
+    } catch (...) { hProcess_ = nullptr; throw; }
+    process.release();
+}
+OcrClient::~OcrClient() { delete static_cast<platform::Process*>(hProcess_); }
+void OcrClient::write_line(const std::string& text) {
+    static_cast<platform::Process*>(hProcess_)->write(text + "\n");
+}
+std::string OcrClient::read_line() {
+    for (;;) {
+        auto pos = rbuf_.find('\n');
+        if (pos != std::string::npos) {
+            auto line = rbuf_.substr(0, pos); rbuf_.erase(0, pos + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            return line;
+        }
+        auto chunk = static_cast<platform::Process*>(hProcess_)->read();
+        if (chunk.empty()) throw std::runtime_error("OCR process closed stdout");
+        rbuf_ += chunk;
+    }
+}
+#endif
 
 std::string OcrClient::recognize_base64(const std::string& b64){
     write_line(b64);

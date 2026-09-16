@@ -2,9 +2,8 @@
 #include <string>
 #include <vector>
 
-// Windows-версия OcrClient: запускает Python OCR-сервер через CreateProcess,
-// общается с ним по анонимным пайпам построчно. Тот же интерфейс, что у
-// POSIX-версии, поэтому main.cpp от платформы не зависит.
+// Запускает Python OCR-сервер через CreateProcess (Windows) или posix_spawn
+// (Linux), общается с ним построчно. Имя файла сохранено для MSBuild-проекта.
 class OcrClient {
 public:
     // python_exe: "python" (как в вашем cmd). script: путь к ocr_server.py.
