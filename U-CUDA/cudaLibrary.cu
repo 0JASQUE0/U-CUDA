@@ -4066,7 +4066,16 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 		return;
 	}
 
-	if (sqrt((data[idxCurPoint] - data[idx]) * (data[idxCurPoint] - data[idx]) + (intervals[idxCurPoint] - intervals[idx]) * (intervals[idxCurPoint] - intervals[idx])) <= eps)
+	// Сравниваем КВАДРАТ расстояния с квадратом порога — тот же критерий без FP64-sqrt
+	// (см. distance2 выше). Порог нестрогий, каким и был: <= , а не <.
+	//
+	// Координаты текущей точки одинаковы для ВСЕХ потоков запуска, но в прежней записи
+	// каждая читалась дважды — выражение (a-b)*(a-b) раскрывалось в четыре загрузки из
+	// глобальной памяти вместо двух. Ядро запускается на всю сетку на каждом шаге обхода,
+	// и оно памятью и ограничено, так что лишние загрузки тут дороже самого корня.
+	const numb curX = data[idxCurPoint];
+	const numb curY = intervals[idxCurPoint];
+	if (distance2(curX, curY, data[idx], intervals[idx]) <= eps * eps)
 	{
 		labels[idx] = labels[idxCurPoint];						// Даем точке кластер. Предполагаем, что у idxCurPoint не может не быть кластера
 		neighbors[atomicAdd(amountOfNeighbors, 1)] = idx;		// Фиксируем индекс найденного соседа - его ждет та же участь
