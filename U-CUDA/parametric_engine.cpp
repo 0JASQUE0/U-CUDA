@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
+#include "module_lru.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1596,143 +1597,86 @@ struct ParametricEngine::Impl {
     };
     CachedOrderModule cached_order;
 
+    // Every cached_* above is just a view on the active entry of its pool; the pool owns the
+    // modules. One slot per analysis type meant recompiling on every switch back to a scheme that
+    // had already been built minutes ago -- 6 seconds of NVRTC for nothing on an implicit scheme.
+    static constexpr std::size_t kModuleCacheCapacity = 4;
+
+    // Guards the pools and the active slots: background prewarming will make compile_* concurrent.
+    std::recursive_mutex cache_mu;
+
+    ModuleLru<CachedModule>            pool_bif1d     { kModuleCacheCapacity };
+    ModuleLru<CachedLleModule>         pool_lle       { kModuleCacheCapacity };
+    ModuleLru<CachedLleModule>         pool_lle_2d    { kModuleCacheCapacity };
+    ModuleLru<CachedLsModule>          pool_ls        { kModuleCacheCapacity };
+    ModuleLru<CachedLsModule>          pool_ls_2d     { kModuleCacheCapacity };
+    ModuleLru<CachedContModule>        pool_cont      { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_lle_cont  { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_ls_cont   { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_dft_cont  { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_dft_hsweep{ kModuleCacheCapacity };
+    ModuleLru<CachedBif2dModule>       pool_bif2d     { kModuleCacheCapacity };
+    ModuleLru<CachedBasinsModule>      pool_basins    { kModuleCacheCapacity };
+    ModuleLru<CachedFastSyncModule>    pool_fs_attr   { kModuleCacheCapacity };
+    ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
+    ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
+
+    // Activates the module already built for this key, if the pool still holds it.
+    template <class T>
+    bool cache_activate(ModuleLru<T>& pool, const std::string& key, T& active) {
+        if (active.module && active.key == key) return true;
+        return pool.take(key, active);
+    }
+
+    // Pins the PREVIOUS active entry while inserting: a running task may still hold its kernels,
+    // and evicting it would unload code from under a live launch.
+    template <class T>
+    void cache_publish(ModuleLru<T>& pool, const T& fresh, T& active) {
+        std::vector<T> evicted;
+        pool.insert(fresh, active.key, evicted);
+        for (const T& e : evicted)
+            if (e.module) cuModuleUnload(e.module);
+        active = fresh;
+    }
+
+    template <class T>
+    void drain_pool(ModuleLru<T>& pool) {
+        for (const T& e : pool.drain())
+            if (e.module) cuModuleUnload(e.module);
+    }
+
     ~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
-            release_module();
-            release_lle_module();
-            release_lle_2d_module();
-            release_ls_module();
-            release_ls_2d_module();
-            release_cont_module();
-            release_bif2d_module();
-            release_basins_module();
-            release_fs_attr_module();
-            release_fs_grid_module();
-            release_order_module();
+            drain_pool(pool_bif1d);
+            drain_pool(pool_lle);
+            drain_pool(pool_lle_2d);
+            drain_pool(pool_ls);
+            drain_pool(pool_ls_2d);
+            drain_pool(pool_cont);
+            drain_pool(pool_lle_cont);
+            drain_pool(pool_ls_cont);
+            drain_pool(pool_dft_cont);
+            drain_pool(pool_dft_hsweep);
+            drain_pool(pool_bif2d);
+            drain_pool(pool_basins);
+            drain_pool(pool_fs_attr);
+            drain_pool(pool_fs_grid);
+            drain_pool(pool_order);
             cuCtxDestroy(context);
         }
     }
 
-    void release_fs_attr_module() {
-        if (cached_fs_attr.module) {
-            cuModuleUnload(cached_fs_attr.module);
-            cached_fs_attr.module         = nullptr;
-            cached_fs_attr.kernel_fs_fill = nullptr;
-            cached_fs_attr.kernel_fs_traj = nullptr;
-            cached_fs_attr.kernel_fs_grid = nullptr;
-            cached_fs_attr.key.clear();
-        }
-    }
-    void release_fs_grid_module() {
-        if (cached_fs_grid.module) {
-            cuModuleUnload(cached_fs_grid.module);
-            cached_fs_grid.module         = nullptr;
-            cached_fs_grid.kernel_fs_fill = nullptr;
-            cached_fs_grid.kernel_fs_traj = nullptr;
-            cached_fs_grid.kernel_fs_grid = nullptr;
-            cached_fs_grid.key.clear();
-        }
-    }
 
-    void release_order_module() {
-        if (cached_order.module) {
-            cuModuleUnload(cached_order.module);
-            cached_order.module = nullptr;
-            cached_order.kernel = nullptr;
-            cached_order.key.clear();
-        }
-    }
 
-    void release_module() {
-        if (cached.module) {
-            cuModuleUnload(cached.module);
-            cached.module = nullptr;
-            cached.kernel_traj = nullptr;
-            cached.kernel_peak = nullptr;
-            cached.kernel_fused = nullptr;
-            cached.kernel_dft = nullptr;
-            cached.key.clear();
-        }
-    }
 
-    void release_lle_module() {
-        if (cached_lle.module) {
-            cuModuleUnload(cached_lle.module);
-            cached_lle.module = nullptr;
-            cached_lle.kernel_lle = nullptr;
-            cached_lle.key.clear();
-        }
-    }
 
-    void release_lle_2d_module() {
-        if (cached_lle_2d.module) {
-            cuModuleUnload(cached_lle_2d.module);
-            cached_lle_2d.module = nullptr;
-            cached_lle_2d.kernel_lle = nullptr;
-            cached_lle_2d.key.clear();
-        }
-    }
 
-    void release_ls_module() {
-        if (cached_ls.module) {
-            cuModuleUnload(cached_ls.module);
-            cached_ls.module = nullptr;
-            cached_ls.kernel_ls = nullptr;
-            cached_ls.key.clear();
-        }
-    }
 
-    void release_ls_2d_module() {
-        if (cached_ls_2d.module) {
-            cuModuleUnload(cached_ls_2d.module);
-            cached_ls_2d.module = nullptr;
-            cached_ls_2d.kernel_ls = nullptr;
-            cached_ls_2d.key.clear();
-        }
-    }
 
-    void release_simple_cont_module(CachedSimpleContModule& m) {
-        if (m.module) {
-            cuModuleUnload(m.module);
-            m.module = nullptr;
-            m.kernel = nullptr;
-            m.key.clear();
-        }
-    }
 
-    void release_cont_module() {
-        if (cached_cont.module) {
-            cuModuleUnload(cached_cont.module);
-            cached_cont.module = nullptr;
-            cached_cont.kernel_cont = nullptr;
-            cached_cont.kernel_peak = nullptr;
-            cached_cont.kernel_dft = nullptr;
-            cached_cont.key.clear();
-        }
-    }
 
-    void release_bif2d_module() {
-        if (cached_bif2d.module) {
-            cuModuleUnload(cached_bif2d.module);
-            cached_bif2d.module        = nullptr;
-            cached_bif2d.kernel_fused  = nullptr;
-            cached_bif2d.kernel_dbscan = nullptr;
-            cached_bif2d.key.clear();
-        }
-    }
 
-    void release_basins_module() {
-        if (cached_basins.module) {
-            cuModuleUnload(cached_basins.module);
-            cached_basins.module              = nullptr;
-            cached_basins.kernel_fused        = nullptr;
-            cached_basins.kernel_dbscan       = nullptr;
-            cached_basins.kernel_search_fixed = nullptr;
-            cached_basins.kernel_search_clear = nullptr;
-            cached_basins.key.clear();
-        }
-    }
 
     bool ensure_init(std::string& err) {
         if (inited) return true;
@@ -1919,8 +1863,8 @@ struct ParametricEngine::Impl {
         // par_or_var в kernel'е cudaLibrary.cu — compile-time макрос. Поэтому
         // включаем его в hash-key: param-sweep и IC-sweep кешируются отдельно.
         std::string key = hash_key(krs_body, amountOfX) + ":pov" + std::to_string(par_or_var);
-        if (cached.module && cached.key == key) return true;  // cache hit
-        release_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_bif1d, key, cached)) return true;  // cache hit
 
         if (!load_sources(err)) return false;
 
@@ -1938,13 +1882,15 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached.module = mod;
-        if (!module_fn(mod, mg[0], cached.kernel_traj, err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[1], cached.kernel_peak, err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[2], cached.kernel_dft,  err)) { release_module(); return false; }
-        if (!module_fn(mod, mg[3], cached.kernel_fused, err)) { release_module(); return false; }
+        CachedModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_traj,  err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[1], fresh.kernel_peak,  err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[2], fresh.kernel_dft,   err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[3], fresh.kernel_fused, err)) { cuModuleUnload(mod); return false; }
 
-        cached.key = key;
+        cache_publish(pool_bif1d, fresh, cached);
         return true;
     }
 
@@ -2366,8 +2312,8 @@ struct ParametricEngine::Impl {
         // par_or_var в kernel — compile-time макрос (см. bif1d). Два PTX-модуля
         // кешируются отдельно: param-sweep и IC-sweep.
         std::string key = hash_key(krs_body, amountOfX) + ":lle:pov" + std::to_string(par_or_var);
-        if (cached_lle.module && cached_lle.key == key) return true;
-        release_lle_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_lle, key, cached_lle)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -2381,10 +2327,12 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_lle.module = mod;
-        if (!module_fn(mod, mg[0], cached_lle.kernel_lle, err)) { release_lle_module(); return false; }
+        CachedLleModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_lle, err)) { cuModuleUnload(mod); return false; }
 
-        cached_lle.key = key;
+        cache_publish(pool_lle, fresh, cached_lle);
         return true;
     }
 
@@ -2711,8 +2659,8 @@ struct ParametricEngine::Impl {
                                   int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":lle2d:pov" + std::to_string(par_or_var);
-        if (cached_lle_2d.module && cached_lle_2d.key == key) return true;
-        release_lle_2d_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_lle_2d, key, cached_lle_2d)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -2726,10 +2674,12 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_lle_2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_lle_2d.kernel_lle, err)) { release_lle_2d_module(); return false; }
+        CachedLleModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_lle, err)) { cuModuleUnload(mod); return false; }
 
-        cached_lle_2d.key = key;
+        cache_publish(pool_lle_2d, fresh, cached_lle_2d);
         return true;
     }
 
@@ -3149,8 +3099,8 @@ struct ParametricEngine::Impl {
                               int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls:pov" + std::to_string(par_or_var);
-        if (cached_ls.module && cached_ls.key == key) return true;
-        release_ls_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_ls, key, cached_ls)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -3164,10 +3114,12 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_ls.module = mod;
-        if (!module_fn(mod, mg[0], cached_ls.kernel_ls, err)) { release_ls_module(); return false; }
+        CachedLsModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_ls, err)) { cuModuleUnload(mod); return false; }
 
-        cached_ls.key = key;
+        cache_publish(pool_ls, fresh, cached_ls);
         return true;
     }
 
@@ -3473,8 +3425,8 @@ struct ParametricEngine::Impl {
                                  int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls2d:pov" + std::to_string(par_or_var);
-        if (cached_ls_2d.module && cached_ls_2d.key == key) return true;
-        release_ls_2d_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_ls_2d, key, cached_ls_2d)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -3488,10 +3440,12 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_ls_2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_ls_2d.kernel_ls, err)) { release_ls_2d_module(); return false; }
+        CachedLsModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_ls, err)) { cuModuleUnload(mod); return false; }
 
-        cached_ls_2d.key = key;
+        cache_publish(pool_ls_2d, fresh, cached_ls_2d);
         return true;
     }
 
@@ -3886,8 +3840,8 @@ struct ParametricEngine::Impl {
                                       std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":cont";
-        if (cached_cont.module && cached_cont.key == key) return true;
-        release_cont_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_cont, key, cached_cont)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -3904,13 +3858,15 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_cont.module = mod;
-        if (!module_fn(mod, "bifurcation1dContinuationKernel", cached_cont.kernel_cont, err))
-            { release_cont_module(); return false; }
-        if (!module_fn(mod, mg[0], cached_cont.kernel_peak, err)) { release_cont_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_cont.kernel_dft,  err)) { release_cont_module(); return false; }
+        CachedContModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, "bifurcation1dContinuationKernel", fresh.kernel_cont, err))
+            { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[0], fresh.kernel_peak, err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[1], fresh.kernel_dft,  err)) { cuModuleUnload(mod); return false; }
 
-        cached_cont.key = key;
+        cache_publish(pool_cont, fresh, cached_cont);
         return true;
     }
 
@@ -3918,7 +3874,8 @@ struct ParametricEngine::Impl {
     // continuation-модулей (LLE и LS). От compile_bif1d_cont_if_needed
     // отличается только тем, что регистрировать mangled-имена не нужно:
     // единственный нужный символ объявлен extern "C".
-    bool compile_simple_cont_if_needed(CachedSimpleContModule& slot,
+    bool compile_simple_cont_if_needed(ModuleLru<CachedSimpleContModule>& pool,
+                                       CachedSimpleContModule& slot,
                                        const std::string& tmpl,
                                        const char* kernel_name,
                                        const char* src_name,
@@ -3927,8 +3884,8 @@ struct ParametricEngine::Impl {
                                        std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + key_suffix;
-        if (slot.module && slot.key == key) return true;
-        release_simple_cont_module(slot);
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool, key, slot)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -3941,11 +3898,12 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        slot.module = mod;
-        if (!module_fn(mod, kernel_name, slot.kernel, err)) {
-            release_simple_cont_module(slot); return false;
-        }
-        slot.key = key;
+        CachedSimpleContModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, kernel_name, fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+
+        cache_publish(pool, fresh, slot);
         return true;
     }
 
@@ -3960,7 +3918,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_lle_cont, src_template_lle_cont,
+        if (!compile_simple_cont_if_needed(pool_lle_cont, cached_lle_cont, src_template_lle_cont,
                                            "lle1dContinuationKernel", "lle1d_cont.cu", ":llecont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4050,7 +4008,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_ls_cont, src_template_ls_cont,
+        if (!compile_simple_cont_if_needed(pool_ls_cont, cached_ls_cont, src_template_ls_cont,
                                            "ls1dContinuationKernel", "ls1d_cont.cu", ":lscont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4153,7 +4111,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_cont, src_template_dft_cont,
+        if (!compile_simple_cont_if_needed(pool_dft_cont, cached_dft_cont, src_template_dft_cont,
                                            "dft1dContinuationKernel", "dft1d_cont.cu", ":dftcont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -4299,7 +4257,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_hsweep, src_template_dft_hsweep,
+        if (!compile_simple_cont_if_needed(pool_dft_hsweep, cached_dft_hsweep, src_template_dft_hsweep,
                                            "dft1dHSweepKernel", "dft1d_hsweep.cu", ":dfthsweep",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -5410,8 +5368,8 @@ struct ParametricEngine::Impl {
                                  int par_or_var, std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":bif2d:" + std::to_string(par_or_var);
-        if (cached_bif2d.module && cached_bif2d.key == key) return true;
-        release_bif2d_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_bif2d, key, cached_bif2d)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -5425,11 +5383,13 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_bif2d.module = mod;
-        if (!module_fn(mod, mg[0], cached_bif2d.kernel_fused,  err)) { release_bif2d_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_bif2d.kernel_dbscan, err)) { release_bif2d_module(); return false; }
+        CachedBif2dModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_fused,  err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[1], fresh.kernel_dbscan, err)) { cuModuleUnload(mod); return false; }
 
-        cached_bif2d.key = key;
+        cache_publish(pool_bif2d, fresh, cached_bif2d);
         return true;
     }
 
@@ -5950,8 +5910,8 @@ struct ParametricEngine::Impl {
                                   std::string& err) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":basins";
-        if (cached_basins.module && cached_basins.key == key) return true;
-        release_basins_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_basins, key, cached_basins)) return true;
 
         if (!load_sources(err)) return false;
 
@@ -5967,13 +5927,15 @@ struct ParametricEngine::Impl {
                           mod, mg, err))
             return false;
 
-        cached_basins.module = mod;
-        if (!module_fn(mod, mg[0], cached_basins.kernel_fused,        err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[1], cached_basins.kernel_dbscan,       err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[2], cached_basins.kernel_search_fixed, err)) { release_basins_module(); return false; }
-        if (!module_fn(mod, mg[3], cached_basins.kernel_search_clear, err)) { release_basins_module(); return false; }
+        CachedBasinsModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, mg[0], fresh.kernel_fused,        err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[1], fresh.kernel_dbscan,       err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[2], fresh.kernel_search_fixed, err)) { cuModuleUnload(mod); return false; }
+        if (!module_fn(mod, mg[3], fresh.kernel_search_clear, err)) { cuModuleUnload(mod); return false; }
 
-        cached_basins.key = key;
+        cache_publish(pool_basins, fresh, cached_basins);
         return true;
     }
 
@@ -6640,6 +6602,7 @@ struct ParametricEngine::Impl {
                            const std::string& krs_body,
                            int type_of_synch_v, int error_estim_v, double fs_error_trs_v,
                            const std::vector<const char*>& expr_kernels,
+                           ModuleLru<CachedFastSyncModule>& pool,
                            CachedFastSyncModule& slot,
                            std::string& err)
     {
@@ -6650,13 +6613,8 @@ struct ParametricEngine::Impl {
                         + ":t" + std::to_string(type_of_synch_v)
                         + ":e" + std::to_string(error_estim_v)
                         + ":r" + trs_buf;
-        if (slot.module && slot.key == key) return true;
-        if (slot.module) {
-            cuModuleUnload(slot.module);
-            slot.module = nullptr;
-            slot.kernel_fs_fill = slot.kernel_fs_traj = slot.kernel_fs_grid = nullptr;
-            slot.key.clear();
-        }
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool, key, slot)) return true;
         if (!load_sources(err)) return false;
 
         CUmodule mod = nullptr;
@@ -6671,20 +6629,21 @@ struct ParametricEngine::Impl {
                           mod, lowered, err))
             return false;
 
-        slot.module = mod;
+        CachedFastSyncModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
 
         // Связываем по expr_kernels индексу.
         for (size_t i = 0; i < expr_kernels.size(); ++i) {
             CUfunction f = nullptr;
-            if (!module_fn(mod, lowered[i], f, err)) {
-                release_fs_attr_module(); release_fs_grid_module(); return false;
-            }
+            if (!module_fn(mod, lowered[i], f, err)) { cuModuleUnload(mod); return false; }
             const std::string sym_name = expr_kernels[i];
-            if      (sym_name == "fillFSMasterTrajectory")                        slot.kernel_fs_fill = f;
-            else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      slot.kernel_fs_traj = f;
-            else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       slot.kernel_fs_grid = f;
+            if      (sym_name == "fillFSMasterTrajectory")                        fresh.kernel_fs_fill = f;
+            else if (sym_name == "calculateDiscreteModelforFastSynchroCUDA")      fresh.kernel_fs_traj = f;
+            else if (sym_name == "calculateDiscreteModelICCforFastSynchro")       fresh.kernel_fs_grid = f;
         }
-        slot.key = key;
+
+        cache_publish(pool, fresh, slot);
         return true;
     }
 
@@ -6694,8 +6653,8 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         const std::string key = hash_key(krs_body, amountOfX) + ":order:v"
                               + std::to_string(amountOfValues);
-        if (cached_order.module && cached_order.key == key) return true;
-        release_order_module();
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        if (cache_activate(pool_order, key, cached_order)) return true;
         if (!load_sources(err)) return false;
 
         CUmodule mod = nullptr;
@@ -6708,11 +6667,12 @@ struct ParametricEngine::Impl {
                           {}, mod, lowered, err))
             return false;
 
-        cached_order.module = mod;
-        CUfunction f = nullptr;
-        if (!module_fn(mod, "orderEstimateKernel", f, err)) { release_order_module(); return false; }
-        cached_order.kernel = f;
-        cached_order.key    = key;
+        CachedOrderModule fresh;
+        fresh.key    = key;
+        fresh.module = mod;
+        if (!module_fn(mod, "orderEstimateKernel", fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+
+        cache_publish(pool_order, fresh, cached_order);
         return true;
     }
 
@@ -7075,7 +7035,7 @@ struct ParametricEngine::Impl {
             };
             if (!compile_fs_module(src_template_fs_attr, ":fs_attr", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_attr, err)) return fail(err);
+                                   exprs, pool_fs_attr, cached_fs_attr, err)) return fail(err);
 
             const int amountOfNTPoints      = (int)(req.window / req.h);
             const int amountOfCTPoints      = (int)(req.t_max / req.h);
@@ -7286,7 +7246,7 @@ struct ParametricEngine::Impl {
             std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_grid, err)) return fail(err);
+                                   exprs, pool_fs_grid, cached_fs_grid, err)) return fail(err);
 
             // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
