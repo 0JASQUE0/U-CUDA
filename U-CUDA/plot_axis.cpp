@@ -547,6 +547,12 @@ float plot_left_margin_for_width(float max_tick_w, bool has_axis_name) {
     return std::clamp(m, 32.0f, 400.0f);
 }
 
+float plot_bottom_margin() {
+    // 2 — штрих под плотом, 6 — зазор между подписями тиков и именем оси,
+    // 6 — воздух снизу; остальное — две строки текста.
+    return 2.0f + plot_text_line_height() + 6.0f + plot_text_line_height() + 6.0f;
+}
+
 float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
     double emin, emax;
     axis_effective(y, emin, emax);

@@ -212,6 +212,12 @@ float  plot_text_line_height();
 float plot_y_axis_margin(const AxisInfo& y, const char* y_name);
 float plot_left_margin_for_width(float max_tick_w, bool has_axis_name);
 
+// Нижний отступ: штрих + строка подписей тиков + зазор + строка имени оси.
+// Раньше — константа 46 px, которую я умножал на кегль подписей целиком, из-за
+// чего на множителе 1.6 под именем оси оставалось ~20 px пустоты: масштабу
+// подчиняются строки текста, а не фиксированные зазоры.
+float plot_bottom_margin();
+
 // Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
 // диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
 // — рект в экранных координатах ImGui (весь блок диаграммы: оси/colorbar/

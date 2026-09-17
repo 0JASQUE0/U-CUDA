@@ -260,7 +260,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // вместе с кеглем подписей.
     const float margin_left   = left_margin_px_;
     const float margin_top    = 20.0f;
-    const float margin_bottom = 46.0f * plot_font_scale();
+    const float margin_bottom = plot_bottom_margin();
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
 
     // Resolve the active number of discrete bands. discrete_levels overrides
