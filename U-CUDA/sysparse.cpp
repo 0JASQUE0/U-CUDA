@@ -204,6 +204,18 @@ namespace {
     // Токенизация правой части по известному алфавиту с вставкой '*'.
     // Алфавит: точные имена (греческие как \sigma и обычные как x).
     // Возвращает выражение с явными операторами, годное для основного парсера.
+    // Math functions the expression parser accepts. Mirrors known_funcs() in
+    // codegen.cpp — that one is the source of truth and raises "unknown
+    // function" for anything missing here.
+    const std::set<std::string>& math_funcs() {
+        static const std::set<std::string> f = {
+            "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
+            "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
+            "pow","atan2","fmod","floor","ceil"
+        };
+        return f;
+    }
+
     std::string insert_mult(const std::string& rhs,
         const std::set<std::string>& alpha_plain,   // x, y, b ...
         const std::set<std::string>& alpha_greek) { // sigma, omega ...
@@ -246,6 +258,20 @@ namespace {
                 continue;
             }
             if (std::isalpha((unsigned char)c)) {
+                // A whole-run function name beats the greedy alphabet scan below:
+                // otherwise "cos" with a parameter named c is eaten as c plus a
+                // junk tail "os". A space still separates letters, so "a cos(x)"
+                // keeps its run as "cos" and only a glued "acos(x)" reads as
+                // arc-cosine. A user symbol of the same name still wins.
+                {
+                    size_t w = i;
+                    while (w < rhs.size() && std::isalpha((unsigned char)rhs[w])) ++w;
+                    const std::string run = rhs.substr(i, w - i);
+                    if (math_funcs().count(run) && !alpha_plain.count(run)) {
+                        if (prev_operand) out += " * ";
+                        out += run; prev_operand = false; i = w; continue;
+                    }
+                }
                 // жадно режем по алфавиту обычных имён: ищем самое длинное совпадение
                 std::string best;
                 for (size_t L = 1; i + L <= rhs.size(); ++L) {
