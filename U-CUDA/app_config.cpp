@@ -134,6 +134,30 @@ std::vector<std::string> split_csv(const std::string& s) {
     return out;
 }
 
+// То же для списков, элементы которых могут содержать запятую (имена систем
+// в hidden_systems): разделитель — '\n', он в однострочных именах невозможен,
+// а json_escape/parse_string_field переживают его без потерь.
+std::vector<std::string> split_lines(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find('\n', i);
+        if (j == std::string::npos) j = s.size();
+        if (j > i) out.emplace_back(s, i, j - i);
+        i = j + 1;
+    }
+    return out;
+}
+
+std::string join_lines(const std::vector<std::string>& v) {
+    std::string out;
+    for (const auto& s : v) {
+        if (!out.empty()) out.push_back('\n');
+        out += s;
+    }
+    return out;
+}
+
 std::string join_csv(const std::vector<std::string>& v) {
     std::string out;
     for (const auto& s : v) {
@@ -226,6 +250,9 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     csv.clear();
     if (parse_string_field(body, "hidden_schemes", csv))
         out.hidden_schemes = split_csv(csv);
+    std::string lines;
+    if (parse_string_field(body, "hidden_systems", lines))
+        out.hidden_systems = split_lines(lines);
 
     // Отсутствие ключа оставляет дефолт true (= дефолт NVRTC), поэтому конфиг,
     // записанный до появления настройки, читается без изменения поведения.
@@ -273,6 +300,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"peak_max_amount\": "      << cfg.peak.max_amount_of_peaks << ",\n";
         f << "  \"hidden_tabs\": \""         << json_escape(join_csv(cfg.hidden_tabs))    << "\",\n";
         f << "  \"hidden_schemes\": \""      << json_escape(join_csv(cfg.hidden_schemes)) << "\",\n";
+        f << "  \"hidden_systems\": \""      << json_escape(join_lines(cfg.hidden_systems)) << "\",\n";
         f << "  \"nvrtc_fmad\": "           << (cfg.nvrtc_fmad ? "true" : "false") << ",\n";
         f << "  \"nvrtc_rdc\": "            << (cfg.nvrtc_rdc ? "true" : "false") << ",\n";
         f << "  \"gpu_block_size\": "       << cfg.gpu_block_size << "\n";

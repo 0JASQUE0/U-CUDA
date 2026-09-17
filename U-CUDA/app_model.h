@@ -304,6 +304,10 @@ public:
     std::vector<std::string> hidden_tabs;
     std::vector<std::string> hidden_schemes;
 
+    // То же для систем библиотеки: имена, скрытые из глобального комбо
+    // (галочки во вкладке Library). Зеркалит AppConfig::hidden_systems.
+    std::vector<std::string> hidden_systems;
+
     static bool name_hidden(const std::vector<std::string>& v, const std::string& n) {
         return std::find(v.begin(), v.end(), n) != v.end();
     }
@@ -314,6 +318,7 @@ public:
     }
     bool tab_hidden(const std::string& id) const { return name_hidden(hidden_tabs, id); }
     bool scheme_hidden(const std::string& name) const { return name_hidden(hidden_schemes, name); }
+    bool system_hidden(const std::string& name) const { return name_hidden(hidden_systems, name); }
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
     PhaseAnalysisSession phase_session;

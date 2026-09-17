@@ -2608,8 +2608,10 @@ static void draw_parameters_tab(AppModel& model) {
 struct LibraryListCache {
     std::vector<std::string> names;
     std::vector<int>         custom_counts;   // параллелен names
-    std::string              note_name;       // для какой системы прочитана заметка
-    std::string              note_text;
+    std::string              sel_name;        // для какой системы прочитано превью ниже
+    bool                     sel_ok = false;  // запись прочиталась
+    SystemRecord             sel_rec;
+    std::string              sel_desc;        // describe_record(sel_rec), готов для буфера обмена
     double                   filled_at = -1.0;
     bool                     valid     = false;
 };
@@ -2617,8 +2619,9 @@ static LibraryListCache g_library_cache;
 
 static void invalidate_library_cache() {
     g_library_cache.valid = false;
-    g_library_cache.note_name.clear();
-    g_library_cache.note_text.clear();
+    g_library_cache.sel_name.clear();
+    g_library_cache.sel_desc.clear();
+    g_library_cache.sel_ok = false;
 }
 
 static const LibraryListCache& library_list_cached(SystemLibrary& lib) {
@@ -2637,6 +2640,62 @@ static const LibraryListCache& library_list_cached(SystemLibrary& lib) {
     g_library_cache.filled_at = now;
     g_library_cache.valid     = true;
     return g_library_cache;
+}
+
+// Persist the Library visibility mask. Read-modify-write, like the other
+// call sites: save_app_config rewrites the whole file.
+static void persist_hidden_systems(const AppModel& model) {
+    AppConfig cfg;
+    load_app_config(get_exe_dir_with_sep(), cfg);
+    cfg.hidden_systems = model.hidden_systems;
+    save_app_config(get_exe_dir_with_sep(), cfg);
+}
+
+// Plain-text dump of a library record: everything the editor shows except the
+// scheme checkboxes. Lets the Library tab hand the description to the clipboard
+// without opening the editor (where a stray edit could be saved over the system).
+static std::string describe_record(const SystemRecord& r) {
+    std::string o;
+    auto line = [&o](const char* key, const std::string& v) {
+        if (!v.empty()) o += std::string(key) + ": " + v + "\n";
+    };
+    auto block = [&o](const char* key, const std::string& v) {
+        if (v.empty()) return;
+        o += std::string(key) + ":\n" + v;
+        if (v.back() != '\n') o += '\n';
+    };
+    auto map_line = [&o](const char* key, const std::map<std::string, std::string>& m) {
+        std::string acc;
+        for (const auto& p : m) {
+            if (p.second.empty()) continue;
+            if (!acc.empty()) acc += ", ";
+            acc += p.first + " = " + p.second;
+        }
+        if (!acc.empty()) o += std::string(key) + ": " + acc + "\n";
+    };
+
+    line("Name", r.name);
+    o += std::string("Type: ") + (r.is_map ? "discrete map" : "ODE system") + "\n";
+    block("Note", r.note);
+    block("LaTeX", r.latex_text);
+    block("Plain", r.plain_text);
+    line("Variables", r.vars_text);
+    line("Parameters", r.params_text);
+    // Legacy records keep vars and params mixed in one list.
+    if (r.vars_text.empty() && r.params_text.empty()) line("Alphabet", r.alphabet_text);
+    if (r.use_aux_funcs) block("Aux functions", r.func_defs_text);
+    line("Step h", r.step_h);
+    map_line("Initial conditions", r.init_conditions);
+    map_line("Parameter values", r.param_values);
+    if (!r.custom_schemes.empty()) {
+        std::string acc;
+        for (const auto& cs : r.custom_schemes) {
+            if (!acc.empty()) acc += ", ";
+            acc += cs.name;
+        }
+        line("Custom schemes", acc);
+    }
+    return o;
 }
 
 // Save-side logic for the editor: validate name, handle rename for EditExisting, persist
@@ -2664,6 +2723,12 @@ static void library_editor_save(AppModel& model, SystemLibrary& lib) {
                 if (!lib.rename(model.edit_original_name, name)) {
                     model.edit_error = "Rename failed.";
                     return;
+                }
+                // The visibility tick is keyed by name — carry it to the new one.
+                if (model.system_hidden(model.edit_original_name)) {
+                    AppModel::set_name_hidden(model.hidden_systems, model.edit_original_name, false);
+                    AppModel::set_name_hidden(model.hidden_systems, name, true);
+                    persist_hidden_systems(model);
                 }
             }
         } else {
@@ -2727,6 +2792,20 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
     static std::string pending_delete;
     static bool        want_open_confirm = false;
 
+    // Visibility mask for the top-bar system picker. Stored as HIDDEN names
+    // (AppModel::hidden_systems), so a newly added system shows up ticked.
+    ImGui::TextDisabled("Tick a system to keep it in the top-bar picker.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Show all")) {
+        model.hidden_systems.clear();
+        persist_hidden_systems(model);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Hide all")) {
+        for (const auto& n : names) AppModel::set_name_hidden(model.hidden_systems, n, true);
+        persist_hidden_systems(model);
+    }
+
     // Name column auto-sized to the longest (name [+ "[N custom]" badge]),
     // instead of proportional stretch, so short names don't waste space.
     float name_col_w = ImGui::CalcTextSize("Name").x;
@@ -2741,9 +2820,10 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
     }
     name_col_w += ImGui::GetStyle().CellPadding.x * 2.0f + 8.0f;
 
-    if (ImGui::BeginTable("libtbl", 4,
+    if (ImGui::BeginTable("libtbl", 5,
         ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit |
         ImGuiTableFlags_NoHostExtendX)) {
+        ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, name_col_w);
         ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed);
@@ -2755,6 +2835,15 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
             ImGui::PushID(n.c_str());
 
             ImGui::TableSetColumnIndex(0);
+            bool shown_in_picker = !model.system_hidden(n);
+            if (ImGui::Checkbox("##vis", &shown_in_picker)) {
+                AppModel::set_name_hidden(model.hidden_systems, n, !shown_in_picker);
+                persist_hidden_systems(model);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Show this system in the top-bar picker");
+
+            ImGui::TableSetColumnIndex(1);
             bool selected = (model.library_selected_name == n);
             if (ImGui::Selectable(n.c_str(), selected)) {
                 model.library_selected_name = n;
@@ -2765,7 +2854,7 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
                     " [%d custom]", cs_counts[row]);
             }
 
-            ImGui::TableSetColumnIndex(1);
+            ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton("Edit")) {
                 try {
                     model.library_edit_buffer->from_record(lib.load(n));
@@ -2776,13 +2865,13 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
                 catch (const std::exception& e) { model.error_message = e.what(); }
             }
 
-            ImGui::TableSetColumnIndex(2);
+            ImGui::TableSetColumnIndex(3);
             if (ImGui::SmallButton("Duplicate")) {
                 try { lib.duplicate(n); invalidate_library_cache(); }
                 catch (const std::exception& e) { model.error_message = e.what(); }
             }
 
-            ImGui::TableSetColumnIndex(3);
+            ImGui::TableSetColumnIndex(4);
             if (ImGui::SmallButton("Delete")) {
                 pending_delete = n;
                 want_open_confirm = true;
@@ -2805,6 +2894,12 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
         if (ImGui::Button("Delete", ImVec2(120, 0))) {
             lib.remove(pending_delete);
             invalidate_library_cache();
+            // Drop the stale tick so a system re-added under the same name
+            // doesn't come back hidden.
+            if (model.system_hidden(pending_delete)) {
+                AppModel::set_name_hidden(model.hidden_systems, pending_delete, false);
+                persist_hidden_systems(model);
+            }
             if (model.library_selected_name == pending_delete)
                 model.library_selected_name.clear();
             pending_delete.clear();
@@ -2818,27 +2913,62 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
         ImGui::EndPopup();
     }
 
-    // Note preview panel for the selected row. Cached by name to avoid a
-    // disk read every frame.
+    // Preview panel for the selected row: note + read-only description, so a
+    // system can be read and copied without the editor. Cached by name to
+    // avoid a disk read every frame.
     ImGui::Separator();
     if (model.library_selected_name.empty()) {
-        ImGui::TextDisabled("Click a row to preview its note.");
-    } else {
-        // Заметка читается один раз на выбранную систему и живёт в общем кэше
-        // (см. LibraryListCache) — сохранение в редакторе его сбрасывает,
-        // поэтому отредактированный текст показывается сразу.
-        if (g_library_cache.note_name != model.library_selected_name) {
-            try { g_library_cache.note_text = lib.load(model.library_selected_name).note; }
-            catch (...) { g_library_cache.note_text.clear(); }
-            g_library_cache.note_name = model.library_selected_name;
-        }
-        ImGui::Text("Selected: %s", model.library_selected_name.c_str());
-        if (g_library_cache.note_text.empty()) {
-            ImGui::TextDisabled("(no note)");
-        } else {
-            ImGui::TextWrapped("%s", g_library_cache.note_text.c_str());
-        }
+        ImGui::TextDisabled("Click a row to preview and copy its description.");
+        return;
     }
+
+    // Запись читается один раз на выбранную систему и живёт в общем кэше
+    // (см. LibraryListCache) — сохранение в редакторе его сбрасывает,
+    // поэтому отредактированный текст показывается сразу.
+    if (g_library_cache.sel_name != model.library_selected_name) {
+        try {
+            g_library_cache.sel_rec  = lib.load(model.library_selected_name);
+            g_library_cache.sel_desc = describe_record(g_library_cache.sel_rec);
+            g_library_cache.sel_ok   = true;
+        }
+        catch (...) {
+            g_library_cache.sel_rec  = SystemRecord{};
+            g_library_cache.sel_desc.clear();
+            g_library_cache.sel_ok   = false;
+        }
+        g_library_cache.sel_name = model.library_selected_name;
+    }
+
+    ImGui::Text("Selected: %s", model.library_selected_name.c_str());
+    if (!g_library_cache.sel_ok) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "(cannot read system.json)");
+        return;
+    }
+
+    const SystemRecord& sel = g_library_cache.sel_rec;
+    if (sel.note.empty()) ImGui::TextDisabled("(no note)");
+    else                  ImGui::TextWrapped("%s", sel.note.c_str());
+
+    ImGui::Spacing();
+    if (ImGui::Button("Copy description")) ImGui::SetClipboardText(g_library_cache.sel_desc.c_str());
+    if (!sel.latex_text.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Copy LaTeX")) ImGui::SetClipboardText(sel.latex_text.c_str());
+    }
+    if (!sel.plain_text.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Copy plain")) ImGui::SetClipboardText(sel.plain_text.c_str());
+    }
+    if (!sel.note.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Copy note")) ImGui::SetClipboardText(sel.note.c_str());
+    }
+
+    // Read-only, so text can also be selected by hand (Ctrl+C) without the
+    // editor; ReadOnly keeps the widget from writing back into the cache.
+    ImGui::InputTextMultiline("##libdesc", g_library_cache.sel_desc.data(),
+                              g_library_cache.sel_desc.size() + 1, ImVec2(-1, 180),
+                              ImGuiInputTextFlags_ReadOnly);
 }
 
 // Editor state: name/note header + System/Parameters sub-tabs + Save/Cancel.
@@ -11144,10 +11274,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
         if (ImGui::BeginCombo("##topsyssel", preview.c_str())) {
+            int listed = 0;
             for (const auto& nm : lib.list()) {
+                // Ticked off in the Library tab. The active system stays listed
+                // regardless, so the combo never previews a name it can't show.
+                if (model.system_hidden(nm) && model.name != nm) continue;
+                ++listed;
                 if (ImGui::Selectable(nm.c_str(), model.name == nm))
                     apply_system_switch(model, lib, nm);
             }
+            if (listed == 0) ImGui::TextDisabled("(all systems hidden in Library)");
             ImGui::EndCombo();
         }
         if (any_in_flight) ImGui::EndDisabled();
@@ -11419,6 +11555,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.gpu_block_size         = m.gpu_block_size;
             cfg.hidden_tabs            = m.hidden_tabs;
             cfg.hidden_schemes         = m.hidden_schemes;
+            cfg.hidden_systems         = m.hidden_systems;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
 

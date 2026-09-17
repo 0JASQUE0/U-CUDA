@@ -308,6 +308,7 @@ int main() {
         // если сохранённая вкладка теперь скрыта.
         model.hidden_tabs    = app_cfg.hidden_tabs;
         model.hidden_schemes = app_cfg.hidden_schemes;
+        model.hidden_systems = app_cfg.hidden_systems;
 
         // Restore last-used AppMode. Clamp to the valid enum range so a
         // future rename/reorder of AppMode doesn't crash the app on an old
