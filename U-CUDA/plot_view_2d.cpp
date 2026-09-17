@@ -8,12 +8,21 @@
 
 // Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
 // margin_left/bottom увеличены, чтобы вместить тики + центрированное
-// название оси.
+// название оси, и растут вместе с кеглем подписей (Settings -> Plot font
+// size): иначе на крупном кегле имя оси уезжает за нижний край блока, а
+// Y-подпись — за левый.
 void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
-    left   = 78.0f;
+    const float k = plot_font_scale();
+    left   = 78.0f * k;
     top    = 20.0f;
     right  = 20.0f;
-    bottom = 46.0f;
+    bottom = 46.0f * k;
+}
+
+void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
+                         float& left, float& top, float& right, float& bottom) {
+    plot_2d_margins(left, top, right, bottom);
+    left = plot_y_axis_margin(y, y_name);
 }
 
 // Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
@@ -298,7 +307,12 @@ void Plot2DView::render(PlotRenderer& renderer,
     // margin_left/bottom увеличены, чтобы вместить тики + центрированное
     // название оси (X — под тиками, Y — повернутое вертикально слева).
     float margin_left, margin_top, margin_right, margin_bottom;
-    plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+    plot_2d_margins_for(y_axis, y_axis.name.empty() ? "y" : y_axis.name.c_str(),
+                        margin_left, margin_top, margin_right, margin_bottom);
+    last_margin_left   = margin_left;
+    last_margin_top    = margin_top;
+    last_margin_right  = margin_right;
+    last_margin_bottom = margin_bottom;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -567,13 +581,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     {
         const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
-        float font_h = ImGui::GetFontSize();
+        float font_h = plot_text_line_height();
 
         // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор)
-        ImVec2 xs = ImGui::CalcTextSize(xl);
+        ImVec2 xs = plot_text_size(xl);
         float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
-        dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
-                    col_text, xl);
+        plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
+                  col_text, xl);
 
         // Y label повёрнут на -90° (читается снизу вверх, mathematical convention): рендерим текст
         // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
@@ -581,7 +595,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         // сетка глифов сохраняется и шрифт остаётся чётким — без AA-шума, который бывает на
         // произвольных углах. X-позиция считается ДИНАМИЧЕСКИ, за самыми широкими Y-тиками, иначе
         // подпись наезжает на длинные числа (например "0.09177").
-        ImVec2 ts = ImGui::CalcTextSize(yl);
+        ImVec2 ts = plot_text_size(yl);
         if (ts.x > 0.0f && ts.y > 0.0f) {
             float max_tick_w = 0.0f;
             double vry = ey1 - ey0;
@@ -593,7 +607,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 int ny = (int)std::floor((hi - ystart) / sy + 1) + 1;
                 for (int iy = 0; iy < ny; ++iy) {
                     std::string tl = fmt_tick(ystart + iy * sy);
-                    float w = ImGui::CalcTextSize(tl.c_str()).x;
+                    float w = plot_text_size(tl.c_str()).x;
                     if (w > max_tick_w) max_tick_w = w;
                 }
             }
@@ -605,7 +619,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             ImVec2 pivot(pivot_x, pivot_y);
 
             int idx_start = dl->VtxBuffer.Size;
-            dl->AddText(pivot, col_text, yl);
+            plot_text(dl, pivot, col_text, yl);
             int idx_end = dl->VtxBuffer.Size;
             for (int i = idx_start; i < idx_end; ++i) {
                 ImDrawVert& v = dl->VtxBuffer[i];
@@ -637,10 +651,10 @@ void Plot2DView::render(PlotRenderer& renderer,
         const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
         char buf[160];
         std::snprintf(buf, sizeof(buf), "%s = %.6g,  %s = %.6g", xn, dx, yn, dy);
-        ImVec2 cs = ImGui::CalcTextSize(buf);
+        ImVec2 cs = plot_text_size(buf);
         float cx = img_pos.x + plot_w - cs.x;
-        float cy = img_pos.y + plot_h + 2.0f + ImGui::GetFontSize() + 6.0f;
-        dl->AddText(ImVec2(cx, cy), col_text, buf);
+        float cy = img_pos.y + plot_h + 2.0f + plot_text_line_height() + 6.0f;
+        plot_text(dl, ImVec2(cx, cy), col_text, buf);
     }
 
     // 8b. Crosshair gestures — MMB drag или Shift+LMB drag внутри плота каждый кадр вызывают

@@ -7902,8 +7902,13 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // совпадать с Plot2DView (он рисует внутри plot_avail): продублированные здесь
         // тремя числами, они разъезжались при любой правке лэйаута, поэтому берутся из
         // plot_2d_margins() — один источник истины.
-        float margin_left, margin_top, margin_right, margin_bottom;
-        plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+        // Берём марджины, которыми render отработал ЭТИМ кадром: левый теперь
+        // зависит от длины подписей оси Y, и пересчитать его здесь заново
+        // значило бы разъехаться с плотом на кадр после каждого зума.
+        const float margin_left   = v.last_margin_left;
+        const float margin_top    = v.last_margin_top;
+        const float margin_right  = v.last_margin_right;
+        const float margin_bottom = v.last_margin_bottom;
         const float plot_w = std::max(64.0f, plot_avail.x - margin_left - margin_right);
         const float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
         draw_colorbar(ImGui::GetWindowDrawList(),
@@ -11541,6 +11546,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             load_app_config(get_exe_dir_with_sep(), cfg);
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
+            cfg.plot_math_font         = m.plot_math_font;
+            cfg.plot_font_scale        = m.plot_font_scale;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
             cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
@@ -11599,6 +11606,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
+
+            float plot_fs = model.plot_font_scale;
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderFloat("Plot font size", &plot_fs, 0.5f, 3.0f, "%.2fx")) {
+                set_plot_font_scale(plot_fs);
+                model.plot_font_scale = plot_font_scale();   // клампнутое значение
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Size of every label on the plots (ticks, axis names,");
+            ImGui::TextDisabled("legend, colorbar), relative to the UI font. Plot margins");
+            ImGui::TextDisabled("follow it, so labels stay inside the diagram block.");
+
+            bool math_font = model.plot_math_font;
+            if (ImGui::Checkbox("LaTeX-style labels on plots", &math_font)) {
+                model.plot_math_font = math_font;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("On: serif math typesetting for every label on the plots —");
+            ImGui::TextDisabled("\"sigma\" prints as a greek glyph, x1 as x with a subscript,");
+            ImGui::TextDisabled("variables go italic, 1e-05 becomes a power of ten.");
+            ImGui::TextDisabled("Computer Modern (the TeX face) is picked up from fonts\\ if");
+            ImGui::TextDisabled("present; otherwise Times New Roman. Off: plain UI font.");
 
             ImGui::Separator();
             ImGui::Text("Axes");

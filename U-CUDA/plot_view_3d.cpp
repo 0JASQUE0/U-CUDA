@@ -153,8 +153,8 @@ void Plot3DView::render(PlotRenderer& renderer,
                         ImVec2 p = project_to_screen(mvp, ex, ey, ez,
                             img_pos, (float)plot_w, (float)plot_h, &zclip);
                         if (zclip > 1.0f) return; // точка за плоскостью отсечения
-                        ImVec2 ts = ImGui::CalcTextSize(name);
-                        dl->AddText(ImVec2(p.x + text_offset, p.y - ts.y * 0.5f), color, name);
+                        ImVec2 ts = plot_text_size(name);
+                        plot_text(dl, ImVec2(p.x + text_offset, p.y - ts.y * 0.5f), color, name);
                     };
 
                 draw_axis_label(xmx, ymn, zmn, x_name.c_str(), col_x);

@@ -369,6 +369,18 @@ public:
     // Чекбокс — в Settings; персистится в _app_config.json.
     bool use_builtin_font = false;
 
+    // Кегль подписей на графиках — множитель к UI-шрифту. Зеркалит
+    // AppConfig::plot_font_scale; при изменении в Settings зовётся
+    // set_plot_font_scale() из plot_axis.h, чтобы подписи и марджины плотов
+    // подхватили новое значение тем же кадром.
+    float plot_font_scale = 1.0f;
+
+    // LaTeX-подписи на графиках (см. plot_text в plot_axis.h): серифная пара
+    // шрифтов + греческие буквы, индексы и курсив. Применяется тем же
+    // apply_ui_scale в app_main.cpp, что и use_builtin_font — шрифты живут в
+    // общем атласе и пересоздаются вместе с UI-шрифтом.
+    bool plot_math_font = true;
+
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
     // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1
     // viridis. Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет сюда, а static

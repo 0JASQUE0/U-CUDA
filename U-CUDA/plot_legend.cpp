@@ -19,7 +19,7 @@ void draw_legend(ImDrawList* dl,
         return (k < (int)global_visible.size()) ? global_visible[k] : true;
         };
 
-    float line_h = ImGui::GetTextLineHeight();
+    float line_h = plot_text_line_height();
     float row_h = line_h + 2;
     float marker_w = 14;
     float gap = 4;
@@ -29,7 +29,7 @@ void draw_legend(ImDrawList* dl,
     int visible_count = 0;
     for (int k = 0; k < (int)entries.size(); ++k) {
         if (!is_global_vis(k)) continue;
-        max_text_w = std::max(max_text_w, ImGui::CalcTextSize(entries[k].label.c_str()).x);
+        max_text_w = std::max(max_text_w, plot_text_size(entries[k].label.c_str()).x);
         ++visible_count;
     }
     if (visible_count == 0) return; // рисовать нечего
@@ -80,7 +80,7 @@ void draw_legend(ImDrawList* dl,
             // (и только по нему, не по подписи) открывает выбор цвета.
             if (out_clicks && ImGui::IsMouseHoveringRect(mmin, mmax, false))
                 dl->AddRect(mmin, mmax, plot_col_text(), 0.0f, 0, 1.5f);
-            dl->AddText(ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
+            plot_text(dl, ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
         }
         ImVec2 emin = ImVec2(leg_min.x + pad, row_y);
         ImVec2 emax = ImVec2(leg_max.x - pad, row_y + row_h);

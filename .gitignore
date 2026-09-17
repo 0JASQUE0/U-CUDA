@@ -63,3 +63,5 @@ vcpkg_installed/
 ucuda-dashboard/
 
 .claudeignore
+# Visual Studio: временная копия при сохранении файла, открытого в редакторе
+enc_temp_folder/
