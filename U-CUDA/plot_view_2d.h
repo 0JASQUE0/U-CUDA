@@ -71,11 +71,10 @@ public:
     float last_margin_bottom = 46.0f;
 
     bool show_legend = true;
-    // If true, force the legend marker's alpha to 1.0 regardless of the
-    // per-series color.w — used by Phase / TimeDomain, where the "Alpha"
-    // slider is meant to fade the trajectory itself, not the swatch that
-    // identifies each IC in the legend.
-    bool legend_ignore_series_alpha = false;
+    // Прозрачность серии в легенду не уходит НИКОГДА — см. render(). Раньше
+    // это был флаг legend_ignore_series_alpha, который выставляли по одному
+    // виду (Phase, TimeDomain, Phase 3D, пики), и про остальные забывали:
+    // Alpha у точек бифуркационной диаграммы гасила ярлыки в легенде.
 
     // Пользовательские цвета серий: ПКМ по строке легенды -> RGB 0..255.
     // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в

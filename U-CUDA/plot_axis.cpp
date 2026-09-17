@@ -656,7 +656,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
         // же пиксели (lo -> 0, hi -> plot_w), поэтому формула ниже верна и
         // после перевода Plot2DView на лог-координату.
         auto draw_edge = [&](double xv) {
-            float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
+            float px = px_line(pos.x + (float)((xv - emin) / vrx) * plot_w);
             dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
             std::string lbl = fmt_tick(xv);
             ImVec2 ts = plot_text_size(lbl.c_str());
@@ -703,7 +703,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     // (они для этого и оставлены в layout'е плота). Не клампим текст в
     // ширину плота, иначе крайние tick'и без подписей.
     auto draw_tick = [&](double xv) {
-        float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
+        float px = px_line(pos.x + (float)((xv - emin) / vrx) * plot_w);
         dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
         std::string lbl = fmt_tick(xv);
         ImVec2 ts = plot_text_size(lbl.c_str());
@@ -755,7 +755,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     // См. draw_axis_x_grid -- log-масштаб рисует только границы диапазона.
     if (y.log_scale) {
         auto draw_edge = [&](double yv) {
-            float py = pos.y + (float)((emax - yv) / vry) * plot_h;
+            float py = px_line(pos.y + (float)((emax - yv) / vry) * plot_h);
             dl->AddLine(ImVec2(pos.x, py), ImVec2(pos.x + plot_w, py), col_grid, 1.0f);
             std::string lbl = fmt_tick(yv);
             ImVec2 ts = plot_text_size(lbl.c_str());
@@ -776,7 +776,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     for (int iy = 0; iy < ny; ++iy) {
         double yv = ystart + iy * sy;
         if (yv > hi + sy * 1e-6 || yv < lo - sy * 1e-6) continue;
-        float py = pos.y + (float)((emax - yv) / vry) * plot_h;
+        float py = px_line(pos.y + (float)((emax - yv) / vry) * plot_h);
         // Подпись центрирована по py — её половина уезжает в margin_top/bottom
         // (они для этого и оставлены в layout'е плота). Не клампим текст по
         // высоте плота, иначе крайние tick'и (на самой границе view) без

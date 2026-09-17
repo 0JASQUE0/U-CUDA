@@ -142,7 +142,7 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
     for (const auto& t : ticks) {
         if (range <= 0.0) {
             // Вырожденный vmin == vmax: всё равно печатаем одну подпись по центру.
-            const float y = cb_y + cb_h * 0.5f;
+            const float y = px_line(cb_y + cb_h * 0.5f);
             plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
                                  y - font_h * 0.5f),
                       col_text, fmt_tick(t.label).c_str());
@@ -151,7 +151,7 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
         float frac = t.frac;
         if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
         frac = std::min(std::max(frac, 0.0f), 1.0f);
-        const float y = cb_y + cb_h * (1.0f - frac);
+        const float y = px_line(cb_y + cb_h * (1.0f - frac));
         dl->AddLine(ImVec2(cb_x + kColorbarWidth, y),
                     ImVec2(cb_x + kColorbarWidth + kColorbarTickLen, y), col_text);
         if (std::abs(y - last_label_y) < label_gap_min) continue;
@@ -286,7 +286,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
 
     ImGui::Dummy(avail_size);
-    ImVec2 img_pos = ImVec2(block_origin.x + margin_left, block_origin.y + margin_top);
+    // На целом пикселе — см. Plot2DView: дробный origin размывает картинку
+    // FBO и смещает рамку с тиками относительно неё.
+    ImVec2 img_pos = ImVec2(std::floor(block_origin.x + margin_left),
+                            std::floor(block_origin.y + margin_top));
 
     // 4. Маппинг view → UV данных. data range — фиксированные границы из
     //    engine'а; view может быть произвольным после zoom/pan.
@@ -818,7 +821,7 @@ void HeatmapView::render(PlotRenderer& renderer,
             : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
                             : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true));
         for (double xv : ticks) {
-            float px = img_pos.x + (float)((xv - emin) / vrx) * plot_w;
+            float px = px_line(img_pos.x + (float)((xv - emin) / vrx) * plot_w);
             dl->AddLine(ImVec2(px, img_pos.y + plot_h),
                         ImVec2(px, img_pos.y + plot_h + 5.0f), col_axis, 1.0f);
             std::string lbl = fmt_tick(xv);
@@ -843,7 +846,7 @@ void HeatmapView::render(PlotRenderer& renderer,
             : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
                             : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false));
         for (double yv : ticks) {
-            float py = img_pos.y + (float)((emax - yv) / vry) * plot_h;
+            float py = px_line(img_pos.y + (float)((emax - yv) / vry) * plot_h);
             dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
                         ImVec2(img_pos.x,         py), col_axis, 1.0f);
             std::string lbl = fmt_tick(yv);
