@@ -1002,6 +1002,11 @@ static void write_order_config(std::ofstream& out, const OrderSnapshot& s, bool 
         out << "measurements per node = " << s.repeats << "\n";
         out << "warmup runs = "           << s.warmup  << "\n";
         out << "replicas per launch = "   << s.replicas << "\n";
+        if (!s.ref_scheme.empty() && s.ref_substeps > 0)
+            out << "reference = " << s.ref_scheme
+                << ", " << s.ref_substeps << " substep(s) per tested step\n";
+        else
+            out << "reference = none\n";
         out << "timing = cudaEvent around the kernel launch only "
                "(no H2D/D2H, no compilation)\n";
     }
@@ -1053,7 +1058,7 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
     std::ofstream out(path);
     if (!out.is_open()) return false;
     out << std::setprecision(set_precision);
-    out << "x,h_eff,n_steps,E1,E2,t_min_us,t_avg_us,t_max_us,status\n";
+    out << "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status\n";
 
     // Ячейку без замера оставляем ПУСТОЙ: ноль здесь читался бы как
     // «посчитано мгновенно», а это ровно противоположный смысл.
@@ -1069,6 +1074,7 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
             << "," << (k < res.n_steps.size() ? res.n_steps[k] : 0LL);
         cell(res.e1, k);
         cell(res.e2, k);
+        cell(res.e_ref, k);
         cell(res.t_min, k);
         cell(res.t_avg, k);
         cell(res.t_max, k);

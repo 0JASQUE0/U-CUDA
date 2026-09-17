@@ -1509,6 +1509,8 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"perf_repeats_text\":";  jstr(o, c.perf_repeats_text);  o << ",";
     o << "\"perf_warmup_text\":";   jstr(o, c.perf_warmup_text);   o << ",";
     o << "\"perf_replicas_text\":"; jstr(o, c.perf_replicas_text); o << ",";
+    o << "\"perf_ref_scheme\":";   jstr(o, c.perf_ref_scheme);   o << ",";
+    o << "\"perf_ref_substeps_text\":"; jstr(o, c.perf_ref_substeps_text); o << ",";
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";       jmap(o, c.param_values);
     o << "}";
@@ -1541,6 +1543,8 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "perf_repeats_text")  c.perf_repeats_text  = p.str();
     else if (key == "perf_warmup_text")   c.perf_warmup_text   = p.str();
     else if (key == "perf_replicas_text") c.perf_replicas_text = p.str();
+    else if (key == "perf_ref_scheme")       c.perf_ref_scheme       = p.str();
+    else if (key == "perf_ref_substeps_text") c.perf_ref_substeps_text = p.str();
     else if (key == "initial_conditions") c.initial_conditions = p.map_ss();
     else if (key == "param_values")       c.param_values       = p.map_ss();
     else return false;

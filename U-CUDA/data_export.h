@@ -373,6 +373,8 @@ struct OrderSnapshot {
     bool   gpu_rdc = false;
     // Только Performance.
     int repeats = 0, warmup = 0, replicas = 0;
+    std::string ref_scheme;          // пусто — эталон не считался
+    int         ref_substeps = 0;
 };
 
 // Order: <path> — по строке на узел (1D) или на ячейку (2D):
@@ -382,7 +384,8 @@ struct OrderSnapshot {
 bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::string& path);
 
 // Performance: <path> — по строке на узел,
-//   "x,h_eff,n_steps,E1,E2,t_min_us,t_avg_us,t_max_us,status".
+//   "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status".
+// E_ref = max|y_h - y_ref| против эталонного метода (пусто, если не считался).
 // Время — микросекунды НА ОДИН запуск ядра, без копирований и компиляции
 // (см. PerfRequest). Узел, на котором замера не было, оставляет ячейки времени
 // пустыми, а не нулями.

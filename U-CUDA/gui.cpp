@@ -8330,6 +8330,24 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "Launches that do not count, made before the measurements. The\n"
                 "very first launch drags the code load into the context along with\n"
                 "it and is therefore always slower than the rest.");
+        ImGui::Separator();
+        // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
+        draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
+                          &s.enabled_builtin_schemes, &model, s.sys.is_map);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "The method that stands for the exact answer in Eref =\n"
+                "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
+                "own error sits below the machine precision of the solution.");
+        InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Reference steps per one step of the scheme under test. 0 turns\n"
+                "the reference off entirely - the branch is then not even compiled\n"
+                "into the kernel. Keep it above 1 when the reference method is the\n"
+                "same as the tested one: at an equal step that would be the very\n"
+                "same arithmetic and the difference identically zero.");
+        ImGui::Separator();
         InputNumStr("replicas", c.perf_replicas_text, kFieldW);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
@@ -8555,6 +8573,14 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
     sn.repeats  = c.perf_result.repeats;
     sn.warmup   = c.perf_result.warmup;
     sn.replicas = c.perf_result.replicas;
+    // Эталон пишем только когда он в результате ЕСТЬ: поля вкладки могли
+    // измениться после прогона, а файл описывает прогон, а не поля.
+    const bool had_ref = std::any_of(c.perf_result.e_ref.begin(), c.perf_result.e_ref.end(),
+                                     [](double v) { return std::isfinite(v) && v > 0.0; });
+    if (had_ref) {
+        sn.ref_scheme   = c.perf_ref_scheme;
+        sn.ref_substeps = std::max(0, (int)parse_num(c.perf_ref_substeps_text, 4.0));
+    }
     return sn;
 }
 
@@ -8701,6 +8727,14 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         ImGui::SameLine(); ImGui::TextDisabled("| X:"); ImGui::SameLine();
         ImGui::RadioButton("E1##perrsrc", &win.error_source, 0); ImGui::SameLine();
         ImGui::RadioButton("E2##perrsrc", &win.error_source, 1); ImGui::SameLine();
+        ImGui::RadioButton("Eref##perrsrc", &win.error_source, 2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "The difference against the reference solution, max|y_h - y_ref|:\n"
+                "the actual error of the scheme at step h, rather than the\n"
+                "Richardson estimate that E1 and E2 are. The reference method is\n"
+                "chosen in the tab's settings (DOPRI78 by default).");
+        ImGui::SameLine();
         ImGui::TextDisabled("| t:"); ImGui::SameLine();
         ImGui::RadioButton("us##ptu", &win.time_unit, 0); ImGui::SameLine();
         ImGui::RadioButton("ms##ptu", &win.time_unit, 1); ImGui::SameLine();
@@ -8751,7 +8785,14 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                 std::vector<std::pair<double, double>> pts;
                 pts.reserve((size_t)r.n_pts);
                 for (int i = 0; i < r.n_pts; ++i) {
-                    const double e  = (win.error_source == 1) ? r.e2[(size_t)i] : r.e1[(size_t)i];
+                    // Eref есть не в каждом результате: эталон можно было и не
+                    // просить, а старые прогоны про него вовсе не знают.
+                    const double e =
+                        (win.error_source == 2)
+                            ? ((size_t)i < r.e_ref.size() ? r.e_ref[(size_t)i]
+                                                          : std::numeric_limits<double>::quiet_NaN())
+                        : (win.error_source == 1) ? r.e2[(size_t)i]
+                                                  : r.e1[(size_t)i];
                     const double tv = t[(size_t)i] * time_scale;
                     if (!std::isfinite(e) || !std::isfinite(tv)) continue;
                     if (win.x_log && !(e > 0.0)) continue;
@@ -8847,6 +8888,17 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             ImGui::SameLine();
             ImGui::TextDisabled("| %d measurements x %d replicas, %d warmup",
                                 r.repeats, r.replicas, r.warmup);
+            if (win.error_source == 2) {
+                ImGui::SameLine();
+                const bool has_ref = std::any_of(r.e_ref.begin(), r.e_ref.end(),
+                                                 [](double v) { return std::isfinite(v) && v > 0.0; });
+                if (has_ref)
+                    ImGui::TextDisabled("| reference: %s x%s",
+                                        c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
+                else
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                                       "| no reference in this result: set reference substeps > 0 and run again");
+            }
         } else {
             if (!c.last_run_ok) continue;
             const OrderResult& r = c.result;
@@ -8876,7 +8928,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     std::string xname = "x";
     for (int mi : win.members) {
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
-        xname = is_perf ? ((win.error_source == 1) ? "E2" : "E1")
+        xname = is_perf ? ((win.error_source == 2) ? "Eref"
+                            : (win.error_source == 1) ? "E2" : "E1")
                         : s.axis_target_label(s.configs[(size_t)mi].axis_x_target);
         break;
     }

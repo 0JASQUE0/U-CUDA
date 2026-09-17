@@ -1033,6 +1033,14 @@ struct OrderRequest {
 
     double max_value = 1.0e6;
 
+    // Эталонное решение: четвёртая копия траектории, которую ведёт ДРУГОЙ метод
+    // (по умолчанию DOPRI78) с шагом h/ref_substeps, в локстепе с грубой копией.
+    // Даёт E_ref = max|y_h - y_ref| — не ричардсоновскую оценку, а саму ошибку
+    // метода на шаге h. Пустое тело или ref_substeps <= 0 выключают эталон
+    // НА КОМПИЛЯЦИИ: ветки в ядре тогда нет вовсе (см. order.template.cu).
+    std::string ref_krs_body;
+    int         ref_substeps = 0;
+
     // See Bifurcation1DRequest::cancel / ::progress.
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
@@ -1066,6 +1074,7 @@ struct OrderResult {
     std::vector<double> p;        // оценка порядка
     std::vector<double> e1;       // max|y_h - y_h/2|
     std::vector<double> e2;       // max|y_h/2 - y_h/4|
+    std::vector<double> e_ref;    // max|y_h - y_ref|; всё NaN, если эталон не считался
     std::vector<double> h_eff;    // фактический шаг ячейки (после snap)
     std::vector<int>    status;
 
@@ -1076,6 +1085,7 @@ struct OrderResult {
     // растягивает шкалу так, что полка перестаёт читаться.
     double p_min = 0.0,  p_max = 0.0;
     double e1_min = 0.0, e1_max = 0.0;
+    double eref_min = 0.0, eref_max = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1120,11 @@ struct PerfRequest {
     int warmup   = 2;    // прогревочных запусков вне зачёта (первый тянет загрузку кода)
     int replicas = 1;    // одинаковых потоков в замеряемом запуске
 
+    // Эталон для оси X (см. OrderRequest::ref_krs_body). На замер времени не
+    // влияет никак: считается в том же не засекаемом order-проходе, что E1/E2.
+    std::string ref_krs_body;
+    int         ref_substeps = 0;
+
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
 };
@@ -1124,7 +1139,7 @@ struct PerfResult {
     std::vector<double> axis_vals;
 
     // Из order-прохода (та же раскладка, что в OrderResult, но всегда 1D).
-    std::vector<double> e1, e2, p, h_eff;
+    std::vector<double> e1, e2, e_ref, p, h_eff;
     std::vector<int>    status;
 
     // Время ОДНОГО запуска в микросекундах, по repeats замерам на узел.
@@ -1137,6 +1152,7 @@ struct PerfResult {
     // ошибка — по ним автоскейлится график «время vs ошибка».
     double e1_min = 0.0, e1_max = 0.0;
     double e2_min = 0.0, e2_max = 0.0;
+    double eref_min = 0.0, eref_max = 0.0;
     double t_lo   = 0.0, t_hi   = 0.0;
 
     int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;

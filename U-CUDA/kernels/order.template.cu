@@ -20,6 +20,8 @@
 //   AMOUNT_OF_X      — размерность системы
 //   AMOUNT_OF_VALUES — размер a[] (a[0] = symmetry s, a[1..M] = параметры)
 //   KRS_BODY         — тело calculateDiscreteModel из codegen
+//   REF_ENABLED      — 1, если нужна четвёртая, эталонная копия траектории
+//   KRS_REF_BODY     — тело шага эталонного метода (пусто при REF_ENABLED 0)
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 #define AMOUNTOFVALUES {{AMOUNT_OF_VALUES}}
@@ -61,6 +63,20 @@ __device__ __host__ __forceinline__
 void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 {{KRS_BODY}}
 }
+
+// Эталонный метод (по умолчанию DOPRI78) — отдельная функция, а не параметр:
+// тело подставляется на компиляции, и когда эталон не нужен, всей ветки в ядре
+// нет вовсе. Это не косметика — DOPRI78 держит 13 стадий в локальных массивах,
+// и присутствие ветки в коде стоило бы регистров ВСЕМ расчётам вкладки, а не
+// только тем, что просили эталон.
+#define ORDER_REF_ENABLED {{REF_ENABLED}}
+
+#if ORDER_REF_ENABLED
+__device__ __host__ __forceinline__
+void calculateReferenceModel(numb* X, const numb* a, const numb h) {
+{{KRS_REF_BODY}}
+}
+#endif
 
 #include "cudaLibrary.cu"
 
@@ -144,9 +160,11 @@ extern "C" __global__ void orderEstimateKernel(
     const int    endpointOnly,            // 1 = сравнивать только в t = tMax
     const numb   maxValue,
     const numb   floorEps,                // относительный порог полки округления
+    const int    refSubsteps,             // шагов эталона на один грубый шаг (0 = эталона нет)
     numb* __restrict__ outP,
     numb* __restrict__ outE1,
     numb* __restrict__ outE2,
+    numb* __restrict__ outERef,           // max|y_h - y_ref|; NaN, когда эталона нет
     numb* __restrict__ outH,              // фактический h ячейки (после snap)
     int*  __restrict__ outStatus,
     const volatile int* cancelFlag,
@@ -207,6 +225,19 @@ extern "C" __global__ void orderEstimateKernel(
     numb e1 = (numb)0, e2 = (numb)0, scale = (numb)0;
     int  status = ORDER_OK;
 
+#if ORDER_REF_ENABLED
+    // Эталон идёт в локстепе с ГРУБОЙ копией: refM его шагов размера h1/refM на
+    // каждый шаг h1. Сравнение поэтому всегда в один и тот же момент времени, и
+    // хранить траекторию не нужно. refM > 1 обязателен, когда эталонный метод
+    // совпадает с испытуемым: при refM == 1 это была бы та же арифметика и
+    // разность тождественно нулевая.
+    const int  refM = (refSubsteps > 0) ? refSubsteps : 1;
+    const numb hRef = h1 / (numb)refM;
+    numb Xr[AMOUNTOFX];
+    for (int i = 0; i < AMOUNTOFX; ++i) Xr[i] = X0[i];
+    numb eRef = (numb)0;
+#endif
+
     size_t sinceReport = 0;
     for (long long n = 0; n < N; ++n) {
         calculateDiscreteModel(Xc, a, h1);
@@ -216,6 +247,9 @@ extern "C" __global__ void orderEstimateKernel(
         calculateDiscreteModel(Xf, a, h4);
         calculateDiscreteModel(Xf, a, h4);
         calculateDiscreteModel(Xf, a, h4);
+#if ORDER_REF_ENABLED
+        for (int q = 0; q < refM; ++q) calculateReferenceModel(Xr, a, hRef);
+#endif
 
         const bool last = (n == N - 1);
         if (!endpointOnly || last) {
@@ -226,11 +260,19 @@ extern "C" __global__ void orderEstimateKernel(
                 if (d2 > e2) e2 = d2;
                 const numb sc = fabs(Xf[i]);
                 if (sc > scale) scale = sc;
+#if ORDER_REF_ENABLED
+                const numb dr = fabs(Xc[i] - Xr[i]);
+                if (dr > eRef) eRef = dr;
+#endif
             }
         }
 
         if ((n % (long long)CHECK_INTERVAL) == 0 || last) {
-            if (orderBadVec(Xc, maxValue) || orderBadVec(Xm, maxValue) || orderBadVec(Xf, maxValue)) {
+            if (orderBadVec(Xc, maxValue) || orderBadVec(Xm, maxValue) || orderBadVec(Xf, maxValue)
+#if ORDER_REF_ENABLED
+                || orderBadVec(Xr, maxValue)
+#endif
+               ) {
                 status = ORDER_DIVERGED;
                 break;
             }
@@ -268,6 +310,13 @@ extern "C" __global__ void orderEstimateKernel(
     outP[gcell]      = p;
     outE1[gcell]     = e1;
     outE2[gcell]     = e2;
+    if (outERef != nullptr) {
+#if ORDER_REF_ENABLED
+        outERef[gcell] = (status == ORDER_DIVERGED) ? (numb)nan("") : eRef;
+#else
+        outERef[gcell] = (numb)nan("");
+#endif
+    }
     outH[gcell]      = hEff;
     outStatus[gcell] = status;
 }

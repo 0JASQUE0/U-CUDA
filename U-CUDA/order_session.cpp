@@ -92,6 +92,9 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.snap_steps         = o.snap_steps;
     req.endpoint_only      = o.endpoint_only;
     req.max_value          = o.max_value;
+    req.ref_substeps       = std::max(0, parse_i(c.perf_ref_substeps_text, 4));
+    if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
+        req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes, s.sys, c.perf_ref_scheme);
     req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
     req.replicas           = std::max(1, parse_i(c.perf_replicas_text, 1));

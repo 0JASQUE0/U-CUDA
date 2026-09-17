@@ -6926,11 +6926,15 @@ struct ParametricEngine::Impl {
     }
 
     bool compile_order_module(bool activate, int amountOfX, int amountOfValues,
-                              const std::string& krs_body, std::string& err)
+                              const std::string& krs_body, const std::string& ref_body,
+                              std::string& err)
     {
         cuCtxSetCurrent(context);
+        // Тело эталона входит в ключ: с ним и без него это РАЗНЫЙ модуль (ветка
+        // эталона вырезается препроцессором), да и сам эталонный метод меняется.
         const std::string key = hash_key(krs_body, amountOfX) + ":order:v"
-                              + std::to_string(amountOfValues);
+                              + std::to_string(amountOfValues)
+                              + ":ref" + std::to_string(std::hash<std::string>{}(ref_body));
         return compile_into(pool_order, key, cached_order, activate, [&](CachedOrderModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> lowered;
@@ -6938,7 +6942,9 @@ struct ParametricEngine::Impl {
             if (!build_module(snapshot_sources(src_template_order), "order.cu",
                               { { "{{AMOUNT_OF_X}}",      std::to_string(amountOfX) },
                                 { "{{AMOUNT_OF_VALUES}}", std::to_string(amountOfValues) },
-                                { "{{KRS_BODY}}",         krs_body } },
+                                { "{{KRS_BODY}}",         krs_body },
+                                { "{{REF_ENABLED}}",      ref_body.empty() ? "0" : "1" },
+                                { "{{KRS_REF_BODY}}",     ref_body } },
                               {}, mod, lowered, err))
                 return false;
 
@@ -7098,7 +7104,11 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_fastsync
 
-        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
+        // Эталон включается только когда есть И тело, И положительное число
+        // подшагов: одно без другого — это просьба посчитать пустоту.
+        const bool ref_on = !req.ref_krs_body.empty() && req.ref_substeps > 0;
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body,
+                                  ref_on ? req.ref_krs_body : std::string(), err)) return fail(err);
 
         // Работа по ячейкам: h ячейки зависит только от той оси, что свипует h.
         auto cell_h = [&](int ix, int iy) -> double {
@@ -7133,7 +7143,7 @@ struct ParametricEngine::Impl {
         if (cellsPerLaunch > total_cells)  cellsPerLaunch = total_cells;
 
         OrderDevBuf d_axisX, d_axisY, d_X0, d_values;
-        OrderDevBuf d_p, d_e1, d_e2, d_h, d_status;
+        OrderDevBuf d_p, d_e1, d_e2, d_eref, d_h, d_status;
         if (!d_axisX .alloc(res.axis_x_vals.size() * sizeof(numb), "axisXVals", err)) return fail(err);
         if (!d_axisY .alloc(res.axis_y_vals.size() * sizeof(numb), "axisYVals", err)) return fail(err);
         if (!d_X0    .alloc((size_t)req.amountOfX  * sizeof(numb), "X0",        err)) return fail(err);
@@ -7141,6 +7151,7 @@ struct ParametricEngine::Impl {
         if (!d_p     .alloc(total_cells * sizeof(numb), "outP",      err)) return fail(err);
         if (!d_e1    .alloc(total_cells * sizeof(numb), "outE1",     err)) return fail(err);
         if (!d_e2    .alloc(total_cells * sizeof(numb), "outE2",     err)) return fail(err);
+        if (!d_eref  .alloc(total_cells * sizeof(numb), "outERef",   err)) return fail(err);
         if (!d_h     .alloc(total_cells * sizeof(numb), "outH",      err)) return fail(err);
         if (!d_status.alloc(total_cells * sizeof(int),  "outStatus", err)) return fail(err);
 
@@ -7194,9 +7205,11 @@ struct ParametricEngine::Impl {
             int    endp_arg   = req.endpoint_only ? 1 : 0;
             numb   maxV_arg   = (numb)req.max_value;
             numb   feps_arg   = floorEps;
+            int    refSub_arg = ref_on ? req.ref_substeps : 0;
             numb*  outP_arg   = d_p.as<numb>();
             numb*  outE1_arg  = d_e1.as<numb>();
             numb*  outE2_arg  = d_e2.as<numb>();
+            numb*  outERef_arg = d_eref.as<numb>();
             numb*  outH_arg   = d_h.as<numb>();
             int*   outSt_arg  = d_status.as<int>();
             int*   cancel_arg = sig.cancelArg();
@@ -7209,7 +7222,8 @@ struct ParametricEngine::Impl {
                 &axXKind, &axXIndex, &axYKind, &axYIndex,
                 &X0_arg, &values_arg,
                 &hBase_arg, &tMax_arg, &snap_arg, &endp_arg, &maxV_arg, &feps_arg,
-                &outP_arg, &outE1_arg, &outE2_arg, &outH_arg, &outSt_arg,
+                &refSub_arg,
+                &outP_arg, &outE1_arg, &outE2_arg, &outERef_arg, &outH_arg, &outSt_arg,
                 &cancel_arg, &prog_arg, &stride_arg
             };
 
@@ -7241,7 +7255,8 @@ struct ParametricEngine::Impl {
         }
 
         {
-            std::vector<numb> hp(total_cells), he1(total_cells), he2(total_cells), hh(total_cells);
+            std::vector<numb> hp(total_cells), he1(total_cells), he2(total_cells),
+                              herf(total_cells), hh(total_cells);
             res.status.assign(total_cells, 0);
             auto dn = [&](void* src, void* dst, size_t bytes, const char* what) -> bool {
                 cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
@@ -7251,16 +7266,19 @@ struct ParametricEngine::Impl {
             if (!dn(d_p.p,      hp.data(),         total_cells * sizeof(numb), "p"))      return fail(err);
             if (!dn(d_e1.p,     he1.data(),        total_cells * sizeof(numb), "e1"))     return fail(err);
             if (!dn(d_e2.p,     he2.data(),        total_cells * sizeof(numb), "e2"))     return fail(err);
+            if (!dn(d_eref.p,   herf.data(),       total_cells * sizeof(numb), "eRef"))   return fail(err);
             if (!dn(d_h.p,      hh.data(),         total_cells * sizeof(numb), "h"))      return fail(err);
             if (!dn(d_status.p, res.status.data(), total_cells * sizeof(int),  "status")) return fail(err);
 
             res.p.resize(total_cells); res.e1.resize(total_cells);
             res.e2.resize(total_cells); res.h_eff.resize(total_cells);
-            bool first_p = true, first_e = true;
+            res.e_ref.resize(total_cells);
+            bool first_p = true, first_e = true, first_er = true;
             for (size_t i = 0; i < total_cells; ++i) {
                 res.p[i]     = (double)hp[i];
                 res.e1[i]    = (double)he1[i];
                 res.e2[i]    = (double)he2[i];
+                res.e_ref[i] = (double)herf[i];
                 res.h_eff[i] = (double)hh[i];
                 switch (res.status[i]) {
                     case ORDER_ST_DIVERGED:   ++res.n_diverged;   break;
@@ -7279,6 +7297,11 @@ struct ParametricEngine::Impl {
                     if (first_e) { res.e1_min = res.e1_max = res.e1[i]; first_e = false; }
                     else { if (res.e1[i] < res.e1_min) res.e1_min = res.e1[i];
                            if (res.e1[i] > res.e1_max) res.e1_max = res.e1[i]; }
+                }
+                if (std::isfinite(res.e_ref[i]) && res.e_ref[i] > 0.0) {
+                    if (first_er) { res.eref_min = res.eref_max = res.e_ref[i]; first_er = false; }
+                    else { if (res.e_ref[i] < res.eref_min) res.eref_min = res.e_ref[i];
+                           if (res.e_ref[i] > res.eref_max) res.eref_max = res.e_ref[i]; }
                 }
             }
         }
@@ -7319,6 +7342,8 @@ struct ParametricEngine::Impl {
         oreq.snap_steps         = req.snap_steps;
         oreq.endpoint_only      = req.endpoint_only;
         oreq.max_value          = req.max_value;
+        oreq.ref_krs_body       = req.ref_krs_body;
+        oreq.ref_substeps       = req.ref_substeps;
         oreq.cancel             = req.cancel;
 
         // Прогресс order-прохода отдаётся в [0, 0.5]: без пересчёта бар
@@ -7349,6 +7374,7 @@ struct ParametricEngine::Impl {
         res.axis_vals = ores.axis_x_vals;
         res.e1        = ores.e1;
         res.e2        = ores.e2;
+        res.e_ref     = ores.e_ref;
         res.p         = ores.p;
         res.h_eff     = ores.h_eff;
         res.status    = ores.status;
@@ -7375,7 +7401,9 @@ struct ParametricEngine::Impl {
         cudaGetLastError();   // сброс sticky-ошибки, см. run_order
 
         const int amountOfValues = (int)req.values.size();
-        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
+        const bool ref_on = !req.ref_krs_body.empty() && req.ref_substeps > 0;
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body,
+                                  ref_on ? req.ref_krs_body : std::string(), err)) return fail(err);
         if (cached_order.kernel_perf == nullptr) return fail("perfIntegrateKernel not found in the module");
 
         OrderDevBuf d_X0, d_values, d_out;
@@ -7484,7 +7512,7 @@ struct ParametricEngine::Impl {
         // Диапазоны для автоскейла: только узлы, у которых есть И время, И
         // конечная положительная ошибка — точка графика существует лишь тогда,
         // когда есть обе координаты.
-        bool first_t = true, first_e1 = true, first_e2 = true;
+        bool first_t = true, first_e1 = true, first_e2 = true, first_er = true;
         for (int i = 0; i < n; ++i) {
             const double ta = res.t_avg[(size_t)i];
             if (!std::isfinite(ta)) continue;
@@ -7499,6 +7527,13 @@ struct ParametricEngine::Impl {
             if (std::isfinite(e2) && e2 > 0.0) {
                 if (first_e2) { res.e2_min = res.e2_max = e2; first_e2 = false; }
                 else { if (e2 < res.e2_min) res.e2_min = e2; if (e2 > res.e2_max) res.e2_max = e2; }
+            }
+            const double er = ((size_t)i < res.e_ref.size())
+                                  ? res.e_ref[(size_t)i]
+                                  : std::numeric_limits<double>::quiet_NaN();
+            if (std::isfinite(er) && er > 0.0) {
+                if (first_er) { res.eref_min = res.eref_max = er; first_er = false; }
+                else { if (er < res.eref_min) res.eref_min = er; if (er > res.eref_max) res.eref_max = er; }
             }
         }
 
