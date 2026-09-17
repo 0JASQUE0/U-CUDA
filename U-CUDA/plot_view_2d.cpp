@@ -59,7 +59,7 @@ static int rgb_channel_input_callback(ImGuiInputTextCallbackData* data) {
 }
 
 void Plot2DView::do_autofit() {
-    float xmin, xmax, ymin, ymax;
+    double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
@@ -109,7 +109,7 @@ void Plot2DView::fit_x() {
         x_axis.view_max = x_fit_max;
         return;
     }
-    float xmin, xmax, ymin, ymax;
+    double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
@@ -129,7 +129,7 @@ void Plot2DView::fit_x() {
 }
 
 void Plot2DView::fit_y() {
-    float xmin, xmax, ymin, ymax;
+    double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
@@ -157,7 +157,27 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (data_generation != series_generation || series_xlog_cached != upload_xlog) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
-        std::vector<float> xlog_buf;
+        std::vector<double> xlog_buf;
+        // Начало координат для VBO: центр данных ПОСЛЕ лог-переноса, общий на весь
+        // набор (матрица проекции одна на все серии). Проход по данным здесь дешевле
+        // самой заливки и делается только при перезаливке.
+        {
+            double xlo = std::numeric_limits<double>::infinity(), xhi = -xlo;
+            double ylo = std::numeric_limits<double>::infinity(), yhi = -ylo;
+            for (const auto& s : series_in) {
+                if (!s.points || s.n_points <= 0) continue;
+                for (int i = 0; i < s.n_points; ++i) {
+                    double x = s.points[(size_t)i * 2 + 0];
+                    if (upload_xlog) x = (x > 0.0) ? std::log10(x) : -300.0;
+                    const double y = s.points[(size_t)i * 2 + 1];
+                    if (x < xlo) xlo = x;  if (x > xhi) xhi = x;
+                    if (y < ylo) ylo = y;  if (y > yhi) yhi = y;
+                }
+            }
+            const bool got = (xlo <= xhi && ylo <= yhi);
+            series_origin_x_ = got ? (xlo + xhi) * 0.5 : 0.0;
+            series_origin_y_ = got ? (ylo + yhi) * 0.5 : 0.0;
+        }
         for (const auto& s : series_in) {
             if (upload_xlog && s.points && s.n_points > 0) {
                 xlog_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
@@ -165,10 +185,12 @@ void Plot2DView::render(PlotRenderer& renderer,
                 // отклоняет, но чекбокс живой — уводим точку далеко влево
                 // вместо NaN, который испортил бы весь VBO.
                 for (size_t t = 0; t < xlog_buf.size(); t += 2)
-                    xlog_buf[t] = (xlog_buf[t] > 0.0f) ? std::log10(xlog_buf[t]) : -300.0f;
-                series_cache_.upload(xlog_buf.data(), s.n_points);
+                    xlog_buf[t] = (xlog_buf[t] > 0.0) ? std::log10(xlog_buf[t]) : -300.0;
+                series_cache_.upload(xlog_buf.data(), s.n_points,
+                                     series_origin_x_, series_origin_y_);
             } else {
-                series_cache_.upload(s.points, s.n_points);
+                series_cache_.upload(s.points, s.n_points,
+                                     series_origin_x_, series_origin_y_);
             }
         }
         series_xlog_cached = upload_xlog;
@@ -233,7 +255,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     double clamp_lo_x = 0.0, clamp_hi_x = 0.0, clamp_lo_y = 0.0, clamp_hi_y = 0.0;
     bool has_bounds_x = false, has_bounds_y = false;
     {
-        float xmn, xmx, ymn, ymx;
+        double xmn, xmx, ymn, ymx;
         bool ok = render_visible_mask_.empty()
                     ? series_cache_.bbox(xmn, xmx, ymn, ymx)
                     : series_cache_.bbox_filtered(xmn, xmx, ymn, ymx, render_visible_mask_);
@@ -363,7 +385,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     }
     float mvp[16];
     // Границы — в экранной координате: VBO залит тем же преобразованием.
-    make_ortho_mvp(sx0, sx1, ey0, ey1, mvp);
+    // В ТОМ ЖЕ начале координат, в котором залит VBO (см. series_origin_x_):
+    // вычитание делается в double, поэтому границы окна становятся малыми по модулю,
+    // и float-матрицы хватает с запасом даже на окне шириной 5e-7 около 0.15.
+    make_ortho_mvp(sx0 - series_origin_x_, sx1 - series_origin_x_,
+                   ey0 - series_origin_y_, ey1 - series_origin_y_, mvp);
     for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
         if (!eff_visible(k)) continue;
         const GpuLineSeries& g = series_cache_.get(k);
@@ -821,15 +847,22 @@ void Plot2DView::render(PlotRenderer& renderer,
                 double x1 = cx, y1 = cy;
                 if (x0 > x1) std::swap(x0, x1);
                 if (y0 > y1) std::swap(y0, y1);
+                // Рамка ПКМ СИЛЬНЕЕ блокировки оси — тот же принцип, что у Auto fit из
+                // меню. Lock защищает от СЛУЧАЙНОГО сдвига (колесо, перетаскивание), а
+                // растянутая рамка — явное указание, куда смотреть; раньше при Lock Y
+                // она молча применялась наполовину, и это выглядело как сломанный зум.
+                // Особенно на протяжке по самой оси Y: жест означает ровно «приблизь Y»,
+                // а блокировка отменяла его целиком.
+                // Сам флаг не снимаем: колесо и пан по этой оси по-прежнему не работают.
                 if (rect_zoom_mode_ == 0) {
-                    if (!x_axis.lock) { x_axis.view_min = x0; x_axis.view_max = x1; }
-                    if (!y_axis.lock) { y_axis.view_min = y0; y_axis.view_max = y1; }
+                    x_axis.view_min = x0; x_axis.view_max = x1;
+                    y_axis.view_min = y0; y_axis.view_max = y1;
                 }
                 else if (rect_zoom_mode_ == 1) {
-                    if (!x_axis.lock) { x_axis.view_min = x0; x_axis.view_max = x1; }
+                    x_axis.view_min = x0; x_axis.view_max = x1;
                 }
                 else {
-                    if (!y_axis.lock) { y_axis.view_min = y0; y_axis.view_max = y1; }
+                    y_axis.view_min = y0; y_axis.view_max = y1;
                 }
                 rect_zoom_active_ = false;
             }

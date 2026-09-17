@@ -575,10 +575,14 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     // Снапшот заблокированных осей: AxisInfo::lock означает «интеракция эту ось
     // не двигает». Проще и надёжнее один раз восстановить её после ВСЕХ мутаций
-    // (wheel / pan / rect-zoom / double-click), чем расставлять проверки в
-    // каждой ветке. Восстановление — перед clamp_view() ниже.
-    const double lock_x_min = x_axis.view_min, lock_x_max = x_axis.view_max;
-    const double lock_y_min = y_axis.view_min, lock_y_max = y_axis.view_max;
+    // (wheel / pan / double-click), чем расставлять проверки в каждой ветке.
+    // Восстановление — перед clamp_view() ниже.
+    //
+    // Исключение — рамка ПКМ: она сильнее lock (см. plot_view_2d.cpp), поэтому
+    // применив её, снапшот ОБНОВЛЯЕМ, и восстановление становится для этих осей
+    // пустой операцией. Снапшот поэтому не const.
+    double lock_x_min = x_axis.view_min, lock_x_max = x_axis.view_max;
+    double lock_y_min = y_axis.view_min, lock_y_max = y_axis.view_max;
 
     // 8a. Wheel zoom (вокруг курсора) — оставляем только в плоте.
     if (plot_hov && io.MouseWheel != 0.0f) {
@@ -679,16 +683,21 @@ void HeatmapView::render(PlotRenderer& renderer,
             if (xb - xa > 1e-12 && yb - ya > 1e-12) {
                 x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
                 y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
+                // Рамка сильнее lock — переносим снапшот на выбранный участок.
+                lock_x_min = x_axis.view_min; lock_x_max = x_axis.view_max;
+                lock_y_min = y_axis.view_min; lock_y_max = y_axis.view_max;
             }
         } else if (rect_zoom_mode_ == 2) {
             double xa = std::min(rect_zoom_x0_, wx), xb = std::max(rect_zoom_x0_, wx);
             if (xb - xa > 1e-12) {
                 x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
+                lock_x_min = x_axis.view_min; lock_x_max = x_axis.view_max;
             }
         } else if (rect_zoom_mode_ == 3) {
             double ya = std::min(rect_zoom_y0_, wy), yb = std::max(rect_zoom_y0_, wy);
             if (yb - ya > 1e-12) {
                 y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
+                lock_y_min = y_axis.view_min; lock_y_max = y_axis.view_max;
             }
         }
         rect_zoom_mode_ = 0;
@@ -700,7 +709,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     else if (yax_dbl) { y_axis.view_min = param_lo_y; y_axis.view_max = param_hi_y; }
 
     // 8d-bis. Восстановление заблокированных осей — отменяет всё, что могли
-    // изменить wheel / pan / rect-zoom / double-click выше (см. снапшот).
+    // изменить wheel / pan / double-click выше (см. снапшот). Для рамки ПКМ
+    // операция пустая: снапшот уже перенесён на выбранный участок.
     if (x_axis.lock) { x_axis.view_min = lock_x_min; x_axis.view_max = lock_x_max; }
     if (y_axis.lock) { y_axis.view_min = lock_y_min; y_axis.view_max = lock_y_max; }
 

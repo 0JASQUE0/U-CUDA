@@ -75,6 +75,40 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     return req;
 }
 
+PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig& c) {
+    // Всё общее с Order берётся из того же построителя: расхождение настроек
+    // между двумя расчётами одной вкладки было бы худшим из возможных багов —
+    // ошибка и время перестали бы относиться к одной и той же задаче.
+    const OrderRequest o = build_order_request(s, c);
+
+    PerfRequest req;
+    req.krs_body           = o.krs_body;
+    req.amountOfX          = o.amountOfX;
+    req.initial_conditions = o.initial_conditions;
+    req.values             = o.values;
+    req.axis               = o.axis_x;
+    req.h                  = o.h;
+    req.t_max              = o.t_max;
+    req.snap_steps         = o.snap_steps;
+    req.endpoint_only      = o.endpoint_only;
+    req.max_value          = o.max_value;
+    req.ref_substeps       = std::max(0, parse_i(c.perf_ref_substeps_text, 4));
+    if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
+        req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes, s.sys, c.perf_ref_scheme);
+    req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
+    req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
+    req.replicas           = std::max(1, parse_i(c.perf_replicas_text, 1));
+    return req;
+}
+
+void apply_perf_result(OrderConfig& c, PerfResult&& r) {
+    c.perf_result = std::move(r);
+    c.perf_last_run_ok = c.perf_result.ok;
+    if (!c.perf_result.ok) c.last_error = c.perf_result.error;
+    c.perf_data_generation++;
+    c.perf_fit_request = true;
+}
+
 void apply_order_result(OrderConfig& c, OrderResult&& r) {
     c.result = std::move(r);
     c.last_run_ok = c.result.ok;
@@ -138,6 +172,10 @@ void OrderAnalysisSession::add_config() {
         c.last_error.clear();
         c.data_generation = 0;
         c.fit_request = false;
+        c.perf_result = PerfResult{};
+        c.perf_last_run_ok = false;
+        c.perf_data_generation = 0;
+        c.perf_fit_request = false;
     } else {
         for (const auto& p : params) c.param_values[p] = "";
         for (const auto& v : vars)   c.initial_conditions[v] = "";
@@ -169,6 +207,27 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
     progress_token = std::make_shared<std::atomic<float>>(0.0f);
 
+    if (c.calc_kind == kOrderCalcPerf) {
+        PerfRequest preq = build_perf_request(*this, c);
+        if (preq.krs_body.empty()) {
+            c.last_error = "krs_code is empty (no valid system or scheme)";
+            cancel_token.reset();
+            progress_token.reset();
+            return false;
+        }
+        preq.cancel   = cancel_token;
+        preq.progress = progress_token;
+
+        in_flight = true;
+        running_is_perf = true;
+        running_config_index = config_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        perf_future = std::async(std::launch::async, [&engine, preq = std::move(preq)]() {
+            return engine.run_performance(preq);
+        });
+        return true;
+    }
+
     OrderRequest req = build_order_request(*this, c);
     if (req.krs_body.empty()) {
         c.last_error = "krs_code is empty (no valid system or scheme)";
@@ -180,6 +239,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     req.progress = progress_token;
 
     in_flight = true;
+    running_is_perf = false;
     running_config_index = config_idx;
     compute_start_time = std::chrono::steady_clock::now();
     run_future = std::async(std::launch::async, [&engine, req = std::move(req)]() {
@@ -194,21 +254,34 @@ void OrderAnalysisSession::request_cancel() {
 
 bool OrderAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!run_future.valid()) {
+    std::future<OrderResult>& of = run_future;
+    std::future<PerfResult>&  pf = perf_future;
+    const bool is_perf = running_is_perf;
+    if (is_perf ? !pf.valid() : !of.valid()) {
         in_flight = false;
+        running_is_perf = false;
         running_config_index = -1;
         cancel_token.reset(); progress_token.reset();
         return false;
     }
-    if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    if ((is_perf ? pf.wait_for(std::chrono::seconds(0)) : of.wait_for(std::chrono::seconds(0)))
+        != std::future_status::ready) return false;
 
-    OrderResult r = run_future.get();
-    const bool cancelled = r.cancelled;
     const int  idx = running_config_index;
     std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[(size_t)idx].label.empty())
                             ? configs[(size_t)idx].label : std::string("order");
-    if (!cancelled && idx >= 0 && idx < (int)configs.size())
-        apply_order_result(configs[(size_t)idx], std::move(r));
+    bool cancelled = false;
+    if (is_perf) {
+        PerfResult r = pf.get();
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)configs.size())
+            apply_perf_result(configs[(size_t)idx], std::move(r));
+    } else {
+        OrderResult r = of.get();
+        cancelled = r.cancelled;
+        if (!cancelled && idx >= 0 && idx < (int)configs.size())
+            apply_order_result(configs[(size_t)idx], std::move(r));
+    }
 
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
@@ -217,6 +290,7 @@ bool OrderAnalysisSession::poll() {
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
 
     in_flight = false;
+    running_is_perf = false;
     running_config_index = -1;
     cancel_token.reset();
     progress_token.reset();

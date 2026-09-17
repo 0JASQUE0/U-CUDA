@@ -1571,6 +1571,80 @@ void AppModel::remove_fastsync_config(int i) {
         if (it.index > i) --it.index;
 }
 
+void AppModel::add_order_plot_window(OrderPlotWindow::Kind kind, std::vector<int> initial_members) {
+    OrderPlotWindow w;
+    w.kind    = kind;
+    w.members = std::move(initial_members);
+    // Карта — хитмапа: наложить две друг на друга нельзя, поэтому лишние
+    // члены отсекаются здесь, а не только радиокнопками в попапе.
+    if (kind == OrderPlotWindow::Kind::Map && w.members.size() > 1) w.members.resize(1);
+    w.id = next_order_plot_window_id++;
+    w.label = "Plot " + std::to_string(w.id);
+    w.label_is_manual = false;
+    // Порядок p линеен по построению — логарифмировать его нечего.
+    if (kind == OrderPlotWindow::Kind::P) w.y_log = false;
+    order_plot_windows.push_back(std::move(w));
+    order_plot_windows_dirty = true;
+}
+
+void AppModel::remove_order_plot_window(int pos) {
+    if (pos < 0 || pos >= (int)order_plot_windows.size()) return;
+    order_plot_windows.erase(order_plot_windows.begin() + pos);
+    order_plot_windows_dirty = true;
+}
+
+void AppModel::load_or_init_order_plot_windows(const std::string& json) {
+    if (!json.empty()) {
+        session_from_json_order_windows(json, order_plot_windows);
+        int max_id = 0;
+        for (const auto& w : order_plot_windows)
+            if (w.id > max_id) max_id = w.id;
+        if (max_id >= next_order_plot_window_id)
+            next_order_plot_window_id = max_id + 1;
+        if (!order_plot_windows.empty()) return;
+    }
+    order_plot_windows.clear();
+    next_order_plot_window_id = 1;
+    // Дефолт — одно окно с кривой p, в котором лежат все сеточные конфиги:
+    // именно так вкладка и выглядела до появления окон.
+    std::vector<int> curves, maps, perfs;
+    for (size_t i = 0; i < order_session.configs.size(); ++i) {
+        const OrderConfig& c = order_session.configs[i];
+        if (c.calc_kind == kOrderCalcPerf) perfs.push_back((int)i);
+        else if (c.two_d)                  maps.push_back((int)i);
+        else                               curves.push_back((int)i);
+    }
+    if (!curves.empty()) add_order_plot_window(OrderPlotWindow::Kind::P, curves);
+    if (!perfs.empty())  add_order_plot_window(OrderPlotWindow::Kind::Perf, perfs);
+    for (int m : maps)   add_order_plot_window(OrderPlotWindow::Kind::Map, { m });
+    if (order_plot_windows.empty())
+        add_order_plot_window(OrderPlotWindow::Kind::P, {});
+}
+
+void AppModel::remove_order_config(int i) {
+    order_session.remove_config(i);
+
+    // Окна графиков: выкинуть i из members, сдвинуть большие индексы,
+    // выбросить окна, оставшиеся вовсе без членов (как у DFT1D).
+    for (auto& w : order_plot_windows) {
+        auto& m = w.members;
+        m.erase(std::remove(m.begin(), m.end(), i), m.end());
+        for (auto& idx : m) if (idx > i) --idx;
+    }
+    order_plot_windows.erase(std::remove_if(order_plot_windows.begin(), order_plot_windows.end(),
+                                            [](const OrderPlotWindow& w) { return w.members.empty(); }),
+                             order_plot_windows.end());
+    order_plot_windows_dirty = true;
+    // Та же чистка очереди, что у Basins/FastSync: выкидываем элементы,
+    // указывающие на удалённый конфиг, и сдвигаем те, что были правее.
+    for (auto it = order_queue.begin(); it != order_queue.end(); ) {
+        if (it->index == i) it = order_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : order_queue)
+        if (it.index > i) --it.index;
+}
+
 bool AppModel::start_next_in_basins_queue() {
     if (basins_session.in_flight) return false;
     if (basins_queue.empty()) return false;
@@ -1583,6 +1657,21 @@ bool AppModel::start_next_in_basins_queue() {
         }
         // ok == false (krs пуст / индекс плохой) — last_error выставлен;
         // идём дальше.
+    }
+    return false;
+}
+
+bool AppModel::start_next_in_order_queue() {
+    if (order_session.in_flight) return false;
+    if (order_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!order_queue.empty()) {
+        OrderQueueItem it = order_queue.front();
+        order_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)order_session.configs.size()) {
+            if (order_session.run_async(*parametric_engine, it.index)) return true;
+        }
+        // ok == false — last_error выставлен run_async; идём дальше.
     }
     return false;
 }

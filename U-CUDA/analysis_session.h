@@ -270,7 +270,7 @@ struct PhaseAnalysisSession {
     // Accumulated recorded time (seconds) since continuation started; not persisted.
     double continuation_elapsed = 0.0;
     // [ic][var] xy-pairs: X = global time, Y = peak. Fed to ProjType::ContinuationDiagram.
-    std::vector<std::vector<std::vector<float>>> continuation_peaks;
+    std::vector<std::vector<std::vector<double>>> continuation_peaks;
     int continuation_peaks_cap = 200000;   // pairs per (ic, var); oldest drop on overflow
     int continuation_peaks_gen = 0;        // bumped on every accumulation → Plot2DView reuploads
 

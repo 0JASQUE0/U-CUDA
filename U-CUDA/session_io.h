@@ -61,6 +61,17 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession
 std::string session_to_json_parametric_windows(const std::vector<ParametricPlotWindow>& wins);
 bool session_from_json_parametric_windows(const std::string& json, std::vector<ParametricPlotWindow>& wins);
 
+// Order-сессия (`_last_order.json`) — multi-config layout как у DFT1D.
+// Настройки отображения в неё не идут: они на окнах графика (ниже).
+std::string session_to_json_order(const OrderAnalysisSession& s);
+bool session_from_json_order(const std::string& json, OrderAnalysisSession& s);
+
+// Окна графиков Order (`_last_order_windows.json`) — вид окна, его члены и
+// настройки отображения. Отдельный файл по той же причине, что у параметрики:
+// это не часть ни одного конфига.
+std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wins);
+bool session_from_json_order_windows(const std::string& json, std::vector<OrderPlotWindow>& wins);
+
 // DFT1D plot windows (AppModel::dft1d_plot_windows) — same idea, its own file
 // (`_last_dft1d_windows.json`), minus the kind/mode_2d/colored_1d fields.
 std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins);

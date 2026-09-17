@@ -34,6 +34,14 @@
 //   1..M               — a[i], i-й параметр системы.
 constexpr int kOrderTargetH = -1;
 
+// Что запускает Run на этой вкладке. Живёт в конфиге, а не в окне графика:
+// "Run all" обязан знать, что именно считать для каждой вкладки, а окна
+// графиков к моменту запуска могут быть вообще закрыты.
+//   kOrderCalcOrder — порядок/ошибка по сетке (order.template.cu);
+//   kOrderCalcPerf  — время счёта vs достигнутая ошибка (perfIntegrateKernel).
+constexpr int kOrderCalcOrder = 0;
+constexpr int kOrderCalcPerf  = 1;
+
 struct OrderConfig {
     std::string label  = "Order";
     std::string scheme = "Euler";
@@ -71,37 +79,42 @@ struct OrderConfig {
     std::map<std::string, std::string> initial_conditions;
     std::map<std::string, std::string> param_values;
 
-    // ---- Отображение ----
-    // Масштаб ОСЕЙ ГРАФИКА, независимо от масштаба сетки узлов (axis_*_log):
-    // сетку можно набрать линейно, а смотреть в логарифме, и наоборот.
-    bool plot_x_log = true;
-    bool plot_y_log = true;     // для кривой ошибки; кривая p всегда линейна
-    // 0 = порядок p, 1 = кривая ошибки E1 (для 2D — то же, но heatmap).
-    int  active_plot_tab = 0;
-    // Показывать на кривой ошибки обе разности, а не только E1.
-    bool show_e2 = false;
-    // Опорная горизонталь на графике p — паспортный порядок выбранной схемы
-    // (kBuiltinSchemes в gui.cpp). 0 = не рисовать.
-    int  nominal_order = 0;
-    // Персистентный colormap 2D-карты; -1 = взять app-дефолт (как у Basins).
-    int  colormap_idx[2] = { -1, -1 };
-
     // ---- Результат ----
-    // Сигнатура нарисованного на прошлом кадре, по одной на вкладку графика
-    // (0 = p, 1 = ошибка). Меняется, когда меняется САМА рисуемая величина:
-    // новый расчёт, переключение lin/log, включение второй кривой. По её
-    // изменению запрашивается autofit — без этого Plot2DView подгоняет вид
-    // ровно один раз (do_autofit зовётся только при !view_valid ||
-    // fit_request || смене видимости), и после переключения с p на ошибку
-    // диапазон остаётся от p: кривая целиком уезжает за пределы вида.
-    // Транзиентное, не сериализуется.
-    int         plot_sig[2] = { -1, -1 };
-
+    // Настройки ОТОБРАЖЕНИЯ (масштаб осей, вторая кривая, колормапа) живут не
+    // здесь, а на окне графика (OrderPlotWindow): в одном окне лежат кривые
+    // нескольких вкладок, и масштаб оси у них обязан быть один.
     OrderResult result;
     bool        last_run_ok = false;
     std::string last_error;
     int         data_generation = 0;
     bool        fit_request = false;
+
+    // ---- Performance ----
+    // Замер времени счёта по той же оси X. Ось Y (2D-карта) здесь не
+    // участвует: диаграмма «время vs ошибка» одномерна по построению.
+    int         calc_kind = kOrderCalcOrder;
+
+    std::string perf_repeats_text  = "20";   // засекаемых запусков на узел
+    std::string perf_warmup_text   = "2";    // прогревочных запусков вне зачёта
+    // Одинаковых потоков в замеряемом запуске. 1 = латентность одного расчёта;
+    // большое число = пропускная способность загруженного GPU. Умолчание 1,
+    // потому что вопрос «сколько стоит ОДИН расчёт» задают чаще.
+    std::string perf_replicas_text = "1";
+
+    // Эталонный метод для третьей величины по оси X: E_ref = max|y_h - y_ref| —
+    // не ричардсоновская оценка, а сама ошибка схемы на шаге h. По умолчанию
+    // DOPRI78: восьмой порядок, и на рабочих шагах его собственная ошибка
+    // уходит под машинную точность решения, то есть он и есть «точный ответ».
+    std::string perf_ref_scheme = "DOPRI78";
+    // Шагов эталона на один шаг испытуемой схемы. Единицы хватает, пока методы
+    // разные; когда эталон совпадает с испытуемым, при равном шаге это была бы
+    // та же арифметика и разность тождественно нулевая — отсюда умолчание 4.
+    std::string perf_ref_substeps_text = "4";
+
+    PerfResult  perf_result;
+    bool        perf_last_run_ok = false;
+    int         perf_data_generation = 0;
+    bool        perf_fit_request = false;
 };
 
 struct OrderAnalysisSession {
@@ -118,6 +131,10 @@ struct OrderAnalysisSession {
     int running_config_index = -1;
 
     std::future<OrderResult> run_future;
+    // Замер времени возвращает другой тип, поэтому у него своё future;
+    // running_is_perf говорит poll'у, какое из них забирать.
+    std::future<PerfResult>  perf_future;
+    bool running_is_perf = false;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
