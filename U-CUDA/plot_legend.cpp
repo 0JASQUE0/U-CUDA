@@ -19,7 +19,7 @@ void draw_legend(ImDrawList* dl,
         return (k < (int)global_visible.size()) ? global_visible[k] : true;
         };
 
-    float line_h = ImGui::GetTextLineHeight();
+    float line_h = plot_text_line_height();
     float row_h = line_h + 2;
     float marker_w = 14;
     float gap = 4;

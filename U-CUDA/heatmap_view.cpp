@@ -108,7 +108,7 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
     if (!dl || height <= 0.0f) return;
     const float cb_x = top_left.x, cb_y = top_left.y, cb_h = height;
     const ImU32 col_text = plot_col_text();
-    const float font_h   = ImGui::GetFontSize();
+    const float font_h   = plot_text_line_height();
 
     // Градиент: непрерывный режим — 256 полос (визуально не отличимо от LUT),
     // discrete — по одной полосе на диапазон, чтобы совпадало с квантованием
@@ -247,9 +247,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 3. Layout. margin_right считается динамически под фактическую ширину
     //    числовых подписей colorbar'а — иначе тики типа "1.234e-05" вылезают
     //    за пределы avail_size и обрезаются.
-    const float margin_left   = 78.0f;
+    // Левый и нижний растут вместе с кеглем подписей — см. plot_2d_margins.
+    const float margin_left   = 78.0f * plot_font_scale();
     const float margin_top    = 20.0f;
-    const float margin_bottom = 46.0f;
+    const float margin_bottom = 46.0f * plot_font_scale();
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
 
     // Resolve the active number of discrete bands. discrete_levels overrides
@@ -915,7 +916,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // они учитывают swap_axes без мутации x_axis.name / y_axis.name.
     const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
     const char* yl = vis_y_name.empty() ? "y" : vis_y_name.c_str();
-    float font_h = ImGui::GetFontSize();
+    float font_h = plot_text_line_height();
     ImVec2 xs = plot_text_size(xl);
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
     plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);

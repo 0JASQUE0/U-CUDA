@@ -114,6 +114,7 @@ void plot_bg_color(float& r, float& g, float& b, float& a) {
 static ImFont* g_math_roman  = nullptr;
 static ImFont* g_math_italic = nullptr;
 static bool    g_math_on     = false;
+static float   g_plot_font_scale = 1.0f;
 
 void set_plot_math_fonts(ImFont* roman, ImFont* italic) {
     g_math_roman  = roman;
@@ -121,6 +122,10 @@ void set_plot_math_fonts(ImFont* roman, ImFont* italic) {
 }
 void set_plot_math_enabled(bool on) { g_math_on = on; }
 bool plot_math_enabled()            { return g_math_on; }
+
+void set_plot_font_scale(float s) { g_plot_font_scale = std::clamp(s, 0.5f, 3.0f); }
+float plot_font_scale()           { return g_plot_font_scale; }
+float plot_text_line_height()     { return ImGui::GetTextLineHeight() * g_plot_font_scale; }
 
 namespace {
 
@@ -440,19 +445,31 @@ bool rewrite_scientific(const char* s, std::string& out) {
 
 ImVec2 plot_text_size(const char* s) {
     if (!s || !*s) return ImGui::CalcTextSize(s ? s : "");
-    if (!g_math_on) return ImGui::CalcTextSize(s);
-    const float size = ImGui::GetFontSize();
+    if (!g_math_on) {
+        // Обычный ImGui-текст, но кегль подписей работает и здесь: при 1.0
+        // путь буквально прежний, иначе меряем тем же шрифтом другого размера.
+        if (g_plot_font_scale == 1.0f) return ImGui::CalcTextSize(s);
+        ImFont* f = ImGui::GetFont();
+        const float sz = ImGui::GetFontSize() * g_plot_font_scale;
+        return ImVec2(run_width(f, sz, s, s + std::strlen(s)), plot_text_line_height());
+    }
+    const float size = ImGui::GetFontSize() * g_plot_font_scale;
     std::string sci;
     const char* src = rewrite_scientific(s, sci) ? sci.c_str() : s;
     MathLayout L;
     const float w = typeset(L, src, src + std::strlen(src), size, Style{});
-    return ImVec2(w, ImGui::GetTextLineHeight());
+    return ImVec2(w, plot_text_line_height());
 }
 
 void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
     if (!dl || !s || !*s) return;
-    if (!g_math_on) { dl->AddText(pos, col, s); return; }
-    const float size = ImGui::GetFontSize();
+    if (!g_math_on) {
+        if (g_plot_font_scale == 1.0f) { dl->AddText(pos, col, s); return; }
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * g_plot_font_scale,
+                    ImVec2(snap_px(pos.x), snap_px(pos.y)), col, s);
+        return;
+    }
+    const float size = ImGui::GetFontSize() * g_plot_font_scale;
     std::string sci;
     const char* src = rewrite_scientific(s, sci) ? sci.c_str() : s;
     MathLayout L;

@@ -15,6 +15,11 @@ struct AppConfig {
     // Segoe UI с `C:\Windows\Fonts\segoeui.ttf`. Чекбокс в Settings.
     bool use_builtin_font = false;
 
+    // Кегль подписей на графиках — множитель к UI-шрифту, [0.5, 3.0], дефолт
+    // 1.0 (прежний вид). Слайдер в Settings; при изменении дёргается
+    // set_plot_font_scale() из plot_axis.h, как tick_precision у осей.
+    float plot_font_scale = 1.0f;
+
     // true (дефолт) → подписи на графиках набираются серифной парой шрифтов с
     // греческими буквами и индексами (см. plot_text в plot_axis.h). false →
     // прежний вид: те же строки текущим UI-шрифтом. Чекбокс в Settings.

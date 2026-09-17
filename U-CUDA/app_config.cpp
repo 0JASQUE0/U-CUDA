@@ -208,6 +208,8 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
         out.use_builtin_font = bv;
     if (parse_bool_field(body, "plot_math_font", bv))
         out.plot_math_font = bv;
+    if (parse_float_field(body, "plot_font_scale", fv))
+        out.plot_font_scale = fv;
     int iv = 0;
     if (parse_int_field(body, "heatmap_colormap", iv))
         out.heatmap_colormap = iv;
@@ -279,6 +281,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"ui_scale_override\": " << cfg.ui_scale_override << ",\n";
         f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << ",\n";
         f << "  \"plot_math_font\": "    << (cfg.plot_math_font ? "true" : "false") << ",\n";
+        f << "  \"plot_font_scale\": "   << cfg.plot_font_scale << ",\n";
         f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << ",\n";
         f << "  \"basins_colormap\": "        << cfg.basins_colormap << ",\n";
         f << "  \"basins_avgpk_colormap\": "  << cfg.basins_avgpk_colormap << ",\n";

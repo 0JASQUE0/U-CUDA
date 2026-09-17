@@ -11542,6 +11542,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
             cfg.plot_math_font         = m.plot_math_font;
+            cfg.plot_font_scale        = m.plot_font_scale;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
             cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
@@ -11600,6 +11601,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
+
+            float plot_fs = model.plot_font_scale;
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderFloat("Plot font size", &plot_fs, 0.5f, 3.0f, "%.2fx")) {
+                set_plot_font_scale(plot_fs);
+                model.plot_font_scale = plot_font_scale();   // клампнутое значение
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Size of every label on the plots (ticks, axis names,");
+            ImGui::TextDisabled("legend, colorbar), relative to the UI font. Plot margins");
+            ImGui::TextDisabled("follow it, so labels stay inside the diagram block.");
 
             bool math_font = model.plot_math_font;
             if (ImGui::Checkbox("LaTeX-style labels on plots", &math_font)) {

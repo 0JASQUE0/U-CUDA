@@ -8,12 +8,15 @@
 
 // Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
 // margin_left/bottom увеличены, чтобы вместить тики + центрированное
-// название оси.
+// название оси, и растут вместе с кеглем подписей (Settings -> Plot font
+// size): иначе на крупном кегле имя оси уезжает за нижний край блока, а
+// Y-подпись — за левый.
 void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
-    left   = 78.0f;
+    const float k = plot_font_scale();
+    left   = 78.0f * k;
     top    = 20.0f;
     right  = 20.0f;
-    bottom = 46.0f;
+    bottom = 46.0f * k;
 }
 
 // Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
@@ -567,7 +570,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     {
         const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
-        float font_h = ImGui::GetFontSize();
+        float font_h = plot_text_line_height();
 
         // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор)
         ImVec2 xs = plot_text_size(xl);
@@ -639,7 +642,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         std::snprintf(buf, sizeof(buf), "%s = %.6g,  %s = %.6g", xn, dx, yn, dy);
         ImVec2 cs = plot_text_size(buf);
         float cx = img_pos.x + plot_w - cs.x;
-        float cy = img_pos.y + plot_h + 2.0f + ImGui::GetFontSize() + 6.0f;
+        float cy = img_pos.y + plot_h + 2.0f + plot_text_line_height() + 6.0f;
         plot_text(dl, ImVec2(cx, cy), col_text, buf);
     }
 

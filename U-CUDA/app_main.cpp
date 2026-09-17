@@ -339,6 +339,7 @@ int main() {
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
         model.plot_math_font   = app_cfg.plot_math_font;
+        model.plot_font_scale  = app_cfg.plot_font_scale;
         // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
         // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.
         model.heatmap_colormap = colormap_id_or(app_cfg.heatmap_colormap, model.heatmap_colormap);
@@ -392,6 +393,9 @@ int main() {
     set_gpu_block_size(model.gpu_block_size);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
+    // Клампится внутри: конфиг мог быть правлен руками.
+    set_plot_font_scale(model.plot_font_scale);
+    model.plot_font_scale = plot_font_scale();
 
     // applied = -1 / opposite → форсируем apply на первом кадре.
     float applied_ui_scale     = -1.0f;

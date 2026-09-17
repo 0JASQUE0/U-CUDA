@@ -96,11 +96,23 @@ void set_plot_math_fonts(ImFont* roman, ImFont* italic);
 void set_plot_math_enabled(bool on);
 bool plot_math_enabled();
 
-// Ширина набранной строки; высота — всегда GetTextLineHeight() базового
-// шрифта, чтобы вертикальная вёрстка плотов не зависела от того, вылезла ли
-// степень над строкой.
+// Кегль подписей на графиках — множитель к текущему шрифту ImGui. Не зависит
+// от режима выше: в обычном (не-LaTeX) виде подписи масштабируются так же.
+// Клампится в [0.5, 3.0]; слайдер — в Settings, персистится в _app_config.json.
+// Марджины плотов и высота строк легенды считаются от него же, поэтому крупный
+// кегль не вылезает за пределы блока диаграммы.
+void  set_plot_font_scale(float s);
+float plot_font_scale();
+
+// Ширина набранной строки; высота — всегда высота строки подписей (базовый
+// шрифт * plot_font_scale), чтобы вертикальная вёрстка плотов не зависела от
+// того, вылезла ли степень над строкой.
 ImVec2 plot_text_size(const char* s);
 void   plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s);
+
+// Высота строки подписей. То же, что GetTextLineHeight() до появления кегля, —
+// вызывать вместо него везде, где считается вёрстка вокруг подписей плота.
+float  plot_text_line_height();
 
 // Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
 // диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
