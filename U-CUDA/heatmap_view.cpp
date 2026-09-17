@@ -779,17 +779,22 @@ void HeatmapView::render(PlotRenderer& renderer,
         // Форс-включение крайних узлов сетки (snap-режим при зуме). Порог "не
         // слишком близко" = 40% от sx — подписи не будут наезжать друг на
         // друга при обычных диапазонах.
-        const double gap_min = sx * 0.4;
+        // «Не слишком близко» решают сами подписи (tick_label_fits): доля от
+        // sx не знает ни их ширины, ни масштаба, а при зуме подпись границы —
+        // самая длинная на оси.
+        auto fits = [&](double v, double neighbor) {
+            return tick_label_fits(v, neighbor, lo, hi, span_px, horizontal);
+        };
         if (step_node > 0.0 && n_nodes > 1) {
             double first_node = node_origin;
             double last_node  = node_origin + (double)(n_nodes - 1) * step_node;
             if (last_node >= lo - step_node * 0.5 && last_node <= hi + step_node * 0.5) {
-                if (out.empty() || last_node - out.back() >= gap_min) {
+                if (out.empty() || fits(last_node, out.back())) {
                     out.push_back(last_node);
                 }
             }
             if (first_node >= lo - step_node * 0.5 && first_node <= hi + step_node * 0.5) {
-                if (out.empty() || out.front() - first_node >= gap_min) {
+                if (out.empty() || fits(first_node, out.front())) {
                     out.insert(out.begin(), first_node);
                 }
             }
@@ -799,10 +804,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         // если он не кратен "красивому" nice_step шагу (напр. 0.001 при шаге
         // 0.005) -- баг, репортнутый для h-свипа в линейном масштабе.
         if (force_hi >= lo - 1e-12 && force_hi <= hi + 1e-12) {
-            if (out.empty() || force_hi - out.back() >= gap_min) out.push_back(force_hi);
+            if (out.empty() || fits(force_hi, out.back())) out.push_back(force_hi);
         }
         if (force_lo >= lo - 1e-12 && force_lo <= hi + 1e-12) {
-            if (out.empty() || out.front() - force_lo >= gap_min) out.insert(out.begin(), force_lo);
+            if (out.empty() || fits(force_lo, out.front())) out.insert(out.begin(), force_lo);
         }
         return out;
     };

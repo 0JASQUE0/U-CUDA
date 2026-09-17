@@ -607,6 +607,21 @@ double fit_tick_step_x(double step, double lo, double hi, float plot_w) {
     return step;
 }
 
+bool tick_label_fits(double v, double neighbor, double lo, double hi,
+                     float span_px, bool horizontal) {
+    const double range = hi - lo;
+    if (!(range > 0.0) || span_px <= 1.0f) return true;
+    const double dist_px = std::abs(v - neighbor) / range * (double)span_px;
+    double need;
+    if (horizontal) {
+        need = ((double)plot_text_size(fmt_tick(v).c_str()).x +
+                (double)plot_text_size(fmt_tick(neighbor).c_str()).x) * 0.5 + 6.0;
+    } else {
+        need = (double)plot_text_line_height() * 1.2;
+    }
+    return dist_px >= need;
+}
+
 double fit_tick_step_y(double step, double range, float plot_h) {
     if (!(step > 0.0) || !(range > 0.0) || plot_h <= 1.0f) return step;
     // Подписи по Y однострочные — меряем высотой строки с запасом в 60%.
@@ -710,34 +725,39 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
         plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
     };
 
-    // Порог растёт вместе с tick precision (Settings): чем больше значащих
-    // цифр в подписи (fmt_tick), тем она шире, и тем больший зазор нужен,
-    // чтобы edge-tick не наезжал текстом на соседний регулярный тик.
-    double edge_frac;
-    if      (g_tick_precision <= 2) edge_frac = 0.25;
-    else if (g_tick_precision == 3) edge_frac = 0.30;
-    else if (g_tick_precision == 4) edge_frac = 0.35;
-    else                            edge_frac = 0.40;
-    const double edge_eps = sx * edge_frac;
-    bool lo_covered = false, hi_covered = false;
-
+    // Сначала собираем значения, потом рисуем: решение про границы свипа
+    // зависит от того, где оказался ближайший регулярный тик.
+    std::vector<double> vals;
+    vals.reserve((size_t)(nx > 0 ? nx : 0) + 2);
     for (int ix = 0; ix < nx; ++ix) {
         double xv = xstart + ix * sx;
         if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
-        if (ix == 0)      lo_covered = std::abs(xv - lo) <= edge_eps;
-        if (ix == nx - 1) hi_covered = std::abs(xv - hi) <= edge_eps;
-        draw_tick(xv);
+        vals.push_back(xv);
     }
 
     // Границы свипа (snap_lo/snap_hi) должны быть видны всегда, даже если
     // регулярный шаг тиков на них не попадает — иначе крайняя точка расчёта
     // визуально теряется (напр. подписи доходят до -0.0996, а не до 0).
     // Только для 1D Bif/LLE/LS (snap активен); Phase/TimeDomain (snap_n==0)
-    // не затрагиваются.
+    // не затрагиваются. Раньше «достаточно ли далеко» решалось долей от шага
+    // (0.25..0.40 по таблице от tick precision) — мера в мировых единицах, не
+    // знающая ни ширины подписи, ни масштаба, поэтому при зуме длинная подпись
+    // границы наезжала на круглую соседнюю.
     if (snap_n > 1) {
-        if (!lo_covered) draw_tick(lo);
-        if (!hi_covered) draw_tick(hi);
+        if (vals.empty()) {
+            vals.push_back(lo);
+            if (tick_label_fits(hi, lo, lo, hi, plot_w, true)) vals.push_back(hi);
+        } else {
+            if (std::abs(vals.front() - lo) > sx * 1e-6 &&
+                tick_label_fits(lo, vals.front(), lo, hi, plot_w, true))
+                vals.insert(vals.begin(), lo);
+            if (std::abs(vals.back() - hi) > sx * 1e-6 &&
+                tick_label_fits(hi, vals.back(), lo, hi, plot_w, true))
+                vals.push_back(hi);
+        }
     }
+
+    for (double xv : vals) draw_tick(xv);
 }
 
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
