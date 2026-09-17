@@ -690,7 +690,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         for (const auto& s : series_in) total_pts += (size_t)std::max(0, s.n_points);
         // Верхняя граница на всякий случай: два прохода по серии на кадр
         // наведения дёшевы для Bif/LLE/LS, но не для многомиллионных наборов.
-        if (snap_x_to_grid && span_s != 0.0 && total_pts > 0 && total_pts <= 4000000) {
+        if (snap_x_to_grid && span_s != 0.0) {
             const double cursor_px = (double)(io.MousePos.x - img_pos.x);
             auto to_px = [&](double w) {
                 return (XS(w) - sx0) / span_s * (double)plot_w;
@@ -698,19 +698,30 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Ближайший X — в ЭКРАННОЙ метрике: на лог-оси «ближайший» должен
             // означать ближайший глазу, а не по разности значений.
             double best_px = 0.0;
-            for (size_t si = 0; si < series_in.size(); ++si) {
-                if (si < visible.size() && !visible[si]) continue;
-                const PlotSeriesInput& s = series_in[si];
-                if (!s.points || s.n_points <= 0) continue;
-                for (int i = 0; i < s.n_points; ++i) {
-                    const double xv = s.points[(size_t)i * 2 + 0];
-                    const double d = std::abs(to_px(xv) - cursor_px);
-                    if (!x_on_node || d < best_px) { best_px = d; dx = xv; x_on_node = true; }
+            if (snap_x_nodes && snap_x_node_count > 0) {
+                // Узлы свипа, включая те, что не дали точек.
+                for (int k = 0; k < snap_x_node_count; ++k) {
+                    const double d = std::abs(to_px(snap_x_nodes[k]) - cursor_px);
+                    if (!x_on_node || d < best_px) { best_px = d; dx = snap_x_nodes[k]; x_on_node = true; }
+                }
+            } else if (total_pts > 0 && total_pts <= 4000000) {
+                // Узлов не дали — снапимся по самим точкам. Верхняя граница на
+                // всякий случай: проход по многомиллионному набору на кадр
+                // наведения уже дорог.
+                for (size_t si = 0; si < series_in.size(); ++si) {
+                    if (si < visible.size() && !visible[si]) continue;
+                    const PlotSeriesInput& s = series_in[si];
+                    if (!s.points || s.n_points <= 0) continue;
+                    for (int i = 0; i < s.n_points; ++i) {
+                        const double xv = s.points[(size_t)i * 2 + 0];
+                        const double d = std::abs(to_px(xv) - cursor_px);
+                        if (!x_on_node || d < best_px) { best_px = d; dx = xv; x_on_node = true; }
+                    }
                 }
             }
             // Ближайшая точка В ЭТОМ столбце: сравнение точное — значения те же
             // самые double, что были прочитаны на первом проходе.
-            if (x_on_node) {
+            if (x_on_node && total_pts <= 4000000) {
                 double best_dy = 0.0;
                 for (size_t si = 0; si < series_in.size(); ++si) {
                     if (si < visible.size() && !visible[si]) continue;
@@ -751,6 +762,17 @@ void Plot2DView::render(PlotRenderer& renderer,
         auto cursor_wx = [&]() -> double {
             double wx = XW(sx0 + (double)(io.MousePos.x - img_pos.x)
                                  / (double)plot_w * (sx1 - sx0));
+            // Узлы от вызывающего — точнее любой реконструкции (см. snap_x_nodes).
+            if (snap_x_to_grid && snap_x_nodes && snap_x_node_count > 0 && sx1 != sx0) {
+                const double cursor_px = (double)(io.MousePos.x - img_pos.x);
+                double best = 0.0; bool got = false;
+                for (int k = 0; k < snap_x_node_count; ++k) {
+                    const double spx = (XS(snap_x_nodes[k]) - sx0) / (sx1 - sx0) * (double)plot_w;
+                    const double d = std::abs(spx - cursor_px);
+                    if (!got || d < best) { best = d; wx = snap_x_nodes[k]; got = true; }
+                }
+                return wx;
+            }
             if (snap_x_to_grid && snap_x_n > 1) {
                 double lo = std::min(snap_x_min, snap_x_max);
                 double hi = std::max(snap_x_min, snap_x_max);

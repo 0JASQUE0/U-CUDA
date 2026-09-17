@@ -2035,6 +2035,30 @@ static std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t
     return bufs;
 }
 
+// Узлы сетки свипа фокусной кривой окна (Plot2DView::snap_x_nodes). Живут
+// между кадрами, как и буферы точек: вид держит указатель на время render().
+static std::vector<double>& window_node_buf(int window_id) {
+    static std::map<int, std::vector<double>> cache;
+    return cache[window_id];
+}
+
+// Заполняет узлы ТОЙ ЖЕ формулой, что строит точки, и отдаёт их виду. Узлы, на
+// которых точек не оказалось (режим не колебательный, λ не финитна), здесь
+// тоже есть: курсор обязан на них вставать — расчёт для них проводился.
+static void set_snap_nodes(Plot2DView& view, int window_id,
+                           int npts, double lo, double hi,
+                           bool log_scale, bool reverse, bool continuation) {
+    auto& nb = window_node_buf(window_id);
+    nb.clear();
+    if (npts > 1) {
+        nb.reserve((size_t)npts);
+        for (int k = 0; k < npts; ++k)
+            nb.push_back(sweep_value_at(k, npts, lo, hi, log_scale, reverse, continuation));
+    }
+    view.snap_x_nodes      = nb.empty() ? nullptr : nb.data();
+    view.snap_x_node_count = (int)nb.size();
+}
+
 // Полоска-превью колормапа как ImGui-виджет: kSeg сегментов с линейным градиентом внутри
 // каждого плюс Dummy того же размера, чтобы полоска занимала место в layout'е. 24 сегмента
 // хватает, чтобы читались даже рваные качественные карты (tab20, glasbey), а рисуется это
@@ -5122,6 +5146,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     // Буферы точек (по одному на серию), свои у каждого окна — см.
     // window_point_bufs: между кадрами они держат capacity.
     auto& bufs = window_point_bufs(win.id, win.members.size());
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis;
@@ -5163,6 +5190,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             // структуры, [0, 1], и курсор садился на узлы чужой сетки.
             if (snap_n_focus == 0) {
                 snap_lo_focus = lo; snap_hi_focus = hi; snap_n_focus = npts;
+                set_snap_nodes(view, win.id, npts, lo, hi, bd.log_scale, rev, bd.continuation);
             }
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
@@ -5486,6 +5514,9 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     view.y_axis.name = "lambda";
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -5514,6 +5545,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             // При backward-continuation точка k считалась для hi-(hi-lo)*k/(n-1)
             // (см. run_lle1d_continuation_cpu) — иначе кривая была бы зеркальной.
             const bool rev = c.result.continuation_reverse;
+            if (view.snap_x_node_count == 0)
+                set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() &&
                     !regime_is_oscillation(c.result.flags[k])) continue;
@@ -5839,6 +5872,9 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     }
 
     auto& bufs = window_point_bufs(win.id, total_series);
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -5864,6 +5900,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         // (см. run_ls1d_cpu) — иначе кривая была бы зеркальной.
         const bool rev = c.result.continuation_reverse;
         bool have = c.last_run_ok && !c.result.spectrum.empty();
+        if (have && view.snap_x_node_count == 0)
+            set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
 
         for (int j = 0; j < N; ++j) {
             auto& buf = bufs[buf_cursor++];
