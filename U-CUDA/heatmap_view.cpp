@@ -752,21 +752,19 @@ void HeatmapView::render(PlotRenderer& renderer,
         double vr = hi - lo;
         if (std::abs(vr) < 1e-30) return out;
         double sx = nice_step(std::abs(vr), target_count);
-        // Шаг раздвигается, пока подписи не перестанут наезжать друг на друга,
-        // а к узлам сетки притягивается только пока они различимы на экране —
-        // см. fit_tick_step_* / node_snap_visible в plot_axis.h.
-        sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
-                        : fit_tick_step_y(sx, std::abs(vr), span_px);
+        // К узлам сетки шаг притягивается только пока они различимы (node_snap_visible),
+        // а ширина подписей меряется ПОСЛЕ снапа: узловые значения длиннее
+        // круглых («10.732» против «10.8»). См. plot_axis.h.
         if (!node_snap_visible(step_node, std::abs(vr), span_px)) step_node = 0.0;
         double xstart;
         if (step_node > 0.0 && n_nodes > 1) {
             int mult = (int)std::lround(sx / step_node);
-            if (mult < 1) mult = 1;
+            mult = fit_node_step(step_node, node_origin, mult, lo, hi, span_px,
+                                 horizontal, xstart);
             sx = (double)mult * step_node;
-            int k_lo = (int)std::ceil((lo - node_origin) / step_node - 1e-9);
-            int k_start = (int)std::ceil((double)k_lo / (double)mult - 1e-9) * mult;
-            xstart = node_origin + (double)k_start * step_node;
         } else {
+            sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
+                            : fit_tick_step_y(sx, std::abs(vr), span_px);
             xstart = std::ceil(lo / sx) * sx;
         }
         int nt = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
@@ -779,17 +777,22 @@ void HeatmapView::render(PlotRenderer& renderer,
         // Форс-включение крайних узлов сетки (snap-режим при зуме). Порог "не
         // слишком близко" = 40% от sx — подписи не будут наезжать друг на
         // друга при обычных диапазонах.
-        const double gap_min = sx * 0.4;
+        // «Не слишком близко» решают сами подписи (tick_label_fits): доля от
+        // sx не знает ни их ширины, ни масштаба, а при зуме подпись границы —
+        // самая длинная на оси.
+        auto fits = [&](double v, double neighbor) {
+            return tick_label_fits(v, neighbor, lo, hi, span_px, horizontal);
+        };
         if (step_node > 0.0 && n_nodes > 1) {
             double first_node = node_origin;
             double last_node  = node_origin + (double)(n_nodes - 1) * step_node;
             if (last_node >= lo - step_node * 0.5 && last_node <= hi + step_node * 0.5) {
-                if (out.empty() || last_node - out.back() >= gap_min) {
+                if (out.empty() || fits(last_node, out.back())) {
                     out.push_back(last_node);
                 }
             }
             if (first_node >= lo - step_node * 0.5 && first_node <= hi + step_node * 0.5) {
-                if (out.empty() || out.front() - first_node >= gap_min) {
+                if (out.empty() || fits(first_node, out.front())) {
                     out.insert(out.begin(), first_node);
                 }
             }
@@ -799,10 +802,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         // если он не кратен "красивому" nice_step шагу (напр. 0.001 при шаге
         // 0.005) -- баг, репортнутый для h-свипа в линейном масштабе.
         if (force_hi >= lo - 1e-12 && force_hi <= hi + 1e-12) {
-            if (out.empty() || force_hi - out.back() >= gap_min) out.push_back(force_hi);
+            if (out.empty() || fits(force_hi, out.back())) out.push_back(force_hi);
         }
         if (force_lo >= lo - 1e-12 && force_lo <= hi + 1e-12) {
-            if (out.empty() || out.front() - force_lo >= gap_min) out.insert(out.begin(), force_lo);
+            if (out.empty() || fits(force_lo, out.front())) out.insert(out.begin(), force_lo);
         }
         return out;
     };
