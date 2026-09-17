@@ -114,6 +114,21 @@ void   plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s);
 // вызывать вместо него везде, где считается вёрстка вокруг подписей плота.
 float  plot_text_line_height();
 
+// Левый марджин плота под фактические подписи оси Y: ширина самого широкого
+// тика текущего вида + повёрнутое имя оси + зазоры. Раньше тут стояла
+// константа 78 px, подобранная под худший случай, — на коротких подписях
+// ("0", "0.5") она съедала полтора сантиметра экрана впустую, а на крупном
+// кегле разрасталась пропорционально.
+//
+// Результат квантуется вверх до 8 px: без этого край плота дёргался бы на
+// каждый пиксель, пока подписи меняют длину при зуме.
+//
+// Тики берутся тем же nice_step, что и draw_axis_y_grid. Кто считает их своим
+// генератором (HeatmapView со снапом к узлам сетки), измеряет ширину сам и
+// зовёт plot_left_margin_for_width.
+float plot_y_axis_margin(const AxisInfo& y, const char* y_name);
+float plot_left_margin_for_width(float max_tick_w, bool has_axis_name);
+
 // Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
 // диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
 // — рект в экранных координатах ImGui (весь блок диаграммы: оси/colorbar/

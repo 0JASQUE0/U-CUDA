@@ -522,6 +522,40 @@ void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
     }
 }
 
+float plot_left_margin_for_width(float max_tick_w, bool has_axis_name) {
+    // 4 — зазор тик/плот (draw_axis_y_grid), 6 — тик/имя оси, высота строки —
+    // само повёрнутое имя, ещё 8 — воздух у левого края блока.
+    float m = max_tick_w + (has_axis_name ? 4.0f + 6.0f + plot_text_line_height() + 8.0f
+                                          : 8.0f);
+    m = std::ceil(m / 8.0f) * 8.0f;
+    return std::clamp(m, 32.0f, 400.0f);
+}
+
+float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
+    double emin, emax;
+    axis_effective(y, emin, emax);
+    const double vry = emax - emin;
+    float max_w = 0.0f;
+    if (std::abs(vry) >= 1e-30) {
+        const double lo = std::min(emin, emax);
+        const double hi = std::max(emin, emax);
+        if (y.log_scale) {
+            // Лог-ось подписывает только границы диапазона — см. draw_axis_y_grid.
+            max_w = std::max(plot_text_size(fmt_tick(lo).c_str()).x,
+                             plot_text_size(fmt_tick(hi).c_str()).x);
+        } else {
+            const double sy = nice_step(std::abs(vry), 6);
+            const double ystart = std::ceil(lo / sy) * sy;
+            const int n = (int)std::floor((hi - ystart) / sy + 1e-9) + 1;
+            // Ограничение сверху — страховка от вырожденного шага: рисуется всё
+            // равно не больше десятка тиков, а мерить миллион строк тут нельзя.
+            for (int i = 0; i < n && i < 64; ++i)
+                max_w = std::max(max_w, plot_text_size(fmt_tick(ystart + i * sy).c_str()).x);
+        }
+    }
+    return plot_left_margin_for_width(max_w, y_name && *y_name);
+}
+
 void set_tick_precision(int n) {
     g_tick_precision = std::clamp(n, 2, 10);
 }

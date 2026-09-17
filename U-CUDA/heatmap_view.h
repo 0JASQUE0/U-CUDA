@@ -198,6 +198,14 @@ private:
     // при пересоздании HeatmapView (fresh app start), не при смене данных.
     bool   discrete_default_applied_ = false;
 
+    // Левый отступ под подписи оси Y, измеренный ПРОШЛЫМ кадром. Тики здесь
+    // снапаются к узлам параметрической сетки (compute_axis_ticks), а их
+    // входные данные готовы уже после того, как отступ нужен для layout'а, —
+    // поэтому берём фактическую ширину предыдущего кадра. Значение квантовано
+    // до 8 px (plot_left_margin_for_width), так что при зуме оно меняется
+    // редко и отставание на кадр не заметно. Старт — прежняя константа.
+    float  left_margin_px_ = 78.0f;
+
     void ensure_tex(int w, int h);
     void upload_data(int nx, int ny, const double* values);
     void do_autofit(double lo_x, double hi_x, double lo_y, double hi_y);

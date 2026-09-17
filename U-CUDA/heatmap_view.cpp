@@ -247,8 +247,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 3. Layout. margin_right считается динамически под фактическую ширину
     //    числовых подписей colorbar'а — иначе тики типа "1.234e-05" вылезают
     //    за пределы avail_size и обрезаются.
-    // Левый и нижний растут вместе с кеглем подписей — см. plot_2d_margins.
-    const float margin_left   = 78.0f * plot_font_scale();
+    // Левый — под фактические подписи оси Y, измеренные прошлым кадром
+    // (см. left_margin_px_). Нижний держит тики + имя оси X, поэтому растёт
+    // вместе с кеглем подписей.
+    const float margin_left   = left_margin_px_;
     const float margin_top    = 20.0f;
     const float margin_bottom = 46.0f * plot_font_scale();
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
@@ -777,6 +779,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         return out;
     };
 
+    // Фактическая ширина самой длинной подписи по Y за этот кадр — из неё
+    // считается левый отступ следующего кадра (см. left_margin_px_).
+    float y_tick_w_max = 0.0f;
     auto draw_x_ticks = [&]() {
         // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы цветовые ячейки
         // центрировались на узлах. Для log-оси линейный полушаг у границ (например 0.001) даёт
@@ -828,6 +833,7 @@ void HeatmapView::render(PlotRenderer& renderer,
                         ImVec2(img_pos.x,         py), col_axis, 1.0f);
             std::string lbl = fmt_tick(yv);
             ImVec2 ts = plot_text_size(lbl.c_str());
+            y_tick_w_max = std::max(y_tick_w_max, ts.x);
             plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, py - ts.y * 0.5f),
                       col_text, lbl.c_str());
         }
@@ -952,6 +958,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         // label_gap — доп. зазор между самым широким тиком и Y-подписью: без него текст вплотную
         // касается цифр (оба span'а стыкуются в точке img_pos.x - max_tick_w - 8).
         const float label_gap = 6.0f;
+        // Оба измерения тиков: своё (compute_axis_ticks в vis-домене) и
+        // фактическое из draw_y_ticks. Берём большее — имя оси не должно
+        // наехать на цифры, даже если генераторы разошлись на краю диапазона.
+        max_tick_w = std::max(max_tick_w, y_tick_w_max);
         float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - label_gap - ts_yl.y);
         float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
         ImVec2 pivot(pivot_x, pivot_y);
@@ -967,6 +977,11 @@ void HeatmapView::render(PlotRenderer& renderer,
             v.pos.y = pivot.y - dx;
         }
     }
+
+    // Левый отступ на следующий кадр — по тому, что реально нарисовано сейчас.
+    // Безусловно: без имени оси блок выше пропускается, но отступ под цифры
+    // всё равно нужен.
+    left_margin_px_ = plot_left_margin_for_width(y_tick_w_max, ts_yl.x > 0.0f);
 
     // 9. Colorbar справа — общая реализация (см. draw_colorbar). tick_vals те
     //    же, по которым выше зарезервирован margin_right.

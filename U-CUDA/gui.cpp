@@ -7902,8 +7902,13 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // совпадать с Plot2DView (он рисует внутри plot_avail): продублированные здесь
         // тремя числами, они разъезжались при любой правке лэйаута, поэтому берутся из
         // plot_2d_margins() — один источник истины.
-        float margin_left, margin_top, margin_right, margin_bottom;
-        plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+        // Берём марджины, которыми render отработал ЭТИМ кадром: левый теперь
+        // зависит от длины подписей оси Y, и пересчитать его здесь заново
+        // значило бы разъехаться с плотом на кадр после каждого зума.
+        const float margin_left   = v.last_margin_left;
+        const float margin_top    = v.last_margin_top;
+        const float margin_right  = v.last_margin_right;
+        const float margin_bottom = v.last_margin_bottom;
         const float plot_w = std::max(64.0f, plot_avail.x - margin_left - margin_right);
         const float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
         draw_colorbar(ImGui::GetWindowDrawList(),

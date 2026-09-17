@@ -19,6 +19,12 @@ void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
     bottom = 46.0f * k;
 }
 
+void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
+                         float& left, float& top, float& right, float& bottom) {
+    plot_2d_margins(left, top, right, bottom);
+    left = plot_y_axis_margin(y, y_name);
+}
+
 // Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
 // пока поле активно, ImGui читает свою внутреннюю копию текста и правки внешнего буфера
 // игнорирует — граница бы «включалась» только после ухода фокуса, а data->Buf это как раз
@@ -301,7 +307,12 @@ void Plot2DView::render(PlotRenderer& renderer,
     // margin_left/bottom увеличены, чтобы вместить тики + центрированное
     // название оси (X — под тиками, Y — повернутое вертикально слева).
     float margin_left, margin_top, margin_right, margin_bottom;
-    plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+    plot_2d_margins_for(y_axis, y_axis.name.empty() ? "y" : y_axis.name.c_str(),
+                        margin_left, margin_top, margin_right, margin_bottom);
+    last_margin_left   = margin_left;
+    last_margin_top    = margin_top;
+    last_margin_right  = margin_right;
+    last_margin_bottom = margin_bottom;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));

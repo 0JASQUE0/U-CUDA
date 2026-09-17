@@ -15,6 +15,12 @@
 // свою копию этих чисел, и она молча разъезжалась при правке лэйаута.
 void plot_2d_margins(float& left, float& top, float& right, float& bottom);
 
+// То же, но левый отступ — под фактические подписи оси Y (plot_y_axis_margin).
+// Именно эту версию зовёт render; вариант выше остался для вызывающих, у
+// которых оси под рукой нет, и отдаёт прежний отступ «под худший случай».
+void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
+                         float& left, float& top, float& right, float& bottom);
+
 struct PlotSeriesInput {
     const float* points = nullptr;
     int          n_points = 0;
@@ -54,6 +60,16 @@ class Plot2DView {
 public:
     AxisInfo x_axis;
     AxisInfo y_axis;
+
+    // Марджины, которыми пользовался последний render(). Левый зависит от
+    // длины подписей, поэтому наружу отдаётся именно использованное значение:
+    // colorbar в FastSync стоит рядом с плотом и обязан знать, где тот
+    // кончился ИМЕННО в этом кадре.
+    float last_margin_left   = 78.0f;
+    float last_margin_top    = 20.0f;
+    float last_margin_right  = 20.0f;
+    float last_margin_bottom = 46.0f;
+
     bool show_legend = true;
     // If true, force the legend marker's alpha to 1.0 regardless of the
     // per-series color.w — used by Phase / TimeDomain, where the "Alpha"
