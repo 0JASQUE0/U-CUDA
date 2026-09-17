@@ -674,42 +674,55 @@ void Plot2DView::render(PlotRenderer& renderer,
         // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
         // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
         // непрерывной (мы за пределами сетки движка).
-        bool x_on_node = false;
-        double node_step = 0.0;
-        if (snap_x_to_grid && snap_x_n > 1) {
-            double lo = std::min(snap_x_min, snap_x_max);
-            double hi = std::max(snap_x_min, snap_x_max);
-            int ix; double sx;
-            if (NearestNode1D(dx, lo, hi, snap_x_n, x_axis.log_scale, ix, sx)) {
-                dx = sx;
-                x_on_node = true;
-                node_step = (hi - lo) / (double)(snap_x_n - 1);
-            }
-        }
-
-        // Y привязываем к ФАКТИЧЕСКОЙ точке массива в столбце под курсором:
-        // подпись должна называть посчитанное значение, а не координату
-        // пикселя между точками. Только когда X сел на узел — у фазового
-        // портрета столбцов нет, там Y остаётся непрерывным.
+        // Привязка к ФАКТИЧЕСКИМ значениям массива, а не к сетке, воссозданной
+        // из конфига. Восстановление требует знать разом: диапазон (у
+        // классического свипа он в текстовых полях, у continuation — в
+        // снапшоте результата), флаг лога и конвенцию reverse/continuation —
+        // и ошибка в любом из них давала узлы, которых в данных нет. Точки же
+        // построены правильной формулой по определению.
+        //
+        // snap_x_to_grid здесь работает признаком «X — ось свипа»: у фазового
+        // портрета столбцов нет, там ближайший по X смысла не имеет.
         const std::string* hit_label = nullptr;
-        bool y_on_data = false;
-        if (x_on_node && node_step > 0.0) {
-            const double x_tol = node_step * 0.5;
-            double best_d = 0.0;
+        bool x_on_node = false, y_on_data = false;
+        const double span_s = sx1 - sx0;
+        size_t total_pts = 0;
+        for (const auto& s : series_in) total_pts += (size_t)std::max(0, s.n_points);
+        // Верхняя граница на всякий случай: два прохода по серии на кадр
+        // наведения дёшевы для Bif/LLE/LS, но не для многомиллионных наборов.
+        if (snap_x_to_grid && span_s != 0.0 && total_pts > 0 && total_pts <= 4000000) {
+            const double cursor_px = (double)(io.MousePos.x - img_pos.x);
+            auto to_px = [&](double w) {
+                return (XS(w) - sx0) / span_s * (double)plot_w;
+            };
+            // Ближайший X — в ЭКРАННОЙ метрике: на лог-оси «ближайший» должен
+            // означать ближайший глазу, а не по разности значений.
+            double best_px = 0.0;
             for (size_t si = 0; si < series_in.size(); ++si) {
                 if (si < visible.size() && !visible[si]) continue;
                 const PlotSeriesInput& s = series_in[si];
                 if (!s.points || s.n_points <= 0) continue;
-                // Цена — один проход по серии на кадр наведения. Для Bif/LLE/LS
-                // это десятки тысяч точек; на портретах (миллионы) снап X
-                // выключен, и сюда не заходим.
                 for (int i = 0; i < s.n_points; ++i) {
-                    const double px_ = s.points[(size_t)i * 2 + 0];
-                    if (std::abs(px_ - dx) > x_tol) continue;
-                    const double py_ = s.points[(size_t)i * 2 + 1];
-                    const double d = std::abs(py_ - dy);
-                    if (!y_on_data || d < best_d) {
-                        best_d = d; dy = py_; y_on_data = true; hit_label = &s.label;
+                    const double xv = s.points[(size_t)i * 2 + 0];
+                    const double d = std::abs(to_px(xv) - cursor_px);
+                    if (!x_on_node || d < best_px) { best_px = d; dx = xv; x_on_node = true; }
+                }
+            }
+            // Ближайшая точка В ЭТОМ столбце: сравнение точное — значения те же
+            // самые double, что были прочитаны на первом проходе.
+            if (x_on_node) {
+                double best_dy = 0.0;
+                for (size_t si = 0; si < series_in.size(); ++si) {
+                    if (si < visible.size() && !visible[si]) continue;
+                    const PlotSeriesInput& s = series_in[si];
+                    if (!s.points || s.n_points <= 0) continue;
+                    for (int i = 0; i < s.n_points; ++i) {
+                        if (s.points[(size_t)i * 2 + 0] != dx) continue;
+                        const double yv = s.points[(size_t)i * 2 + 1];
+                        const double d = std::abs(yv - dy);
+                        if (!y_on_data || d < best_dy) {
+                            best_dy = d; dy = yv; y_on_data = true; hit_label = &s.label;
+                        }
                     }
                 }
             }

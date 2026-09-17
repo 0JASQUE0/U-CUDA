@@ -100,6 +100,29 @@ inline bool NearestNode1D(double cursor_x, double x_min, double x_max, int n,
     return true;
 }
 
+// Половина расстояния до ближайшего соседнего узла — в той шкале, в какой
+// сетка реально разложена. Нужна как допуск «эта точка данных принадлежит
+// узлу idx»: линейный (hi-lo)/(n-1) на лог-свипе врёт в обе стороны — у
+// густого края он в десятки раз больше настоящего зазора (в допуск попадают
+// чужие узлы), у редкого меньше (не попадает ни один).
+inline double NodeHalfGap(double x_min, double x_max, int n, int idx, bool log_scale) {
+    if (n < 2) return 0.0;
+    const bool use_log = log_scale && x_min > 0.0 && x_max > 0.0;
+    auto val = [&](int k) -> double {
+        k = std::clamp(k, 0, n - 1);
+        return use_log ? (double)ucuda_node_value_log(k, n, (numb)x_min, (numb)x_max)
+                       : (double)ucuda_node_value(k, n, (numb)x_min, (numb)x_max);
+    };
+    const double v = val(idx);
+    double gap = 0.0;
+    if (idx > 0)     gap = std::abs(v - val(idx - 1));
+    if (idx < n - 1) {
+        const double g2 = std::abs(val(idx + 1) - v);
+        gap = (gap > 0.0) ? std::min(gap, g2) : g2;
+    }
+    return gap * 0.5;
+}
+
 // 1D-вариант — только X. Y-координата вызывающий трактует как непрерывную.
 // Тоже floor по пиксельной разбивке, отображаем позицию узла.
 // log_scale: узлы сетки движка распределены по getValueByIdx_log (лог-

@@ -342,6 +342,17 @@ static void refresh_auto_labels(AppModel& model) {
     return parse_num_int(v, def);
 }
 
+// Распарсилось ли поле вообще. parse_num молча отдаёт default, и вызывающий не
+// отличает «поле пустое» от «в поле ноль»; пробуем два разных дефолта —
+// совпали, значит число прочиталось.
+[[nodiscard]] static inline bool parse_num_ok(const std::string& v, double& out) {
+    const double a = parse_ratio_or(v, 0.0);
+    const double b = parse_ratio_or(v, 1.0);
+    if (a != b) return false;
+    out = a;
+    return true;
+}
+
 // ctx_menu — контекстное меню поля (ПКМ). Вызывается СРАЗУ после InputText:
 // ниже может встать предупреждение о невалидном числе, и BeginPopupContextItem
 // внутри колбэка привязался бы к нему, а не к самому полю.
@@ -1776,7 +1787,9 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
 // n < 2 отключает snap (readout остаётся непрерывным).
 static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
     view.snap_x_to_grid = true;
-    if (n > 1) {
+    // Вырожденный диапазон — это не сетка: снап по нему сажал бы курсор на
+    // узлы, которых в данных нет. Проверка здесь, в единственной точке входа.
+    if (n > 1 && hi != lo) {
         view.snap_x_min = lo;
         view.snap_x_max = hi;
         view.snap_x_n   = n;
@@ -1919,12 +1932,20 @@ static void apply_snap_x_from_config(Plot2DView& view,
                                      const std::string& lo_text,
                                      const std::string& hi_text,
                                      const std::string& n_text) {
-    if (have_result && res_n > 1) {
+    if (have_result && res_n > 1 && res_hi != res_lo) {
         apply_snap_x(view, res_lo, res_hi, res_n);
         return;
     }
+    // Без прогона сетку берём из полей конфига — но ТОЛЬКО если они реально
+    // прочитались. Раньше здесь стояли дефолты parse_ratio_or(lo, 0.0) и
+    // (hi, 1.0): на непрочитанных полях снап включался с чужой сеткой [0, 1],
+    // и курсор садился на её узлы (k/(n-1)) вместо значений свипа.
     const int n = parse_int_or(n_text, 0);
-    apply_snap_x(view, parse_ratio_or(lo_text, 0.0), parse_ratio_or(hi_text, 1.0), n);
+    double lo = 0.0, hi = 0.0;
+    if (n > 1 && parse_num_ok(lo_text, lo) && parse_num_ok(hi_text, hi) && lo != hi)
+        apply_snap_x(view, lo, hi, n);
+    else
+        apply_snap_x(view, 0.0, 1.0, 0);   // n = 0 -> снап выключен
 }
 
 // Тот же snap, но по ПЕРВОМУ члену окна. Раньше — три идентичных хвоста
@@ -1936,12 +1957,20 @@ static void apply_snap_x_from_first_member(Plot2DView& view,
     view.snap_x_to_grid = true;
     view.snap_x_n       = 0;
     if (members.empty()) return;
-    const int aidx = members[0];
-    if (aidx < 0 || aidx >= (int)cfgs.size()) return;
-    const Cfg& c = cfgs[(size_t)aidx];
-    apply_snap_x_from_config(view, c.last_run_ok,
-                             c.result.param_lo, c.result.param_hi, c.result.n_pts,
-                             c.param_lo_text, c.param_hi_text, c.n_pts_text);
+    // Первый член С РЕЗУЛЬТАТОМ, а не просто первый: сетку задаёт то, что
+    // реально нарисовано, а members[0] может быть ещё не посчитан — тогда
+    // снап уходил на поля конфига и дальше на их дефолты.
+    const Cfg* pick = nullptr;
+    for (int aidx : members) {
+        if (aidx < 0 || aidx >= (int)cfgs.size()) continue;
+        const Cfg& c = cfgs[(size_t)aidx];
+        if (!pick) pick = &c;
+        if (c.last_run_ok && c.result.n_pts > 1) { pick = &c; break; }
+    }
+    if (!pick) return;
+    apply_snap_x_from_config(view, pick->last_run_ok,
+                             pick->result.param_lo, pick->result.param_hi, pick->result.n_pts,
+                             pick->param_lo_text, pick->param_hi_text, pick->n_pts_text);
 }
 
 // Right-click «Export data...» подменю: перечисляет ВСЕ конфиги сессии с готовым
@@ -5104,6 +5133,11 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     bool any_fit = false;
     int  data_gen = 0;
 
+    // Сетка снапа фокусной (первой посчитанной) диаграммы окна — заполняется
+    // в цикле ниже теми же lo/hi/npts, по которым строятся точки.
+    double snap_lo_focus = 0.0, snap_hi_focus = 0.0;
+    int    snap_n_focus  = 0;
+
     for (size_t mi = 0; mi < win.members.size(); ++mi) {
         int idx = win.members[mi];
         if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
@@ -5123,6 +5157,13 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                         ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
+            // Сетка снапа — ровно та, по которой строятся точки ниже. Раньше
+            // она бралась из bd.result.param_lo/hi, а классический (не
+            // continuation) прогон их не заполняет: снап уходил на дефолты
+            // структуры, [0, 1], и курсор садился на узлы чужой сетки.
+            if (snap_n_focus == 0) {
+                snap_lo_focus = lo; snap_hi_focus = hi; snap_n_focus = npts;
+            }
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
                     !regime_is_oscillation(bd.result.flags[k])) continue;
@@ -5177,8 +5218,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
-    // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_first_member).
-    apply_snap_x_from_first_member(view, win.members, s.diagrams);
+    // Snap X к узлам фокусной БД — по той же сетке, что и её точки (см. выше).
+    apply_snap_x(view, snap_lo_focus, snap_hi_focus, snap_n_focus);
 
     // Маркер/размер точек — свойства вида (одни на окно): берём у фокусного
     // члена, тулбар выше держит остальных членов синхронно.
