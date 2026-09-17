@@ -276,7 +276,8 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	const bool Par_or_Var, const int hSweepAxis,
 	const numb transientTime, const numb tMax, const int logAxisMask,
 	const size_t peakStride, const int peakCapacity,
-	const volatile int* cancelFlag, int* progressCounter, const int progressStride);
+	const volatile int* cancelFlag, int* progressCounter, const int progressStride,
+	const bool emitAllSamples);   // true = every iterate, not just the peaks
 
 // Ядро: траектории ансамбля при свипе по шагу интегрирования.
 // transientTime здесь в единицах времени, а не в шагах.
