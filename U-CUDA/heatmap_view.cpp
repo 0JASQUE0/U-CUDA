@@ -142,22 +142,22 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
     for (const auto& t : ticks) {
         if (range <= 0.0) {
             // Вырожденный vmin == vmax: всё равно печатаем одну подпись по центру.
-            const float y = px_line(cb_y + cb_h * 0.5f);
+            const float y = axis_px(cb_y + cb_h * 0.5f, cb_y, cb_h);
             plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
-                                 y - font_h * 0.5f),
+                                 px_center(y) - font_h * 0.5f),
                       col_text, fmt_tick(t.label).c_str());
             continue;
         }
         float frac = t.frac;
         if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
         frac = std::min(std::max(frac, 0.0f), 1.0f);
-        const float y = px_line(cb_y + cb_h * (1.0f - frac));
-        dl->AddLine(ImVec2(cb_x + kColorbarWidth, y),
-                    ImVec2(cb_x + kColorbarWidth + kColorbarTickLen, y), col_text);
+        const float y = axis_px(cb_y + cb_h * (1.0f - frac), cb_y, cb_h);
+        fill_row_px(dl, y, cb_x + kColorbarWidth,
+                    cb_x + kColorbarWidth + kColorbarTickLen, col_text);
         if (std::abs(y - last_label_y) < label_gap_min) continue;
         last_label_y = y;
         plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
-                             y - font_h * 0.5f),
+                             px_center(y) - font_h * 0.5f),
                   col_text, fmt_tick(t.label).c_str());
     }
 }
@@ -821,12 +821,12 @@ void HeatmapView::render(PlotRenderer& renderer,
             : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
                             : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true));
         for (double xv : ticks) {
-            float px = px_line(img_pos.x + (float)((xv - emin) / vrx) * plot_w);
-            dl->AddLine(ImVec2(px, img_pos.y + plot_h),
-                        ImVec2(px, img_pos.y + plot_h + 5.0f), col_axis, 1.0f);
+            float px = axis_px(img_pos.x + (float)((xv - emin) / vrx) * plot_w,
+                               img_pos.x, (float)plot_w);
+            fill_col_px(dl, px, img_pos.y + plot_h, img_pos.y + plot_h + 5.0f, col_axis);
             std::string lbl = fmt_tick(xv);
             ImVec2 ts = plot_text_size(lbl.c_str());
-            plot_text(dl, ImVec2(px - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
+            plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
                       col_text, lbl.c_str());
         }
     };
@@ -846,13 +846,13 @@ void HeatmapView::render(PlotRenderer& renderer,
             : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
                             : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false));
         for (double yv : ticks) {
-            float py = px_line(img_pos.y + (float)((emax - yv) / vry) * plot_h);
-            dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
-                        ImVec2(img_pos.x,         py), col_axis, 1.0f);
+            float py = axis_px(img_pos.y + (float)((emax - yv) / vry) * plot_h,
+                               img_pos.y, (float)plot_h);
+            fill_row_px(dl, py, img_pos.x - 5.0f, img_pos.x, col_axis);
             std::string lbl = fmt_tick(yv);
             ImVec2 ts = plot_text_size(lbl.c_str());
             y_tick_w_max = std::max(y_tick_w_max, ts.x);
-            plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, py - ts.y * 0.5f),
+            plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, px_center(py) - ts.y * 0.5f),
                       col_text, lbl.c_str());
         }
     };
