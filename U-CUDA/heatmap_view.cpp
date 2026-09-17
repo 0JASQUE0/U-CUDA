@@ -133,6 +133,12 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
                 plot_col_border());
 
     const double range = (double)vmax - (double)vmin;
+    // Подписи прореживаем по фактическому месту: шаг тиков шкала берёт от
+    // диапазона значений, а не от своей высоты, и на низком блоке (или при
+    // десятках дискретных полос) подписи наезжали друг на друга. Штрихи
+    // рисуются все — прячется только текст.
+    const float label_gap_min = font_h * 1.4f;
+    float last_label_y = -1e30f;
     for (const auto& t : ticks) {
         if (range <= 0.0) {
             // Вырожденный vmin == vmax: всё равно печатаем одну подпись по центру.
@@ -148,6 +154,8 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
         const float y = cb_y + cb_h * (1.0f - frac);
         dl->AddLine(ImVec2(cb_x + kColorbarWidth, y),
                     ImVec2(cb_x + kColorbarWidth + kColorbarTickLen, y), col_text);
+        if (std::abs(y - last_label_y) < label_gap_min) continue;
+        last_label_y = y;
         plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
                              y - font_h * 0.5f),
                   col_text, fmt_tick(t.label).c_str());
@@ -723,13 +731,20 @@ void HeatmapView::render(PlotRenderer& renderer,
     // выборе mult, не делящего N-1).
     auto compute_axis_ticks = [](double lo, double hi, int target_count,
                             double step_node, double node_origin, int n_nodes,
-                            double force_lo, double force_hi)
+                            double force_lo, double force_hi,
+                            float span_px, bool horizontal)
                         -> std::vector<double>
     {
         std::vector<double> out;
         double vr = hi - lo;
         if (std::abs(vr) < 1e-30) return out;
         double sx = nice_step(std::abs(vr), target_count);
+        // Шаг раздвигается, пока подписи не перестанут наезжать друг на друга,
+        // а к узлам сетки притягивается только пока они различимы на экране —
+        // см. fit_tick_step_* / node_snap_visible в plot_axis.h.
+        sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
+                        : fit_tick_step_y(sx, std::abs(vr), span_px);
+        if (!node_snap_visible(step_node, std::abs(vr), span_px)) step_node = 0.0;
         double xstart;
         if (step_node > 0.0 && n_nodes > 1) {
             int mult = (int)std::lround(sx / step_node);
@@ -800,8 +815,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         // только границы текущего view.
         std::vector<double> ticks = vis_log_x
             ? std::vector<double>{ lo, hi }
-            : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x)
-                            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x));
+            : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
+                            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true));
         for (double xv : ticks) {
             float px = img_pos.x + (float)((xv - emin) / vrx) * plot_w;
             dl->AddLine(ImVec2(px, img_pos.y + plot_h),
@@ -825,8 +840,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         // См. draw_x_ticks выше.
         std::vector<double> ticks = vis_log_y
             ? std::vector<double>{ lo, hi }
-            : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
-                            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y));
+            : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
+                            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false));
         for (double yv : ticks) {
             float py = img_pos.y + (float)((emax - yv) / vry) * plot_h;
             dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
@@ -944,8 +959,8 @@ void HeatmapView::render(PlotRenderer& renderer,
             double lo = std::min(vis_view_min_y, vis_view_max_y);
             double hi = std::max(vis_view_min_y, vis_view_max_y);
             auto ticks = y_full_view
-                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
-                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y);
+                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
+                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false);
             for (double yv : ticks) {
                 std::string tl = fmt_tick(yv);
                 float w = plot_text_size(tl.c_str()).x;

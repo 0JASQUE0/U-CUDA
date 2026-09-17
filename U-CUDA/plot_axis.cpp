@@ -21,6 +21,22 @@ double nice_step(double range, int target_count) {
     return step * mag;
 }
 
+double nice_step_up(double step) {
+    if (!(step > 0.0)) return step;
+    const double mag  = std::pow(10.0, std::floor(std::log10(step) + 1e-9));
+    const double norm = step / mag;
+    if (norm < 1.5) return 2.0  * mag;
+    if (norm < 3.5) return 5.0  * mag;
+    return 10.0 * mag;
+}
+
+bool node_snap_visible(double step_node, double range, float span_px) {
+    if (!(step_node > 0.0) || !(range > 0.0) || span_px <= 1.0f) return false;
+    // 4 px — порог различимости узла. Ниже него притяжение к сетке двигает тик
+    // меньше чем на толщину линии, а подпись портит целиком.
+    return (double)span_px * step_node / range >= 4.0;
+}
+
 // Глобальное значение для fmt_tick. Менеджится set_tick_precision() (зовётся
 // из app_main при загрузке config и из Settings UI при изменении слайдера).
 static int g_tick_precision = 4;
@@ -573,6 +589,37 @@ std::string fmt_tick(double v) {
     return buf;
 }
 
+double fit_tick_step_x(double step, double lo, double hi, float plot_w) {
+    const double range = hi - lo;
+    if (!(step > 0.0) || !(range > 0.0) || plot_w <= 1.0f) return step;
+    for (int guard = 0; guard < 12; ++guard) {
+        const double v0 = std::ceil(lo / step) * step;
+        const int n = (int)std::floor((hi - v0) / step + 1e-9) + 1;
+        if (n <= 1) return step;   // одна подпись ни на что не наезжает
+        float w = 0.0f;
+        for (int i = 0; i < n && i < 40; ++i)
+            w = std::max(w, plot_text_size(fmt_tick(v0 + i * step).c_str()).x);
+        if ((double)plot_w * step / range >= (double)w + 8.0) return step;
+        const double up = nice_step_up(step);
+        if (!(up > step)) return step;
+        step = up;
+    }
+    return step;
+}
+
+double fit_tick_step_y(double step, double range, float plot_h) {
+    if (!(step > 0.0) || !(range > 0.0) || plot_h <= 1.0f) return step;
+    // Подписи по Y однострочные — меряем высотой строки с запасом в 60%.
+    const double need = (double)plot_text_line_height() * 1.6;
+    for (int guard = 0; guard < 12; ++guard) {
+        if ((double)plot_h * step / range >= need) return step;
+        const double up = nice_step_up(step);
+        if (!(up > step)) return step;
+        step = up;
+    }
+    return step;
+}
+
 void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float out[16]) {
     double dx = xmax - xmin; if (std::abs(dx) < 1e-30) dx = 1.0;
     double dy = ymax - ymin; if (std::abs(dy) < 1e-30) dy = 1.0;
@@ -621,12 +668,18 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     }
 
     double sx = nice_step(std::abs(vrx), 8);
+    sx = fit_tick_step_x(sx, lo, hi, plot_w);
     // Snap-to-node: округляем шаг тиков к целому кратному step_node и стартовую
     // позицию тоже кратно этому шагу. Каждый тик тогда — узел параметрической
     // сетки (snap_lo + k*step_node), без "промежуточных" значений.
+    //
+    // Только пока узлы различимы на экране (node_snap_visible). На плотной
+    // сетке шаг тика наследовал иррациональный шаг узлов: свип 4..20 из 500
+    // точек давал подписи 4, 5.99, 7.98, ..., 19.9 вместо 4, 6, ..., 20.
     double xstart;
     double step_node = (snap_n > 1 && snap_hi > snap_lo)
                        ? (snap_hi - snap_lo) / (double)(snap_n - 1) : 0.0;
+    if (!node_snap_visible(step_node, std::abs(vrx), plot_w)) step_node = 0.0;
     if (step_node > 0.0) {
         int mult = (int)std::lround(sx / step_node);
         if (mult < 1) mult = 1;
@@ -714,6 +767,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     }
 
     double sy = nice_step(std::abs(vry), 6);
+    sy = fit_tick_step_y(sy, std::abs(vry), plot_h);
     double ystart = std::ceil(lo / sy) * sy;
     // См. комментарий в draw_axis_x_grid про формулу и +1e-9 эпсилон.
     int ny = (int)std::floor((hi - ystart) / sy + 1e-9) + 1;
