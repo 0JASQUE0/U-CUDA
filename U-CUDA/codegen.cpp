@@ -1884,6 +1884,203 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     return o.str();
 }
 
+// --- Композиция -------------------------------------------------------------
+
+static const char* const kCompPrefix = "Comp(";
+
+std::string make_composition_name(const std::string& base,
+                                  const std::vector<std::string>& gammas) {
+    std::string s = kCompPrefix + base + "|";
+    for (size_t k = 0; k < gammas.size(); ++k) {
+        if (k) s += ",";
+        s += gammas[k];
+    }
+    return s + ")";
+}
+
+namespace {
+
+    std::string comp_trim(const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && std::isspace((unsigned char)s[a])) ++a;
+        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+
+    // Режем только по запятым ВЕРХНЕГО уровня: коэффициент — выражение, и
+    // запятая внутри pow(g,2) не должна заканчивать токен.
+    bool comp_split(const std::string& tail, std::vector<std::string>& out) {
+        int depth = 0;
+        std::string cur;
+        for (char c : tail) {
+            if (c == '(') ++depth;
+            else if (c == ')' && --depth < 0) return false;
+            if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
+            cur += c;
+        }
+        if (depth != 0) return false;
+        out.push_back(cur);
+        return true;
+    }
+
+    // Сворачивает коэффициент в число. false на любом символе — тогда значение
+    // известно только в рантайме, и звать нас незачем.
+    bool comp_fold(const PN& n, double* v) {
+        if (!n) return false;
+        double a = 0, b = 0;
+        switch (n->kind) {
+        case Node::Num: *v = n->num; return true;
+        case Node::Neg: if (!comp_fold(n->a, &a)) return false; *v = -a; return true;
+        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
+            if (!comp_fold(n->a, &a) || !comp_fold(n->b, &b)) return false;
+            switch (n->kind) {
+            case Node::Add: *v = a + b; break;
+            case Node::Sub: *v = a - b; break;
+            case Node::Mul: *v = a * b; break;
+            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
+            default:        *v = std::pow(a, b); break;
+            }
+            return true;
+        default: return false;   // Sym / Call
+        }
+    }
+
+} // namespace
+
+bool parse_composition_name(const std::string& name, CompositionSpec* out,
+                            std::string* err) {
+    auto fail = [&](const char* msg) { if (err) *err = msg; return false; };
+
+    const std::string pref = kCompPrefix;
+    if (name.size() <= pref.size() || name.compare(0, pref.size(), pref) != 0)
+        return fail("not a composed scheme name");
+    if (name.back() != ')')
+        return fail("missing closing ')'");
+
+    const std::string inner = name.substr(pref.size(), name.size() - pref.size() - 1);
+    // rfind, как у Extr: имя базы по правилам валидации '|' не содержит, но из
+    // старого JSON могло приехать что угодно — резать надо по последней черте.
+    const size_t bar = inner.rfind('|');
+    if (bar == std::string::npos) return fail("missing '|' between base and coefficients");
+
+    CompositionSpec spec;
+    spec.base = comp_trim(inner.substr(0, bar));
+    if (spec.base.empty()) return fail("empty base scheme name");
+    // Обёртка над обёрткой отрезает рекурсию в резолвере, как и у Extr.
+    if (spec.base.compare(0, pref.size(), pref) == 0 ||
+        spec.base.compare(0, 5, "Extr(") == 0)
+        return fail("base scheme cannot itself be a wrapper");
+
+    std::vector<std::string> toks;
+    if (!comp_split(inner.substr(bar + 1), toks)) return fail("unbalanced parentheses");
+
+    for (const std::string& t : toks) {
+        const std::string g = comp_trim(t);
+        if (g.empty()) return fail("empty coefficient");
+        // Синтаксис проверяем здесь, чтобы кривое имя не доехало до Run: имена
+        // резолвятся позже, в wrap_composition, где уже известна система.
+        try { Parser(g, false).parse(); }
+        catch (const std::exception& e) {
+            if (err) *err = "coefficient \"" + g + "\": " + e.what();
+            return false;
+        }
+        spec.gammas.push_back(g);
+    }
+
+    const int K = (int)spec.gammas.size();
+    if (K < kCompMinStages) return fail("at least 2 stages are needed");
+    if (K > kCompMaxStages) return fail("at most 9 stages are supported");
+
+    if (out) *out = spec;
+    return true;
+}
+
+bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum) {
+    double s = 0.0, c = 0.0;
+    for (const std::string& g : spec.gammas) {
+        double v = 0.0;
+        PN ast;
+        try { ast = Parser(g, false).parse(); } catch (...) { return false; }
+        if (!comp_fold(ast, &v)) return false;
+        s += v;
+        c += v * v * v;
+    }
+    if (sum)      *sum = s;
+    if (cube_sum) *cube_sum = c;
+    return true;
+}
+
+std::string wrap_composition(const std::string& base_body, const System& sys,
+                             const std::vector<std::string>& gammas,
+                             int p, bool symmetric, const std::string& base_name) {
+    const int K = (int)gammas.size();
+    if (K < 1) throw std::runtime_error("composition needs at least one stage");
+    if (base_body.empty()) throw std::runtime_error("composition needs a base body");
+
+    // Коэффициенты видят ТОЛЬКО параметры и константы: переменная состояния
+    // здесь означала бы шаг, зависящий от X посреди шага.
+    NameMap nm;
+    for (size_t j = 0; j < sys.params.size(); ++j)
+        nm.m[sys.params[j]] = "a[" + std::to_string(1 + (int)j) + "]";
+    for (const auto& c : math_constants()) nm.m[c] = c;
+
+    std::vector<std::string> gc((size_t)K);
+    for (int k = 0; k < K; ++k) {
+        try { gc[(size_t)k] = emit_to_str(Parser(gammas[(size_t)k], false).parse(), nm); }
+        catch (const std::exception& e) {
+            throw std::runtime_error("composition coefficient \"" + gammas[(size_t)k]
+                                     + "\": " + e.what()
+                                     + " (only system parameters and pi are allowed)");
+        }
+    }
+
+    std::ostringstream o;
+    o << "    // --- " << make_composition_name(base_name, gammas) << " ---\n";
+    o << "    // base: order " << p << ", " << (symmetric ? "symmetric" : "non-symmetric")
+      << "; " << K << " stages, " << K << " base steps per macro-step\n";
+
+    CompositionSpec probe;
+    probe.gammas = gammas;
+    double gsum = 0.0, gcube = 0.0;
+    if (!composition_sums(probe, &gsum, &gcube)) {
+        o << "    // coefficients are symbolic -- the order follows their run-time\n"
+             "    // values; sweep them in the Order tab to see it\n";
+    } else {
+        o << "    // sum(gamma) = " << fmtnum(gsum)
+          << (std::fabs(gsum - 1.0) < 1e-12
+                  ? "  (consistent)\n"
+                  : "  -- NOT 1: this integrates the field scaled by that factor\n");
+        o << "    // sum(gamma^3) = " << fmtnum(gcube);
+        if (symmetric && std::fabs(gcube) < 1e-12) o << "  ->  expected order " << (p + 2) << "\n";
+        else if (symmetric)                        o << "  -- not 0, order stays " << p << "\n";
+        else                                       o << "  (base is not symmetric: order not implied)\n";
+    }
+    for (int k = 0; k < K; ++k)
+        o << "    //   gamma[" << k << "] = " << gammas[(size_t)k]
+          << (gc[(size_t)k] == gammas[(size_t)k] ? "" : "  ->  " + gc[(size_t)k]) << "\n";
+
+    // Та же лямбда, что у wrap_extrapolation, и ровно по той же причине:
+    // параметр h затеняет макрошаг, поэтому база не правится ни в одном символе.
+    o << "    auto step_co = [&](const numb h) {\n";
+    {
+        size_t pos = 0;
+        while (pos < base_body.size()) {
+            size_t eol = base_body.find('\n', pos);
+            if (eol == std::string::npos) eol = base_body.size();
+            const std::string line = base_body.substr(pos, eol - pos);
+            if (!line.empty()) o << "    " << line;
+            o << "\n";
+            pos = eol + 1;
+        }
+    }
+    o << "    };\n\n";
+
+    for (int k = 0; k < K; ++k)
+        o << "    step_co(h * (" << gc[(size_t)k] << "));\n";
+
+    return o.str();
+}
+
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     // Одна форма на оба пути. CPU-интегратор считает тот же AST через
     // байткод-интерпретатор, а диагонально-неявные схемы (CD, Complex CD, SIMP,

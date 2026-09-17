@@ -161,6 +161,60 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
                                const std::vector<int>& n, int p, bool symmetric,
                                const std::string& base_name);
 
+// --- Composition of a base scheme with itself -------------------------------
+//
+// The wrapper lives in the name: "Comp(<base>|g1,g2,...,gK)". Stages run
+// SEQUENTIALLY, each from the previous result, with step gk*h. That is the one
+// structural difference from Extr, where K independent runs start from the same
+// state and are then summed with weights -- so this wrapper needs neither the
+// saved state nor the accumulator.
+//
+// A coefficient is any expression over the system PARAMETERS and math
+// constants: "1.3512", "g1", "1 - 2*g1". Names resolve to a[k] through the same
+// NameMap the right-hand sides use, so a coefficient declared as a parameter is
+// swept by the Order tab -- that is what makes a p(g1, g2) map possible without
+// a hand-written KRS. State variables are rejected: the step size may not
+// depend on X.
+//
+// The order is deliberately NOT computed here. Over a symmetric base of order p
+// a palindromic composition reaches p+2 exactly when Sum(g) = 1 and
+// Sum(g^3) = 0, but codegen can only check that for constant coefficients
+// (composition_sums); a symbolic one is known at run time only, and measuring
+// it is the Order tab's job.
+constexpr int kCompMinStages = 2;
+constexpr int kCompMaxStages = 9;
+
+struct CompositionSpec {
+    std::string              base;    // base scheme name (built-in or custom KRS)
+    std::vector<std::string> gammas;  // step coefficient per stage
+};
+
+// Builds the wrapper name. Inverse of parse_composition_name.
+std::string make_composition_name(const std::string& base,
+                                  const std::vector<std::string>& gammas);
+
+// Parses "Comp(CD|g1,1-2*g1,g1)". false when the name is not a composition OR
+// the limits are broken (stage count, empty or unparsable coefficient); err, if
+// given, receives the reason. Nesting is refused: the base cannot itself be a
+// wrapper. The coefficient SUM is not checked -- sweeping g moves it off 1 on
+// purpose, and rejecting that would rule out the p(g1, g2) map.
+bool parse_composition_name(const std::string& name, CompositionSpec* out,
+                            std::string* err = nullptr);
+
+// Sum(g) and Sum(g^3) -- the two order conditions of a palindromic composition
+// over a symmetric base. false when any coefficient is symbolic, in which case
+// neither sum is knowable at codegen time and the outputs are left alone.
+bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum);
+
+// Wraps a READY step body in K sequential stages. The body is inserted verbatim
+// and exactly once, inside a lambda whose parameter is named h -- same trick as
+// wrap_extrapolation, and the same reason it works on an opaque custom KRS.
+// sys is needed to resolve coefficient names into a[k]; p/symmetric only feed
+// the header comment. Throws std::runtime_error on an unresolvable coefficient.
+std::string wrap_composition(const std::string& base_body, const System& sys,
+                             const std::vector<std::string>& gammas,
+                             int p, bool symmetric, const std::string& base_name);
+
 // Нормализует числовое значение/выражение параметра для подстановки в C-код:
 //   "8/3"   -> "8.0/3.0"   (вещественное деление, без потери точности)
 //   "1e-5"  -> "1e-05"

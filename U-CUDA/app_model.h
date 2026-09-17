@@ -276,10 +276,12 @@ public:
     // вместе с built-in). Имя не должно совпадать с built-in.
     std::vector<CustomScheme> custom_schemes;
 
-    // Собранные экстраполяционные обёртки — только имена "Extr(<база>|n...)".
-    // Встают в то же комбо третьей группой. Тело не хранится: резолвер
-    // пересобирает его из имени, поэтому правка системы их не протухает.
-    std::vector<std::string> extr_schemes;
+    // Wrapper schemes the user has assembled -- names only, and BOTH kinds:
+    // "Extr(<base>|n...)" and "Comp(<base>|g...)". One list, because the
+    // resolver dispatches on the name prefix; that is what lets a second
+    // combinator cost no new plumbing. The body is not stored -- it is rebuilt
+    // from the name, so editing the system never leaves a stale wrapper.
+    std::vector<std::string> wrapper_schemes;
 
     // Состояние конструктора обёрток в System tab. Живёт здесь, а не в
     // рисующей функции: ImGui перерисовывает панель каждый кадр, локальные
@@ -290,6 +292,15 @@ public:
     // Дефолт — гармоническая последовательность: при равном порядке она
     // дешевле удвоения (сумма n меньше).
     int         extr_builder_n[6] = { 1, 2, 3, 4, 5, 6 };
+
+    // Composition builder. Coefficients are TEXT, not numbers: a stage may be
+    // a parameter name or an expression over parameters ("g1", "1-2*g1"), and
+    // that is the whole point -- a coefficient that is a parameter is sweepable
+    // from the Order tab. Default is the Yoshida triple jump over a symmetric
+    // base, written symbolically so the map works out of the box.
+    std::string comp_builder_base = "CD";
+    int         comp_builder_stages = 3;
+    std::string comp_builder_g[9] = { "g1", "1-2*g1", "g1", "", "", "", "", "", "" };
 
     // порядок индексации параметров a[1..]
     ParamOrder param_order = ParamOrder::AsInAlphabet;

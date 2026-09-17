@@ -200,7 +200,8 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 [[nodiscard]] static bool scheme_needs_compiled_body(const std::string& scheme_name,
                               const std::vector<CustomScheme>& custom_schemes) {
     return is_custom_scheme(scheme_name, custom_schemes)
-        || parse_extrapolation_name(scheme_name, nullptr);
+        || parse_extrapolation_name(scheme_name, nullptr)
+        || parse_composition_name(scheme_name, nullptr);
 }
 
 // Heuristic text match: does a custom KRS body actually reference a[0]
@@ -230,6 +231,11 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     ExtrapolationSpec spec;
     if (parse_extrapolation_name(scheme_name, &spec))
         return scheme_uses_symmetry(spec.base, custom_schemes);
+    // Same for a composition: its body is the base repeated with scaled steps,
+    // so hiding s under "Comp(CD|...)" would hide a knob the inner CD reads.
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_symmetry(cspec.base, custom_schemes);
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
         || scheme_name == "Complex Implicit Euler"
         || scheme_name == "SEMP" || scheme_name == "SIMP"
@@ -750,7 +756,7 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::vector<std::string>* enabled_builtins = nullptr,
                               AppModel* bc = nullptr,
                               bool is_map = false,
-                              const std::vector<std::string>* extr_schemes = nullptr) {
+                              const std::vector<std::string>* wrapper_schemes = nullptr) {
     // Nothing to choose for a discrete map: the step is the right-hand side.
     if (is_map) {
         scheme = kMapSchemeName;
@@ -788,12 +794,13 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         for (const auto& cs : custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(), scheme == cs.name))
                 choose(cs.name);
-        // Экстраполяционные обёртки — отдельной группой: у них нет своего
-        // "паспортного" порядка в таблице, он вычисляется из базы и числа
-        // стадий, поэтому в группировку по Order выше они не встают.
-        if (extr_schemes && !extr_schemes->empty()) {
-            ImGui::SeparatorText("Extrapolated");
-            for (const auto& nm : *extr_schemes)
+        // Обёртки — отдельной группой: паспортного порядка в таблице у них
+        // нет (у Extr он считается из базы и числа стадий, у Comp вообще
+        // известен только в рантайме), поэтому в группировку по Order выше
+        // они не встают.
+        if (wrapper_schemes && !wrapper_schemes->empty()) {
+            ImGui::SeparatorText("Wrappers");
+            for (const auto& nm : *wrapper_schemes)
                 if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
         }
         ImGui::EndCombo();
@@ -2325,7 +2332,7 @@ static bool extr_base_needs_half_s(const std::string& nm) {
 static void draw_extrapolation_builder(AppModel& model) {
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Extrapolated schemes (Richardson)",
-        model.extr_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen))
+        model.wrapper_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen))
         return;
 
     ImGui::TextDisabled(
@@ -2417,7 +2424,7 @@ static void draw_extrapolation_builder(AppModel& model) {
 
     const std::string new_name = make_extrapolation_name(model.extr_builder_base, n);
     bool duplicate = false;
-    for (const auto& nm : model.extr_schemes) if (nm == new_name) duplicate = true;
+    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
 
     ImGui::Separator();
     if (!problem.empty()) {
@@ -2466,38 +2473,219 @@ static void draw_extrapolation_builder(AppModel& model) {
 
     ImGui::BeginDisabled(!problem.empty() || duplicate);
     if (ImGui::Button("+ Add extrapolated scheme"))
-        model.extr_schemes.push_back(new_name);
+        model.wrapper_schemes.push_back(new_name);
     ImGui::EndDisabled();
     if (duplicate) {
         ImGui::SameLine();
         ImGui::TextDisabled("(already in the list)");
     }
 
-    // --- уже собранные ----------------------------------------------------
-    if (!model.extr_schemes.empty()) {
-        ImGui::Separator();
-        int to_delete = -1;
-        for (int i = 0; i < (int)model.extr_schemes.size(); ++i) {
-            ImGui::PushID(i);
-            ImGui::TextUnformatted(model.extr_schemes[i].c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Delete")) to_delete = i;
-            // Отвалившаяся база (кастомную КРС переименовали или удалили) —
-            // на Run это станет пустой КРС, поэтому говорим сразу.
-            ExtrapolationSpec sp;
-            if (parse_extrapolation_name(model.extr_schemes[i], &sp)) {
-                bool ok = builtin_scheme_traits(sp.base, nullptr, nullptr);
-                if (!ok)
-                    for (const auto& cs : model.custom_schemes)
-                        if (cs.name == sp.base) { ok = true; break; }
-                if (!ok)
-                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
-                        "  base '%s' no longer exists.", sp.base.c_str());
+}
+
+// Конструктор композиций. Имя вида "Comp(CD|g1,1-2*g1,g1)"; тела, как и у Extr,
+// нигде нет — резолвер пересобирает его из имени.
+static void draw_composition_builder(AppModel& model) {
+    ImGui::Spacing();
+    if (!ImGui::CollapsingHeader("Composed schemes (triple jump / Suzuki)"))
+        return;
+
+    ImGui::TextDisabled(
+        "Runs the base scheme K times in a row, stage k with step gamma[k]*h.\n"
+        "Over a SYMMETRIC base of order p the composition reaches p+2 when\n"
+        "sum(gamma) = 1 and sum(gamma^3) = 0. Cost is K base steps per step.\n"
+        "A coefficient may be a parameter name - then the Order tab can sweep it.");
+
+    // --- база -------------------------------------------------------------
+    ImGui::SetNextItemWidth(kComboW);
+    if (ImGui::BeginCombo("base scheme##comp", model.comp_builder_base.c_str())) {
+        int shown_order = 0;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!(model.*(b.flag)) && model.comp_builder_base != b.name) continue;
+            if (b.order != shown_order) {
+                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                shown_order = b.order;
             }
-            ImGui::PopID();
+            if (ImGui::Selectable(b.name, model.comp_builder_base == b.name))
+                model.comp_builder_base = b.name;
         }
-        if (to_delete >= 0) model.extr_schemes.erase(model.extr_schemes.begin() + to_delete);
+        if (!model.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : model.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(),
+                                  model.comp_builder_base == cs.name))
+                model.comp_builder_base = cs.name;
+        ImGui::EndCombo();
     }
+
+    int  base_p = 1;
+    bool base_sym = false;
+    bool base_known = builtin_scheme_traits(model.comp_builder_base, &base_p, &base_sym);
+    if (!base_known) {
+        for (const auto& cs : model.custom_schemes) {
+            if (cs.name == model.comp_builder_base) {
+                base_p = cs.order; base_sym = cs.symmetric; base_known = true; break;
+            }
+        }
+    }
+
+    // --- стадии -----------------------------------------------------------
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputInt("stages K##comp", &model.comp_builder_stages)) {
+        if (model.comp_builder_stages < kCompMinStages) model.comp_builder_stages = kCompMinStages;
+        if (model.comp_builder_stages > kCompMaxStages) model.comp_builder_stages = kCompMaxStages;
+    }
+    const int K = model.comp_builder_stages;
+
+    ImGui::TextUnformatted("gamma:");
+    for (int k = 0; k < K; ++k) {
+        ImGui::SameLine();
+        ImGui::PushID(k);
+        InputTextStr("##g", model.comp_builder_g[k], 110.0f);
+        ImGui::PopID();
+    }
+
+    auto preset = [&](const char* label, const char* const* vals, int cnt, const char* tip) {
+        if (ImGui::SmallButton(label)) {
+            model.comp_builder_stages = cnt;
+            for (int k = 0; k < cnt; ++k) model.comp_builder_g[k] = vals[k];
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        ImGui::SameLine();
+    };
+    // Йошида: 2*g^3 + (1-2g)^3 = 0 даёт g = 1/(2 - 2^(1/3)); Судзуки: пятикратная
+    // композиция с w = 1/(4 - 4^(1/3)). Цифры выписаны, а не посчитаны на месте —
+    // это имя схемы, оно уезжает в JSON и должно быть воспроизводимым.
+    static const char* const kYoshida[] = { "1.3512071919596578", "-1.7024143839193155",
+                                            "1.3512071919596578" };
+    static const char* const kSuzuki[]  = { "0.41449077179437573", "0.41449077179437573",
+                                            "-0.6579630871775029",
+                                            "0.41449077179437573", "0.41449077179437573" };
+    static const char* const kLine[]    = { "g1", "1-2*g1", "g1" };
+    static const char* const kFree[]    = { "g1", "g2", "g1" };
+    ImGui::TextUnformatted("presets:"); ImGui::SameLine();
+    preset("Yoshida", kYoshida, 3, "Triple jump, order 4 from a symmetric order-2 base.\n"
+                                   "The middle step is NEGATIVE (-1.70 h): backward in time,\n"
+                                   "which is what a real composition pays to kill the h^3 term.");
+    preset("Suzuki",  kSuzuki,  5, "Suzuki 5-fold, also order 4 but with a much smaller\n"
+                                   "negative step (-0.66 h) - 5 base steps instead of 3.");
+    preset("sweep g1", kLine,   3, "Consistency 2*g1 + g2 = 1 built in, so a 1D sweep of g1\n"
+                                   "in the Order tab stays inside the triple-jump family.");
+    preset("sweep g1,g2", kFree, 3, "Both coefficients free: gives the p(g1, g2) map.\n"
+                                    "Declare g1 and g2 as parameters unused by the RHS.");
+    ImGui::NewLine();
+
+    // --- валидация и превью ------------------------------------------------
+    std::vector<std::string> g;
+    for (int k = 0; k < K; ++k) g.push_back(model.comp_builder_g[k]);
+    const std::string new_name = make_composition_name(model.comp_builder_base, g);
+
+    CompositionSpec spec;
+    std::string problem;
+    if (!parse_composition_name(new_name, &spec, &problem)) { /* problem set */ }
+    else if (!base_known) problem = "base scheme is not resolvable";
+    else problem.clear();
+
+    bool duplicate = false;
+    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
+
+    ImGui::Separator();
+    if (!problem.empty()) {
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
+    }
+    else {
+        ImGui::Text("%s", new_name.c_str());
+        ImGui::Text("base order %d%s     cost %d base steps per step",
+                    base_p, base_sym ? " (symmetric)" : "", K);
+        if (!base_sym)
+            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                "  base is not self-adjoint: the p+2 conditions below do not apply to it,\n"
+                "  and the published coefficients were derived assuming they do.");
+
+        double gsum = 0.0, gcube = 0.0;
+        if (!composition_sums(spec, &gsum, &gcube)) {
+            ImGui::TextDisabled("  coefficients are symbolic - measure the order in the Order tab");
+        }
+        else {
+            const bool consistent = std::fabs(gsum - 1.0) < 1e-12;
+            const bool cubic_ok   = std::fabs(gcube) < 1e-12;
+            ImGui::Text("  sum(gamma) = %.12g   sum(gamma^3) = %.3g", gsum, gcube);
+            if (!consistent)
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                    "  sum != 1: this integrates the field scaled by %.6g, i.e. a different\n"
+                    "  problem. The measured order stays valid, the solution does not.", gsum);
+            else if (base_sym && cubic_ok)
+                ImGui::TextColored(ImVec4(0.5f, 1, 0.5f, 1), "  -> expected order %d", base_p + 2);
+            else if (base_sym)
+                ImGui::TextDisabled("  sum(gamma^3) != 0: order stays %d", base_p);
+        }
+
+        double gmin = 0.0;
+        for (const std::string& t : g) {
+            double v = 0.0;
+            CompositionSpec one; one.gammas = { t, t };
+            if (composition_sums(one, &v, nullptr) && v / 2 < gmin) gmin = v / 2;
+        }
+        if (gmin < 0.0)
+            ImGui::TextDisabled("  most negative stage: %.4g*h - a backward step; stiff or strongly\n"
+                                "  dissipative systems may blow up there.", gmin);
+
+        if (extr_base_needs_half_s(model.comp_builder_base)) {
+            const double s_now = parse_num(model.symmetry_s, 0.5);
+            if (s_now != 0.5)
+                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    "  '%s' is symmetric only at s = 0.5, and s is currently %g:\n"
+                    "  the composition conditions no longer hold.",
+                    model.comp_builder_base.c_str(), s_now);
+            else
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                    "  '%s' stays symmetric only while s (a[0]) is 0.5 - do not sweep it.",
+                    model.comp_builder_base.c_str());
+        }
+    }
+
+    ImGui::BeginDisabled(!problem.empty() || duplicate);
+    if (ImGui::Button("+ Add composed scheme"))
+        model.wrapper_schemes.push_back(new_name);
+    ImGui::EndDisabled();
+    if (duplicate) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(already in the list)");
+    }
+}
+
+// Общий список собранных обёрток. Один на оба конструктора: список один, и
+// проверка отвалившейся базы у Extr и Comp дословно совпадает.
+static void draw_wrapper_list(AppModel& model) {
+    if (model.wrapper_schemes.empty()) return;
+    ImGui::Spacing();
+    if (!ImGui::CollapsingHeader("Assembled wrappers", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    int to_delete = -1;
+    for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
+        ImGui::PushID(i);
+        ImGui::TextUnformatted(model.wrapper_schemes[i].c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete")) to_delete = i;
+
+        // Отвалившаяся база (кастомную КРС переименовали или удалили) — на Run
+        // это станет пустой КРС, поэтому говорим сразу.
+        ExtrapolationSpec esp;
+        CompositionSpec   csp;
+        std::string base;
+        if (parse_extrapolation_name(model.wrapper_schemes[i], &esp)) base = esp.base;
+        else if (parse_composition_name(model.wrapper_schemes[i], &csp)) base = csp.base;
+        if (!base.empty()) {
+            bool ok = builtin_scheme_traits(base, nullptr, nullptr);
+            if (!ok)
+                for (const auto& cs : model.custom_schemes)
+                    if (cs.name == base) { ok = true; break; }
+            if (!ok)
+                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    "  base '%s' no longer exists.", base.c_str());
+        }
+        ImGui::PopID();
+    }
+    if (to_delete >= 0) model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
 }
 
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
@@ -2846,6 +3034,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     }
 
     draw_extrapolation_builder(model);
+    draw_composition_builder(model);
+    draw_wrapper_list(model);
 
     draw_generated_code_block(model, cb);
 }
@@ -3385,7 +3575,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
                                  [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.extr_schemes);
+                                 &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.wrapper_schemes);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
@@ -4831,7 +5021,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -5537,7 +5727,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -5870,7 +6060,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -6422,7 +6612,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -7145,7 +7335,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -7692,7 +7882,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
     // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
     s.custom_schemes = model.custom_schemes;
-    s.extr_schemes   = model.extr_schemes;
+    s.wrapper_schemes   = model.wrapper_schemes;
 
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
@@ -7756,7 +7946,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.extr_schemes);
+                      &model, model.is_map, &s.wrapper_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -8637,7 +8827,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // ---- Интегрирование ----
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                          &model, model.is_map, &s.extr_schemes);
+                          &model, model.is_map, &s.wrapper_schemes);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
         const bool h_swept = (c.axis_x_target == kOrderTargetH)
@@ -8689,7 +8879,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::Separator();
         // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
         draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.extr_schemes);
+                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "The method that stands for the exact answer in Eref =\n"
@@ -9721,7 +9911,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
             // Custom КРС и экстраполяционные обёртки в Custom-вкладке считаются только на GPU.
             if (scheme_needs_compiled_body(nm, custom_schemes)) phase.use_gpu = true;
         },
-        &cs.enabled_builtin_schemes, &model, model.is_map, &cs.extr_schemes);
+        &cs.enabled_builtin_schemes, &model, model.is_map, &cs.wrapper_schemes);
 
     // Integration group — mirrors the "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is
@@ -11754,20 +11944,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.custom_session.basins_session.custom_schemes = model.custom_schemes;
     // Экстраполяционные обёртки — тем же покадровым синком и по тем же
     // причинам: собранная в Library схема должна появиться в комбо сразу.
-    model.phase_session.extr_schemes       = model.extr_schemes;
-    model.bifurcation_session.extr_schemes = model.extr_schemes;
-    model.lle_session.extr_schemes         = model.extr_schemes;
-    model.ls_session.extr_schemes          = model.extr_schemes;
-    model.dft1d_session.extr_schemes       = model.extr_schemes;
-    model.basins_session.extr_schemes      = model.extr_schemes;
-    model.fastsync_session.extr_schemes    = model.extr_schemes;
-    model.order_session.extr_schemes       = model.extr_schemes;
-    model.custom_session.extr_schemes                = model.extr_schemes;
-    model.custom_session.bif_session.extr_schemes    = model.extr_schemes;
-    model.custom_session.lle_session.extr_schemes    = model.extr_schemes;
-    model.custom_session.ls_session.extr_schemes     = model.extr_schemes;
-    model.custom_session.phase_session.extr_schemes  = model.extr_schemes;
-    model.custom_session.basins_session.extr_schemes = model.extr_schemes;
+    model.phase_session.wrapper_schemes       = model.wrapper_schemes;
+    model.bifurcation_session.wrapper_schemes = model.wrapper_schemes;
+    model.lle_session.wrapper_schemes         = model.wrapper_schemes;
+    model.ls_session.wrapper_schemes          = model.wrapper_schemes;
+    model.dft1d_session.wrapper_schemes       = model.wrapper_schemes;
+    model.basins_session.wrapper_schemes      = model.wrapper_schemes;
+    model.fastsync_session.wrapper_schemes    = model.wrapper_schemes;
+    model.order_session.wrapper_schemes       = model.wrapper_schemes;
+    model.custom_session.wrapper_schemes                = model.wrapper_schemes;
+    model.custom_session.bif_session.wrapper_schemes    = model.wrapper_schemes;
+    model.custom_session.lle_session.wrapper_schemes    = model.wrapper_schemes;
+    model.custom_session.ls_session.wrapper_schemes     = model.wrapper_schemes;
+    model.custom_session.phase_session.wrapper_schemes  = model.wrapper_schemes;
+    model.custom_session.basins_session.wrapper_schemes = model.wrapper_schemes;
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.

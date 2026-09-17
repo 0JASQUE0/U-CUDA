@@ -130,8 +130,8 @@ struct OrderAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена экстраполяционных обёрток для комбо; тело даёт резолвер по имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper names for the combo; the resolver builds the body from the name.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
