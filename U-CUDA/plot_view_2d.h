@@ -64,6 +64,18 @@ struct PlotSeriesInput {
     int   points_override = -1;
     int   point_marker    = -1;    // PointMarker; только при points_override == 1
     float point_size_px   = 0.0f;  // <= 0 → point_size_px вью
+
+    // Необязательные величины «за точкой» для всплывающей подсказки при
+    // наведении (см. Plot2DView::point_markers). Раскладка ПОТОЧЕЧНАЯ:
+    // point_tags[i * point_tag_count + k] — k-я величина i-й точки, имена даёт
+    // Plot2DView::point_tag_names. Длина массива = n_points * point_tag_count.
+    //
+    // Нужны там, где на осях лежат не те числа, о которых хочется спросить.
+    // На диаграмме производительности таких сразу три: шага h на осях нет
+    // вовсе, ось X — выбранный источник ошибки, а по Y в лог-режиме лежит
+    // log10(t), а не само время. nullptr — подсказка покажет сырые координаты.
+    const double* point_tags      = nullptr;
+    int           point_tag_count = 0;
 };
 
 class Plot2DView {
@@ -212,6 +224,20 @@ public:
     // друг от друга, поэтому радиус в пикселях по каждой оси свой.
     double   hover_circle_r     = std::numeric_limits<double>::quiet_NaN();
     unsigned hover_circle_color = 0xFFE0E0E0u;  // ARGB, как crosshair_*_color
+
+    // Маркеры узлов ПОВЕРХ линий + подсказка по наведению. Отдельный флаг, а не
+    // points_mode: тот переключает линию НА точки, а здесь нужно и то и другое —
+    // линия показывает тренд, маркеры показывают, где реальные замеры.
+    // Рисуются через ImDrawList (не через VBO): режим рассчитан на графики
+    // в десятки узлов, поэтому серии длиннее point_markers_max молча остаются
+    // без маркеров — иначе один фазовый портрет залил бы плот кружками
+    // и утопил бы кадр.
+    bool  point_markers     = false;
+    float point_marker_px   = 3.5f;
+    int   point_markers_max = 512;
+    // Подписи величин из PlotSeriesInput::point_tags, по одной на столбец.
+    // Недостающие имена показываются как "tag<k>".
+    std::vector<std::string> point_tag_names;
 
     // render:
     //  global_visible — внешний фильтр (галочки вкладки: показывать серию вообще),

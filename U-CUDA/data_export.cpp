@@ -998,20 +998,34 @@ static void write_order_config(std::ofstream& out, const OrderSnapshot& s, bool 
     }
     out << "\n";
 
+    out << "device = " << (s.use_gpu ? "GPU (NVRTC)" : "CPU (cl.exe, sequential)") << "\n";
+
     if (perf) {
         out << "measurements per node = " << s.repeats << "\n";
         out << "warmup runs = "           << s.warmup  << "\n";
-        out << "replicas per launch = "   << s.replicas << "\n";
+        if (s.use_gpu) {
+            out << "replicas per launch = " << s.replicas << "\n";
+            out << "timing = cudaEvent around the kernel launch only "
+                   "(no H2D/D2H, no compilation)\n";
+        } else {
+            // На CPU реплик нет по построению, и писать "1" значило бы намекать
+            // на настройку, которой не существует.
+            out << "replicas per launch = n/a (sequential run of one trajectory)\n";
+            out << "timing = steady_clock around the step loop only "
+                   "(no setup, no compilation)\n";
+        }
         if (!s.ref_scheme.empty() && s.ref_substeps > 0)
             out << "reference = " << s.ref_scheme
                 << ", " << s.ref_substeps << " substep(s) per tested step\n";
         else
             out << "reference = none\n";
-        out << "timing = cudaEvent around the kernel launch only "
-               "(no H2D/D2H, no compilation)\n";
     }
-    write_fmad_line(out, s.gpu_fmad);
-    out << "NVRTC split compilation = " << (s.gpu_rdc ? "on" : "off") << "\n";
+    // Настройки NVRTC на CPU-прогон не влияют никак — печатать их там значило бы
+    // приписать файлу провенанс, которого у него нет.
+    if (s.use_gpu) {
+        write_fmad_line(out, s.gpu_fmad);
+        out << "NVRTC split compilation = " << (s.gpu_rdc ? "on" : "off") << "\n";
+    }
 }
 
 bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::string& path)

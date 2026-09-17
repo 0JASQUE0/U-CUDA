@@ -161,13 +161,24 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
     kvmap(o, "param_values", r.param_values);
-    // custom_schemes: [ {"name": "...", "body": "..."}, ... ]
+    // custom_schemes: [ {"name": "...", "body": "...", "order": "2", "symmetric": "0"}, ... ]
+    // order/symmetric пишутся СТРОКАМИ: читатель ниже для любого значения
+    // зовёт parse_string(), и голое число его сломало бы.
     o << "  \"custom_schemes\": [";
     for (size_t k = 0; k < r.custom_schemes.size(); ++k) {
         const auto& cs = r.custom_schemes[k];
         if (k) o << ", ";
         o << "{\"name\": \"" << esc(cs.name)
-          << "\", \"body\": \"" << esc(cs.body) << "\"}";
+          << "\", \"body\": \"" << esc(cs.body)
+          << "\", \"order\": \"" << cs.order
+          << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0) << "\"}";
+    }
+    o << "],\n";
+    // extr_schemes: ["Extr(RK4|1,2,4)", ...] — только имена, тело пересобирается.
+    o << "  \"extr_schemes\": [";
+    for (size_t k = 0; k < r.extr_schemes.size(); ++k) {
+        if (k) o << ", ";
+        o << "\"" << esc(r.extr_schemes[k]) << "\"";
     }
     o << "]\n";
     o << "}\n";
@@ -220,12 +231,42 @@ SystemRecord record_from_json(const std::string& json) {
                         std::string cv = p.parse_string();
                         if (ck == "name") cs.name = cv;
                         else if (ck == "body") cs.body = cv;
+                        // Записи от старых версий этих ключей не содержат —
+                        // остаются дефолты (порядок 1, несимметричная), то есть
+                        // самое консервативное предположение.
+                        else if (ck == "order") {
+                            int v = 0;
+                            bool digits = !cv.empty() && cv.size() <= 2;
+                            for (char c : cv) {
+                                if (c < '0' || c > '9') { digits = false; break; }
+                                v = v * 10 + (c - '0');
+                            }
+                            if (digits && v >= 1) cs.order = v;
+                        }
+                        else if (ck == "symmetric") cs.symmetric = (cv == "1" || cv == "true");
                         p.ws();
                         if (p.peek() == ',') { ++p.i; continue; }
                         if (p.peek() == '}') { ++p.i; break; }
                         break;
                     }
                     r.custom_schemes.push_back(std::move(cs));
+                    p.ws();
+                    if (p.peek() == ',') { ++p.i; continue; }
+                    if (p.peek() == ']') { ++p.i; break; }
+                    break;
+                }
+            } else { ++p.i; }
+        }
+        else if (key == "extr_schemes") {
+            // Плоский массив строк. Имена валидируются не здесь, а резолвером:
+            // непонятное имя отдаёт пустую КРС, то есть честную ошибку на Run,
+            // а не молчаливую подмену схемы.
+            p.ws();
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for extr_schemes");
+            ++p.i; p.ws();
+            if (p.peek() != ']') {
+                while (true) {
+                    r.extr_schemes.push_back(p.parse_string());
                     p.ws();
                     if (p.peek() == ',') { ++p.i; continue; }
                     if (p.peek() == ']') { ++p.i; break; }

@@ -598,6 +598,84 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
+    // Маркеры узлов поверх линий + подсказка по ближайшему к курсору.
+    // Проекция — те же X()/Y(), что у данных, поэтому лог-ось и независимый
+    // масштаб осей получаются сами собой. Рисуем ДО рамки и легенды: маркер —
+    // это данные, он не должен лезть поверх обрамления.
+    if (point_markers && !series_in.empty()) {
+        ImGuiIO& io = ImGui::GetIO();
+        const float r = point_marker_px;
+        // Радиус захвата чуть больше самого маркера: попасть курсором в кружок
+        // в 3.5px иначе неприятно.
+        const float pick_r = r + 4.0f;
+        int   best_s = -1, best_i = -1;
+        float best_d2 = pick_r * pick_r;
+
+        dl->PushClipRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+        for (int si = 0; si < (int)series_in.size(); ++si) {
+            if (!eff_visible(si)) continue;
+            const PlotSeriesInput& s = series_in[(size_t)si];
+            if (!s.points || s.n_points <= 0 || s.n_points > point_markers_max) continue;
+            const ImVec4 c4 = series_color(s);
+            const ImU32 col = ImGui::ColorConvertFloat4ToU32(c4);
+            // Тёмный контур: светлый маркер на светлой сетке иначе теряется.
+            const ImU32 edge = IM_COL32(0, 0, 0, (int)(160.0f * c4.w));
+            for (int i = 0; i < s.n_points; ++i) {
+                const float px = X(s.points[(size_t)i * 2]);
+                const float py = Y(s.points[(size_t)i * 2 + 1]);
+                if (!std::isfinite(px) || !std::isfinite(py)) continue;
+                if (px < img_pos.x - r || px > img_pos.x + plot_w + r) continue;
+                if (py < img_pos.y - r || py > img_pos.y + plot_h + r) continue;
+                dl->AddCircleFilled(ImVec2(px, py), r, col, 12);
+                dl->AddCircle(ImVec2(px, py), r, edge, 12, 1.0f);
+                if (plot_h_ov) {
+                    const float dx = px - io.MousePos.x;
+                    const float dy = py - io.MousePos.y;
+                    const float d2 = dx * dx + dy * dy;
+                    if (d2 < best_d2) { best_d2 = d2; best_s = si; best_i = i; }
+                }
+            }
+        }
+        if (best_s >= 0) {
+            const PlotSeriesInput& s = series_in[(size_t)best_s];
+            const float px = X(s.points[(size_t)best_i * 2]);
+            const float py = Y(s.points[(size_t)best_i * 2 + 1]);
+            dl->AddCircle(ImVec2(px, py), r + 3.0f, IM_COL32(255, 255, 255, 230), 16, 1.5f);
+            dl->AddCircle(ImVec2(px, py), r + 3.0f, IM_COL32(0, 0, 0, 160), 16, 3.0f);
+        }
+        dl->PopClipRect();
+
+        if (best_s >= 0) {
+            const PlotSeriesInput& s = series_in[(size_t)best_s];
+            ImGui::BeginTooltip();
+            if (!s.label.empty()) {
+                const ImVec4 c4 = series_color(s);
+                ImGui::TextColored(ImVec4(c4.x, c4.y, c4.z, 1.0f), "%s", s.label.c_str());
+            }
+            if (s.point_tags && s.point_tag_count > 0) {
+                for (int k = 0; k < s.point_tag_count; ++k) {
+                    const std::string nm =
+                        ((size_t)k < point_tag_names.size() && !point_tag_names[(size_t)k].empty())
+                            ? point_tag_names[(size_t)k]
+                            : ("tag" + std::to_string(k));
+                    ImGui::Text("%s = %.6g", nm.c_str(),
+                                s.point_tags[(size_t)best_i * s.point_tag_count + k]);
+                }
+            } else {
+                // Сырые координаты — запасной вариант, когда caller тегов не
+                // дал. Если в буфере лежит log10(y), об этом говорит имя оси:
+                // подпись там уже вида "log10 t, us".
+                ImGui::TextDisabled("%s = %.6g",
+                    x_axis.name.empty() ? "x" : x_axis.name.c_str(),
+                    s.points[(size_t)best_i * 2]);
+                ImGui::TextDisabled("%s = %.6g",
+                    y_axis.name.empty() ? "y" : y_axis.name.c_str(),
+                    s.points[(size_t)best_i * 2 + 1]);
+            }
+            ImGui::EndTooltip();
+        }
+    }
+
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         plot_col_border(), 0.0f, 0, 1.0f);
 

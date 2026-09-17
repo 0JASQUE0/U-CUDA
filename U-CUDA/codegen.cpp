@@ -1690,6 +1690,200 @@ Scheme scheme_from_name(const std::string& name) {
     return Scheme::Euler;
 }
 
+// --- Паспорт встроенных схем -----------------------------------------------
+// Порядки — те, что замерены и записаны в подсказках чекбоксов (см. gui.cpp).
+// Напоминание про a[0] = 1/2: у CD, Complex CD, Complex CD4, SEMP и SIMP
+// заявленный порядок достигается только при этом значении, иначе все они
+// падают до первого. Здесь стоит паспортный (то есть при a[0] = 1/2) —
+// предупредить пользователя обязан UI.
+bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric) {
+    struct Row { const char* name; int order; bool symmetric; };
+    static const Row kRows[] = {
+        { "Euler",                  1, false },
+        { "Euler-Cromer",           1, false },
+        { "D",                      1, false },
+        { "Implicit Euler",         1, false },
+        { "Explicit Midpoint",      2, false },
+        { "Implicit Midpoint",      2, true  },  // Phi* ∘ Phi, самосопряжённая
+        { "CD",                     2, true  },  // самосопряжённая при a[0] = 1/2
+        { "Complex CD",             2, false },
+        { "Complex Implicit Euler", 2, false },
+        { "SEMP",                   2, false },  // предиктор-корректор, не Phi* ∘ Phi
+        { "SIMP",                   2, false },
+        { "RK4",                    4, false },
+        { "Complex CD4",            4, false },
+        { "DOPRI78",                8, false },
+    };
+    for (const Row& r : kRows) {
+        if (name == r.name) {
+            if (order)     *order     = r.order;
+            if (symmetric) *symmetric = r.symmetric;
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- Экстраполяция Ричардсона ----------------------------------------------
+
+static const char* const kExtrPrefix = "Extr(";
+
+std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n) {
+    std::string s = kExtrPrefix + base + "|";
+    for (size_t k = 0; k < n.size(); ++k) {
+        if (k) s += ",";
+        s += std::to_string(n[k]);
+    }
+    return s + ")";
+}
+
+// "12" -> 12. Отказывает на пустой строке, нецифрах и выходе за диапазон,
+// чтобы кривое имя из старого JSON не превратилось молча в рабочую схему.
+static bool extr_parse_substeps(const std::string& s, int* out) {
+    if (s.empty() || s.size() > 9) return false;
+    for (char c : s) if (c < '0' || c > '9') return false;
+    const long v = std::strtol(s.c_str(), nullptr, 10);
+    if (v < 1 || v > kExtrMaxSubsteps) return false;
+    *out = (int)v;
+    return true;
+}
+
+bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
+                              std::string* err) {
+    auto fail = [&](const char* msg) { if (err) *err = msg; return false; };
+
+    const std::string pref = kExtrPrefix;
+    if (name.size() <= pref.size() || name.compare(0, pref.size(), pref) != 0)
+        return fail("not an extrapolated scheme name");
+    if (name.back() != ')')
+        return fail("missing closing ')'");
+
+    const std::string inner = name.substr(pref.size(), name.size() - pref.size() - 1);
+    // rfind, а не find: имя базы по правилам валидации '|' не содержит, но если
+    // в старом JSON такое всё же лежит — резать надо по последней черте, иначе
+    // список n разберётся как часть имени и схема тихо станет другой.
+    const size_t bar = inner.rfind('|');
+    if (bar == std::string::npos) return fail("missing '|' between base and substep list");
+
+    ExtrapolationSpec spec;
+    spec.base = inner.substr(0, bar);
+    if (spec.base.empty()) return fail("empty base scheme name");
+    // Вложенность запрещена: порядок обёртки над обёрткой считается не как
+    // p + K - 1, и заодно это отрезает бесконечную рекурсию в резолвере.
+    if (spec.base.compare(0, pref.size(), pref) == 0)
+        return fail("base scheme cannot itself be extrapolated");
+
+    const std::string tail = inner.substr(bar + 1);
+    size_t pos = 0;
+    while (true) {
+        const size_t comma = tail.find(',', pos);
+        const std::string tok = tail.substr(pos, comma == std::string::npos
+                                                ? std::string::npos : comma - pos);
+        int v = 0;
+        if (!extr_parse_substeps(tok, &v)) return fail("substep counts must be integers in 1..1024");
+        spec.n.push_back(v);
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+
+    const int K = (int)spec.n.size();
+    if (K < kExtrMinStages) return fail("at least 2 stages are needed");
+    if (K > kExtrMaxStages) return fail("at most 6 stages are supported");
+    for (int k = 1; k < K; ++k)
+        if (spec.n[k] <= spec.n[k - 1]) return fail("substep counts must strictly increase");
+
+    if (out) *out = spec;
+    return true;
+}
+
+int extrapolation_order(int stages, int p, bool symmetric) {
+    if (stages < 1) return p;
+    return symmetric ? p + 2 * (stages - 1) : p + stages - 1;
+}
+
+std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool symmetric) {
+    const int K = (int)n.size();
+    std::vector<double> u((size_t)K), alpha((size_t)K);
+    for (int k = 0; k < K; ++k) {
+        const double inv = 1.0 / (double)n[k];
+        u[k] = symmetric ? inv * inv : inv;
+    }
+    // alpha_k ~ n_k^p * prod_{m != k} 1/(u_k - u_m). Вектор обратных произведений
+    // разностей — это коэффициенты (K-1)-й разделённой разности, то есть ровно
+    // тот единственный (с точностью до масштаба) вектор, который ортогонален
+    // 1, u, ..., u^(K-2). Нормировка суммы в 1 закрывает условие состоятельности.
+    double sum = 0.0;
+    for (int k = 0; k < K; ++k) {
+        double prod = 1.0;
+        for (int m = 0; m < K; ++m)
+            if (m != k) prod *= (u[k] - u[m]);
+        alpha[k] = std::pow((double)n[k], (double)p) / prod;
+        sum += alpha[k];
+    }
+    for (int k = 0; k < K; ++k) alpha[k] /= sum;
+    return alpha;
+}
+
+std::string wrap_extrapolation(const std::string& base_body, int N,
+                               const std::vector<int>& n, int p, bool symmetric,
+                               const std::string& base_name) {
+    const int K = (int)n.size();
+    if (K < 1) throw std::runtime_error("extrapolation needs at least one stage");
+    if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
+
+    const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
+    long long cost = 0;
+    for (int k = 0; k < K; ++k) cost += n[k];
+
+    const std::string Ns = std::to_string(N);
+    std::ostringstream o;
+
+    o << "    // --- " << make_extrapolation_name(base_name, n) << " ---\n";
+    o << "    // base: order " << p << ", " << (symmetric ? "symmetric" : "non-symmetric")
+      << "  ->  extrapolated order " << extrapolation_order(K, p, symmetric) << "\n";
+    o << "    // " << K << " stages, " << cost << " base steps per macro-step\n";
+    for (int k = 0; k < K; ++k)
+        o << "    //   n[" << k << "] = " << n[k] << "   alpha = " << fmtnum(alpha[k]) << "\n";
+
+    o << "    numb X0_ex[" << Ns << "], AC_ex[" << Ns << "];\n";
+    o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { X0_ex[i_ex] = X[i_ex]; AC_ex[i_ex] = (numb)0; }\n\n";
+
+    // Тело базы вставляется дословно и ровно один раз. Параметр лямбды назван h
+    // и затеняет макрошаг из сигнатуры calculateDiscreteModel, поэтому любое
+    // "h" внутри базы становится подшагом без единой правки текста — это же и
+    // позволяет обернуть кастомную КРС, содержимое которой нам непрозрачно.
+    o << "    auto step_ex = [&](const numb h) {\n";
+    {
+        // Сдвигаем базу на уровень вложенности: панель KRS показывает этот текст
+        // как есть, и без отступа он читается хуже.
+        size_t pos = 0;
+        while (pos < base_body.size()) {
+            size_t eol = base_body.find('\n', pos);
+            if (eol == std::string::npos) eol = base_body.size();
+            const std::string line = base_body.substr(pos, eol - pos);
+            if (!line.empty()) o << "    " << line;
+            o << "\n";
+            pos = eol + 1;
+        }
+    }
+    o << "    };\n\n";
+
+    for (int k = 0; k < K; ++k) {
+        o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s")
+          << " of h/" << n[k] << "\n";
+        o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h / (numb)"
+          << fmtnum((double)n[k]) << ");\n";
+        o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] += (numb)("
+          << fmtnum(alpha[k]) << ") * X[i_ex];";
+        // После последней стадии откатывать нечего — X сразу перезаписывается.
+        if (k + 1 < K) o << " X[i_ex] = X0_ex[i_ex];";
+        o << " }\n";
+    }
+
+    o << "\n    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) X[i_ex] = AC_ex[i_ex];\n";
+    return o.str();
+}
+
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     // Одна форма на оба пути. CPU-интегратор считает тот же AST через
     // байткод-интерпретатор, а диагонально-неявные схемы (CD, Complex CD, SIMP,

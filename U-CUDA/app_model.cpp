@@ -157,6 +157,7 @@ SystemRecord AppModel::to_record() const {
     r.init_conditions = init_conditions;
     r.param_values = param_values;
     r.custom_schemes = custom_schemes;
+    r.extr_schemes = extr_schemes;
     return r;
 }
 
@@ -200,6 +201,7 @@ void AppModel::from_record(const SystemRecord& r) {
     init_conditions = r.init_conditions;
     param_values = r.param_values;
     custom_schemes = r.custom_schemes;
+    extr_schemes = r.extr_schemes;
     loaded_name = r.name;          // запоминаем имя на диске
     // обновим списки символов (без падения, если система ещё неполна)
     refresh_symbols();
@@ -240,6 +242,7 @@ void AppModel::clear() {
     init_conditions.clear();
     param_values.clear();
     custom_schemes.clear();
+    extr_schemes.clear();
     known_vars.clear();
     known_params.clear();
     generated_code.clear();
@@ -950,6 +953,22 @@ void AppModel::propagate_to_sessions() {
     custom_session.ls_session.custom_schemes     = custom_schemes;
     custom_session.phase_session.custom_schemes  = custom_schemes;
     custom_session.basins_session.custom_schemes = custom_schemes;
+
+    // Экстраполяционные обёртки едут тем же маршрутом: в сессии нужны только
+    // имена, тело каждый раз пересобирает compute_krs_for_scheme.
+    phase_session.extr_schemes       = extr_schemes;
+    bifurcation_session.extr_schemes = extr_schemes;
+    lle_session.extr_schemes         = extr_schemes;
+    ls_session.extr_schemes          = extr_schemes;
+    dft1d_session.extr_schemes       = extr_schemes;
+    basins_session.extr_schemes      = extr_schemes;
+    fastsync_session.extr_schemes    = extr_schemes;
+    custom_session.extr_schemes                = extr_schemes;
+    custom_session.bif_session.extr_schemes    = extr_schemes;
+    custom_session.lle_session.extr_schemes    = extr_schemes;
+    custom_session.ls_session.extr_schemes     = extr_schemes;
+    custom_session.phase_session.extr_schemes  = extr_schemes;
+    custom_session.basins_session.extr_schemes = extr_schemes;
 
     // Mirror enabled built-in schemes from the current model into every session.
     const std::vector<std::string> enabled_now = enabled_builtins_from_record(to_record());

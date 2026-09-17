@@ -215,6 +215,8 @@ struct CustomSession {
     std::vector<std::string> params;
     System                   sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена экстраполяционных обёрток для комбо; тело даёт резолвер по имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string              loaded_system_name;
 

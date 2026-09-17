@@ -528,9 +528,17 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.krs_code     = s.krs_code;
     in.krs_is_custom = false;
     // For a map krs_code is always codegen output; custom KRS do not apply.
-    if (!s.sys.is_map)
+    if (!s.sys.is_map) {
         for (const auto& cs : s.custom_schemes)
             if (cs.name == s.scheme) { in.krs_is_custom = true; break; }
+        // Экстраполяционная обёртка — тоже "сырой текст" в смысле этой ветки:
+        // тело базы завёрнуто в лямбду и стадийные циклы, интерпретатору
+        // выражений такое не разобрать. Зато CPU компилирует тем же cl.exe
+        // БУКВАЛЬНО тот же текст, который NVRTC собирает для GPU, — совпадение
+        // путей тут точнее, чем у любой встроенной схемы.
+        if (!in.krs_is_custom && parse_extrapolation_name(s.scheme, nullptr))
+            in.krs_is_custom = true;
+    }
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
     // Continuation: on frames >= 1 resume from the previous chunk's final X[]
@@ -649,24 +657,11 @@ static Scheme scheme_from_string(const std::string& s) {
 }
 
 void PhaseAnalysisSession::regenerate_krs() {
-    krs_code.clear();
-    // Сначала ищем среди custom — имя имеет приоритет над built-in (если бы
-    // совпали, что мы блокируем в System tab).
-    bool found_custom = false;
-    // A map has no scheme, and custom KRS do not apply either - one step only.
-    for (const auto& cs : custom_schemes) {
-        if (sys.is_map) break;
-        if (cs.name == scheme) { krs_code = cs.body; found_custom = true; break; }
-    }
-    if (!found_custom && !sys.rhs.empty()) {
-        try {
-            krs_code = codegen_scheme(sys, sys.is_map ? Scheme::Map
-                                                      : scheme_from_string(scheme));
-        }
-        catch (...) {
-            krs_code.clear();
-        }
-    }
+    // Раньше здесь лежала вторая копия резолвера, и добавить разбор имени
+    // пришлось бы в оба места: панель KRS рисует именно krs_code, а Run идёт
+    // через compute_krs_for_scheme. Разъехавшись, они показывали бы одно, а
+    // считали другое — поэтому теперь резолвер ровно один.
+    krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme);
 
     // Фоновый прогрев NVRTC-кэша под новую систему/метод, не дожидаясь Run. Новый прогрев не
     // запускаем, пока предыдущий не закончился: присвоение prewarm_future иначе заблокировало бы
@@ -686,28 +681,81 @@ void PhaseAnalysisSession::regenerate_krs() {
 // BifurcationAnalysisSession
 
 // Резолвит КРС по имени scheme: сперва среди custom_schemes (имя имеет
-// приоритет над built-in, что блокируется в System tab), иначе генерирует
-// через codegen_scheme. Чистая функция — зовётся при сборке Request в
-// момент Run (не персистится). Переиспользуется bifurcation и LLE.
-std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
-                                          const System& sys,
-                                          const std::string& scheme) {
+// приоритет над built-in, что блокируется в System tab), затем разбирает имя
+// как экстраполяционную обёртку "Extr(<база>|n...)", иначе генерирует через
+// codegen_scheme. Чистая функция — зовётся при сборке Request в момент Run
+// (не персистится). Переиспользуется bifurcation и LLE.
+//
+// gen отличает GPU-форму от CPU-эквивалента: обе проходят ОДИН И ТОТ ЖЕ разбор
+// имени, поэтому панель KRS и движок не могут понять имя по-разному.
+static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
+                                       const System& sys,
+                                       const std::string& scheme,
+                                       std::string (*gen)(const System&, Scheme)) {
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
         if (sys.rhs.empty()) return {};
-        try { return codegen_scheme(sys, Scheme::Map); } catch (...) { return {}; }
+        try { return gen(sys, Scheme::Map); } catch (...) { return {}; }
     }
     for (const auto& cs : custom_schemes) {
         if (cs.name == scheme) return cs.body;
     }
     if (sys.rhs.empty()) return {};
+
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme, &spec)) {
+        // Порядок и симметричность базы: у кастомной КРС их объявил автор, у
+        // встроенной берём из паспорта. Неизвестная база — отказ, а не тихий
+        // откат на Эйлер: пустая КРС наверху превращается в честную ошибку.
+        int  p   = 1;
+        bool sym = false;
+        std::string base_body;
+        bool base_is_custom = false;
+        for (const auto& cs : custom_schemes) {
+            if (cs.name == spec.base) {
+                base_body      = cs.body;
+                p              = cs.order;
+                sym            = cs.symmetric;
+                base_is_custom = true;
+                break;
+            }
+        }
+        if (!base_is_custom) {
+            if (!builtin_scheme_traits(spec.base, &p, &sym)) return {};
+            try { base_body = gen(sys, scheme_from_string(spec.base)); }
+            catch (...) { return {}; }
+        }
+        if (base_body.empty()) return {};
+        try {
+            return wrap_extrapolation(base_body, (int)sys.vars.size(),
+                                      spec.n, p, sym, spec.base);
+        }
+        catch (...) { return {}; }
+    }
+
     try {
-        return codegen_scheme(sys, scheme_from_string(scheme));
+        return gen(sys, scheme_from_string(scheme));
     }
     catch (...) {
         return {};
     }
+}
+
+std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                          const System& sys,
+                                          const std::string& scheme) {
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme);
+}
+
+// CPU-форма того же шага — только для отладочной панели, нигде не
+// компилируется (CPU-интегратор гоняет байткод AST, а не этот текст).
+// Экстраполяция оборачивает CPU-эквивалент базы той же wrap_extrapolation,
+// так что обе панели показывают одну и ту же структуру стадий.
+std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                       const System& sys,
+                                       const std::string& scheme) {
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme_cpu_equivalent);
 }
 
 void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
