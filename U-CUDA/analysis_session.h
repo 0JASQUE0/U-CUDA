@@ -899,7 +899,7 @@ constexpr bool basin_feature_names_are_ascii() {
     return true;
 }
 static_assert(basin_feature_names_are_ascii(),
-              "kBasinFeatureNames: только ASCII — строки уходят в _config.csv");
+              "kBasinFeatureNames: ASCII only - the strings go into _config.csv");
 
 // Безопасный доступ по коду из снапшота/сессии: вне [0, BF_FEATURE_COUNT) отдаёт "unknown".
 // Нужен там, где код приходит из файла и мог быть записан другой версией приложения.

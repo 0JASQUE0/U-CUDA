@@ -115,8 +115,8 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     if (needs_complex) {
         const std::string path = exe_dir() + "\\kernels\\configCUDA.h";
         std::ifstream f(path, std::ios::binary);
-        if (!f) NV_FAIL("не найден " + path + " (нужен для схем с комплексными "
-                        "коэффициентами; проверь, что kernels\\ скопирован рядом с .exe)");
+        if (!f) NV_FAIL("missing " + path + " (needed for schemes with complex "
+                        "coefficients; check that kernels\\ was copied next to the .exe)");
         std::ostringstream ss; ss << f.rdbuf();
         cfg_header = ss.str();
         // Санитайзинг — тот же, что в parametric_engine.cpp::read_text_file, и

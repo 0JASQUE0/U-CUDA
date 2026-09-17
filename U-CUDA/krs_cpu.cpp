@@ -80,19 +80,19 @@ bool krs_cpu_check_indices(const std::string& b, int amountOfX, int amountOfValu
 
         const long idx = std::strtol(b.substr(ds, de - ds).c_str(), nullptr, 10);
         if (id == "X" && (idx < 0 || idx >= amountOfX)) {
-            std::string m = "X[" + std::to_string(idx) + "]: в системе " +
-                            std::to_string(amountOfX) + " переменных";
+            std::string m = "X[" + std::to_string(idx) + "]: the system has " +
+                            std::to_string(amountOfX) + " variables";
             if (amountOfX > 0)
-                m += ", допустимо X[0.." + std::to_string(amountOfX - 1) + "]";
+                m += ", allowed X[0.." + std::to_string(amountOfX - 1) + "]";
             diags.push_back({ line, m });
             ok = false;
         }
         if (id == "a" && (idx < 0 || idx >= amountOfValues)) {
-            std::string m = "a[" + std::to_string(idx) + "]: доступно a[0] (symmetry s)";
+            std::string m = "a[" + std::to_string(idx) + "]: a[0] (symmetry s) is available";
             if (amountOfValues > 1)
-                m += " и a[1.." + std::to_string(amountOfValues - 1) + "] (параметры)";
+                m += " and a[1.." + std::to_string(amountOfValues - 1) + "] (parameters)";
             else
-                m += "; параметров в системе нет";
+                m += "; the system has no parameters";
             diags.push_back({ line, m });
             ok = false;
         }
@@ -222,13 +222,13 @@ const std::string& vcvars_path(std::string& why) {
         char   pf[MAX_PATH] = { 0 };
         size_t len = 0;
         if (getenv_s(&len, pf, sizeof pf, "ProgramFiles(x86)") != 0 || len == 0) {
-            s_why = "не найдена переменная ProgramFiles(x86)";
+            s_why = "the ProgramFiles(x86) variable was not found";
             return;
         }
         const std::string vswhere = std::string(pf) +
             "\\Microsoft Visual Studio\\Installer\\vswhere.exe";
         if (GetFileAttributesA(vswhere.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            s_why = "не найден vswhere.exe (Visual Studio не установлена?)";
+            s_why = "vswhere.exe not found (is Visual Studio installed?)";
             return;
         }
         std::string out = run_capture(
@@ -239,12 +239,12 @@ const std::string& vcvars_path(std::string& why) {
                (out.back() == '\r' || out.back() == '\n' || out.back() == ' '))
             out.pop_back();
         if (out.empty()) {
-            s_why = "vswhere не нашёл установку с компонентом C++ (VC Tools)";
+            s_why = "vswhere found no installation with the C++ component (VC Tools)";
             return;
         }
         const std::string vc = out + "\\VC\\Auxiliary\\Build\\vcvars64.bat";
         if (GetFileAttributesA(vc.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            s_why = "не найден vcvars64.bat в " + out;
+            s_why = "vcvars64.bat not found in " + out;
             return;
         }
         s_path = vc;
@@ -258,7 +258,7 @@ const std::string& vcvars_path(std::string& why) {
 bool krs_cpu_backend_available(std::string* why_not) {
     std::string why;
     if (!vcvars_path(why).empty()) return true;
-    if (why_not) *why_not = why.empty() ? "компилятор не найден" : why;
+    if (why_not) *why_not = why.empty() ? "compiler not found" : why;
     return false;
 }
 
@@ -410,7 +410,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
     std::string why;
     const std::string vcvars = vcvars_path(why);
     if (vcvars.empty()) {
-        diags.push_back({ 0, "CPU-компилятор недоступен: " + why });
+        diags.push_back({ 0, "CPU compiler unavailable: " + why });
         return false;
     }
 
@@ -427,7 +427,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         const std::string source = make_source(body, amountOfX);
         FILE* f = nullptr;
         if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
-            diags.push_back({ 0, "не удалось записать " + src });
+            diags.push_back({ 0, "failed to write " + src });
             return false;
         }
         fwrite(source.data(), 1, source.size(), f);
@@ -458,7 +458,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         if (rc != 0 || GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
             parse_cl_log(oem_to_utf8(build_out), diags);
             if (diags.empty())
-                diags.push_back({ 0, "cl.exe завершился с кодом " + std::to_string(rc) });
+                diags.push_back({ 0, "cl.exe exited with code " + std::to_string(rc) });
             DeleteFileA(dll.c_str());   // не оставляем полуфабрикат в кэше
             return false;
         }
@@ -466,13 +466,13 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 
     HMODULE m = LoadLibraryA(dll.c_str());
     if (!m) {
-        diags.push_back({ 0, "не удалось загрузить " + dll });
+        diags.push_back({ 0, "failed to load " + dll });
         return false;
     }
     auto p = (StepFn)GetProcAddress(m, "krs_step");
     if (!p) {
         FreeLibrary(m);
-        diags.push_back({ 0, "в собранной DLL нет krs_step" });
+        diags.push_back({ 0, "the built DLL has no krs_step" });
         return false;
     }
     module_ = m;

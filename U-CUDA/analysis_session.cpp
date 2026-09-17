@@ -885,7 +885,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         Bifurcation2DResult r = engine.run_bifurcation_2d(req);
@@ -895,7 +895,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         Bifurcation1DResult r = engine.run_bifurcation_1d(req);
@@ -934,7 +934,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -951,7 +951,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1194,7 +1194,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LLE2DResult r = engine.run_lle_2d(req);
@@ -1204,7 +1204,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LLE1DResult r = engine.run_lle_1d(req);
@@ -1242,7 +1242,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1259,7 +1259,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1454,7 +1454,7 @@ bool Dft1DAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
     Dft1DResult r = engine.run_dft_1d(req);
@@ -1475,7 +1475,7 @@ bool Dft1DAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         cancel_token.reset();
         progress_token.reset();
         return false;
@@ -1699,7 +1699,7 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
     BasinsResult r = engine.run_basins(req);
@@ -1723,7 +1723,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) 
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         cancel_token.reset();
         progress_token.reset();
         progress_phase_token.reset();
@@ -1750,7 +1750,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     if (!c.last_run_ok || c.result.avg_peaks.empty() ||
         c.result.avg_intervals.empty() || c.result.helpful_array.empty() ||
         c.result.n_pts <= 0) {
-        c.last_error = "Нет кэша фич — запусти полный Run сначала.";
+        c.last_error = "No feature cache - run a full Run first.";
         return false;
     }
 
@@ -1759,7 +1759,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     // если система не менялась — compile_basins_if_needed обойдётся no-op'ом.
     BasinsRequest sim_req = build_basins_request(*this, c);
     if (sim_req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
 
@@ -2391,7 +2391,7 @@ bool FastSyncAnalysisSession::run(ParametricEngine& engine, int config_idx) {
     FastSyncConfig& c = configs[config_idx];
     c.last_error.clear();
     FastSyncRequest req = build_fastsync_request(*this, c);
-    if (req.krs_body.empty()) { c.last_error = "krs_code пуст"; return false; }
+    if (req.krs_body.empty()) { c.last_error = "krs_code is empty"; return false; }
     FastSyncResult r = engine.run_fastsync(req);
     bool ok = r.ok;
     apply_fastsync_result(c, std::move(r));
@@ -2409,7 +2409,7 @@ bool FastSyncAnalysisSession::run_async(ParametricEngine& engine, int config_idx
 
     FastSyncRequest req = build_fastsync_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст";
+        c.last_error = "krs_code is empty";
         cancel_token.reset(); progress_token.reset();
         return false;
     }
@@ -2648,7 +2648,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LS2DResult r = engine.run_ls_2d(req);
@@ -2658,7 +2658,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LS1DResult r = engine.run_ls_1d(req);
@@ -2696,7 +2696,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -2713,7 +2713,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
