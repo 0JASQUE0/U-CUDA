@@ -1078,6 +1078,70 @@ struct OrderResult {
     double e1_min = 0.0, e1_max = 0.0;
 };
 
+// ---------------------------------------------------------------------------
+// Performance — замер времени счёта (третья вкладка графика на Order).
+//
+// По той же одномерной сетке узлов, что и Order, но меряется НЕ ошибка, а
+// время: на каждом узле запускается perfIntegrateKernel, который интегрирует
+// одну траекторию шагом этого узла, repeats раз подряд. В зачёт идёт только
+// сам запуск — cudaEvent стоят вплотную вокруг cuLaunchKernel, загрузки H2D
+// сделаны до цикла, выгрузка D2H — после, компиляция модуля не входит в замер
+// по определению (модуль общий с Order и к этому моменту уже готов).
+//
+// Ошибки E1/E2 для оси X берутся из ОТДЕЛЬНОГО, не засекаемого прогона
+// orderEstimateKernel по той же сетке: на графике «время vs ошибка» это ровно
+// та ошибка, ради которой заплачено измеренное время.
+struct PerfRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;   // [amountOfX]
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    OrderAxis axis;           // всегда одномерная: H или Value
+
+    double h       = 0.01;
+    double t_max   = 10.0;
+    bool   snap_steps    = true;
+    bool   endpoint_only = false;
+    double max_value = 1.0e6;
+
+    int repeats  = 20;   // засекаемых запусков на узел
+    int warmup   = 2;    // прогревочных запусков вне зачёта (первый тянет загрузку кода)
+    int replicas = 1;    // одинаковых потоков в замеряемом запуске
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct PerfResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_pts = 0;
+    OrderAxis axis;
+    std::vector<double> axis_vals;
+
+    // Из order-прохода (та же раскладка, что в OrderResult, но всегда 1D).
+    std::vector<double> e1, e2, p, h_eff;
+    std::vector<int>    status;
+
+    // Время ОДНОГО запуска в микросекундах, по repeats замерам на узел.
+    std::vector<double>    t_min, t_max, t_avg;
+    std::vector<long long> n_steps;   // шагов в замеряемом запуске
+
+    int repeats = 0, warmup = 0, replicas = 0;
+
+    // Диапазоны по узлам, у которых есть и время, и конечная положительная
+    // ошибка — по ним автоскейлится график «время vs ошибка».
+    double e1_min = 0.0, e1_max = 0.0;
+    double e2_min = 0.0, e2_max = 0.0;
+    double t_lo   = 0.0, t_hi   = 0.0;
+
+    int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -1123,6 +1187,9 @@ public:
     // Order — оценка порядка точности (Эйткен/Ричардсон на тройке h, h/2, h/4).
     // Один вызов обслуживает и 1D-диаграмму, и 2D-карту: различает их axis_y.kind.
     OrderResult run_order(const OrderRequest& req);
+
+    // Performance — время счёта vs ошибка по той же одномерной сетке.
+    PerfResult run_performance(const PerfRequest& req);
 
     // Компилирует модуль под этот запрос, ничего не считая: тот же ключ кэша, что возьмёт
     // соответствующий run_*, поэтому Run потом просто найдёт готовый модуль. Зовётся из фонового

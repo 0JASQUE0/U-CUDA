@@ -963,6 +963,120 @@ bool export_fastsync(const FastSyncResult& res, const std::string& path)
     return true;
 }
 
+// Order / Performance
+
+static void write_order_config(std::ofstream& out, const OrderSnapshot& s, bool perf)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    out << (perf ? "Order / Performance\n" : "Order (accuracy order)\n");
+    out << "scheme = " << s.scheme << "\n";
+    out << "h = " << s.h << "\n";
+    out << "CT = " << s.t_max << "\n";
+    out << "max value = " << s.max_value << "\n";
+    out << "snap h -> t_max/N = " << (s.snap_steps ? 1 : 0) << "\n";
+    out << "endpoint only = "     << (s.endpoint_only ? 1 : 0) << "\n";
+    out << "axis_x = " << s.axis_x_name << "\n";
+    if (!s.axis_y_name.empty()) out << "axis_y = " << s.axis_y_name << "\n";
+
+    out << "IC: ";
+    for (size_t i = 0; i < s.initial_conditions.size(); ++i) {
+        if (i) out << ", ";
+        if (i < s.var_names.size()) out << s.var_names[i] << " = ";
+        out << s.initial_conditions[i];
+    }
+    out << "\n";
+
+    // values[0] — коэффициент симметрии s, values[1..M] — параметры системы
+    // (та же раскладка a[], что во всех вкладках).
+    out << "params: ";
+    for (size_t i = 0; i < s.values.size(); ++i) {
+        if (i) out << ", ";
+        if (i == 0) out << "s = ";
+        else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        out << s.values[i];
+    }
+    out << "\n";
+
+    if (perf) {
+        out << "measurements per node = " << s.repeats << "\n";
+        out << "warmup runs = "           << s.warmup  << "\n";
+        out << "replicas per launch = "   << s.replicas << "\n";
+        out << "timing = cudaEvent around the kernel launch only "
+               "(no H2D/D2H, no compilation)\n";
+    }
+    write_fmad_line(out, s.gpu_fmad);
+    out << "NVRTC split compilation = " << (s.gpu_rdc ? "on" : "off") << "\n";
+}
+
+bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::string& path)
+{
+    std::ofstream cfg(path + "_config.csv");
+    if (!cfg.is_open()) return false;
+    write_order_config(cfg, snap, /*perf*/ false);
+    cfg.close();
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+
+    const bool two_d = res.n_pts_y > 1;
+    if (two_d) out << "x,y,h_eff,p,E1,E2,status\n";
+    else       out << "x,h_eff,p,E1,E2,status\n";
+
+    const size_t total = res.p.size();
+    for (size_t i = 0; i < total; ++i) {
+        const size_t ix = (res.n_pts_x > 0) ? (i % (size_t)res.n_pts_x) : 0;
+        const size_t iy = (res.n_pts_x > 0) ? (i / (size_t)res.n_pts_x) : 0;
+        if (ix < res.axis_x_vals.size()) out << res.axis_x_vals[ix];
+        out << ",";
+        if (two_d) {
+            if (iy < res.axis_y_vals.size()) out << res.axis_y_vals[iy];
+            out << ",";
+        }
+        out << (i < res.h_eff.size() ? res.h_eff[i] : 0.0) << ","
+            << res.p[i] << ","
+            << (i < res.e1.size() ? res.e1[i] : 0.0) << ","
+            << (i < res.e2.size() ? res.e2[i] : 0.0) << ","
+            << (i < res.status.size() ? res.status[i] : 0) << "\n";
+    }
+    return true;
+}
+
+bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path)
+{
+    std::ofstream cfg(path + "_config.csv");
+    if (!cfg.is_open()) return false;
+    write_order_config(cfg, snap, /*perf*/ true);
+    cfg.close();
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+    out << "x,h_eff,n_steps,E1,E2,t_min_us,t_avg_us,t_max_us,status\n";
+
+    // Ячейку без замера оставляем ПУСТОЙ: ноль здесь читался бы как
+    // «посчитано мгновенно», а это ровно противоположный смысл.
+    auto cell = [&out](const std::vector<double>& v, size_t i) {
+        out << ",";
+        if (i < v.size() && std::isfinite(v[i])) out << v[i];
+    };
+
+    for (int i = 0; i < res.n_pts; ++i) {
+        const size_t k = (size_t)i;
+        if (k < res.axis_vals.size()) out << res.axis_vals[k];
+        out << "," << (k < res.h_eff.size() ? res.h_eff[k] : 0.0)
+            << "," << (k < res.n_steps.size() ? res.n_steps[k] : 0LL);
+        cell(res.e1, k);
+        cell(res.e2, k);
+        cell(res.t_min, k);
+        cell(res.t_avg, k);
+        cell(res.t_max, k);
+        out << "," << (k < res.status.size() ? res.status[k] : 0) << "\n";
+    }
+    return true;
+}
+
 // legacy — построчные копии блоков _config.csv из hostLibrary.cu. Каждая строка перенесена
 // дословно, включая опечатки и расстановку пробелов (обоснование — в data_export.h). Сверять правки
 // надо с форматом, а не с «как правильно»: эти файлы читают внешние скрипты.

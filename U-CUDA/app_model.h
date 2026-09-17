@@ -78,6 +78,41 @@ struct Dft1DPlotWindow {
     int id = 0;
 };
 
+// Одно окно графика вкладки Order — полный аналог ParametricPlotWindow.
+// Что показано в окне, определяет список members (индексы
+// order_session.configs), поэтому один и тот же конфиг может лежать сразу в
+// нескольких окнах, а окно — собирать кривые нескольких вкладок. Ради этого
+// сравнения (Эйлер против RK4 на одной диаграмме) окна и заведены.
+//
+// Настройки ОТОБРАЖЕНИЯ живут на окне, а не на конфиге: масштаб оси в окне
+// общий для всех лежащих в нём кривых, и хранить его на конфиге значило бы
+// иметь столько мнений о масштабе, сколько в окне вкладок.
+struct OrderPlotWindow {
+    // Одномерные виды (P / Error / Perf) оверлеят сколько угодно конфигов;
+    // Map — хитмапа, и живёт ровно с одним.
+    enum class Kind { P = 0, Error = 1, Map = 2, Perf = 3 };
+    Kind kind = Kind::P;
+
+    std::string label = "Plot 1";
+    bool        label_is_manual = true;
+    std::vector<int> members;
+    int id = 0;
+
+    bool x_log = true;
+    bool y_log = true;          // лог берётся от ЗНАЧЕНИЙ: Plot2DView умеет лог только по X
+    bool show_e2 = false;       // Error: вторая разность рядом с первой
+    bool show_nominal = false;  // P: паспортный порядок схемы горизонталью
+    bool map_error = false;     // Map: log10 E1 вместо p
+    int  colormap_idx = -1;     // Map; -1 = взять app-дефолт
+    int  error_source = 0;      // Perf: 0 = E1, 1 = E2 по оси X
+    int  time_unit = 0;         // Perf: 0 = мкс, 1 = мс
+    bool show_min = true, show_avg = true, show_max = true;   // Perf
+
+    // Сигнатура нарисованного на прошлом кадре: по её изменению запрашивается
+    // autofit. Транзиентное, не сериализуется.
+    int plot_sig = -1;
+};
+
 // Один элемент DFT1D-очереди — индекс config'а в dft1d_session.configs.
 // Отдельная очередь по той же причине, что и у Basins/FastSync — DFT1D
 // независим от parametric/basins по UI.
@@ -96,6 +131,13 @@ struct BasinsQueueItem {
 // Аналогично для FastSync: индекс config'а в fastsync_session.configs.
 // Отдельная очередь по той же причине — FastSync независим от parametric/basins.
 struct FastSyncQueueItem {
+    int index = 0;
+};
+
+// Аналогично для Order: индекс config'а в order_session.configs. Своя очередь
+// по той же причине, что у Basins/FastSync — вкладка независима по UI, а
+// движок всё равно обслуживает её последовательно.
+struct OrderQueueItem {
     int index = 0;
 };
 
@@ -532,6 +574,16 @@ public:
     void remove_dft1d_plot_window(int pos);
     void load_or_init_dft1d_plot_windows(const std::string& json);
 
+    // Dynamic plot windows for Order mode (see OrderPlotWindow).
+    std::vector<OrderPlotWindow> order_plot_windows;
+    int  next_order_plot_window_id = 1;
+    int  order_layout_generation = 0;
+    bool order_plot_windows_dirty = false;
+
+    void add_order_plot_window(OrderPlotWindow::Kind kind, std::vector<int> initial_members);
+    void remove_order_plot_window(int pos);
+    void load_or_init_order_plot_windows(const std::string& json);
+
     // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
     std::deque<BasinsQueueItem> basins_queue;
     bool start_next_in_basins_queue();
@@ -539,6 +591,10 @@ public:
     // FastSync batch queue — независимая (см. FastSyncQueueItem).
     std::deque<FastSyncQueueItem> fastsync_queue;
     bool start_next_in_fastsync_queue();
+
+    // Order batch queue — независимая (см. OrderQueueItem).
+    std::deque<OrderQueueItem> order_queue;
+    bool start_next_in_order_queue();
 
     // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
     // Items are pushed by the Run buttons and by drill-down clicks; drained
@@ -557,6 +613,7 @@ public:
     void remove_dft1d_config(int i);
     void remove_basins_config(int i);
     void remove_fastsync_config(int i);
+    void remove_order_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.

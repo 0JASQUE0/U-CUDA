@@ -252,6 +252,19 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return axis + " [" + lo + ".." + hi + "]";
 }
 
+// Устойчивая часть подписи — всё до " [", то есть имя оси без диапазона.
+// Нужна отмене (ViewRangeTarget::relocate), которая опознаёт конфиг по подписи.
+// Автоподпись 1D-диаграммы — это "<ось> [lo..hi]" (sweep_range_label выше), а
+// диапазон в ней переписывает ровно та команда, которую потом откатывают: сверять
+// подпись целиком значило сверять её с тем, что сам же и изменил, и сверка
+// проваливалась всегда. У 2D автоподпись "<x> x <y>" скобок не содержит, у ручных
+// имён их обычно нет — там функция возвращает строку как есть, то есть поведение
+// прежнее. Отсюда и симптом «Ctrl+Z не работает именно в 1D».
+[[nodiscard]] static std::string label_identity(const std::string& s) {
+    const size_t k = s.rfind(" [");
+    return k == std::string::npos ? s : s.substr(0, k);
+}
+
 // Автоподпись BD / LLE / LS: "<x> x <y>" в 2D-режиме, "<x> [lo..hi]" в 1D.
 // Шаблон, а не общий базовый класс: конфиги независимы, связывать их
 // наследованием ради одинакового набора полей было бы хуже. Раньше — три
@@ -1001,12 +1014,14 @@ template <class T>
         bool T::*y_manual = nullptr) {
     ViewRangeTarget t;
     if (idx < 0 || idx >= (int)vec.size()) return t;   // цели нет — пустая
-    t.relocate = [&vec, idx, label = vec[(size_t)idx].label,
+    t.relocate = [&vec, idx, label_id = label_identity(vec[(size_t)idx].label),
                   x_lo, x_hi, y_lo, y_hi, y_manual]() {
         ViewRangeSlots s;
         if (idx < 0 || idx >= (int)vec.size()) return s;
         T& c = vec[(size_t)idx];
-        if (c.label != label) return s;   // на этом индексе уже другой конфиг
+        // Сверяем ИМЯ ОСИ, а не подпись целиком: диапазон в автоподписи 1D-диаграммы
+        // меняет сама эта команда (см. label_identity).
+        if (label_identity(c.label) != label_id) return s;   // на этом индексе другой конфиг
         s.x_lo = &(c.*x_lo); s.x_hi = &(c.*x_hi);
         if (y_lo)     s.y_lo = &(c.*y_lo);
         if (y_hi)     s.y_hi = &(c.*y_hi);
@@ -1303,9 +1318,15 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
 }
 
 // Пункты правого клика. Зовётся из popup_extras, т.е. уже внутри BeginPopup.
+// swapped и model — БЕЗ значений по умолчанию, и это принципиально. Пока они были
+// умолчательными, вызов с четырьмя аргументами компилировался молча: AppModel* приводился
+// к bool в параметр swapped (указатель всегда ненулевой, то есть swapped = true), а model
+// оставался nullptr. У всех 1D-графиков это давало сразу три поломки — диапазон свипа брался
+// с оси Y вместо X, запись не попадала в стек отмены и не отчитывалась в шапке, а
+// Ctrl+Shift+T сваливался на одну цель. Теперь недостача аргумента — ошибка компиляции.
 static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
                                  const AxisInfo& x, const AxisInfo& y,
-                                 bool swapped = false, AppModel* model = nullptr) {
+                                 bool swapped, AppModel* model) {
     if (!view_range_bound(targets)) { draw_undo_menu_item(model); return; }
     ImGui::Separator();
     std::string one = "Calculation range from view";
@@ -1405,7 +1426,7 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
 // здесь означал бы "перепиши диапазон неизвестно чему".
 static void handle_view_range_keys(const std::vector<ViewRangeTarget>& targets,
                                    const AxisInfo& x, const AxisInfo& y, bool active,
-                                   bool swapped = false, AppModel* model = nullptr) {
+                                   bool swapped, AppModel* model) {   // без умолчаний — см. draw_view_range_menu
     if (!active || !view_range_bound(targets)) return;
     const ImGuiIO& io = ImGui::GetIO();
     // С Alt не реагируем вовсе: Ctrl+Alt+T — не наше сочетание, и тихо
@@ -1978,8 +1999,8 @@ static HeatmapView& get_or_create_heatmap(
 // assign() передёргивал буферы каждый кадр, и оптимизация не работала (корректность при этом
 // не страдала — render() забирает точки синхронно).
 // Записи удалённых окон остаются в карте до перезапуска, как и у хитмап: окон единицы.
-static std::vector<std::vector<float>>& window_point_bufs(int window_id, size_t n_series) {
-    static std::map<int, std::vector<std::vector<float>>> cache;
+static std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t n_series) {
+    static std::map<int, std::vector<std::vector<double>>> cache;
     auto& bufs = cache[window_id];
     if (bufs.size() != n_series) bufs.assign(n_series, {});
     return bufs;
@@ -3690,7 +3711,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // локальный — render() ниже забирает точки синхронно. static тут был
                     // бесполезен (clear()+resize() всё равно убивает capacity) и опасен:
                     // три вызова draw_projection_windows делили бы один буфер.
-                    std::vector<std::vector<float>> series_data(res.trajectories.size());
+                    std::vector<std::vector<double>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.trajectories.size());
@@ -3714,14 +3735,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         if (as_point) {
                             if (!traj.empty()) {
                                 const auto& pt = traj.back();
-                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
                             }
                         } else {
                             buf.reserve(traj.size() * 2);
                             for (const auto& pt : traj) {
-                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
                             }
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
@@ -3816,7 +3837,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->imdraw_lines = false;
 
                     // Локальный буфер — см. series_data в ветке Phase2D выше.
-                    std::vector<std::vector<float>> feat_data(res.features.size());
+                    std::vector<std::vector<double>> feat_data(res.features.size());
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.features.size());
                     std::vector<bool> init_vis(res.features.size(), true);
@@ -3834,8 +3855,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             for (size_t p = 0; p < n; ++p) {
                                 if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
                                     continue;
-                                buf.push_back((float)(fp.peaks[p]     * mp));
-                                buf.push_back((float)(fp.intervals[p] * mi));
+                                buf.push_back((double)(fp.peaks[p]     * mp));
+                                buf.push_back((double)(fp.intervals[p] * mi));
                             }
                             total_pts += buf.size() / 2;
                         }
@@ -3940,7 +3961,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     // серии: одна на (траектория k, видимая переменная vi).
                     // Локальный буфер — см. ветку Phase2D выше.
-                    std::vector<std::vector<float>> series_data;
+                    std::vector<std::vector<double>> series_data;
 
                     std::vector<PlotSeriesInput> series_in;
                     std::vector<bool> init_vis;
@@ -3970,8 +3991,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             auto& buf = series_data.back();
                             buf.reserve(n * 2);
                             for (int t = 0; t < n; ++t) {
-                                buf.push_back((float)(t * dt));
-                                buf.push_back((float)(is_combo
+                                buf.push_back((double)(t * dt));
+                                buf.push_back((double)(is_combo
                                     ? combo_var_value(traj[t], nvars)
                                     : traj[t][vi < (int)traj[t].size() ? vi : 0]));
                             }
@@ -4335,9 +4356,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         auto& buf = series_data[k];
                         buf.reserve(traj.size() * 3);
                         for (const auto& pt : traj) {
-                            buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                            buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
-                            buf.push_back((float)pt[az < (int)pt.size() ? az : 0]);
+                            buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                            buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
+                            buf.push_back((double)pt[az < (int)pt.size() ? az : 0]);
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
                         if (s.legend_show_ic) lab = ic_legend_text(res, k);
@@ -4406,7 +4427,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     size_t total_pts = 0;
                     for (size_t k = 0; k < s.continuation_peaks.size(); ++k) {
                         const auto& per_var = s.continuation_peaks[k];
-                        const float* pts = nullptr;
+                        const double* pts = nullptr;
                         int          np  = 0;
                         if (av >= 0 && av < (int)per_var.size()) {
                             const auto& buf = per_var[(size_t)av];
@@ -5116,8 +5137,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev, bd.continuation);
                 if (k >= (int)source.size()) continue;
                 for (double y : source[k]) {
-                    buf.push_back((float)x);
-                    buf.push_back((float)y);
+                    buf.push_back((double)x);
+                    buf.push_back((double)y);
                     ++total_pts;
                 }
             }
@@ -5161,7 +5182,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             [&s](int i) { return s.in_flight && i == s.running_diagram_index; },
             [&s](int i, const std::string& p) { data_export::export_bif1d(s.diagrams[i].result, p); },
             cb);
-        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
     // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_first_member).
@@ -5180,7 +5201,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
 
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE0F1D, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
-    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
 
 // LLE: контролы (per-curve в табе) + line-plot λ(param)
@@ -5466,8 +5487,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
                 double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
                 double y = c.result.lyapunov[k];
                 if (!std::isfinite(y)) continue;
-                buf.push_back((float)x);
-                buf.push_back((float)y);
+                buf.push_back((double)x);
+                buf.push_back((double)y);
                 ++total_pts;
             }
         }
@@ -5499,7 +5520,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
             [&s](int i, const std::string& p) { data_export::export_lle1d(s.curves[i].result, p); },
             cb);
-        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
     // Snap X к узлам первой кривой этого окна (см. apply_snap_x_from_first_member).
@@ -5509,7 +5530,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE11E5, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
-    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
 
 // LS: контролы (per-curve в табе) + line-plot λ_k(param), N экспонент
@@ -5826,8 +5847,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                     double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
                     double y = row[j];
                     if (!std::isfinite(y)) continue;
-                    buf.push_back((float)x);
-                    buf.push_back((float)y);
+                    buf.push_back((double)x);
+                    buf.push_back((double)y);
                     ++total_pts;
                 }
             }
@@ -5862,7 +5883,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_curve_index; },
             [&s](int i, const std::string& p) { data_export::export_ls1d(s.curves[i].result, p); },
             cb);
-        draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
     // Snap X к узлам первой LS-кривой этого окна (см. apply_snap_x_from_first_member).
@@ -5872,7 +5893,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(renderer, origin, avail, /*owner_id*/ 0x15A1E0, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
-    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
 
 // Parametric plot windows — shared setup-row helper. The row (Label | Type | Members... | X)
@@ -7177,7 +7198,7 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         int min_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
 
         // Сгруппируем точки по basin_idx.
-        std::map<int, std::vector<float>> bufs;
+        std::map<int, std::vector<double>> bufs;
         int valid_pts = 0;
         for (size_t k = 0; k < total; ++k) {
             int id = src_idx[k];
@@ -7186,8 +7207,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             if (!std::isfinite(xp) || !std::isfinite(yp)) continue;
             if (xp ==  kSentinelNoData || xp == -kSentinelNoData ||
                 yp ==  kSentinelNoData || yp == -kSentinelNoData) continue;
-            bufs[id].push_back((float)xp);
-            bufs[id].push_back((float)yp);
+            bufs[id].push_back((double)xp);
+            bufs[id].push_back((double)yp);
             ++valid_pts;
         }
         if (valid_pts == 0) {
@@ -7198,7 +7219,7 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         // Буферы локальные: render() ниже забирает точки синхронно, дольше
         // вызова указатели не нужны (static здесь ещё и делил бы память между
         // config'ами бассейнов).
-        std::vector<std::vector<float>> series_buffers;
+        std::vector<std::vector<double>> series_buffers;
         std::vector<std::string>        series_labels;
         series_buffers.reserve(bufs.size());
         series_labels.reserve(bufs.size());
@@ -7817,7 +7838,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // Пересобираем XY/values из полного буфера (без decimator'а — рисуем
         // все точки, ImDrawList сегмент-за-сегментом справляется).
         int n_in = c.result.n_pts_traj;
-        static std::vector<float> xy_buf;
+        static std::vector<double> xy_buf;
         static std::vector<float> err_buf;
         xy_buf.resize((size_t)n_in * 2);
         err_buf.resize((size_t)n_in);
@@ -8114,6 +8135,45 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
     }
 }
 
+// Определено ниже, вместе с окнами графиков: панель настроек раздаёт по ним
+// вкладки и обязана знать, какой вид окна какие конфиги принимает.
+static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k);
+
+// Вид окна, в котором конфигу место по его текущим настройкам.
+static OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
+    if (c.calc_kind == kOrderCalcPerf) return OrderPlotWindow::Kind::Perf;
+    return c.two_d ? OrderPlotWindow::Kind::Map : OrderPlotWindow::Kind::P;
+}
+
+// Конфиг сменил вид расчёта (или размерность сетки) — перевесить его на окно,
+// которое такое умеет показывать. Без этого переключение на performance
+// вынимало вкладку из всех окон, и Run выглядел как «ничего не произошло».
+static void order_rehome_config(AppModel& model, int idx) {
+    OrderAnalysisSession& s = model.order_session;
+    if (idx < 0 || idx >= (int)s.configs.size()) return;
+    const OrderConfig& c = s.configs[(size_t)idx];
+    const OrderPlotWindow::Kind want = order_kind_for(c);
+    bool placed = false;
+    for (auto& w : model.order_plot_windows) {
+        auto& mem = w.members;
+        const bool has  = std::find(mem.begin(), mem.end(), idx) != mem.end();
+        const bool fits = order_member_fits(c, w.kind);
+        if (has && !fits) {
+            mem.erase(std::remove(mem.begin(), mem.end(), idx), mem.end());
+            continue;
+        }
+        if (has) { placed = true; continue; }
+        // Доложить в ПЕРВОЕ подходящее окно нужного вида; карты одиночны, для
+        // них всегда заводится своё окно.
+        if (fits && !placed && w.kind == want && want != OrderPlotWindow::Kind::Map) {
+            mem.push_back(idx);
+            placed = true;
+        }
+    }
+    if (!placed) model.add_order_plot_window(want, { idx });
+    model.order_plot_windows_dirty = true;
+}
+
 static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     OrderAnalysisSession& s = model.order_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -8126,50 +8186,96 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
 
-    if (ImGui::BeginTabBar("##order_tabs", ImGuiTabBarFlags_AutoSelectNewTabs |
-                                           ImGuiTabBarFlags_Reorderable)) {
-        int to_remove = -1;
-        for (int i = 0; i < (int)s.configs.size(); ++i) {
-            bool open = true;
-            ImGui::PushID(i);
-            const std::string tab_id = s.configs[(size_t)i].label + "##ordertab" + std::to_string(i);
-            if (ImGui::BeginTabItem(tab_id.c_str(), s.configs.size() > 1 ? &open : nullptr)) {
-                s.active_config_index = i;
-                ImGui::EndTabItem();
-            }
-            if (!open) to_remove = i;
-            ImGui::PopID();
-        }
-        if (ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing | ImGuiTabItemFlags_NoTooltip))
-            s.add_config();
-        ImGui::EndTabBar();
-        if (to_remove >= 0) s.remove_config(to_remove);
+    // Run / Run all... — над таб-баром, как у Basins/FastSync: управляют активным
+    // конфигом и должны быть доступны без прокрутки. Ctrl+R / Ctrl+Shift+R приходят
+    // вместе с общим хелпером; "Run all..." кладёт отмеченные индексы в
+    // model.order_queue, которую draw_gui тикает после poll'ов.
+    {
+        const bool no_cfg = s.configs.empty();
+        RunAllGroup g;
+        g.pick_id = "porder_";
+        g.n       = (int)s.configs.size();
+        g.label   = [&s](int i) { return s.configs[i].label; };
+        g.enqueue = [&model](int i) { model.order_queue.push_back({ i }); };
+        draw_run_and_run_all("##run_all_order", s.in_flight, no_cfg,
+                             s.in_flight || no_cfg, 160.0f,
+                             [&model, &s]() {
+                                 if (!model.parametric_engine)
+                                     model.parametric_engine = std::make_unique<ParametricEngine>();
+                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                             },
+                             [&s]() {
+                                 // Локальный Stop остаётся рядом с Run: глобальный
+                                 // Cancel живёт в статус-баре, но привычка жать Stop
+                                 // тут же, где Run, старше вкладки.
+                                 ImGui::SameLine();
+                                 if (!s.in_flight) ImGui::BeginDisabled();
+                                 if (ImGui::Button("Stop", ImVec2(90, 0))) s.request_cancel();
+                                 if (!s.in_flight) ImGui::EndDisabled();
+                             },
+                             { g },
+                             [&model]() { model.start_next_in_order_queue(); },
+                             model.order_queue.size());
     }
-    if (s.configs.empty()) return;
+    ImGui::Separator();
+
+    const TabBarResult tabs = draw_config_tab_bar(
+        "##order_tabs", "order_tab_", (int)s.configs.size(),
+        s.in_flight, s.running_config_index,
+        [&s](int i) { return s.configs[i].label; },
+        {},
+        [&s, &model]() {
+            s.add_config();
+            // Новая вкладка обязана где-то показаться: кладём её в первое
+            // подходящее окно-оверлей, а если такого нет — заводим своё.
+            const int ni = (int)s.configs.size() - 1;
+            if (ni < 0) return;
+            const OrderPlotWindow::Kind want = order_kind_for(s.configs[(size_t)ni]);
+            if (want != OrderPlotWindow::Kind::Map) {
+                for (auto& w : model.order_plot_windows)
+                    if (w.kind == want) {
+                        w.members.push_back(ni);
+                        model.order_plot_windows_dirty = true;
+                        return;
+                    }
+            }
+            model.add_order_plot_window(want, { ni });
+        });
+    if (tabs.active    >= 0) s.active_config_index = tabs.active;
+    if (tabs.to_remove >= 0) model.remove_order_config(tabs.to_remove);
+
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No order configs. Press '+' to add one.");
+        return;
+    }
     if (s.active_config_index >= (int)s.configs.size())
         s.active_config_index = (int)s.configs.size() - 1;
 
     const int idx = s.active_config_index;
     OrderConfig& c = s.configs[(size_t)idx];
 
-    // ---- Run / Stop ----
-    {
-        const bool busy = s.in_flight;
-        if (busy) ImGui::BeginDisabled();
-        if (ImGui::Button("Run", ImVec2(90, 0))) {
-            if (!model.parametric_engine)
-                model.parametric_engine = std::make_unique<ParametricEngine>();
-            s.run_async(*model.parametric_engine, idx);
-        }
-        if (busy) ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (!busy) ImGui::BeginDisabled();
-        if (ImGui::Button("Stop", ImVec2(90, 0))) s.request_cancel();
-        if (!busy) ImGui::EndDisabled();
-        ImGui::SameLine();
-        draw_label_rename("##order_label", c.label, kFieldW);
-    }
-
+    draw_label_rename("##order_label", c.label, kFieldW);
+    ImGui::SameLine();
+    ImGui::TextDisabled("|"); ImGui::SameLine();
+    const int calc_kind_before = c.calc_kind;
+    ImGui::RadioButton("order p", &c.calc_kind, kOrderCalcOrder);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Accuracy order and the error curve over the node grid.");
+    ImGui::SameLine();
+    ImGui::RadioButton("performance", &c.calc_kind, kOrderCalcPerf);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Timing over the same X axis: on every node the kernel that\n"
+            "integrates a single trajectory with that node's step is launched\n"
+            "several times under cudaEvents. The plot then shows time against\n"
+            "the error achieved - what that accuracy costs.");
+    if (c.calc_kind != calc_kind_before) order_rehome_config(model, idx);
+    // Дискретное отображение шага не имеет вовсе, уточнять нечего: обе
+    // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =
+    // f(x_n) обе разности тождественно нулевые.
+    if (s.sys.is_map)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                           "Discrete map: there is no step to refine, the accuracy order is undefined.");
     ImGui::Separator();
 
     // ---- Интегрирование ----
@@ -8209,9 +8315,62 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         draw_order_steps_hint(c, s);
     }
 
+    // ---- Performance ----
+    if (c.calc_kind == kOrderCalcPerf &&
+        ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        InputNumStr("measurements", c.perf_repeats_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "How many times to run the computation on every node. Minimum,\n"
+                "maximum and average are taken over these measurements - all\n"
+                "three go onto the plot.");
+        InputNumStr("warmup runs", c.perf_warmup_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Launches that do not count, made before the measurements. The\n"
+                "very first launch drags the code load into the context along with\n"
+                "it and is therefore always slower than the rest.");
+        InputNumStr("replicas", c.perf_replicas_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "How many IDENTICAL tasks the timed launch computes.\n"
+                "1 - the time of a single computation (the GPU mostly idles);\n"
+                "a large number - the throughput of a loaded GPU, where the\n"
+                "time per task = measured / replicas.");
+
+        const int n_nodes = std::max(1, (int)parse_num(c.axis_x_n_text, 200.0));
+        const int reps    = std::max(1, (int)parse_num(c.perf_repeats_text, 20.0));
+        const int wu      = std::max(0, (int)parse_num(c.perf_warmup_text, 2.0));
+        const long long launches = (long long)n_nodes * (long long)(reps + wu);
+        ImGui::TextDisabled("%d nodes x %d launches = %lld; plus the order pass for the errors",
+                            n_nodes, reps + wu, launches);
+        if (launches > 20000)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                               "a great many launches: the measurement will take %d times longer "
+                               "than a plain run",
+                               reps + wu);
+        ImGui::TextDisabled("Only the kernel launch itself is timed: no H2D/D2H, no compilation.");
+        // Split compilation не встраивает шаг в ядро, и та же задача считается
+        // в разы дольше (на Лоренце с явным Эйлером — в 3.6 раза). Настройка
+        // глобальная, поэтому кривые, снятые при разном её положении, сравнивать
+        // между собой нельзя.
+        if (model.nvrtc_rdc)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                               "Split compilation is on (Settings): the step is not inlined into "
+                               "the kernel,\nso the measured time is several times larger than "
+                               "with it off.");
+    }
+
     // ---- Оси ----
     if (ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("2D map", &c.two_d);
+        const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
+        if (perf_mode) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("2D map", &c.two_d)) order_rehome_config(model, idx);
+        if (perf_mode) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(the measurement is 1D: the X axis carries the error)");
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Off - a p(X axis) curve. On - a p(X, Y) map.");
         draw_order_axis_block("axx", "Axis X", s, c.axis_x_target,
@@ -8238,287 +8397,595 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     if (!c.last_error.empty())
         draw_error_box("##order_err", c.last_error);
+
+    // ---- Окна графиков ----
+    // Ровно та же схема, что у параметрики и DFT1D: окно знает свой вид и
+    // список вкладок, чьи кривые в нём лежат.
+    ImGui::Separator();
+    ImGui::SeparatorText("Plot windows");
+    int win_to_remove = -1;
+    for (int wi = 0; wi < (int)model.order_plot_windows.size(); ++wi) {
+        OrderPlotWindow& win = model.order_plot_windows[wi];
+        ImGui::PushID(win.id);
+        ImGui::SetNextItemWidth(150);
+        if (InputTextStr("##wlabel", win.label)) {
+            win.label_is_manual = !win.label.empty();   // пусто -> обратно к автоподписи
+            model.order_plot_windows_dirty = true;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140);
+        int kind = (int)win.kind;
+        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance" };
+        if (ImGui::Combo("##wkind", &kind, kind_names, 4)) {
+            win.kind = (OrderPlotWindow::Kind)kind;
+            // Члены, которые новому виду не подходят, из окна выпадают: иначе
+            // окно молча показывало бы "нет данных" от чужой вкладки.
+            auto& mem = win.members;
+            mem.erase(std::remove_if(mem.begin(), mem.end(), [&](int idx) {
+                          return idx < 0 || idx >= (int)s.configs.size()
+                              || !order_member_fits(s.configs[(size_t)idx], win.kind);
+                      }), mem.end());
+            if (win.kind == OrderPlotWindow::Kind::Map && mem.size() > 1) mem.resize(1);
+            if (win.kind == OrderPlotWindow::Kind::P) win.y_log = false;
+            win.plot_sig = -1;
+            model.order_plot_windows_dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_order_window_members");
+        if (ImGui::BeginPopup("edit_order_window_members")) {
+            bool any = false;
+            for (int ci = 0; ci < (int)s.configs.size(); ++ci) {
+                if (!order_member_fits(s.configs[(size_t)ci], win.kind)) continue;
+                any = true;
+                const std::string lbl = s.configs[(size_t)ci].label + "##ordmem" + std::to_string(ci);
+                const bool sel = std::find(win.members.begin(), win.members.end(), ci) != win.members.end();
+                if (win.kind == OrderPlotWindow::Kind::Map) {
+                    // Хитмапу поверх хитмапы не положишь — здесь выбор одиночный.
+                    if (ImGui::RadioButton(lbl.c_str(), sel)) {
+                        win.members.assign(1, ci);
+                        model.order_plot_windows_dirty = true;
+                    }
+                } else {
+                    bool v = sel;
+                    if (ImGui::Checkbox(lbl.c_str(), &v)) {
+                        if (v) win.members.push_back(ci);
+                        else   win.members.erase(std::remove(win.members.begin(), win.members.end(), ci),
+                                                 win.members.end());
+                        win.plot_sig = -1;
+                        model.order_plot_windows_dirty = true;
+                    }
+                }
+            }
+            if (!any) ImGui::TextDisabled("(no matching tabs)");
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) win_to_remove = wi;
+        ImGui::PopID();
+    }
+    if (win_to_remove >= 0) model.remove_order_plot_window(win_to_remove);
+
+    if (ImGui::Button("Add window"))
+        model.add_order_plot_window(order_kind_for(c), { s.active_config_index });
+    ImGui::SameLine();
+    if (ImGui::Button("Reset windows layout")) model.order_layout_generation++;
 }
 
-static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
+// ---------------------------------------------------------------------------
+// Order — окна графиков (см. OrderPlotWindow в app_model.h).
+//
+// Окно знает, ЧТО оно рисует (kind), и какие конфиги в нём лежат (members).
+// Одномерные виды оверлеят сколько угодно вкладок — ради сравнения схем между
+// собой вкладка и заведена; карта p(x, y) остаётся одиночной.
+
+static const char* order_window_kind_name(OrderPlotWindow::Kind k) {
+    switch (k) {
+        case OrderPlotWindow::Kind::P:     return "Order p";
+        case OrderPlotWindow::Kind::Error: return "Error";
+        case OrderPlotWindow::Kind::Map:   return "Order map 2D";
+        case OrderPlotWindow::Kind::Perf:  return "Performance";
+    }
+    return "Order";
+}
+
+// Может ли конфиг попасть в окно этого вида. Performance показывает только
+// замеры времени, карта — только двумерные прогоны, p/ошибка — одномерные.
+static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k) {
+    switch (k) {
+        case OrderPlotWindow::Kind::Perf: return c.calc_kind == kOrderCalcPerf;
+        case OrderPlotWindow::Kind::Map:  return c.calc_kind == kOrderCalcOrder && c.two_d;
+        default:                          return c.calc_kind == kOrderCalcOrder && !c.two_d;
+    }
+}
+
+// Оттенок базового цвета серии: min темнее, max светлее, avg — как есть.
+// Три кривые одной вкладки обязаны читаться как одна группа.
+static ImVec4 order_shade(ImVec4 c, float k) {
+    auto ch = [k](float v) { return std::min(1.0f, std::max(0.0f, v * k)); };
+    return ImVec4(ch(c.x), ch(c.y), ch(c.z), c.w);
+}
+
+// Короткая сводка по статусам прогона — содержательная часть диаграммы:
+// левый обвал (потеря устойчивости) и правая полка (машинная точность) видны
+// именно как счётчики, а не только как форма кривой.
+static void draw_order_status_line(const char* label, int n_ok, int n_div, int n_floor, int n_noc) {
+    ImGui::TextDisabled("%s:", label);
+    ImGui::SameLine(); ImGui::Text("ok %d", n_ok);
+    ImGui::SameLine(); ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "| diverged %d", n_div);
+    ImGui::SameLine(); ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "| floor %d", n_floor);
+    ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| p<=0 %d", n_noc);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "floor    - E2 sank into the machine precision of the solution: the right\n"
+            "           plateau, the order is not measurable any further.\n"
+            "p<=0     - the differences stopped contracting: loss of\n"
+            "           stability, the left edge of the working window in h.\n"
+            "diverged - nan/inf or |X| > max value; such cells are NaN.");
+}
+
+// Снимок настроек вкладки для <path>_config.csv: движок его не собирает —
+// OrderResult/PerfResult не носят ни схемы, ни параметров системы.
+static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
+                                                 const OrderConfig& c,
+                                                 bool two_d, bool gpu_fmad, bool gpu_rdc) {
+    data_export::OrderSnapshot sn;
+    sn.scheme      = c.scheme;
+    sn.axis_x_name = s.axis_target_label(c.axis_x_target);
+    sn.axis_y_name = two_d ? s.axis_target_label(c.axis_y_target) : std::string();
+    sn.var_names   = s.vars;
+    sn.param_names = s.params;
+    for (const auto& v : s.vars) {
+        auto it = c.initial_conditions.find(v);
+        sn.initial_conditions.push_back(it != c.initial_conditions.end() ? parse_num(it->second, 0.0) : 0.0);
+    }
+    sn.values.push_back(parse_num(c.symmetry_s, 0.5));
+    for (const auto& p : s.params) {
+        auto it = c.param_values.find(p);
+        sn.values.push_back(it != c.param_values.end() ? parse_num(it->second, 0.0) : 0.0);
+    }
+    sn.h             = parse_num(c.h_text, 0.01);
+    sn.t_max         = parse_num(c.t_max_text, 10.0);
+    sn.max_value     = parse_num(c.max_value_text, 1.0e6);
+    sn.snap_steps    = c.snap_steps;
+    sn.endpoint_only = c.endpoint_only;
+    sn.gpu_fmad      = gpu_fmad;
+    sn.gpu_rdc       = gpu_rdc;
+    // Режим замера пишем ФАКТИЧЕСКИЙ, из результата: поля вкладки могли
+    // измениться уже после прогона.
+    sn.repeats  = c.perf_result.repeats;
+    sn.warmup   = c.perf_result.warmup;
+    sn.replicas = c.perf_result.replicas;
+    return sn;
+}
+
+// ПКМ по графику: по пункту на каждую лежащую в окне вкладку — в оверлее
+// «просто экспортировать» нечего, файлы у вкладок разные.
+static void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
+                                    const GuiCallbacks& cb, bool busy) {
+    const OrderAnalysisSession& s = model.order_session;
+    const bool perf = (win.kind == OrderPlotWindow::Kind::Perf);
+    for (int mi : win.members) {
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        const OrderConfig& c = s.configs[(size_t)mi];
+        const bool has = perf ? c.perf_last_run_ok : c.last_run_ok;
+        const std::string item = "Export " + c.label + "...";
+        if (!ImGui::MenuItem(item.c_str(), nullptr, false, has && !busy)) continue;
+        if (!cb.pick_save_file_csv) continue;
+        const std::string path = cb.pick_save_file_csv();
+        if (path.empty()) continue;
+        const data_export::OrderSnapshot sn =
+            order_snapshot(s, c, win.kind == OrderPlotWindow::Kind::Map,
+                           model.nvrtc_fmad, model.nvrtc_rdc);
+        if (perf) data_export::export_perf(c.perf_result, sn, path);
+        else      data_export::export_order(c.result, sn, path);
+    }
+}
+
+// 2D-карта: ровно один член, хитмапа p или log10 E1.
+static void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
+                                  const GuiCallbacks& cb,
+                                  PlotRenderer& renderer, HeatmapView& hv) {
     OrderAnalysisSession& s = model.order_session;
-    if (s.configs.empty()) { ImGui::TextDisabled("No data yet. Press Run."); return; }
-    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
-        s.active_config_index = 0;
-    OrderConfig& c = s.configs[(size_t)s.active_config_index];
-
-    static std::unique_ptr<PlotRenderer> renderer;
-    static std::map<int, std::unique_ptr<HeatmapView>> hm_map;
-    static std::map<int, std::unique_ptr<Plot2DView>>  curve_map;
-    if (!renderer) renderer = std::make_unique<PlotRenderer>();
-
-    const int oid = s.active_config_index;
+    if (win.members.empty()) { ImGui::TextDisabled("The window is empty - add a tab via \"Members...\"."); return; }
+    const int mi = win.members[0];
+    if (mi < 0 || mi >= (int)s.configs.size()) { ImGui::TextDisabled("The tab has been removed."); return; }
+    OrderConfig& c = s.configs[(size_t)mi];
     const OrderResult& r = c.result;
 
-    // Сводка по статусам — она и есть содержательная часть диаграммы:
-    // левый обвал (потеря устойчивости) и правая полка (машинная точность)
-    // видны именно как счётчики, а не только как форма кривой.
-    if (c.last_run_ok) {
-        ImGui::Text("ok %d", r.n_ok);
-        ImGui::SameLine(); ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "| diverged %d", r.n_diverged);
-        ImGui::SameLine(); ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "| floor %d", r.n_floor);
-        ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| p<=0 %d", r.n_nocontract);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "floor    - E2 sank into the machine precision of the solution: the right\n"
-                "           plateau, the order is not measurable any further.\n"
-                "p<=0     - the differences stopped contracting: loss of\n"
-                "           stability, the left edge of the working window in h.\n"
-                "diverged - nan/inf or |X| > max value; such cells are NaN.");
-    }
+    ImGui::Checkbox("show error", &win.map_error);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Off - the map of the order p. On - log10 E1.");
+    ImGui::SameLine();
+    draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
 
-    if (ImGui::BeginTabBar("##order_plot_tabs")) {
-        if (ImGui::BeginTabItem("Order p")) { c.active_plot_tab = 0; ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Error"))   { c.active_plot_tab = 1; ImGui::EndTabItem(); }
-        ImGui::EndTabBar();
-    }
-    const bool show_err = (c.active_plot_tab == 1);
-
-    if (!c.last_run_ok || r.p.empty()) {
+    if (!c.last_run_ok || r.p.empty() || r.n_pts_y <= 1) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
 
-    // Вкладки p и «ошибка» рисуют РАЗНЫЕ величины, поэтому у каждой свой вью:
-    // иначе они делят зум, цветовую шкалу и колормапу, а переключение вкладки
-    // выглядит как поехавший масштаб.
-    const int tab = show_err ? 1 : 0;
-
-    // ------------------------------- 2D -------------------------------
-    if (r.n_pts_y > 1) {
-        auto& slot = hm_map[oid * 2 + tab];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-            slot->colormap = (HeatmapColormap)colormap_id_or(
-                c.colormap_idx[tab], model.heatmap_colormap);
-        }
-        HeatmapView& hv = *slot;
-        {
-            HeatmapToolbarOpts topts;
-            topts.persist_colormap = [&c, tab](int cm) { c.colormap_idx[tab] = cm; };
-            draw_heatmap_toolbar(hv, topts);
-        }
-
-        // Ошибка гуляет на много порядков — в карту идёт log10, иначе одна
-        // ячейка растягивает шкалу и остальное становится однотонным.
-        static std::vector<double> buf;
-        const std::vector<double>* vals = &r.p;
-        if (show_err) {
-            buf.resize(r.e1.size());
-            for (size_t i = 0; i < r.e1.size(); ++i)
-                buf[i] = (std::isfinite(r.e1[i]) && r.e1[i] > 0.0)
-                             ? std::log10(r.e1[i]) : std::numeric_limits<double>::quiet_NaN();
-            vals = &buf;
-        }
-        // Диапазон цвета — по ячейкам со статусом OK (движок их и отдаёт в
-        // p_min/p_max и e1_min/e1_max). Ячейки на полке округления и
-        // разошедшиеся из шкалы исключены намеренно: одна такая растягивает
-        // её так, что вся рабочая область становится одноцветной. Они не
-        // пропадают — просто упираются в край палитры.
-        double vmin = 0.0, vmax = 0.0;
-        if (show_err) {
-            vmin = (r.e1_min > 0.0) ? std::log10(r.e1_min) : 0.0;
-            vmax = (r.e1_max > 0.0) ? std::log10(r.e1_max) : 0.0;
-        } else {
-            vmin = r.p_min;
-            vmax = r.p_max;
-        }
-        if (!(vmax > vmin)) {
-            // Чистых ячеек не осталось (или все с одним значением) — падаем на
-            // полный диапазон, иначе шкала выродится в точку.
-            bool first = true;
-            for (double v : *vals) {
-                if (!std::isfinite(v)) continue;
-                if (first) { vmin = vmax = v; first = false; }
-                else { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
-            }
-            if (!(vmax > vmin)) { vmin -= 0.5; vmax += 0.5; }
-        }
-
-        hv.x_axis.name = s.axis_target_label(c.axis_x_target);
-        hv.y_axis.name = s.axis_target_label(c.axis_y_target);
-        hv.x_axis.log_scale = r.axis_x.log_scale;
-        hv.y_axis.log_scale = r.axis_y.log_scale;
-
-        bool fit = c.fit_request;
-        if (fit) c.fit_request = false;
-
-        // Ctrl+T: обе оси карты — диапазоны свипа (по умолчанию X — сам шаг h).
-        const std::vector<ViewRangeTarget> vrt = {
-            vr_target(s.configs, s.active_config_index,
-                      &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text,
-                      &OrderConfig::axis_y_lo_text, &OrderConfig::axis_y_hi_text) };
-        hv.popup_extras = [&vrt, &model, &hv]() { draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model); };
-
-        ImVec2 avail  = ImGui::GetContentRegionAvail();
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        hv.render(*renderer, origin, avail,
-                  /*owner_id*/ 0x0BDE0000 + oid * 2 + tab,
-                  c.data_generation * 2 + tab,
-                  r.n_pts_x, r.n_pts_y, vals->data(),
-                  r.axis_x.lo, r.axis_x.hi, r.axis_y.lo, r.axis_y.hi,
-                  vmin, vmax, fit);
-        handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
-                               hv.swap_axes, &model);
-        return;
+    {
+        HeatmapToolbarOpts topts;
+        topts.persist_colormap = [&win](int cm) { win.colormap_idx = cm; };
+        draw_heatmap_toolbar(hv, topts);
     }
 
-    // ------------------------------- 1D -------------------------------
-    auto& vslot = curve_map[oid * 2 + tab];
-    if (!vslot) {
-        vslot = std::make_unique<Plot2DView>();
-        vslot->imdraw_lines = true;
-        vslot->show_zero_x  = false;
-        // Линия y = 0 осмысленна только на графике порядка: ниже неё разности
-        // перестали сокращаться. В логарифме ошибки нуль — это E = 1, рисовать
-        // его незачем.
-        vslot->show_zero_y  = !show_err;
+    // Ошибка гуляет на много порядков — в карту идёт log10, иначе одна ячейка
+    // растягивает шкалу и остальное становится однотонным.
+    std::vector<double> buf;
+    const std::vector<double>* vals = &r.p;
+    if (win.map_error) {
+        buf.resize(r.e1.size());
+        for (size_t i = 0; i < r.e1.size(); ++i)
+            buf[i] = (std::isfinite(r.e1[i]) && r.e1[i] > 0.0)
+                         ? std::log10(r.e1[i]) : std::numeric_limits<double>::quiet_NaN();
+        vals = &buf;
     }
-    Plot2DView& view = *vslot;
+    // Диапазон цвета — по ячейкам со статусом OK (движок отдаёт их в p_min/p_max
+    // и e1_min/e1_max). Полка округления и разошедшиеся ячейки исключены
+    // намеренно: одна такая растягивает шкалу так, что рабочая область
+    // становится одноцветной. Они не пропадают — упираются в край палитры.
+    double vmin = 0.0, vmax = 0.0;
+    if (win.map_error) {
+        vmin = (r.e1_min > 0.0) ? std::log10(r.e1_min) : 0.0;
+        vmax = (r.e1_max > 0.0) ? std::log10(r.e1_max) : 0.0;
+    } else {
+        vmin = r.p_min;
+        vmax = r.p_max;
+    }
+    if (!(vmax > vmin)) {
+        bool first = true;
+        for (double v : *vals) {
+            if (!std::isfinite(v)) continue;
+            if (first) { vmin = vmax = v; first = false; }
+            else { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+        }
+        if (!(vmax > vmin)) { vmin -= 0.5; vmax += 0.5; }
+    }
 
-    ImGui::Checkbox("log X", &c.plot_x_log);
-    if (show_err) {
+    hv.x_axis.name = s.axis_target_label(c.axis_x_target);
+    hv.y_axis.name = s.axis_target_label(c.axis_y_target);
+    hv.x_axis.log_scale = r.axis_x.log_scale;
+    hv.y_axis.log_scale = r.axis_y.log_scale;
+
+    const int sig = c.data_generation * 2 + (win.map_error ? 1 : 0);
+    bool fit = c.fit_request;
+    if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
+    if (c.fit_request) c.fit_request = false;
+
+    // Ctrl+T: обе оси карты — диапазоны свипа (по умолчанию X — сам шаг h).
+    const std::vector<ViewRangeTarget> vrt = {
+        vr_target(s.configs, mi,
+                  &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text,
+                  &OrderConfig::axis_y_lo_text, &OrderConfig::axis_y_hi_text) };
+    hv.popup_extras = [&vrt, &model, &hv, &win, &cb, &s]() {
+        draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
+        ImGui::Separator();
+        draw_order_export_items(model, win, cb, s.in_flight);
+    };
+
+    ImVec2 avail  = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    hv.render(renderer, origin, avail,
+              /*owner_id*/ 0x0BDE0000 + win.id,
+              sig,
+              r.n_pts_x, r.n_pts_y, vals->data(),
+              r.axis_x.lo, r.axis_x.hi, r.axis_y.lo, r.axis_y.hi,
+              vmin, vmax, fit);
+    handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(), hv.swap_axes, &model);
+}
+
+// Одномерное окно: p(x), E(x) или «время vs ошибка». Кривые всех членов
+// лежат в одних осях.
+static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
+                                    const GuiCallbacks& cb,
+                                    PlotRenderer& renderer, Plot2DView& view) {
+    OrderAnalysisSession& s = model.order_session;
+    const bool is_perf  = (win.kind == OrderPlotWindow::Kind::Perf);
+    const bool is_error = (win.kind == OrderPlotWindow::Kind::Error);
+    const bool is_p     = (win.kind == OrderPlotWindow::Kind::P);
+
+    // ---- Тулбар ----
+    ImGui::Checkbox("log X", &win.x_log);
+    if (!is_p) {
         ImGui::SameLine();
-        ImGui::Checkbox("log Y", &c.plot_y_log);
+        ImGui::Checkbox("log Y", &win.y_log);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "The logarithm is taken of THE VALUES THEMSELVES while the axis stays linear:\n"
                 "Plot2DView can only do log on X. The slope of the line in log-log\n"
-                "does not change because of that and equals p, but the axis labels read\n"
-                "as log10 E, not as 1e-6.");
-        ImGui::SameLine();
-        ImGui::Checkbox("show E2", &c.show_e2);
-    } else {
-        ImGui::SameLine();
-        const int nom = builtin_scheme_order(c.scheme);
-        bool ref_on = (c.nominal_order != 0);
-        if (ImGui::Checkbox("nominal order line", &ref_on))
-            c.nominal_order = ref_on ? (nom > 0 ? nom : 1) : 0;
-        if (nom > 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%s: %d)", c.scheme.c_str(), nom);
-            if (ref_on) c.nominal_order = nom;
-        }
+                "does not change because of that, but the axis labels read as log10.");
+    }
+    if (is_error) { ImGui::SameLine(); ImGui::Checkbox("show E2", &win.show_e2); }
+    if (is_p)     { ImGui::SameLine(); ImGui::Checkbox("nominal order line", &win.show_nominal); }
+    if (is_perf) {
+        ImGui::SameLine(); ImGui::TextDisabled("| X:"); ImGui::SameLine();
+        ImGui::RadioButton("E1##perrsrc", &win.error_source, 0); ImGui::SameLine();
+        ImGui::RadioButton("E2##perrsrc", &win.error_source, 1); ImGui::SameLine();
+        ImGui::TextDisabled("| t:"); ImGui::SameLine();
+        ImGui::RadioButton("us##ptu", &win.time_unit, 0); ImGui::SameLine();
+        ImGui::RadioButton("ms##ptu", &win.time_unit, 1); ImGui::SameLine();
+        ImGui::TextDisabled("|"); ImGui::SameLine();
+        ImGui::Checkbox("min", &win.show_min); ImGui::SameLine();
+        ImGui::Checkbox("avg", &win.show_avg); ImGui::SameLine();
+        ImGui::Checkbox("max", &win.show_max);
     }
 
-    const bool ylog = show_err && c.plot_y_log;
-    view.x_axis.name = s.axis_target_label(c.axis_x_target);
-    view.y_axis.name = show_err ? (ylog ? "log10 E" : "E") : "p";
-    view.x_axis.log_scale = c.plot_x_log;
-    view.points_mode = false;
+    const bool   ylog       = win.y_log && !is_p;
+    const double time_scale = (is_perf && win.time_unit == 1) ? 1.0e-3 : 1.0;
 
-    // Явный X-диапазон по всему свипу — как у Bif/LLE/LS. Нужен не только
-    // ради того, чтобы ось охватывала весь прогон, даже когда часть узлов
-    // отфильтрована: без него Plot2DView берёт границы клампа из bbox VBO, а
-    // там на лог-оси лежит log10(x). На лог-оси считаем только по
-    // положительным узлам — неположительный в логарифме невыразим, и такие
-    // точки в серию ниже всё равно не попадают.
-    {
-        double xlo = 0.0, xhi = 0.0;
-        bool got = false;
-        for (double v : r.axis_x_vals) {
-            if (c.plot_x_log && !(v > 0.0)) continue;
-            if (!got) { xlo = xhi = v; got = true; }
-            else { if (v < xlo) xlo = v; if (v > xhi) xhi = v; }
+    // ---- Сбор кривых ----
+    // Буферы локальные: render() заливает VBO прямо в вызове, держать их между
+    // кадрами не нужно (и нельзя — членов у окна произвольное число).
+    std::vector<std::vector<double>> bufs;
+    std::vector<std::string>         labels;
+    std::vector<ImVec4>              colors;
+    std::vector<ViewRangeTarget>     vrt;
+    bool   any_data = false, fit = false;
+    double xlo = 0.0, xhi = 0.0;
+    bool   got_x = false;
+    int    sig = (int)win.kind * 1000003;
+
+    auto note_x = [&](double x) {
+        if (!got_x) { xlo = xhi = x; got_x = true; }
+        else { if (x < xlo) xlo = x; if (x > xhi) xhi = x; }
+    };
+
+    for (size_t j = 0; j < win.members.size(); ++j) {
+        const int mi = win.members[j];
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        OrderConfig& c = s.configs[(size_t)mi];
+        const ImVec4 base = ic_base_color((int)j);
+
+        if (is_perf) {
+            const PerfResult& r = c.perf_result;
+            sig = sig * 131 + mi * 17 + c.perf_data_generation;
+            if (!c.perf_last_run_ok || r.n_pts <= 0) continue;
+            if (c.perf_fit_request) { fit = true; c.perf_fit_request = false; }
+            any_data = true;
+
+            // Точка существует, только когда есть ОБЕ координаты: ошибка узла
+            // и его время. Сортировка по X обязательна — ось X здесь не сетка
+            // узлов, а посчитанная величина, и монотонность её не гарантирована.
+            auto add_time_series = [&](const std::vector<double>& t, const char* suffix, float shade_k) {
+                if (t.empty()) return;
+                std::vector<std::pair<double, double>> pts;
+                pts.reserve((size_t)r.n_pts);
+                for (int i = 0; i < r.n_pts; ++i) {
+                    const double e  = (win.error_source == 1) ? r.e2[(size_t)i] : r.e1[(size_t)i];
+                    const double tv = t[(size_t)i] * time_scale;
+                    if (!std::isfinite(e) || !std::isfinite(tv)) continue;
+                    if (win.x_log && !(e > 0.0)) continue;
+                    if (ylog && !(tv > 0.0)) continue;
+                    pts.emplace_back(e, ylog ? std::log10(tv) : tv);
+                }
+                if (pts.empty()) return;
+                std::sort(pts.begin(), pts.end(),
+                          [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
+                              return a.first < b.first;
+                          });
+                std::vector<double> xy;
+                xy.reserve(pts.size() * 2);
+                for (const auto& pr : pts) { xy.push_back(pr.first); xy.push_back(pr.second); note_x(pr.first); }
+                bufs.push_back(std::move(xy));
+                labels.push_back(c.label + " " + suffix);
+                colors.push_back(order_shade(base, shade_k));
+            };
+            if (win.show_min) add_time_series(r.t_min, "min", 0.62f);
+            if (win.show_avg) add_time_series(r.t_avg, "avg", 1.0f);
+            if (win.show_max) add_time_series(r.t_max, "max", 1.45f);
+            continue;
         }
-        view.x_fit_use_explicit = got && (xhi > xlo);
-        view.x_fit_min = xlo;
-        view.x_fit_max = xhi;
-    }
 
-    static std::vector<float> buf_a, buf_b, buf_ref;
-    buf_a.clear(); buf_b.clear(); buf_ref.clear();
-    int n_a = 0, n_b = 0, n_ref = 0;
+        const OrderResult& r = c.result;
+        sig = sig * 131 + mi * 17 + c.data_generation;
+        if (!c.last_run_ok || r.p.empty() || r.n_pts_y > 1) continue;
+        if (c.fit_request) { fit = true; c.fit_request = false; }
+        any_data = true;
 
-    const int n = std::min((int)r.axis_x_vals.size(), (int)r.p.size());
-    for (int i = 0; i < n; ++i) {
-        const double x = r.axis_x_vals[(size_t)i];
-        if (c.plot_x_log && !(x > 0.0)) continue;
-        if (show_err) {
-            const double e1 = r.e1[(size_t)i];
-            if (std::isfinite(e1) && (!ylog || e1 > 0.0)) {
-                buf_a.push_back((float)x);
-                buf_a.push_back((float)(ylog ? std::log10(e1) : e1));
-                ++n_a;
+        // Ctrl+T: по X идёт свип, и его границы — поля конфига. По Y входа
+        // в расчёте нет (p и E — результат), поэтому цель односторонняя.
+        vrt.push_back(vr_target(s.configs, mi,
+                                &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text));
+
+        const int n = std::min((int)r.axis_x_vals.size(), (int)r.p.size());
+        auto add_node_series = [&](int which, const std::string& suffix, float shade_k) {
+            std::vector<double> xy;
+            xy.reserve((size_t)n * 2);
+            for (int i = 0; i < n; ++i) {
+                const double x = r.axis_x_vals[(size_t)i];
+                if (win.x_log && !(x > 0.0)) continue;
+                double y;
+                if (which == 0) {
+                    // Ячейки floor / p<=0 НЕ выбрасываем: их провал и есть ответ
+                    // на вопрос, где метод ещё держит свой порядок. Прячем
+                    // только diverged — там ничего не посчитано.
+                    y = r.p[(size_t)i];
+                    if (!std::isfinite(y)) continue;
+                } else {
+                    const double e = (which == 1) ? r.e1[(size_t)i] : r.e2[(size_t)i];
+                    if (!std::isfinite(e) || (ylog && !(e > 0.0))) continue;
+                    y = ylog ? std::log10(e) : e;
+                }
+                xy.push_back(x); xy.push_back(y); note_x(x);
             }
-            if (c.show_e2) {
-                const double e2 = r.e2[(size_t)i];
-                if (std::isfinite(e2) && (!ylog || e2 > 0.0)) {
-                    buf_b.push_back((float)x);
-                    buf_b.push_back((float)(ylog ? std::log10(e2) : e2));
-                    ++n_b;
+            if (xy.empty()) return;
+            bufs.push_back(std::move(xy));
+            labels.push_back(suffix.empty() ? c.label : (c.label + " " + suffix));
+            colors.push_back(order_shade(base, shade_k));
+        };
+
+        if (is_error) {
+            add_node_series(1, "E1", 1.0f);
+            if (win.show_e2) add_node_series(2, "E2", 0.62f);
+        } else {
+            add_node_series(0, "", 1.0f);
+            if (win.show_nominal) {
+                const int nom = builtin_scheme_order(c.scheme);
+                if (nom > 0 && !r.axis_x_vals.empty()) {
+                    double a = r.axis_x_vals.front(), b = r.axis_x_vals.back();
+                    if (b < a) std::swap(a, b);
+                    if (!win.x_log || (a > 0.0 && b > 0.0)) {
+                        std::vector<double> xy = { a, (double)nom, b, (double)nom };
+                        bufs.push_back(std::move(xy));
+                        labels.push_back(c.label + " nominal " + std::to_string(nom));
+                        colors.push_back(ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
+                    }
                 }
             }
-        } else {
-            // Ячейки floor / p<=0 НЕ выбрасываем: их провал и есть ответ на
-            // вопрос, где метод ещё держит свой порядок. Прячем только
-            // diverged — там ничего не посчитано.
-            const double p = r.p[(size_t)i];
-            if (!std::isfinite(p)) continue;
-            buf_a.push_back((float)x);
-            buf_a.push_back((float)p);
-            ++n_a;
         }
     }
 
-    if (!show_err && c.nominal_order > 0 && n_a > 0) {
-        double xlo = r.axis_x_vals.front(), xhi = r.axis_x_vals.back();
-        if (xhi < xlo) std::swap(xlo, xhi);
-        buf_ref.push_back((float)xlo); buf_ref.push_back((float)c.nominal_order);
-        buf_ref.push_back((float)xhi); buf_ref.push_back((float)c.nominal_order);
-        n_ref = 2;
+    // Сводка по статусам — по строке на член окна.
+    for (size_t j = 0; j < win.members.size(); ++j) {
+        const int mi = win.members[j];
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        const OrderConfig& c = s.configs[(size_t)mi];
+        if (is_perf) {
+            if (!c.perf_last_run_ok) continue;
+            const PerfResult& r = c.perf_result;
+            draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
+            ImGui::SameLine();
+            ImGui::TextDisabled("| %d measurements x %d replicas, %d warmup",
+                                r.repeats, r.replicas, r.warmup);
+        } else {
+            if (!c.last_run_ok) continue;
+            const OrderResult& r = c.result;
+            draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
+        }
     }
+
+    if (win.members.empty()) {
+        ImGui::TextDisabled("The window is empty - add a tab via \"Members...\".");
+        return;
+    }
+    if (!any_data || bufs.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    view.imdraw_lines = true;
+    view.show_zero_x  = false;
+    // Линия y = 0 осмысленна только на графике порядка: ниже неё разности
+    // перестали сокращаться. В логарифме ошибки нуль — это E = 1, рисовать
+    // его незачем.
+    view.show_zero_y  = is_p;
+    view.points_mode  = false;
+
+    // Подписи осей. У членов окна ось X по построению одна и та же величина,
+    // поэтому имя берём у первого valid-члена.
+    std::string xname = "x";
+    for (int mi : win.members) {
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        xname = is_perf ? ((win.error_source == 1) ? "E2" : "E1")
+                        : s.axis_target_label(s.configs[(size_t)mi].axis_x_target);
+        break;
+    }
+    if (is_perf && win.x_log) { /* ось логарифмическая, имя величины не меняется */ }
+    view.x_axis.name = xname;
+    if (is_perf) {
+        const char* unit = (win.time_unit == 1) ? "ms" : "us";
+        view.y_axis.name = ylog ? (std::string("log10 t, ") + unit) : (std::string("t, ") + unit);
+    } else {
+        view.y_axis.name = is_error ? (ylog ? "log10 E" : "E") : "p";
+    }
+    view.x_axis.log_scale = win.x_log;
+
+    // Явный X-диапазон по всем кривым окна: без него Plot2DView берёт границы
+    // клампа из bbox VBO, а там на лог-оси лежит log10(x).
+    view.x_fit_use_explicit = got_x && (xhi > xlo);
+    view.x_fit_min = xlo;
+    view.x_fit_max = xhi;
 
     std::vector<PlotSeriesInput> series;
     std::vector<bool> init_vis, glob_vis;
-    auto add = [&](std::vector<float>& b, int np, const char* label, ImVec4 col) {
+    series.reserve(bufs.size());
+    for (size_t i = 0; i < bufs.size(); ++i) {
         PlotSeriesInput si;
-        si.points   = b.empty() ? nullptr : b.data();
-        si.n_points = np;
-        si.color    = col;
-        si.label    = label;
+        si.points   = bufs[i].empty() ? nullptr : bufs[i].data();
+        si.n_points = (int)(bufs[i].size() / 2);
+        si.color    = colors[i];
+        si.label    = labels[i];
         series.push_back(si);
         init_vis.push_back(true);
         glob_vis.push_back(true);
-    };
-    if (show_err) {
-        add(buf_a, n_a, "E1 = max|y_h - y_h/2|", ic_base_color(0));
-        if (c.show_e2) add(buf_b, n_b, "E2 = max|y_h/2 - y_h/4|", ic_base_color(1));
-    } else {
-        add(buf_a, n_a, "p", ic_base_color(0));
-        if (n_ref > 0) add(buf_ref, n_ref, "nominal", ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
     }
 
-    // Сигнатура рисуемой величины: новые данные, смена масштаба любой оси,
-    // включение второй кривой. Служит и поколением для перезаливки VBO, и
-    // триггером autofit — вид обязан пересчитаться, потому что log10 E и E
-    // отличаются на четырнадцать порядков, а p от них обоих.
-    const int sig = c.data_generation * 8
-                  + (c.plot_x_log ? 4 : 0) + (ylog ? 2 : 0) + (c.show_e2 ? 1 : 0);
-    bool fit = c.fit_request;
-    if (c.plot_sig[tab] != sig) { fit = true; c.plot_sig[tab] = sig; }
-    if (c.fit_request) c.fit_request = false;
+    // Сигнатура рисуемого: новые данные любого члена, смена масштаба любой
+    // оси, состав кривых. Служит и поколением для перезаливки VBO, и триггером
+    // autofit — log10 E и E отличаются на четырнадцать порядков, а p от них обоих.
+    sig = sig * 131 + (win.x_log ? 1 : 0) + (ylog ? 2 : 0) + (win.show_e2 ? 4 : 0)
+        + (win.show_nominal ? 8 : 0) + (win.show_min ? 16 : 0) + (win.show_avg ? 32 : 0)
+        + (win.show_max ? 64 : 0) + win.error_source * 128 + win.time_unit * 256
+        + (int)bufs.size() * 512;
+    if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
 
-    // Ctrl+T: по X идёт свип, по Y — p либо сама ошибка, входа в расчёте у них
-    // нет. Ось X остаётся в мировых координатах даже при лог-шкале (её делает
-    // Plot2DView), поэтому границы вида пишутся в поля как есть; Y здесь
-    // логарифмируется руками, и это ещё одна причина его не трогать.
-    const std::vector<ViewRangeTarget> vrt = {
-        vr_target(s.configs, s.active_config_index,
-                  &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text) };
-    view.popup_extras = [&vrt, &model, &view]() { draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model); };
+    // Ctrl+T есть только там, где по X лежит вход расчёта: на диаграмме
+    // производительности ось X — посчитанная ошибка, задать её нельзя.
+    view.popup_extras = [&vrt, &model, &view, &win, &cb, &s]() {
+        if (!vrt.empty()) {
+            draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
+            ImGui::Separator();
+        }
+        draw_order_export_items(model, win, cb, s.in_flight);
+    };
 
     ImVec2 avail  = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
-    view.render(*renderer, origin, avail,
-                /*owner_id*/ 0x0BDE1000 + oid * 2 + tab, sig,
+    view.render(renderer, origin, avail,
+                /*owner_id*/ 0x0BDE1000 + win.id, sig,
                 series, init_vis, glob_vis, fit);
-    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
+    if (!vrt.empty())
+        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
+}
+
+static void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
+    static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
+    static std::map<int, std::unique_ptr<HeatmapView>>  heatmaps;
+    static std::map<int, std::unique_ptr<Plot2DView>>   curves;
+
+    int to_remove = -1;
+    for (int i = 0; i < (int)model.order_plot_windows.size(); ++i) {
+        OrderPlotWindow& win = model.order_plot_windows[i];
+
+        auto& renderer = renderers[win.id];
+        if (!renderer) renderer = std::make_unique<PlotRenderer>();
+
+        // Автоподпись держит вид окна: пользователь переименовал — не трогаем.
+        if (!win.label_is_manual)
+            win.label = std::string(order_window_kind_name(win.kind)) + " " + std::to_string(win.id);
+
+        std::string title = win.label + "###orderwin" + std::to_string(win.id)
+                          + "_g" + std::to_string(model.order_layout_generation);
+        bool open = true;
+        float ox = 60.0f + (float)(i % 5) * 35.0f, oy = 80.0f + (float)(i % 5) * 35.0f;
+        ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &open)) {
+            ImGui::PushID(win.id);
+            if (win.kind == OrderPlotWindow::Kind::Map) {
+                auto& hv = heatmaps[win.id];
+                if (!hv) {
+                    hv = std::make_unique<HeatmapView>();
+                    hv->colormap = (HeatmapColormap)colormap_id_or(win.colormap_idx, model.heatmap_colormap);
+                }
+                draw_order_map_window(model, win, cb, *renderer, *hv);
+            } else {
+                auto& cv = curves[win.id];
+                if (!cv) cv = std::make_unique<Plot2DView>();
+                draw_order_curve_window(model, win, cb, *renderer, *cv);
+            }
+            ImGui::PopID();
+        }
+        ImGui::End();
+        if (!open) to_remove = i;
+    }
+    if (to_remove >= 0) {
+        const int id = model.order_plot_windows[to_remove].id;
+        renderers.erase(id);
+        heatmaps.erase(id);
+        curves.erase(id);
+        model.remove_order_plot_window(to_remove);
+    }
 }
 
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
@@ -8733,10 +9200,11 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             break;
         }
         case AppModel::AppMode::Order: {
-            // Своего _last_order.json у вкладки пока нет, поэтому только
-            // пересборка сессии из записи библиотеки: сетка осей, схема и
-            // значения приходят из дефолтов новой системы.
             model.start_order_analysis();
+            std::string jo = lib.load_session(model.loaded_name, "_last_order");
+            apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
+            std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
+            model.load_or_init_order_plot_windows(jw);
             break;
         }
         case AppModel::AppMode::Library:
@@ -9990,7 +10458,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     static int                                          ls_init_exp_seen  = -999;
     static std::array<std::unique_ptr<Plot2DView>,  6>  l1_views;
     static std::array<std::unique_ptr<PlotRenderer>, 6> l1_renderers;
-    static std::array<std::vector<std::vector<float>>, 6> l1_bufs;
+    static std::array<std::vector<std::vector<double>>, 6> l1_bufs;
     // Custom Basins (Level-3 kind=1) HeatmapView + renderer — hoisted so the
     // system-change block below can reset them alongside the other statics.
     static HeatmapView                                  bsn_hv;
@@ -10519,8 +10987,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                            /*reverse*/ false, d.continuation);
                 for (double y : source[p]) {
                     if (!std::isfinite(y)) continue;
-                    buf.push_back((float)px);
-                    buf.push_back((float)y);
+                    buf.push_back((double)px);
+                    buf.push_back((double)y);
                 }
             }
             PlotSeriesInput si;
@@ -10548,8 +11016,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 if (!std::isfinite(y)) continue;
                 double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
                                            /*reverse*/ false, c.continuation);
-                buf.push_back((float)px);
-                buf.push_back((float)y);
+                buf.push_back((double)px);
+                buf.push_back((double)y);
                 ++total_pts;
             }
             PlotSeriesInput si;
@@ -10579,8 +11047,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                                    /*reverse*/ false, c.continuation);
                         double y = row[j];
                         if (!std::isfinite(y)) continue;
-                        buf.push_back((float)px);
-                        buf.push_back((float)y);
+                        buf.push_back((double)px);
+                        buf.push_back((double)y);
                         ++total_pts;
                     }
                     PlotSeriesInput si;
@@ -10624,7 +11092,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                         data_export::export_ls1d(cs.ls_session.curves[ci].result, path);
                 }
             });
-            draw_view_range_menu(vrt, view.x_axis, view.y_axis, &model);
+            draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
         };
 
         // Autofit whenever the underlying result changed (bif/lle/ls each
@@ -10647,7 +11115,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                     /*owner_id*/ (0xC10000 + i) ^ sys_owner_delta,
                     series_gen,
                     series_in, init_vis, glob_vis, fit);
-        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), &model);
+        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
         ImGui::PopID();
         ImGui::End();
     }
@@ -10914,9 +11382,18 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                              session_to_json_fastsync(model.fastsync_session));
     }
     // Order: тот же контракт, что у FastSync — без poll() in_flight никогда не
-    // сбросится и "Running" повиснет навсегда. Сессию на диск не пишем: своего
-    // _last_order.json у вкладки пока нет.
-    model.order_session.poll();
+    // сбросится и "Running" повиснет навсегда. По завершении пишем сессию.
+    if (model.order_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_order",
+                             session_to_json_order(model.order_session));
+    }
+    if (model.order_plot_windows_dirty) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_order_windows",
+                             session_to_json_order_windows(model.order_plot_windows));
+        model.order_plot_windows_dirty = false;
+    }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
     // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
     // (add/close/rename таба, drag сплиттера, перенос окна между табами) — с одним лишь
@@ -10947,6 +11424,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.start_next_in_basins_queue();
     // То же для fastsync-очереди (независимая).
     model.start_next_in_fastsync_queue();
+    // То же для order-очереди (независимая).
+    model.start_next_in_order_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
     // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
@@ -11180,6 +11659,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue.size();
             else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
             else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue.size();
+            else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue.size();
             else                                      queue_n = model.parametric_queue.size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
@@ -11244,6 +11724,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 model.dft1d_queue.clear();
                 model.basins_queue.clear();
                 model.fastsync_queue.clear();
+                model.order_queue.clear();
                 model.custom_queue.clear();
             }
             ImGui::PopStyleColor(3);
@@ -11388,13 +11869,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jb, model.basins_session, session_from_json_basins, "_last_basins");
         }
     }
-    // Order: своего _last_order.json пока нет, поэтому после init'а просто
-    // остаются дефолты из записи библиотеки — ничего не восстанавливаем.
     auto order_need_init = model.order_session.loaded_system_name != model.name
                         || model.order_session.vars.empty()
                         || model.order_session.vars   != model.known_vars
                         || model.order_session.params != model.known_params;
-    if (entering_order && order_need_init) model.start_order_analysis();
+    if (entering_order && order_need_init) {
+        model.start_order_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jo = lib.load_session(model.loaded_name, "_last_order");
+            apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
+            std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
+            model.load_or_init_order_plot_windows(jw);
+        }
+    }
+    // Окна могли не появиться вовсе: несохранённая система (loaded_name пуст,
+    // грузить нечего), сессия из старой сборки без файла окон, вкладка открыта
+    // впервые. Проверяем каждый кадр, а не только на входе, — иначе Order
+    // рисовал бы пустой экран без единого окна и без способа его завести.
+    if ((AppModel::AppMode)mode == AppModel::AppMode::Order
+        && model.order_plot_windows.empty()
+        && !model.order_session.configs.empty())
+        model.load_or_init_order_plot_windows({});
     auto fastsync_need_init = model.fastsync_session.loaded_system_name != model.name
                            || model.fastsync_session.vars.empty()
                            || model.fastsync_session.vars   != model.known_vars
@@ -11518,16 +12013,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Order) {
-        // Order mode: панель настроек + одно окно графика (кривая p или
-        // 2D-карта — по тому, включён ли в конфиге 2D map).
+        // Order mode: панель настроек + динамический список окон графика
+        // (кривая p, кривая ошибки, 2D-карта, диаграмма производительности).
         if (ImGui::Begin("Order Controls")) {
             draw_order_controls(model, lib);
         }
         ImGui::End();
-        if (ImGui::Begin("Accuracy order")) {
-            draw_order_plot(model, cb);
-        }
-        ImGui::End();
+        draw_order_plot_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

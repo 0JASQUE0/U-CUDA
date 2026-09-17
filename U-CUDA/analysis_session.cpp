@@ -602,7 +602,7 @@ bool PhaseAnalysisSession::poll() {
                 per_var_out.assign(per_var_in.size(), {});
             for (size_t v = 0; v < per_var_in.size(); ++v) {
                 const FeaturePoints& fp = per_var_in[v];
-                std::vector<float>& buf = per_var_out[v];
+                std::vector<double>& buf = per_var_out[v];
                 double cumt = base;
                 const size_t n = fp.peaks.size() < fp.intervals.size()
                                ? fp.peaks.size() : fp.intervals.size();
@@ -610,8 +610,8 @@ bool PhaseAnalysisSession::poll() {
                 for (size_t p = 0; p < n; ++p) {
                     if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p])) continue;
                     cumt += fp.intervals[p];
-                    buf.push_back((float)cumt);
-                    buf.push_back((float)fp.peaks[p]);
+                    buf.push_back((double)cumt);
+                    buf.push_back((double)fp.peaks[p]);
                 }
                 const size_t cap_pairs = (size_t)std::max(1, continuation_peaks_cap);
                 const size_t cur_pairs = buf.size() / 2;

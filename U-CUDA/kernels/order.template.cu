@@ -87,6 +87,46 @@ __device__ __forceinline__ bool orderBadVec(const numb* X, numb maxValue) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Замер времени счёта (вкладка графика Performance).
+//
+// Ядро НЕ считает ни ошибок, ни порядка: его время работы И ЕСТЬ измеряемая
+// величина — стоимость интегрирования одной траектории шагом h на nSteps
+// шагов. Ошибки для оси X приходят из отдельного, НЕ засекаемого прогона
+// orderEstimateKernel по той же сетке.
+//
+// Здесь намеренно нет ни cancelFlag, ни progressCounter: чтение
+// глобального флага раз в CHECK_INTERVAL шагов и atomicAdd прогресса — это
+// работа, которой в замеряемом интервале быть не должно. Отмена ловится
+// хостом МЕЖДУ запусками.
+//
+// nThreads одинаковых реплик считают одну и ту же задачу: при 1 меряется
+// латентность одного расчёта, при большом числе — пропускная способность
+// загруженного GPU. Финальное состояние обязано уходить в глобальную память,
+// иначе компилятор вправе выбросить весь цикл целиком.
+extern "C" __global__ void perfIntegrateKernel(
+    const int    nThreads,
+    const numb* __restrict__ X0,          // [AMOUNTOFX]
+    const numb* __restrict__ values,      // [AMOUNTOFVALUES]
+    const numb   h,
+    const long long nSteps,
+    numb* __restrict__ out)               // [nThreads * AMOUNTOFX]
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nThreads) return;
+
+    numb a[AMOUNTOFVALUES];
+    for (int i = 0; i < AMOUNTOFVALUES; ++i) a[i] = values[i];
+    numb X[AMOUNTOFX];
+    for (int i = 0; i < AMOUNTOFX; ++i) X[i] = X0[i];
+
+    for (long long n = 0; n < nSteps; ++n)
+        calculateDiscreteModel(X, a, h);
+
+    for (int i = 0; i < AMOUNTOFX; ++i)
+        out[(size_t)tid * (size_t)AMOUNTOFX + (size_t)i] = X[i];
+}
+
 extern "C" __global__ void orderEstimateKernel(
     const int    nPtsX,
     const int    nPtsY,                   // 1 для 1D-свипа

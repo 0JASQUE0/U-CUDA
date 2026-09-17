@@ -1622,7 +1622,8 @@ struct ParametricEngine::Impl {
     struct CachedOrderModule {
         std::string key;
         CUmodule    module = nullptr;
-        CUfunction  kernel = nullptr;   // orderEstimateKernel
+        CUfunction  kernel = nullptr;        // orderEstimateKernel
+        CUfunction  kernel_perf = nullptr;   // perfIntegrateKernel (вкладка Performance)
     };
     CachedOrderModule cached_order;
 
@@ -6944,6 +6945,9 @@ struct ParametricEngine::Impl {
             fresh.key    = key;
             fresh.module = mod;
             if (!module_fn(mod, "orderEstimateKernel", fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+            // Ядро замера лежит в том же модуле: Performance нужны ОБА прохода,
+            // и второй компиляции ради этого быть не должно.
+            if (!module_fn(mod, "perfIntegrateKernel", fresh.kernel_perf, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -7276,6 +7280,225 @@ struct ParametricEngine::Impl {
                     else { if (res.e1[i] < res.e1_min) res.e1_min = res.e1[i];
                            if (res.e1[i] > res.e1_max) res.e1_max = res.e1[i]; }
                 }
+            }
+        }
+
+        res.ok = true;
+        return res;
+    }
+
+    // Performance — «время счёта vs достигнутая ошибка» по одномерной сетке.
+    //
+    // Два прохода. Первый — обычный run_order по той же оси: он даёт E1/E2,
+    // статусы и фактический шаг узла и НЕ засекается. Второй — собственно
+    // замер: на каждом узле warmup холостых запусков, затем repeats запусков
+    // под cudaEvent'ами, стоящими вплотную вокруг cuLaunchKernel. Всё, что
+    // запуском ядра не является — компиляция модуля, H2D значений, выделение
+    // выходного буфера, D2H, — из измеряемого интервала вынесено; кэш модуля
+    // к этому моменту уже прогрет order-проходом.
+    PerfResult run_performance(const PerfRequest& req) {
+        PerfResult res;
+        res.axis = req.axis;
+        auto fail = [&](const std::string& msg) -> PerfResult& { res.error = msg; return res; };
+
+        if (req.axis.kind == OrderAxisKind::None) return fail("the axis is not set");
+        if (req.repeats  < 1) return fail("the number of measurements must be >= 1");
+        if (req.replicas < 1) return fail("the number of replicas must be >= 1");
+        if (req.warmup   < 0) return fail("the number of warmup launches cannot be negative");
+
+        // ---- Проход 1: ошибки (не засекается) ----
+        OrderRequest oreq;
+        oreq.krs_body           = req.krs_body;
+        oreq.amountOfX          = req.amountOfX;
+        oreq.initial_conditions = req.initial_conditions;
+        oreq.values             = req.values;
+        oreq.axis_x             = req.axis;
+        oreq.axis_y             = OrderAxis{};          // kind == None -> одномерная сетка
+        oreq.h                  = req.h;
+        oreq.t_max              = req.t_max;
+        oreq.snap_steps         = req.snap_steps;
+        oreq.endpoint_only      = req.endpoint_only;
+        oreq.max_value          = req.max_value;
+        oreq.cancel             = req.cancel;
+
+        // Прогресс order-прохода отдаётся в [0, 0.5]: без пересчёта бар
+        // пробежал бы от нуля до конца дважды. run_order синхронный, поэтому
+        // масштабированием занимается отдельный поток, живущий ровно на время
+        // вызова.
+        std::shared_ptr<std::atomic<float>> sub_prog;
+        std::atomic<bool> watch_stop{ false };
+        std::thread watcher;
+        if (req.progress) {
+            sub_prog = std::make_shared<std::atomic<float>>(0.0f);
+            oreq.progress = sub_prog;
+            watcher = std::thread([&req, &sub_prog, &watch_stop]() {
+                while (!watch_stop.load(std::memory_order_relaxed)) {
+                    req.progress->store(0.5f * sub_prog->load(std::memory_order_relaxed),
+                                        std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+        }
+        OrderResult ores = run_order(oreq);
+        if (watcher.joinable()) { watch_stop.store(true, std::memory_order_relaxed); watcher.join(); }
+
+        if (ores.cancelled) { res.cancelled = true; return res; }
+        if (!ores.ok) return fail(ores.error.empty() ? std::string("the order pass failed") : ores.error);
+
+        res.n_pts     = ores.n_pts_x;
+        res.axis_vals = ores.axis_x_vals;
+        res.e1        = ores.e1;
+        res.e2        = ores.e2;
+        res.p         = ores.p;
+        res.h_eff     = ores.h_eff;
+        res.status    = ores.status;
+        res.n_ok         = ores.n_ok;
+        res.n_diverged   = ores.n_diverged;
+        res.n_floor      = ores.n_floor;
+        res.n_nocontract = ores.n_nocontract;
+        res.repeats   = req.repeats;
+        res.warmup    = req.warmup;
+        res.replicas  = req.replicas;
+
+        const int n = res.n_pts;
+        if (n <= 0) return fail("empty grid");
+        const double qnan = std::numeric_limits<double>::quiet_NaN();
+        res.t_min.assign((size_t)n, qnan);
+        res.t_max.assign((size_t)n, qnan);
+        res.t_avg.assign((size_t)n, qnan);
+        res.n_steps.assign((size_t)n, 0);
+
+        // ---- Проход 2: замер ----
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        cudaGetLastError();   // сброс sticky-ошибки, см. run_order
+
+        const int amountOfValues = (int)req.values.size();
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
+        if (cached_order.kernel_perf == nullptr) return fail("perfIntegrateKernel not found in the module");
+
+        OrderDevBuf d_X0, d_values, d_out;
+        if (!d_X0    .alloc((size_t)req.amountOfX  * sizeof(numb), "X0",      err)) return fail(err);
+        if (!d_values.alloc((size_t)amountOfValues * sizeof(numb), "values",  err)) return fail(err);
+        if (!d_out   .alloc((size_t)req.replicas * (size_t)req.amountOfX * sizeof(numb), "perfOut", err)) return fail(err);
+
+        std::vector<numb> h_vals = to_numb(req.values);
+        {
+            const std::vector<numb> x0 = to_numb(req.initial_conditions);
+            cudaError_t e = cudaMemcpy(d_X0.p, x0.data(), x0.size() * sizeof(numb), cudaMemcpyHostToDevice);
+            if (e != cudaSuccess) return fail(std::string("memcpy X0: ") + cudaGetErrorString(e));
+            e = cudaMemcpy(d_values.p, h_vals.data(), h_vals.size() * sizeof(numb), cudaMemcpyHostToDevice);
+            if (e != cudaSuccess) return fail(std::string("memcpy values: ") + cudaGetErrorString(e));
+        }
+
+        struct EventPair {
+            cudaEvent_t a = nullptr, b = nullptr;
+            ~EventPair() { if (a) cudaEventDestroy(a); if (b) cudaEventDestroy(b); }
+        } ev;
+        if (cudaEventCreate(&ev.a) != cudaSuccess || cudaEventCreate(&ev.b) != cudaSuccess)
+            return fail("cudaEventCreate: could not create the timing events");
+
+        // Ширина блока — 32: измерено, что дальше упирается в регистры, а не в
+        // лимит блоков на SM. При replicas == 1 это один активный warp.
+        const int blockSize = 32;
+        const int gridSize  = (req.replicas + blockSize - 1) / blockSize;
+
+        for (int i = 0; i < n; ++i) {
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+                res.cancelled = true;
+                return res;
+            }
+
+            const double h_node = res.h_eff[(size_t)i];
+            if (!(h_node > 0.0) || !std::isfinite(h_node)) continue;   // узел без времени: см. status
+
+            // Свип по параметру меняет a[] от узла к узлу. Загрузка делается
+            // здесь, ДО прогрева, и в замер не попадает.
+            if (req.axis.kind == OrderAxisKind::Value) {
+                const int vi = req.axis.index;
+                if (vi >= 0 && vi < amountOfValues) {
+                    h_vals[(size_t)vi] = (numb)res.axis_vals[(size_t)i];
+                    cudaError_t e = cudaMemcpy(d_values.p, h_vals.data(),
+                                               h_vals.size() * sizeof(numb), cudaMemcpyHostToDevice);
+                    if (e != cudaSuccess) return fail(std::string("memcpy values: ") + cudaGetErrorString(e));
+                }
+            }
+
+            const long long N = order_steps_for(h_node, req.t_max, req.snap_steps);
+            res.n_steps[(size_t)i] = N;
+
+            int       nt_arg  = req.replicas;
+            numb*     X0_arg  = d_X0.as<numb>();
+            numb*     val_arg = d_values.as<numb>();
+            numb      h_arg   = (numb)h_node;
+            long long n_arg   = N;
+            numb*     out_arg = d_out.as<numb>();
+            void* args[] = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg };
+
+            auto launch = [&](const char* what) -> bool {
+                CUresult r = cuLaunchKernel(cached_order.kernel_perf, gridSize, 1, 1, blockSize, 1, 1,
+                                            0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) { err = std::string("cuLaunchKernel(") + what + "): " + cu_err(r); return false; }
+                return true;
+            };
+
+            for (int w = 0; w < req.warmup; ++w) {
+                if (!launch("perf warmup")) return fail(err);
+                cudaError_t ce = cudaDeviceSynchronize();
+                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
+            }
+
+            double tmin = 0.0, tmax = 0.0, tsum = 0.0;
+            int got = 0;
+            for (int rep = 0; rep < req.repeats; ++rep) {
+                cudaEventRecord(ev.a, 0);
+                if (!launch("perf")) return fail(err);
+                cudaEventRecord(ev.b, 0);
+                cudaError_t ce = cudaEventSynchronize(ev.b);
+                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
+                float ms = 0.0f;
+                ce = cudaEventElapsedTime(&ms, ev.a, ev.b);
+                if (ce != cudaSuccess) return fail(std::string("cudaEventElapsedTime: ") + cudaGetErrorString(ce));
+                const double us = (double)ms * 1000.0;
+                if (got == 0) { tmin = tmax = us; }
+                else { if (us < tmin) tmin = us; if (us > tmax) tmax = us; }
+                tsum += us;
+                ++got;
+
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+                    res.cancelled = true;
+                    return res;
+                }
+            }
+            if (got > 0) {
+                res.t_min[(size_t)i] = tmin;
+                res.t_max[(size_t)i] = tmax;
+                res.t_avg[(size_t)i] = tsum / (double)got;
+            }
+
+            if (req.progress)
+                req.progress->store(0.5f + 0.5f * (float)(i + 1) / (float)n, std::memory_order_relaxed);
+        }
+
+        // Диапазоны для автоскейла: только узлы, у которых есть И время, И
+        // конечная положительная ошибка — точка графика существует лишь тогда,
+        // когда есть обе координаты.
+        bool first_t = true, first_e1 = true, first_e2 = true;
+        for (int i = 0; i < n; ++i) {
+            const double ta = res.t_avg[(size_t)i];
+            if (!std::isfinite(ta)) continue;
+            const double lo = res.t_min[(size_t)i], hi = res.t_max[(size_t)i];
+            if (first_t) { res.t_lo = lo; res.t_hi = hi; first_t = false; }
+            else { if (lo < res.t_lo) res.t_lo = lo; if (hi > res.t_hi) res.t_hi = hi; }
+            const double e1 = res.e1[(size_t)i], e2 = res.e2[(size_t)i];
+            if (std::isfinite(e1) && e1 > 0.0) {
+                if (first_e1) { res.e1_min = res.e1_max = e1; first_e1 = false; }
+                else { if (e1 < res.e1_min) res.e1_min = e1; if (e1 > res.e1_max) res.e1_max = e1; }
+            }
+            if (std::isfinite(e2) && e2 > 0.0) {
+                if (first_e2) { res.e2_min = res.e2_max = e2; first_e2 = false; }
+                else { if (e2 < res.e2_min) res.e2_min = e2; if (e2 > res.e2_max) res.e2_max = e2; }
             }
         }
 
@@ -7836,6 +8059,10 @@ BasinsResult ParametricEngine::run_basins(const BasinsRequest& req) {
 
 BasinsReclusterResult ParametricEngine::run_basins_recluster(const BasinsReclusterRequest& req) {
     return impl_->run_basins_recluster(req);
+}
+
+PerfResult ParametricEngine::run_performance(const PerfRequest& req) {
+    return impl_->run_performance(req);
 }
 
 OrderResult ParametricEngine::run_order(const OrderRequest& req) {

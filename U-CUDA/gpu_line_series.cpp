@@ -1,26 +1,33 @@
 ﻿#include "gpu_line_series.h"
 #include <limits>
+#include <vector>
 #include <algorithm>
 
-int GpuLineSeriesSet::upload(const float* points, int n_points) {
+int GpuLineSeriesSet::upload(const double* points, int n_points,
+                             double origin_x, double origin_y) {
     GpuLineSeries s;
     s.point_count = n_points;
-    float xmin = std::numeric_limits<float>::infinity();
-    float xmax = -std::numeric_limits<float>::infinity();
-    float ymin = std::numeric_limits<float>::infinity();
-    float ymax = -std::numeric_limits<float>::infinity();
+    double xmin = std::numeric_limits<double>::infinity();
+    double xmax = -std::numeric_limits<double>::infinity();
+    double ymin = std::numeric_limits<double>::infinity();
+    double ymax = -std::numeric_limits<double>::infinity();
 
     if (n_points > 0 && points) {
+        // bbox — по АБСОЛЮТНЫМ значениям (его читает autofit), а в VBO уходят
+        // смещённые: вычитание в double, приведение к float уже после него.
+        std::vector<float> shifted((size_t)n_points * 2);
         for (int i = 0; i < n_points; ++i) {
-            float x = points[i * 2 + 0];
-            float y = points[i * 2 + 1];
+            const double x = points[i * 2 + 0];
+            const double y = points[i * 2 + 1];
             xmin = std::min(xmin, x); xmax = std::max(xmax, x);
             ymin = std::min(ymin, y); ymax = std::max(ymax, y);
+            shifted[(size_t)i * 2 + 0] = (float)(x - origin_x);
+            shifted[(size_t)i * 2 + 1] = (float)(y - origin_y);
         }
         glGenBuffers(1, &s.vbo);
         glBindBuffer(GL_ARRAY_BUFFER, s.vbo);
         glBufferData(GL_ARRAY_BUFFER, n_points * 2 * sizeof(float),
-            points, GL_STATIC_DRAW);
+            shifted.data(), GL_STATIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
     else {
@@ -48,12 +55,12 @@ void GpuLineSeriesSet::clear() {
     bbox_data_.clear();
 }
 
-bool GpuLineSeriesSet::bbox(float& xmin, float& xmax, float& ymin, float& ymax) const {
+bool GpuLineSeriesSet::bbox(double& xmin, double& xmax, double& ymin, double& ymax) const {
     if (series_.empty()) return false;
-    xmin = std::numeric_limits<float>::infinity();
-    xmax = -std::numeric_limits<float>::infinity();
-    ymin = std::numeric_limits<float>::infinity();
-    ymax = -std::numeric_limits<float>::infinity();
+    xmin = std::numeric_limits<double>::infinity();
+    xmax = -std::numeric_limits<double>::infinity();
+    ymin = std::numeric_limits<double>::infinity();
+    ymax = -std::numeric_limits<double>::infinity();
     bool any = false;
     for (size_t k = 0; k < series_.size(); ++k) {
         if (!series_[k].valid()) continue;
@@ -66,13 +73,13 @@ bool GpuLineSeriesSet::bbox(float& xmin, float& xmax, float& ymin, float& ymax) 
     return any;
 }
 
-bool GpuLineSeriesSet::bbox_filtered(float& xmin, float& xmax, float& ymin, float& ymax,
+bool GpuLineSeriesSet::bbox_filtered(double& xmin, double& xmax, double& ymin, double& ymax,
                                      const std::vector<bool>& visible_mask) const {
     if (series_.empty()) return false;
-    xmin = std::numeric_limits<float>::infinity();
-    xmax = -std::numeric_limits<float>::infinity();
-    ymin = std::numeric_limits<float>::infinity();
-    ymax = -std::numeric_limits<float>::infinity();
+    xmin = std::numeric_limits<double>::infinity();
+    xmax = -std::numeric_limits<double>::infinity();
+    ymin = std::numeric_limits<double>::infinity();
+    ymax = -std::numeric_limits<double>::infinity();
     bool any = false;
     for (size_t k = 0; k < series_.size(); ++k) {
         if (!series_[k].valid()) continue;
