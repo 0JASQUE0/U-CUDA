@@ -794,7 +794,7 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         // есть, и без неё кастомные читались как хвост последней Order-группы.
         if (!custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : custom_schemes)
-            if (ImGui::Selectable((cs.name + " (custom)").c_str(), scheme == cs.name))
+            if (ImGui::Selectable((cs.name + "##custom").c_str(), scheme == cs.name))
                 choose(cs.name);
         // Обёртки — отдельной группой: паспортного порядка в таблице у них
         // нет (у Extr он считается из базы и числа стадий, у Comp вообще
@@ -2363,7 +2363,7 @@ static void draw_extrapolation_builder(AppModel& model) {
         }
         if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : model.custom_schemes)
-            if (ImGui::Selectable((cs.name + " (custom)").c_str(),
+            if (ImGui::Selectable((cs.name + "##custom").c_str(),
                                   model.extr_builder_base == cs.name))
                 model.extr_builder_base = cs.name;
         ImGui::EndCombo();
@@ -2517,7 +2517,7 @@ static void draw_composition_builder(AppModel& model) {
         }
         if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : model.custom_schemes)
-            if (ImGui::Selectable((cs.name + " (custom)").c_str(),
+            if (ImGui::Selectable((cs.name + "##custom").c_str(),
                                   model.comp_builder_base == cs.name))
                 model.comp_builder_base = cs.name;
         ImGui::EndCombo();
