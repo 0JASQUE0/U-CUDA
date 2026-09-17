@@ -197,6 +197,9 @@ struct PhaseSnapshot {
     std::vector<std::vector<double>> ic_flat;  // [ic][var] starting state
     std::vector<std::string> ic_labels;
     std::string scheme;
+    // Discrete map: h = 1, so the CSV index column is the iteration number n
+    // and t_max / t_skip are counted in iterations.
+    bool   is_map   = false;
     double h        = 0.0;
     double t_max    = 0.0;
     double t_skip   = 0.0;

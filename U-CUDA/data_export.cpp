@@ -725,12 +725,12 @@ static void write_phase_config(std::ofstream& out, const PhaseSnapshot& s)
 static void write_phase_trajectory(std::ofstream& out,
                                    const std::vector<std::string>& vars,
                                    const std::vector<std::vector<double>>& traj,
-                                   double dt)
+                                   double dt, bool is_map)
 {
     if (!out.is_open()) return;
     out << std::setprecision(set_precision);
-    // Header row.
-    out << "t";
+    // Header row. Discrete map: the index column is the iteration number.
+    out << (is_map ? "n" : "t");
     for (const auto& v : vars) out << ", " << v;
     out << '\n';
     for (std::size_t i = 0; i < traj.size(); ++i) {
@@ -778,7 +778,7 @@ static void write_phase_trajectories_wide(std::ofstream& out,
     const std::size_t n_ic  = trajs.size();
     const std::size_t n_var = snapshot.vars.size();
 
-    out << "t";
+    out << (snapshot.is_map ? "n" : "t");
     for (std::size_t k = 0; k < n_ic; ++k) {
         const std::string tag = phase_ic_tag(snapshot, k);
         for (std::size_t v = 0; v < n_var; ++v)
@@ -921,7 +921,7 @@ bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
         std::ofstream out(path);
         if (!out.is_open()) return false;
         out << std::setprecision(set_precision);
-        out << "t";
+        out << (snapshot.is_map ? "n" : "t");
         for (const auto& v : snapshot.vars) out << ", " << v;
         out << '\n';
         return true;
@@ -933,7 +933,7 @@ bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
     if (n_ic == 1) {
         // Одно НУ — шапка без суффикса ("t, x, y, z"), ровно как раньше:
         // разделять на блоки нечего, а этот формат читают внешние скрипты.
-        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt);
+        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt, snapshot.is_map);
         return true;
     }
 

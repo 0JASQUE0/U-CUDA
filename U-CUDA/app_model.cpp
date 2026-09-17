@@ -31,7 +31,7 @@ System AppModel::build_system() const {
         // и после OCR, и при ручном вводе LaTeX — многострочный LaTeX-разбор
         if (latex_text.empty()) throw std::runtime_error("LaTeX is empty");
         if (alpha.empty()) throw std::runtime_error("alphabet is empty");
-        System s = parse_system_from_latex(latex_text, alpha, param_order, funcs);
+        System s = parse_system_from_latex(latex_text, alpha, param_order, funcs, is_map);
         apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
         return s;
     }
@@ -41,7 +41,7 @@ System AppModel::build_system() const {
     // часто срабатывает (x*(r-z) и т.п.).
     if (plain_text.empty()) throw std::runtime_error("equations are empty");
     if (alpha.empty()) throw std::runtime_error("alphabet is empty");
-    System s = parse_system_from_latex(plain_text, alpha, param_order, funcs);
+    System s = parse_system_from_latex(plain_text, alpha, param_order, funcs, is_map);
     apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
     return s;
 }
@@ -121,6 +121,7 @@ SystemRecord AppModel::to_record() const {
     SystemRecord r;
     r.name = name;
     r.note = note;
+    r.is_map = is_map;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -162,11 +163,14 @@ SystemRecord AppModel::to_record() const {
 void AppModel::from_record(const SystemRecord& r) {
     name = r.name;
     note = r.note;
+    is_map = r.is_map;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
-    // Same normaliser as fresh OCR output; idempotent.
-    latex_text = r.latex_text.empty() ? r.latex_text : format_latex(r.latex_text);
+    // Same normaliser as fresh OCR output; idempotent. Skipped for maps: it
+    // only rewrites derivative forms to \dot{X}, which map notation never has.
+    latex_text = (r.latex_text.empty() || r.is_map) ? r.latex_text
+                                                    : format_latex(r.latex_text);
     plain_text = r.plain_text;
     alphabet_text = r.alphabet_text;
     vars_text = r.vars_text;
@@ -202,7 +206,9 @@ void AppModel::from_record(const SystemRecord& r) {
     // сразу перегенерируем код загруженной системы (если выбраны методы),
     // чтобы не показывать код от предыдущей системы.
     generated_code.clear();
-    if (scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
+    // A map has no scheme_* flag set — its single body is always generated.
+    if (is_map
+        || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
         || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint
         || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler)
         generate();
@@ -222,6 +228,7 @@ void AppModel::clear() {
     params_text.clear();
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
+    is_map = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
         = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint
         = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler = false;

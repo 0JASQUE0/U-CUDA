@@ -583,6 +583,16 @@ struct BuiltinScheme {
     // Подсказка чекбокса; nullptr — схема говорит сама за себя.
     const char* tooltip;
 };
+// Scheme name for a discrete map. Deliberately NOT in kBuiltinSchemes: it is
+// never picked from the combo, but it is reserved as a custom-KRS name.
+static const char* const kMapSchemeName = "Map";
+
+// "Is a map" predicate for UI code with no AppModel at hand: load_from_record
+// pins scheme to "Map" for a map system, and that name is barred for custom KRS.
+[[nodiscard]] static bool scheme_is_map(const std::string& name) {
+    return name == kMapSchemeName;
+}
+
 static const BuiltinScheme kBuiltinSchemes[] = {
     { "Euler",                    1, &AppModel::scheme_euler, nullptr },
     { "Euler-Cromer",             1, &AppModel::scheme_cromer, nullptr },
@@ -697,7 +707,14 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::vector<CustomScheme>& custom_schemes,
                               const std::function<void(const std::string&)>& on_pick = {},
                               const std::vector<std::string>* enabled_builtins = nullptr,
-                              AppModel* bc = nullptr) {
+                              AppModel* bc = nullptr,
+                              bool is_map = false) {
+    // Nothing to choose for a discrete map: the step is the right-hand side.
+    if (is_map) {
+        scheme = kMapSchemeName;
+        ImGui::TextDisabled("Map (x_{n+1} = f(x_n)) - no scheme");
+        return false;
+    }
     bool picked = false;
     auto choose = [&](const std::string& nm) {
         scheme = nm;
@@ -767,7 +784,10 @@ static void draw_sweep_target_combo(const char* label,
                                     float width = kComboW,
                                     bool allow_s = false,
                                     AppModel* bc = nullptr,
-                                    BroadcastField which = BroadcastField::SweepTarget) {
+                                    BroadcastField which = BroadcastField::SweepTarget,
+                                    bool allow_h = true) {
+    // A map has no step, so there is nothing to sweep over.
+    if (!allow_h) over_h = false;
     if (params.empty() && vars.empty() && note_when_empty) {
         ImGui::TextDisabled("No parameters/variables (select a system first)");
         return;
@@ -816,10 +836,12 @@ static void draw_sweep_target_combo(const char* label,
             par_index = -1; over_var = false; over_h = false;
         }
     }
-    ImGui::Separator();
-    if (ImGui::Selectable("dt (h)", over_h)) {
-        over_h = true; over_var = false;
-        if (other_over_h) *other_over_h = false;   // ровно одна ось = h
+    if (allow_h) {
+        ImGui::Separator();
+        if (ImGui::Selectable("dt (h)", over_h)) {
+            over_h = true; over_var = false;
+            if (other_over_h) *other_over_h = false;   // ровно одна ось = h
+        }
     }
     ImGui::EndCombo();
     apply_all_menu();
@@ -843,21 +865,26 @@ static bool draw_integration_block(const char* header,
                                    const std::string& scheme,
                                    const std::vector<CustomScheme>& custom_schemes,
                                    const IntegrationFields& f,
-                                   AppModel* bc = nullptr) {
+                                   AppModel* bc = nullptr,
+                                   bool is_map = false) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return false;
     bool changed = false;
     auto menu = [&](BroadcastField kind, const char* label, const std::string& v) {
         return [bc, kind, label, &v] { field_apply_all_menu(bc, kind, {}, label, v); };
     };
-    if (f.h) changed |= InputNumStr("h", *f.h, kFieldW,
+    // h is pinned to 1 for a map (see default_h_from_record), so the field is
+    // gone and the engine's "time" is exactly the iteration count.
+    const char* t_max_label     = is_map ? "iterations"           : "computing time";
+    const char* transient_label = is_map ? "transient iterations" : "transient time";
+    if (f.h && !is_map) changed |= InputNumStr("h", *f.h, kFieldW,
                                     menu(BroadcastField::StepH, "h", *f.h));
     if (f.symmetry_s && scheme_uses_symmetry(scheme, custom_schemes))
         changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW,
                                menu(BroadcastField::SymmetryS, "symmetry s", *f.symmetry_s));
-    if (f.t_max)       changed |= InputNumStr("computing time", *f.t_max,       kFieldW,
-                               menu(BroadcastField::TMax, "computing time", *f.t_max));
-    if (f.transient)   changed |= InputNumStr("transient time", *f.transient,   kFieldW,
-                               menu(BroadcastField::Transient, "transient time", *f.transient));
+    if (f.t_max)       changed |= InputNumStr(t_max_label, *f.t_max,       kFieldW,
+                               menu(BroadcastField::TMax, t_max_label, *f.t_max));
+    if (f.transient)   changed |= InputNumStr(transient_label, *f.transient,   kFieldW,
+                               menu(BroadcastField::Transient, transient_label, *f.transient));
     if (f.pre_scaller) changed |= InputNumStr("decimator",      *f.pre_scaller, kFieldW,
                                menu(BroadcastField::PreScaller, "decimator", *f.pre_scaller));
     if (f.max_value)   changed |= InputNumStr("max value",      *f.max_value,   kFieldW,
@@ -2162,6 +2189,28 @@ static void ls_resolve_plane(LSCurveConfig& cact, int k,
 }
 
 // Вкладка System: ввод системы, методы, генерация кода
+// Generate button, error text and the generated-code viewer. Extracted because
+// the System tab stops earlier for a map - no schemes and no custom KRS.
+static void draw_generated_code_block(AppModel& model, const GuiCallbacks& cb) {
+    if (ImGui::Button("Generate")) model.generate();
+    if (!model.error_message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Error: %s", model.error_message.c_str());
+    }
+
+    if (!model.generated_code.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Generated code:");
+        if (ImGui::Button("Copy")) {
+            if (cb.set_clipboard_text) cb.set_clipboard_text(model.generated_code);
+        }
+        ImGui::InputTextMultiline("##code",
+            (char*)model.generated_code.c_str(), model.generated_code.size() + 1,
+            ImVec2(-1, model.gen_code_editor_h), ImGuiInputTextFlags_ReadOnly);
+        draw_resize_handle("##code_resize", model.gen_code_editor_h);
+    }
+}
+
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     model.poll(); // забрать результат OCR, если готов
 
@@ -2173,6 +2222,11 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::RadioButton("LaTeX", &mode, (int)InputMode::Latex); ImGui::SameLine();
     ImGui::RadioButton("Plain", &mode, (int)InputMode::Plain);
     model.mode = (InputMode)mode;
+    ImGui::SameLine();
+    ImGui::Checkbox("Discrete map", &model.is_map);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("System is given as x_{n+1} = f(x_n): no integration\n"
+                          "scheme, no step h, and time is the iteration number n.");
     ImGui::Separator();
 
     // источник картинки
@@ -2204,11 +2258,18 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         InputTextMultilineStr("##latex", model.latex_text, ImVec2(-1, model.latex_editor_h));
         draw_resize_handle("##latex_resize", model.latex_editor_h);
         if (ImGui::CollapsingHeader("LaTeX format examples")) {
-            ImGui::TextDisabled(
-                "Each equation on its own line, LHS must have a derivative:\n"
-                "  \\dot{x} = \\sigma(y-x) \\\\\n  \\dot{y} = x(\\rho-z)-y\n"
-                "Supported: \\frac{a}{b}, x^{2}, \\sin x, \\sin^{2} x, \\cdot, |x|,\n"
-                "  subscripts x_{m}, greek \\sigma. Derivatives: \\dot{x}, x', dx/dt.");
+            if (model.is_map)
+                ImGui::TextDisabled(
+                    "Each equation on its own line, LHS is the next iterate:\n"
+                    "  x_{n+1} = 1 - a x_n^{2} + y_n \\\\\n  y_{n+1} = b x_n\n"
+                    "Supported: \\frac{a}{b}, x^{2}, \\sin x, \\sin^{2} x, \\cdot, |x|,\n"
+                    "  greek \\sigma. The iteration index (_n, _{n+1}) is stripped.");
+            else
+                ImGui::TextDisabled(
+                    "Each equation on its own line, LHS must have a derivative:\n"
+                    "  \\dot{x} = \\sigma(y-x) \\\\\n  \\dot{y} = x(\\rho-z)-y\n"
+                    "Supported: \\frac{a}{b}, x^{2}, \\sin x, \\sin^{2} x, \\cdot, |x|,\n"
+                    "  subscripts x_{m}, greek \\sigma. Derivatives: \\dot{x}, x', dx/dt.");
         }
     }
     else {
@@ -2216,9 +2277,14 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         InputTextMultilineStr("##plain", model.plain_text, ImVec2(-1, model.plain_editor_h));
         draw_resize_handle("##plain_resize", model.plain_editor_h);
         if (ImGui::CollapsingHeader("Plain format examples")) {
-            ImGui::TextDisabled(
-                "  \\dot{x} = sigma*(y - x) \\\\\n  \\dot{y} = x*(rho - z) - y\n"
-                "Use * for multiplication, ^ for powers. LHS needs \\dot{x}= or x'=.");
+            if (model.is_map)
+                ImGui::TextDisabled(
+                    "  x_{n+1} = 1 - a*x_n^2 + y_n \\\\\n  y_{n+1} = b*x_n\n"
+                    "Use * for multiplication, ^ for powers. LHS needs x_{n+1}=.");
+            else
+                ImGui::TextDisabled(
+                    "  \\dot{x} = sigma*(y - x) \\\\\n  \\dot{y} = x*(rho - z) - y\n"
+                    "Use * for multiplication, ^ for powers. LHS needs \\dot{x}= or x'=.");
         }
     }
 
@@ -2246,7 +2312,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         const std::string& src = (model.mode == InputMode::Plain)
                                  ? model.plain_text
                                  : model.latex_text;
-        DetectedAlphabet det = detect_alphabet(src);
+        DetectedAlphabet det = detect_alphabet(src, model.is_map);
         auto join = [](const std::vector<std::string>& v) {
             std::string out;
             for (size_t i = 0; i < v.size(); ++i) {
@@ -2281,6 +2347,15 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     model.param_order = (ParamOrder)porder;
 
     ImGui::Separator();
+
+    // A map has no scheme: codegen emits exactly one step body.
+    if (model.is_map) {
+        ImGui::TextDisabled("Discrete map: the step is the right-hand side itself,\n"
+                            "so there is no scheme to pick and no step h.");
+        ImGui::Spacing();
+        draw_generated_code_block(model, cb);
+        return;
+    }
 
     // методы
     ImGui::Text("Schemes to generate:");
@@ -2407,6 +2482,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             int n = (int)model.custom_schemes.size() + 1;
             std::string candidate;
             auto name_clash = [&](const std::string& nm) {
+                if (nm == kMapSchemeName) return true;
                 for (const auto& b : kBuiltinSchemes) if (nm == b.name) return true;
                 for (const auto& cs : model.custom_schemes) if (cs.name == nm) return true;
                 return false;
@@ -2418,6 +2494,11 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // подсветка конфликтов
         for (const auto& cs : model.custom_schemes) {
+            if (cs.name == kMapSchemeName) {
+                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    "  '%s' is reserved for discrete maps; rename it.", kMapSchemeName);
+                continue;
+            }
             for (const auto& b : kBuiltinSchemes) {
                 if (cs.name == b.name) {
                     ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
@@ -2440,23 +2521,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         }
     }
 
-    if (ImGui::Button("Generate")) model.generate();
-    if (!model.error_message.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Error: %s", model.error_message.c_str());
-    }
-
-    if (!model.generated_code.empty()) {
-        ImGui::Separator();
-        ImGui::Text("Generated code:");
-        if (ImGui::Button("Copy")) {
-            if (cb.set_clipboard_text) cb.set_clipboard_text(model.generated_code);
-        }
-        ImGui::InputTextMultiline("##code",
-            (char*)model.generated_code.c_str(), model.generated_code.size() + 1,
-            ImVec2(-1, model.gen_code_editor_h), ImGuiInputTextFlags_ReadOnly);
-        draw_resize_handle("##code_resize", model.gen_code_editor_h);
-    }
+    draw_generated_code_block(model, cb);
 }
 
 // Вкладка Parameters: НУ, значения/диапазоны параметров, шаг
@@ -2471,11 +2536,13 @@ static void draw_parameters_tab(AppModel& model) {
     }
     ImGui::Separator();
 
-    // шаг дискретизации
-    ImGui::Text("Discretization step h:");
-    ImGui::SameLine();
-    InputNumStr("##step_h", model.step_h, kFieldW);
-    ImGui::TextDisabled("(leave empty to skip)");
+    // Discretization step; always 1 for a map, and not editable there.
+    if (!model.is_map) {
+        ImGui::Text("Discretization step h:");
+        ImGui::SameLine();
+        InputNumStr("##step_h", model.step_h, kFieldW);
+        ImGui::TextDisabled("(leave empty to skip)");
+    }
 
     ImGui::Spacing();
 
@@ -2862,7 +2929,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
                                  [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes, bc);
+                                 &s.enabled_builtin_schemes, bc, s.sys.is_map);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
@@ -2876,12 +2943,14 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         }
     }
 
-    // время, шаг, децимация
-    ImGui::Text("Step h:"); ImGui::SameLine();
-    changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
-    ImGui::Text("Time(s):"); ImGui::SameLine();
+    // Time, step, decimation; for a map h = 1 and "time" is the iteration index.
+    if (!s.sys.is_map) {
+        ImGui::Text("Step h:"); ImGui::SameLine();
+        changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
+    }
+    ImGui::Text(s.sys.is_map ? "Iterations:" : "Time(s):"); ImGui::SameLine();
     changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
-    ImGui::Text("Skip(s):"); ImGui::SameLine();
+    ImGui::Text(s.sys.is_map ? "Skip:" : "Skip(s):"); ImGui::SameLine();
     changed |= InputNumStr("##ssk", s.skip_time, 70);
     // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
     // only show the field if the body actually references a[0].
@@ -3715,7 +3784,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         pr.show_var[(size_t)nvars] = false;
                     }
 
-                    pr.view2d->x_axis.name = "t";
+                    // step_h == 1 for a map, so dt above equals decimation: the
+                    // X axis already counts iterations, only the label changes.
+                    pr.view2d->x_axis.name = s.sys.is_map ? "n" : "t";
                     pr.view2d->y_axis.name = "value";
 
                     pr.view2d->pad_x = false;
@@ -4030,8 +4101,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         pr.rqa_view_mode_applied = pr.rqa_view_mode;
                     }
 
-                    pr.viewrp->x_axis.name = "t_j, s";
-                    pr.viewrp->y_axis.name = "t_i, s";
+                    pr.viewrp->x_axis.name = s.sys.is_map ? "n_j" : "t_j, s";
+                    pr.viewrp->y_axis.name = s.sys.is_map ? "n_i" : "t_i, s";
                     // Свой экспорт вместо phase_popup_extras: из этого окна нужны матрица и
                     // метрики, а не траектории. Траекторный экспорт оставлен вторым пунктом —
                     // он тут тоже осмыслен (RQA считалась именно по ним).
@@ -4152,7 +4223,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
                     else                                    ax_name = s.vars[av < nv_ax ? av : 0];
 
-                    pr.view2d->x_axis.name = "t, s";
+                    pr.view2d->x_axis.name = s.sys.is_map ? "n" : "t, s";
                     pr.view2d->y_axis.name = "peak " + ax_name;
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = true;
@@ -4280,7 +4351,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -4295,7 +4366,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                             bd.mode_2d ? &bd.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(bd.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget);
+                            &model, BroadcastField::SweepTarget, !model.is_map);
     InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text); });
@@ -4326,7 +4397,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                                     bd.sweep_over_h_2, &bd.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(bd.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map);
         InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text); });
@@ -4385,7 +4456,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
         f.max_value   = &bd.max_value_text;
-        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f, &model);
+        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     draw_named_num_fields("Initial conditions##bd_ic", s.vars,   bd.initial_conditions,
@@ -4956,7 +5027,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -4966,7 +5037,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget);
+                            &model, BroadcastField::SweepTarget, !model.is_map);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -4995,7 +5066,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map);
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
@@ -5018,14 +5089,17 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
-        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f, &model);
+        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     // LLE (Wolf/Benettin) (collapsible)
     if (ImGui::CollapsingHeader("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
-        ImGui::TextDisabled("eps = initial perturbation magnitude; NT = block length\n"
+        ImGui::TextDisabled(model.is_map
+            ? "eps = initial perturbation magnitude; NT = block length\n"
+              "between renormalizations (in iterations)."
+            : "eps = initial perturbation magnitude; NT = block length\n"
                             "between renormalizations (in time units).");
     }
 
@@ -5281,7 +5355,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -5291,7 +5365,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget);
+                            &model, BroadcastField::SweepTarget, !model.is_map);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -5318,7 +5392,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map);
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
@@ -5341,14 +5415,17 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
-        draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f, &model);
+        draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     // LS (Wolf/Benettin + Gram-Schmidt) (collapsible)
     if (ImGui::CollapsingHeader("LS (Wolf/Benettin + Gram-Schmidt)##ls_wbgs", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
-        ImGui::TextDisabled("eps = initial perturbation magnitude; NT = block length\n"
+        ImGui::TextDisabled(model.is_map
+            ? "eps = initial perturbation magnitude; NT = block length\n"
+              "between renormalizations (in iterations)."
+            : "eps = initial perturbation magnitude; NT = block length\n"
                             "between renormalizations (in time units).");
     }
 
@@ -5825,7 +5902,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -5836,7 +5913,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
                             c.sweep_over_h, nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget);
+                            &model, BroadcastField::SweepTarget, !model.is_map);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -5915,7 +5992,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f, &model);
+        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions,
@@ -6548,7 +6625,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -6588,7 +6665,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration", c.scheme, s.custom_schemes, f, &model);
+        draw_integration_block("Integration", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     // Features (DBSCAN axes + plot data) (collapsible)
@@ -7158,7 +7235,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model);
+                      &model, model.is_map);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -7200,9 +7277,9 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     // Integration (collapsible)
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("h",                c.h_text, kFieldW);
+        if (!model.is_map) InputNumStr("h",  c.h_text, kFieldW);
         if (c.mode == 0) {
-            InputNumStr("t_max",        c.t_max_text, kFieldW);
+            InputNumStr(model.is_map ? "iterations" : "t_max", c.t_max_text, kFieldW);
         }
         if (c.mode == 1) {
             // On Grid: у каждой системы свой транзиент. Свипуемая сеткой
@@ -7921,19 +7998,21 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // ---- Интегрирование ----
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                          &model);
+                          &model, model.is_map);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
         const bool h_swept = (c.axis_x_target == kOrderTargetH)
                           || (c.two_d && c.axis_y_target == kOrderTargetH);
-        if (h_swept) ImGui::BeginDisabled();
-        InputNumStr("h", c.h_text, kFieldW);
-        if (h_swept) ImGui::EndDisabled();
-        if (h_swept) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(swept along the axis)");
+        if (!model.is_map) {
+            if (h_swept) ImGui::BeginDisabled();
+            InputNumStr("h", c.h_text, kFieldW);
+            if (h_swept) ImGui::EndDisabled();
+            if (h_swept) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(swept along the axis)");
+            }
         }
-        InputNumStr("computing time", c.t_max_text, kFieldW);
+        InputNumStr(model.is_map ? "iterations" : "computing time", c.t_max_text, kFieldW);
         InputNumStr("max value", c.max_value_text, kFieldW);
 
         ImGui::Checkbox("snap h -> t_max/N", &c.snap_steps);
@@ -8531,7 +8610,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
             // Custom КРС в Custom-вкладке считаются только на GPU.
             if (is_custom_scheme(nm, custom_schemes)) phase.use_gpu = true;
         },
-        &cs.enabled_builtin_schemes, &model);
+        &cs.enabled_builtin_schemes, &model, model.is_map);
 
     // Integration group — mirrors the "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is
@@ -8540,18 +8619,21 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
     // independent transient/computing-time overrides — step is intentionally the ONLY per-L1D
     // field kept in sync with shared.
     if (ImGui::CollapsingHeader("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (InputNumStr("h",              c.h_text, kFieldW)) {
-            c.l1d_h_text  = c.h_text;
-            phase.step_h  = c.h_text;
-        }
+        if (!model.is_map)
+            if (InputNumStr("h",          c.h_text, kFieldW)) {
+                c.l1d_h_text  = c.h_text;
+                phase.step_h  = c.h_text;
+            }
         if (scheme_uses_symmetry(c.scheme, custom_schemes))
             if (InputNumStr("symmetry s", c.symmetry_s, kFieldW))
                 phase.symmetry_s = c.symmetry_s;
         // TT before CT: transient runs first, computing-time is what's
         // actually sampled after — order matches conceptual flow.
-        if (InputNumStr("transient time", c.transient_text, kFieldW))
+        if (InputNumStr(model.is_map ? "transient iterations" : "transient time",
+                        c.transient_text, kFieldW))
             phase.skip_time = c.transient_text;
-        if (InputNumStr("computing time", c.t_max_text, kFieldW))
+        if (InputNumStr(model.is_map ? "iterations" : "computing time",
+                        c.t_max_text, kFieldW))
             phase.sim_time  = c.t_max_text;
         if (InputNumStr("decimator",      c.pre_scaller_text, kFieldW))
             phase.decimation = c.pre_scaller_text;
@@ -8653,7 +8735,7 @@ void draw_level2d_detail(AppModel& model, CustomSession& cs) {
                             c.axis_x_over_h, &c.axis_y_over_h,
                             /*note_when_empty*/ false, 120.0f,
                             scheme_uses_symmetry(c.scheme, cs.custom_schemes),
-                            &model, BroadcastField::SweepTarget);
+                            &model, BroadcastField::SweepTarget, !model.is_map);
     InputNumStr("lo##ax", c.axis_x_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                           "sweep lo", c.axis_x_lo_text); });
@@ -8671,7 +8753,7 @@ void draw_level2d_detail(AppModel& model, CustomSession& cs) {
                             c.axis_y_over_h, &c.axis_x_over_h,
                             /*note_when_empty*/ false, 120.0f,
                             scheme_uses_symmetry(c.scheme, cs.custom_schemes),
-                            &model, BroadcastField::SweepTarget2);
+                            &model, BroadcastField::SweepTarget2, !model.is_map);
     InputNumStr("lo##ay", c.axis_y_lo_text, kFieldW);
     InputNumStr("hi##ay", c.axis_y_hi_text, kFieldW);
     ImGui::Checkbox("Log scale##ay_log", &c.axis_y_log);
@@ -8760,7 +8842,9 @@ void draw_level1d_detail(CustomSession& cs) {
                                 cs.params, cs.vars, par, ov, vi, oh,
                                 inheriting ? &other_copy : other_oh,
                                 /*note_when_empty*/ false, 120.0f,
-                                scheme_uses_symmetry(c.scheme, cs.custom_schemes));
+                                scheme_uses_symmetry(c.scheme, cs.custom_schemes),
+                                nullptr, BroadcastField::SweepTarget,
+                                /*allow_h*/ !scheme_is_map(c.scheme));
         InputNumStr((std::string("lo##") + tag).c_str(), lo, kFieldW);
         InputNumStr((std::string("hi##") + tag).c_str(), hi, kFieldW);
         ImGui::Checkbox((std::string("Log scale##") + tag + "log").c_str(), &lg);

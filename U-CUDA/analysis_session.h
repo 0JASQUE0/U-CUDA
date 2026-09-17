@@ -15,6 +15,13 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                    const System& sys,
                                    const std::string& scheme);
+
+// Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
+// t/h, so with h = 1 the computing time is exactly the iteration count.
+std::string default_h_from_record(const SystemRecord& r);
+
+// Session start scheme: "Map" for a map, otherwise left untouched.
+std::string default_scheme_from_record(const SystemRecord& r, std::string current);
 #include <atomic>
 #include <chrono>
 #include <functional>

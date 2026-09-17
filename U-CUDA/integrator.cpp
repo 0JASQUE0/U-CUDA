@@ -16,6 +16,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "SIMP")              return IntScheme::SIMP;
     if (s == "D")                 return IntScheme::D;
     if (s == "Complex Implicit Euler") return IntScheme::ComplexIEuler;
+    if (s == "Map")               return IntScheme::Map;
     return IntScheme::Euler;
 }
 
@@ -49,6 +50,13 @@ void step_euler(const SystemEvaluator& ev, double* X, const double* a, double h,
                 int n, double* k1) {
     ev.eval(X, a, k1);
     for (int i = 0; i < n; ++i) X[i] += h * k1[i];
+}
+
+// Discrete map: eval already yields x_{n+1} itself, not a derivative.
+void step_map(const SystemEvaluator& ev, double* X, const double* a,
+              int n, double* k1) {
+    ev.eval(X, a, k1);
+    for (int i = 0; i < n; ++i) X[i] = k1[i];
 }
 
 void step_euler_cromer(const SystemEvaluator& ev, double* X, const double* a, double h,
@@ -524,6 +532,7 @@ bool computePhasePortraitCPU(
 
     auto do_step = [&]() {
         switch (scheme) {
+        case IntScheme::Map:              step_map(ev, X.data(), a, n, k1.data()); break;
         case IntScheme::Euler:            step_euler(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::EulerCromer:      step_euler_cromer(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::ExplicitMidpoint: step_midpoint(ev, X.data(), a, h, n, k1.data(), tmp.data()); break;
