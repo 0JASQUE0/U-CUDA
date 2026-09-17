@@ -8540,11 +8540,13 @@ static void draw_order_target_combo(const char* label, int& target,
 }
 
 // Блок настроек одной оси. Возвращает ничего: всё пишется прямо в конфиг.
+// n_text == nullptr — ось не владеет числом узлов (в 2D оно общее и живёт на
+// X): поле не рисуется, вместо него подпись, откуда берётся разрешение.
 static void draw_order_axis_block(const char* id, const char* title,
                                   const OrderAnalysisSession& s,
                                   int& target, std::string& lo, std::string& hi,
-                                  bool& log_grid, std::string& n_text,
-                                  bool enabled) {
+                                  bool& log_grid, std::string* n_text,
+                                  bool enabled, const char* n_label = "points") {
     ImGui::PushID(id);
     if (!enabled) ImGui::BeginDisabled();
     ImGui::SeparatorText(title);
@@ -8552,8 +8554,14 @@ static void draw_order_axis_block(const char* id, const char* title,
     InputNumStr("from", lo, kFieldW);
     ImGui::SameLine();
     InputNumStr("to", hi, kFieldW);
-    InputNumStr("points", n_text, kFieldW);
-    ImGui::SameLine();
+    if (n_text) {
+        InputNumStr(n_label, *n_text, kFieldW);
+        ImGui::SameLine();
+    }
+    else {
+        ImGui::TextDisabled("resolution: same as X");
+        ImGui::SameLine();
+    }
     ImGui::Checkbox("log grid", &log_grid);
     if (log_grid) {
         ImGui::SameLine();
@@ -8599,7 +8607,7 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
                               c.axis_x_log, c.axis_x_n_text, true);
     if (!sweeping_h)
         sweeping_h = collect(c.axis_y_target, c.axis_y_lo_text, c.axis_y_hi_text,
-                             c.axis_y_log, c.axis_y_n_text, c.two_d);
+                             c.axis_y_log, c.axis_x_n_text, c.two_d);
     if (!sweeping_h) hs.push_back(parse_ratio_or(c.h_text, 0.0));
 
     long long n_min = -1, n_max = -1;
@@ -8630,8 +8638,12 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
         for (double h : hs) if (h > 0.0) total += (double)order_steps_for_h(h, tmax, c.snap_steps);
         double cells = (double)hs.size();
         if (c.two_d) {
-            const double other = std::max(1.0, parse_ratio_or(
-                (c.axis_x_target == kOrderTargetH) ? c.axis_y_n_text : c.axis_x_n_text, 200.0));
+            // Сетка квадратная, N x N. hs уже содержит узлы той оси, что свипует
+            // h; вторая добавляет N. Если h не свипуется вовсе, hs — одна точка,
+            // и обе оси идут множителями (раньше здесь терялась одна из них, и
+            // счётчик ячеек занижался ровно в N раз).
+            const double n_side = std::max(1.0, parse_ratio_or(c.axis_x_n_text, 200.0));
+            const double other = sweeping_h ? n_side : n_side * n_side;
             total *= other;
             cells *= other;
         }
@@ -8958,10 +8970,11 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             ImGui::SetTooltip("Off - a p(X axis) curve. On - a p(X, Y) map.");
         draw_order_axis_block("axx", "Axis X", s, c.axis_x_target,
                               c.axis_x_lo_text, c.axis_x_hi_text,
-                              c.axis_x_log, c.axis_x_n_text, true);
+                              c.axis_x_log, &c.axis_x_n_text, true,
+                              c.two_d ? "resolution (both axes)" : "points");
         draw_order_axis_block("axy", "Axis Y", s, c.axis_y_target,
                               c.axis_y_lo_text, c.axis_y_hi_text,
-                              c.axis_y_log, c.axis_y_n_text, c.two_d);
+                              c.axis_y_log, nullptr, c.two_d);
 
         if (c.axis_x_target == kOrderTargetH && c.two_d && c.axis_y_target == kOrderTargetH)
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep h");
