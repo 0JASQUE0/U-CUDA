@@ -790,7 +790,9 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
             }
             if (ImGui::Selectable(b.name, scheme == b.name)) choose(b.name);
         }
-        if (!custom_schemes.empty()) ImGui::Separator();
+        // Своя шапка, а не голая черта: у групп порядка и у обёрток заголовки
+        // есть, и без неё кастомные читались как хвост последней Order-группы.
+        if (!custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(), scheme == cs.name))
                 choose(cs.name);
@@ -2354,7 +2356,7 @@ static void draw_extrapolation_builder(AppModel& model) {
             if (ImGui::Selectable(b.name, model.extr_builder_base == b.name))
                 model.extr_builder_base = b.name;
         }
-        if (!model.custom_schemes.empty()) ImGui::Separator();
+        if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : model.custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(),
                                   model.extr_builder_base == cs.name))
@@ -2508,7 +2510,7 @@ static void draw_composition_builder(AppModel& model) {
             if (ImGui::Selectable(b.name, model.comp_builder_base == b.name))
                 model.comp_builder_base = b.name;
         }
-        if (!model.custom_schemes.empty()) ImGui::Separator();
+        if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
         for (const auto& cs : model.custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(),
                                   model.comp_builder_base == cs.name))
