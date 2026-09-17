@@ -174,11 +174,13 @@ std::string record_to_json(const SystemRecord& r) {
           << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0) << "\"}";
     }
     o << "],\n";
-    // extr_schemes: ["Extr(RK4|1,2,4)", ...] — только имена, тело пересобирается.
+    // Wrapper scheme names only ("Extr(RK4|1,2,4)", "Comp(CD|g1,g2,g1)"); the
+    // body is rebuilt by the resolver. The JSON key stays "extr_schemes" so
+    // that system.json files written before Comp existed still load.
     o << "  \"extr_schemes\": [";
-    for (size_t k = 0; k < r.extr_schemes.size(); ++k) {
+    for (size_t k = 0; k < r.wrapper_schemes.size(); ++k) {
         if (k) o << ", ";
-        o << "\"" << esc(r.extr_schemes[k]) << "\"";
+        o << "\"" << esc(r.wrapper_schemes[k]) << "\"";
     }
     o << "]\n";
     o << "}\n";
@@ -266,7 +268,7 @@ SystemRecord record_from_json(const std::string& json) {
             ++p.i; p.ws();
             if (p.peek() != ']') {
                 while (true) {
-                    r.extr_schemes.push_back(p.parse_string());
+                    r.wrapper_schemes.push_back(p.parse_string());
                     p.ws();
                     if (p.peek() == ',') { ++p.i; continue; }
                     if (p.peek() == ']') { ++p.i; break; }

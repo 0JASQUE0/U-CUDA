@@ -54,13 +54,16 @@ struct OrderConfig {
     std::string axis_x_lo_text  = "1e-4";
     std::string axis_x_hi_text  = "1e-1";
     bool        axis_x_log      = true;    // лог-сетка УЗЛОВ по оси
+    // Число узлов. В 2D — ОБЩЕЕ на обе оси, отдельного axis_y_n_text нет:
+    // карта всегда N x N. Разные N по осям давали растянутые ячейки, из-за
+    // чего тонкая структура (например луч порядка у композиций) читалась
+    // по-разному вдоль X и вдоль Y.
     std::string axis_x_n_text   = "200";
 
     int         axis_y_target   = 0;
     std::string axis_y_lo_text  = "0";
     std::string axis_y_hi_text  = "1";
     bool        axis_y_log      = false;
-    std::string axis_y_n_text   = "200";
 
     // Устройство расчёта. GPU — прежний путь через NVRTC и order.template.cu.
     // CPU — та же арифметика тем же телом КРС, скомпилированным cl.exe
@@ -130,8 +133,8 @@ struct OrderAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена экстраполяционных обёрток для комбо; тело даёт резолвер по имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper names for the combo; the resolver builds the body from the name.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 

@@ -1500,7 +1500,6 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"axis_y_lo_text\":";  jstr(o, c.axis_y_lo_text);  o << ",";
     o << "\"axis_y_hi_text\":";  jstr(o, c.axis_y_hi_text);  o << ",";
     o << "\"axis_y_log\":"       << (c.axis_y_log ? "true" : "false") << ",";
-    o << "\"axis_y_n_text\":";   jstr(o, c.axis_y_n_text);   o << ",";
     o << "\"h_text\":";          jstr(o, c.h_text);          o << ",";
     o << "\"t_max_text\":";      jstr(o, c.t_max_text);      o << ",";
     o << "\"max_value_text\":";  jstr(o, c.max_value_text);  o << ",";
@@ -1535,7 +1534,6 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "axis_y_lo_text")   c.axis_y_lo_text   = p.str();
     else if (key == "axis_y_hi_text")   c.axis_y_hi_text   = p.str();
     else if (key == "axis_y_log")       c.axis_y_log       = p.boolean();
-    else if (key == "axis_y_n_text")    c.axis_y_n_text    = p.str();
     else if (key == "h_text")           c.h_text           = p.str();
     else if (key == "t_max_text")       c.t_max_text       = p.str();
     else if (key == "max_value_text")   c.max_value_text   = p.str();

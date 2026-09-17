@@ -703,33 +703,43 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     }
     if (sys.rhs.empty()) return {};
 
-    ExtrapolationSpec spec;
-    if (parse_extrapolation_name(scheme, &spec)) {
-        // Порядок и симметричность базы: у кастомной КРС их объявил автор, у
-        // встроенной берём из паспорта. Неизвестная база — отказ, а не тихий
-        // откат на Эйлер: пустая КРС наверху превращается в честную ошибку.
-        int  p   = 1;
-        bool sym = false;
-        std::string base_body;
-        bool base_is_custom = false;
+    // Порядок и симметричность базы: у кастомной КРС их объявил автор, у
+    // встроенной берём из паспорта. Неизвестная база — отказ, а не тихий
+    // откат на Эйлер: пустая КРС наверху превращается в честную ошибку.
+    // Общее для ОБЕИХ обёрток — иначе Extr и Comp разъехались бы по тому,
+    // что считают допустимой базой.
+    auto resolve_base = [&](const std::string& base_name, std::string& body,
+                            int& p, bool& sym) -> bool {
+        p = 1; sym = false;
         for (const auto& cs : custom_schemes) {
-            if (cs.name == spec.base) {
-                base_body      = cs.body;
-                p              = cs.order;
-                sym            = cs.symmetric;
-                base_is_custom = true;
-                break;
+            if (cs.name == base_name) {
+                body = cs.body; p = cs.order; sym = cs.symmetric;
+                return !body.empty();
             }
         }
-        if (!base_is_custom) {
-            if (!builtin_scheme_traits(spec.base, &p, &sym)) return {};
-            try { base_body = gen(sys, scheme_from_string(spec.base)); }
-            catch (...) { return {}; }
-        }
-        if (base_body.empty()) return {};
+        if (!builtin_scheme_traits(base_name, &p, &sym)) return false;
+        try { body = gen(sys, scheme_from_string(base_name)); }
+        catch (...) { return false; }
+        return !body.empty();
+    };
+
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme, &spec)) {
+        int  p = 1; bool sym = false; std::string base_body;
+        if (!resolve_base(spec.base, base_body, p, sym)) return {};
         try {
             return wrap_extrapolation(base_body, (int)sys.vars.size(),
                                       spec.n, p, sym, spec.base);
+        }
+        catch (...) { return {}; }
+    }
+
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme, &cspec)) {
+        int  p = 1; bool sym = false; std::string base_body;
+        if (!resolve_base(cspec.base, base_body, p, sym)) return {};
+        try {
+            return wrap_composition(base_body, sys, cspec.gammas, p, sym, cspec.base);
         }
         catch (...) { return {}; }
     }

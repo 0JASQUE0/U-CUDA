@@ -248,9 +248,9 @@ struct PhaseAnalysisSession {
     // Пользовательские КРС из текущей системы (копия из SystemRecord).
     // Доступны в scheme combo вместе с built-in именами.
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     // Enabled built-in schemes for this system; empty = combo shows all built-ins.
     std::vector<std::string> enabled_builtin_schemes;
 
@@ -525,9 +525,9 @@ struct BifurcationAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -699,9 +699,9 @@ struct LLEAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -852,9 +852,9 @@ struct Dft1DAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1091,9 +1091,9 @@ struct BasinsAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1281,9 +1281,9 @@ struct FastSyncAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1415,9 +1415,9 @@ struct LyapunovSpectrumAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
-    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
-    // только комбо выбора схемы: тело резолвится из самого имени.
-    std::vector<std::string>  extr_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 

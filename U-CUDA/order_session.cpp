@@ -67,8 +67,9 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
 
     req.axis_x = to_engine_axis(c.axis_x_target, c.axis_x_lo_text, c.axis_x_hi_text,
                                 c.axis_x_log, c.axis_x_n_text, true, amountOfValues);
+    // Та же сетка по обеим осям — см. OrderConfig::axis_x_n_text.
     req.axis_y = to_engine_axis(c.axis_y_target, c.axis_y_lo_text, c.axis_y_hi_text,
-                                c.axis_y_log, c.axis_y_n_text, c.two_d, amountOfValues);
+                                c.axis_y_log, c.axis_x_n_text, c.two_d, amountOfValues);
 
     req.h             = parse_d(c.h_text, 0.01);
     req.t_max         = parse_d(c.t_max_text, 10.0);
