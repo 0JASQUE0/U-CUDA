@@ -1,6 +1,6 @@
-﻿#include "nvrtc_engine.h"
-#include "parametric_engine.h"
-#include "platform_paths.h"
+﻿#include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/cuda/parametric_engine.h"
+#include "ucuda/platform/platform_paths.h"
 #include <cuda.h>
 #include <cmath>
 #include <iostream>

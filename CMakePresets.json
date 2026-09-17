@@ -10,6 +10,8 @@
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc-15",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-15",
         "CMAKE_CUDA_ARCHITECTURES": "75",
         "CMAKE_CUDA_COMPILER": "/opt/cuda/bin/nvcc",
         "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-15",
@@ -40,6 +42,8 @@
     { "name": "windows-release", "configurePreset": "windows", "configuration": "Release", "jobs": 4 }
   ],
   "testPresets": [
+    { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-release", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } },
     { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
     { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } }
   ]

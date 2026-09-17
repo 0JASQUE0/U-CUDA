@@ -2,6 +2,15 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "U-CUDA (Windows)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${command:cmake.launchTargetPath}",
+      "cwd": "${command:cmake.launchTargetDirectory}",
+      "preLaunchTask": "CMake: build",
+      "console": "integratedTerminal"
+    },
+    {
       "name": "U-CUDA (Linux)",
       "type": "gdb",
       "request": "launch",
@@ -10,15 +19,6 @@
       "preLaunchTask": "CMake: build",
       "gdbpath": "/usr/bin/gdb",
       "valuesFormatting": "prettyPrinters"
-    },
-    {
-      "name": "U-CUDA (Windows)",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "program": "${command:cmake.launchTargetPath}",
-      "cwd": "${command:cmake.launchTargetDirectory}",
-      "preLaunchTask": "CMake: build",
-      "console": "integratedTerminal"
     }
   ]
 }

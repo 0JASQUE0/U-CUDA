@@ -1,7 +1,7 @@
-﻿#include "platform_posix.h"
-#include "platform_paths.h"
-#include "krs_cpu.h"
-#include "ocr_client_win.h"
+﻿#include "ucuda/platform/platform_posix.h"
+#include "ucuda/platform/platform_paths.h"
+#include "ucuda/numerics/krs_cpu.h"
+#include "ucuda/ocr/ocr_client_win.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>

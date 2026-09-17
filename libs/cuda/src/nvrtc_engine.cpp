@@ -1,0 +1,278 @@
+﻿#include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/equations/adaptive_codegen.h"
+#include "ucuda/cuda/runtime_settings.h"   // get_nvrtc_fmad(): режим FMA общий с картами
+#include <cuda.h>
+#include <nvrtc.h>
+#include <cstdio>
+#include <sstream>
+#include <fstream>
+
+// exe_dir(): единственное внешнее определение живёт в app_main.cpp (Release) /
+// main_NonLinAnal.cu (Debug) — копия в parametric_engine.cpp лежит в
+// анонимном namespace и снаружи не видна.
+extern std::string exe_dir();
+
+// помощники проверки ошибок, пишут в error_
+#define NV_FAIL(msg) do { error_ = (msg); return false; } while(0)
+
+static bool nvrtc_ok(nvrtcResult r, std::string& err, const char* where) {
+    if (r != NVRTC_SUCCESS) { err = std::string("NVRTC: ") + nvrtcGetErrorString(r) + " @ " + where; return false; }
+    return true;
+}
+static bool cu_ok(CUresult r, std::string& err, const char* where) {
+    if (r != CUDA_SUCCESS) {
+        const char* m = nullptr; cuGetErrorString(r, &m);
+        err = std::string("CUDA: ") + (m ? m : "?") + " @ " + where; return false;
+    }
+    return true;
+}
+#define NVOK(x,w) do { if(!nvrtc_ok((x),error_,w)) return false; } while(0)
+#define CUOK(x,w) do { if(!cu_ok((x),error_,w)) return false; } while(0)
+
+NvrtcEngine::NvrtcEngine() {}
+NvrtcEngine::~NvrtcEngine() {
+    unload_all();
+    if (context_) { cuCtxDestroy((CUcontext)context_); context_ = nullptr; }
+}
+
+void NvrtcEngine::unload_all() {
+    for (auto& e : cache_) cuModuleUnload((CUmodule)e.module);
+    cache_.clear();
+    kernel_ = nullptr;
+    compiled_ = false;
+}
+
+bool NvrtcEngine::init() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (inited_) return true;
+    CUOK(cuInit(0), "cuInit");
+    CUdevice dev;
+    CUOK(cuDeviceGet(&dev, 0), "cuDeviceGet");
+    CUcontext ctx;
+    // В CUDA 13 у cuCtxCreate появился параметр CUctxCreateParams* перед flags.
+    // nullptr эквивалентен поведению старого 3-арг вызова.
+#if CUDA_VERSION >= 13000
+    CUOK(cuCtxCreate(&ctx, nullptr, 0, dev), "cuCtxCreate");
+#else
+    CUOK(cuCtxCreate(&ctx, 0, dev), "cuCtxCreate");
+#endif
+    context_ = ctx;
+    CUOK(cuDeviceGetAttribute(&cc_major_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev), "ccMajor");
+    CUOK(cuDeviceGetAttribute(&cc_minor_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "ccMinor");
+    inited_ = true;
+    return true;
+}
+
+bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inited_ && !init()) return false;
+    // Если этот worker-thread унаследовал чужой текущий контекст (например от
+    // ParametricEngine, который работал в той же thread-pool ячейке), модуль
+    // и kernel из нашего контекста дадут "invalid resource handle @ launch".
+    // Жёстко выставляем НАШ контекст текущим перед любыми CU/NVRTC-вызовами.
+    cuCtxSetCurrent((CUcontext)context_);
+
+    // Ключ кэша: КРС-текст + размерность + режим FMA. 0x1F — разделитель (не
+    // встречается в сгенерированном коде), иначе "foo"+"12" неотличимо от
+    // "foo1"+"2".
+    // fmad меняет не текст, а опцию компиляции, т.е. при том же КРС даёт другой
+    // PTX. Без него в ключе переключатель в Settings молча не применялся бы к
+    // портретам до перезапуска — модуль отдавался бы из кэша.
+    const bool fmad = get_nvrtc_fmad();
+    std::string key = krs_body;
+    key += '\x1f';
+    key += std::to_string(amountOfX);
+    key += '\x1f';
+    key += (fmad ? '1' : '0');
+
+    // Cache hit: систему/метод уже компилировали в этой сессии — переключаемся
+    // на готовый модуль без обращения к NVRTC.
+    for (size_t i = 0; i < cache_.size(); ++i) {
+        if (cache_[i].key == key) {
+            kernel_ = cache_[i].kernel;
+            amountOfX_ = amountOfX;
+            compiled_ = true;
+            if (i + 1 != cache_.size()) {           // MRU: hit -> в конец
+                CacheEntry hit = cache_[i];
+                cache_.erase(cache_.begin() + i);
+                cache_.push_back(hit);
+            }
+            return true;
+        }
+    }
+
+    amountOfX_ = amountOfX;
+
+    // Схемы с комплексными коэффициентами (Complex CD) держат внутри шага
+    // ucmplx — тип объявлен в configCUDA.h. В отличие от параметрического
+    // движка, этот исходник самодостаточен и собирается вообще без -I, поэтому
+    // заголовок подаём текстом, и только когда он реально нужен: для остальных
+    // схем исходник и опции компиляции остаются прежними.
+    // Признак берём из самого тела — ucmplx в нём есть тогда и только тогда,
+    // когда схема комплексная, а тело и так является ключом кеша модулей, так
+    // что рассинхронизироваться тут нечему.
+    const bool needs_complex = krs_body.find("ucmplx") != std::string::npos || is_adaptive_body(krs_body);
+    std::string adaptive_header;
+    std::string cfg_header;
+    if (needs_complex) {
+        const std::string path = exe_dir() + "/kernels/configCUDA.h";
+        std::ifstream f(path, std::ios::binary);
+        if (!f) NV_FAIL("не найден " + path + " (нужен для схем с комплексными "
+                        "коэффициентами; проверь, что kernels\\ скопирован рядом с .exe)");
+        std::ostringstream ss; ss << f.rdbuf();
+        cfg_header = ss.str();
+        std::ifstream af(exe_dir() + "/kernels/adaptive_solver.h", std::ios::binary);
+        if (!af) NV_FAIL("missing kernels/adaptive_solver.h");
+        std::ostringstream as; as << af.rdbuf(); adaptive_header = as.str();
+        if (adaptive_header.size() >= 3 && (unsigned char)adaptive_header[0] == 0xEF) adaptive_header.erase(0,3);
+        // Санитайзинг — тот же, что в parametric_engine.cpp::read_text_file, и
+        // по той же причине. Все исходники проекта в UTF-8 С BOM
+        // (.editorconfig): файл, найденный по -I, NVRTC разбирает сам, но
+        // заголовок, поданный ТЕКСТОМ, попадает в препроцессор как есть, и BOM
+        // становится "unrecognized token" ещё до #pragma once (проверено: и в
+        // первой строке, и в любой другой). Не-ASCII байты глушим до пробела:
+        // весь не-ASCII в configCUDA.h живёт в комментариях, а исторически
+        // NVRTC спотыкался и о них.
+        if (cfg_header.size() >= 3 && (unsigned char)cfg_header[0] == 0xEF
+            && (unsigned char)cfg_header[1] == 0xBB && (unsigned char)cfg_header[2] == 0xBF)
+            cfg_header.erase(0, 3);
+        for (char& c : cfg_header) if ((unsigned char)c >= 0x80) c = ' ';
+    }
+
+    // Собираем полный CUDA-исходник: тип, КРС как __device__, ядро траектории.
+    // krs_body использует X[], a[], h (как выдаёт codegen). Тип numb=double тут.
+    std::ostringstream src;
+    src << "typedef double numb;\n"
+        << "#define AMOUNTOFX " << amountOfX << "\n";
+    // configCUDA.h сам объявляет numb и AMOUNTOFX (второе — под #ifndef, первое
+    // повторным typedef того же типа, что легально), поэтому порядок безопасен.
+    if (needs_complex) src << "#include \"configCUDA.h\"\n";
+    else src << "namespace adaptive { struct Stats; }\n";
+    src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
+        << krs_body << "\n"
+        << "}\n"
+        // Ядро на N траекторий: поток tid считает траекторию для НУ номер tid.
+        // Все траектории параллельны. Параметры values общие для всех потоков.
+        // Layout НУ:    ic[tid*AMOUNTOFX + k]
+        // Layout выхода: data[(tid*total + step)*AMOUNTOFX + k]
+        << "extern \"C\" __global__ void phase_kernel("
+        "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data, adaptive::Stats* diagnostics) {\n"
+        << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
+        << "    if (tid >= N) return;\n"
+        << "    numb X[AMOUNTOFX];\n"
+        << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
+        << "    for (int s=0;s<skip;++s) calculateDiscreteModel(X, values, h);\n"
+        << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
+        << "    for (int t=0;t<total;++t) {\n"
+        << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
+        << "        calculateDiscreteModel(X, values, h);\n"
+        << "    }\n"
+        << "}\n";
+    if (is_adaptive_body(krs_body)) {
+        src.str(""); src.clear();
+        src << "#define AMOUNTOFX " << amountOfX << "\n#include \"configCUDA.h\"\n";
+        src << "extern \"C\" __global__ void phase_kernel(const numb* ic,const numb* values,numb h,int total,int skip,int N,numb* data,adaptive::Stats* diagnostics) {\n"
+               "int tid=blockIdx.x*blockDim.x+threadIdx.x; if(tid>=N) return;\n"
+               "numb X[AMOUNTOFX]; for(int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX+i];\n"
+               "numb* out=data+(size_t)tid*total*AMOUNTOFX; adaptive::Stats* stats=diagnostics+tid;\n"
+            << adaptive_phase_loop(krs_body) << "\n}\n";
+    }
+    std::string code = src.str();
+
+    nvrtcProgram prog;
+    const char* hdr_src[]  = { cfg_header.c_str(), adaptive_header.c_str() };
+    const char* hdr_name[] = { "configCUDA.h", "adaptive_solver.h" };
+    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu",
+                            needs_complex ? 2 : 0,
+                            needs_complex ? hdr_src  : nullptr,
+                            needs_complex ? hdr_name : nullptr), "createProgram");
+    char arch[32];
+    snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
+    // FMA-контракция обязана совпадать с parametric_engine.cpp: фазовый портрет
+    // рисуется по ячейке уже посчитанной карты, и если карта считалась с
+    // контракцией, а портрет без — на фрактальной границе бассейнов траектория
+    // уходит в другой аттрактор. Раньше здесь стоял жёсткий --fmad=false с
+    // комментарием «см. parametric_engine.cpp», где этого флага не было вовсе.
+    // Теперь обе стороны читают одну настройку (Settings -> get_nvrtc_fmad).
+    const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false", "--std=c++17" };
+    nvrtcResult comp = nvrtcCompileProgram(prog, 3, opts);
+    // лог (при ошибке — в error_)
+    size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+    std::string log;
+    if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+    if (comp != NVRTC_SUCCESS) {
+        error_ = "NVRTC compile failed:\n" + log;
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+    size_t ptxsz = 0; NVOK(nvrtcGetPTXSize(prog, &ptxsz), "ptxSize");
+    std::string ptx(ptxsz, '\0'); NVOK(nvrtcGetPTX(prog, &ptx[0]), "getPtx");
+    nvrtcDestroyProgram(&prog);
+
+    CUmodule mod;
+    CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad");
+    CUfunction fn;
+    CUOK(cuModuleGetFunction(&fn, mod, "phase_kernel"), "getFunction");
+
+    // При переполнении кэша вытесняем самый старый (LRU, начало вектора).
+    if (cache_.size() >= kCacheCapacity) {
+        cuModuleUnload((CUmodule)cache_.front().module);
+        cache_.erase(cache_.begin());
+    }
+    cache_.push_back({ key, mod, fn });
+    kernel_ = fn;
+    compiled_ = true;
+    return true;
+}
+
+bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
+    const std::vector<double>& values,
+    double h, int total, int skip,
+    std::vector<std::vector<std::vector<double>>>& out, std::vector<adaptive::Stats>* diagnostics) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out.clear();
+    // см. комментарий в compile() — нужно выставить НАШ контекст текущим.
+    cuCtxSetCurrent((CUcontext)context_);
+    if (!compiled_) NV_FAIL("not compiled");
+    if (N <= 0) NV_FAIL("N<=0");
+    if ((int)ic_flat.size() != N * amountOfX_) NV_FAIL("ic_flat size != N*amountOfX");
+    if (total <= 0) NV_FAIL("total<=0");
+
+    int nx = amountOfX_, nv = (int)values.size();
+    size_t data_count = (size_t)N * total * nx;
+    CUdeviceptr d_ic = 0, d_val = 0, d_data = 0, d_stats = 0;
+    struct Cleanup { CUdeviceptr &a,&b,&c,&d; ~Cleanup() { if(a)cuMemFree(a); if(b)cuMemFree(b); if(c)cuMemFree(c); if(d)cuMemFree(d); } } cleanup{d_ic,d_val,d_data,d_stats};
+    CUOK(cuMemAlloc(&d_stats, (size_t)N * sizeof(adaptive::Stats)), "allocStats");
+    CUOK(cuMemsetD8(d_stats, 0, (size_t)N * sizeof(adaptive::Stats)), "clearStats");
+    CUOK(cuMemAlloc(&d_ic, (size_t)N * nx * sizeof(double)), "allocIc");
+    CUOK(cuMemAlloc(&d_val, (nv > 0 ? nv : 1) * sizeof(double)), "allocVal");
+    CUOK(cuMemAlloc(&d_data, data_count * sizeof(double)), "allocData");
+    CUOK(cuMemcpyHtoD(d_ic, ic_flat.data(), (size_t)N * nx * sizeof(double)), "cpyIc");
+    if (nv > 0) CUOK(cuMemcpyHtoD(d_val, values.data(), nv * sizeof(double)), "cpyVal");
+
+    double hh = h;
+    int tot = total, sk = skip, n = N;
+    void* args[] = { &d_ic, &d_val, &hh, &tot, &sk, &n, &d_data, &d_stats };
+    // N потоков: поток tid -> траектория tid. Раскладка под N.
+    int threads = 256, blocks = (N + threads - 1) / threads;
+    CUOK(cuLaunchKernel((CUfunction)kernel_, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), "launch");
+    CUOK(cuCtxSynchronize(), "sync");
+
+    std::vector<double> flat(data_count);
+    CUOK(cuMemcpyDtoH(flat.data(), d_data, data_count * sizeof(double)), "cpyOut");
+    std::vector<adaptive::Stats> stats(N);
+    CUOK(cuMemcpyDtoH(stats.data(), d_stats, (size_t)N*sizeof(adaptive::Stats)), "copyStats");
+    if (diagnostics) *diagnostics = stats;
+    for (int i=0;i<N;++i) if (stats[i].status != adaptive::Success)
+        NV_FAIL("trajectory " + std::to_string(i+1) + ": " + adaptive::status_text(stats[i].status));
+
+    // раскладка: out[tid][step][coord]
+    out.resize(N);
+    for (int tid = 0; tid < N; ++tid) {
+        auto& traj = out[tid];
+        traj.resize(total);
+        const double* base = flat.data() + (size_t)tid * total * nx;
+        for (int t = 0; t < total; ++t) { traj[t].resize(nx); for (int k = 0; k < nx; ++k) traj[t][k] = base[(size_t)t * nx + k]; }
+    }
+    return true;
+}

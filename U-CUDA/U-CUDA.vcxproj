@@ -79,7 +79,8 @@ xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cu"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cuh" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaMacros.cuh"  "$(OutDir)kernels\"
-xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
+xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"
+xcopy /Y /I "$(ProjectDir)adaptive_solver.h" "$(OutDir)kernels\"</Command>
       <Message>Copying runtime data (ocr_server.py, kernels\ + NonLinAnal sources) to $(OutDir); library\ is resolved from source at runtime</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -115,7 +116,8 @@ xcopy /Y /E /I "$(ProjectDir)kernels" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cu"  "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaLibrary.cuh" "$(OutDir)kernels\"
 xcopy /Y /I "$(ProjectDir)cudaMacros.cuh"  "$(OutDir)kernels\"
-xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
+xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"
+xcopy /Y /I "$(ProjectDir)adaptive_solver.h" "$(OutDir)kernels\"</Command>
       <Message>Copying runtime data (ocr_server.py, kernels\ + NonLinAnal sources) to $(OutDir); library\ is resolved from source at runtime</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>

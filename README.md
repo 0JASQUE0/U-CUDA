@@ -2,9 +2,26 @@
 
 Анализ нелинейных динамических систем на CUDA + ImGui. Пользователь задаёт систему ОДУ (LaTeX или текст, можно с фото через OCR), приложение генерирует CUDA-код, интегрирует на GPU и рисует фазовые портреты 2D/3D.
 
+## Адаптивный шаг
+
+В конфигурациях анализа доступны DOPRI5 и адаптация выбранной схемы через два полушага. Настройки, ограничения и проверки описаны в [ADAPTIVE_INTEGRATION.md](ADAPTIVE_INTEGRATION.md).
+
 ## CMake: Arch Linux и Windows
 
 Общая сборка описана в `CMakeLists.txt`, профили — в `CMakePresets.json`.
+Один набор исходников используется в VS Code на Windows/Linux и в Visual Studio 2022
+на Windows. Отдельные папки с копиями исходников не нужны: CMake складывает результаты
+Windows в `build/windows/` (Debug и Release внутри), Linux — в `build/linux-debug/`
+и `build/linux-release/`. На Windows C++ компилируется MSVC, CUDA — nvcc с MSVC;
+на Linux C++ компилируется GCC, CUDA — nvcc с тем же GCC. Windows GCC/MinGW
+в эту схему сборки не входит.
+
+В Visual Studio 2022 можно открыть корневую папку проекта и выбрать профиль `windows`.
+Другой вариант: выполнить `cmake --preset windows` и открыть сгенерированный
+`build/windows/U_CUDA.sln`. Это решение использует тот же CMake, что и VS Code;
+его не нужно редактировать или хранить в Git. Рукописный `U-CUDA.sln` в корне
+пока относится к старому способу сборки, описанному ниже.
+
 ImGui (docking), ImPlot и ImPlot3D загружаются автоматически в закреплённых версиях.
 GLFW берётся из системы либо собирается из исходников. При первой конфигурации нужен интернет.
 
@@ -51,28 +68,32 @@ GPU-расчёты требуют работающего драйвера NVIDIA
 
 Нужны CMake 3.25+, Git, Visual Studio 2022 с C++ и CUDA Toolkit
 с интеграцией Visual Studio. `CUDA_PATH` должен указывать на Toolkit,
-а `%CUDA_PATH%\bin` — присутствовать в `PATH` для CUDA DLL.
+а необходимые CUDA DLL автоматически копируются рядом с приложением
+(поддерживаются каталоги `bin` и `bin/x64`).
 vcpkg для этого способа не требуется.
 
 ```powershell
 cmake --preset windows
 cmake --build --preset windows-debug
+ctest --preset windows-debug
 .\build\windows\bin\Debug\U-CUDA.exe
 # Оптимизированная версия:
 cmake --build --preset windows-release
+ctest --preset windows-release
 .\build\windows\bin\Release\U-CUDA.exe
 ```
 
 Профили по умолчанию используют CUDA-архитектуру `75` (RTX 2080).
 Для другой видеокарты переопредели `CMAKE_CUDA_ARCHITECTURES` при конфигурации.
-На Windows конфигурация подготовлена, но её сборку следует проверить на Windows:
-Linux-проверки не заменяют проверку MSVC.
+На Windows проверены MSVC 19.44 (Visual Studio 2022), CUDA Toolkit 13.0
+и GPU-тест NVRTC в Debug/Release на NVIDIA GeForce RTX 4070 SUPER.
 
 ### VS Code / Code OSS
 
 1. Открой **корень репозитория**, установи рекомендованные расширения.
-2. Выполни **CMake: Select Configure Preset**: на этой машине `linux-local`,
-   на Arch с системной CUDA `linux-debug`, на Windows `windows`.
+2. Выполни **CMake: Select Configure Preset**: на Arch с системной CUDA
+   `linux-debug`, на Windows `windows`. Затем **CMake: Select Build Preset**:
+   для Windows `windows-debug` (отладка) или `windows-release`.
 3. Выбери цель запуска **U-CUDA** через **CMake: Set Debug Target**.
 4. **Ctrl+Shift+B** собирает приложение. В панели Run and Debug выбери
    **U-CUDA (Linux)** или **U-CUDA (Windows)** и нажми **F5**.
@@ -81,6 +102,9 @@ Linux использует Native Debug (`webfreak.debug`) и GDB, подска�
 CMake Tools копирует `compile_commands.json` в `build/` для clangd.
 Для Windows-профиля отладки нужен Microsoft C/C++ (`ms-vscode.cpptools`)
 из каталога обычного VS Code; в каталоге Code OSS он может отсутствовать.
+На Windows подсказки Microsoft C/C++ получают настройки от CMake Tools;
+clangd и Native Debug нужны для Linux. Генератор Visual Studio не создаёт
+`compile_commands.json`.
 Для отладки устройства CUDA нужен отдельный CUDA-отладчик; F5 здесь отлаживает CPU-код.
 
 Ресурсы `kernels/`, `library_template/` и `ocr_server.py` копируются рядом

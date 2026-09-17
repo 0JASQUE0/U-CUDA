@@ -1,0 +1,76 @@
+﻿#pragma once
+#include "ucuda/plotting/plot_axis.h"
+#include "ucuda/plotting/plot_legend.h"
+#include "ucuda/plotting/gpu_line_series_3d.h"
+#include "ucuda/plotting/plot_renderer.h"
+#include "ucuda/plotting/plot_camera_3d.h"
+#include <vector>
+#include <string>
+#include <functional>
+
+struct PlotSeriesInput3D {
+    const float* points = nullptr;   // n_points * 3 float (x,y,z подряд)
+    int          n_points = 0;
+    ImVec4       color = ImVec4(1, 1, 1, 1);
+    std::string  label;
+};
+
+class Plot3DView {
+public:
+    // Имена осей (идут в подписи на концах осей)
+    std::string x_name = "x", y_name = "y", z_name = "z";
+
+    // Легенда
+    bool show_legend = true;
+    // If true, force the legend marker's alpha to 1.0 regardless of the
+    // per-series color.w — used by Phase 3D, where the "Alpha" slider is
+    // meant to fade the trajectory itself, not the swatch in the legend.
+    bool legend_ignore_series_alpha = false;
+    bool show_axes = true;
+    bool view_valid = false;
+    int  series_generation = -1;
+
+    // Толщина линий данных (не осей). Аналогично Plot2DView::line_thickness_px.
+    // По умолчанию 1.5f — совпадает со старым хардкодом, регрессии нет.
+    // NB: в OpenGL core profile glLineWidth может клампиться драйвером до 1
+    // (что и наблюдалось). Реальная толщина обеспечивается путём
+    // custom_line_style=true → PlotRenderer::draw_line_3d(..., thick_style=true),
+    // который проходит через geometry shader и рисует screen-aligned quads.
+    float line_thickness_px = 1.5f;
+
+    // true → серии данных рисуются через thick-path (GS quads + BLEND).
+    // При false — старый быстрый путь (GL_LINE_STRIP + glLineWidth). Оси
+    // координат ВСЕГДА идут по старому пути, независимо от этого флага.
+    bool custom_line_style = false;
+
+    // Локальная видимость серий (переключается кликом по легенде).
+    std::vector<bool> visible;
+
+    // Опционально: callback для добавления custom-пунктов в right-click popup
+    // (после стандартных Auto fit / Show legend / Show axes / Copy image).
+    // Caller выставляет лямбду перед каждым render(); view вызывает её внутри
+    // своего BeginPopup/EndPopup. Зеркалит Plot2DView::popup_extras и
+    // HeatmapView::popup_extras — нужен, чтобы "Export data..." был доступен
+    // и на 3D-проекциях, а не только на 2D/TimeDomain.
+    std::function<void()> popup_extras;
+
+    // Камера — публичное поле: до неё дотягивается меню («reset view» и т.п.).
+    PlotCamera3D camera;
+
+    void render(PlotRenderer& renderer,
+        ImVec2 avail_pos, ImVec2 avail_size,
+        int owner_id,
+        int data_generation,
+        const std::vector<PlotSeriesInput3D>& series_in,
+        const std::vector<bool>& init_visible,
+        const std::vector<bool>& global_visible,
+        bool fit_request = false);
+
+private:
+    GpuLineSeriesSet3D series_cache_;
+    GpuLineSeriesSet3D axis_cache_; // 3 линии: X, Y, Z (по 2 точки каждая)
+    float axis_bbox_[6] = { 0,0,0,0,0,0 }; // bbox, по которому собран axis_cache_
+
+    void do_autofit();
+    void rebuild_axis_cache(); // строит/пересобирает 3 линии-оси по текущему bbox
+};

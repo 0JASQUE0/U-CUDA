@@ -1,0 +1,688 @@
+﻿#pragma once
+#include "ucuda/domain/plot_window.h"
+#include "ucuda/equations/codegen.hpp"
+#include "ucuda/equations/sysparse.hpp"
+#include "ucuda/platform/image_source.h"
+#include "ucuda/domain/system_record.h"
+#include "ucuda/analysis/analysis_session.h"
+#include "ucuda/analysis/custom_session.h"
+#include "ucuda/analysis/order_session.h"
+#include <map>
+#include <string>
+#include <vector>
+#include <memory>
+#include <future>
+#include <mutex>
+#include <atomic>
+#include <deque>
+#include <regex>
+
+// Функция-распознаватель: PNG-байты -> LaTeX. Внедряется снаружи,
+// чтобы модель не зависела от OcrClient напрямую (и была тестируема).
+using OcrFn = std::function<std::string(const std::vector<unsigned char>&)>;
+
+// Способ ввода системы.
+enum class InputMode { Image, Latex, Plain };
+
+// Один элемент общей parametric-очереди: какой анализ + индекс в его сессии.
+// Очередь живёт в AppModel и драйнится в draw_gui после polls. См. план
+// «Cross-analysis batch Run all».
+struct ParametricQueueItem {
+    enum class Kind { Bifurcation, LLE, LS };
+    Kind kind = Kind::Bifurcation;
+    int  index = 0;
+};
+
+// One dynamic plot window in Parametric mode (mirrors PhaseAnalysisSession's Projection, but must
+// span 3 independent sessions — bifurcation_session / lle_session / ls_session — so it lives on
+// AppModel rather than inside any one of them). Replaces the old fixed "Bifurcation 1D"/"LLE 1D"/
+// "Lyapunov Spectrum" windows and the per-diagram bool `visible`: a window's `members` list is now
+// the only source of "what's shown here", since the same diagram/curve can belong to zero, one, or
+// several windows at once.
+
+
+// Dynamic plot window for DFT1D mode — mirrors ParametricPlotWindow but simplified: only one
+// display kind exists (heatmap), so no `kind`/`mode_2d`/`colored_1d` fields. `members` indexes
+// dft1d_session.configs and always holds at most one entry — a DFT1D window shows exactly one
+// config's heatmap (as Bifurcation's 2D/colored-1D windows do; single-select radio in the
+// "Members..." popup, enforced again in add_dft1d_plot_window).
+
+
+// Один элемент DFT1D-очереди — индекс config'а в dft1d_session.configs.
+// Отдельная очередь по той же причине, что и у Basins/FastSync — DFT1D
+// независим от parametric/basins по UI.
+struct Dft1DQueueItem {
+    int index = 0;
+};
+
+// Один элемент basins-очереди — индекс config'а в basins_session.configs. Basins живёт в отдельной
+// очереди (а не в parametric_queue), потому что параметрика и basins сейчас не пересекаются по UI:
+// parametric "Run all" пушит BD/LLE/LS, а basins "Run all" — свои configs. Драйнится тем же
+// движком, но независимым тиком в draw_gui.
+struct BasinsQueueItem {
+    int index = 0;
+};
+
+// Аналогично для FastSync: индекс config'а в fastsync_session.configs.
+// Отдельная очередь по той же причине — FastSync независим от parametric/basins.
+struct FastSyncQueueItem {
+    int index = 0;
+};
+
+// Состояние распознавания (для UI-индикации).
+enum class OcrState { Idle, Running, Done, Failed };
+
+// Отложенный запрос «скопировать диаграмму в буфер» (правый клик "Copy image to clipboard", см.
+// plot_axis.h request_plot_screenshot). Разбирается один раз в главном цикле app_main.cpp: сам
+// glReadPixels ждёт пару кадров после запроса, потому что right-click popup закрывается только на
+// СЛЕДУЮЩЕМ кадре (семантика ImGui) — иначе он попадёт в захваченную картинку.
+struct PendingScreenshot {
+    bool  active = false;
+    int   frames_left = 0;
+    float min_x = 0, min_y = 0, max_x = 0, max_y = 0; // экранные координаты ImGui
+};
+
+// Модель приложения: всё состояние + логика. НЕ знает про ImGui.
+// UI читает поля и вызывает методы; долгие операции идут в фоне.
+class SystemLibrary;
+
+class AppModel {
+public:
+    void tick(SystemLibrary& library);
+    explicit AppModel(OcrFn ocr) : AppModel(std::move(ocr), true) {}
+
+    // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
+    PendingScreenshot pending_screenshot;
+
+    // редактируемые UI-поля (UI читает/пишет напрямую)
+    InputMode mode = InputMode::Image;
+    std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
+    std::string plain_text;        // обычный синтаксис (режим Plain)
+    std::string alphabet_text;     // legacy: один список (vars+params вперемешку)
+    // Явные списки переменных и параметров. Если оба непустые — приоритет
+    // над alphabet_text. Удобнее визуально, явно отделяет переменные от
+    // параметров. alphabet_text остаётся для старых сохранённых систем.
+    std::string vars_text;
+    std::string params_text;
+    bool scheme_euler = false;
+    bool scheme_cromer = false;
+    bool scheme_midpoint = false;
+    bool scheme_rk4 = false;
+    bool scheme_dopri78 = false;
+    bool scheme_cd = false;
+    // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
+    // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
+    bool scheme_ccd = false;
+    // Complex CD4: два прохода CD с шагами gamma*h и conj(gamma)*h — порядок 4.
+    // Требует s = 0.5 (иначе внутренний CD несимметричен и порядок падает до 1).
+    bool scheme_ccd4 = false;
+    // Неявные схемы: Ньютон по символьному якобиану, решается ВСЯ связанная
+    // система (в отличие от CD, диагонально-неявного). Отсюда A-устойчивость.
+    bool scheme_ieuler = false;
+    bool scheme_imidpoint = false;
+    // SEMP / SIMP: средняя точка с последовательной стадией на полушаге
+    // h1 = s*h (s = a[0], слот CD). У SEMP стадия явная, у SIMP —
+    // диагонально-неявная. Порядок 2 только при s = 0.5.
+    bool scheme_semp = false;
+    bool scheme_simp = false;
+    // D: та же диагонально-неявная стадия, но как самостоятельный шаг на
+    // полный h — метод первого порядка, a[0] не читает.
+    bool scheme_dmethod = false;
+    // Complex Implicit Euler: композиция двух неявных Эйлеров с сопряжёнными
+    // комплексными шагами tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0].
+    // Порядок 2 только при s = 0.5 — коэффициенты вынуждены, см. codegen.hpp.
+    bool scheme_cieuler = false;
+
+    // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
+    bool        newton_full      = false;
+    std::string newton_tol       = "1e-10";
+    std::string newton_max_iters = "8";
+
+    // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
+    std::string symmetry_s = "0.5";
+
+    // Пользовательские именованные КРС (выбираются в scheme combo сессий
+    // вместе с built-in). Имя не должно совпадать с built-in.
+    std::vector<CustomScheme> custom_schemes;
+
+    // порядок индексации параметров a[1..]
+    ParamOrder param_order = ParamOrder::AsInAlphabet;
+
+    // вспомогательные функции (опция). Если включено, func_defs_text парсится
+    // и инлайнится в правые части. Напр.: "h(x) = m1*x + 0.5*(m0-m1)*(|x+1|-|x-1|)"
+    bool use_aux_funcs = false;
+    std::string func_defs_text;
+
+    // Editor heights (px) for Library multiline inputs. Per-session only.
+    float latex_editor_h = 90.0f;
+    float plain_editor_h = 90.0f;
+    float funcs_editor_h = 60.0f;
+    float gen_code_editor_h = 220.0f;
+    std::map<std::string, float> custom_scheme_editor_h;   // keyed by scheme name
+
+    // метаданные для библиотеки
+    std::string name;
+    std::string note;
+
+    // значения по умолчанию (всё опционально, пустая строка = не задано)
+    std::string step_h;
+    std::map<std::string, std::string> init_conditions; // var -> value
+    std::map<std::string, std::string> param_values;    // param -> value
+
+    // имена переменных/параметров, полученные при последнем refresh_symbols()
+    std::vector<std::string> known_vars;
+    std::vector<std::string> known_params;
+
+    // имя, под которым система сейчас сохранена на диске (для переименования).
+    // Пусто = система ещё не сохранена/загружена под именем.
+    std::string loaded_name;
+
+    // Library-tab edit state (in-memory only, not persisted to session)
+    // Library sub-tab has two states: a plain list (None) and an editor
+    // (EditExisting for the "Edit" action, AddNew for "Add new system").
+    // The editor edits into library_edit_buffer (a scratch AppModel), never
+    // into this model directly, so opening/typing/Cancel never touches the
+    // globally active system used by Parametric/Phase/Basins/FastSync. Save
+    // validates, rename+saves (EditExisting) or saves (AddNew) the buffer to
+    // disk, and only mirrors it into this model if edit_original_name is the
+    // currently active system (see library_editor_save in gui.cpp).
+    enum class LibraryEditMode { None, EditExisting, AddNew };
+    LibraryEditMode library_edit_mode = LibraryEditMode::None;
+    std::string     library_selected_name;   // row selected in the list (for note preview)
+    std::string     edit_original_name;      // on-disk name at the moment Edit was pressed
+    std::string     edit_error;              // inline validation / rename error in the editor
+    std::unique_ptr<AppModel> library_edit_buffer; // scratch model the editor actually edits
+
+    // режим приложения и сессия анализа (слой 2)
+    // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
+    // бассейны притяжения или настройки.
+    // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
+    // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
+    // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order };
+    AppMode app_mode = AppMode::Library;
+
+    // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
+    PhaseAnalysisSession phase_session;
+
+    // Parametric mode держит три независимых анализа (1D bif / LLE / LS),
+    // переключаемых верхними табами в Parametric Controls. Каждый —
+    // песочница: своя копия системы, свои Run-кнопки, свой плот, свой
+    // _last_*.json. Результаты сессии не share'ят между собой.
+    BifurcationAnalysisSession bifurcation_session;
+    LLEAnalysisSession         lle_session;
+    LyapunovSpectrumAnalysisSession ls_session;
+
+    // 1D DFT — отдельный AppMode (между Parametric и Basins), своя очередь и
+    // список конфигов (см. Dft1DAnalysisSession в analysis_session.h).
+    Dft1DAnalysisSession       dft1d_session;
+
+    // Basins of attraction — отдельный AppMode со своим Run и 5-плотным окном.
+    BasinsAnalysisSession      basins_session;
+
+    // Fast Synchro — отдельный AppMode (anti-synchro analysis на attractor / IC grid).
+    FastSyncAnalysisSession    fastsync_session;
+
+    // Order — оценка порядка точности схемы (p по Эйткену/Ричардсону).
+    OrderAnalysisSession       order_session;
+
+    // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
+    // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
+    // Phase/Basins sub-sessions (see CustomSession); never shares state with
+    // parametric_/phase_/basins_session above.
+    CustomSession              custom_session;
+
+    // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
+    // indicator. По умолчанию — Bifurcation.
+    int parametric_active_analysis = 0;
+
+    // UI scale (DPI-aware). `ui_scale_auto` выставляется однократно при старте из
+    // glfwGetMonitorContentScale, `ui_scale_override` — слайдер в GUI, где 0.0 означает
+    // «использовать auto». Эффективный scale идёт в apply_ui_scale в app_main каждый кадр: если
+    // изменился, шрифт и ImGui-style пересоздаются.
+    float ui_scale_auto     = 1.0f;
+    float ui_scale_override = 0.0f;
+    float effective_ui_scale() const {
+        return ui_scale_override > 0.0f ? ui_scale_override : ui_scale_auto;
+    }
+
+    // Выбор шрифта. false (дефолт) → TTF Segoe UI (антиалиаc, читаемо на 1080p
+    // и крупных DPI). true → bitmap ProggyClean (компактный, классический ImGui).
+    // Чекбокс — в Settings; персистится в _app_config.json.
+    bool use_builtin_font = false;
+
+    // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
+    // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1
+    // viridis. Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет сюда, а static
+    // HeatmapView в draw_lle_plot читает при первом создании.
+    int heatmap_colormap = 0;
+
+    // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/States) хранит свой
+    // независимый выбор, чтобы переключение в одном не влияло на остальные; отдельно от
+    // heatmap_colormap, который шарится Bif/LLE/LS. Дефолт 2 = #168 turbo (хорошо разделяет
+    // дискретные / категориальные значения).
+    int basins_colormap        = 2;
+    int basins_avgpk_colormap  = 2;
+    int basins_avgint_colormap = 2;
+    int basins_states_colormap = 2;
+
+    // Маска включённых карт slanCM (kSlanCmCount символов '0'/'1') — зеркало
+    // AppConfig::slancm_enabled. При изменении в Settings вызывается
+    // set_enabled_slancm() из plot_renderer.h, чтобы пикер сразу подхватил,
+    // — ровно как tick_precision + set_tick_precision() у осей.
+    std::string slancm_enabled;
+
+    // Строка фильтра в списке колормапов (Settings). Живёт в модели, а не в
+    // static внутри draw_settings: immediate-mode UI не хранит состояние
+    // между кадрами сам (см. CLAUDE.md).
+    std::string colormap_filter;
+
+    // Кол-во значащих цифр в подписях тиков осей и colorbar'а (2-10).
+    // Зеркалит AppConfig::tick_precision; при изменении в Settings вызывается
+    // set_tick_precision() из plot_axis.h, чтобы fmt_tick() сразу подхватил.
+    int tick_precision = 4;
+
+    // ImGui color theme. true = Dark (default), false = Light. Применяется
+    // через apply_ui_scale в app_main.cpp: на каждый scale-apply сначала
+    // выбирается ImGui::StyleColorsDark/Light, потом скейлится. На изменение
+    // в Settings forced re-apply через сравнение applied_dark_theme.
+    bool dark_theme = true;
+
+    // Knobs configCUDA.h (peak-finder + пороги режимов). Зеркалит
+    // AppConfig::peak; ImGui-состояние обязано жить здесь, а не в локальных
+    // переменных кадра. Settings после правки пушит его в set_peak_config(),
+    // который бампает epoch и инвалидирует PTX-кэши движка.
+    PeakConfig peak;
+
+    // Текстовые буферы полей peak-конфига в Settings. Ввод чисел там такой же, как во вкладках
+    // анализа (InputNumStr поверх InputText: ↑/↓ шаг по разряду, запятая→точка, дроби "a/b",
+    // inline-предупреждение), а не InputDouble с фиксированным "%.3e". Строка — только буфер ввода;
+    // источник истины сам `peak`, поэтому буферы пересеиваются из него через sync_peak_text() при
+    // старте, после загрузки конфига и после клампа/сброса.
+    std::string peak_eps_fixed_point_text;
+    std::string peak_eps_peak_delta_text;
+    std::string peak_eps_interPeak_delta_text;
+    std::string peak_threshold_text;
+    std::string peak_max_amount_text;
+
+    // Перезаписывает буферы выше текущими значениями `peak`.
+    void sync_peak_text();
+
+    // Непустая строка = последняя загрузка сохранённой сессии не прошла
+    // (битый / обрезанный _last_*.json). Показывается в шапке и держится до
+    // следующей успешной загрузки. Пишет apply_session_json в gui.cpp.
+    std::string session_load_warning;
+
+    // FMA-контракция во всех NVRTC-сборках. Зеркалит AppConfig::nvrtc_fmad;
+    // Settings после правки пушит значение в set_nvrtc_fmad(), которое меняет
+    // ключи кэшей модулей в обоих движках (см. parametric_engine.h).
+    bool nvrtc_fmad = true;
+
+    // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
+    std::unique_ptr<ParametricEngine> parametric_engine;
+
+    // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
+    // BD/LLE/LS. start_next_in_parametric_queue() драйнит её серийно (engine один).
+    std::deque<ParametricQueueItem> parametric_queue;
+
+    // Если ни одна из трёх сессий не in_flight и очередь не пуста — снимает
+    // элемент с фронта и запускает run_async соответствующей сессии.
+    // Возвращает true если что-то стартовало. Безопасно вызывать каждый кадр.
+    bool start_next_in_parametric_queue();
+
+    // Dynamic plot windows for Parametric mode (see ParametricPlotWindow).
+    // Rendered by draw_parametric_plot_windows(); managed (add/remove/
+    // rename/membership) by the "Plot windows" section in
+    // draw_parametric_controls.
+    std::vector<ParametricPlotWindow> parametric_plot_windows;
+    int  next_parametric_plot_window_id = 1;
+    // Bumped by "Reset windows layout" in draw_parametric_controls — mirrors
+    // PhaseAnalysisSession::layout_generation, but shared across all 3 kinds (one button resets
+    // every parametric plot window's docking at once). Goes into each window's ImGui title so
+    // docking treats them as new windows after a reset. Not persisted (transient, like Phase's).
+    int  parametric_layout_generation = 0;
+    // Set by add/remove/membership edits on parametric_plot_windows; drained
+    // once per frame in draw_gui to trigger a "_last_parametric_windows"
+    // session save (avoids writing to disk every single frame).
+    bool parametric_plot_windows_dirty = false;
+
+    // Add a new plot window of (kind, mode_2d) with the given initial member
+    // indices (into the matching session's diagrams/curves list). Assigns a
+    // fresh id and a default "Plot N" label.
+    void add_parametric_plot_window(ParametricPlotWindow::Kind kind, bool mode_2d,
+                                     std::vector<int> initial_members,
+                                     bool colored_1d = false);
+    // Remove by position in parametric_plot_windows (from the "X" in the
+    // Plot windows list, or a closed floating window).
+    void remove_parametric_plot_window(int pos);
+
+    // Load parametric_plot_windows from a previously-saved "_last_parametric_windows" JSON (empty
+    // json = file never existed for this system). If empty, synthesizes one default window per
+    // (kind, mode_2d) combo that has >=1 diagram/curve — reproducing the old "everything overlaid in
+    // one shared plot per kind" behaviour as the day-one default. If json is present (even an empty
+    // window list, meaning the user deliberately closed everything), respects it as-is.
+    void load_or_init_parametric_plot_windows(const std::string& json);
+
+    // DFT1D batch queue — независимая от parametric_queue (см. Dft1DQueueItem).
+    std::deque<Dft1DQueueItem> dft1d_queue;
+    bool start_next_in_dft1d_queue();
+
+    // Dynamic plot windows for DFT1D mode (see Dft1DPlotWindow) — mirrors
+    // parametric_plot_windows, minus the kind/mode_2d/colored_1d dimensions.
+    std::vector<Dft1DPlotWindow> dft1d_plot_windows;
+    int  next_dft1d_plot_window_id = 1;
+    int  dft1d_layout_generation = 0;
+    bool dft1d_plot_windows_dirty = false;
+
+    void add_dft1d_plot_window(std::vector<int> initial_members);
+    void remove_dft1d_plot_window(int pos);
+    void load_or_init_dft1d_plot_windows(const std::string& json);
+
+    // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
+    std::deque<BasinsQueueItem> basins_queue;
+    bool start_next_in_basins_queue();
+
+    // FastSync batch queue — независимая (см. FastSyncQueueItem).
+    std::deque<FastSyncQueueItem> fastsync_queue;
+    bool start_next_in_fastsync_queue();
+
+    // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
+    // Items are pushed by the Run buttons and by drill-down clicks; drained
+    // sequentially by start_next_in_custom_queue() so the shared engine
+    // processes them one at a time (like parametric_queue).
+    std::deque<CustomQueueItem> custom_queue;
+    bool start_next_in_custom_queue();
+
+    // Удаление конфига + чистка очереди (убрать item с этим индексом, у
+    // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
+    // вместо прямого session.remove_*, чтобы очередь не указывала на
+    // удалённые слоты.
+    void remove_bifurcation_diagram(int i);
+    void remove_lle_curve(int i);
+    void remove_ls_curve(int i);
+    void remove_dft1d_config(int i);
+    void remove_basins_config(int i);
+    void remove_fastsync_config(int i);
+
+    // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
+    // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
+    bool start_phase_analysis();
+    // Инициализирует ВСЕ parametric-сессии (bif/LLE/LS) из текущей системы —
+    // пользователь ждёт одинаковые vars/params в любом верхнем табе.
+    bool start_parametric_analysis();
+    // Инициализирует dft1d-сессию из текущей системы.
+    bool start_dft1d_analysis();
+    // Инициализирует basins-сессию из текущей системы.
+    bool start_basins_analysis();
+    bool start_order_analysis();
+    bool start_fastsync_analysis();
+    // Initialise the Custom pipeline: seeds shared config from the record and
+    // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
+    bool start_custom_analysis();
+
+    // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params) во ВСЕ сессии без
+    // сброса per-config настроек. Используется в Save / Save as copy: после правки тела
+    // custom-схемы или уравнений системы следующий Run в любом режиме подхватит свежее состояние
+    // без переоткрытия вкладки. Phase'у дополнительно сбрасывается krs_code, чтобы regenerate_krs
+    // пересчитался от актуального cs.body / sys.
+    void propagate_to_sessions();
+
+    // результат генерации
+    std::string generated_code;    // итоговый код всех выбранных схем
+    std::string error_message;     // ошибка парсинга/генерации (для показа в UI)
+
+    // запуск фонового OCR
+    // Не блокирует UI. Источник изображения передаётся владением.
+    void start_ocr(std::unique_ptr<ImageSource> src) {
+        if (ocr_state_ == OcrState::Running) return; // одно распознавание за раз
+        ocr_state_ = OcrState::Running;
+        ocr_error_.clear();
+        auto fn = ocr_;
+        ImageSource* raw = src.release();
+        ocr_future_ = std::async(std::launch::async, [fn, raw]() -> std::string {
+            std::unique_ptr<ImageSource> owner(raw);
+            auto png = owner->get_png();      // чтение файла/буфера
+            return fn(png);                   // вызов OCR (долгий)
+            });
+    }
+
+    // Вызывается КАЖДЫЙ кадр из UI-потока. Забирает результат, когда готов.
+    // Возвращает true, если состояние изменилось (UI может отреагировать).
+    bool poll() {
+        if (ocr_state_ != OcrState::Running) return false;
+        if (!ocr_future_.valid()) { ocr_state_ = OcrState::Idle; return false; }
+        if (ocr_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return false;
+        try {
+            std::string raw = ocr_future_.get();   // успех
+            latex_text = format_latex(raw);
+            mode = InputMode::Latex;
+            ocr_state_ = OcrState::Done;
+        }
+        catch (const std::exception& e) {
+            ocr_error_ = e.what();
+            ocr_state_ = OcrState::Failed;
+        }
+        return true;
+    }
+
+    OcrState ocr_state() const { return ocr_state_; }
+    const std::string& ocr_error() const { return ocr_error_; }
+
+    // генерация кода из текущих полей
+    // Возвращает true при успехе, иначе заполняет error_message.
+    bool generate() {
+        error_message.clear();
+        generated_code.clear();
+        try {
+            System sys = build_system();
+            std::string out;
+            struct Item { bool on; const char* name; Scheme s; };
+            // Порядок — как в UI: по порядку точности (1, 2, 4, 8).
+            const Item items[] = {
+                { scheme_euler,    "Euler",             Scheme::Euler },
+                { scheme_cromer,   "Euler-Cromer",      Scheme::EulerCromer },
+                { scheme_dmethod,  "D",                 Scheme::D },
+                { scheme_ieuler,   "Implicit Euler",    Scheme::ImplicitEuler },
+                { scheme_midpoint, "Explicit Midpoint", Scheme::ExplicitMidpoint },
+                { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
+                { scheme_cd,       "CD",                Scheme::CD },
+                { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },
+                { scheme_semp,     "SEMP",              Scheme::SEMP },
+                { scheme_simp,     "SIMP",              Scheme::SIMP },
+                { scheme_rk4,      "RK4",               Scheme::RK4 },
+                { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
+                { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
+            };
+            bool any = false;
+            for (const auto& it : items) {
+                if (!it.on) continue;
+                any = true;
+                out += "// ===== ";
+                out += it.name;
+                out += " =====\n";
+                out += codegen_scheme(sys, it.s);
+                out += "\n";
+            }
+            // custom-схемы — добавляем их код как есть для preview
+            for (const auto& cs : custom_schemes) {
+                if (cs.body.empty()) continue;
+                any = true;
+                out += "// ===== ";
+                out += cs.name;
+                out += " (custom) =====\n";
+                out += cs.body;
+                out += "\n";
+            }
+            if (!any) { error_message = "no scheme selected"; return false; }
+            generated_code = out;
+            return true;
+        }
+        catch (const std::exception& e) {
+            error_message = e.what();
+            return false;
+        }
+    }
+
+    // Парсит систему и обновляет known_vars/known_params, синхронизируя
+    // словари значений (сохраняет уже введённые, убирает исчезнувшие символы).
+    // Возвращает true при успехе; при ошибке парсинга кладёт её в error_message.
+    bool refresh_symbols();
+
+    // Выгрузка/загрузка состояния в запись библиотеки.
+    SystemRecord to_record() const;
+    void from_record(const SystemRecord& r);
+
+    // Сброс всех полей к пустому состоянию (новая система с нуля).
+    void clear();
+
+private:
+    // with_edit_buffer=false constructs the scratch library_edit_buffer
+    // itself, without recursing into another scratch buffer.
+    AppModel(OcrFn ocr, bool with_edit_buffer) : ocr_(std::move(ocr)) {
+        // std::make_unique can't reach this private constructor (it isn't a
+        // friend), so construct directly with new from within the class.
+        if (with_edit_buffer)
+            library_edit_buffer.reset(new AppModel(ocr_, false));
+    }
+
+    OcrFn ocr_;
+
+    // Форматирует сырой LaTeX в единообразный вид: каждое уравнение на своей строке, без
+    // \begin{aligned}/\end{aligned} и без \\, все формы производных нормализуются к \dot{X}.
+    // Поддерживаемые исходные формы: \frac{dX}{dt}, \dfrac{dX}{dt} (+ варианты с \tau, \theta,
+    // пробелами), X' (prime), dX/dt (slash-form).
+    static std::string format_latex(const std::string& raw) {
+        std::string s = raw;
+        // 1) Снимаем обёртки окружений.
+        auto remove_all = [&](const std::string& token) {
+            size_t p;
+            while ((p = s.find(token)) != std::string::npos) s.erase(p, token.size());
+            };
+        for (const char* env : { "aligned","array","cases","equation","gather","split","matrix" }) {
+            remove_all(std::string("\\begin{") + env + "}");
+            remove_all(std::string("\\end{") + env + "}");
+        }
+        remove_all("\\left\\{");
+        remove_all("\\right.");
+        // align-табы и `{}=`-обёртки правой части — типичный OCR-мусор.
+        remove_all("&");
+        // \mathrm{d}, \mathrm{t} → d, t (чтобы \frac-нормализация ниже поймала).
+        auto replace_all = [&](const std::string& from, const std::string& to) {
+            size_t p = 0;
+            while ((p = s.find(from, p)) != std::string::npos) {
+                s.replace(p, from.size(), to);
+                p += to.size();
+            }
+            };
+        replace_all("\\mathrm{d}", "d");
+        replace_all("\\mathrm{t}", "t");
+        replace_all("\\mathrm d",  "d");
+        replace_all("\\mathrm t",  "t");
+        replace_all("{{}=", "=");   // OCR-артефакт "{{}=..."
+        replace_all("{}=",  "=");
+
+        // 2) Нормализация производных к \dot{X}. X = одна буква, \greek или {group}.
+        //    std::regex с raw-strings ECMAScript-flavor по умолчанию.
+        try {
+            static const std::regex re_frac(
+                R"(\\d?frac\s*\{\s*d\s*([A-Za-z]|\\[A-Za-z]+|\{[^{}]*\})\s*\}\s*\{\s*d\s*(t|\\tau|\\theta)\s*\})");
+            static const std::regex re_slash(
+                R"(d\s*([A-Za-z]|\\[A-Za-z]+)\s*/\s*d\s*(t|\\tau|\\theta))");
+            static const std::regex re_prime(
+                R"(([A-Za-z]|\\[A-Za-z]+)\s*\')");
+            s = std::regex_replace(s, re_frac,  R"(\dot{$1})");
+            s = std::regex_replace(s, re_slash, R"(\dot{$1})");
+            s = std::regex_replace(s, re_prime, R"(\dot{$1})");
+        } catch (const std::regex_error&) {
+            // если regex недоступен по какой-то причине — оставляем как было
+        }
+
+        // 3) Разбить по "\\" и по переводам строк.
+        std::vector<std::string> eqs;
+        size_t start = 0;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i + 1 < s.size() && s[i] == '\\' && s[i + 1] == '\\') {
+                eqs.push_back(s.substr(start, i - start));
+                i += 1; start = i + 1;
+            } else if (s[i] == '\n' || s[i] == '\r') {
+                eqs.push_back(s.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        eqs.push_back(s.substr(start));
+
+        // 4) Trim, снять обёртки `{...}` вокруг всего уравнения, собрать со `\\` в конце.
+        std::vector<std::string> clean;
+        for (auto& e : eqs) {
+            size_t a = e.find_first_not_of(" \t\n\r");
+            size_t b = e.find_last_not_of(" \t\n\r");
+            if (a == std::string::npos) continue;
+            std::string eq = e.substr(a, b - a + 1);
+            // снять внешние `{ ... }` (артефакт OCR-вывода).
+            while (eq.size() >= 2 && eq.front() == '{' && eq.back() == '}') {
+                // только если фигурные сбалансированы строго на концах.
+                int depth = 0; bool ok = true;
+                for (size_t k = 0; k < eq.size(); ++k) {
+                    if (eq[k] == '{') ++depth;
+                    else if (eq[k] == '}') {
+                        --depth;
+                        if (depth == 0 && k + 1 < eq.size()) { ok = false; break; }
+                    }
+                }
+                if (!ok) break;
+                eq = eq.substr(1, eq.size() - 2);
+                size_t a2 = eq.find_first_not_of(" \t");
+                size_t b2 = eq.find_last_not_of(" \t");
+                if (a2 == std::string::npos) { eq.clear(); break; }
+                eq = eq.substr(a2, b2 - a2 + 1);
+            }
+            bool only_braces = eq.find_first_not_of("{}clr| \t") == std::string::npos;
+            if (only_braces) continue;
+            // снять trailing punctuation типа " ,"/" ." (артефакты OCR).
+            while (!eq.empty() && (eq.back() == ',' || eq.back() == '.' || eq.back() == ';' || eq.back() == ' ' || eq.back() == '\t'))
+                eq.pop_back();
+            if (eq.empty()) continue;
+            clean.push_back(eq);
+        }
+        if (clean.empty()) return raw;
+        std::string out;
+        for (size_t i = 0; i < clean.size(); ++i) {
+            if (i) out += "\n";
+            out += clean[i];
+            if (i + 1 < clean.size()) out += " \\\\";
+        }
+        return out;
+    }
+    std::future<std::string> ocr_future_;
+    std::atomic<OcrState> ocr_state_{ OcrState::Idle };
+    std::string ocr_error_;
+
+    // парсит алфавит из строки "x, y, z" -> вектор
+    std::vector<std::string> parse_alphabet() const {
+        // Если alphabet_text пуст, но есть явные vars+params, склеиваем их
+        // (нужно для build_system / parse_system_from_latex с новым форматом).
+        const std::string& src =
+            !alphabet_text.empty()
+                ? alphabet_text
+                : (!vars_text.empty() && !params_text.empty()
+                    ? (combined_alpha_ = vars_text + "," + params_text)
+                    : alphabet_text);
+        std::vector<std::string> out;
+        std::string cur;
+        for (char c : src) {
+            if (c == ',' || c == ' ' || c == '\t' || c == '\n' || c == ';') {
+                if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+            }
+            else cur += c;
+        }
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    }
+    // буфер для склеенного алфавита (используется в parse_alphabet)
+    mutable std::string combined_alpha_;
+
+    // строит System из текущего режима ввода
+    System build_system() const; // реализовано в .cpp (зависит от sysparse)
+};

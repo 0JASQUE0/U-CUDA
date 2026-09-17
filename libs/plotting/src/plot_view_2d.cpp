@@ -1,0 +1,985 @@
+﻿#include "ucuda/plotting/plot_view_2d.h"
+#include "ucuda/domain/grid_snap.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+// Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
+// margin_left/bottom увеличены, чтобы вместить тики + центрированное
+// название оси.
+void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
+    left   = 78.0f;
+    top    = 20.0f;
+    right  = 20.0f;
+    bottom = 46.0f;
+}
+
+// Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
+// пока поле активно, ImGui читает свою внутреннюю копию текста и правки внешнего буфера
+// игнорирует — граница бы «включалась» только после ухода фокуса, а data->Buf это как раз
+// внутренний буфер. В CharFilter-событии Buf невалиден (там есть только EventChar), поэтому клампим
+// на Edit/History. History нужен отдельно, потому что ImGui выбирает событие цепочкой else-if: в
+// кадре со стрелкой ↑/↓ Edit уже не придёт, а шагнуть за границу стрелка может.
+static void clamp_rgb_channel_buf(ImGuiInputTextCallbackData* data) {
+    if (data->Buf == nullptr || data->BufTextLen <= 0) return;
+    std::string text(data->Buf, data->Buf + data->BufTextLen);
+    char* end = nullptr;
+    float v = std::strtof(text.c_str(), &end);
+    if (end == text.c_str()) return;      // "-", "." — ещё не число, не мешаем
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return;             // мусор в хвосте — тоже не наше дело
+    if (v >= 0.0f && v <= 255.0f) return;
+
+    const char* clamped = (v < 0.0f) ? "0" : "255";
+    data->DeleteChars(0, data->BufTextLen);
+    data->InsertChars(0, clamped);
+    data->CursorPos      = data->BufTextLen;
+    data->SelectionStart = data->CursorPos;
+    data->SelectionEnd   = data->CursorPos;
+}
+
+static int rgb_channel_input_callback(ImGuiInputTextCallbackData* data) {
+    // Базовое поведение — общее с полями параметров: запятая→точка и ↑/↓ по
+    // разряду под курсором.
+    const int rc = digit_step_input_callback(data);
+    if (data->EventFlag != ImGuiInputTextFlags_CallbackCharFilter)
+        clamp_rgb_channel_buf(data);
+    return rc;
+}
+
+void Plot2DView::do_autofit() {
+    float xmin, xmax, ymin, ymax;
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
+        // bbox снят с VBO, а там при лог-оси лежит log10(x) (см. заливку в
+        // render). Возвращаем X в мировые единицы, и запас берём в ЛОГ-домене:
+        // линейные 5% от диапазона 0.1..14 дали бы view_min = -0.595, ось
+        // ушла бы в минус и лог-режим молча выключился бы сам.
+        double wxmin = (double)xmin, wxmax = (double)xmax;
+        if (series_xlog_cached) {
+            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
+            wxmin = std::pow(10.0, wxmin - lpad);
+            wxmax = std::pow(10.0, wxmax + lpad);
+        } else {
+            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
+            wxmin -= padx; wxmax += padx;
+        }
+        double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
+        // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
+        // locked axes, but fit_request used to stomp them on every data change
+        // (esp. visible in phase continuation, where each tick refit the view).
+        if (!x_axis.lock) {
+            if (x_fit_use_explicit) {
+                x_axis.view_min = x_fit_min;
+                x_axis.view_max = x_fit_max;
+            } else {
+                x_axis.view_min = wxmin;
+                x_axis.view_max = wxmax;
+            }
+        }
+        if (!y_axis.lock) {
+            y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+        }
+        view_valid = true;
+    }
+    else if (x_fit_use_explicit && !x_axis.lock) {
+        // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
+        x_axis.view_min = x_fit_min;
+        x_axis.view_max = x_fit_max;
+        view_valid = true;
+    }
+}
+
+void Plot2DView::fit_x() {
+    if (x_fit_use_explicit) {
+        x_axis.view_min = x_fit_min;
+        x_axis.view_max = x_fit_max;
+        return;
+    }
+    float xmin, xmax, ymin, ymax;
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
+        // Тот же обратный перевод и лог-домен запаса, что в do_autofit.
+        double wxmin = (double)xmin, wxmax = (double)xmax;
+        if (series_xlog_cached) {
+            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
+            wxmin = std::pow(10.0, wxmin - lpad);
+            wxmax = std::pow(10.0, wxmax + lpad);
+        } else {
+            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
+            wxmin -= padx; wxmax += padx;
+        }
+        x_axis.view_min = wxmin; x_axis.view_max = wxmax;
+    }
+}
+
+void Plot2DView::fit_y() {
+    float xmin, xmax, ymin, ymax;
+    bool ok = render_visible_mask_.empty()
+              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    if (ok) {
+        double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
+        y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+    }
+}
+
+void Plot2DView::render(PlotRenderer& renderer,
+    ImVec2 block_origin, ImVec2 avail_size,
+    int owner_id,
+    int data_generation,
+    const std::vector<PlotSeriesInput>& series_in,
+    const std::vector<bool>& init_visible,
+    const std::vector<bool>& global_visible,
+    bool fit_request)
+{
+    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим оси X. Лог-ось переносит саму
+    // координату: в VBO уходит log10(x), потому что GL рисует вершины аффинной make_ortho_mvp, а
+    // логарифм не аффинен (см. XS/XW ниже). Флаг обязан входить в условие перезаливки — иначе
+    // переключение Log scale не тронуло бы уже залитый буфер и график остался бы в прежних
+    // координатах.
+    const bool upload_xlog = x_axis.log_scale;
+    if (data_generation != series_generation || series_xlog_cached != upload_xlog) {
+        bool count_changed = ((int)visible.size() != (int)series_in.size());
+        series_cache_.clear();
+        std::vector<float> xlog_buf;
+        for (const auto& s : series_in) {
+            if (upload_xlog && s.points && s.n_points > 0) {
+                xlog_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
+                // Неположительный X на лог-оси невыразим: движок такой Run
+                // отклоняет, но чекбокс живой — уводим точку далеко влево
+                // вместо NaN, который испортил бы весь VBO.
+                for (size_t t = 0; t < xlog_buf.size(); t += 2)
+                    xlog_buf[t] = (xlog_buf[t] > 0.0f) ? std::log10(xlog_buf[t]) : -300.0f;
+                series_cache_.upload(xlog_buf.data(), s.n_points);
+            } else {
+                series_cache_.upload(s.points, s.n_points);
+            }
+        }
+        series_xlog_cached = upload_xlog;
+        series_generation = data_generation;
+        // Не сбрасываем view_valid здесь: смена набора серий (вкл/выкл переменной через show_var)
+        // не должна двигать вид. Автофит — только по fit_request или когда вида ещё не было.
+        // Исключение: если число серий изменилось, старые индексы не годятся, поэтому локальную
+        // видимость пересобираем из init_visible.
+        if (count_changed) {
+            visible.assign(series_in.size(), true);
+            for (size_t k = 0; k < series_in.size() && k < init_visible.size(); ++k)
+                visible[k] = init_visible[k];
+        }
+    }
+    if (visible.size() != series_in.size()) // страховка от рассинхрона
+        visible.resize(series_in.size(), true);
+
+    // Итоговая видимость серии: глобальная (галочка вкладки) и локальная (легенда)
+    auto eff_visible = [&](int k) -> bool {
+        bool loc = (k < (int)visible.size()) ? visible[k] : true;
+        bool glob = (k < (int)global_visible.size()) ? global_visible[k] : true;
+        return loc && glob;
+        };
+
+    // Итоговый цвет серии: пользовательский override (ПКМ по строке легенды),
+    // если он задан для этой подписи, поверх цвета от caller'а. Alpha всегда
+    // caller'ская — за неё отвечают слайдеры Alpha в Phase/TimeDomain/Bif.
+    auto series_color = [&](const PlotSeriesInput& s) -> ImVec4 {
+        auto it = series_color_override.find(s.label);
+        if (it == series_color_override.end()) return s.color;
+        return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
+        };
+
+    // Кэшируем маску видимости — её используют do_autofit/fit_x/fit_y, чтобы
+    // НЕ включать скрытые серии (через легенду) в авто-диапазон осей.
+    render_visible_mask_.resize(series_cache_.size());
+    for (int k = 0; k < series_cache_.size(); ++k)
+        render_visible_mask_[k] = eff_visible(k);
+
+    // Detect legend-toggle across frames (legend clicks flip visible[k] later in this render, so the
+    // change lands in NEXT frame's mask). Any bit that flipped → autofit, so newly-visible series
+    // come into view. Was asymmetric before: turning OFF shrunk the view via clamp, turning ON left
+    // the clamp bounds wider but the view stayed zoomed.
+    bool visibility_changed = false;
+    if (render_visible_mask_prev_.size() == render_visible_mask_.size()) {
+        for (size_t k = 0; k < render_visible_mask_.size(); ++k) {
+            if (render_visible_mask_prev_[k] != render_visible_mask_[k]) {
+                visibility_changed = true;
+                break;
+            }
+        }
+    }
+    render_visible_mask_prev_ = render_visible_mask_;
+
+    // 2. Автофит при первом показе или по явному запросу (fit_request)
+    if (!view_valid || fit_request || visibility_changed) do_autofit();
+
+    // Bounds for view clamping — computed once per frame, applied by clamp_view
+    // below after all interactions. Padded on continuous data to match the 5%
+    // autofit padding so a freshly-fit view is not immediately clipped; for
+    // BD/LLE/LS the X-axis follows the explicit sweep range (no padding).
+    double clamp_lo_x = 0.0, clamp_hi_x = 0.0, clamp_lo_y = 0.0, clamp_hi_y = 0.0;
+    bool has_bounds_x = false, has_bounds_y = false;
+    {
+        float xmn, xmx, ymn, ymx;
+        bool ok = render_visible_mask_.empty()
+                    ? series_cache_.bbox(xmn, xmx, ymn, ymx)
+                    : series_cache_.bbox_filtered(xmn, xmx, ymn, ymx, render_visible_mask_);
+        if (x_fit_use_explicit) {
+            clamp_lo_x = std::min(x_fit_min, x_fit_max);
+            clamp_hi_x = std::max(x_fit_min, x_fit_max);
+            has_bounds_x = true;
+        } else if (ok) {
+            // bbox снят с VBO, а на лог-оси там лежит log10(x) (см. заливку
+            // выше). Границы клампа обязаны быть в тех же единицах, что
+            // view_min/view_max, то есть МИРОВЫХ — иначе clamp_view ниже
+            // сравнивает логарифм с мировым значением и переставляет вид в
+            // лог-домен: свежий autofit тут же затирался, ось показывала
+            // -4..-1 вместо 1e-4..0.1, а данные уезжали за край.
+            // Пересчёт повторяет do_autofit операция в операцию, чтобы
+            // только что подогнанный вид ровно совпал с границами и не был
+            // сдвинут на первом же кадре.
+            double lo = (double)xmn, hi = (double)xmx;
+            if (series_xlog_cached) {
+                const double lpad = pad_x ? (hi - lo) * 0.05 : 0.0;
+                lo = std::pow(10.0, lo - lpad);
+                hi = std::pow(10.0, hi + lpad);
+            } else {
+                double padx = pad_x ? (hi - lo) * 0.05 : 0.0;
+                if (pad_x && padx < 1e-9) padx = 1.0;
+                lo -= padx;
+                hi += padx;
+            }
+            clamp_lo_x = lo;
+            clamp_hi_x = hi;
+            has_bounds_x = true;
+        }
+        if (ok) {
+            double pady = pad_y ? (ymx - ymn) * 0.05 : 0.0;
+            if (pad_y && pady < 1e-9) pady = 1.0;
+            clamp_lo_y = ymn - pady;
+            clamp_hi_y = ymx + pady;
+            has_bounds_y = true;
+        }
+    }
+    auto clamp_view = [&]() {
+        if (has_bounds_x && !x_axis.lock) {
+            double rx = x_axis.view_max - x_axis.view_min;
+            if (rx >= clamp_hi_x - clamp_lo_x) {
+                x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_hi_x;
+            } else {
+                if (x_axis.view_min < clamp_lo_x) {
+                    x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_lo_x + rx;
+                }
+                if (x_axis.view_max > clamp_hi_x) {
+                    x_axis.view_max = clamp_hi_x; x_axis.view_min = clamp_hi_x - rx;
+                }
+            }
+        }
+        if (has_bounds_y && !y_axis.lock) {
+            double ry = y_axis.view_max - y_axis.view_min;
+            if (ry >= clamp_hi_y - clamp_lo_y) {
+                y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_hi_y;
+            } else {
+                if (y_axis.view_min < clamp_lo_y) {
+                    y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_lo_y + ry;
+                }
+                if (y_axis.view_max > clamp_hi_y) {
+                    y_axis.view_max = clamp_hi_y; y_axis.view_min = clamp_hi_y - ry;
+                }
+            }
+        }
+    };
+
+    // 3. Отступы и размеры
+    // margin_left/bottom увеличены, чтобы вместить тики + центрированное
+    // название оси (X — под тиками, Y — повернутое вертикально слева).
+    float margin_left, margin_top, margin_right, margin_bottom;
+    plot_2d_margins(margin_left, margin_top, margin_right, margin_bottom);
+
+    int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
+    int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
+
+    ImGui::Dummy(avail_size);
+    ImVec2 img_pos = ImVec2(block_origin.x + margin_left, block_origin.y + margin_top);
+
+    double ex0, ex1, ey0, ey1;
+    axis_effective(x_axis, ex0, ex1);
+    axis_effective(y_axis, ey0, ey1);
+
+    // Логарифмическая ось X
+    // Реализована переносом координаты: на экран (VBO, MVP, тики, курсор,
+    // крест) уходит log10(x), наружу — view_min/max, snap_x, crosshair_x,
+    // колбэки, подписи — всё остаётся МИРОВЫМ. XS/XW — единственная пара
+    // переходов, через неё обязаны идти все X-формулы ниже.
+    //
+    // Активна только при положительных границах: чекбокс можно включить до
+    // Run, и log10(<=0) отравил бы NaN'ом весь кадр. Концы диапазона в обоих
+    // режимах совпадают, поэтому подписи границ на оси остаются на месте.
+    const bool xlog = x_axis.log_scale && std::min(ex0, ex1) > 0.0;
+    auto XS = [xlog](double w) { return xlog ? std::log10(w > 0.0 ? w : 1e-300) : w; };
+    auto XW = [xlog](double s) { return xlog ? std::pow(10.0, s) : s; };
+    const double sx0 = XS(ex0), sx1 = XS(ex1);
+
+    // Зум вокруг точки и сдвиг — в экранной координате: на лог-оси
+    // арифметика по мировым значениям увела бы вид от курсора.
+    auto zoom_x_about = [&](double center_w, double scale) {
+        const double c = XS(center_w);
+        x_axis.view_min = XW(c + (XS(x_axis.view_min) - c) * scale);
+        x_axis.view_max = XW(c + (XS(x_axis.view_max) - c) * scale);
+    };
+    auto pan_x_by_px = [&](double dpx) {
+        const double d = -dpx / (double)plot_w * (sx1 - sx0);
+        x_axis.view_min = XW(XS(x_axis.view_min) + d);
+        x_axis.view_max = XW(XS(x_axis.view_max) + d);
+    };
+
+    // 4. FBO render
+    {
+        float br, bg, bb, ba;
+        plot_bg_color(br, bg, bb, ba);
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+    }
+    float mvp[16];
+    // Границы — в экранной координате: VBO залит тем же преобразованием.
+    make_ortho_mvp(sx0, sx1, ey0, ey1, mvp);
+    for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
+        if (!eff_visible(k)) continue;
+        const GpuLineSeries& g = series_cache_.get(k);
+        if (!g.valid()) continue;
+        const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
+        ImVec4 c = si ? series_color(*si) : ImVec4(1, 1, 1, 1);
+        float color[4] = { c.x, c.y, c.z, c.w };
+        // Per-series override (см. PlotSeriesInput::points_override) имеет
+        // приоритет над флагом вью. Точечные серии рисуются здесь ВСЕГДА,
+        // даже при imdraw_lines — ImDrawList-проход ниже их пропускает.
+        bool  as_points = points_mode;
+        int   marker    = point_marker;
+        float psize     = point_size_px;
+        if (si && si->points_override >= 0) {
+            as_points = (si->points_override == 1);
+            marker    = si->point_marker;
+            if (si->point_size_px > 0.0f) psize = si->point_size_px;
+        }
+        if (as_points)
+            renderer.draw_points(g.vbo, g.point_count, mvp, color, psize, marker);
+        else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
+            renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+    }
+    renderer.end_frame();
+
+    // 5. Вывод FBO
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
+        img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
+        ImVec2(0, 1), ImVec2(1, 0));
+
+    // 6. Legend — INTERACT-проход. Клики по entry-элементам обрабатываем ЗДЕСЬ,
+    // ДО плота-InvisibleButton (line ~178), чтобы легенда получала клики как
+    // и раньше. Сам визуал легенды рисуем в самом конце — тогда линии данных
+    // (imdraw_lines-путь ниже) не перекроют её.
+    std::vector<LegendEntry> legend_entries;
+    LegendRightClick legend_rclick;   // ПКМ по легенде: квадрат -> цвет, мимо -> меню плота
+    if (show_legend) {
+        legend_entries.reserve(series_in.size());
+        for (const auto& s : series_in) {
+            LegendEntry e{ s.label, series_color(s) };
+            if (legend_ignore_series_alpha) e.color.w = 1.0f;
+            legend_entries.push_back(e);
+        }
+        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
+                    owner_id, LegendPass::Interact, &legend_rclick);
+    }
+
+    // 7. Зоны взаимодействия
+    ImGui::SetCursorScreenPos(ImVec2(img_pos.x, img_pos.y + plot_h));
+    char id_buf[48];
+    std::snprintf(id_buf, sizeof(id_buf), "##xaxis_%d", owner_id);
+    ImGui::InvisibleButton(id_buf, ImVec2((float)plot_w, margin_bottom),
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    bool xax_h = ImGui::IsItemHovered();
+    bool xax_a = ImGui::IsItemActive();
+    bool xax_dbl = xax_h && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+
+    ImGui::SetCursorScreenPos(ImVec2(img_pos.x - margin_left, img_pos.y));
+    std::snprintf(id_buf, sizeof(id_buf), "##yaxis_%d", owner_id);
+    ImGui::InvisibleButton(id_buf, ImVec2(margin_left, (float)plot_h),
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    bool yax_h = ImGui::IsItemHovered();
+    bool yax_a = ImGui::IsItemActive();
+    bool yax_dbl = yax_h && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+
+    ImGui::SetCursorScreenPos(img_pos);
+    std::snprintf(id_buf, sizeof(id_buf), "##plot_%d", owner_id);
+    ImGui::InvisibleButton(id_buf, ImVec2((float)plot_w, (float)plot_h),
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    bool plot_h_ov = ImGui::IsItemHovered();
+    bool plot_a = ImGui::IsItemActive();
+    bool plot_dbl = plot_h_ov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+
+    // 8. Сетка, оси
+    ImU32 col_grid = plot_col_grid();
+    ImU32 col_axis = plot_col_axis();
+    ImU32 col_text = plot_col_text();
+    // Snap-to-node тиков X — активируется, когда caller выставил snap-конфиг
+    // (1D Bif/LLE/LS). Оси других графиков (Phase/TimeDomain) идут по дефолту
+    // без snap.
+    double snap_axis_lo = std::min(snap_x_min, snap_x_max);
+    double snap_axis_hi = std::max(snap_x_min, snap_x_max);
+    int    snap_axis_n  = (snap_x_to_grid && snap_x_n > 1) ? snap_x_n : 0;
+    draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
+                     snap_axis_lo, snap_axis_hi, snap_axis_n);
+    draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
+
+    double vrx = sx1 - sx0;
+    double vry = ey1 - ey0;
+    auto X = [&](double x) { return img_pos.x + (float)((XS(x) - sx0) / vrx) * plot_w; };
+    auto Y = [&](double y) { return img_pos.y + (float)((ey1 - y) / vry) * plot_h; };
+
+    if (show_zero_x && std::min(ex0, ex1) <= 0 && std::max(ex0, ex1) >= 0)
+        dl->AddLine(ImVec2(X(0), img_pos.y), ImVec2(X(0), img_pos.y + plot_h), col_axis, 1.5f);
+    if (show_zero_y && std::min(ey0, ey1) <= 0 && std::max(ey0, ey1) >= 0)
+        dl->AddLine(ImVec2(img_pos.x, Y(0)), ImVec2(img_pos.x + plot_w, Y(0)), col_axis, 1.5f);
+
+    // Линии данных поверх осей через ImDrawList (только если imdraw_lines).
+    // Рисуем посегментно (AddLine), а не AddPolyline — последняя на резких
+    // скачках LLE/LS визуально «рвётся» из-за miter-joins при острых углах.
+    // Толщина >1px надёжна (ImGui триангулирует), порядок: после осей.
+    if (imdraw_lines) {
+        ImVec2 cmin_clip = img_pos;
+        ImVec2 cmax_clip(img_pos.x + plot_w, img_pos.y + plot_h);
+        dl->PushClipRect(cmin_clip, cmax_clip, true);
+        for (int k = (int)series_in.size() - 1; k >= 0; --k) {
+            if (!eff_visible(k)) continue;
+            const PlotSeriesInput& s = series_in[k];
+            if (!s.points || s.n_points < 2) continue;
+            if (s.points_override == 1) continue;  // уже нарисована как GL-точки
+            const bool   colored = (s.values != nullptr);
+            const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
+            const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(series_color(s));
+            const int    n_seg = s.n_points - 1;
+
+            // Если задан segment_order — painter's algorithm. Иначе линейный
+            // обход (старое поведение).
+            for (int sk = 0; sk < n_seg; ++sk) {
+                const int i = s.segment_order ? s.segment_order[sk] : sk;
+                if (i < 0 || i >= n_seg) continue;
+                ImVec2 a(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
+                ImVec2 b(X(s.points[2 * (i + 1) + 0]), Y(s.points[2 * (i + 1) + 1]));
+                ImU32 col = uniform_col;
+                if (colored) {
+                    // Цвет сегмента — по значению на его старте (i, не i+1) —
+                    // mirror MATLAB patch EdgeColor=flat.
+                    float t = (s.values[i] - s.cmin) / crange;
+                    if (t < 0) t = 0; else if (t > 1) t = 1;
+                    col = cmap_sample(t, s.colormap);
+                    // s.color.w — alpha-мультипликатор поверх cmap.
+                    if (s.color.w < 1.0f) {
+                        unsigned aa = (col >> IM_COL32_A_SHIFT) & 0xFF;
+                        aa = (unsigned)((float)aa * s.color.w);
+                        col = (col & ~IM_COL32_A_MASK) | (aa << IM_COL32_A_SHIFT);
+                    }
+                }
+                dl->AddLine(a, b, col, line_thickness_px);
+            }
+        }
+        dl->PopClipRect();
+    }
+
+    // Crosshair overlay — dark halo + coloured core. Colours encode which
+    // sweep-axis the line belongs to (vertical = X-sweep, horizontal =
+    // Y-sweep by convention; caller can override crosshair_*_color).
+    // Mirrors HeatmapView's crosshair path.
+    if (std::isfinite(crosshair_x) || std::isfinite(crosshair_y)) {
+        ImU32 col_halo = IM_COL32(0, 0, 0, 220);
+        if (std::isfinite(crosshair_x) && crosshair_x >= std::min(ex0, ex1)
+                                       && crosshair_x <= std::max(ex0, ex1)) {
+            float px = X(crosshair_x);
+            ImVec2 a(px, img_pos.y), b(px, img_pos.y + (float)plot_h);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_x_color, 1.5f);
+        }
+        if (std::isfinite(crosshair_y) && crosshair_y >= std::min(ey0, ey1)
+                                       && crosshair_y <= std::max(ey0, ey1)) {
+            float py = Y(crosshair_y);
+            ImVec2 a(img_pos.x, py), b(img_pos.x + (float)plot_w, py);
+            dl->AddLine(a, b, col_halo, 3.0f);
+            dl->AddLine(a, b, (ImU32)crosshair_y_color, 1.5f);
+        }
+    }
+
+    // ε-окружность вокруг курсора (hover_circle_r в plot_view_2d.h) — визуальный подбор DBSCAN eps.
+    // Сэмплируем в МИРОВЫХ координатах и гоним каждую точку через X()/Y(): так сами собой выходят и
+    // разный масштаб осей (на экране эллипс), и лог-ось X. ImDrawList::AddEllipse не подошёл бы ни
+    // там, ни там — он рисует оси-параллельный эллипс в пикселях, а на лог-оси ε-окрестность вообще
+    // не эллипс (левый и правый края сжаты по-разному). Halo + ядро — как у crosshair выше, чтобы
+    // линия читалась и на светлой, и на тёмной подложке.
+    if (plot_h_ov && std::isfinite(hover_circle_r) && hover_circle_r > 0.0) {
+        ImGuiIO& io = ImGui::GetIO();
+        // Центр — курсор в мировых координатах (та же пара формул, что у
+        // читалки координат ниже).
+        const double cx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
+        const double cy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        const int kSeg = 72;
+        ImVec2 pts[kSeg];
+        // finite — гард на патологический радиус: eps приходит из текстового
+        // поля, и на 1e300 экранные координаты переполняются в inf, после чего
+        // в vertex buffer уезжают inf/NaN. Тогда просто не рисуем.
+        bool finite = true;
+        for (int k = 0; k < kSeg; ++k) {
+            const double a = 2.0 * 3.14159265358979323846 * (double)k / (double)kSeg;
+            // На лог-оси часть окружности может уехать в x <= 0 — XS() клампит
+            // такую точку к 1e-300, т.е. далеко за левый край (координата при
+            // этом остаётся конечной). Clip-rect ниже это срезает, кривая просто
+            // уходит из плота.
+            pts[k] = ImVec2(X(cx + hover_circle_r * std::cos(a)),
+                            Y(cy + hover_circle_r * std::sin(a)));
+            if (!std::isfinite(pts[k].x) || !std::isfinite(pts[k].y)) { finite = false; break; }
+        }
+        if (finite) {
+            dl->PushClipRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+            dl->AddPolyline(pts, kSeg, IM_COL32(0, 0, 0, 220), 3.0f, ImDrawFlags_Closed);
+            dl->AddPolyline(pts, kSeg, (ImU32)hover_circle_color, 1.5f, ImDrawFlags_Closed);
+            dl->PopClipRect();
+        }
+    }
+
+    dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
+        plot_col_border(), 0.0f, 0, 1.0f);
+
+    // Legend — DRAW-проход (визуал поверх линий данных, включая imdraw_lines
+    // путь custom line style). InvisibleButton'ы уже поданы в Interact-проходе
+    // выше — здесь только dl-> отрисовка. hover highlight через
+    // IsMouseHoveringRect (в отличие от IsItemHovered из Interact-прохода).
+    if (show_legend) {
+        // &legend_rclick и здесь: в Draw-проходе клики не ловятся, указатель
+        // служит признаком «меню цвета есть» — по нему рисуется рамка-подсказка
+        // на наведении цветного квадрата (см. plot_legend.h).
+        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
+                    owner_id, LegendPass::Draw, &legend_rclick);
+    }
+
+    // Названия осей: X — горизонтально, под тиками по центру плота.
+    // Y — повёрнут на 90° против часовой, у левого края, по центру плота.
+    {
+        const char* xl = x_axis.name.empty() ? "x" : x_axis.name.c_str();
+        const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+        float font_h = ImGui::GetFontSize();
+
+        // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор)
+        ImVec2 xs = ImGui::CalcTextSize(xl);
+        float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
+        dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
+                    col_text, xl);
+
+        // Y label повёрнут на -90° (читается снизу вверх, mathematical convention): рендерим текст
+        // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
+        // ТОЧНО -90° матрица имеет целочисленные компоненты (cos=0, sin=-1), поэтому пиксельная
+        // сетка глифов сохраняется и шрифт остаётся чётким — без AA-шума, который бывает на
+        // произвольных углах. X-позиция считается ДИНАМИЧЕСКИ, за самыми широкими Y-тиками, иначе
+        // подпись наезжает на длинные числа (например "0.09177").
+        ImVec2 ts = ImGui::CalcTextSize(yl);
+        if (ts.x > 0.0f && ts.y > 0.0f) {
+            float max_tick_w = 0.0f;
+            double vry = ey1 - ey0;
+            if (std::abs(vry) >= 1e-30) {
+                double lo = std::min(ey0, ey1);
+                double hi = std::max(ey0, ey1);
+                double sy = nice_step(std::abs(vry), 6);
+                double ystart = std::ceil(lo / sy) * sy;
+                int ny = (int)std::floor((hi - ystart) / sy + 1) + 1;
+                for (int iy = 0; iy < ny; ++iy) {
+                    std::string tl = fmt_tick(ystart + iy * sy);
+                    float w = ImGui::CalcTextSize(tl.c_str()).x;
+                    if (w > max_tick_w) max_tick_w = w;
+                }
+            }
+            // Pivot — позиция левого-верхнего угла текста ДО поворота, одновременно центр вращения.
+            // После -90° (dx, dy) ↦ (dy, -dx): по X текст занимает [pivot.x, pivot.x + ts.y], по Y —
+            // [pivot.y - ts.x, pivot.y]. Снапим к целым пикселям — критично для чёткости глифов.
+            float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts.y);
+            float pivot_y = std::floor(img_pos.y + (plot_h + ts.x) * 0.5f);
+            ImVec2 pivot(pivot_x, pivot_y);
+
+            int idx_start = dl->VtxBuffer.Size;
+            dl->AddText(pivot, col_text, yl);
+            int idx_end = dl->VtxBuffer.Size;
+            for (int i = idx_start; i < idx_end; ++i) {
+                ImDrawVert& v = dl->VtxBuffer[i];
+                float dx = v.pos.x - pivot.x;
+                float dy = v.pos.y - pivot.y;
+                v.pos.x = pivot.x + dy;
+                v.pos.y = pivot.y - dx;
+            }
+        }
+    }
+
+    // Координаты под курсором — справа на уровне X-подписи, пока курсор внутри
+    // плота. Формат: "<x_name> = <val>,  <y_name> = <val>". Если имени оси нет
+    // (axis.name пуст) — используется 'x' / 'y'.
+    if (plot_h_ov) {
+        ImGuiIO& io = ImGui::GetIO();
+        double dx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
+        double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
+        // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
+        // непрерывной (мы за пределами сетки движка).
+        if (snap_x_to_grid && snap_x_n > 1) {
+            double lo = std::min(snap_x_min, snap_x_max);
+            double hi = std::max(snap_x_min, snap_x_max);
+            int ix; double sx;
+            if (SnapCursorToGrid1D(dx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) dx = sx;
+        }
+        const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
+        const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "%s = %.6g,  %s = %.6g", xn, dx, yn, dy);
+        ImVec2 cs = ImGui::CalcTextSize(buf);
+        float cx = img_pos.x + plot_w - cs.x;
+        float cy = img_pos.y + plot_h + 2.0f + ImGui::GetFontSize() + 6.0f;
+        dl->AddText(ImVec2(cx, cy), col_text, buf);
+    }
+
+    // 8b. Crosshair gestures — MMB drag или Shift+LMB drag внутри плота каждый кадр вызывают
+    // `on_left_drag(world_x)`, а release любого из них — `on_left_click(world_x)`. Чистый LMB
+    // оставлен пану и drill-down НЕ запускает: голый клик просто для фокуса окна не должен
+    // стартовать фазовый прогон.
+    if (plot_h_ov && (on_left_drag || on_left_click)) {
+        ImGuiIO& io = ImGui::GetIO();
+        auto cursor_wx = [&]() -> double {
+            double wx = XW(sx0 + (double)(io.MousePos.x - img_pos.x)
+                                 / (double)plot_w * (sx1 - sx0));
+            if (snap_x_to_grid && snap_x_n > 1) {
+                double lo = std::min(snap_x_min, snap_x_max);
+                double hi = std::max(snap_x_min, snap_x_max);
+                int ix; double sx;
+                // log_scale обязателен и здесь: без него drag крестика садился
+                // на линейный узел, которого при лог-свипе в данных нет
+                // (readout выше этот флаг уже передавал).
+                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) wx = sx;
+            }
+            return wx;
+        };
+        bool crosshair_held = ImGui::IsMouseDown(ImGuiMouseButton_Middle)
+                           || (ImGui::IsMouseDown(ImGuiMouseButton_Left) && io.KeyShift);
+        if (crosshair_held && on_left_drag) on_left_drag(cursor_wx());
+
+        bool crosshair_released = ImGui::IsMouseReleased(ImGuiMouseButton_Middle)
+                               || (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.KeyShift);
+        if (crosshair_released && on_left_click && !plot_dbl)
+            on_left_click(cursor_wx());
+    }
+
+    // 9. Двойные клики
+    if (xax_dbl)   fit_x();
+    if (yax_dbl)   fit_y();
+    if (plot_dbl)  view_valid = false;
+
+    // 10. Зум/пан внутри поля графика
+    if (plot_h_ov || plot_a) {
+        ImGuiIO& io = ImGui::GetIO();
+        float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
+        float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
+        double cx = XW(sx0 + mx * (sx1 - sx0));
+        double cy = ey0 + my * (ey1 - ey0);
+
+        if (plot_h_ov && io.MouseWheel != 0.0f) {
+            double scale = std::pow(0.85, io.MouseWheel);
+            if (!x_axis.lock) zoom_x_about(cx, scale);
+            if (!y_axis.lock) {
+                y_axis.view_min = cy + (y_axis.view_min - cy) * scale;
+                y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
+            }
+        }
+        // LMB pan — skip when Shift is held (that's a crosshair gesture).
+        if (plot_a && !io.KeyShift
+            && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+            ImVec2 d = io.MouseDelta;
+            if (!x_axis.lock) pan_x_by_px((double)d.x);
+            if (!y_axis.lock) {
+                double dy_data = (double)d.y / plot_h * (ey1 - ey0);
+                y_axis.view_min += dy_data; y_axis.view_max += dy_data;
+            }
+        }
+    }
+
+    // 11. Зум/пан по линейкам осей
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        if (xax_h && io.MouseWheel != 0.0f && !x_axis.lock) {
+            float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
+            double cx = XW(sx0 + mx * (sx1 - sx0));
+            double scale = std::pow(0.85, io.MouseWheel);
+            zoom_x_about(cx, scale);
+        }
+        if (yax_h && io.MouseWheel != 0.0f && !y_axis.lock) {
+            float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
+            double cy = ey0 + my * (ey1 - ey0);
+            double scale = std::pow(0.85, io.MouseWheel);
+            y_axis.view_min = cy + (y_axis.view_min - cy) * scale;
+            y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
+        }
+        if (xax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !x_axis.lock) {
+            pan_x_by_px((double)io.MouseDelta.x);
+        }
+        if (yax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !y_axis.lock) {
+            ImVec2 d = io.MouseDelta;
+            double dy_data = (double)d.y / plot_h * (ey1 - ey0);
+            y_axis.view_min += dy_data; y_axis.view_max += dy_data;
+        }
+    }
+
+    // 12. Rect-zoom + popup
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
+        float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
+        double cx = XW(sx0 + mx * (sx1 - sx0));
+        double cy = ey0 + my * (ey1 - ey0);
+
+        const float drag_threshold = 5.0f;
+
+        if (!rect_zoom_pending_ && !rect_zoom_active_ &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        {
+            if (plot_h_ov || xax_h || yax_h) {
+                rect_zoom_pending_ = true;
+                rect_zoom_start_x_ = io.MousePos.x;
+                rect_zoom_start_y_ = io.MousePos.y;
+                if (xax_h) rect_zoom_mode_ = 1;
+                else if (yax_h) rect_zoom_mode_ = 2;
+                else            rect_zoom_mode_ = 0;
+                rect_zoom_x0_ = cx; rect_zoom_y0_ = cy;
+            }
+        }
+        if (rect_zoom_pending_ && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            float dx = io.MousePos.x - rect_zoom_start_x_;
+            float dy = io.MousePos.y - rect_zoom_start_y_;
+            if (std::sqrt(dx * dx + dy * dy) > drag_threshold) {
+                rect_zoom_active_ = true;
+                rect_zoom_pending_ = false;
+            }
+        }
+        if (rect_zoom_pending_ && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+            rect_zoom_pending_ = false;
+            char pop_id[48];
+            if (rect_zoom_mode_ == 1) std::snprintf(pop_id, sizeof(pop_id), "##xaxis_menu_%d", owner_id);
+            else if (rect_zoom_mode_ == 2) std::snprintf(pop_id, sizeof(pop_id), "##yaxis_menu_%d", owner_id);
+            else                            std::snprintf(pop_id, sizeof(pop_id), "##plot_menu_%d", owner_id);
+            ImGui::OpenPopup(pop_id);
+        }
+        if (rect_zoom_active_) {
+            auto d2s = [&](double x, double y) -> ImVec2 {
+                float sx = img_pos.x + (float)((XS(x) - sx0) / (sx1 - sx0)) * plot_w;
+                float sy = img_pos.y + (float)((ey1 - y) / (ey1 - ey0)) * plot_h;
+                return ImVec2(sx, sy);
+                };
+            ImVec2 p0, p1;
+            if (rect_zoom_mode_ == 0) {
+                p0 = d2s(rect_zoom_x0_, rect_zoom_y0_); p1 = d2s(cx, cy);
+            }
+            else if (rect_zoom_mode_ == 1) {
+                p0 = ImVec2(d2s(rect_zoom_x0_, 0).x, img_pos.y);
+                p1 = ImVec2(d2s(cx, 0).x, img_pos.y + plot_h);
+            }
+            else {
+                p0 = ImVec2(img_pos.x, d2s(0, rect_zoom_y0_).y);
+                p1 = ImVec2(img_pos.x + plot_w, d2s(0, cy).y);
+            }
+            ImVec2 rmin = ImVec2(std::min(p0.x, p1.x), std::min(p0.y, p1.y));
+            ImVec2 rmax = ImVec2(std::max(p0.x, p1.x), std::max(p0.y, p1.y));
+            dl->AddRectFilled(rmin, rmax, IM_COL32(100, 180, 255, 50));
+            dl->AddRect(rmin, rmax, IM_COL32(100, 180, 255, 220), 0.0f, 0, 1.5f);
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                double x0 = rect_zoom_x0_, y0 = rect_zoom_y0_;
+                double x1 = cx, y1 = cy;
+                if (x0 > x1) std::swap(x0, x1);
+                if (y0 > y1) std::swap(y0, y1);
+                if (rect_zoom_mode_ == 0) {
+                    if (!x_axis.lock) { x_axis.view_min = x0; x_axis.view_max = x1; }
+                    if (!y_axis.lock) { y_axis.view_min = y0; y_axis.view_max = y1; }
+                }
+                else if (rect_zoom_mode_ == 1) {
+                    if (!x_axis.lock) { x_axis.view_min = x0; x_axis.view_max = x1; }
+                }
+                else {
+                    if (!y_axis.lock) { y_axis.view_min = y0; y_axis.view_max = y1; }
+                }
+                rect_zoom_active_ = false;
+            }
+        }
+    }
+
+    // 13. Контекстное меню
+    char pop_id[48];
+    std::snprintf(pop_id, sizeof(pop_id), "##plot_menu_%d", owner_id);
+    // ПКМ по подписи в легенде — то же меню, что по самому плоту. Через
+    // rect_zoom-ветку выше это не проходит: там условие plot_h_ov, а под
+    // легендой hover принадлежит её кнопке, не плоту. OpenPopup здесь заодно
+    // закрывает открытое меню цвета — popup'ы одного уровня взаимоисключающи.
+    if (legend_rclick.row_other) ImGui::OpenPopup(pop_id);
+    if (ImGui::BeginPopup(pop_id)) {
+        if (ImGui::MenuItem("Auto fit (both)")) view_valid = false;
+        if (ImGui::MenuItem("Auto fit X"))      fit_x();
+        if (ImGui::MenuItem("Auto fit Y"))      fit_y();
+        ImGui::Separator();
+        ImGui::MenuItem("Show legend", nullptr, &show_legend);
+        ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
+        ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
+        ImGui::Separator();
+        ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
+        ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy image to clipboard")) {
+            request_plot_screenshot(block_origin,
+                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+        }
+        // Caller-injected пункты (например, FastSync "Invert depth axis").
+        if (popup_extras) {
+            ImGui::Separator();
+            popup_extras();
+        }
+        ImGui::EndPopup();
+    }
+    std::snprintf(pop_id, sizeof(pop_id), "##xaxis_menu_%d", owner_id);
+    if (ImGui::BeginPopup(pop_id)) {
+        if (ImGui::MenuItem("Auto fit X")) fit_x();
+        ImGui::Separator();
+        char xmin_buf[32], xmax_buf[32];
+        std::snprintf(xmin_buf, sizeof(xmin_buf), "%.6g", x_axis.view_min);
+        std::snprintf(xmax_buf, sizeof(xmax_buf), "%.6g", x_axis.view_max);
+        ImGui::Text("X range:");
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputText("min##x", xmin_buf, sizeof(xmin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
+            x_axis.view_min = std::atof(xmin_buf);
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputText("max##x", xmax_buf, sizeof(xmax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
+            x_axis.view_max = std::atof(xmax_buf);
+        ImGui::Separator();
+        ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
+        ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
+        ImGui::EndPopup();
+    }
+    std::snprintf(pop_id, sizeof(pop_id), "##yaxis_menu_%d", owner_id);
+    if (ImGui::BeginPopup(pop_id)) {
+        if (ImGui::MenuItem("Auto fit Y")) fit_y();
+        ImGui::Separator();
+        char ymin_buf[32], ymax_buf[32];
+        std::snprintf(ymin_buf, sizeof(ymin_buf), "%.6g", y_axis.view_min);
+        std::snprintf(ymax_buf, sizeof(ymax_buf), "%.6g", y_axis.view_max);
+        ImGui::Text("Y range:");
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputText("min##y", ymin_buf, sizeof(ymin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
+            y_axis.view_min = std::atof(ymin_buf);
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputText("max##y", ymax_buf, sizeof(ymax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
+            y_axis.view_max = std::atof(ymax_buf);
+        ImGui::Separator();
+        ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
+        ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        ImGui::EndPopup();
+    }
+
+    // 13b. Цвет серии — меню по ПКМ на строке легенды. RGB задаётся float'ами
+    // 0..255. Серии с per-segment colormap (FastSync colored trajectory)
+    // пропускаем: их линия рисуется cmap_sample'ом, uniform-цвет не при делах,
+    // и меню меняло бы только квадратик в легенде — то есть врало бы.
+    std::snprintf(pop_id, sizeof(pop_id), "##legend_color_%d", owner_id);
+    auto fmt_channel = [](float v) -> std::string {
+        char b[32];
+        std::snprintf(b, sizeof(b), "%.1f", v);
+        return std::string(b);
+        };
+    // Канал из текста поля: 0..255, с проверкой что строка съедена целиком
+    // ("12x" / "abc" — не число, старое значение остаётся).
+    auto parse_channel = [](const std::string& s, float& out) -> bool {
+        if (s.empty()) return false;
+        char* end = nullptr;
+        float v = std::strtof(s.c_str(), &end);
+        if (end == s.c_str()) return false;
+        while (*end == ' ' || *end == '\t') ++end;
+        if (*end != '\0') return false;
+        out = std::min(255.0f, std::max(0.0f, v));
+        return true;
+        };
+
+    const int color_target = legend_rclick.swatch_index;
+    if (color_target >= 0 && color_target < (int)series_in.size() &&
+        series_in[color_target].values == nullptr) {
+        const PlotSeriesInput& s = series_in[color_target];
+        ImVec4 cur = series_color(s);
+        legend_color_target_  = s.label;
+        legend_color_text_[0] = fmt_channel(cur.x * 255.0f);
+        legend_color_text_[1] = fmt_channel(cur.y * 255.0f);
+        legend_color_text_[2] = fmt_channel(cur.z * 255.0f);
+        ImGui::OpenPopup(pop_id);
+    }
+    if (ImGui::BeginPopup(pop_id)) {
+        ImGui::TextUnformatted(legend_color_target_.empty() ? "(series)"
+                                                            : legend_color_target_.c_str());
+        ImGui::TextDisabled("RGB, 0..255");
+        ImGui::Separator();
+        static const char* kChannel[3] = { "R", "G", "B" };
+        bool edited = false;
+        bool renorm[3] = { false, false, false };
+        for (int c = 0; c < 3; ++c) {
+            std::string& t = legend_color_text_[c];
+            std::vector<char> buf(t.begin(), t.end());
+            buf.resize(t.size() + 64);
+            buf[t.size()] = '\0';
+            ImGui::SetNextItemWidth(90);
+            // Тот же ввод, что у полей параметров: ↑/↓ шагают разряд под
+            // курсором, запятая превращается в точку. Плюс CallbackEdit —
+            // через него канал зажимается в [0, 255] прямо в поле.
+            if (ImGui::InputText(kChannel[c], buf.data(), buf.size(),
+                                 ImGuiInputTextFlags_CallbackCharFilter |
+                                 ImGuiInputTextFlags_CallbackHistory |
+                                 ImGuiInputTextFlags_CallbackEdit,
+                                 rgb_channel_input_callback)) {
+                t = buf.data();
+                edited = true;
+            }
+            renorm[c] = ImGui::IsItemDeactivatedAfterEdit();
+        }
+
+        float ch[3] = { 0, 0, 0 };
+        bool parsed = parse_channel(legend_color_text_[0], ch[0])
+                   && parse_channel(legend_color_text_[1], ch[1])
+                   && parse_channel(legend_color_text_[2], ch[2]);
+        if (!parsed) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                "invalid number, keeping previous colour");
+        } else {
+            ImVec4 preview(ch[0] / 255.0f, ch[1] / 255.0f, ch[2] / 255.0f, 1.0f);
+            ImGui::ColorButton("##legend_color_preview", preview,
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(120, ImGui::GetTextLineHeight()));
+            // Override создаётся ТОЛЬКО после реальной правки: просто открыть
+            // меню и закрыть — цвет остаётся палитровым.
+            if (edited && !legend_color_target_.empty())
+                series_color_override[legend_color_target_] = preview;
+            // Пока печатают, "300" не трогаем (иначе ввод дерётся с клампом),
+            // но на уходе фокуса поле переписываем тем, что реально ушло в цвет.
+            for (int c = 0; c < 3; ++c)
+                if (renorm[c]) legend_color_text_[c] = fmt_channel(ch[c]);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset this colour")) {
+            series_color_override.erase(legend_color_target_);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Reset all colours", nullptr, false,
+                            !series_color_override.empty()))
+            series_color_override.clear();
+        ImGui::EndPopup();
+    }
+
+    // Clamp view to data bounds — after ALL interactions this frame (wheel/pan
+    // on plot & axes, rect-zoom, and popup min/max InputText). Mirrors the
+    // one-call-at-end pattern from heatmap_view.cpp. Bounds & lock respected.
+    clamp_view();
+}
