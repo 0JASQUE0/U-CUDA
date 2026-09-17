@@ -6,6 +6,10 @@
 #include <cstdlib>
 #include <string>
 
+// Радиус притяжения тултипа к точке по вертикали: дальше курсор считается
+// висящим в пустоте и подпись Y идёт по самому курсору.
+static constexpr double kTooltipSnapPx = 12.0;
+
 // Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
 // margin_left/bottom увеличены, чтобы вместить тики + центрированное
 // название оси, и растут вместе с кеглем подписей (Settings -> Plot font
@@ -664,9 +668,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
 
-    // Координаты под курсором — справа на уровне X-подписи, пока курсор внутри
-    // плота. Формат: "<x_name> = <val>,  <y_name> = <val>". Если имени оси нет
-    // (axis.name пуст) — используется 'x' / 'y'.
+    // Координаты под курсором — тултипом, пока курсор внутри плота: две строки
+    // "<x_name> = <val>". Если имени оси нет (axis.name пуст) — 'x' / 'y'.
     if (plot_h_ov) {
         ImGuiIO& io = ImGui::GetIO();
         double dx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
@@ -683,8 +686,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         //
         // snap_x_to_grid здесь работает признаком «X — ось свипа»: у фазового
         // портрета столбцов нет, там ближайший по X смысла не имеет.
-        const std::string* hit_label = nullptr;
-        bool x_on_node = false, y_on_data = false;
+        bool x_on_node = false, col_has_point = false;
         const double span_s = sx1 - sx0;
         size_t total_pts = 0;
         for (const auto& s : series_in) total_pts += (size_t)std::max(0, s.n_points);
@@ -722,7 +724,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Ближайшая точка В ЭТОМ столбце: сравнение точное — значения те же
             // самые double, что были прочитаны на первом проходе.
             if (x_on_node && total_pts <= 4000000) {
-                double best_dy = 0.0;
+                double best_dy = 0.0, best_yv = 0.0;
                 for (size_t si = 0; si < series_in.size(); ++si) {
                     if (si < visible.size() && !visible[si]) continue;
                     const PlotSeriesInput& s = series_in[si];
@@ -731,11 +733,19 @@ void Plot2DView::render(PlotRenderer& renderer,
                         if (s.points[(size_t)i * 2 + 0] != dx) continue;
                         const double yv = s.points[(size_t)i * 2 + 1];
                         const double d = std::abs(yv - dy);
-                        if (!y_on_data || d < best_dy) {
-                            best_dy = d; dy = yv; y_on_data = true; hit_label = &s.label;
+                        if (!col_has_point || d < best_dy) {
+                            best_dy = d; best_yv = yv; col_has_point = true;
                         }
                     }
                 }
+                // Притягиваем Y, только когда точка реально рядом с курсором.
+                // Без порога подпись переставала зависеть от вертикали вообще:
+                // у LLE/LS в столбце ОДНА точка, и её значение показывалось на
+                // всю высоту плота, а у БД — значение ближайшего края полосы,
+                // когда курсор в пустоте между ветвями.
+                const double py_per_w = (ey1 != ey0)
+                    ? (double)plot_h / std::abs(ey1 - ey0) : 0.0;
+                if (col_has_point && best_dy * py_per_w <= kTooltipSnapPx) dy = best_yv;
             }
         }
 
@@ -746,10 +756,6 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::BeginTooltip();
         ImGui::Text("%s = %.10g", xn, dx);
         ImGui::Text("%s = %.10g", yn, dy);
-        if (y_on_data && hit_label && !hit_label->empty())
-            ImGui::TextDisabled("%s", hit_label->c_str());
-        else if (!y_on_data)
-            ImGui::TextDisabled("%s", x_on_node ? "no data point here" : "cursor position");
         ImGui::EndTooltip();
     }
 
