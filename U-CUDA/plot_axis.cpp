@@ -547,6 +547,12 @@ float plot_left_margin_for_width(float max_tick_w, bool has_axis_name) {
     return std::clamp(m, 32.0f, 400.0f);
 }
 
+float plot_bottom_margin() {
+    // 2 — штрих под плотом, 6 — зазор между подписями тиков и именем оси,
+    // 6 — воздух снизу; остальное — две строки текста.
+    return 2.0f + plot_text_line_height() + 6.0f + plot_text_line_height() + 6.0f;
+}
+
 float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
     double emin, emax;
     axis_effective(y, emin, emax);
@@ -728,28 +734,13 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
         return;
     }
 
-    double sx = nice_step(std::abs(vrx), 8);
-    // Snap-to-node: шаг тиков кратен step_node, стартовая позиция тоже. Каждый
-    // тик тогда — узел параметрической сетки (snap_lo + k*step_node), без
-    // "промежуточных" значений.
-    //
-    // Только пока узлы различимы на экране (node_snap_visible). На плотной
-    // сетке шаг тика наследовал иррациональный шаг узлов: свип 4..20 из 500
-    // точек давал подписи 4, 5.99, 7.98, ..., 19.9 вместо 4, 6, ..., 20.
-    double xstart;
-    double step_node = (snap_n > 1 && snap_hi > snap_lo)
-                       ? (snap_hi - snap_lo) / (double)(snap_n - 1) : 0.0;
-    if (!node_snap_visible(step_node, std::abs(vrx), plot_w)) step_node = 0.0;
-    if (step_node > 0.0) {
-        // Кратность подбирается ПОСЛЕ снапа, по узловым подписям: они длиннее
-        // круглых, и подбор шага до снапа мерил не те строки.
-        int mult = (int)std::lround(sx / step_node);
-        mult = fit_node_step(step_node, snap_lo, mult, lo, hi, plot_w, true, xstart);
-        sx = (double)mult * step_node;
-    } else {
-        sx = fit_tick_step_x(sx, lo, hi, plot_w);
-        xstart = std::ceil(lo / sx) * sx;
-    }
+    // Шаг тиков — «красивое» число, к узлам параметрической сетки он больше не
+    // притягивается. Привязка давала подписи вида 4, 5.6, 7.2 — читаются хуже
+    // круглых, а смысл её («тик называет реально посчитанное значение») теперь
+    // закрывает тултип: он снапится к узлам, включая те, где точек не вышло.
+    // Границы свипа по-прежнему подписываются всегда — блок ниже.
+    double sx = fit_tick_step_x(nice_step(std::abs(vrx), 8), lo, hi, plot_w);
+    double xstart = std::ceil(lo / sx) * sx;
     // hi-xstart нормируется на sx → floor(...) + 1 даёт ровно столько тиков,
     // сколько помещается в [xstart, hi]. Эпсилон ловит floating-point случаи
     // когда xstart + k*sx должно совпадать с hi, но из-за accumulation lo чуть

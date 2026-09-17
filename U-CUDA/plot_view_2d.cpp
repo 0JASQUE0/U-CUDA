@@ -12,11 +12,10 @@
 // size): иначе на крупном кегле имя оси уезжает за нижний край блока, а
 // Y-подпись — за левый.
 void plot_2d_margins(float& left, float& top, float& right, float& bottom) {
-    const float k = plot_font_scale();
-    left   = 78.0f * k;
+    left   = 78.0f * plot_font_scale();
     top    = 20.0f;
     right  = 20.0f;
-    bottom = 46.0f * k;
+    bottom = plot_bottom_margin();
 }
 
 void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
@@ -675,20 +674,83 @@ void Plot2DView::render(PlotRenderer& renderer,
         // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
         // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
         // непрерывной (мы за пределами сетки движка).
-        if (snap_x_to_grid && snap_x_n > 1) {
-            double lo = std::min(snap_x_min, snap_x_max);
-            double hi = std::max(snap_x_min, snap_x_max);
-            int ix; double sx;
-            if (SnapCursorToGrid1D(dx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) dx = sx;
+        // Привязка к ФАКТИЧЕСКИМ значениям массива, а не к сетке, воссозданной
+        // из конфига. Восстановление требует знать разом: диапазон (у
+        // классического свипа он в текстовых полях, у continuation — в
+        // снапшоте результата), флаг лога и конвенцию reverse/continuation —
+        // и ошибка в любом из них давала узлы, которых в данных нет. Точки же
+        // построены правильной формулой по определению.
+        //
+        // snap_x_to_grid здесь работает признаком «X — ось свипа»: у фазового
+        // портрета столбцов нет, там ближайший по X смысла не имеет.
+        const std::string* hit_label = nullptr;
+        bool x_on_node = false, y_on_data = false;
+        const double span_s = sx1 - sx0;
+        size_t total_pts = 0;
+        for (const auto& s : series_in) total_pts += (size_t)std::max(0, s.n_points);
+        // Верхняя граница на всякий случай: два прохода по серии на кадр
+        // наведения дёшевы для Bif/LLE/LS, но не для многомиллионных наборов.
+        if (snap_x_to_grid && span_s != 0.0) {
+            const double cursor_px = (double)(io.MousePos.x - img_pos.x);
+            auto to_px = [&](double w) {
+                return (XS(w) - sx0) / span_s * (double)plot_w;
+            };
+            // Ближайший X — в ЭКРАННОЙ метрике: на лог-оси «ближайший» должен
+            // означать ближайший глазу, а не по разности значений.
+            double best_px = 0.0;
+            if (snap_x_nodes && snap_x_node_count > 0) {
+                // Узлы свипа, включая те, что не дали точек.
+                for (int k = 0; k < snap_x_node_count; ++k) {
+                    const double d = std::abs(to_px(snap_x_nodes[k]) - cursor_px);
+                    if (!x_on_node || d < best_px) { best_px = d; dx = snap_x_nodes[k]; x_on_node = true; }
+                }
+            } else if (total_pts > 0 && total_pts <= 4000000) {
+                // Узлов не дали — снапимся по самим точкам. Верхняя граница на
+                // всякий случай: проход по многомиллионному набору на кадр
+                // наведения уже дорог.
+                for (size_t si = 0; si < series_in.size(); ++si) {
+                    if (si < visible.size() && !visible[si]) continue;
+                    const PlotSeriesInput& s = series_in[si];
+                    if (!s.points || s.n_points <= 0) continue;
+                    for (int i = 0; i < s.n_points; ++i) {
+                        const double xv = s.points[(size_t)i * 2 + 0];
+                        const double d = std::abs(to_px(xv) - cursor_px);
+                        if (!x_on_node || d < best_px) { best_px = d; dx = xv; x_on_node = true; }
+                    }
+                }
+            }
+            // Ближайшая точка В ЭТОМ столбце: сравнение точное — значения те же
+            // самые double, что были прочитаны на первом проходе.
+            if (x_on_node && total_pts <= 4000000) {
+                double best_dy = 0.0;
+                for (size_t si = 0; si < series_in.size(); ++si) {
+                    if (si < visible.size() && !visible[si]) continue;
+                    const PlotSeriesInput& s = series_in[si];
+                    if (!s.points || s.n_points <= 0) continue;
+                    for (int i = 0; i < s.n_points; ++i) {
+                        if (s.points[(size_t)i * 2 + 0] != dx) continue;
+                        const double yv = s.points[(size_t)i * 2 + 1];
+                        const double d = std::abs(yv - dy);
+                        if (!y_on_data || d < best_dy) {
+                            best_dy = d; dy = yv; y_on_data = true; hit_label = &s.label;
+                        }
+                    }
+                }
+            }
         }
+
         const char* xn = x_axis.name.empty() ? "x" : x_axis.name.c_str();
         const char* yn = y_axis.name.empty() ? "y" : y_axis.name.c_str();
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "%s = %.6g,  %s = %.6g", xn, dx, yn, dy);
-        ImVec2 cs = plot_text_size(buf);
-        float cx = img_pos.x + plot_w - cs.x;
-        float cy = img_pos.y + plot_h + 2.0f + plot_text_line_height() + 6.0f;
-        plot_text(dl, ImVec2(cx, cy), col_text, buf);
+        // %.10g вместо %.6g: подпись обязана называть значение узла целиком,
+        // иначе при зуме соседние узлы печатаются одинаково.
+        ImGui::BeginTooltip();
+        ImGui::Text("%s = %.10g", xn, dx);
+        ImGui::Text("%s = %.10g", yn, dy);
+        if (y_on_data && hit_label && !hit_label->empty())
+            ImGui::TextDisabled("%s", hit_label->c_str());
+        else if (!y_on_data)
+            ImGui::TextDisabled("%s", x_on_node ? "no data point here" : "cursor position");
+        ImGui::EndTooltip();
     }
 
     // 8b. Crosshair gestures — MMB drag или Shift+LMB drag внутри плота каждый кадр вызывают
@@ -700,14 +762,26 @@ void Plot2DView::render(PlotRenderer& renderer,
         auto cursor_wx = [&]() -> double {
             double wx = XW(sx0 + (double)(io.MousePos.x - img_pos.x)
                                  / (double)plot_w * (sx1 - sx0));
+            // Узлы от вызывающего — точнее любой реконструкции (см. snap_x_nodes).
+            if (snap_x_to_grid && snap_x_nodes && snap_x_node_count > 0 && sx1 != sx0) {
+                const double cursor_px = (double)(io.MousePos.x - img_pos.x);
+                double best = 0.0; bool got = false;
+                for (int k = 0; k < snap_x_node_count; ++k) {
+                    const double spx = (XS(snap_x_nodes[k]) - sx0) / (sx1 - sx0) * (double)plot_w;
+                    const double d = std::abs(spx - cursor_px);
+                    if (!got || d < best) { best = d; wx = snap_x_nodes[k]; got = true; }
+                }
+                return wx;
+            }
             if (snap_x_to_grid && snap_x_n > 1) {
                 double lo = std::min(snap_x_min, snap_x_max);
                 double hi = std::max(snap_x_min, snap_x_max);
                 int ix; double sx;
                 // log_scale обязателен и здесь: без него drag крестика садился
                 // на линейный узел, которого при лог-свипе в данных нет
-                // (readout выше этот флаг уже передавал).
-                if (SnapCursorToGrid1D(wx, lo, hi, snap_x_n, ix, sx, x_axis.log_scale)) wx = sx;
+                // (readout выше этот флаг уже передавал). Ближайший узел, а не
+                // пиксельная полоса: клик означает «вот эта посчитанная точка».
+                if (NearestNode1D(wx, lo, hi, snap_x_n, x_axis.log_scale, ix, sx)) wx = sx;
             }
             return wx;
         };

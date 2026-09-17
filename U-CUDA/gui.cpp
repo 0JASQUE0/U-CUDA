@@ -342,6 +342,17 @@ static void refresh_auto_labels(AppModel& model) {
     return parse_num_int(v, def);
 }
 
+// Распарсилось ли поле вообще. parse_num молча отдаёт default, и вызывающий не
+// отличает «поле пустое» от «в поле ноль»; пробуем два разных дефолта —
+// совпали, значит число прочиталось.
+[[nodiscard]] static inline bool parse_num_ok(const std::string& v, double& out) {
+    const double a = parse_ratio_or(v, 0.0);
+    const double b = parse_ratio_or(v, 1.0);
+    if (a != b) return false;
+    out = a;
+    return true;
+}
+
 // ctx_menu — контекстное меню поля (ПКМ). Вызывается СРАЗУ после InputText:
 // ниже может встать предупреждение о невалидном числе, и BeginPopupContextItem
 // внутри колбэка привязался бы к нему, а не к самому полю.
@@ -1776,7 +1787,9 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
 // n < 2 отключает snap (readout остаётся непрерывным).
 static void apply_snap_x(Plot2DView& view, double lo, double hi, int n) {
     view.snap_x_to_grid = true;
-    if (n > 1) {
+    // Вырожденный диапазон — это не сетка: снап по нему сажал бы курсор на
+    // узлы, которых в данных нет. Проверка здесь, в единственной точке входа.
+    if (n > 1 && hi != lo) {
         view.snap_x_min = lo;
         view.snap_x_max = hi;
         view.snap_x_n   = n;
@@ -1919,12 +1932,20 @@ static void apply_snap_x_from_config(Plot2DView& view,
                                      const std::string& lo_text,
                                      const std::string& hi_text,
                                      const std::string& n_text) {
-    if (have_result && res_n > 1) {
+    if (have_result && res_n > 1 && res_hi != res_lo) {
         apply_snap_x(view, res_lo, res_hi, res_n);
         return;
     }
+    // Без прогона сетку берём из полей конфига — но ТОЛЬКО если они реально
+    // прочитались. Раньше здесь стояли дефолты parse_ratio_or(lo, 0.0) и
+    // (hi, 1.0): на непрочитанных полях снап включался с чужой сеткой [0, 1],
+    // и курсор садился на её узлы (k/(n-1)) вместо значений свипа.
     const int n = parse_int_or(n_text, 0);
-    apply_snap_x(view, parse_ratio_or(lo_text, 0.0), parse_ratio_or(hi_text, 1.0), n);
+    double lo = 0.0, hi = 0.0;
+    if (n > 1 && parse_num_ok(lo_text, lo) && parse_num_ok(hi_text, hi) && lo != hi)
+        apply_snap_x(view, lo, hi, n);
+    else
+        apply_snap_x(view, 0.0, 1.0, 0);   // n = 0 -> снап выключен
 }
 
 // Тот же snap, но по ПЕРВОМУ члену окна. Раньше — три идентичных хвоста
@@ -1936,12 +1957,20 @@ static void apply_snap_x_from_first_member(Plot2DView& view,
     view.snap_x_to_grid = true;
     view.snap_x_n       = 0;
     if (members.empty()) return;
-    const int aidx = members[0];
-    if (aidx < 0 || aidx >= (int)cfgs.size()) return;
-    const Cfg& c = cfgs[(size_t)aidx];
-    apply_snap_x_from_config(view, c.last_run_ok,
-                             c.result.param_lo, c.result.param_hi, c.result.n_pts,
-                             c.param_lo_text, c.param_hi_text, c.n_pts_text);
+    // Первый член С РЕЗУЛЬТАТОМ, а не просто первый: сетку задаёт то, что
+    // реально нарисовано, а members[0] может быть ещё не посчитан — тогда
+    // снап уходил на поля конфига и дальше на их дефолты.
+    const Cfg* pick = nullptr;
+    for (int aidx : members) {
+        if (aidx < 0 || aidx >= (int)cfgs.size()) continue;
+        const Cfg& c = cfgs[(size_t)aidx];
+        if (!pick) pick = &c;
+        if (c.last_run_ok && c.result.n_pts > 1) { pick = &c; break; }
+    }
+    if (!pick) return;
+    apply_snap_x_from_config(view, pick->last_run_ok,
+                             pick->result.param_lo, pick->result.param_hi, pick->result.n_pts,
+                             pick->param_lo_text, pick->param_hi_text, pick->n_pts_text);
 }
 
 // Right-click «Export data...» подменю: перечисляет ВСЕ конфиги сессии с готовым
@@ -2004,6 +2033,30 @@ static std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t
     auto& bufs = cache[window_id];
     if (bufs.size() != n_series) bufs.assign(n_series, {});
     return bufs;
+}
+
+// Узлы сетки свипа фокусной кривой окна (Plot2DView::snap_x_nodes). Живут
+// между кадрами, как и буферы точек: вид держит указатель на время render().
+static std::vector<double>& window_node_buf(int window_id) {
+    static std::map<int, std::vector<double>> cache;
+    return cache[window_id];
+}
+
+// Заполняет узлы ТОЙ ЖЕ формулой, что строит точки, и отдаёт их виду. Узлы, на
+// которых точек не оказалось (режим не колебательный, λ не финитна), здесь
+// тоже есть: курсор обязан на них вставать — расчёт для них проводился.
+static void set_snap_nodes(Plot2DView& view, int window_id,
+                           int npts, double lo, double hi,
+                           bool log_scale, bool reverse, bool continuation) {
+    auto& nb = window_node_buf(window_id);
+    nb.clear();
+    if (npts > 1) {
+        nb.reserve((size_t)npts);
+        for (int k = 0; k < npts; ++k)
+            nb.push_back(sweep_value_at(k, npts, lo, hi, log_scale, reverse, continuation));
+    }
+    view.snap_x_nodes      = nb.empty() ? nullptr : nb.data();
+    view.snap_x_node_count = (int)nb.size();
 }
 
 // Полоска-превью колормапа как ImGui-виджет: kSeg сегментов с линейным градиентом внутри
@@ -5093,6 +5146,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
     // Буферы точек (по одному на серию), свои у каждого окна — см.
     // window_point_bufs: между кадрами они держат capacity.
     auto& bufs = window_point_bufs(win.id, win.members.size());
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis;
@@ -5103,6 +5159,11 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
 
     bool any_fit = false;
     int  data_gen = 0;
+
+    // Сетка снапа фокусной (первой посчитанной) диаграммы окна — заполняется
+    // в цикле ниже теми же lo/hi/npts, по которым строятся точки.
+    double snap_lo_focus = 0.0, snap_hi_focus = 0.0;
+    int    snap_n_focus  = 0;
 
     for (size_t mi = 0; mi < win.members.size(); ++mi) {
         int idx = win.members[mi];
@@ -5123,6 +5184,14 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                         ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
+            // Сетка снапа — ровно та, по которой строятся точки ниже. Раньше
+            // она бралась из bd.result.param_lo/hi, а классический (не
+            // continuation) прогон их не заполняет: снап уходил на дефолты
+            // структуры, [0, 1], и курсор садился на узлы чужой сетки.
+            if (snap_n_focus == 0) {
+                snap_lo_focus = lo; snap_hi_focus = hi; snap_n_focus = npts;
+                set_snap_nodes(view, win.id, npts, lo, hi, bd.log_scale, rev, bd.continuation);
+            }
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
                     !regime_is_oscillation(bd.result.flags[k])) continue;
@@ -5177,8 +5246,8 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
-    // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_first_member).
-    apply_snap_x_from_first_member(view, win.members, s.diagrams);
+    // Snap X к узлам фокусной БД — по той же сетке, что и её точки (см. выше).
+    apply_snap_x(view, snap_lo_focus, snap_hi_focus, snap_n_focus);
 
     // Маркер/размер точек — свойства вида (одни на окно): берём у фокусного
     // члена, тулбар выше держит остальных членов синхронно.
@@ -5445,6 +5514,9 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
     view.y_axis.name = "lambda";
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -5473,6 +5545,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             // При backward-continuation точка k считалась для hi-(hi-lo)*k/(n-1)
             // (см. run_lle1d_continuation_cpu) — иначе кривая была бы зеркальной.
             const bool rev = c.result.continuation_reverse;
+            if (view.snap_x_node_count == 0)
+                set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)c.result.flags.size() &&
                     !regime_is_oscillation(c.result.flags[k])) continue;
@@ -5798,6 +5872,9 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     }
 
     auto& bufs = window_point_bufs(win.id, total_series);
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis, glob_vis;
@@ -5823,6 +5900,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         // (см. run_ls1d_cpu) — иначе кривая была бы зеркальной.
         const bool rev = c.result.continuation_reverse;
         bool have = c.last_run_ok && !c.result.spectrum.empty();
+        if (have && view.snap_x_node_count == 0)
+            set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
 
         for (int j = 0; j < N; ++j) {
             auto& buf = bufs[buf_cursor++];
