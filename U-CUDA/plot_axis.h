@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include <cmath>
 #include <string>
+#include <vector>
 #include <functional>
 
 // ---------------------------------------------------------------------------
@@ -57,8 +58,7 @@ struct AxisInfo {
     // Активен только при положительных границах вида: чекбокс можно включить
     // до Run, и log10(<=0) отравил бы NaN'ом весь кадр.
     //
-    // draw_axis_*_grid при этом по-прежнему рисует только границы диапазона
-    // (lo/hi), без промежуточных отметок — решение по оформлению.
+    // draw_axis_x_grid при этом рисует декадную сетку (log_axis_ticks).
     // У оси Y лог-отображения нет: сетка по Y логарифмической не бывает.
     bool   log_scale = false;
 };
@@ -118,6 +118,29 @@ int fit_node_step(double step_node, double node_origin, int mult0,
 // подпись превращается в 5.99 вместо 6, потому что шаг тика наследует
 // иррациональный шаг сетки (16/499 на свипе 4..20 из 500 точек).
 bool node_snap_visible(double step_node, double range, float span_px);
+
+// Тик логарифмической оси: major подписывается числом, остальные дают только
+// линию сетки (2·10^k, 3·10^k, ...).
+struct LogAxisTick {
+    double value = 0.0;
+    bool   major = false;
+};
+
+// Тики лог-оси на [lo, hi] (обе границы > 0) под span_px пикселей: декады,
+// прорежённые до читаемой плотности, плюс промежуточные мантиссы; на слишком
+// узком для декад диапазоне — обычный nice_step. Позиции считаются по log10 —
+// ровно тем же преобразованием, каким ось выводится на экран, поэтому подходит
+// и Plot2DView (log10 в VBO), и HeatmapView (ячейки равномерны по индексу
+// узла, а узлы лог-распределены).
+std::vector<LogAxisTick> log_axis_ticks(double lo, double hi, float span_px,
+                                        bool horizontal);
+
+// Приглушённый цвет minor-линий лог-сетки: те же линии, что major, сбили бы
+// восприятие декад.
+inline ImU32 dim_grid_col(ImU32 c) {
+    const ImU32 a = (c & IM_COL32_A_MASK) >> IM_COL32_A_SHIFT;
+    return (c & ~IM_COL32_A_MASK) | ((a * 45 / 100) << IM_COL32_A_SHIFT);
+}
 
 // Форматирует подпись тика (с текущей точностью).
 std::string fmt_tick(double v);
