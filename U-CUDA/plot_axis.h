@@ -1,7 +1,43 @@
 ﻿#pragma once
 #include "imgui.h"
+#include <cmath>
 #include <string>
 #include <functional>
+
+// ---------------------------------------------------------------------------
+// Пиксельная модель плота. Область плота — пиксели [x0, x0+W) x [y0, y0+H) при
+// целых x0/y0/W/H (origin округляется в Plot2DView/HeatmapView, размеры и так
+// целые). Рамку рисует AddRect: он сам ужимается на 0.5 (imgui_draw.cpp) и
+// занимает КРАЙНИЕ пиксели области — столбцы x0 и x0+W-1, строки y0 и y0+H-1.
+// Значит и линии сетки, и штрихи тиков обязаны попадать в тот же диапазон.
+//
+// AddLine для однопиксельных линий не годится: он прибавляет +0.5 к ОБЕИМ
+// точкам и центрирует штрих по отрезку. Целая координата от этого попадает на
+// стык двух пикселей, а концы отрезка вылезают на полпикселя за заданный
+// диапазон — из-за этого вертикальные линии сетки торчали снизу.
+// ---------------------------------------------------------------------------
+
+// Номер пикселя (левый/верхний край) для точки v внутри области [origin,
+// origin+span). Кламп обязателен: значение на верхней границе оси даёт
+// origin+span — первый пиксель ЗА областью, и тик уезжал за рамку.
+inline float axis_px(float v, float origin, float span) {
+    float p = std::floor(v);
+    const float last = origin + span - 1.0f;
+    if (p < origin) p = origin;
+    if (p > last)   p = last;
+    return p;
+}
+
+// Однопиксельные линии — заливкой ровно одного столбца/строки пикселей.
+inline void fill_col_px(ImDrawList* dl, float x_px, float y_top, float y_bottom, ImU32 col) {
+    dl->AddRectFilled(ImVec2(x_px, y_top), ImVec2(x_px + 1.0f, y_bottom), col);
+}
+inline void fill_row_px(ImDrawList* dl, float y_px, float x_left, float x_right, ImU32 col) {
+    dl->AddRectFilled(ImVec2(x_left, y_px), ImVec2(x_right, y_px + 1.0f), col);
+}
+
+// Центр пикселя — для центрирования подписи под тиком.
+inline float px_center(float p) { return p + 0.5f; }
 
 // AxisInfo - состояние одной оси.
 // Живёт внутри Plot2DView, в render-функции передаётся по ссылке.

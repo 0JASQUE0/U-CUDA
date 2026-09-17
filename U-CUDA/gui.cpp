@@ -3652,8 +3652,6 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // for a state-space trajectory.
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    pr.view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
@@ -3793,7 +3791,6 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // нулевая линия по Y тут осмысленна, по X нет.
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = true;
-                    pr.view2d->legend_ignore_series_alpha = true;
                     // ε-окружность под курсором: радиус eps в ТЕХ ЖЕ осях, в которых
                     // уложены точки (множители уже применены), поэтому накрытые ею пики —
                     // то, что dbscan сольёт в один кластер. Без DBSCAN-конфига радиуса нет
@@ -3898,8 +3895,6 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // y=0 rarely coincides with a meaningful reference.
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    pr.view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
@@ -4286,8 +4281,6 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                 }
                 else {
                     if (!pr.view3d) pr.view3d = std::make_unique<Plot3DView>();
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    pr.view3d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (толщина + α). В 3D нет
                     // ImDrawList-fallback (потерялся бы depth-sorting), толщина идёт через
@@ -4385,7 +4378,6 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view2d->y_axis.name = "peak " + ax_name;
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = true;
-                    pr.view2d->legend_ignore_series_alpha = true;
 
                     draw_style_toolbar("Custom point style", "contdiag", pr.custom_line_style,
                         [&pr]() {

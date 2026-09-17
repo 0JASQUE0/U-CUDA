@@ -170,7 +170,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         entries.reserve(series_in.size());
         for (const auto& s : series_in) {
             LegendEntry e{ s.label, s.color };
-            if (legend_ignore_series_alpha) e.color.w = 1.0f;
+            e.color.w = 1.0f;   // см. Plot2DView: ярлык не гаснет вместе с кривой
             entries.push_back(e);
         }
         draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id);

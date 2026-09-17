@@ -318,7 +318,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
 
     ImGui::Dummy(avail_size);
-    ImVec2 img_pos = ImVec2(block_origin.x + margin_left, block_origin.y + margin_top);
+    // Левый верхний угол картинки — на целом пикселе: сюда идёт AddImage с
+    // FBO, и дробный origin размывал бы всю картинку билинейной выборкой, а
+    // рамку и тики смещал бы на полпикселя относительно неё.
+    ImVec2 img_pos = ImVec2(std::floor(block_origin.x + margin_left),
+                            std::floor(block_origin.y + margin_top));
 
     double ex0, ex1, ey0, ey1;
     axis_effective(x_axis, ex0, ex1);
@@ -401,7 +405,11 @@ void Plot2DView::render(PlotRenderer& renderer,
         legend_entries.reserve(series_in.size());
         for (const auto& s : series_in) {
             LegendEntry e{ s.label, series_color(s) };
-            if (legend_ignore_series_alpha) e.color.w = 1.0f;
+            // Квадрат в легенде ОПОЗНАЁТ серию, поэтому всегда непрозрачен:
+            // слайдер Alpha гасит саму кривую, а не ярлык. Полупрозрачный
+            // маркер к тому же сливался с фоном легенды, а на скрытой записи
+            // (visible == false) множился на 0.35 и исчезал совсем.
+            e.color.w = 1.0f;
             legend_entries.push_back(e);
         }
         draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
