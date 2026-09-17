@@ -2,8 +2,11 @@
 #include "digit_input.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <cfloat>
 #include <algorithm>
 #include <string>
+#include <vector>
 
 double nice_step(double range, int target_count) {
     if (range <= 0) return 1.0;
@@ -101,6 +104,374 @@ void plot_bg_color(float& r, float& g, float& b, float& a) {
     else              { r = 0.080f; g = 0.080f; b = 0.100f; a = 1.0f; }
 }
 
+// ---------------------------------------------------------------------------
+// LaTeX-подписи (контракт — в plot_axis.h). Строка разбирается в список
+// прогонов {текст, шрифт, кегль, сдвиг базовой линии} плюс накладки — точки
+// \dot, линейки \bar и дробные черты. Рисуется всё обычным AddText, поэтому
+// поворот Y-подписи на -90° (plot_view_2d/heatmap_view крутят вершины кадра
+// вручную) продолжает работать.
+// ---------------------------------------------------------------------------
+static ImFont* g_math_roman  = nullptr;
+static ImFont* g_math_italic = nullptr;
+static bool    g_math_on     = false;
+
+void set_plot_math_fonts(ImFont* roman, ImFont* italic) {
+    g_math_roman  = roman;
+    g_math_italic = italic;
+}
+void set_plot_math_enabled(bool on) { g_math_on = on; }
+bool plot_math_enabled()            { return g_math_on; }
+
+namespace {
+
+struct MathRun {
+    std::string text;
+    ImFont*     font;
+    float       size;
+    float       x;    // от левого края строки
+    float       dy;   // сдвиг базовой линии: степень вверх, индекс вниз
+};
+// r > 0 — точка (\dot/\ddot); r == 0 — линейка (\bar, дробная черта).
+struct MathMark { float x0, x1, y, r; };
+struct MathLayout {
+    std::vector<MathRun>  runs;
+    std::vector<MathMark> marks;
+};
+// Форсированное начертание внутри \mathrm{...} / \mathit{...}.
+struct Style { bool upright = false; bool italic = false; };
+
+ImFont* math_roman()  { return g_math_roman  ? g_math_roman  : ImGui::GetFont(); }
+ImFont* math_italic() { return g_math_italic ? g_math_italic : math_roman(); }
+
+float font_ascent(ImFont* f, float size) {
+    ImFontBaked* b = f ? f->GetFontBaked(size) : nullptr;
+    return (b && b->Ascent > 0.0f) ? b->Ascent : size * 0.8f;
+}
+float run_width(ImFont* f, float size, const char* b, const char* e) {
+    return f ? f->CalcTextSizeA(size, FLT_MAX, 0.0f, b, e).x : 0.0f;
+}
+// Шрифт может не знать типографских знаков (ProggyClean) — тогда обходимся ASCII.
+bool has_glyph(ImWchar c) {
+    ImFont* f = math_roman();
+    return f && f->IsGlyphInFont(c);
+}
+
+struct NameGlyph { const char* name; const char* glyph; };
+
+// Имена пишутся и со слешем (\sigma из LaTeX-поля), и без него: в alphabet_text
+// системы параметры заданы словами — "x,y,z,sigma,rho,beta".
+const NameGlyph kGreek[] = {
+    {"alpha","α"}, {"beta","β"}, {"gamma","γ"}, {"delta","δ"}, {"epsilon","ε"},
+    {"varepsilon","ε"}, {"zeta","ζ"}, {"eta","η"}, {"theta","θ"}, {"vartheta","ϑ"},
+    {"iota","ι"}, {"kappa","κ"}, {"lambda","λ"}, {"mu","μ"}, {"nu","ν"}, {"xi","ξ"},
+    {"omicron","ο"}, {"pi","π"}, {"varpi","ϖ"}, {"rho","ρ"}, {"varrho","ϱ"},
+    {"sigma","σ"}, {"varsigma","ς"}, {"tau","τ"}, {"upsilon","υ"}, {"phi","φ"},
+    {"varphi","ϕ"}, {"chi","χ"}, {"psi","ψ"}, {"omega","ω"},
+    {"Gamma","Γ"}, {"Delta","Δ"}, {"Theta","Θ"}, {"Lambda","Λ"}, {"Xi","Ξ"},
+    {"Pi","Π"}, {"Sigma","Σ"}, {"Upsilon","Υ"}, {"Phi","Φ"}, {"Psi","Ψ"}, {"Omega","Ω"},
+};
+// Только со слешем: слово "in" или "to" в подписи — это слово, а не оператор.
+const NameGlyph kSymbols[] = {
+    {"cdot","·"}, {"times","×"}, {"infty","∞"}, {"pm","±"}, {"mp","∓"},
+    {"partial","∂"}, {"nabla","∇"}, {"approx","≈"}, {"neq","≠"}, {"leq","≤"},
+    {"geq","≥"}, {"ll","≪"}, {"gg","≫"}, {"to","→"}, {"rightarrow","→"},
+    {"leftarrow","←"}, {"ldots","…"}, {"cdots","⋯"}, {"prime","′"},
+    {"circ","°"}, {"hbar","ℏ"}, {"propto","∝"}, {"in","∈"}, {"sum","∑"},
+    {"int","∫"}, {"sqrt","√"}, {"langle","⟨"}, {"rangle","⟩"},
+};
+
+const char* lookup(const NameGlyph* tbl, int n, const std::string& s) {
+    for (int i = 0; i < n; ++i)
+        if (s == tbl[i].name) return tbl[i].glyph;
+    return nullptr;
+}
+
+bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+bool is_digit(char c) { return c >= '0' && c <= '9'; }
+bool is_lower(char c) { return c >= 'a' && c <= 'z'; }
+
+const char* group_end(const char* b, const char* e) {
+    int depth = 1;
+    for (const char* p = b; p < e; ++p) {
+        if (*p == '{') ++depth;
+        else if (*p == '}' && --depth == 0) return p;
+    }
+    return e;
+}
+
+// Аргумент команды или индекса: {...} целиком, \cmd целиком либо один символ
+// (UTF-8 — вместе с продолжающими байтами).
+void take_arg(const char*& p, const char* e, const char*& ab, const char*& ae) {
+    if (p >= e) { ab = ae = p; return; }
+    if (*p == '{') {
+        ab = p + 1;
+        ae = group_end(ab, e);
+        p  = (ae < e) ? ae + 1 : e;
+        return;
+    }
+    ab = p;
+    if (*p == '\\') { ++p; while (p < e && is_alpha(*p)) ++p; }
+    else            { ++p; while (p < e && ((unsigned char)*p & 0xC0) == 0x80) ++p; }
+    ae = p;
+}
+
+float typeset(MathLayout& L, const char* b, const char* e, float size, Style st);
+
+void append_layout(MathLayout& dst, const MathLayout& src, float dx, float dy) {
+    for (MathRun r : src.runs)   { r.x  += dx; r.dy += dy; dst.runs.push_back(r); }
+    for (MathMark m : src.marks) { m.x0 += dx; m.x1 += dx; m.y += dy; dst.marks.push_back(m); }
+}
+
+void emit(MathLayout& L, float& x, ImFont* f, float size, const std::string& text) {
+    if (text.empty()) return;
+    L.runs.push_back({ text, f, size, x, 0.0f });
+    x += run_width(f, size, text.c_str(), text.c_str() + text.size());
+}
+
+// Цифры вплотную к одиночной букве или греческому имени уходят в индекс:
+// переменные системы объявляются как x1,x2,x3, а не как x_1.
+void emit_trailing_digits(MathLayout& L, float& x, const char*& p, const char* e, float size) {
+    const char* ds = p;
+    while (p < e && is_digit(*p)) ++p;
+    if (ds == p) return;
+    MathLayout sub;
+    const float w = typeset(sub, ds, p, size * 0.72f, Style{ true, false });
+    append_layout(L, sub, x, size * 0.20f);
+    x += w;
+}
+
+// Цифры, знаки и пробелы — прямым начертанием; дефис становится настоящим
+// минусом, иначе подписи тиков рядом с 10^−5 выглядят разнобоем.
+std::string upright_text(const char* b, const char* e) {
+    const bool real_minus = has_glyph(0x2212);
+    std::string t;
+    t.reserve((size_t)(e - b));
+    for (const char* p = b; p < e; ++p) {
+        if (*p == '-' && real_minus) t += "\xE2\x88\x92";   // U+2212 MINUS SIGN
+        else                         t += *p;
+    }
+    return t;
+}
+
+float typeset(MathLayout& L, const char* b, const char* e, float size, Style st) {
+    float x = 0.0f;
+    const char* p = b;
+    while (p < e) {
+        const char c = *p;
+
+        if (c == '{') {
+            const char* ge = group_end(p + 1, e);
+            MathLayout sub;
+            const float w = typeset(sub, p + 1, ge, size, st);
+            append_layout(L, sub, x, 0.0f);
+            x += w;
+            p = (ge < e) ? ge + 1 : e;
+            continue;
+        }
+        if (c == '}') { ++p; continue; }
+
+        if (c == '_' || c == '^') {
+            ++p;
+            const char *ab, *ae;
+            take_arg(p, e, ab, ae);
+            MathLayout sub;
+            const float w = typeset(sub, ab, ae, size * 0.72f, st);
+            append_layout(L, sub, x, (c == '^') ? -size * 0.42f : size * 0.20f);
+            x += w + size * 0.02f;
+            continue;
+        }
+
+        if (c == '\\' && p + 1 < e) {
+            ++p;
+            if (!is_alpha(*p)) {
+                const char cc = *p++;
+                if      (cc == ',' || cc == ';' || cc == ' ') x += size * 0.17f;  // \, \; — тонкий пробел
+                else if (cc == '!')                           x -= size * 0.10f;  // \! — отрицательный
+                else emit(L, x, math_roman(), size, std::string(1, cc));          // \{ \} \% \&
+                continue;
+            }
+            const char* cs = p;
+            while (p < e && is_alpha(*p)) ++p;
+            const std::string cmd(cs, p);
+
+            if (const char* g = lookup(kGreek, IM_ARRAYSIZE(kGreek), cmd)) {
+                const bool it = st.italic || (!st.upright && is_lower(cmd[0]));
+                emit(L, x, it ? math_italic() : math_roman(), size, g);
+                emit_trailing_digits(L, x, p, e, size);
+                continue;
+            }
+            if (const char* g = lookup(kSymbols, IM_ARRAYSIZE(kSymbols), cmd)) {
+                emit(L, x, math_roman(), size, g);
+                continue;
+            }
+            if (cmd == "dot" || cmd == "ddot" || cmd == "bar") {
+                const char *ab, *ae;
+                take_arg(p, e, ab, ae);
+                MathLayout sub;
+                const float w = typeset(sub, ab, ae, size, st);
+                append_layout(L, sub, x, 0.0f);
+                const float top = -font_ascent(math_italic(), size) * 0.86f;
+                const float cx  = x + w * 0.5f;
+                if (cmd == "bar")      L.marks.push_back({ x + w * 0.05f, x + w * 0.95f, top, 0.0f });
+                else if (cmd == "dot") L.marks.push_back({ cx, cx, top, size * 0.055f });
+                else {
+                    const float d = size * 0.12f;
+                    L.marks.push_back({ cx - d, cx - d, top, size * 0.055f });
+                    L.marks.push_back({ cx + d, cx + d, top, size * 0.055f });
+                }
+                x += w;
+                continue;
+            }
+            if (cmd == "hat" || cmd == "tilde" || cmd == "vec" || cmd == "mathbf") {
+                // Диакритику не рисуем: голый глиф честнее кривой шляпки.
+                const char *ab, *ae;
+                take_arg(p, e, ab, ae);
+                MathLayout sub;
+                const float w = typeset(sub, ab, ae, size, st);
+                append_layout(L, sub, x, 0.0f);
+                x += w;
+                continue;
+            }
+            if (cmd == "frac") {
+                const char *nb, *ne, *db, *de;
+                take_arg(p, e, nb, ne);
+                take_arg(p, e, db, de);
+                MathLayout num, den;
+                const float fs = size * 0.82f;
+                const float wn = typeset(num, nb, ne, fs, st);
+                const float wd = typeset(den, db, de, fs, st);
+                const float w  = std::max(wn, wd) + size * 0.20f;
+                const float axis = -size * 0.28f;   // высота дробной черты над базовой линией
+                append_layout(L, num, x + (w - wn) * 0.5f, axis - fs * 0.45f);
+                append_layout(L, den, x + (w - wd) * 0.5f, axis + fs * 0.78f);
+                L.marks.push_back({ x + size * 0.05f, x + w - size * 0.05f, axis, 0.0f });
+                x += w;
+                continue;
+            }
+            if (cmd == "mathrm" || cmd == "text" || cmd == "operatorname" || cmd == "mathit") {
+                const char *ab, *ae;
+                take_arg(p, e, ab, ae);
+                Style s2 = st;
+                s2.italic  = (cmd == "mathit");
+                s2.upright = !s2.italic;
+                MathLayout sub;
+                const float w = typeset(sub, ab, ae, size, s2);
+                append_layout(L, sub, x, 0.0f);
+                x += w;
+                continue;
+            }
+            // Неизвестная команда: печатаем её имя прямым, без слеша.
+            emit(L, x, math_roman(), size, cmd);
+            continue;
+        }
+
+        if (is_alpha(c)) {
+            const char* ws = p;
+            while (p < e && is_alpha(*p)) ++p;
+            const std::string w(ws, p);
+
+            // 'e' между цифрами — это порядок числа, а не переменная: строку
+            // целиком rewrite_scientific уже развернул бы в степень десятки,
+            // но внутри подписи ("h=1e-3, RK4") число остаётся как есть.
+            if (w.size() == 1 && (w[0] == 'e' || w[0] == 'E') &&
+                ws > b && is_digit(ws[-1]) && p < e &&
+                (is_digit(*p) || ((*p == '+' || *p == '-') && p + 1 < e && is_digit(p[1])))) {
+                emit(L, x, math_roman(), size, w);
+                continue;
+            }
+
+            const char* g = lookup(kGreek, IM_ARRAYSIZE(kGreek), w);
+            // Слово из нескольких букв — это не произведение переменных, а
+            // название ("parameter", "max", "IC"): TeX набирает такое прямым.
+            bool it = g ? is_lower(w[0]) : (w.size() == 1);
+            if (st.upright) it = false;
+            if (st.italic)  it = true;
+            emit(L, x, it ? math_italic() : math_roman(), size, g ? g : w);
+            if (g || w.size() == 1) emit_trailing_digits(L, x, p, e, size);
+            continue;
+        }
+
+        const char* rs = p;
+        while (p < e && !is_alpha(*p) && *p != '\\' && *p != '{' && *p != '}'
+                     && *p != '_' && *p != '^') ++p;
+        if (p == rs) ++p;   // одиночный спецсимвол в хвосте строки: не зациклиться
+        emit(L, x, math_roman(), size, upright_text(rs, p));
+    }
+    return x;
+}
+
+// "1.5e-05" -> "1.5×10^{-5}". Только если ВСЯ строка — одно такое число:
+// иначе пострадала бы подпись вида "h=1e-3, RK4".
+bool rewrite_scientific(const char* s, std::string& out) {
+    const char* p = s;
+    const char* mant = p;
+    if (*p == '+' || *p == '-') ++p;
+    bool any = false;
+    while (is_digit(*p)) { ++p; any = true; }
+    if (*p == '.') { ++p; while (is_digit(*p)) { ++p; any = true; } }
+    if (!any || (*p != 'e' && *p != 'E')) return false;
+    const std::string mantissa(mant, p);
+
+    ++p;
+    bool neg = false;
+    if      (*p == '+') ++p;
+    else if (*p == '-') { neg = true; ++p; }
+    const char* ds = p;
+    while (is_digit(*p)) ++p;
+    if (ds == p || *p != '\0') return false;
+    std::string digits(ds, p);
+    while (digits.size() > 1 && digits[0] == '0') digits.erase(0, 1);
+
+    out.clear();
+    // Мантисса "1" в TeX не пишется — остаётся чистая степень десяти.
+    if (mantissa != "1") {
+        out += mantissa;
+        out += has_glyph(0x00D7) ? "×" : "*";
+    }
+    out += "10^{";
+    if (neg) out += "-";
+    out += digits;
+    out += "}";
+    return true;
+}
+
+}  // namespace
+
+ImVec2 plot_text_size(const char* s) {
+    if (!s || !*s) return ImGui::CalcTextSize(s ? s : "");
+    if (!g_math_on) return ImGui::CalcTextSize(s);
+    const float size = ImGui::GetFontSize();
+    std::string sci;
+    const char* src = rewrite_scientific(s, sci) ? sci.c_str() : s;
+    MathLayout L;
+    const float w = typeset(L, src, src + std::strlen(src), size, Style{});
+    return ImVec2(w, ImGui::GetTextLineHeight());
+}
+
+void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
+    if (!dl || !s || !*s) return;
+    if (!g_math_on) { dl->AddText(pos, col, s); return; }
+    const float size = ImGui::GetFontSize();
+    std::string sci;
+    const char* src = rewrite_scientific(s, sci) ? sci.c_str() : s;
+    MathLayout L;
+    typeset(L, src, src + std::strlen(src), size, Style{});
+
+    // AddText кладёт pos в верх строки, значит базовая линия = pos.y + ascent
+    // базового шрифта. Прогоны другого кегля выравниваются по ней же.
+    const float base = pos.y + font_ascent(math_roman(), size);
+    for (const MathRun& r : L.runs) {
+        const ImVec2 rp(pos.x + r.x, base + r.dy - font_ascent(r.font, r.size));
+        dl->AddText(r.font, r.size, rp, col, r.text.c_str());
+    }
+    for (const MathMark& m : L.marks) {
+        const ImVec2 a(pos.x + m.x0, base + m.y);
+        if (m.r > 0.0f) dl->AddCircleFilled(a, std::max(1.0f, m.r), col, 8);
+        else dl->AddLine(a, ImVec2(pos.x + m.x1, base + m.y), col,
+                         std::max(1.0f, size * 0.055f));
+    }
+}
+
 void set_tick_precision(int n) {
     g_tick_precision = std::clamp(n, 2, 10);
 }
@@ -157,8 +528,8 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
             float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
             dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
             std::string lbl = fmt_tick(xv);
-            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-            dl->AddText(ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            plot_text(dl, ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
         };
         draw_edge(lo);
         draw_edge(hi);
@@ -198,8 +569,8 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
         float px = pos.x + (float)((xv - emin) / vrx) * plot_w;
         dl->AddLine(ImVec2(px, pos.y), ImVec2(px, pos.y + plot_h), col_grid, 1.0f);
         std::string lbl = fmt_tick(xv);
-        ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-        dl->AddText(ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
+        ImVec2 ts = plot_text_size(lbl.c_str());
+        plot_text(dl, ImVec2(px - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
     };
 
     // Порог растёт вместе с tick precision (Settings): чем больше значащих
@@ -250,8 +621,8 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
             float py = pos.y + (float)((emax - yv) / vry) * plot_h;
             dl->AddLine(ImVec2(pos.x, py), ImVec2(pos.x + plot_w, py), col_grid, 1.0f);
             std::string lbl = fmt_tick(yv);
-            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-            dl->AddText(ImVec2(pos.x - ts.x - 4, py - ts.y * 0.5f), col_text, lbl.c_str());
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            plot_text(dl, ImVec2(pos.x - ts.x - 4, py - ts.y * 0.5f), col_text, lbl.c_str());
         };
         draw_edge(lo);
         draw_edge(hi);
@@ -274,7 +645,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
         // подписей.
         dl->AddLine(ImVec2(pos.x, py), ImVec2(pos.x + plot_w, py), col_grid, 1.0f);
         std::string lbl = fmt_tick(yv);
-        ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-        dl->AddText(ImVec2(pos.x - ts.x - 4, py - ts.y * 0.5f), col_text, lbl.c_str());
+        ImVec2 ts = plot_text_size(lbl.c_str());
+        plot_text(dl, ImVec2(pos.x - ts.x - 4, py - ts.y * 0.5f), col_text, lbl.c_str());
     }
 }

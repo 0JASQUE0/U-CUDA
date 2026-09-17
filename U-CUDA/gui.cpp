@@ -11541,6 +11541,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             load_app_config(get_exe_dir_with_sep(), cfg);
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
+            cfg.plot_math_font         = m.plot_math_font;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
             cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
@@ -11599,6 +11600,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             }
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
+
+            bool math_font = model.plot_math_font;
+            if (ImGui::Checkbox("LaTeX-style labels on plots", &math_font)) {
+                model.plot_math_font = math_font;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("On: serif math typesetting for every label on the plots —");
+            ImGui::TextDisabled("\"sigma\" prints as a greek glyph, x1 as x with a subscript,");
+            ImGui::TextDisabled("variables go italic, 1e-05 becomes a power of ten.");
+            ImGui::TextDisabled("Computer Modern (the TeX face) is picked up from fonts\\ if");
+            ImGui::TextDisabled("present; otherwise Times New Roman. Off: plain UI font.");
 
             ImGui::Separator();
             ImGui::Text("Axes");

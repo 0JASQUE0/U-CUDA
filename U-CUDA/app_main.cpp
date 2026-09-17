@@ -45,6 +45,53 @@ static bool dir_exists(const std::string& p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static bool file_exists(const std::string& p) {
+    DWORD a = GetFileAttributesA(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Серифная пара под LaTeX-подписи графиков (plot_text в plot_axis.h).
+struct MathFontPaths {
+    std::string roman;    // пусто = серифа нет, верстаем текущим UI-шрифтом
+    std::string italic;   // пусто = курсива нет, переменные идут прямым
+};
+
+// Порядок поиска тот же, что у resolve_library_paths: env, dev-раскладка через
+// vcxproj, dev-раскладка через solution, рядом с exe. В каталоге пробуем
+// известные имена Computer Modern / Latin Modern — шрифт достаточно положить в
+// fonts\, .vcxproj для этого трогать не нужно.
+static MathFontPaths resolve_math_font_paths(const std::string& exe_dir_with_sep) {
+    std::vector<std::string> dirs;
+    char env_buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("U_CUDA_FONTS", env_buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) dirs.push_back(std::string(env_buf, n) + "\\");
+    dirs.push_back(exe_dir_with_sep + "fonts\\");
+    dirs.push_back(exe_dir_with_sep + "..\\..\\fonts\\");
+    dirs.push_back(exe_dir_with_sep + "..\\..\\U-CUDA\\fonts\\");
+
+    static const char* kPairs[][2] = {
+        { "cmunrm.ttf",                   "cmunti.ttf"                  },  // Computer Modern Unicode
+        { "lmroman10-regular.otf",        "lmroman10-italic.otf"        },  // Latin Modern
+        { "LatinModernRoman-Regular.ttf", "LatinModernRoman-Italic.ttf" },
+        { "texgyretermes-regular.otf",    "texgyretermes-italic.otf"    },  // Times-клон из TeX Gyre
+    };
+    for (const std::string& d : dirs)
+        for (const auto& pair : kPairs)
+            if (file_exists(d + pair[0]))
+                return { d + pair[0],
+                         file_exists(d + pair[1]) ? d + pair[1] : std::string() };
+
+    // Times New Roman есть на любой Windows и покрывает латиницу, греческий и
+    // кириллицу. Не Computer Modern, но засечки те же по духу.
+    MathFontPaths p;
+    if (file_exists("C:\\Windows\\Fonts\\times.ttf")) {
+        p.roman = "C:\\Windows\\Fonts\\times.ttf";
+        if (file_exists("C:\\Windows\\Fonts\\timesi.ttf"))
+            p.italic = "C:\\Windows\\Fonts\\timesi.ttf";
+    }
+    return p;
+}
+
 // Paths returned by resolve_library_paths. `library` is the writable
 // per-user copy (gitignored in dev, next-to-exe in deployed builds).
 // `tmpl` is the git-tracked baseline that seeds `library` on first run.
@@ -291,6 +338,7 @@ int main() {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
+        model.plot_math_font   = app_cfg.plot_math_font;
         // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
         // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.
         model.heatmap_colormap = colormap_id_or(app_cfg.heatmap_colormap, model.heatmap_colormap);
@@ -349,6 +397,8 @@ int main() {
     float applied_ui_scale     = -1.0f;
     bool  applied_font_builtin = !model.use_builtin_font;  // !=, форсирует первый apply
     bool  applied_dark_theme   = !model.dark_theme;        // != — то же самое для темы
+    bool  applied_math_font    = !model.plot_math_font;    // != — и для LaTeX-подписей
+    const MathFontPaths math_fonts = resolve_math_font_paths(dir);
     auto apply_ui_scale = [&](float scale) {
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
@@ -376,7 +426,28 @@ int main() {
             cfg.GlyphOffset.y = 1.0f * (float)(int)(cfg.SizePixels / 13.0f);
             io.Fonts->AddFontDefault(&cfg);
         }
+
+        // LaTeX-подписи графиков: серифная пара (прямой + курсив) в том же
+        // атласе, что и UI-шрифт. Кегль здесь номинальный — plot_text рисует
+        // размером текущего шрифта, а 1.92 печёт глифы под запрошенный размер.
+        ImFont* math_roman  = nullptr;
+        ImFont* math_italic = nullptr;
+        if (model.plot_math_font && !math_fonts.roman.empty()) {
+            ImFontConfig cfg;
+            cfg.OversampleH = 2;
+            cfg.OversampleV = 1;
+            cfg.PixelSnapH  = false;
+            math_roman = io.Fonts->AddFontFromFileTTF(
+                math_fonts.roman.c_str(), 15.0f * scale, &cfg);
+            if (!math_fonts.italic.empty())
+                math_italic = io.Fonts->AddFontFromFileTTF(
+                    math_fonts.italic.c_str(), 15.0f * scale, &cfg);
+        }
         io.Fonts->Build();
+        // Атлас только что пересобран — старые ImFont* мертвы, пушим новые до
+        // ближайшего NewFrame.
+        set_plot_math_fonts(math_roman, math_italic);
+        set_plot_math_enabled(model.plot_math_font);
         // В ImGui 1.92+ backend сам обновит fonts texture при следующем NewFrame
         // через ImTextureData::Status — ручных Destroy/Create не нужно.
 
@@ -426,11 +497,13 @@ int main() {
         float wanted_scale = model.effective_ui_scale();
         if (wanted_scale != applied_ui_scale ||
             model.use_builtin_font != applied_font_builtin ||
-            model.dark_theme       != applied_dark_theme) {
+            model.dark_theme       != applied_dark_theme   ||
+            model.plot_math_font   != applied_math_font) {
             apply_ui_scale(wanted_scale);
             applied_ui_scale     = wanted_scale;
             applied_font_builtin = model.use_builtin_font;
             applied_dark_theme   = model.dark_theme;
+            applied_math_font    = model.plot_math_font;
         }
 
         ImGui_ImplOpenGL3_NewFrame();

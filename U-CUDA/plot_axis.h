@@ -78,6 +78,30 @@ ImU32 plot_col_border();      // рамка плота, тики на colorbar
 // Цвет очистки FBO под плот. Передаётся в PlotRenderer::begin_frame.
 void  plot_bg_color(float& r, float& g, float& b, float& a);
 
+// LaTeX-подписи на графиках. Весь текст на плотах (тики, имена осей, легенда,
+// шкала colorbar) идёт через plot_text/plot_text_size вместо dl->AddText и
+// ImGui::CalcTextSize, а те набирают строку мини-верстальщиком из plot_axis.cpp:
+// имена греческих букв превращаются в глифы ("sigma" -> σ, "\lambda" -> λ),
+// `_`/`^` — в индексы и степени, одиночные буквы идут курсивом, слова из
+// нескольких букв ("parameter", "max") — прямым, как \mathrm в TeX. Плюс
+// \dot{x}, \frac{a}{b} и запись 1e-05 как 10^-5.
+//
+// Пару шрифтов (прямой + курсив) грузит app_main вместе с UI-шрифтом и один
+// раз отдаёт сюда — тот же принцип "set once, читается откуда угодно из
+// plot-кода", что и у set_plot_light_theme выше. Шрифты могут быть nullptr:
+// тогда верстальщик работает текущим шрифтом ImGui (греческие буквы и индексы
+// остаются, засечек нет). Выключенный режим возвращает оба вызова к обычному
+// ImGui-тексту байт-в-байт, поэтому чекбокс в Settings ничего не ломает.
+void set_plot_math_fonts(ImFont* roman, ImFont* italic);
+void set_plot_math_enabled(bool on);
+bool plot_math_enabled();
+
+// Ширина набранной строки; высота — всегда GetTextLineHeight() базового
+// шрифта, чтобы вертикальная вёрстка плотов не зависела от того, вылезла ли
+// степень над строкой.
+ImVec2 plot_text_size(const char* s);
+void   plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s);
+
 // Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
 // диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
 // — рект в экранных координатах ImGui (весь блок диаграммы: оси/colorbar/
