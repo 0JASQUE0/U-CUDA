@@ -150,6 +150,7 @@ float font_ascent(ImFont* f, float size) {
 float run_width(ImFont* f, float size, const char* b, const char* e) {
     return f ? f->CalcTextSizeA(size, FLT_MAX, 0.0f, b, e).x : 0.0f;
 }
+float snap_px(float v) { return std::floor(v + 0.5f); }
 // Шрифт может не знать типографских знаков (ProggyClean) — тогда обходимся ASCII.
 bool has_glyph(ImWchar c) {
     ImFont* f = math_roman();
@@ -459,15 +460,23 @@ void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
 
     // AddText кладёт pos в верх строки, значит базовая линия = pos.y + ascent
     // базового шрифта. Прогоны другого кегля выравниваются по ней же.
-    const float base = pos.y + font_ascent(math_roman(), size);
+    //
+    // Каждый прогон садится на ЦЕЛЫЙ пиксель. Дробная позиция глифа означает
+    // билинейную выборку из атласа, то есть мыло: ascent прямого и курсивного
+    // начертаний отличается на доли пикселя, а подписи тиков вдобавок
+    // центрируются по px - ширина/2. Снап — по обеим осям и до поворота
+    // Y-подписи: на -90° целые координаты остаются целыми.
+    const float base = snap_px(pos.y + font_ascent(math_roman(), size));
     for (const MathRun& r : L.runs) {
-        const ImVec2 rp(pos.x + r.x, base + r.dy - font_ascent(r.font, r.size));
+        const ImVec2 rp(snap_px(pos.x + r.x),
+                        snap_px(base + r.dy - font_ascent(r.font, r.size)));
         dl->AddText(r.font, r.size, rp, col, r.text.c_str());
     }
     for (const MathMark& m : L.marks) {
-        const ImVec2 a(pos.x + m.x0, base + m.y);
+        const float my = snap_px(base + m.y);
+        const ImVec2 a(snap_px(pos.x + m.x0), my);
         if (m.r > 0.0f) dl->AddCircleFilled(a, std::max(1.0f, m.r), col, 8);
-        else dl->AddLine(a, ImVec2(pos.x + m.x1, base + m.y), col,
+        else dl->AddLine(a, ImVec2(snap_px(pos.x + m.x1), my), col,
                          std::max(1.0f, size * 0.055f));
     }
 }

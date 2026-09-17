@@ -434,7 +434,10 @@ int main() {
         ImFont* math_italic = nullptr;
         if (model.plot_math_font && !math_fonts.roman.empty()) {
             ImFontConfig cfg;
-            cfg.OversampleH = 2;
+            // Oversample 3 против 2 у UI-шрифта: внутри прогона ImGui двигает
+            // глифы дробными advance'ами, а тонкие засечки Times/CM на 15px
+            // мылятся от этого заметнее, чем гротеск.
+            cfg.OversampleH = 3;
             cfg.OversampleV = 1;
             cfg.PixelSnapH  = false;
             math_roman = io.Fonts->AddFontFromFileTTF(
