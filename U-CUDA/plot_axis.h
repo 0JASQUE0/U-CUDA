@@ -98,6 +98,21 @@ double fit_tick_step_y(double step, double range, float plot_h);
 bool tick_label_fits(double v, double neighbor, double lo, double hi,
                      float span_px, bool horizontal);
 
+// Ширина самой широкой подписи на сетке {start + k*step} в пределах [lo, hi].
+float max_tick_label_width(double start, double step, double lo, double hi);
+
+// Шаг тиков, кратный шагу узла параметрической сетки, при котором подписи
+// узлов не наезжают друг на друга. Возвращает кратность (>= 1) и через
+// out_start — первый тик.
+//
+// Отдельно от fit_tick_step_x, потому что снап к узлам меняет не только шаг,
+// но и САМИ ЗНАЧЕНИЯ: вместо круглых «10.8» на оси появляются узловые
+// «10.732», которые в полтора раза шире. Мерить их можно только ПОСЛЕ снапа —
+// подбор шага по круглым подписям давал «влезает» там, где не влезало.
+int fit_node_step(double step_node, double node_origin, int mult0,
+                  double lo, double hi, float span_px, bool horizontal,
+                  double& out_start);
+
 // Имеет ли смысл притягивать шаг тиков к узлам параметрической сетки. На
 // плотной сетке — нет: «честный» тик визуально не отличается от круглого, а
 // подпись превращается в 5.99 вместо 6, потому что шаг тика наследует

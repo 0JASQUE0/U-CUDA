@@ -752,21 +752,19 @@ void HeatmapView::render(PlotRenderer& renderer,
         double vr = hi - lo;
         if (std::abs(vr) < 1e-30) return out;
         double sx = nice_step(std::abs(vr), target_count);
-        // Шаг раздвигается, пока подписи не перестанут наезжать друг на друга,
-        // а к узлам сетки притягивается только пока они различимы на экране —
-        // см. fit_tick_step_* / node_snap_visible в plot_axis.h.
-        sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
-                        : fit_tick_step_y(sx, std::abs(vr), span_px);
+        // К узлам сетки шаг притягивается только пока они различимы (node_snap_visible),
+        // а ширина подписей меряется ПОСЛЕ снапа: узловые значения длиннее
+        // круглых («10.732» против «10.8»). См. plot_axis.h.
         if (!node_snap_visible(step_node, std::abs(vr), span_px)) step_node = 0.0;
         double xstart;
         if (step_node > 0.0 && n_nodes > 1) {
             int mult = (int)std::lround(sx / step_node);
-            if (mult < 1) mult = 1;
+            mult = fit_node_step(step_node, node_origin, mult, lo, hi, span_px,
+                                 horizontal, xstart);
             sx = (double)mult * step_node;
-            int k_lo = (int)std::ceil((lo - node_origin) / step_node - 1e-9);
-            int k_start = (int)std::ceil((double)k_lo / (double)mult - 1e-9) * mult;
-            xstart = node_origin + (double)k_start * step_node;
         } else {
+            sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
+                            : fit_tick_step_y(sx, std::abs(vr), span_px);
             xstart = std::ceil(lo / sx) * sx;
         }
         int nt = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
