@@ -8,13 +8,23 @@
 std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 
 // Тело calculateDiscreteModel для выбранной схемы: сперва ищется среди
-// пользовательских КРС по имени, иначе генерируется кодогеном. Пустая строка =
+// пользовательских КРС по имени, затем имя пробуется как экстраполяционная
+// обёртка "Extr(<база>|n...)", иначе генерируется кодогеном. Пустая строка =
 // нет валидной системы или схема не разобралась. Живёт здесь, а не в
 // analysis_session.cpp приватно, потому что тем же путём КРС резолвит
 // order_session.cpp.
+// ЕДИНСТВЕННЫЙ резолвер имени схемы: сюда же ходит PhaseAnalysisSession::
+// regenerate_krs, которая наполняет отладочную панель KRS.
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                    const System& sys,
                                    const std::string& scheme);
+
+// То же имя, но CPU-форма шага (codegen_scheme_cpu_equivalent под тем же
+// разбором имени). Только для отладочной панели: этот текст нигде не
+// компилируется, CPU-интегратор считает по байткоду AST.
+std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                       const System& sys,
+                                       const std::string& scheme);
 
 // Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
 // t/h, so with h = 1 the computing time is exactly the iteration count.
@@ -238,6 +248,9 @@ struct PhaseAnalysisSession {
     // Пользовательские КРС из текущей системы (копия из SystemRecord).
     // Доступны в scheme combo вместе с built-in именами.
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     // Enabled built-in schemes for this system; empty = combo shows all built-ins.
     std::vector<std::string> enabled_builtin_schemes;
 
@@ -512,6 +525,9 @@ struct BifurcationAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -683,6 +699,9 @@ struct LLEAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -833,6 +852,9 @@ struct Dft1DAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1069,6 +1091,9 @@ struct BasinsAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1256,6 +1281,9 @@ struct FastSyncAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1387,6 +1415,9 @@ struct LyapunovSpectrumAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена собранных экстраполяционных обёрток, "Extr(RK4|1,2,4)". Нужны
+    // только комбо выбора схемы: тело резолвится из самого имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 

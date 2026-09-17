@@ -192,6 +192,17 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     return false;
 }
 
+// Требует ли схема КОМПИЛЯЦИИ тела, а не интерпретации AST. Таких две группы:
+// кастомные КРС (сырой C) и экстраполяционные обёртки (тело базы, размноженное
+// по стадиям внутри лямбды — интерпретатору выражений это не по зубам).
+// На GPU разницы нет, обе идут через NVRTC; на CPU обеим нужен внешний cl.exe.
+// Тот же предикат решает krs_is_custom при сборке Request — см. analysis_session.cpp.
+[[nodiscard]] static bool scheme_needs_compiled_body(const std::string& scheme_name,
+                              const std::vector<CustomScheme>& custom_schemes) {
+    return is_custom_scheme(scheme_name, custom_schemes)
+        || parse_extrapolation_name(scheme_name, nullptr);
+}
+
 // Heuristic text match: does a custom KRS body actually reference a[0]
 // (the symmetry slot, same as built-in CD)? Raw C/CUDA source, not parsed
 // into an AST, so this is a regex over the literal text rather than a real
@@ -213,6 +224,12 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
 // требовало не забыть все четыре.
 [[nodiscard]] static bool scheme_uses_symmetry(const std::string& scheme_name,
                                          const std::vector<CustomScheme>& custom_schemes) {
+    // Экстраполяционная обёртка читает a[0] ровно тогда, когда его читает база:
+    // её тело — это тело базы, повторённое по стадиям. Без этой развёртки выбор
+    // "Extr(CD|1,2)" прятал бы поле s, которым обёрнутый CD пользуется.
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_symmetry(spec.base, custom_schemes);
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
         || scheme_name == "Complex Implicit Euler"
         || scheme_name == "SEMP" || scheme_name == "SIMP"
@@ -732,7 +749,8 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::function<void(const std::string&)>& on_pick = {},
                               const std::vector<std::string>* enabled_builtins = nullptr,
                               AppModel* bc = nullptr,
-                              bool is_map = false) {
+                              bool is_map = false,
+                              const std::vector<std::string>* extr_schemes = nullptr) {
     // Nothing to choose for a discrete map: the step is the right-hand side.
     if (is_map) {
         scheme = kMapSchemeName;
@@ -770,6 +788,14 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         for (const auto& cs : custom_schemes)
             if (ImGui::Selectable((cs.name + " (custom)").c_str(), scheme == cs.name))
                 choose(cs.name);
+        // Экстраполяционные обёртки — отдельной группой: у них нет своего
+        // "паспортного" порядка в таблице, он вычисляется из базы и числа
+        // стадий, поэтому в группировку по Order выше они не встают.
+        if (extr_schemes && !extr_schemes->empty()) {
+            ImGui::SeparatorText("Extrapolated");
+            for (const auto& nm : *extr_schemes)
+                if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
+        }
         ImGui::EndCombo();
     }
     // Меню вешаем ПОСЛЕ комбо: последним элементом остаётся оно само, и ПКМ
@@ -2285,6 +2311,195 @@ static void draw_generated_code_block(AppModel& model, const GuiCallbacks& cb) {
     }
 }
 
+// Конструктор экстраполяционных обёрток. Собирает ИМЯ вида "Extr(RK4|1,2,4)" —
+// тела здесь нет и не хранится нигде: его пересобирает compute_krs_for_scheme
+// при каждом обращении, поэтому правка системы обёртку не протухает.
+// Схемы, читающие a[0] как коэффициент симметрии, держат паспортный порядок
+// только при a[0] = 0.5; проверить это в кодогене нельзя (значение приходит в
+// рантайме), поэтому предупреждаем здесь.
+static bool extr_base_needs_half_s(const std::string& nm) {
+    return nm == "CD" || nm == "Complex CD" || nm == "Complex CD4"
+        || nm == "SEMP" || nm == "SIMP";
+}
+
+static void draw_extrapolation_builder(AppModel& model) {
+    ImGui::Spacing();
+    if (!ImGui::CollapsingHeader("Extrapolated schemes (Richardson)",
+        model.extr_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    ImGui::TextDisabled(
+        "Splits the step h into K independent runs of a base scheme: stage k goes\n"
+        "from the SAME state in n[k] substeps of h/n[k]. The results are combined so\n"
+        "that the first K-1 error terms cancel. Cost is sum(n) base steps per step.\n"
+        "Every thread does the same work, so there is no warp divergence.");
+
+    // --- выбор базы -------------------------------------------------------
+    ImGui::SetNextItemWidth(kComboW);
+    if (ImGui::BeginCombo("base scheme", model.extr_builder_base.c_str())) {
+        int shown_order = 0;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!(model.*(b.flag)) && model.extr_builder_base != b.name) continue;
+            if (b.order != shown_order) {
+                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                shown_order = b.order;
+            }
+            if (ImGui::Selectable(b.name, model.extr_builder_base == b.name))
+                model.extr_builder_base = b.name;
+        }
+        if (!model.custom_schemes.empty()) ImGui::Separator();
+        for (const auto& cs : model.custom_schemes)
+            if (ImGui::Selectable((cs.name + " (custom)").c_str(),
+                                  model.extr_builder_base == cs.name))
+                model.extr_builder_base = cs.name;
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Only schemes ticked above are listed.\n"
+                          "A custom KRS can be the base too - its order and symmetry\n"
+                          "come from the fields next to its editor.");
+
+    // Паспорт базы: у встроенной из таблицы, у кастомной — со слов автора.
+    int  base_p   = 1;
+    bool base_sym = false;
+    bool base_known = builtin_scheme_traits(model.extr_builder_base, &base_p, &base_sym);
+    if (!base_known) {
+        for (const auto& cs : model.custom_schemes) {
+            if (cs.name == model.extr_builder_base) {
+                base_p = cs.order; base_sym = cs.symmetric; base_known = true; break;
+            }
+        }
+    }
+
+    // --- число стадий и сами n -------------------------------------------
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputInt("stages K", &model.extr_builder_stages)) {
+        if (model.extr_builder_stages < kExtrMinStages) model.extr_builder_stages = kExtrMinStages;
+        if (model.extr_builder_stages > kExtrMaxStages) model.extr_builder_stages = kExtrMaxStages;
+    }
+    const int K = model.extr_builder_stages;
+
+    ImGui::TextUnformatted("substeps n:");
+    for (int k = 0; k < K; ++k) {
+        ImGui::SameLine();
+        ImGui::PushID(k);
+        ImGui::SetNextItemWidth(70);
+        ImGui::InputInt("##n", &model.extr_builder_n[k], 0, 0);
+        if (model.extr_builder_n[k] < 1) model.extr_builder_n[k] = 1;
+        if (model.extr_builder_n[k] > kExtrMaxSubsteps) model.extr_builder_n[k] = kExtrMaxSubsteps;
+        ImGui::PopID();
+    }
+
+    auto preset = [&](const char* label, const int* vals, int cnt, const char* tip) {
+        if (ImGui::SmallButton(label)) {
+            model.extr_builder_stages = cnt;
+            for (int k = 0; k < cnt; ++k) model.extr_builder_n[k] = vals[k];
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        ImGui::SameLine();
+    };
+    static const int kHarm3[] = { 1,2,3 }, kHarm4[] = { 1,2,3,4 };
+    static const int kDbl3[]  = { 1,2,4 }, kBulirsch[] = { 1,2,4,6 };
+    ImGui::TextUnformatted("presets:"); ImGui::SameLine();
+    preset("1,2,3",   kHarm3,    3, "Harmonic, 3 stages. Cheapest at this order (6 base steps).");
+    preset("1,2,3,4", kHarm4,    4, "Harmonic, 4 stages. 10 base steps.");
+    preset("1,2,4",   kDbl3,     3, "Step doubling (Romberg). 7 base steps.");
+    preset("1,2,4,6", kBulirsch, 4, "Bulirsch-style. 13 base steps - the harmonic 1,2,3,4\n"
+                                    "reaches the same order for 10.");
+    ImGui::NewLine();
+
+    // --- валидация и живое превью ----------------------------------------
+    std::vector<int> n(model.extr_builder_n, model.extr_builder_n + K);
+    std::string problem;
+    for (int k = 1; k < K; ++k)
+        if (n[k] <= n[k - 1]) { problem = "substep counts must strictly increase"; break; }
+    if (!base_known) problem = "base scheme is not resolvable";
+
+    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n);
+    bool duplicate = false;
+    for (const auto& nm : model.extr_schemes) if (nm == new_name) duplicate = true;
+
+    ImGui::Separator();
+    if (!problem.empty()) {
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
+    }
+    else {
+        const std::vector<double> alpha = extrapolation_weights(n, base_p, base_sym);
+        long long cost = 0;
+        for (int k = 0; k < K; ++k) cost += n[k];
+        double amax = 0.0;
+        for (double v : alpha) if (std::fabs(v) > amax) amax = std::fabs(v);
+
+        ImGui::Text("%s", new_name.c_str());
+        ImGui::Text("base order %d%s  ->  order %d     cost %lld base steps per step",
+                    base_p, base_sym ? " (symmetric)" : "",
+                    extrapolation_order(K, base_p, base_sym), cost);
+        std::string wline = "weights:";
+        for (double v : alpha) {
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "  %.6g", v);
+            wline += buf;
+        }
+        ImGui::TextDisabled("%s", wline.c_str());
+
+        // Знакопеременные веса усиливают шум округления пропорционально max|alpha|.
+        // Для double и разумных наборов это ничто, но "1,2,3,100" пользователь
+        // вбить может, и там сокращение уже съедает разряды.
+        if (amax > 20.0)
+            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                "  max|weight| = %.0f: heavy cancellation, ~%.1f decimal digits lost.",
+                amax, std::log10(amax));
+
+        if (extr_base_needs_half_s(model.extr_builder_base)) {
+            const double s_now = parse_num(model.symmetry_s, 0.5);
+            if (s_now != 0.5)
+                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    "  '%s' is order %d only at s = 0.5, and s is currently %g:\n"
+                    "  the base drops to order 1 and the wrapper gains nothing.",
+                    model.extr_builder_base.c_str(), base_p, s_now);
+            else
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                    "  '%s' holds order %d only while s (a[0]) stays 0.5 - do not sweep it.",
+                    model.extr_builder_base.c_str(), base_p);
+        }
+    }
+
+    ImGui::BeginDisabled(!problem.empty() || duplicate);
+    if (ImGui::Button("+ Add extrapolated scheme"))
+        model.extr_schemes.push_back(new_name);
+    ImGui::EndDisabled();
+    if (duplicate) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(already in the list)");
+    }
+
+    // --- уже собранные ----------------------------------------------------
+    if (!model.extr_schemes.empty()) {
+        ImGui::Separator();
+        int to_delete = -1;
+        for (int i = 0; i < (int)model.extr_schemes.size(); ++i) {
+            ImGui::PushID(i);
+            ImGui::TextUnformatted(model.extr_schemes[i].c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) to_delete = i;
+            // Отвалившаяся база (кастомную КРС переименовали или удалили) —
+            // на Run это станет пустой КРС, поэтому говорим сразу.
+            ExtrapolationSpec sp;
+            if (parse_extrapolation_name(model.extr_schemes[i], &sp)) {
+                bool ok = builtin_scheme_traits(sp.base, nullptr, nullptr);
+                if (!ok)
+                    for (const auto& cs : model.custom_schemes)
+                        if (cs.name == sp.base) { ok = true; break; }
+                if (!ok)
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                        "  base '%s' no longer exists.", sp.base.c_str());
+            }
+            ImGui::PopID();
+        }
+        if (to_delete >= 0) model.extr_schemes.erase(model.extr_schemes.begin() + to_delete);
+    }
+}
+
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     model.poll(); // забрать результат OCR, если готов
 
@@ -2525,6 +2740,32 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             InputTextStr(name_label.c_str(), cs.name);
             ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) to_delete = i;
+            // Паспорт КРС. Нужен ТОЛЬКО когда эта схема берётся опорной для
+            // Extr(...): из порядка и симметричности считаются веса стадий.
+            // Кодоген тела не разбирает, так что сказать может только автор.
+            ImGui::SetNextItemWidth(90);
+            std::string ord_label = "order##cs_ord_" + std::to_string(i);
+            if (ImGui::InputInt(ord_label.c_str(), &cs.order)) {
+                if (cs.order < 1)  cs.order = 1;
+                if (cs.order > 12) cs.order = 12;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Order of accuracy of this step.\n"
+                                  "Used only when this scheme is the base of an\n"
+                                  "Extr(...) wrapper - it sets the extrapolation\n"
+                                  "weights. Getting it wrong does not produce wrong\n"
+                                  "numbers, it just cancels the wrong error terms\n"
+                                  "and the wrapper falls back to the base order.");
+            ImGui::SameLine();
+            std::string sym_label = "symmetric##cs_sym_" + std::to_string(i);
+            ImGui::Checkbox(sym_label.c_str(), &cs.symmetric);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Tick if the error expansion has EVEN powers of h only.\n"
+                                  "True for self-adjoint steps (Phi* composed with Phi):\n"
+                                  "implicit midpoint, trapezoid, leapfrog, CD at s = 0.5.\n"
+                                  "NOT true for explicit midpoint / RK4 / predictor-corrector.\n"
+                                  "A symmetric base gains 2 orders per extrapolation stage\n"
+                                  "instead of 1. Same as above: a wrong tick only costs order.");
             std::string body_label = "##cs_body_" + std::to_string(i);
             float& body_h = model.custom_scheme_editor_h.try_emplace(cs.name, 100.0f).first->second;
             InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, body_h));
@@ -2593,7 +2834,18 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                 }
             }
         }
+        // Символы, ломающие имя обёртки Extr(<база>|n...): по ним резолвер
+        // режет строку, так что база с ними стала бы неразрешимой.
+        for (const auto& cs : model.custom_schemes) {
+            if (cs.name.find_first_of("|()") != std::string::npos) {
+                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    "  '%s' contains | ( or ) - those are reserved by Extr(...) names.",
+                    cs.name.c_str());
+            }
+        }
     }
+
+    draw_extrapolation_builder(model);
 
     draw_generated_code_block(model, cb);
 }
@@ -3133,11 +3385,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
                                  [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes, bc, s.sys.is_map);
+                                 &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.extr_schemes);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
-    if (is_custom_scheme(s.scheme, s.custom_schemes) && !s.use_gpu) {
+    if (scheme_needs_compiled_body(s.scheme, s.custom_schemes) && !s.use_gpu) {
         std::string why;
         if (!krs_cpu_backend_available(&why)) {
             ImGui::SameLine();
@@ -3452,7 +3704,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         const std::string cpu_key = s.scheme + "\n" + s.krs_code;
         if (cpu_cache_key != cpu_key) {
             try {
-                cpu_cache_body = codegen_scheme_cpu_equivalent(s.sys, scheme_from_name(s.scheme));
+                // Через тот же резолвер, что и GPU-форма. Раньше здесь стоял
+                // прямой scheme_from_name(s.scheme), а он на любое незнакомое
+                // имя молча отдаёт Scheme::Euler — панель показывала бы код
+                // Эйлера под заголовком "эквивалент" для каждой Extr(...).
+                cpu_cache_body = compute_krs_cpu_for_scheme(s.custom_schemes, s.sys, s.scheme);
             } catch (...) {
                 cpu_cache_body = "(generation failed)";
             }
@@ -4575,7 +4831,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -5281,7 +5537,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -5614,7 +5870,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
     ImGui::Separator();
 
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -6166,7 +6422,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
 
     // Scheme (built-in + custom)
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -6673,7 +6929,7 @@ static void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     }
     // Custom КРС на CPU требует внешнего компилятора — та же проверка, что и в
     // draw_phase_controls; без него молча возвращаем GPU.
-    if (is_custom_scheme(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
+    if (scheme_needs_compiled_body(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
         std::string why;
         if (!krs_cpu_backend_available(&why)) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom scheme requires GPU: %s)", why.c_str());
@@ -6889,7 +7145,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -7436,6 +7692,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
     // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
     s.custom_schemes = model.custom_schemes;
+    s.extr_schemes   = model.extr_schemes;
 
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
@@ -7499,7 +7756,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     // Scheme
     draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map);
+                      &model, model.is_map, &s.extr_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -8341,6 +8598,34 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "several times under cudaEvents. The plot then shows time against\n"
             "the error achieved - what that accuracy costs.");
     if (c.calc_kind != calc_kind_before) order_rehome_config(model, idx);
+
+    // Устройство расчёта. Обе ветки считают по одним формулам и одним порогам,
+    // но замер времени у них меряет РАЗНОЕ: GPU — ядро с replicas нитями,
+    // CPU — одну траекторию последовательно. Числа между устройствами поэтому
+    // не сопоставимы, и это не баг, а два разных вопроса к схеме.
+    ImGui::SameLine();
+    ImGui::TextDisabled("|"); ImGui::SameLine();
+    int ord_dev = c.use_gpu ? 0 : 1;
+    ImGui::RadioButton("GPU##ord_dev", &ord_dev, 0);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Kernel compiled by NVRTC (kernels/order.template.cu).");
+    ImGui::SameLine();
+    ImGui::RadioButton("CPU##ord_dev", &ord_dev, 1);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "The same KRS body, compiled to a native step by cl.exe instead of\n"
+            "NVRTC, run sequentially on one core. Same formulas, same floor and\n"
+            "divergence thresholds, so the order diagram is directly comparable\n"
+            "with the GPU one.\n"
+            "Performance means something else here: the time of ONE trajectory,\n"
+            "not the throughput of a loaded GPU - replicas are ignored.");
+    c.use_gpu = (ord_dev == 0);
+    if (!c.use_gpu) {
+        std::string why;
+        if (!krs_cpu_backend_available(&why))
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+                               "CPU backend unavailable: %s", why.c_str());
+    }
     // Дискретное отображение шага не имеет вовсе, уточнять нечего: обе
     // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =
     // f(x_n) обе разности тождественно нулевые.
@@ -8352,7 +8637,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // ---- Интегрирование ----
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                          &model, model.is_map);
+                          &model, model.is_map, &s.extr_schemes);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
         const bool h_swept = (c.axis_x_target == kOrderTargetH)
@@ -8404,7 +8689,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::Separator();
         // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
         draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                          &s.enabled_builtin_schemes, &model, s.sys.is_map);
+                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.extr_schemes);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "The method that stands for the exact answer in Eref =\n"
@@ -8419,13 +8704,21 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "same as the tested one: at an equal step that would be the very\n"
                 "same arithmetic and the difference identically zero.");
         ImGui::Separator();
+        // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU
+        // прогон последовательный, и поле нечего означать, поэтому гасим его,
+        // а не молча игнорируем значение.
+        if (!c.use_gpu) ImGui::BeginDisabled();
         InputNumStr("replicas", c.perf_replicas_text, kFieldW);
+        if (!c.use_gpu) ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "How many IDENTICAL tasks the timed launch computes.\n"
-                "1 - the time of a single computation (the GPU mostly idles);\n"
-                "a large number - the throughput of a loaded GPU, where the\n"
-                "time per task = measured / replicas.");
+                c.use_gpu
+                ? "How many IDENTICAL tasks the timed launch computes.\n"
+                  "1 - the time of a single computation (the GPU mostly idles);\n"
+                  "a large number - the throughput of a loaded GPU, where the\n"
+                  "time per task = measured / replicas."
+                : "GPU only: the CPU branch runs one trajectory sequentially,\n"
+                  "so the measurement is always the time of a single task.");
 
         const int n_nodes = std::max(1, (int)parse_num(c.axis_x_n_text, 200.0));
         const int reps    = std::max(1, (int)parse_num(c.perf_repeats_text, 20.0));
@@ -8637,6 +8930,7 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
     sn.max_value     = parse_num(c.max_value_text, 1.0e6);
     sn.snap_steps    = c.snap_steps;
     sn.endpoint_only = c.endpoint_only;
+    sn.use_gpu       = c.use_gpu;
     sn.gpu_fmad      = gpu_fmad;
     sn.gpu_rdc       = gpu_rdc;
     // Режим замера пишем ФАКТИЧЕСКИЙ, из результата: поля вкладки могли
@@ -8822,6 +9116,12 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // Буферы локальные: render() заливает VBO прямо в вызове, держать их между
     // кадрами не нужно (и нельзя — членов у окна произвольное число).
     std::vector<std::vector<double>> bufs;
+    // Величина «за точкой» для подсказки при наведении, по буферу на кривую и
+    // в том же порядке. Пусто — у этой кривой подсказки нет (у диаграммы
+    // порядка h лежит прямо на оси X, спрашивать нечего). Выравнивание с bufs
+    // держится resize'ом ниже, а не парным push_back: точек добавления кривых
+    // пять, и забыть одну было бы легко.
+    std::vector<std::vector<double>> tags;
     std::vector<std::string>         labels;
     std::vector<ImVec4>              colors;
     std::vector<ViewRangeTarget>     vrt;
@@ -8853,7 +9153,11 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             // узлов, а посчитанная величина, и монотонность её не гарантирована.
             auto add_time_series = [&](const std::vector<double>& t, const char* suffix, float shade_k) {
                 if (t.empty()) return;
-                std::vector<std::pair<double, double>> pts;
+                // Третья компонента — шаг узла. Он обязан ехать вместе с точкой
+                // через сортировку по X: после неё позиция в массиве уже ничего
+                // не говорит о том, какому h точка принадлежала.
+                struct Pt { double x, y, h, e, t, steps; };
+                std::vector<Pt> pts;
                 pts.reserve((size_t)r.n_pts);
                 for (int i = 0; i < r.n_pts; ++i) {
                     // Eref есть не в каждом результате: эталон можно было и не
@@ -8868,17 +9172,35 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     if (!std::isfinite(e) || !std::isfinite(tv)) continue;
                     if (win.x_log && !(e > 0.0)) continue;
                     if (ylog && !(tv > 0.0)) continue;
-                    pts.emplace_back(e, ylog ? std::log10(tv) : tv);
+                    // h_eff старые результаты могли не заполнить — тогда в
+                    // подсказке будет NaN, и это честнее выдуманного нуля.
+                    const double hv = ((size_t)i < r.h_eff.size())
+                                        ? r.h_eff[(size_t)i]
+                                        : std::numeric_limits<double>::quiet_NaN();
+                    const double ns = ((size_t)i < r.n_steps.size())
+                                        ? (double)r.n_steps[(size_t)i]
+                                        : std::numeric_limits<double>::quiet_NaN();
+                    // e и tv кладём в теги ОТДЕЛЬНО от координат: по X может
+                    // стоять любой из трёх источников ошибки, а по Y в
+                    // лог-режиме лежит log10(t). В подсказке хочется исходные
+                    // числа, а не то, во что их превратил режим осей.
+                    pts.push_back({ e, ylog ? std::log10(tv) : tv, hv, e, tv, ns });
                 }
                 if (pts.empty()) return;
                 std::sort(pts.begin(), pts.end(),
-                          [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
-                              return a.first < b.first;
-                          });
-                std::vector<double> xy;
+                          [](const Pt& a, const Pt& b) { return a.x < b.x; });
+                std::vector<double> xy, tg;
                 xy.reserve(pts.size() * 2);
-                for (const auto& pr : pts) { xy.push_back(pr.first); xy.push_back(pr.second); note_x(pr.first); }
+                tg.reserve(pts.size() * 4);
+                for (const auto& pr : pts) {
+                    xy.push_back(pr.x); xy.push_back(pr.y);
+                    tg.push_back(pr.h); tg.push_back(pr.e);
+                    tg.push_back(pr.t); tg.push_back(pr.steps);
+                    note_x(pr.x);
+                }
                 bufs.push_back(std::move(xy));
+                tags.resize(bufs.size());
+                tags.back() = std::move(tg);
                 labels.push_back(c.label + " " + suffix);
                 colors.push_back(order_shade(base, shade_k));
             };
@@ -9020,15 +9342,35 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     view.x_fit_min = xlo;
     view.x_fit_max = xhi;
 
+    // Маркеры узлов нужны именно на диаграмме производительности: ни шага, ни
+    // самого времени в лог-режиме на осях нет. На диаграмме порядка h лежит
+    // прямо на оси X, спрашивать нечего.
+    view.point_markers = is_perf;
+    if (is_perf) {
+        const char* ename = (win.error_source == 2) ? "Eref"
+                          : (win.error_source == 1) ? "E2" : "E1";
+        const char* unit  = (win.time_unit == 1) ? "ms" : "us";
+        view.point_tag_names = { "h", ename, std::string("t, ") + unit, "steps" };
+    }
+
     std::vector<PlotSeriesInput> series;
     std::vector<bool> init_vis, glob_vis;
     series.reserve(bufs.size());
+    tags.resize(bufs.size());
     for (size_t i = 0; i < bufs.size(); ++i) {
         PlotSeriesInput si;
         si.points   = bufs[i].empty() ? nullptr : bufs[i].data();
         si.n_points = (int)(bufs[i].size() / 2);
         si.color    = colors[i];
         si.label    = labels[i];
+        // Длины обязаны сойтись: если кривая отфильтровалась иначе, чем
+        // собирались теги, лучше остаться без подсказки, чем показать чужое h.
+        const int tag_cols = (int)view.point_tag_names.size();
+        if (tag_cols > 0 && !tags[i].empty() &&
+            tags[i].size() == (size_t)si.n_points * (size_t)tag_cols) {
+            si.point_tags      = tags[i].data();
+            si.point_tag_count = tag_cols;
+        }
         series.push_back(si);
         init_vis.push_back(true);
         glob_vis.push_back(true);
@@ -9376,10 +9718,10 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
         [&phase, &custom_schemes](const std::string& nm) {
             phase.scheme = nm;
             phase.regenerate_krs();
-            // Custom КРС в Custom-вкладке считаются только на GPU.
-            if (is_custom_scheme(nm, custom_schemes)) phase.use_gpu = true;
+            // Custom КРС и экстраполяционные обёртки в Custom-вкладке считаются только на GPU.
+            if (scheme_needs_compiled_body(nm, custom_schemes)) phase.use_gpu = true;
         },
-        &cs.enabled_builtin_schemes, &model, model.is_map);
+        &cs.enabled_builtin_schemes, &model, model.is_map, &cs.extr_schemes);
 
     // Integration group — mirrors the "Integration##bd_int" collapsing header in
     // draw_diagram_controls (per-line InputNumStr with comma→dot + ↑/↓). Each edited field is
@@ -11410,6 +11752,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.custom_session.ls_session.custom_schemes     = model.custom_schemes;
     model.custom_session.phase_session.custom_schemes  = model.custom_schemes;
     model.custom_session.basins_session.custom_schemes = model.custom_schemes;
+    // Экстраполяционные обёртки — тем же покадровым синком и по тем же
+    // причинам: собранная в Library схема должна появиться в комбо сразу.
+    model.phase_session.extr_schemes       = model.extr_schemes;
+    model.bifurcation_session.extr_schemes = model.extr_schemes;
+    model.lle_session.extr_schemes         = model.extr_schemes;
+    model.ls_session.extr_schemes          = model.extr_schemes;
+    model.dft1d_session.extr_schemes       = model.extr_schemes;
+    model.basins_session.extr_schemes      = model.extr_schemes;
+    model.fastsync_session.extr_schemes    = model.extr_schemes;
+    model.order_session.extr_schemes       = model.extr_schemes;
+    model.custom_session.extr_schemes                = model.extr_schemes;
+    model.custom_session.bif_session.extr_schemes    = model.extr_schemes;
+    model.custom_session.lle_session.extr_schemes    = model.extr_schemes;
+    model.custom_session.ls_session.extr_schemes     = model.extr_schemes;
+    model.custom_session.phase_session.extr_schemes  = model.extr_schemes;
+    model.custom_session.basins_session.extr_schemes = model.extr_schemes;
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.

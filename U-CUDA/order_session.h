@@ -62,6 +62,14 @@ struct OrderConfig {
     bool        axis_y_log      = false;
     std::string axis_y_n_text   = "200";
 
+    // Устройство расчёта. GPU — прежний путь через NVRTC и order.template.cu.
+    // CPU — та же арифметика тем же телом КРС, скомпилированным cl.exe
+    // (krs_cpu.h), но прогоны ПОСЛЕДОВАТЕЛЬНЫЕ: меряется время одной
+    // траектории, а не пропускная способность, поэтому replicas там не значат
+    // ничего и в UI гасятся. Формулы, пороги и коды статусов у обеих веток
+    // общие — см. run_order_cpu в order_session.cpp.
+    bool        use_gpu        = true;
+
     // ---- Интегрирование ----
     std::string h_text         = "0.01";   // базовый шаг, когда h не свипуется
     std::string t_max_text     = "10";
@@ -122,6 +130,8 @@ struct OrderAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена экстраполяционных обёрток для комбо; тело даёт резолвер по имени.
+    std::vector<std::string>  extr_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
