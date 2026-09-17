@@ -687,6 +687,94 @@ double fit_tick_step_y(double step, double range, float plot_h) {
     return step;
 }
 
+std::vector<LogAxisTick> log_axis_ticks(double lo, double hi, float span_px,
+                                        bool horizontal)
+{
+    std::vector<LogAxisTick> out;
+    if (!(lo > 0.0) || !(hi > lo) || span_px <= 1.0f) return out;
+
+    const double l0 = std::log10(lo), l1 = std::log10(hi);
+    const double lspan = l1 - l0;
+    // Зум до неразличимых в log10 границ: делить на lspan уже нельзя, а ось без
+    // единой подписи хуже двух одинаковых.
+    if (!(lspan > 1e-12)) { out.push_back({ lo, true }); out.push_back({ hi, true }); return out; }
+    const double px_dec = (double)span_px / lspan;      // пикселей на декаду
+
+    auto px_of = [&](double v) { return (std::log10(v) - l0) * px_dec; };
+    auto fits = [&](double a, double b) {
+        const double need = horizontal
+            ? ((double)plot_text_size(fmt_tick(a).c_str()).x +
+               (double)plot_text_size(fmt_tick(b).c_str()).x) * 0.5 + 6.0
+            : (double)plot_text_line_height() * 1.2;
+        return std::abs(px_of(a) - px_of(b)) >= need;
+    };
+
+    // Подписи расставляем по приоритету мантиссы: сначала декады, потом 5, 2, 3
+    // и остальное — что не влезло, остаётся линией без числа.
+    std::vector<double> labeled;
+    auto try_label = [&](double v) {
+        auto it = std::lower_bound(labeled.begin(), labeled.end(), v);
+        if (it != labeled.end() && !fits(v, *it)) return;
+        if (it != labeled.begin() && !fits(v, *(it - 1))) return;
+        labeled.insert(it, v);
+    };
+
+    struct Cand { double v; int prio; };
+    std::vector<Cand> cand;
+
+    // Шаг по декадам: линии чаще, чем раз в 10 px, сливаются в заливку.
+    int dk = (px_dec >= 10.0) ? 1 : (int)std::ceil(10.0 / std::max(px_dec, 1e-9));
+    if (dk > 4096) return out;    // диапазон в тысячи декад — рисовать нечего
+
+    // Промежуточные мантиссы только когда декада реально широкая: иначе 2..9
+    // превращаются в кашу у правого края каждой декады.
+    const bool with_minor = (dk == 1) && (px_dec >= 40.0);
+    static const int kPrio[10] = { 0, 0, 2, 3, 4, 1, 4, 4, 4, 4 };  // [мантисса]
+
+    const int kfirst = (int)std::floor(l0) - 1;
+    const int klast  = (int)std::floor(l1) + 1;
+    for (int k = kfirst; k <= klast; ++k) {
+        const double dec = std::pow(10.0, (double)k);
+        const bool dec_ok = (((k % dk) + dk) % dk) == 0;
+        for (int m = 1; m <= 9; ++m) {
+            if (m == 1 ? !dec_ok : !with_minor) continue;
+            const double v = dec * (double)m;
+            if (v < lo * (1.0 - 1e-9) || v > hi * (1.0 + 1e-9)) continue;
+            cand.push_back({ v, kPrio[m] });
+        }
+    }
+
+    std::sort(cand.begin(), cand.end(),
+              [](const Cand& a, const Cand& b) { return a.v < b.v; });
+    for (int prio = 0; prio <= 4; ++prio)
+        for (const Cand& c : cand)
+            if (c.prio == prio) try_label(c.v);
+
+    if (labeled.size() >= 2) {
+        out.reserve(cand.size());
+        for (const Cand& c : cand)
+            out.push_back({ c.v, std::binary_search(labeled.begin(), labeled.end(), c.v) });
+        return out;
+    }
+
+    // Диапазон уже декады (1.02..1.08) — декадных отметок в нём нет вовсе.
+    // Лог здесь почти неотличим от линейного, поэтому обычный nice_step.
+    const double step = nice_step(hi - lo, horizontal ? 8 : 6);
+    if (!(step > 0.0)) return out;
+    double last_label = 0.0;
+    bool   has_label = false;
+    for (int i = 0; i < 256; ++i) {
+        const double v = std::ceil(lo / step) * step + (double)i * step;
+        if (v > hi + step * 1e-6) break;
+        if (v < lo - step * 1e-6) continue;
+        const bool major = !has_label || fits(v, last_label);
+        if (major) { last_label = v; has_label = true; }
+        out.push_back({ v, major });
+    }
+    if (out.empty()) { out.push_back({ lo, true }); out.push_back({ hi, true }); }
+    return out;
+}
+
 void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float out[16]) {
     double dx = xmax - xmin; if (std::abs(dx) < 1e-30) dx = 1.0;
     double dy = ymax - ymin; if (std::abs(dy) < 1e-30) dy = 1.0;
@@ -713,24 +801,23 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
 
-    // Log-масштаб: маппинг у Plot2DView теперь действительно логарифмический
-    // (см. AxisInfo::log_scale), но промежуточные отметки здесь по-прежнему НЕ
-    // рисуем — только границы диапазона. Это решение по оформлению, а не
-    // ограничение: "красивые" линейные тики подписывали бы значения, которые
-    // не считались, а декадные загромождают узкие диапазоны.
-    if (x.log_scale) {
-        // Концы в линейном и логарифмическом отображении попадают в одни и те
-        // же пиксели (lo -> 0, hi -> plot_w), поэтому формула ниже верна и
-        // после перевода Plot2DView на лог-координату.
-        auto draw_edge = [&](double xv) {
-            float px = axis_px(pos.x + (float)((xv - emin) / vrx) * plot_w, pos.x, plot_w);
-            fill_col_px(dl, px, pos.y, pos.y + plot_h, col_grid);
-            std::string lbl = fmt_tick(xv);
+    // Log-масштаб: отображение у Plot2DView логарифмическое (см. XS/XW там же),
+    // поэтому и позиция тика считается через log10 — линейная формула ниже
+    // верна только на концах диапазона. Guard lo > 0 повторяет guard самого
+    // Plot2DView: чекбокс можно включить до Run, и тогда ось остаётся линейной.
+    if (x.log_scale && lo > 0.0) {
+        const double le0 = std::log10(emin), le1 = std::log10(emax);
+        const double lvr = le1 - le0;
+        const ImU32 col_minor = dim_grid_col(col_grid);
+        for (const LogAxisTick& t : log_axis_ticks(lo, hi, plot_w, true)) {
+            float px = axis_px(pos.x + (float)((std::log10(t.value) - le0) / lvr) * plot_w,
+                               pos.x, plot_w);
+            fill_col_px(dl, px, pos.y, pos.y + plot_h, t.major ? col_grid : col_minor);
+            if (!t.major) continue;
+            std::string lbl = fmt_tick(t.value);
             ImVec2 ts = plot_text_size(lbl.c_str());
             plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
-        };
-        draw_edge(lo);
-        draw_edge(hi);
+        }
         return;
     }
 
@@ -808,7 +895,9 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
 
-    // См. draw_axis_x_grid -- log-масштаб рисует только границы диапазона.
+    // Декадной сетки тут нет намеренно: отображение по Y у Plot2DView линейное
+    // (лог-оси по Y не бывает, см. AxisInfo::log_scale) — тики 10^k встали бы
+    // не там, где данные. Остаются границы диапазона.
     if (y.log_scale) {
         auto draw_edge = [&](double yv) {
             float py = axis_px(pos.y + (float)((emax - yv) / vry) * plot_h, pos.y, plot_h);

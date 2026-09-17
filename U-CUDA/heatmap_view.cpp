@@ -342,6 +342,17 @@ void HeatmapView::render(PlotRenderer& renderer,
         return v;
     };
 
+    // Обратное к vis_pos: мировое значение по позиции в визуальном домене. Нужно тикам лог-оси —
+    // view_min/max хранятся в node-координатах, а подписывать надо параметр.
+    auto vis_world = [](double p, int n, double lo, double hi, bool log_scale, double step) {
+        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && step > 0.0) {
+            const double l0 = std::log10(lo), l1 = std::log10(hi);
+            const double kf = (p - lo) / step;
+            return std::pow(10.0, l0 + kf * (l1 - l0) / (double)(n - 1));
+        }
+        return p;
+    };
+
     // Значение узла — ОБЩАЯ с ядром реализация (ucuda_node_value* в configCUDA.h). Раньше здесь
     // стояла своя пара формул: линейная через lo + k*step и лог с умножением до деления — и то, и
     // другое расходилось с getValueByIdx в последних битах, а на правом конце оси заметнее.
@@ -814,25 +825,42 @@ void HeatmapView::render(PlotRenderer& renderer,
     // считается левый отступ следующего кадра (см. left_margin_px_).
     float y_tick_w_max = 0.0f;
     auto draw_x_ticks = [&]() {
+        // Log-масштаб: ячейки равномерны по ИНДЕКСУ узла, а узлы лог-распределены — значит по
+        // экрану ось логарифмическая, и декадные тики (log_axis_ticks) на ней законны. Раньше
+        // подписывались только концы view, причём прямо в node-координатах: под зумом это уже не
+        // параметр, а линейная позиция ячейки. Здесь и значения, и позиции идут через vis_world /
+        // vis_pos — те же формулы, по которым ставится крест.
+        if (vis_log_x && param_lo_x > 0.0 && param_hi_x > 0.0 && nx > 1 &&
+            std::abs(evis_x1 - evis_x0) > 1e-30) {
+            const double w0 = vis_world(evis_x0, nx, param_lo_x, param_hi_x, true, step_x);
+            const double w1 = vis_world(evis_x1, nx, param_lo_x, param_hi_x, true, step_x);
+            const ImU32 col_minor = dim_grid_col(col_axis);
+            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                       (float)plot_w, true)) {
+                const double vp = vis_pos(t.value, nx, param_lo_x, param_hi_x, true, step_x);
+                float px = axis_px(img_pos.x + (float)((vp - evis_x0) / (evis_x1 - evis_x0)) * plot_w,
+                                   img_pos.x, (float)plot_w);
+                fill_col_px(dl, px, img_pos.y + plot_h,
+                            img_pos.y + plot_h + (t.major ? 5.0f : 3.0f),
+                            t.major ? col_axis : col_minor);
+                if (!t.major) continue;
+                std::string lbl = fmt_tick(t.value);
+                ImVec2 ts = plot_text_size(lbl.c_str());
+                plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
+                          col_text, lbl.c_str());
+            }
+            return;
+        }
         // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы цветовые ячейки
-        // центрировались на узлах. Для log-оси линейный полушаг у границ (например 0.001) даёт
-        // заметный сдвиг подписи — берём точный view_min/max без этого паддинга.
-        // invert: границы уже переставлены в evis_x0/x1, для log-оси делаем то же вручную.
-        double emin = vis_log_x
-                      ? (x_axis.invert ? x_axis.view_max : x_axis.view_min) : evis_x0;
-        double emax = vis_log_x
-                      ? (x_axis.invert ? x_axis.view_min : x_axis.view_max) : evis_x1;
+        // центрировались на узлах.
+        double emin = evis_x0;
+        double emax = evis_x1;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        // Log-масштаб: см. plot_axis.cpp draw_axis_x_grid -- нет настоящей
-        // лог-оси, поэтому вместо "красивых" линейных тиков (которые
-        // подписали бы значения, никогда не просимулированные) рисуем
-        // только границы текущего view.
-        std::vector<double> ticks = vis_log_x
-            ? std::vector<double>{ lo, hi }
-            : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
-                            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true));
+        std::vector<double> ticks =
+            x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
+                        : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true);
         for (double xv : ticks) {
             float px = axis_px(img_pos.x + (float)((xv - emin) / vrx) * plot_w,
                                img_pos.x, (float)plot_w);
@@ -845,19 +873,35 @@ void HeatmapView::render(PlotRenderer& renderer,
     };
     auto draw_y_ticks = [&]() {
         // См. draw_x_ticks выше про vis_view-паддинг и log-масштаб.
-        // См. draw_x_ticks про invert.
-        double emin = vis_log_y
-                      ? (y_axis.invert ? y_axis.view_max : y_axis.view_min) : evis_y0;
-        double emax = vis_log_y
-                      ? (y_axis.invert ? y_axis.view_min : y_axis.view_max) : evis_y1;
+        if (vis_log_y && param_lo_y > 0.0 && param_hi_y > 0.0 && ny > 1 &&
+            std::abs(evis_y1 - evis_y0) > 1e-30) {
+            const double w0 = vis_world(evis_y0, ny, param_lo_y, param_hi_y, true, step_y);
+            const double w1 = vis_world(evis_y1, ny, param_lo_y, param_hi_y, true, step_y);
+            const ImU32 col_minor = dim_grid_col(col_axis);
+            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                       (float)plot_h, false)) {
+                const double vp = vis_pos(t.value, ny, param_lo_y, param_hi_y, true, step_y);
+                float py = axis_px(img_pos.y + (float)((evis_y1 - vp) / (evis_y1 - evis_y0)) * plot_h,
+                                   img_pos.y, (float)plot_h);
+                fill_row_px(dl, py, img_pos.x - (t.major ? 5.0f : 3.0f), img_pos.x,
+                            t.major ? col_axis : col_minor);
+                if (!t.major) continue;
+                std::string lbl = fmt_tick(t.value);
+                ImVec2 ts = plot_text_size(lbl.c_str());
+                y_tick_w_max = std::max(y_tick_w_max, ts.x);
+                plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, px_center(py) - ts.y * 0.5f),
+                          col_text, lbl.c_str());
+            }
+            return;
+        }
+        double emin = evis_y0;
+        double emax = evis_y1;
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        // См. draw_x_ticks выше.
-        std::vector<double> ticks = vis_log_y
-            ? std::vector<double>{ lo, hi }
-            : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
-                            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false));
+        std::vector<double> ticks =
+            y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
+                        : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false);
         for (double yv : ticks) {
             float py = axis_px(img_pos.y + (float)((emax - yv) / vry) * plot_h,
                                img_pos.y, (float)plot_h);
