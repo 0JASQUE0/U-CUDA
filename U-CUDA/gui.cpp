@@ -98,7 +98,7 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
 // разъедутся, пользователь введёт "pi" и получит не то число, которое считает
 // GPU, — молча. Поэтому сверка на этапе компиляции.
 static_assert(static_cast<double>(::pi) == num_parse_detail::kPi,
-              "pi в num_parse.h разошлась с configCUDA.h");
+              "pi in num_parse.h diverged from configCUDA.h");
 
 // Значение комбинации в точке траектории — зеркалит формулу ядра. Константы
 // pi/euler берутся из configCUDA.h, а не набираются заново.
@@ -1701,7 +1701,7 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
     }
     ImGui::EndDisabled();
     if (blocked)
-        ImGui::TextDisabled("(continuation: только param- или h-sweep, не IC, не 2D)");
+        ImGui::TextDisabled("(continuation: param- or h-sweep only, not IC, not 2D)");
 
     int dev = c.use_gpu ? 0 : 1;
     ImGui::BeginDisabled(device_locked);
@@ -1711,7 +1711,7 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
     if (!device_locked) c.use_gpu = (dev == 0);
     if (c.continuation && c.use_gpu) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(continuation на GPU однопоточный, CPU быстрее)");
+        ImGui::TextDisabled("(continuation on the GPU is single-threaded, CPU is faster)");
     }
     if (!c.use_gpu) {
         std::string why;
@@ -3895,14 +3895,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         pr.rqa_colormap = cmap_idx;
                     }
                     ImGui::Checkbox("reverse colormap", &pr.viewrp->reverse_colormap);
-                    hint("Инвертирует шкалу. Для матрицы расстояний это переключает, каким концом "
-                         "шкалы читается близость точек; для бинарной — какой уровень тёмный.");
+                    hint("Inverts the scale. For the distance matrix this switches which end of "
+                         "the scale reads as closeness of points; for the binary one, which level is dark.");
 
                     ImGui::Checkbox("autoscale color", &pr.viewrp->autoscale);
-                    hint("Включено: шкала берётся из данных — 0..max(D) для матрицы расстояний и "
-                         "0..1 для бинарной. Выключено: границы задаются вручную полями ниже.\n"
-                         "Ручной диапазон полезен, чтобы сравнивать две матрицы по одной шкале, но "
-                         "на бинарном виде он ломает соответствие уровней 0/1 полосам colorbar'а.");
+                    hint("On: the scale is taken from the data - 0..max(D) for the distance matrix and "
+                         "0..1 for the binary one. Off: the bounds are set manually in the fields below.\n"
+                         "A manual range is useful for comparing two matrices on one scale, but "
+                         "on the binary view it breaks the match between levels 0/1 and the colorbar bands.");
                     if (!pr.viewrp->autoscale) {
                         // Ровно как в draw_heatmap_toolbar: текст парсится каждый кадр, значение
                         // кладётся в float-поля вью (parse_ratio_or понимает и дроби вида 1/3).
@@ -3916,24 +3916,24 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     ImGui::SeparatorText("Lines");
                     ch |= InputNumStr("Theiler window", pr.rqa_theiler_text, 100.0f);
-                    hint("Пары с |i-j| <= w исключаются полностью. Для потоков "
-                        "обязательно: без окна соседние по времени точки дают ложные диагонали и завышают DET/LAM.");
+                    hint("Pairs with |i-j| <= w are excluded entirely. For flows this is "
+                        "mandatory: without the window, points adjacent in time give false diagonals and inflate DET/LAM.");
                     ch |= InputNumStr("l_min", pr.rqa_lmin_text, 100.0f);
                     ch |= InputNumStr("v_min", pr.rqa_vmin_text, 100.0f);
 
                     ImGui::SeparatorText("Sampling");
                     ch |= InputNumStr("RP points (n)", pr.rqa_points_text, 100.0f);
-                    hint("Сторона матрицы. Траектория равномерно прореживается до n точек; метрики "
-                        "считаются по ТОЙ ЖЕ матрице, что нарисована. Потолок 4096 (4096^2 doubles = "
-                        "134 МБ и на GPU, и в памяти хоста).\n"
-                        "Замеры на RTX: 512 ~ 3 мс, 1024 ~ 6 мс, 2048 ~ 20 мс, 4096 ~ 70 мс.");
+                    hint("Side of the matrix. The trajectory is decimated uniformly to n points; the metrics "
+                        "are computed on THE SAME matrix that is drawn. The ceiling is 4096 (4096^2 doubles = "
+                        "134 MB both on the GPU and in host memory).\n"
+                        "Measured on an RTX: 512 ~ 3 ms, 1024 ~ 6 ms, 2048 ~ 20 ms, 4096 ~ 70 ms.");
                     ch |= ImGui::Checkbox("network measures (clustering, transitivity)", &pr.rqa_network);
-                    hint("Подсчёт треугольников сети рекуррентности: O(RR*n^3). Замеры: +30 мс на "
-                        "n=2048, +85 мс на n=4096 сверх обычного расчёта. Поэтому по умолчанию выключено.");
+                    hint("Counting triangles of the recurrence network: O(RR*n^3). Measured: +30 ms at "
+                        "n=2048, +85 ms at n=4096 on top of the usual computation. That is why it is off by default.");
                     ch |= ImGui::Checkbox("compute in continuation mode", &pr.rqa_in_continuation);
-                    hint("В continuation кадр идёт раз в ~50 мс, а RQA на n=2048 стоит ~20 мс из них "
-                        "(на 4096 — 70 мс, то есть кадр уже не выдерживается). Если не укладывается, снимите "
-                        "галочку: траектории продолжат считаться, RQA замрёт до обычного Recompute.");
+                    hint("In continuation a frame comes once every ~50 ms, and RQA at n=2048 costs ~20 ms of that "
+                        "(at 4096 it is 70 ms, i.e. the frame no longer holds). If it does not fit, clear the "
+                        "checkbox: trajectories keep being computed, RQA freezes until the next ordinary Recompute.");
 
                     if (ch) s.rqa_dirty = true;
                     ImGui::EndPopup();
@@ -3957,23 +3957,23 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         const rqa::Metrics& M = rq->metrics;
                         struct Row { const char* name; double val; const char* tip; };
                         const Row rows[] = {
-                            { "RR",     M.RR,     "Recurrence rate: доля рекуррентных пар вне окна Тейлера" },
-                            { "DET",    M.DET,    "Determinism: доля точек, лежащих на диагоналях длины >= l_min" },
-                            { "L",      M.L,      "Средняя длина диагональной линии, в отсчётах" },
-                            { "L_max",  M.L_max,  "Самая длинная диагональ (без LOI), в отсчётах" },
+                            { "RR",     M.RR,     "Recurrence rate: fraction of recurrent pairs outside the Theiler window" },
+                            { "DET",    M.DET,    "Determinism: fraction of points lying on diagonals of length >= l_min" },
+                            { "L",      M.L,      "Mean diagonal line length, in samples" },
+                            { "L_max",  M.L_max,  "Longest diagonal (excluding the LOI), in samples" },
                             { "DIV",    M.DIV,    "1 / L_max" },
-                            { "ENTR",   M.ENTR,   "Энтропия Шеннона распределения диагоналей, нат" },
+                            { "ENTR",   M.ENTR,   "Shannon entropy of the diagonal length distribution, nats" },
                             { "RATIO",  M.RATIO,  "DET / RR" },
-                            { "LAM",    M.LAM,    "Laminarity: доля точек на вертикалях длины >= v_min" },
-                            { "TT",     M.TT,     "Trapping time: средняя вертикаль, в отсчётах" },
-                            { "V_max",  M.V_max,  "Самая длинная вертикаль, в отсчётах" },
-                            { "V_ENTR", M.V_ENTR, "Энтропия распределения вертикалей, нат" },
-                            { "TREND",  M.TREND,  "Наклон линейной регрессии RR по номеру диагонали (RR на отсчёт)" },
-                            { "T1",     M.T1,     "Время возврата 1-го рода, в отсчётах" },
-                            { "T2",     M.T2,     "Время возврата 2-го рода (по началам вертикальных блоков)" },
-                            { "W",      M.W,      "Средняя длина белой вертикали, в отсчётах" },
-                            { "W_max",  M.W_max,  "Самая длинная белая вертикаль, в отсчётах" },
-                            { "RTE",    M.RTE,    "Recurrence time entropy, нормирована на [0,1]" },
+                            { "LAM",    M.LAM,    "Laminarity: fraction of points on verticals of length >= v_min" },
+                            { "TT",     M.TT,     "Trapping time: mean vertical, in samples" },
+                            { "V_max",  M.V_max,  "Longest vertical, in samples" },
+                            { "V_ENTR", M.V_ENTR, "Entropy of the vertical length distribution, nats" },
+                            { "TREND",  M.TREND,  "Slope of the linear regression of RR on diagonal index (RR per sample)" },
+                            { "T1",     M.T1,     "Recurrence time of the first kind, in samples" },
+                            { "T2",     M.T2,     "Recurrence time of the second kind (from the starts of vertical blocks)" },
+                            { "W",      M.W,      "Mean white vertical length, in samples" },
+                            { "W_max",  M.W_max,  "Longest white vertical, in samples" },
+                            { "RTE",    M.RTE,    "Recurrence time entropy, normalised to [0,1]" },
                         };
                         if (ImGui::BeginTable("rqa_metrics", 6,
                                 ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
@@ -5887,10 +5887,10 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("В дБ power и amplitude совпадают тождественно:\n"
+                ImGui::SetTooltip("In dB power and amplitude are identically equal:\n"
                                   "20*log10(sqrt(P)) = 10*log10(P).\n"
-                                  "Различаются они только в линейной шкале —\n"
-                                  "мощность давит слабые пики квадратично.");
+                                  "They differ only on a linear scale -\n"
+                                  "power suppresses weak peaks quadratically.");
         }
         ImGui::BeginDisabled(!c.db_scale);
         InputNumStr("dB floor", c.db_floor_text, kFieldW);
@@ -5899,9 +5899,9 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Нижняя граница логарифмической шкалы.\n"
-                                  "Всё, что слабее, прижимается к этому значению —\n"
-                                  "иначе нулевая ячейка дала бы -inf.");
+                ImGui::SetTooltip("Lower bound of the logarithmic scale.\n"
+                                  "Everything weaker is pinned to this value -\n"
+                                  "otherwise a zero bin would give -inf.");
         }
         ImGui::EndDisabled();
     }
@@ -7769,7 +7769,7 @@ static void draw_order_axis_block(const char* id, const char* title,
 // узел, поэтому счётчик показывает, сколько именно узлов задеты.
 static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) {
     const double tmax = parse_ratio_or(c.t_max_text, 0.0);
-    if (!(tmax > 0.0)) { ImGui::TextDisabled("computing time должно быть > 0"); return; }
+    if (!(tmax > 0.0)) { ImGui::TextDisabled("computing time must be > 0"); return; }
 
     // Собираем узлы по h — либо одну точку (h не свипуется), либо всю ось.
     std::vector<double> hs;
@@ -7819,7 +7819,7 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
 
     if (n_zero > 0)
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-                           "%d узлов с h <= 0 — они уйдут в diverged", n_zero);
+                           "%d nodes with h <= 0 - they will go to diverged", n_zero);
     if (n_min > 0) {
         // Полная работа: 7 вызовов КРС на грубый шаг (1 + 2 + 4).
         double total = 0.0;
@@ -7832,31 +7832,31 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
             cells *= other;
         }
         if (n_min == n_max)
-            ImGui::Text("шагов на ячейку: %lld   ячеек: %.0f   вызовов КРС: %.3g",
+            ImGui::Text("steps per cell: %lld   cells: %.0f   KRS calls: %.3g",
                         n_min, cells, total * 7.0);
         else
-            ImGui::Text("шагов на ячейку: %lld..%lld   ячеек: %.0f   вызовов КРС: %.3g",
+            ImGui::Text("steps per cell: %lld..%lld   cells: %.0f   KRS calls: %.3g",
                         n_min, n_max, cells, total * 7.0);
     }
 
     if (n_bad > 0) {
         if (c.snap_steps) {
             ImGui::TextColored(ImVec4(0.65f, 0.85f, 0.65f, 1.0f),
-                "t_max/h нецелое в %d из %d узлов — h подогнан к t_max/N (сдвиг до %.2g%%)",
+                "t_max/h non-integer in %d of %d nodes - h snapped to t_max/N (shift up to %.2g%%)",
                 n_bad, (int)hs.size(), worst_rel * 100.0);
         } else {
             ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
-                "t_max/h нецелое в %d из %d узлов: конечное время плавает, "
-                "в ошибку подмешан вклад O(h)", n_bad, (int)hs.size());
+                "t_max/h non-integer in %d of %d nodes: the final time drifts, "
+                "an O(h) contribution is mixed into the error", n_bad, (int)hs.size());
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Число шагов должно быть целым. Иначе фактическое конечное время\n"
-                "N*h отличается от t_max и МЕНЯЕТСЯ от узла к узлу, а разница\n"
-                "решений в разные моменты времени имеет порядок O(h) — она\n"
-                "складывается с измеряемой ошибкой и для схем порядка выше\n"
-                "первого полностью её забивает.\n"
-                "\"snap h -> t_max/N\" убирает это, слегка сдвигая сам шаг.");
+                "The number of steps must be an integer. Otherwise the actual final time\n"
+                "N*h differs from t_max and CHANGES from node to node, and the difference\n"
+                "between solutions at different moments in time is of order O(h) - it\n"
+                "adds up with the measured error and for schemes of order above\n"
+                "the first it drowns it out completely.\n"
+                "\"snap h -> t_max/N\" removes this by shifting the step itself slightly.");
     }
 }
 
@@ -7866,7 +7866,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     model.broadcast_source_tab = BroadcastTab::Order;
     model.broadcast_source_idx = s.active_config_index;
     if (s.configs.empty()) {
-        ImGui::TextDisabled("Система не загружена. Выбери систему в списке сверху.");
+        ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
         return;
     }
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
@@ -7931,7 +7931,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         if (h_swept) ImGui::EndDisabled();
         if (h_swept) {
             ImGui::SameLine();
-            ImGui::TextDisabled("(свипуется по оси)");
+            ImGui::TextDisabled("(swept along the axis)");
         }
         InputNumStr("computing time", c.t_max_text, kFieldW);
         InputNumStr("max value", c.max_value_text, kFieldW);
@@ -7939,16 +7939,16 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::Checkbox("snap h -> t_max/N", &c.snap_steps);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Подогнать шаг так, чтобы число шагов было целым.\n"
-                "Выключение воспроизводит поведение остальных вкладок\n"
-                "(floor(t_max/h)) ценой паразитного вклада O(h) в ошибку.");
+                "Adjust the step so that the number of steps is an integer.\n"
+                "Turning this off reproduces the behaviour of the other tabs\n"
+                "(floor(t_max/h)) at the cost of a parasitic O(h) contribution to the error.");
         ImGui::SameLine();
         ImGui::Checkbox("endpoint only", &c.endpoint_only);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Мерить разность только в t = t_max, а не максимум по всей\n"
-                "траектории. На хаотических системах максимум по траектории\n"
-                "быстро начинает отражать разбегание, а не порядок схемы.");
+                "Measure the difference only at t = t_max, not the maximum over the whole\n"
+                "trajectory. On chaotic systems the maximum over the trajectory\n"
+                "quickly starts reflecting divergence rather than the order of the scheme.");
 
         draw_order_steps_hint(c, s);
     }
@@ -7957,7 +7957,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("2D map", &c.two_d);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Выключено — кривая p(ось X). Включено — карта p(X, Y).");
+            ImGui::SetTooltip("Off - a p(X axis) curve. On - a p(X, Y) map.");
         draw_order_axis_block("axx", "Axis X", s, c.axis_x_target,
                               c.axis_x_lo_text, c.axis_x_hi_text,
                               c.axis_x_log, c.axis_x_n_text, true);
@@ -7966,18 +7966,18 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                               c.axis_y_log, c.axis_y_n_text, c.two_d);
 
         if (c.axis_x_target == kOrderTargetH && c.two_d && c.axis_y_target == kOrderTargetH)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "обе оси свипают h");
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep h");
         else if (c.two_d && c.axis_x_target == c.axis_y_target)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "обе оси свипают одно и то же");
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep the same thing");
     }
 
     draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
                           nullptr, &model, BroadcastField::InitCondition);
     draw_named_num_fields("Parameters", s.params, c.param_values,
-        "Параметры МЕТОДА (для композиционных схем) объявляй здесь же обычными "
-        "параметрами системы: в правых частях их можно не использовать, "
-        "а тело кастомной КРС читает их как a[k]. В селекторе оси они "
-        "появятся наравне с остальными.",
+        "Declare METHOD parameters (for composition schemes) right here as ordinary "
+        "system parameters: they need not be used in the right-hand sides, "
+        "and the body of a custom KRS reads them as a[k]. In the axis selector they "
+        "will appear alongside the rest.",
         &model, BroadcastField::Param);
 
     if (!c.last_error.empty())
@@ -8009,11 +8009,11 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| p<=0 %d", r.n_nocontract);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "floor    — E2 утонуло в машинной точности решения: правая\n"
-                "           полка, порядок дальше не измеряется.\n"
-                "p<=0     — разности перестали сокращаться: потеря\n"
-                "           устойчивости, левый край рабочего окна по h.\n"
-                "diverged — nan/inf или |X| > max value; такие ячейки NaN.");
+                "floor    - E2 sank into the machine precision of the solution: the right\n"
+                "           plateau, the order is not measurable any further.\n"
+                "p<=0     - the differences stopped contracting: loss of\n"
+                "           stability, the left edge of the working window in h.\n"
+                "diverged - nan/inf or |X| > max value; such cells are NaN.");
     }
 
     if (ImGui::BeginTabBar("##order_plot_tabs")) {
@@ -8131,10 +8131,10 @@ static void draw_order_plot(AppModel& model, const GuiCallbacks& /*cb*/) {
         ImGui::Checkbox("log Y", &c.plot_y_log);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Логарифм берётся от САМИХ ЗНАЧЕНИЙ, а ось остаётся линейной:\n"
-                "Plot2DView умеет лог только по X. Наклон прямой в log-log\n"
-                "от этого не меняется и равен p, но подписи оси читаются\n"
-                "как log10 E, а не как 1e-6.");
+                "The logarithm is taken of THE VALUES THEMSELVES while the axis stays linear:\n"
+                "Plot2DView can only do log on X. The slope of the line in log-log\n"
+                "does not change because of that and equals p, but the axis labels read\n"
+                "as log10 E, not as 1e-6.");
         ImGui::SameLine();
         ImGui::Checkbox("show E2", &c.show_e2);
     } else {

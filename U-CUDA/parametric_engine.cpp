@@ -366,19 +366,19 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     };
 
     // Та же валидация, что и у GPU-двойника.
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
+                                                              return fail("param_index out of range");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -399,7 +399,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -503,17 +503,17 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
 
     // Диспетчер уже провалидировал req целиком; здесь — только то, от чего
     // зависит своя разметка буферов, плюс дешёвая страховка на прямой вызов.
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -532,7 +532,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -658,7 +658,7 @@ std::string exe_dir() {
 
 std::string read_text_file(const std::string& path, std::string& err) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) { err = "не удалось открыть " + path; return {}; }
+    if (!f) { err = "failed to open " + path; return {}; }
     std::ostringstream ss; ss << f.rdbuf();
     std::string s = ss.str();
     // UTF-8 BOM: 0xEF 0xBB 0xBF в начале — NVRTC от него спотыкается.
@@ -769,18 +769,18 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     LLE1DResult res;
     auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-    if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+                                                              return fail("param_index out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.NT <= 0.0)          return fail("NT must be > 0");
+    if (req.eps <= 0.0)         return fail("eps must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -1078,18 +1078,18 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     LS1DResult res;
     auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-    if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+                                                              return fail("param_index out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.NT <= 0.0)          return fail("NT must be > 0");
+    if (req.eps <= 0.0)         return fail("eps must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -1261,26 +1261,26 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     Dft1DResult res;
     auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (!req.sweep_over_h && !req.sweep_over_var &&
         (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
-                                                              return fail("param_index вне диапазона");
+                                                              return fail("param_index out of range");
     if (req.sweep_over_var &&
         (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
-                                                              return fail("var_sweep_index вне диапазона");
+                                                              return fail("var_sweep_index out of range");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
     if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-                                return fail("log-сетка по частоте требует freq lo/hi > 0");
+                                return fail("a log grid over frequency requires freq lo/hi > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -1297,7 +1297,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -1861,8 +1861,8 @@ struct ParametricEngine::Impl {
                 cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
         }
         if (cuda_include_opt.empty()) {
-            err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
-                  "(установи CUDA Toolkit или задай CUDA_PATH=...)";
+            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+                  "(install the CUDA Toolkit or set CUDA_PATH=...)";
             nvrtcDestroyProgram(&prog);
             return false;
         }
@@ -2108,8 +2108,8 @@ struct ParametricEngine::Impl {
                 cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
         }
         if (cuda_include_opt.empty()) {
-            err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
-                  "(установи CUDA Toolkit или задай CUDA_PATH=...)";
+            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+                  "(install the CUDA Toolkit or set CUDA_PATH=...)";
             nvrtcDestroyProgram(&prog);
             return false;
         }
@@ -2220,7 +2220,7 @@ struct ParametricEngine::Impl {
         if (req.continuation) {
             if (req.sweep_over_var) {
                 Bifurcation1DResult r;
-                r.error = "continuation требует param-sweep, не IC-sweep";
+                r.error = "continuation requires a param sweep, not an IC sweep";
                 return r;
             }
             // Continuation-ветка возвращается ДО общего блока валидации ниже,
@@ -2229,7 +2229,7 @@ struct ParametricEngine::Impl {
             // диспетчера, там дублировать не нужно.
             if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
                 Bifurcation1DResult r;
-                r.error = "log scale требует param lo/hi > 0";
+                r.error = "log scale requires param lo/hi > 0";
                 return r;
             }
             // h-свип теперь поддержан обеими ветками: шаг пересчитывается в
@@ -2244,32 +2244,32 @@ struct ParametricEngine::Impl {
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
         // валидация
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         // base_values уже идёт со сдвигом +1 (a[0] зарезервирован):
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.sweep_over_h) {
             if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
-                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+                return fail("h lo/hi must be > 0 with sweep_over_h");
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
+                return fail("var_sweep_index out of range");
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
         // writable_var == -1 — sentinel "combination of first vars" (порт MATLAB
         // выбора x[0]+pi*x[1]+euler*x[2] в loopCalculateDiscreteModel_int).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0");
+            return fail("log scale requires param lo/hi > 0");
 
         // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU
         // (то же место в конвейере, что у run_lle_1d / run_ls_1d). Стоит после
@@ -2337,7 +2337,7 @@ struct ParametricEngine::Impl {
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Пики живут в собственных коротких строках, а не в буферах длиной
         // в траекторию — см. run_bif2d. Для 1D это важнее, чем для 2D: здесь оба
@@ -2371,7 +2371,7 @@ struct ParametricEngine::Impl {
         // ядра сами отсекают лишние потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
         // кратным 32 не бывает и всегда считался нормально. Зато при n_pts < 32 округление давало
         // 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
+        if (nPtsLimiter == 0) return fail("n_pts must be > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // Host buffers (порт строк 257-264 NL)
@@ -2646,39 +2646,39 @@ struct ParametricEngine::Impl {
         auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
         // валидация
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.sweep_over_h) {
             if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
-                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+                return fail("h lo/hi must be > 0 with sweep_over_h");
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
+                return fail("var_sweep_index out of range");
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.NT <= 0.0)          return fail("NT must be > 0");
+        if (req.eps <= 0.0)         return fail("eps must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0");
+            return fail("log scale requires param lo/hi > 0");
 
         // Continuation: точки выстроены в цепочку, поэтому IC-свип несовместим
         // (как в run_bif1d). h-свип и log-сетка поддержаны на обоих устройствах.
         if (req.continuation) {
-            if (req.sweep_over_var) return fail("continuation требует param-sweep, не IC-sweep");
+            if (req.sweep_over_var) return fail("continuation requires a param sweep, not an IC sweep");
             return req.use_cpu ? run_lle1d_cpu(req, /*continuation*/ true)
                                : run_lle1d_continuation_gpu(req);
         }
         // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU.
         if (req.use_cpu) {
-            if (req.sweep_over_var) return fail("CPU-ветка поддерживает только param-sweep");
+            if (req.sweep_over_var) return fail("the CPU branch supports a param sweep only");
             return run_lle1d_cpu(req, /*continuation*/ false);
         }
 
@@ -2723,7 +2723,7 @@ struct ParametricEngine::Impl {
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT too small)");
 
         // Memory budget — мирор NonLinAnal LLE1D:2291-2299 (консервативно).
         size_t freeMemory = 0;
@@ -2987,16 +2987,16 @@ struct ParametricEngine::Impl {
         LLE2DResult res;
         auto fail = [&](const std::string& msg) -> LLE2DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне допустимого диапазона");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of the allowed range");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.NT <= 0.0)          return fail("NT must be > 0");
+        if (req.eps <= 0.0)         return fail("eps must be > 0");
 
         // par_or_var — compile-time. Логика маппинга см. parametric_engine.h.
         // Дополнительно нужен swap_xy: если X=param, Y=IC, передаём в kernel с
@@ -3020,12 +3020,12 @@ struct ParametricEngine::Impl {
         bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;
 
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось X)");
+            return fail("log scale requires param lo/hi > 0 (X axis)");
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось Y)");
+            return fail("log scale requires param lo/hi > 0 (Y axis)");
 
         if (req.sweep_over_h && req.sweep_over_h_2)
-            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+            return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
         if (req.sweep_over_h || req.sweep_over_h_2) {
             // Ровно одна ось — h, другая param либо IC. Кернел-слоты X/Y совпадают с
@@ -3038,19 +3038,19 @@ struct ParametricEngine::Impl {
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
                 } else {
-                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                     idx_axis_y = req.var_sweep_index_2;
                 }
                 idx_axis_x = 0; // dummy -- слот X пропускается в кернеле (i == hSweepAxis)
             } else {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
                     idx_axis_x = req.param_index;
                 } else {
-                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
                     idx_axis_x = req.var_sweep_index;
                 }
                 idx_axis_y = 0; // dummy
@@ -3063,13 +3063,13 @@ struct ParametricEngine::Impl {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
-                if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
-                if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+                if (!check_param(req.param_index))    return fail("param_index (X axis) out of range");
+                if (!check_param(req.param_index_2))  return fail("param_index_2 (Y axis) out of range");
                 idx_axis_x = req.param_index;
                 idx_axis_y = req.param_index_2;
             } else {
-                if (!check_var(req.var_sweep_index))    return fail("var_sweep_index (ось X) вне диапазона");
-                if (!check_var(req.var_sweep_index_2))  return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                if (!check_var(req.var_sweep_index))    return fail("var_sweep_index (X axis) out of range");
+                if (!check_var(req.var_sweep_index_2))  return fail("var_sweep_index_2 (Y axis) out of range");
                 idx_axis_x = req.var_sweep_index;
                 idx_axis_y = req.var_sweep_index_2;
             }
@@ -3079,8 +3079,8 @@ struct ParametricEngine::Impl {
             // X=IC, Y=param — нативно соответствует ветке par_or_var=2 kernel'а.
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
-            if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+            if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
+            if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
             idx_axis_x = req.var_sweep_index;
             idx_axis_y = req.param_index_2;
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
@@ -3090,8 +3090,8 @@ struct ParametricEngine::Impl {
             // под капотом и транспонируем результат при выгрузке.
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
-            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
+            if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
             // В kernel: ось 1 (IC) = пользовательский Y, ось 2 (param) = X.
             idx_axis_x = req.var_sweep_index_2;
             idx_axis_y = req.param_index;
@@ -3133,7 +3133,7 @@ struct ParametricEngine::Impl {
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT too small)");
 
         size_t total_cells = (size_t)nPts * (size_t)nPts;
 
@@ -3422,38 +3422,38 @@ struct ParametricEngine::Impl {
         LS1DResult res;
         auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.sweep_over_h) {
             if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
-                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+                return fail("h lo/hi must be > 0 with sweep_over_h");
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
+                return fail("var_sweep_index out of range");
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.NT <= 0.0)          return fail("NT must be > 0");
+        if (req.eps <= 0.0)         return fail("eps must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0");
+            return fail("log scale requires param lo/hi > 0");
 
         // CPU-ветки — до ensure_init, CUDA им не нужна. Ограничения те же, что
         // и у LLE (см. run_lle_1d).
         if (req.continuation) {
-            if (req.sweep_over_var) return fail("continuation требует param-sweep, не IC-sweep");
+            if (req.sweep_over_var) return fail("continuation requires a param sweep, not an IC sweep");
             return req.use_cpu ? run_ls1d_cpu(req, /*continuation*/ true)
                                : run_ls1d_continuation_gpu(req);
         }
         if (req.use_cpu) {
-            if (req.sweep_over_var) return fail("CPU-ветка поддерживает только param-sweep");
+            if (req.sweep_over_var) return fail("the CPU branch supports a param sweep only");
             return run_ls1d_cpu(req, /*continuation*/ false);
         }
 
@@ -3494,7 +3494,7 @@ struct ParametricEngine::Impl {
         int amountOfPointsInBlock = (int)(tMax / NT);
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT too small)");
 
         // Memory budget — мирор NonLinAnal LS1D:2719-2727 (агрессивно делит /16,
         // т.к. per-system memory ~ N).
@@ -3742,16 +3742,16 @@ struct ParametricEngine::Impl {
         LS2DResult res;
         auto fail = [&](const std::string& msg) -> LS2DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне допустимого диапазона");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of the allowed range");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-        if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.NT <= 0.0)          return fail("NT must be > 0");
+        if (req.eps <= 0.0)         return fail("eps must be > 0");
 
         // par_or_var + swap_xy: точная копия логики из run_lle_2d.
         auto check_param = [&](int p1based) -> bool {
@@ -3769,12 +3769,12 @@ struct ParametricEngine::Impl {
         bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;  // см. run_lle_2d
 
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось X)");
+            return fail("log scale requires param lo/hi > 0 (X axis)");
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось Y)");
+            return fail("log scale requires param lo/hi > 0 (Y axis)");
 
         if (req.sweep_over_h && req.sweep_over_h_2)
-            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+            return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
         if (req.sweep_over_h || req.sweep_over_h_2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
@@ -3784,19 +3784,19 @@ struct ParametricEngine::Impl {
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
                 } else {
-                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                     idx_axis_y = req.var_sweep_index_2;
                 }
                 idx_axis_x = 0;
             } else {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
                     idx_axis_x = req.param_index;
                 } else {
-                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
                     idx_axis_x = req.var_sweep_index;
                 }
                 idx_axis_y = 0;
@@ -3807,13 +3807,13 @@ struct ParametricEngine::Impl {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
-                if (!check_param(req.param_index))    return fail("param_index (ось X) вне диапазона");
-                if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+                if (!check_param(req.param_index))    return fail("param_index (X axis) out of range");
+                if (!check_param(req.param_index_2))  return fail("param_index_2 (Y axis) out of range");
                 idx_axis_x = req.param_index;
                 idx_axis_y = req.param_index_2;
             } else {
-                if (!check_var(req.var_sweep_index))    return fail("var_sweep_index (ось X) вне диапазона");
-                if (!check_var(req.var_sweep_index_2))  return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                if (!check_var(req.var_sweep_index))    return fail("var_sweep_index (X axis) out of range");
+                if (!check_var(req.var_sweep_index_2))  return fail("var_sweep_index_2 (Y axis) out of range");
                 idx_axis_x = req.var_sweep_index;
                 idx_axis_y = req.var_sweep_index_2;
             }
@@ -3822,8 +3822,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
-            if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+            if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
+            if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
             idx_axis_x = req.var_sweep_index;
             idx_axis_y = req.param_index_2;
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
@@ -3831,8 +3831,8 @@ struct ParametricEngine::Impl {
         } else {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
-            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
+            if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
             idx_axis_x = req.var_sweep_index_2;
             idx_axis_y = req.param_index;
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
@@ -3873,7 +3873,7 @@ struct ParametricEngine::Impl {
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max / NT too small)");
 
         size_t total_cells = (size_t)nPts * (size_t)nPts;
         const int N = amountOfInitialConditions;
@@ -4395,7 +4395,7 @@ struct ParametricEngine::Impl {
         const double worstCaseH = req.sweep_over_h
                                 ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                                 : req.h;
-        if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+        if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
         const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
         if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -4514,20 +4514,20 @@ struct ParametricEngine::Impl {
         // Валидация — как в run_dft1d_classical, минус param_index/var_sweep_index:
         // свипуемая величина здесь h, индексы параметра/НУ не участвуют вовсе
         // (именно поэтому старый путь ломался на системах без параметров).
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
         // param_lo/hi (= границы h) проверены на положительность в run_dft_1d.
 
         std::string err;
@@ -4541,7 +4541,7 @@ struct ParametricEngine::Impl {
         const int    nPts  = req.n_pts;
         const int    nFreq = req.n_freq;
         const double worstCaseH = (req.param_lo < req.param_hi) ? req.param_lo : req.param_hi;
-        if (worstCaseH <= 0.0) return fail("h lo/hi должны быть > 0 при свипе по dt (h)");
+        if (worstCaseH <= 0.0) return fail("h lo/hi must be > 0 when sweeping over dt (h)");
 
         // Самый мелкий шаг диапазона задаёт длину буфера. Считаем в double и
         // проверяем до сужения в int: t_max/h_lo легко перевалит за 2^31, и без
@@ -4549,9 +4549,9 @@ struct ParametricEngine::Impl {
         // внятного сообщения.
         const double maxBlockD = std::ceil(req.t_max / worstCaseH / (double)req.pre_scaller);
         if (!(maxBlockD >= 1.0))
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
         if (maxBlockD > 2.0e9)
-            return fail("h lo слишком мал: блок > 2e9 сэмплов (подними h lo, t_max или pre_scaller)");
+            return fail("h lo too small: block > 2e9 samples (raise h lo, t_max or pre_scaller)");
         const int maxPointsInBlock = (int)maxBlockD;
 
         // --- Memory budget: как в run_dft1d_classical, но на систему берётся
@@ -4574,8 +4574,8 @@ struct ParametricEngine::Impl {
 
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter == 0)
-            return fail("не хватает памяти GPU даже на одну точку h-свипа "
-                        "(блок " + std::to_string(maxPointsInBlock) + " сэмплов)");
+            return fail("not enough GPU memory even for a single h-sweep point "
+                        "(block " + std::to_string(maxPointsInBlock) + " samples)");
         if (nPtsLimiter > (size_t)nPts) nPtsLimiter = (size_t)nPts;
         const size_t originalNPtsLimiter = nPtsLimiter;
 
@@ -4776,20 +4776,20 @@ struct ParametricEngine::Impl {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
         if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                                     return fail("param_index вне диапазона");
+                                                                     return fail("param_index out of range");
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                     return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -4803,7 +4803,7 @@ struct ParametricEngine::Impl {
         const double worstCaseH = req.sweep_over_h
                                 ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                                 : req.h;
-        if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+        if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
         const int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
         if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -4996,7 +4996,7 @@ struct ParametricEngine::Impl {
         // поэтому стоят до ensure_init внутри самих функций.
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
             Dft1DResult r;
-            r.error = "log scale требует param lo/hi > 0";
+            r.error = "log scale requires param lo/hi > 0";
             return r;
         }
         // h-свип: границы — это сам шаг, нулевой/отрицательный шаг не считается
@@ -5004,13 +5004,13 @@ struct ParametricEngine::Impl {
         // log_scale выше (см. те же проверки в run_bif1d / run_lle_1d).
         if (req.sweep_over_h && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
             Dft1DResult r;
-            r.error = "h lo/hi должны быть > 0 при свипе по dt (h)";
+            r.error = "h lo/hi must be > 0 when sweeping over dt (h)";
             return r;
         }
         if (req.continuation) {
             if (req.sweep_over_var) {
                 Dft1DResult r;
-                r.error = "continuation требует param-sweep, не IC-sweep";
+                r.error = "continuation requires a param sweep, not an IC sweep";
                 return r;
             }
             return req.use_cpu ? run_dft1d_cpu(req, /*continuation*/ true)
@@ -5042,31 +5042,31 @@ struct ParametricEngine::Impl {
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
         // валидация (как run_bif1d + n_freq/freq range)
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
+                return fail("var_sweep_index out of range");
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int
         // / Bifurcation1DRequest::writable_var) — тот же calculateDiscreteModelCUDA,
         // так что DFT1D поддерживает её точно так же.
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -5101,7 +5101,7 @@ struct ParametricEngine::Impl {
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Memory budget: как run_bif1d, но выход DFT (AkCOS/BkSIN, nPtsLimiter*n_freq каждый)
         // обычно намного меньше, чем outPeaks/timeOfPeaks (nPtsLimiter*amountOfPointsInBlock) —
@@ -5132,7 +5132,7 @@ struct ParametricEngine::Impl {
         // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
         // run_bif1d: ядра сами отсекают лишние потоки, а при n_pts < 32 округление давало 0, и Run
         // падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
+        if (nPtsLimiter == 0) return fail("n_pts must be > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         std::vector<numb> h_AkCOS(nPtsLimiter * (size_t)nFreq);
@@ -5414,24 +5414,24 @@ struct ParametricEngine::Impl {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
         if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                                     return fail("param_index вне диапазона");
+                                                                     return fail("param_index out of range");
         // writable_var == -1 — sentinel "combination" (см. run_bif1d_continuation).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                     return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -5672,17 +5672,17 @@ struct ParametricEngine::Impl {
         auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
 
         // валидация
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
-        if (req.n_pts <= 0)          return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)            return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)        return fail("t_max должно быть > 0");
-        if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)    return fail("pre_scaller должно быть > 0");
-        if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan должно быть > 0");
-        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.n_pts <= 0)          return fail("n_pts must be > 0");
+        if (req.h <= 0.0)            return fail("h must be > 0");
+        if (req.t_max <= 0.0)        return fail("t_max must be > 0");
+        if (req.transient_time < 0)  return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)    return fail("pre_scaller must be > 0");
+        if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan must be > 0");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
 
         // par_or_var + swap_xy (та же логика что у run_lle_2d)
         auto check_param = [&](int p1based) -> bool {
@@ -5700,12 +5700,12 @@ struct ParametricEngine::Impl {
         bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;  // см. run_lle_2d
 
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось X)");
+            return fail("log scale requires param lo/hi > 0 (X axis)");
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось Y)");
+            return fail("log scale requires param lo/hi > 0 (Y axis)");
 
         if (req.sweep_over_h && req.sweep_over_h_2)
-            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+            return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
         if (req.sweep_over_h || req.sweep_over_h_2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
@@ -5715,19 +5715,19 @@ struct ParametricEngine::Impl {
 
             if (req.sweep_over_h) {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
                 } else {
-                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                     idx_axis_y = req.var_sweep_index_2;
                 }
                 idx_axis_x = 0;
             } else {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
                     idx_axis_x = req.param_index;
                 } else {
-                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
                     idx_axis_x = req.var_sweep_index;
                 }
                 idx_axis_y = 0;
@@ -5740,7 +5740,7 @@ struct ParametricEngine::Impl {
             const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
             const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
             if (h_lo <= 0.0 || h_hi <= 0.0)
-                return fail(std::string("h lo/hi должны быть > 0 при свипе по dt (h) (ось ")
+                return fail(std::string("h lo/hi must be > 0 when sweeping over dt (h) (axis ")
                             + (req.sweep_over_h ? "X" : "Y") + ")");
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
@@ -5748,13 +5748,13 @@ struct ParametricEngine::Impl {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
-                if (!check_param(req.param_index))   return fail("param_index (ось X) вне диапазона");
-                if (!check_param(req.param_index_2)) return fail("param_index_2 (ось Y) вне диапазона");
+                if (!check_param(req.param_index))   return fail("param_index (X axis) out of range");
+                if (!check_param(req.param_index_2)) return fail("param_index_2 (Y axis) out of range");
                 idx_axis_x = req.param_index;
                 idx_axis_y = req.param_index_2;
             } else {
-                if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
-                if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
+                if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                 idx_axis_x = req.var_sweep_index;
                 idx_axis_y = req.var_sweep_index_2;
             }
@@ -5763,8 +5763,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (ось X) вне диапазона");
-            if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+            if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (X axis) out of range");
+            if (!check_param(req.param_index_2))  return fail("param_index_2 (Y axis) out of range");
             idx_axis_x = req.var_sweep_index;
             idx_axis_y = req.param_index_2;
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
@@ -5772,8 +5772,8 @@ struct ParametricEngine::Impl {
         } else {
             par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                        req.sweep_over_var, req.sweep_over_var_2);
-            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
-            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
+            if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
             idx_axis_x = req.var_sweep_index_2;
             idx_axis_y = req.param_index;
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
@@ -5824,7 +5824,7 @@ struct ParametricEngine::Impl {
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Буферы пиков больше НЕ длиной в траекторию: peakFinder всё равно отдаёт
         // не больше max_amount_of_peaks. "+1" — стадия межпиковых интервалов съедает
@@ -5859,7 +5859,7 @@ struct ParametricEngine::Impl {
         // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
         // run_bif1d: ядра сами отсекают лишние потоки, а при числе ячеек сетки < 32 округление
         // давало 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("сетка пуста (n_pts должно быть > 0)");
+        if (nPtsLimiter == 0) return fail("the grid is empty (n_pts must be > 0)");
 
         size_t originalNPtsLimiter = nPtsLimiter;
 
@@ -6214,20 +6214,20 @@ struct ParametricEngine::Impl {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                  return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне допустимого диапазона");
+        if (req.krs_body.empty())                                  return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of the allowed range");
         if ((int)req.initial_conditions.size() != req.amountOfX)   return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)      return fail("base_values слишком много");
-        if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
-        if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
-        if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (выбери разные переменные)");
-        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
-        if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan должно быть > 0");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)      return fail("too many base_values");
+        if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
+        if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
+        if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (pick different variables)");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+        if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -6672,14 +6672,14 @@ struct ParametricEngine::Impl {
             res.error = msg; return res;
         };
 
-        if (req.krs_body.empty())                                return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX вне допустимого диапазона");
-        if (req.n_pts <= 0)                                      return fail("n_pts должно быть > 0");
-        if (req.eps_dbscan <= 0.0)                               return fail("eps_dbscan должно быть > 0");
+        if (req.krs_body.empty())                                return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX out of the allowed range");
+        if (req.n_pts <= 0)                                      return fail("n_pts must be > 0");
+        if (req.eps_dbscan <= 0.0)                               return fail("eps_dbscan must be > 0");
         const size_t total_cells = (size_t)req.n_pts * (size_t)req.n_pts;
-        if (req.avg_peaks.size()     != total_cells)             return fail("avg_peaks: размер не совпадает с n_pts²");
-        if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: размер не совпадает с n_pts²");
-        if (req.helpful_array.size() != total_cells)             return fail("helpful_array: размер не совпадает с n_pts²");
+        if (req.avg_peaks.size()     != total_cells)             return fail("avg_peaks: size does not match n_pts²");
+        if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: size does not match n_pts²");
+        if (req.helpful_array.size() != total_cells)             return fail("helpful_array: size does not match n_pts²");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -6993,14 +6993,14 @@ struct ParametricEngine::Impl {
                                  std::vector<double>& out, std::string& err)
     {
         const int n = (ax.kind == OrderAxisKind::None) ? 1 : ax.n_pts;
-        if (n <= 0)    { err = std::string(what) + ": число точек должно быть > 0"; return false; }
-        if (n > 100000){ err = std::string(what) + ": число точек слишком велико"; return false; }
+        if (n <= 0)    { err = std::string(what) + ": the number of points must be > 0"; return false; }
+        if (n > 100000){ err = std::string(what) + ": the number of points is too large"; return false; }
         out.assign((size_t)n, 0.0);
         if (ax.kind == OrderAxisKind::None) { out[0] = 0.0; return true; }
         if (n == 1) { out[0] = ax.lo; return true; }
         if (ax.log_scale) {
             if (!(ax.lo > 0.0) || !(ax.hi > 0.0)) {
-                err = std::string(what) + ": лог-масштаб требует обеих границ > 0";
+                err = std::string(what) + ": log scale requires both bounds > 0";
                 return false;
             }
             const double k = std::log(ax.hi / ax.lo) / (double)(n - 1);
@@ -7039,42 +7039,42 @@ struct ParametricEngine::Impl {
         res.axis_y = req.axis_y;
         auto fail = [&](const std::string& msg) -> OrderResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX) return fail("initial_conditions.size() != amountOfX");
-        if (req.values.empty())                                  return fail("values пуст (нужен хотя бы a[0])");
-        if ((int)req.values.size() > kMaxAmountOfValues)         return fail("values слишком много");
-        if (!(req.h > 0.0))                                      return fail("h должно быть > 0");
-        if (!(req.t_max > 0.0))                                  return fail("t_max должно быть > 0");
-        if (req.axis_x.kind == OrderAxisKind::None)              return fail("ось X не задана");
+        if (req.values.empty())                                  return fail("values is empty (at least a[0] is required)");
+        if ((int)req.values.size() > kMaxAmountOfValues)         return fail("too many values");
+        if (!(req.h > 0.0))                                      return fail("h must be > 0");
+        if (!(req.t_max > 0.0))                                  return fail("t_max must be > 0");
+        if (req.axis_x.kind == OrderAxisKind::None)              return fail("the X axis is not set");
 
         const int amountOfValues = (int)req.values.size();
         auto check_axis_index = [&](const OrderAxis& ax, const char* what) -> bool {
             if (ax.kind != OrderAxisKind::Value) return true;
             if (ax.index < 0 || ax.index >= amountOfValues) {
-                res.error = std::string(what) + ": индекс параметра вне a[]";
+                res.error = std::string(what) + ": parameter index outside a[]";
                 return false;
             }
             return true;
         };
-        if (!check_axis_index(req.axis_x, "ось X")) return res;
-        if (!check_axis_index(req.axis_y, "ось Y")) return res;
+        if (!check_axis_index(req.axis_x, "X axis")) return res;
+        if (!check_axis_index(req.axis_y, "Y axis")) return res;
         if (req.axis_x.kind == OrderAxisKind::H && req.axis_y.kind == OrderAxisKind::H)
-            return fail("обе оси не могут свипать h");
+            return fail("both axes cannot sweep h");
         if (req.axis_x.kind == OrderAxisKind::Value && req.axis_y.kind == OrderAxisKind::Value
             && req.axis_x.index == req.axis_y.index)
-            return fail("обе оси свипают один и тот же параметр");
+            return fail("both axes sweep the same parameter");
 
         std::string err;
-        if (!order_axis_nodes(req.axis_x, "ось X", res.axis_x_vals, err)) return fail(err);
-        if (!order_axis_nodes(req.axis_y, "ось Y", res.axis_y_vals, err)) return fail(err);
+        if (!order_axis_nodes(req.axis_x, "X axis", res.axis_x_vals, err)) return fail(err);
+        if (!order_axis_nodes(req.axis_y, "Y axis", res.axis_y_vals, err)) return fail(err);
 
         res.n_pts_x = (int)res.axis_x_vals.size();
         res.n_pts_y = (req.axis_y.kind == OrderAxisKind::None) ? 1 : (int)res.axis_y_vals.size();
         if (req.axis_y.kind == OrderAxisKind::None) res.axis_y_vals.assign(1, 0.0);
 
         const size_t total_cells = (size_t)res.n_pts_x * (size_t)res.n_pts_y;
-        if (total_cells == 0) return fail("пустая сетка");
+        if (total_cells == 0) return fail("empty grid");
 
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
@@ -7099,7 +7099,7 @@ struct ParametricEngine::Impl {
             }
         // 1e15 шагов — это уже «никогда не досчитается», и (long long) ниже
         // всё равно переполнится на произведении с числом ячеек.
-        if (totalSteps > 1.0e15) return fail("t_max / h слишком велико: работа не помещается в разумное время");
+        if (totalSteps > 1.0e15) return fail("t_max / h too large: the work does not fit into a reasonable time");
 
         const int    progressStride = progress_stride_for((size_t)maxStepsPerCell);
         const double ticksTotal     = totalSteps / (double)progressStride;
@@ -7275,16 +7275,16 @@ struct ParametricEngine::Impl {
         res.mode = req.mode;
         auto fail = [&](const std::string& msg) -> FastSyncResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                  return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                  return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
         if ((int)req.ic_master.size()  != req.amountOfX)           return fail("ic_master.size() != amountOfX");
         if ((int)req.ic_slave.size()   != req.amountOfX)           return fail("ic_slave.size() != amountOfX");
         if ((int)req.k_forward.size()  != req.amountOfX)           return fail("k_forward.size() != amountOfX");
         if ((int)req.k_backward.size() != req.amountOfX)           return fail("k_backward.size() != amountOfX");
-        if ((int)req.values.size() > kMaxAmountOfValues)           return fail("values слишком много");
-        if (req.h <= 0.0)             return fail("h должно быть > 0");
-        if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr должно быть > 0");
-        if (req.pre_scaller <= 0)     return fail("pre_scaller должно быть > 0");
+        if ((int)req.values.size() > kMaxAmountOfValues)           return fail("too many values");
+        if (req.h <= 0.0)             return fail("h must be > 0");
+        if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr must be > 0");
+        if (req.pre_scaller <= 0)     return fail("pre_scaller must be > 0");
 
         // Snapshot CSV-relevant request fields for GUI right-click export.
         // FastSync has no engine-side CSV writer, so this is consumed only by
@@ -7332,9 +7332,9 @@ struct ParametricEngine::Impl {
 
         if (req.mode == 0) {
             // On Attractor
-            if (req.t_max <= 0.0)         return fail("t_max должно быть > 0");
-            if (req.transient_time < 0)   return fail("transient_time должно быть >= 0");
-            if (req.window <= (numb)0.0)  return fail("window должно быть > 0");
+            if (req.t_max <= 0.0)         return fail("t_max must be > 0");
+            if (req.transient_time < 0)   return fail("transient_time must be >= 0");
+            if (req.window <= (numb)0.0)  return fail("window must be > 0");
 
             // Two FS-specific kernels — НЕ calculateDiscreteModelCUDA:
             //   fillFSMasterTrajectory (template, single-thread) — фильтрует
@@ -7355,7 +7355,7 @@ struct ParametricEngine::Impl {
             {
                 const double skip_d = req.transient_time / req.h;   // h > 0 проверен выше
                 if (!std::isfinite(skip_d) || skip_d > 1.0e15)
-                    return fail("transient_time / h слишком велико");
+                    return fail("transient_time / h too large");
                 amountOfPointsForSkip = (size_t)skip_d;
             }
             const int nPts                  = amountOfCTPoints / (req.pre_scaller > 0 ? req.pre_scaller : 1);
@@ -7547,12 +7547,12 @@ struct ParametricEngine::Impl {
         }
         else {
             // On Grid
-            if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-            if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
-            if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
+            if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+            if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
+            if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
             if (req.axis_x_var == req.axis_y_var) return fail("axis_x_var == axis_y_var");
-            if (req.transient_time < 0)        return fail("transient_time должно быть >= 0");
-            if (req.transient_time_slave < 0)  return fail("transient_time_slave должно быть >= 0");
+            if (req.transient_time < 0)        return fail("transient_time must be >= 0");
+            if (req.transient_time_slave < 0)  return fail("transient_time_slave must be >= 0");
 
             std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
@@ -7574,7 +7574,7 @@ struct ParametricEngine::Impl {
                 if (tt <= 0.0) return true;
                 const double skip_d = tt / req.h;
                 if (!std::isfinite(skip_d) || skip_d > 1.0e15) {
-                    err = std::string(what) + " / h слишком велико";
+                    err = std::string(what) + " / h too large";
                     return false;
                 }
                 out = (size_t)skip_d;

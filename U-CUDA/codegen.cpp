@@ -468,8 +468,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
     void cd_check_complex_safe(const PN& n) {
         if (!n) return;
         if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2"))
-            throw std::runtime_error("Complex CD: функция " + n->name +
-                " не определена в комплексной арифметике — выбери другую схему");
+            throw std::runtime_error("Complex CD: function " + n->name +
+                " is not defined in complex arithmetic - pick another scheme");
         cd_check_complex_safe(n->a);
         cd_check_complex_safe(n->b);
         for (const auto& c : n->args) cd_check_complex_safe(c);

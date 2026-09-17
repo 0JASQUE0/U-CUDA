@@ -170,7 +170,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     OrderRequest req = build_order_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         cancel_token.reset();
         progress_token.reset();
         return false;
@@ -225,7 +225,7 @@ bool OrderAnalysisSession::poll() {
 std::vector<std::string> OrderAnalysisSession::axis_target_names() const {
     std::vector<std::string> out;
     out.reserve(params.size() + 2);
-    out.push_back("h (шаг)");
+    out.push_back("h (step)");
     out.push_back("s (a[0])");
     for (size_t i = 0; i < params.size(); ++i)
         out.push_back(params[i] + " (a[" + std::to_string(i + 1) + "])");
