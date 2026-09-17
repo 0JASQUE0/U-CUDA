@@ -7,8 +7,9 @@
 // Расширяемый набор схем интегрирования поверх SystemEvaluator.
 // Добавление новой схемы = добавить enum + одну функцию шага в .cpp,
 // не трогая расчёт траектории и остальные схемы.
+// Map is not a scheme but the discrete-map step itself (h is unused).
 enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler };
+                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
 
 IntScheme int_scheme_from_string(const std::string& s);
 

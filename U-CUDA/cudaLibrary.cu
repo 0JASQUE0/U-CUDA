@@ -929,11 +929,18 @@ struct PeakStream
 	numb   sumP, sumP2, sumI, sumI2;
 	numb   last;
 
+	// Emit every sample instead of peaks. A discrete map's bifurcation diagram
+	// plots each iterate x_n, not the local maxima of the sequence: the peak
+	// filter would drop the lower branch of every period-2 orbit and clip the
+	// bottom of the chaotic band. Feeds pushRaw() instead of push().
+	bool   emitAll;
+
 	__device__ __host__ void init(numb* peaks, numb* times, size_t base,
-		numb step, size_t len, int cap)
+		numb step, size_t len, int cap, bool all = false)
 	{
 		outPeaks = peaks; timeOfPeaks = times; peakBase = base;
 		sampleStep = step; scanLen = len; capacity = cap;
+		emitAll = all || !doCalculatePeaks;
 		w0 = w1 = w2 = (numb)0;
 		n = 0; nextI = 2; walking = false; done = false;
 		raw = 0; emitted = 0; anchorTime = (numb)0; haveAnchor = false;
@@ -1243,8 +1250,8 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 			sample = x[writableVar];
 		}
 
-		if (doCalculatePeaks) peaks.push(sample);
-		else                  peaks.pushRaw(sample);
+		if (peaks.emitAll) peaks.pushRaw(sample);
+		else               peaks.push(sample);
 
 		for (int j = 0; j < preScaller; ++j)
 			calculateDiscreteModel(x, values, h);
@@ -1536,7 +1543,8 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	const int		peakCapacity,
 	const volatile int* cancelFlag,   // device-side, polled once per CHECK_INTERVAL steps
 	int*			progressCounter,  // device-side; one atomic per progressStride steps of work
-	const int		progressStride)   // 0 = не считать прогресс
+	const int		progressStride,   // 0 = не считать прогресс
+	const bool		emitAllSamples)   // true = every iterate, not just the peaks
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -1570,7 +1578,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
 		peaks.init(outPeaks, timeOfPeaks, (size_t)idx * peakStride,
-			h_local * (numb)preScaller, iters_local, peakCapacity);
+			h_local * (numb)preScaller, iters_local, peakCapacity, emitAllSamples);
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
@@ -1578,9 +1586,14 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
-		if (flag == REGIME_OSCILLATION) {
+		//
+		// Emitting every sample takes the fixed point too: for a map a period-1
+		// orbit is a legitimate single branch, and the samples are already in the
+		// buffer (the FP verdict is decided after the loop has run in full).
+		// Dropping it is what leaves the periodic windows blank.
+		if (flag == REGIME_OSCILLATION || (peaks.emitAll && flag == REGIME_FIXED_POINT)) {
 			if (maxValueCheckerArray != nullptr)
-				maxValueCheckerArray[idx] = doCalculatePeaks ? peaks.count() : peaks.countRaw();
+				maxValueCheckerArray[idx] = peaks.emitAll ? peaks.countRaw() : peaks.count();
 			// Добивка до ожидаемого числа тиков — см. тот же блок ниже.
 			if (progressCounter != nullptr && progressStride > 0) {
 				const size_t totalSteps = skip_local + iters_local;
@@ -2003,7 +2016,8 @@ __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataInde
 
 __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h,
-	const size_t peakStartIndex, const int peakCapacity)
+	const size_t peakStartIndex, const int peakCapacity,
+	const bool emitAll)
 {
 	// Peaks may live in buffers whose per-thread stride is NOT sizeOfBlock (the
 	// 2D path sizes them by max_amount_of_peaks instead of by trajectory length).
@@ -2013,7 +2027,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 	// which is what keeps the writes inside a short peak buffer.
 	const int peakCap = peakCapacity;
 
-	if (doCalculatePeaks) {
+	if (doCalculatePeaks && !emitAll) {
 		// Переменная для хранения найденных пиков
 		int amountOfPeaks = 0;
 
@@ -2130,7 +2144,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
-	const size_t peakStride, const int peakCapacity)
+	const size_t peakStride, const int peakCapacity, const bool emitAllSamples)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -2141,7 +2155,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 	// FP и Unbound проносим сквозь этап без изменений: код режима остаётся в
 	// массиве и дальше читается DBSCAN'ом (см. dbscanCUDA / avgPeakFinderCUDA).
 	// Для REGIME_OSCILLATION значение перезаписывается числом найденных пиков.
-	if ( amountOfPeaks[idx] == REGIME_FIXED_POINT )
+	// Emitting every sample takes the fixed point too: for a map a period-1
+	// orbit is a real branch and its samples are already in data[].
+	if ( amountOfPeaks[idx] == REGIME_FIXED_POINT && !emitAllSamples )
 	{
 		amountOfPeaks[idx] = REGIME_FIXED_POINT;
 		return;

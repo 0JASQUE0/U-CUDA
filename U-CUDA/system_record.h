@@ -20,6 +20,8 @@ struct SystemRecord {
     std::string note;            // заметка/ссылка на статью
 
     // ввод (для редактирования)
+    // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
+    bool        is_map = false;
     std::string mode;            // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;

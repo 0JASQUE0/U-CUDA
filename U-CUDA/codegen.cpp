@@ -635,6 +635,14 @@ namespace { // внутренняя линковка: всё ниже не ви�
     }
 
     // Схемы
+    // Discrete map x_{n+1} = f(x_n): the right-hand side is the step, h unused.
+    // The temp buffer is required - updating in place would be Gauss-Seidel.
+    std::string scheme_map(const System& s) {
+        int N = (int)s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
+        o << "    numb X1[" << N << "];\n    int i;\n";
+        for (int i = 0; i < N; ++i) o << "    X1[" << i << "] = (" << f[i] << ");\n";
+        o << "    for (i = 0; i < " << N << "; i++)\n        X[i] = X1[i];\n"; return o.str();
+    }
     std::string scheme_euler(const System& s) {
         int N = s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
         o << "    numb X1[" << N << "];\n    int i;\n";
@@ -1659,6 +1667,7 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::SIMP:             return scheme_simp(s);
     case Scheme::D:                return scheme_d(s);
     case Scheme::ComplexIEuler:    return scheme_complex_ieuler(s);
+    case Scheme::Map:              return scheme_map(s);
     }
     throw std::runtime_error("unknown scheme");
 }
@@ -1677,6 +1686,7 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "SIMP")              return Scheme::SIMP;
     if (name == "D")                 return Scheme::D;
     if (name == "Complex Implicit Euler") return Scheme::ComplexIEuler;
+    if (name == "Map")               return Scheme::Map;
     return Scheme::Euler;
 }
 

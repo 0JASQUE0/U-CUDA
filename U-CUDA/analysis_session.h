@@ -15,6 +15,17 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                    const System& sys,
                                    const std::string& scheme);
+
+// Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
+// t/h, so with h = 1 the computing time is exactly the iteration count.
+std::string default_h_from_record(const SystemRecord& r);
+
+// Session start scheme: "Map" for a map, otherwise left untouched.
+std::string default_scheme_from_record(const SystemRecord& r, std::string current);
+
+// Start value for BifurcationDiagramConfig::plot_all_iterates: a map's diagram
+// is built from every iterate, a flow's from peaks (a Poincare section).
+bool default_all_iterates_from_record(const SystemRecord& r);
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -73,6 +84,14 @@ struct Projection {
     bool  custom_line_style = false;
     float line_width        = 1.5f;
     float alpha             = 1.0f;
+
+    // Draw the trajectory as markers rather than a polyline (Phase2D/Phase3D).
+    // Consecutive iterates of a discrete map are not joined by a continuous
+    // path, so the connecting segments are an artefact: a Clifford attractor
+    // turns into a tangle of chords. Defaulted from the system type when the
+    // projection is created.
+    bool  draw_points     = false;
+    float point_size      = 2.0f;
 
     std::unique_ptr<Plot2DView> view2d;
     std::unique_ptr<Plot3DView> view3d;
@@ -402,6 +421,14 @@ struct BifurcationDiagramConfig {
     // false → точки = значения пиков (bifurcation_points). true → межпиковые
     // интервалы (peak_times). Колонка 3 vs 2 в CSV.
     bool        plot_inter_peaks = false;
+
+    // true -> EVERY recorded iterate goes into the diagram, not only the local
+    // maxima. That is how diagrams for discrete maps are built: the peak filter
+    // (a Poincare section, which makes sense for flows) would drop the lower
+    // branch of every period-2 orbit, halve the period-doubling cascade and
+    // leave the periodic windows empty. The default comes from the system type
+    // - see default_all_iterates_from_record.
+    bool        plot_all_iterates = false;
 
     // Custom point style (аналог Projection::custom_line_style)
     // Действует на классическую 1D-scatter БД; к 2D- и Colored-1D-хитмапам

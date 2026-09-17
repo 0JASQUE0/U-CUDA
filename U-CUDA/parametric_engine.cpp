@@ -238,13 +238,14 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
 // матрицу nPts x record_steps. Логика — построчная копия, включая параболическую интерполяцию,
 // сдвиг пиков влево на один и пересчёт timeOfPeaks в межпиковые интервалы.
 int cpu_peak_finder(const numb* data, size_t amountOfPoints,
-                    numb* outPeaks, numb* timeOfPeaks, numb h)
+                    numb* outPeaks, numb* timeOfPeaks, numb h,
+                    bool emit_all)
 {
     // Снимок knobs на весь вызов: GPU-двойник видит их как compile-time
     // константы, поэтому в пределах одной точки свипа они меняться не должны.
     const PeakConfig pc = get_peak_config();
 
-    if (!pc.do_calculate_peaks) {
+    if (emit_all || !pc.do_calculate_peaks) {
         int n = (int)amountOfPoints;
         if (n >= pc.max_amount_of_peaks) n = pc.max_amount_of_peaks;
         for (int i = 0; i < n; ++i) { outPeaks[i] = data[i]; timeOfPeaks[i] = (numb)0; }
@@ -467,14 +468,18 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         // d_amountOfPeaks уходит СЫРОЙ REGIME_*, и peakFinderCUDA пропускает и
         // FP, и unbound. Раньше unbound на основном участке проходил дальше, и
         // пики искались в уже разошедшемся блоке.
-        if (flag != REGIME_OSCILLATION) {
+        // Emitting every sample keeps the fixed point: for a map a period-1
+        // orbit is a real branch, and the block already holds its iterates.
+        if (flag != REGIME_OSCILLATION &&
+            !(req.emit_all_samples && flag == REGIME_FIXED_POINT)) {
             res.flags[j] = flag;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
         }
 
         const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
-                                      peaks.data(), times.data(), timeStep);
+                                      peaks.data(), times.data(), timeStep,
+                                      req.emit_all_samples);
         res.flags[j] = n;
         if (n > 0) {
             res.bifurcation_points[j].assign(peaks.begin(),  peaks.begin() + n);
@@ -626,10 +631,13 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
                                   pointsInBlock, req.amountOfX,
                                   req.pre_scaller, req.writable_var,
                                   req.max_value, block.data());
-        if (flag != REGIME_OSCILLATION) { finish_point(flag); continue; }
+        // Same reasoning as above: a map's period-1 orbit is a branch, not a blank.
+        if (flag != REGIME_OSCILLATION &&
+            !(req.emit_all_samples && flag == REGIME_FIXED_POINT)) { finish_point(flag); continue; }
 
         const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
-                                      peaks.data(), times.data(), timeStep);
+                                      peaks.data(), times.data(), timeStep,
+                                      req.emit_all_samples);
         res.flags[j] = n;
         if (n > 0) {
             res.bifurcation_points[j].assign(peaks.begin(), peaks.begin() + n);
@@ -2519,6 +2527,7 @@ struct ParametricEngine::Impl {
             int*   d_cancel_arg              = sig.cancelArg();
             int*   d_progress_arg            = sig.progressArg();
             int    progressStride_arg        = progressStride;
+            bool   emitAllSamples_arg        = req.emit_all_samples;
             sig.resetTicks();
 
             void* args_fused[] = {
@@ -2530,7 +2539,8 @@ struct ParametricEngine::Impl {
                 &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
                 &par_or_var_arg, &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
                 &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                &emitAllSamples_arg
             };
 
             unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
@@ -4925,11 +4935,13 @@ struct ParametricEngine::Impl {
         // Передаём явно по той же причине, что и actualIterations выше.
         size_t peakStride_arg   = 0;
         int    peakCapacity_arg = 0;
+        // 11th parameter: emit every iterate instead of peaks (discrete maps).
+        bool   emitAllSamples_arg = req.emit_all_samples;
         void* peak_args[] = {
             &d_data, &sizeOfBlock_s, &nBlocks,
             &d_amountOfPeaks, &d_outPeaks, &d_timeOfPeaks, &timeStep,
             &d_actualIterations,
-            &peakStride_arg, &peakCapacity_arg
+            &peakStride_arg, &peakCapacity_arg, &emitAllSamples_arg
         };
         int    peakBlock = 32;
         int    peakGrid  = (nPts + peakBlock - 1) / peakBlock;
@@ -6027,6 +6039,7 @@ struct ParametricEngine::Impl {
             int*   d_progress_arg            = sig.progressArg();
             int    progressStride_arg        = progressStride;
             int    peakCapacity_arg          = peakCapacity;
+            bool   emitAllSamples_arg        = req.emit_all_samples;
 
             void* args_fused[] = {
                 &nPts_int,
@@ -6057,7 +6070,8 @@ struct ParametricEngine::Impl {
                 &peakCapacity_arg,
                 &d_cancel_arg,
                 &d_progress_arg,
-                &progressStride_arg
+                &progressStride_arg,
+                &emitAllSamples_arg
             };
             sig.resetTicks();
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);

@@ -102,7 +102,8 @@ void OrderAnalysisSession::load_from_record(const SystemRecord& r,
 
     OrderConfig c;
     c.label      = "Order 1";
-    c.h_text     = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text     = default_h_from_record(r);
+    c.scheme     = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {

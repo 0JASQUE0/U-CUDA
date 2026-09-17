@@ -330,9 +330,9 @@ void CustomSession::load_from_record(const SystemRecord& r,
     shared = CustomTabSharedConfig{};
 
     // Seed shared config from the record's defaults.
-    shared.scheme         = "Euler";
+    shared.scheme         = default_scheme_from_record(r, "Euler");
     shared.symmetry_s     = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
-    shared.h_text         = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    shared.h_text         = default_h_from_record(r);
     // Seed L1D integrator overrides from the same shared defaults; user
     // can drift them apart later in the L1D detail panel.
     shared.l1d_h_text         = shared.h_text;

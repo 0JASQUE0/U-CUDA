@@ -182,6 +182,8 @@ public:
     PendingScreenshot pending_screenshot;
 
     // редактируемые UI-поля (UI читает/пишет напрямую)
+    // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
+    bool is_map = false;
     InputMode mode = InputMode::Image;
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
@@ -715,6 +717,12 @@ public:
         try {
             System sys = build_system();
             std::string out;
+            // A map has exactly one step body and no scheme to pick from.
+            if (is_map) {
+                generated_code = "// ===== Map =====\n"
+                               + codegen_scheme(sys, Scheme::Map) + "\n";
+                return true;
+            }
             struct Item { bool on; const char* name; Scheme s; };
             // Порядок — как в UI: по порядку точности (1, 2, 4, 8).
             const Item items[] = {

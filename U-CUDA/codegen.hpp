@@ -14,6 +14,13 @@ struct System {
     std::vector<std::string> rhs;
     bool latex = false;
 
+    // Discrete map: rhs is x_{n+1} directly, not a derivative. It lives here for
+    // the same reason as the Newton knobs below - build_system() is the single
+    // System factory and its result is copied into every session. The config's
+    // scheme is then ignored, so a stale session JSON holding some older scheme
+    // cannot substitute a different step for the map.
+    bool is_map = false;
+
     // Newton knobs for the implicit schemes. They live here (and not in every
     // per-analysis config) because AppModel::build_system() is the single System
     // factory and its result is copied into every session, so codegen sees them
@@ -68,8 +75,10 @@ struct System {
 // (её Re уже не убирает), и порядок падает до первого — ровно как у CD.
 // Шаг целиком считается в ucmplx, наружу пишется Re; мнимая часть живёт
 // внутри одного шага и в следующий не переносится.
+// Map is not an integration scheme but the right-hand side of a discrete map
+// x_{n+1} = f(x_n) itself. The only emitter that never uses h.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler };
+                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.

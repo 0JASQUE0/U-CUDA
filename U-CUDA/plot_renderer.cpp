@@ -166,8 +166,11 @@ static const char* VS_3D = R"(
 #version 330 core
 layout(location = 0) in vec3 a_pos;
 uniform mat4 u_mvp;
+uniform float u_point_size;
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 1.0);
+    // Ignored for line/triangle draws; read only by draw_points_3d.
+    gl_PointSize = max(u_point_size, 1.0);
 }
 )";
 
@@ -430,6 +433,7 @@ void PlotRenderer::compile_shaders() {
         if (program_3d_) {
             loc_mvp_3d_ = glGetUniformLocation(program_3d_, "u_mvp");
             loc_color_3d_ = glGetUniformLocation(program_3d_, "u_color");
+            loc_point_size_3d_ = glGetUniformLocation(program_3d_, "u_point_size");
         }
     }
     if (fs && vs3 && gs3t) {
@@ -659,6 +663,35 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
+}
+
+void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[16],
+    const float color[4], float point_size) {
+    if (point_count < 1 || !vbo || !program_3d_) return;
+
+    // Blending is on for the same reason as in draw_points: a dense map attractor
+    // leans on alpha, and without it the markers would be opaque squares.
+    GLboolean was_blend = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(program_3d_);
+    glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
+    glUniform4fv(loc_color_3d_, 1, color);
+    if (loc_point_size_3d_ >= 0) glUniform1f(loc_point_size_3d_, point_size);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    // Core profile takes the size from gl_PointSize only under this flag.
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glDrawArrays(GL_POINTS, 0, point_count);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    if (!was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
