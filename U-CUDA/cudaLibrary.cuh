@@ -373,7 +373,8 @@ __device__ __host__ numb globalPeakFinder(numb* data, const size_t startDataInde
 // 0 — legacy-поведение (пики лежат в той же раскладке, скан не ограничен).
 __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex, const size_t amountOfPoints,
 	numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h=0.0025,
-	const size_t peakStartIndex = (size_t)-1, const int peakCapacity = 0);
+	const size_t peakStartIndex = (size_t)-1, const int peakCapacity = 0,
+	const bool emitAll = false);   // true = every sample, no peak filter (discrete maps)
 
 __device__ __host__ void MeanAndMedianFreq(const int idx, const int startDataIndex, int amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq);
 
@@ -389,12 +390,13 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 	int* amountOfPeaks, numb* outPeaks);
 
 // ВНИМАНИЕ: через driver API (cuLaunchKernel) дефолты НЕ подставляются —
-// массив аргументов обязан содержать все 10 параметров (как у dbscanCUDA ниже).
+// массив аргументов обязан содержать все 11 параметров (как у dbscanCUDA ниже).
 __global__ void peakFinderCUDA( numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks = nullptr, numb* outPeaks = nullptr, numb* timeOfPeaks = nullptr, numb h = 0.0025,
 	const int* actualIterations = nullptr, // per-thread valid prefix of `data`; nullptr = always scan full sizeOfBlock
 	const size_t peakStride = 0,           // 0 = peaks share the `data` layout (stride sizeOfBlock)
-	const int peakCapacity = 0 );          // 0 = scan is not capped
+	const int peakCapacity = 0,            // 0 = scan is not capped
+	const bool emitAllSamples = false );   // true = every sample, no peak filter
 
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq, numb* medianFreq);

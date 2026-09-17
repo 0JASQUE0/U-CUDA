@@ -189,6 +189,12 @@ struct Bifurcation1DRequest {
     // Защита от расхождения
     double max_value = 1.0e6;
 
+    // Plot every recorded iterate instead of only the peaks. A discrete map
+    // wants each x_n: the peak filter would drop the lower branch of every
+    // period-2 orbit, halve the period-doubling cascade and blank the
+    // period-1 windows. Ignored by the continuation path.
+    bool emit_all_samples = false;
+
     // Если не пусто — engine запишет CSV с результатами по тому же формату,
     // что и NonLinAnal::bifurcation1D (для publication-quality пост-процессинга).
     // Пустая строка = ничего не пишем (только в памяти).
@@ -623,6 +629,12 @@ struct Bifurcation2DRequest {
     double t_max          = 100.0;
     int    pre_scaller    = 1;
     double max_value      = 1.0e6;
+
+    // Plot every recorded iterate instead of only the peaks. A discrete map
+    // wants each x_n: the peak filter would drop the lower branch of every
+    // period-2 orbit, halve the period-doubling cascade and blank the
+    // period-1 windows. Ignored by the continuation path.
+    bool emit_all_samples = false;
 
     // DBSCAN-порог: радиус эпсилон для кластеризации пиков.
     // Тот же смысл, что eps в bifurcation2D NonLinAnal (hostLibrary.cu:912).

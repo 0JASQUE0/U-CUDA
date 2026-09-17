@@ -43,6 +43,11 @@ public:
     // координат ВСЕГДА идут по старому пути, независимо от этого флага.
     bool custom_line_style = false;
 
+    // Draw with GL_POINTS instead of a polyline - see Plot2DView::points_mode.
+    // Discrete maps need it: there is nothing to join consecutive iterates with.
+    bool  points_mode   = false;
+    float point_size_px = 2.0f;
+
     // Локальная видимость серий (переключается кликом по легенде).
     std::vector<bool> visible;
 

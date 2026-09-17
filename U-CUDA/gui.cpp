@@ -3537,8 +3537,24 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             ch |= ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
-                    pr.view2d->imdraw_lines      = pr.custom_line_style;
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Points##phase2d", &pr.draw_points);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
+                                          "Default for discrete maps: consecutive iterates are\n"
+                                          "not joined by a continuous path, so the connecting\n"
+                                          "segments are an artefact.");
+                    if (pr.draw_points) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(110);
+                        ImGui::SliderFloat("size##phase2dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
+                    }
+                    // imdraw_lines is the ImDrawList path for LINES; it does not
+                    // apply in point mode, where there are no segments to thicken.
+                    pr.view2d->imdraw_lines      = pr.custom_line_style && !pr.draw_points;
                     pr.view2d->line_thickness_px = pr.line_width;
+                    pr.view2d->points_mode       = pr.draw_points;
+                    pr.view2d->point_size_px     = pr.point_size;
 
                     // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
                     // локальный — render() ниже забирает точки синхронно. static тут был
@@ -4156,8 +4172,20 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             ch |= ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Points##phase3d", &pr.draw_points);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
+                                          "Default for discrete maps.");
+                    if (pr.draw_points) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(110);
+                        ImGui::SliderFloat("size##phase3dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
+                    }
                     pr.view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     pr.view3d->custom_line_style = pr.custom_line_style;
+                    pr.view3d->points_mode       = pr.draw_points;
+                    pr.view3d->point_size_px     = pr.point_size;
 
                     pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
                     pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
@@ -4424,7 +4452,21 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
     InputNumStr("Resolution", bd.n_pts_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
                                         "Resolution", bd.n_pts_text); });
-    if (!bd.mode_2d)
+    // Every iterate vs peaks only. Inter-peaks is meaningless in the first mode
+    // (consecutive samples are one step apart by construction), so it is hidden.
+    if (ImGui::Checkbox("Plot every iterate (no peak filter)", &bd.plot_all_iterates))
+        bd.fit_request = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "On: the diagram gets every recorded iterate - the convention for\n"
+            "discrete maps, and the default for them.\n"
+            "Off: only local maxima (a Poincare section), the convention for flows.\n"
+            "For a map the peak filter drops the lower branch of every period-2\n"
+            "orbit and leaves the period-1 windows empty.");
+    // Inter-peak times are not filled in the all-iterates path (pushRaw writes
+    // zeros), so a stale toggle would plot a flat line at 0.
+    if (bd.plot_all_iterates) bd.plot_inter_peaks = false;
+    if (!bd.mode_2d && !bd.plot_all_iterates)
         if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
             bd.fit_request = true;
 

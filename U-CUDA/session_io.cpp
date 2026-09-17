@@ -180,6 +180,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
@@ -250,6 +251,10 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
                             else if (k == "cls")   pr.custom_line_style = p.boolean();
                             else if (k == "lw")    pr.line_width = (float)std::stod(p.str_or_num());
                             else if (k == "al")    pr.alpha      = (float)std::stod(p.str_or_num());
+                        else if (k == "pts")   pr.draw_points = p.boolean();
+                        else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
+                            else if (k == "pts")   pr.draw_points = p.boolean();
+                            else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
                             else if (k == "show_var") {
                                 pr.show_var.clear();
                                 p.expect('[');
@@ -312,6 +317,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"csv_save_enabled\":" << (bd.csv_save_enabled ? "true" : "false");
     o << ",\"csv_output_path\":"; jstr(o, bd.csv_output_path);
     o << ",\"plot_inter_peaks\":" << (bd.plot_inter_peaks ? "true" : "false");
+    o << ",\"plot_all_iterates\":" << (bd.plot_all_iterates ? "true" : "false");
     // 2D-mode config: result_2d not persisted (too heavy), user runs again.
     o << ",\"mode_2d\":"           << (bd.mode_2d ? "true" : "false");
     o << ",\"param_index_2\":"     << bd.param_index_2;
@@ -368,6 +374,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "csv_save_enabled")   bd.csv_save_enabled  = p.boolean();
     else if (key == "csv_output_path")    bd.csv_output_path   = p.str();
     else if (key == "plot_inter_peaks")   bd.plot_inter_peaks  = p.boolean();
+    else if (key == "plot_all_iterates")  bd.plot_all_iterates = p.boolean();
     // 2D-mode: backwards-compatible — старые JSON без этих ключей оставят
     // дефолты конструктора.
     else if (key == "mode_2d")            bd.mode_2d           = p.boolean();
@@ -962,6 +969,7 @@ static void write_basins_phase_projections(std::ostringstream& o,
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v) o << ","; o << (p.show_var[v] ? "true" : "false"); }

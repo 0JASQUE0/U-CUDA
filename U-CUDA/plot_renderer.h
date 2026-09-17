@@ -163,6 +163,12 @@ public:
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width, bool thick_style = false);
 
+    // 3D points (vbo with float[3] per vertex) via GL_POINTS. Same program as
+    // draw_line_3d (VS_3D writes gl_PointSize), so the depth test behaves the
+    // same. Needed by discrete maps: consecutive iterates are not joined.
+    void draw_points_3d(GLuint vbo, int point_count, const float mvp[16],
+        const float color[4], float point_size);
+
     void end_frame();
 
     GLuint texture_id() const { return color_tex_; }
@@ -191,6 +197,7 @@ private:
     GLuint program_3d_thick_ = 0;
     GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
+    GLint  loc_point_size_3d_ = -1;
     GLint  loc_mvp_points_ = -1, loc_color_points_ = -1,
            loc_point_size_points_ = -1, loc_marker_points_ = -1;
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;

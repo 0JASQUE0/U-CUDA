@@ -125,6 +125,9 @@ void PhaseAnalysisSession::remove_ic(int i) {
 void PhaseAnalysisSession::add_projection() {
     Projection p;
     int n = (int)projections.size();
+    // A map's iterates are not joined by a continuous path, so markers, not a
+    // polyline. sys is set right after load_from_record by start_phase_analysis.
+    p.draw_points = sys.is_map;
     p.label = "Projection " + std::to_string(n + 1);
     p.axis_x = 0;
     p.axis_y = (vars.size() > 1) ? 1 : 0;
@@ -147,6 +150,10 @@ std::string default_h_from_record(const SystemRecord& r) {
 
 std::string default_scheme_from_record(const SystemRecord& r, std::string current) {
     return r.is_map ? std::string("Map") : std::move(current);
+}
+
+bool default_all_iterates_from_record(const SystemRecord& r) {
+    return r.is_map;
 }
 
 std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
@@ -202,6 +209,9 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     // одна проекция по умолчанию
     projections.clear();
     add_projection();
+    // add_projection() reads sys.is_map, but sys is only assigned after this
+    // call (see AppModel::start_phase_analysis) — take it from the record here.
+    for (auto& p : projections) p.draw_points = r.is_map;
 
     result = AnalysisResult{};
 }
@@ -715,6 +725,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     bd.label_is_manual = false;   // fresh diagram → auto-label
     bd.h_text = default_h_from_record(r);
     bd.scheme = default_scheme_from_record(r, bd.scheme);
+    bd.plot_all_iterates = default_all_iterates_from_record(r);
     bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -823,6 +834,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.transient_time = parse_d(bd.transient_text, 100.0);
     req.pre_scaller    = std::max(1, parse_i(bd.pre_scaller_text, 1));
     req.max_value      = parse_d(bd.max_value_text, 1.0e6);
+    req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     return req;
 }
@@ -888,6 +900,7 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.transient_time     = parse_d(bd.transient_text, 100.0);
     req.pre_scaller        = std::max(1, parse_i(bd.pre_scaller_text, 1));
     req.max_value          = parse_d(bd.max_value_text, 1.0e6);
+    req.emit_all_samples   = bd.plot_all_iterates;
     req.eps_dbscan         = parse_d(bd.eps_dbscan_text, 0.1);
     req.mult_peak          = parse_d(bd.mult_peak_text,     (double)::mult_peak);
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
