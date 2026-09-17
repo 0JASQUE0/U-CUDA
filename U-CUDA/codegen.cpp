@@ -2010,6 +2010,55 @@ bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum
     return true;
 }
 
+namespace {
+
+    // Округляет КАЖДЫЙ числовой литерал в строке, не трогая имена и операторы.
+    // Работает и на цельном числе, и на выражении: "-1.2599210498948732*g1"
+    // укорачивается так же, как "1.3512071919596578".
+    std::string comp_round_literals(const std::string& s, int digits) {
+        std::string out;
+        for (size_t i = 0; i < s.size(); ) {
+            const char c = s[i];
+            // Идентификатор забирает свои цифры целиком, иначе g1 стало бы g1.
+            if (std::isalpha((unsigned char)c) || c == '_') {
+                while (i < s.size() && (std::isalnum((unsigned char)s[i]) || s[i] == '_'))
+                    out += s[i++];
+                continue;
+            }
+            const bool starts_num = std::isdigit((unsigned char)c)
+                || (c == '.' && i + 1 < s.size() && std::isdigit((unsigned char)s[i + 1]));
+            if (!starts_num) { out += c; ++i; continue; }
+
+            const char* start = s.c_str() + i;
+            char* end = nullptr;
+            const double v = std::strtod(start, &end);
+            if (end == start) { out += c; ++i; continue; }
+            const size_t len = (size_t)(end - start);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.*g", digits, v);
+            // Короче из двух: у "2" и "1e-05" %g даёт ровно исходное.
+            if (std::strlen(buf) < len) out += buf;
+            else                        out.append(start, len);
+            i += len;
+        }
+        return out;
+    }
+
+} // namespace
+
+std::string wrapper_display_name(const std::string& name, int digits) {
+    CompositionSpec spec;
+    if (!parse_composition_name(name, &spec)) return name;
+    if (digits < 1)  digits = 1;
+    if (digits > 17) digits = 17;
+
+    std::vector<std::string> shown;
+    shown.reserve(spec.gammas.size());
+    for (const std::string& g : spec.gammas)
+        shown.push_back(comp_round_literals(g, digits));
+    return make_composition_name(spec.base, shown);
+}
+
 std::string wrap_composition(const std::string& base_body, const System& sys,
                              const std::vector<std::string>& gammas,
                              int p, bool symmetric, const std::string& base_name) {

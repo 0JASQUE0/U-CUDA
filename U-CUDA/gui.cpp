@@ -778,7 +778,7 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         return false;
     };
     ImGui::SetNextItemWidth(kComboW);
-    if (ImGui::BeginCombo(label, scheme.c_str())) {
+    if (ImGui::BeginCombo(label, wrapper_display_name(scheme).c_str())) {
         // Заголовок порядка печатаем лениво — перед ПЕРВОЙ видимой схемой
         // группы, иначе отфильтрованная группа оставила бы пустую шапку.
         int shown_order = 0;
@@ -802,8 +802,13 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         // они не встают.
         if (wrapper_schemes && !wrapper_schemes->empty()) {
             ImGui::SeparatorText("Wrappers");
-            for (const auto& nm : *wrapper_schemes)
-                if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
+            for (const auto& nm : *wrapper_schemes) {
+                const std::string shown = wrapper_display_name(nm);
+                if (ImGui::Selectable((shown + "##" + nm).c_str(), scheme == nm))
+                    choose(nm);
+                if (shown != nm && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", nm.c_str());
+            }
         }
         ImGui::EndCombo();
     }
@@ -2594,7 +2599,8 @@ static void draw_composition_builder(AppModel& model) {
         ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
     }
     else {
-        ImGui::Text("%s", new_name.c_str());
+        // Полное имя, без округления: именно оно уедет в список по кнопке Add.
+        ImGui::TextWrapped("%s", new_name.c_str());
         ImGui::Text("base order %d%s     cost %d base steps per step",
                     base_p, base_sym ? " (symmetric)" : "", K);
         if (!base_sym)
@@ -2665,7 +2671,10 @@ static void draw_wrapper_list(AppModel& model) {
     int to_delete = -1;
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
         ImGui::PushID(i);
-        ImGui::TextUnformatted(model.wrapper_schemes[i].c_str());
+        const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
+        ImGui::TextUnformatted(shown.c_str());
+        if (shown != model.wrapper_schemes[i] && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", model.wrapper_schemes[i].c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Delete")) to_delete = i;
 

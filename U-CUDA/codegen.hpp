@@ -215,6 +215,17 @@ std::string wrap_composition(const std::string& base_body, const System& sys,
                              const std::vector<std::string>& gammas,
                              int p, bool symmetric, const std::string& base_name);
 
+// Short form of a wrapper name, FOR DISPLAY ONLY: constant coefficients are
+// rounded to `digits` significant figures, symbolic ones are printed as typed.
+// "Comp(CD|1.3512071919596578,-1.7024143839193155,1.3512071919596578)" becomes
+// "Comp(CD|1.3512,-1.7024,1.3512)", which is the difference between a readable
+// combo row and one that needs a scrollbar at five stages.
+// Anything that is not a composition (a built-in, a custom KRS, an "Extr(...)"
+// whose substeps are short integers anyway) comes back unchanged.
+// NEVER use the result as a key: the full name is the scheme's identity, and
+// two different methods can round to the same short form.
+std::string wrapper_display_name(const std::string& name, int digits = 5);
+
 // Нормализует числовое значение/выражение параметра для подстановки в C-код:
 //   "8/3"   -> "8.0/3.0"   (вещественное деление, без потери точности)
 //   "1e-5"  -> "1e-05"
