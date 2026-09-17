@@ -162,6 +162,22 @@ bool has_glyph(ImWchar c) {
     return f && f->IsGlyphInFont(c);
 }
 
+// Отдельный глиф может отсутствовать в серифной паре: у CM Serif нет ∞ и ∂ —
+// они живут в отдельных математических начертаниях CM. Рисуем такой знак
+// UI-шрифтом, иначе ImGui подставит '?'.
+ImFont* font_with_glyph(ImFont* pref, const char* utf8) {
+    const unsigned char* p = (const unsigned char*)utf8;
+    unsigned cp;
+    if (p[0] < 0x80) cp = p[0];
+    else if ((p[0] & 0xE0) == 0xC0 && p[1]) cp = ((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu);
+    else if ((p[0] & 0xF0) == 0xE0 && p[1] && p[2])
+        cp = ((p[0] & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu);
+    else return pref;   // вне BMP у нас глифов нет
+    if (!pref || pref->IsGlyphInFont((ImWchar)cp)) return pref;
+    ImFont* ui = ImGui::GetFont();
+    return (ui && ui->IsGlyphInFont((ImWchar)cp)) ? ui : pref;
+}
+
 struct NameGlyph { const char* name; const char* glyph; };
 
 // Имена пишутся и со слешем (\sigma из LaTeX-поля), и без него: в alphabet_text
@@ -302,12 +318,12 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
 
             if (const char* g = lookup(kGreek, IM_ARRAYSIZE(kGreek), cmd)) {
                 const bool it = st.italic || (!st.upright && is_lower(cmd[0]));
-                emit(L, x, it ? math_italic() : math_roman(), size, g);
+                emit(L, x, font_with_glyph(it ? math_italic() : math_roman(), g), size, g);
                 emit_trailing_digits(L, x, p, e, size);
                 continue;
             }
             if (const char* g = lookup(kSymbols, IM_ARRAYSIZE(kSymbols), cmd)) {
-                emit(L, x, math_roman(), size, g);
+                emit(L, x, font_with_glyph(math_roman(), g), size, g);
                 continue;
             }
             if (cmd == "dot" || cmd == "ddot" || cmd == "bar") {
@@ -392,7 +408,8 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
             bool it = g ? is_lower(w[0]) : (w.size() == 1);
             if (st.upright) it = false;
             if (st.italic)  it = true;
-            emit(L, x, it ? math_italic() : math_roman(), size, g ? g : w);
+            ImFont* wf = it ? math_italic() : math_roman();
+            emit(L, x, g ? font_with_glyph(wf, g) : wf, size, g ? g : w);
             if (g || w.size() == 1) emit_trailing_digits(L, x, p, e, size);
             continue;
         }

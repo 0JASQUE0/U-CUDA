@@ -70,7 +70,8 @@ static MathFontPaths resolve_math_font_paths(const std::string& exe_dir_with_sep
     dirs.push_back(exe_dir_with_sep + "..\\..\\U-CUDA\\fonts\\");
 
     static const char* kPairs[][2] = {
-        { "cmunrm.ttf",                   "cmunti.ttf"                  },  // Computer Modern Unicode
+        { "cmunrm.otf",                   "cmunti.otf"                  },  // Computer Modern Unicode (лежит в репозитории)
+        { "cmunrm.ttf",                   "cmunti.ttf"                  },  // он же, если взят из TTF-сборки
         { "lmroman10-regular.otf",        "lmroman10-italic.otf"        },  // Latin Modern
         { "LatinModernRoman-Regular.ttf", "LatinModernRoman-Italic.ttf" },
         { "texgyretermes-regular.otf",    "texgyretermes-italic.otf"    },  // Times-клон из TeX Gyre
