@@ -11289,6 +11289,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
+            cfg.nvrtc_rdc              = m.nvrtc_rdc;
             cfg.gpu_block_size         = m.gpu_block_size;
             cfg.hidden_tabs            = m.hidden_tabs;
             cfg.hidden_schemes         = m.hidden_schemes;
@@ -11646,6 +11647,35 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 "on fractal basin boundaries they may differ visibly. The value in");
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                 "effect at Run time is written into every exported _config.csv.");
+
+            ImGui::Separator();
+            ImGui::Text("Kernel compilation");
+            ImGui::TextDisabled("Parametric analyses only; phase portraits build their own tiny");
+            ImGui::TextDisabled("kernel and are unaffected.");
+
+            if (ImGui::Checkbox("Split compilation (-rdc + link)##nvrtc_rdc", &model.nvrtc_rdc)) {
+                set_nvrtc_rdc(model.nvrtc_rdc);
+                persist_settings(model);
+            }
+            if (model.nvrtc_rdc) {
+                ImGui::TextDisabled("On: the NonLinAnal library compiles once and is reused, only");
+                ImGui::TextDisabled("the step is rebuilt when the scheme changes. Measured on a 1D");
+                ImGui::TextDisabled("bifurcation: 62 ms per scheme switch instead of 1700 ms.");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "The step is called instead of being inlined, so FMA contraction");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "across that boundary is gone. Measured on Lorenz: 13 of 14 schemes");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "bit-identical, Complex Implicit Euler differs by up to 3e-10 (with");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "FMA off both agree exactly). Maps and phase portraits may therefore");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "disagree in the last digits on such schemes.");
+            } else {
+                ImGui::TextDisabled("Off: every kernel is built as one translation unit, library");
+                ImGui::TextDisabled("included, exactly as before. Slow on a scheme change, but the");
+                ImGui::TextDisabled("step is inlined and results stay bit-comparable with older runs.");
+            }
 
             // GPU launch width. В отличие от FMA и peak-knobs, на результат не влияет вовсе:
             // это аргумент cuLaunchKernel, а не опция компиляции, поэтому кэши модулей не

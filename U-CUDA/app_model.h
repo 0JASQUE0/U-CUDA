@@ -429,6 +429,11 @@ public:
     // ключи кэшей модулей в обоих движках (см. parametric_engine.h).
     bool nvrtc_fmad = true;
 
+    // Раздельная компиляция NVRTC. Зеркалит AppConfig::nvrtc_rdc тем же способом, что nvrtc_fmad:
+    // Settings пушит значение в set_nvrtc_rdc(). Входит в ключ кэша модулей, т.е. переключение
+    // заставляет пересобрать их на следующем Run.
+    bool nvrtc_rdc = false;
+
     // Ширина блока запуска CUDA-ядер. Зеркалит AppConfig::gpu_block_size; Settings после
     // правки пушит значение в set_gpu_block_size(). На РЕЗУЛЬТАТ не влияет — в отличие от
     // nvrtc_fmad, кэши модулей не трогает и перекомпиляции не требует.

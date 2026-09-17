@@ -63,6 +63,16 @@ std::atomic<bool> g_nvrtc_fmad{ true };
 void set_nvrtc_fmad(bool enabled) { g_nvrtc_fmad.store(enabled, std::memory_order_relaxed); }
 bool get_nvrtc_fmad()             { return g_nvrtc_fmad.load(std::memory_order_relaxed); }
 
+// Раздельная компиляция (см. build_module). Отключается на случай драйвера, на котором линковка
+// поведёт себя не так, как на проверенных: тогда движок собирает всё одной единицей трансляции,
+// как раньше. Хранится атомарно по той же причине, что и fmad.
+namespace {
+std::atomic<bool> g_nvrtc_rdc{ false };
+}  // namespace
+
+void set_nvrtc_rdc(bool enabled) { g_nvrtc_rdc.store(enabled, std::memory_order_relaxed); }
+bool get_nvrtc_rdc()             { return g_nvrtc_rdc.load(std::memory_order_relaxed); }
+
 // Ширина блока запуска (см. parametric_engine.h). Тоже atomic и по той же причине: одно
 // int-поле, читателю нужен только свежий снимок. В hash_key НЕ входит — на PTX не влияет.
 namespace {
@@ -687,7 +697,8 @@ std::string hash_key(const std::string& krs_body, int amountOfX) {
     // модуль вместо лишней перекомпиляции.
     return std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
            std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch()) +
-           ":fm" + (get_nvrtc_fmad() ? "1" : "0");
+           ":fm" + (get_nvrtc_fmad() ? "1" : "0") +
+           ":rdc" + (get_nvrtc_rdc() ? "1" : "0");
 }
 
 // Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот оборачивает свои
@@ -1791,16 +1802,6 @@ struct ParametricEngine::Impl {
         return true;
     }
 
-    // build_module — общая часть всех compile_*_if_needed: подстановка плейсхолдеров в шаблон,
-    // NVRTC-компиляция с едиными опциями, добыча mangled-имён и загрузка PTX. У вызывающих
-    // различаются только шаблон, имя исходника и набор символов.
-    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и когда --fmad стал
-    // настройкой, флаг проставили в nvrtc_engine.cpp, а копии здесь остались на дефолте NVRTC —
-    // карта и фазовый портрет считались разной арифметикой, и на фрактальной границе траектория
-    // уходила в другой аттрактор (см. nvrtc_fmad_opt).
-    // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
-    // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
-    // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
     // Copy of everything build_module reads, taken under cache_mu. NVRTC then runs unlocked:
     // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
     // std::string while another thread assigns it is a race no matter how rare.
@@ -1812,6 +1813,206 @@ struct ParametricEngine::Impl {
         return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h };
     }
 
+    // Кэш PTX библиотечной половины: ключ — всё, кроме КРС. Именно это и есть смысл затеи:
+    // при смене схемы 1.2 МБ PTX библиотеки переиспользуются, а заново собирается только шаг.
+    struct CachedLibPtx {
+        std::string              key;
+        std::string              ptx;
+        std::vector<std::string> lowered;   // mangled-имена ядер: они из библиотечной половины
+    };
+    struct CachedKrsPtx {
+        std::string key;
+        std::string ptx;
+    };
+
+    // Свой мьютекс: build_module работает с ОТПУЩЕННЫМ cache_mu (иначе NVRTC сериализовался бы),
+    // поэтому эти кэши защищаются отдельно. Вложенности нет — cache_mu здесь не берётся.
+    std::mutex                  ptx_mu;
+    std::set<std::string>       lib_in_flight;
+    std::condition_variable     lib_ptx_done;
+    ModuleLru<CachedLibPtx>     pool_lib_ptx{ 4 };   // ~1.2 МБ на запись
+    ModuleLru<CachedKrsPtx>     pool_krs_ptx{ 8 };   // ~50 КБ на запись
+
+    // Компиляция одной единицы трансляции в PTX. rdc=true — для половинок раздельной сборки.
+    bool compile_ptx(const std::string& src, const char* src_name,
+                     const std::vector<const char*>& headers_src,
+                     const std::vector<const char*>& headers_name,
+                     const std::vector<const char*>& name_exprs,
+                     bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
+                     std::string& err) {
+        nvrtcProgram prog = nullptr;
+        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
+                                            (int)headers_src.size(),
+                                            headers_src.empty() ? nullptr : headers_src.data(),
+                                            headers_name.empty() ? nullptr : headers_name.data());
+        if (nr != NVRTC_SUCCESS) {
+            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
+            return false;
+        }
+        for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
+
+        char arch[64];
+        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+        std::string cuda_include_opt;
+        {
+            char buf[MAX_PATH];
+            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+            if (nlen > 0 && nlen < MAX_PATH)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
+        if (cuda_include_opt.empty()) {
+            err = "переменная окружения CUDA_PATH не задана — NVRTC не найдёт math_constants.h "
+                  "(установи CUDA Toolkit или задай CUDA_PATH=...)";
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        std::string std_opt = "--std=c++17";
+        std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
+                                          cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+        if (rdc) opts.push_back("--relocatable-device-code=true");
+
+        nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
+        if (nr != NVRTC_SUCCESS) {
+            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+            std::string log;
+            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+
+        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+        out_ptx.assign(ptxsz, '\0');
+        nvrtcGetPTX(prog, &out_ptx[0]);
+
+        // Mangled-имена копируем ДО destroy — после него указатели невалидны.
+        lowered.clear();
+        lowered.reserve(name_exprs.size());
+        for (const char* sym : name_exprs) {
+            const char* lo = nullptr;
+            nvrtcGetLoweredName(prog, sym, &lo);
+            lowered.push_back(lo ? lo : sym);
+        }
+        nvrtcDestroyProgram(&prog);
+        return true;
+    }
+
+    // Библиотечная половина: тот же шаблон, но вместо тела шага — вызов внешнего krs_step.
+    // Объявление вставляется сразу после #include "cudaLibrary.cuh" (он тянет numb из
+    // configCUDA.h, а сам КРС определяется четырьмя строками ниже — структура одинакова у всех
+    // 15 шаблонов).
+    bool lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
+                     const std::vector<std::pair<std::string, std::string>>& subs,
+                     const std::vector<const char*>& name_exprs,
+                     CachedLibPtx& out, std::string& err) {
+        std::unique_lock<std::mutex> lk(ptx_mu);
+        for (;;) {
+            if (pool_lib_ptx.take(lib_key, out)) return true;
+            if (lib_in_flight.insert(lib_key).second) break;
+            lib_ptx_done.wait(lk);
+        }
+        lk.unlock();
+
+        std::string src = snap.tmpl;
+        for (const auto& sub : subs) {
+            if (sub.first == "{{KRS_BODY}}") continue;
+            src = replace_all(src, sub.first, sub.second);
+        }
+        src = replace_all(src, "{{KRS_BODY}}", "    krs_step(X, a, h);");
+        src = replace_all(src, "#include \"cudaLibrary.cuh\"",
+                          "#include \"cudaLibrary.cuh\"\n"
+                          "extern \"C\" __device__ void krs_step(numb* X, const numb* a, const numb h);");
+
+        const std::vector<const char*> hs = { snap.lib_cu.c_str(), snap.lib_cuh.c_str(),
+                                              snap.macros_cuh.c_str(), snap.config_h.c_str() };
+        const std::vector<const char*> hn = { "cudaLibrary.cu", "cudaLibrary.cuh",
+                                              "cudaMacros.cuh", "configCUDA.h" };
+        CachedLibPtx fresh;
+        fresh.key = lib_key;
+        const bool ok = compile_ptx(src, src_name, hs, hn, name_exprs, true,
+                                    fresh.ptx, fresh.lowered, err);
+
+        lk.lock();
+        lib_in_flight.erase(lib_key);
+        lib_ptx_done.notify_all();
+        if (!ok) return false;
+        std::vector<CachedLibPtx> evicted;
+        pool_lib_ptx.insert(fresh, std::string(), evicted);
+        out = fresh;
+        return true;
+    }
+
+    // Половина с шагом: отдельная единица трансляции на одном configCUDA.h (нужен и numb, и
+    // ucmplx для комплексных схем).
+    bool krs_ptx_for(const SrcSnapshot& snap, const std::string& krs_body,
+                     const std::string& amount_of_x, const std::string& krs_key,
+                     std::string& out_ptx, std::string& err) {
+        {
+            std::lock_guard<std::mutex> lk(ptx_mu);
+            CachedKrsPtx hit;
+            if (pool_krs_ptx.take(krs_key, hit)) { out_ptx = hit.ptx; return true; }
+        }
+
+        std::string src = "#define AMOUNTOFX " + amount_of_x + "\n"
+                          "#include \"configCUDA.h\"\n"
+                          "extern \"C\" __device__ void krs_step(numb* X, const numb* a, const numb h) {\n"
+                          + krs_body + "\n}\n";
+        const std::vector<const char*> hs = { snap.config_h.c_str() };
+        const std::vector<const char*> hn = { "configCUDA.h" };
+        std::vector<std::string> ignored;
+        if (!compile_ptx(src, "krs.cu", hs, hn, {}, true, out_ptx, ignored, err)) return false;
+
+        std::lock_guard<std::mutex> lk(ptx_mu);
+        CachedKrsPtx fresh;
+        fresh.key = krs_key;
+        fresh.ptx = out_ptx;
+        std::vector<CachedKrsPtx> evicted;
+        pool_krs_ptx.insert(fresh, std::string(), evicted);
+        return true;
+    }
+
+    // Линкует половинки в cubin и грузит модуль. Указатель из cuLinkComplete живёт до
+    // cuLinkDestroy — модуль обязан загрузиться ДО разрушения линкера.
+    bool link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
+                       CUmodule& out_module, std::string& err) {
+        CUlinkState st = nullptr;
+        CUresult r = cuLinkCreate(0, nullptr, nullptr, &st);
+        if (r != CUDA_SUCCESS) { err = "cuLinkCreate: " + cu_err(r); return false; }
+        auto fail = [&](const std::string& what, CUresult rr) {
+            err = what + ": " + cu_err(rr);
+            cuLinkDestroy(st);
+            return false;
+        };
+        r = cuLinkAddData(st, CU_JIT_INPUT_PTX, (void*)lib_ptx.data(), lib_ptx.size() + 1,
+                          "lib", 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) return fail("cuLinkAddData(lib)", r);
+        r = cuLinkAddData(st, CU_JIT_INPUT_PTX, (void*)krs_ptx.data(), krs_ptx.size() + 1,
+                          "krs", 0, nullptr, nullptr);
+        if (r != CUDA_SUCCESS) return fail("cuLinkAddData(krs)", r);
+
+        void* cubin = nullptr; size_t cubin_size = 0;
+        r = cuLinkComplete(st, &cubin, &cubin_size);
+        if (r != CUDA_SUCCESS) return fail("cuLinkComplete", r);
+
+        CUmodule mod = nullptr;
+        r = cuModuleLoadData(&mod, cubin);
+        cuLinkDestroy(st);
+        if (r != CUDA_SUCCESS) { err = "cuModuleLoadData(linked): " + cu_err(r); return false; }
+        out_module = mod;
+        return true;
+    }
+
+    // build_module — общая часть всех compile_*_if_needed: подстановка плейсхолдеров в шаблон,
+    // NVRTC-компиляция с едиными опциями, добыча mangled-имён и загрузка PTX. У вызывающих
+    // различаются только шаблон, имя исходника и набор символов.
+    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и когда --fmad стал
+    // настройкой, флаг проставили в nvrtc_engine.cpp, а копии здесь остались на дефолте NVRTC —
+    // карта и фазовый портрет считались разной арифметикой, и на фрактальной границе траектория
+    // уходила в другой аттрактор (см. nvrtc_fmad_opt).
+    // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
+    // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
+    // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
     bool build_module(const SrcSnapshot& snap,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
@@ -1819,6 +2020,48 @@ struct ParametricEngine::Impl {
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Раздельная сборка: библиотека без КРС компилируется один раз на (шаблон, размерность,
+        // настройки) и переиспользуется, шаг живёт в своём модуле, склейка — cuLink. Замерено на
+        // bifurcation2d + implicit midpoint: смена КРС 0.25 с против ~15 с одной единицей
+        // трансляции. Цена — вызов вместо инлайна: на RTX 2060 SUPER от -1% до +7% времени счёта,
+        // результаты побитово те же (FP64 идёт 1/32 скорости, накладные прячутся в её тени).
+        if (get_nvrtc_rdc()) {
+            std::string krs_body, amount_of_x = "3";
+            std::string lib_key = src_name;
+            for (const auto& sub : subs) {
+                if (sub.first == "{{KRS_BODY}}") { krs_body = sub.second; continue; }
+                if (sub.first == "{{AMOUNT_OF_X}}") amount_of_x = sub.second;
+                lib_key += ''; lib_key += sub.first; lib_key += '='; lib_key += sub.second;
+            }
+            lib_key += get_nvrtc_fmad() ? "|fm1" : "|fm0";
+            lib_key += "|pk" + std::to_string(peak_config_epoch());
+
+            std::string krs_err;
+            std::string krs_ptx;
+            const std::string krs_key = std::to_string(std::hash<std::string>{}(krs_body))
+                                      + ":" + amount_of_x
+                                      + (get_nvrtc_fmad() ? ":fm1" : ":fm0")
+                                      + ":pk" + std::to_string(peak_config_epoch());
+            if (!krs_ptx_for(snap, krs_body, amount_of_x, krs_key, krs_ptx, krs_err)) {
+                // Не компилируется САМ шаг — это ошибка пользователя, и монолитный путь выдал бы
+                // ту же самую. Отдаём как есть, без второго захода на те же грабли.
+                err = krs_err;
+                return false;
+            }
+
+            CachedLibPtx lib;
+            std::string lib_err;
+            if (lib_ptx_for(snap, src_name, lib_key, subs, name_exprs, lib, lib_err)
+                && link_and_load(lib.ptx, krs_ptx, out_module, lib_err)) {
+                lowered = lib.lowered;
+                return true;
+            }
+            // Библиотека или линковка — не пользовательская ошибка: собираем по-старому, одной
+            // единицей трансляции. Медленно, но работает везде, где работало раньше.
+            std::fprintf(stderr, "[nvrtc] rdc split failed (%s), falling back to one TU\n",
+                         lib_err.c_str());
+        }
+
         std::string src = snap.tmpl;
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
 
