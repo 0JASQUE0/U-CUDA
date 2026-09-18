@@ -4166,6 +4166,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
         for (size_t k = 0; k < s.projections.size(); ++k)
             renderers.push_back(std::make_unique<PlotRenderer>());
     }
+    // Запрос автоскейла раздаём по проекциям и сразу гасим сессионный: дальше
+    // каждая проекция отвечает за свой флаг сама (см. Projection::fit_pending).
+    if (s.fit_request) {
+        for (auto& p : s.projections) p.fit_pending = true;
+        s.fit_request = false;
+    }
     int pr_to_remove = -1;
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
@@ -4307,7 +4313,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Диаграмма признаков: точечный график (значение пика; интервал до
@@ -4437,7 +4443,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::TimeDomain) {
@@ -4557,7 +4563,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
@@ -4826,7 +4832,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                       (i ^ owner_id_delta) ^ 0x5251A0, data_gen,
                                       n, n, values,
                                       rq->t0, rq->t1, rq->t0, rq->t1,
-                                      vlo, vhi, s.fit_request);
+                                      vlo, vhi, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::Phase3D) {
@@ -4912,7 +4918,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view3d->popup_extras = phase_popup_extras;
                     pr.view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::ContinuationDiagram) {
@@ -4991,17 +4997,21 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             ImGui::PopID();
+            // Окно реально отрисовалось в этом кадре — автоскейл до него дошёл.
+            // Гасим здесь, а не после цикла: у невидимых окон Begin вернул
+            // false, и их запрос должен дожить до кадра, когда их покажут.
+            // Ветка "No data" тоже гасит: фитить нечего, а приход результата
+            // взведёт fit_request заново.
+            pr.fit_pending = false;
         }
         ImGui::End();
         if (!open) pr_to_remove = i; // окно закрыто крестиком
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
-    // автоскейл применён ко всем окнам в этом кадре — сбрасываем запрос
-    s.fit_request = false;
 }
 
 // Combo "Writable var": переменные + (через разделитель) комбинация
@@ -11326,6 +11336,29 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     if (!cs.ls_session.curves.empty())
         init_cmap_from_config(2, cs.ls_session.curves[0].colormap_idx);
 
+    // Автоскейл 2D-карт. Тот же узор, что в Parametric (draw_bifurcation_plot:
+    // "bool fit = bdact.fit_request_2d; if (fit) ... = false"): запрос живёт в
+    // конфиге подсессии и взводится приходом результата. Здесь в render уходило
+    // жёстко false, поэтому после первого прогона HeatmapView фиксировал вид
+    // (view_valid) и больше его не трогал: пересчёт в ДРУГОМ диапазоне рисовался
+    // в старых границах — при расширении диапазона это выглядело как "новый
+    // расчёт не сработал", потому что на экране оставался прежний узкий кусок.
+    //
+    // Забираем флаг у самой отрисовки, а не при сборке slots: карты сложены в
+    // один док, у невидимой вкладки Begin вернёт false, и съеденный за неё
+    // запрос пропал бы (ровно та же ловушка, что у Projection::fit_pending).
+    auto take_fit_2d = [&cs](int slot) {
+        bool* f = nullptr;
+        if      (slot == 0 && !cs.bif_session.diagrams.empty())
+            f = &cs.bif_session.diagrams[0].fit_request_2d;
+        else if (slot == 1 && !cs.lle_session.curves.empty())
+            f = &cs.lle_session.curves[0].fit_request_2d;
+        else if (slot == 2 && !cs.ls_session.curves.empty())
+            f = &cs.ls_session.curves[0].fit_request_2d;
+        if (!f || !*f) return false;
+        *f = false;
+        return true;
+    };
     for (int i = 0; i < 3; ++i) {
         if (!slots[i].show) continue;
         ensure_docked(slots[i].title);
@@ -11439,7 +11472,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                           slots[i].lo_x, slots[i].hi_x,
                           slots[i].lo_y, slots[i].hi_y,
                           vmin_use, vmax_use,
-                          /*fit_request*/ false);
+                          take_fit_2d(i));
                 handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
                                hv.swap_axes, &model);
                 ImGui::PopID();
@@ -11865,6 +11898,16 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     }
     // Level 3 Basins window (unchanged HeatmapView minimal renderer)
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
+        // Автоскейл — как у 2D-карт выше (см. take_fit_2d): сюда тоже уходило
+        // жёсткое false, и карта, посчитанная в новой сетке НУ, рисовалась в
+        // границах предыдущего прогона.
+        auto take_fit_basins = [&cs]() {
+            if (cs.basins_session.configs.empty()) return false;
+            bool& f = cs.basins_session.configs[0].fit_request;
+            if (!f) return false;
+            f = false;
+            return true;
+        };
         std::string basins_title = "Custom Basins" + suffix;
         ensure_docked(basins_title);
         if (ImGui::Begin(basins_title.c_str())) {
@@ -11925,7 +11968,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                       r.axis_x_lo, r.axis_x_hi,
                                       r.axis_y_lo, r.axis_y_hi,
                                       vmin, vmax,
-                                      /*fit_request*/ false);
+                                      take_fit_basins());
                     }
                 }
             }
