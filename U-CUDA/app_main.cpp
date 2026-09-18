@@ -259,7 +259,8 @@ int main() {
     AppModel model(ocr_fn);
     model.app_mode = AppModel::AppMode::Analysis;
     model.start_phase_analysis();
-    model.alphabet_text = "x,y,z,sigma,rho,beta";
+    model.vars_text   = "x, y, z";
+    model.params_text = "sigma, rho, beta";
 
     SystemLibrary library(library_dir);
 
