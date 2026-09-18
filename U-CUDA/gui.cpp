@@ -2669,6 +2669,11 @@ static void draw_wrapper_list(AppModel& model) {
         return;
 
     int to_delete = -1;
+    // Своя область ID на весь список: строки нумеруются с нуля и здесь, и
+    // в "Custom KRS schemes" выше, а CollapsingHeader своей области не
+    // открывает (это TreeNodeBehavior без TreePush). Без этого PushID(0) +
+    // SmallButton("Delete") в обоих списках даёт один и тот же ID.
+    ImGui::PushID("wrapper_list");
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
         ImGui::PushID(i);
         const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
@@ -2696,6 +2701,7 @@ static void draw_wrapper_list(AppModel& model) {
         }
         ImGui::PopID();
     }
+    ImGui::PopID();
     if (to_delete >= 0) model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
 }
 
@@ -2931,6 +2937,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // существующие схемы
         int to_delete = -1;
+        // Парная к draw_wrapper_list область ID (см. комментарий там).
+        ImGui::PushID("custom_krs_list");
         for (int i = 0; i < (int)model.custom_schemes.size(); ++i) {
             auto& cs = model.custom_schemes[i];
             ImGui::PushID(i);
@@ -2987,6 +2995,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             ImGui::Spacing();
             ImGui::PopID();
         }
+        ImGui::PopID();
         if (to_delete >= 0) model.custom_schemes.erase(model.custom_schemes.begin() + to_delete);
 
         // блокируем добавление с уже существующим/built-in именем
