@@ -9874,6 +9874,31 @@ static void draw_network_coupling_block(AppModel& model, NetworkSession& s, Netw
                           "so K is the pull per node and a hub is not dragged N times harder.\n"
                           "Off: the plain Laplacian sum - the hub of a star will blow up first.");
 
+    // Закон на ВСЕ рёбра сразу — рядом с общей силой связи, потому что это тот
+    // же вопрос «какая связь у сети», только про вид, а не про величину.
+    // Разнородный набор показывается как (mixed) и не трогается, пока из списка
+    // не выберут закон.
+    {
+        int common = c.edges.empty() ? 0 : c.edges.front().law;
+        for (const NetEdge& e : c.edges)
+            if (e.law != common) { common = -1; break; }
+        const char* preview = (common < 0) ? "(mixed)"
+                            : (common < (int)c.laws.size() ? c.laws[(size_t)common].name.c_str() : "?");
+        ImGui::SetNextItemWidth(kFieldW + 60.0f);
+        if (ImGui::BeginCombo("law for all edges", preview)) {
+            for (size_t li = 0; li < c.laws.size(); ++li) {
+                const bool selected = ((int)li == common);
+                if (ImGui::Selectable(c.laws[li].name.c_str(), selected))
+                    for (NetEdge& e : c.edges) e.law = (int)li;
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Assigns the picked law to every edge at once.\n"
+                              "Per-edge exceptions stay available in the Edges table.");
+    }
+
     ImGui::TextDisabled("A law is one expression per equation; empty = no coupling there.");
     ImGui::TextDisabled("Names: %s_j = source node, %s or %s_i = this node, K = edge weight.",
                         s.vars.empty() ? "x" : s.vars[0].c_str(),
@@ -10116,6 +10141,7 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
         e.from = 0;
         e.to   = (int)c.nodes.size() > 1 ? 1 : 0;
         e.bidirectional = true;
+        if (!c.edges.empty()) e.law = c.edges.back().law;   // см. графовый редактор
         c.edges.push_back(e);
         net_mark_custom(c);
     }
@@ -10422,6 +10448,10 @@ static void draw_network_graph_window(AppModel& model) {
                 e.from = pending;
                 e.to   = hovered_node;
                 e.bidirectional = !c.gen_directed;
+                // Закон — как у последнего ребра: у однородной сети новое
+                // ребро обязано остаться в той же связи, иначе «закон на все
+                // рёбра» ломается первой же ручной правкой.
+                if (!c.edges.empty()) e.law = c.edges.back().law;
                 c.edges.push_back(e);
                 net_mark_custom(c);
                 vs.selected_edge = (int)c.edges.size() - 1;

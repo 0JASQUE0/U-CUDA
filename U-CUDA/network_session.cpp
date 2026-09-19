@@ -164,6 +164,14 @@ std::string net_generate_topology(NetworkConfig& c, const std::vector<std::strin
         c.nodes[(size_t)i].label = std::to_string(i);
     }
 
+    // Закон связи переживает перегенерацию, если он был ОДИН на всю сеть:
+    // иначе выбранный «закон на все рёбра» сбрасывался бы каждым изменением
+    // числа узлов.
+    int common_law = c.edges.empty() ? 0 : c.edges.front().law;
+    for (const NetEdge& e : c.edges)
+        if (e.law != common_law) { common_law = 0; break; }
+    if (common_law < 0 || common_law >= (int)c.laws.size()) common_law = 0;
+
     std::set<long long> seen;
     std::vector<NetEdge> edges;
     auto add = [&](int a, int b) {
@@ -173,7 +181,7 @@ std::string net_generate_topology(NetworkConfig& c, const std::vector<std::strin
         e.from = a; e.to = b;
         e.bidirectional = !c.gen_directed;
         e.weight_text = "1";
-        e.law = 0;
+        e.law = common_law;
         edges.push_back(e);
     };
 
