@@ -9964,19 +9964,19 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
         for (const auto& v : s.vars)   ImGui::TableSetupColumn((v + "0").c_str());
         ImGui::TableHeadersRow();
 
+        // Прокрутка к узлу, выбранному кликом в графе. Позицию НЕ считаем
+        // арифметикой: строка тут выше строки текста (в ней поля ввода), и
+        // счёт по высоте текста промахивался тем сильнее, чем дальше узел.
+        // Вместо этого заставляем клиппер выдать именно эту строку и просим
+        // SetScrollHereY у неё самой.
+        const int  scroll_to = model.network_view.selected_node;
+        const bool want_scroll = model.network_view.scroll_nodes_to_selected
+                              && scroll_to >= 0 && scroll_to < (int)c.nodes.size();
+        model.network_view.scroll_nodes_to_selected = false;
+
         ImGuiListClipper clipper;
         clipper.Begin((int)c.nodes.size());
-        // Прокрутка к узлу, выбранному кликом в графе. Клиппер рисует только
-        // видимые строки, поэтому просить SetScrollHereY у самой строки нельзя —
-        // её может не быть в этом кадре; считаем позицию по номеру строки.
-        if (model.network_view.scroll_nodes_to_selected) {
-            const int sel = model.network_view.selected_node;
-            if (sel >= 0 && sel < (int)c.nodes.size()) {
-                const float row_h = ImGui::GetTextLineHeightWithSpacing();
-                ImGui::SetScrollY((float)sel * row_h - height * 0.5f + row_h);
-            }
-            model.network_view.scroll_nodes_to_selected = false;
-        }
+        if (want_scroll) clipper.IncludeItemByIndex(scroll_to);
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 NetNode& nd = c.nodes[(size_t)i];
@@ -9989,6 +9989,7 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
                 if (ImGui::Selectable(std::to_string(i).c_str(), sel,
                                       ImGuiSelectableFlags_SpanAllColumns))
                     model.network_view.selected_node = sel ? -1 : i;
+                if (want_scroll && i == scroll_to) ImGui::SetScrollHereY(0.5f);
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", net_degree(c, i));
                 // Правка любой ячейки выделяет узел — так строка таблицы и
@@ -10051,17 +10052,15 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
         ImGui::TableSetupColumn("");
         ImGui::TableHeadersRow();
 
+        // Прокрутка к ребру, выбранному кликом в графе — см. таблицу узлов.
+        const int  scroll_to = model.network_view.selected_edge;
+        const bool want_scroll = model.network_view.scroll_edges_to_selected
+                              && scroll_to >= 0 && scroll_to < (int)c.edges.size();
+        model.network_view.scroll_edges_to_selected = false;
+
         ImGuiListClipper clipper;
         clipper.Begin((int)c.edges.size());
-        // Прокрутка к ребру, выбранному кликом в графе — см. таблицу узлов.
-        if (model.network_view.scroll_edges_to_selected) {
-            const int sel = model.network_view.selected_edge;
-            if (sel >= 0 && sel < (int)c.edges.size()) {
-                const float row_h = ImGui::GetTextLineHeightWithSpacing();
-                ImGui::SetScrollY((float)sel * row_h - height * 0.5f + row_h);
-            }
-            model.network_view.scroll_edges_to_selected = false;
-        }
+        if (want_scroll) clipper.IncludeItemByIndex(scroll_to);
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 NetEdge& e = c.edges[(size_t)i];
@@ -10073,6 +10072,10 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
                 ImGui::SetNextItemWidth(60.0f);
                 if (ImGui::InputInt("##f", &e.from, 0, 0)) { net_mark_custom(c); }
                 if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
+                // ПОСЛЕ первого виджета строки: SetScrollHereY целится в
+                // ПРЕДЫДУЩУЮ поданную строку, и вызов до него увёл бы прокрутку
+                // на строку выше.
+                if (want_scroll && i == scroll_to) ImGui::SetScrollHereY(0.5f);
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(60.0f);
                 if (ImGui::InputInt("##t", &e.to, 0, 0)) { net_mark_custom(c); }
