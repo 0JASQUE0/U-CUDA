@@ -1307,6 +1307,21 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession
 // вложенные коллекции: узлы (переопределения параметров и НУ, положение в
 // редакторе) и рёбра. Результат расчёта не пишется — он на порядки больше
 // самой сессии и восстанавливается одним Run.
+// Переопределения узла: пустое значение значит «берём общее», и таблица UI
+// заводит такой ключ на КАЖДЫЙ параметр каждого узла просто потому, что по нему
+// кликнули. В файл они не идут — иначе сессия из 256 узлов распухает на
+// тысячи пустых строк, не неся ничего.
+static void jmap_nonempty(std::ostringstream& o, const std::map<std::string, std::string>& m) {
+    o << "{"; bool first = true;
+    for (const auto& kv : m) {
+        if (kv.second.empty()) continue;
+        if (!first) o << ",";
+        o << '"' << esc(kv.first) << "\":\"" << esc(kv.second) << '"';
+        first = false;
+    }
+    o << "}";
+}
+
 static void write_network_config(std::ostringstream& o, const NetworkConfig& c) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);            o << ",";
@@ -1352,8 +1367,8 @@ static void write_network_config(std::ostringstream& o, const NetworkConfig& c) 
         const NetNode& nd = c.nodes[i];
         o << "{\"label\":"; jstr(o, nd.label);
         o << ",\"x\":" << nd.ui_x << ",\"y\":" << nd.ui_y;
-        o << ",\"params\":"; jmap(o, nd.param_values);
-        o << ",\"ic\":";     jmap(o, nd.initial_conditions);
+        o << ",\"params\":"; jmap_nonempty(o, nd.param_values);
+        o << ",\"ic\":";     jmap_nonempty(o, nd.initial_conditions);
         o << "}";
     }
     o << "],";

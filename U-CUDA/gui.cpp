@@ -10315,6 +10315,10 @@ static void draw_network_graph_window(AppModel& model) {
         c.nodes.erase(c.nodes.begin() + dead);
         net_mark_custom(c);
         vs.selected_node = -1;
+        vs.selected_edge = -1;
+        // Узла больше нет, а подсказка ниже ходит по индексу: без сброса она
+        // прочитала бы за концом вектора в этом же кадре.
+        hovered_node = -1;
     }
 
     // Подсказка о значении под курсором.
