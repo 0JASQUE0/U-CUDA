@@ -1041,6 +1041,12 @@ struct OrderRequest {
     std::string ref_krs_body;
     int         ref_substeps = 0;
 
+    // Считать в double-double (~32 цифры) вместо double. Флаг только для
+    // CPU-ветки: GPU-путь его игнорирует, ядро собирается в обычном numb.
+    // Нужен там, где схема высокого порядка упирается в полку округления
+    // раньше, чем выходит на асимптотику (подробности — в order_session.cpp).
+    bool cpu_dd = false;
+
     // See Bifurcation1DRequest::cancel / ::progress.
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
@@ -1124,6 +1130,10 @@ struct PerfRequest {
     // влияет никак: считается в том же не засекаемом order-проходе, что E1/E2.
     std::string ref_krs_body;
     int         ref_substeps = 0;
+
+    // См. OrderRequest::cpu_dd. Здесь он меняет и ось времени: в расширенной
+    // точности меряется стоимость dd-арифметики, а не double.
+    bool cpu_dd = false;
 
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;

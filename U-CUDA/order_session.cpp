@@ -76,6 +76,10 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     req.max_value     = parse_d(c.max_value_text, 1.0e6);
     req.snap_steps    = c.snap_steps;
     req.endpoint_only = c.endpoint_only;
+    // На GPU расширенной точности нет, и молча считать в double при выбранном
+    // dd было бы хуже, чем не дать выбрать: цифры на графике те же, а смысл
+    // другой. Поэтому UI гасит селектор при GPU, а здесь флаг снимается.
+    req.cpu_dd        = (!c.use_gpu && c.cpu_precision == kOrderPrecDD);
     return req;
 }
 
@@ -96,6 +100,7 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.snap_steps         = o.snap_steps;
     req.endpoint_only      = o.endpoint_only;
     req.max_value          = o.max_value;
+    req.cpu_dd             = o.cpu_dd;
     req.ref_substeps       = std::max(0, parse_i(c.perf_ref_substeps_text, 4));
     if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
         req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes, s.sys, c.perf_ref_scheme);
@@ -218,12 +223,44 @@ void OrderAnalysisSession::remove_config(int i) {
 // траектории. На GPU replicas меняют смысл замера с латентности на пропускную
 // способность; здесь такого выбора нет, поле просто игнорируется.
 
+// Точность CPU-ветки — параметр шаблона. Скаляров два: numb (= double, бит в
+// бит как на GPU) и ucuda::dd (~32 цифры, kernels/ucuda_hp.h). Расширенная
+// точность нужна ровно из-за полки округления в оценке порядка: при eps =
+// 2.2e-16 разность E1 = |y_h - y_h/2| для схемы порядка 8 уходит под шум
+// раньше, чем схема выйдет на асимптотику, и p не измеряется вовсе.
+//
+// Различий между скалярами ровно два — код точности для компилятора КРС и
+// сигнатура готового шага (в dd шаг h передаётся указателем, см. StepFnDD).
+// Всё остальное пишется одним текстом.
+template <class S> struct CpuScalarTraits;
+
+template <> struct CpuScalarTraits<numb> {
+    using Fn = KrsCpuStep::StepFn;
+    static constexpr KrsCpuPrec prec = KrsCpuPrec::Double;
+    static Fn   fn(const KrsCpuStep& s) { return s.fn(); }
+    static void call(Fn f, numb* X, const numb* a, const numb& h) { f(X, a, h); }
+};
+
+template <> struct CpuScalarTraits<ucuda::dd> {
+    using Fn = KrsCpuStep::StepFnDD;
+    static constexpr KrsCpuPrec prec = KrsCpuPrec::DD;
+    static Fn   fn(const KrsCpuStep& s) { return s.fn_dd(); }
+    static void call(Fn f, ucuda::dd* X, const ucuda::dd* a, const ucuda::dd& h) { f(X, a, &h); }
+};
+
+// Результат наружу всегда double: p, e1, e2 — это логарифмы отношений, лишние
+// разряды в них смысла не несут, а график и CSV везде работают с double.
+static double as_d(numb x)             { return x; }
+static double as_d(const ucuda::dd& x) { return x.hi; }
+
 // Тот же предикат «улетела», что orderBadVec в ядре.
-static bool order_bad_vec_cpu(const numb* X, int n, numb maxValue) {
-    numb acc = (numb)0;
-    for (int i = 0; i < n; ++i) acc += std::fabs(X[i]);
-    if (std::isnan(acc) || std::isinf(acc)) return true;
-    if (maxValue != (numb)0 && acc > maxValue) return true;
+template <class S>
+static bool order_bad_vec_cpu(const S* X, int n, const S& maxValue) {
+    using std::fabs; using std::isnan; using std::isinf;
+    S acc = S(0);
+    for (int i = 0; i < n; ++i) acc += fabs(X[i]);
+    if (isnan(acc) || isinf(acc)) return true;
+    if (maxValue != S(0) && acc > maxValue) return true;
     return false;
 }
 
@@ -259,10 +296,11 @@ static long long order_steps_for_cpu(double h, double tMax, bool snap) {
 
 // Компиляция тела (и эталона) в нативные шаги. Ошибки компилятора приходят с
 // номерами строк В ТЕЛЕ КРС, поэтому их видно так же, как в редакторе схем.
+template <class S>
 static bool compile_cpu_step(const std::string& body, int amountOfX, int amountOfValues,
                              const char* what, KrsCpuStep& out, std::string& err) {
     std::vector<KrsCpuDiag> diags;
-    if (out.compile(body, amountOfX, amountOfValues, diags)) return true;
+    if (out.compile(body, amountOfX, amountOfValues, CpuScalarTraits<S>::prec, diags)) return true;
     err = std::string("CPU ") + what + ":";
     for (const auto& d : diags) {
         err += "\n";
@@ -272,7 +310,10 @@ static bool compile_cpu_step(const std::string& body, int amountOfX, int amountO
     return false;
 }
 
-static OrderResult run_order_cpu(const OrderRequest& req) {
+template <class S>
+static OrderResult run_order_cpu_t(const OrderRequest& req) {
+    using Tr = CpuScalarTraits<S>;
+    using std::fabs; using std::sqrt;
     OrderResult res;
     res.axis_x = req.axis_x;
     res.axis_y = req.axis_y;
@@ -298,12 +339,12 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
 
     const bool ref_on = !req.ref_krs_body.empty() && req.ref_substeps > 0;
     KrsCpuStep step_main, step_ref;
-    if (!compile_cpu_step(req.krs_body, n, amountOfValues, "KRS", step_main, err))
+    if (!compile_cpu_step<S>(req.krs_body, n, amountOfValues, "KRS", step_main, err))
         return fail(err);
-    if (ref_on && !compile_cpu_step(req.ref_krs_body, n, amountOfValues, "reference KRS", step_ref, err))
+    if (ref_on && !compile_cpu_step<S>(req.ref_krs_body, n, amountOfValues, "reference KRS", step_ref, err))
         return fail(err);
-    const KrsCpuStep::StepFn fmain = step_main.fn();
-    const KrsCpuStep::StepFn fref  = ref_on ? step_ref.fn() : nullptr;
+    const typename Tr::Fn fmain = Tr::fn(step_main);
+    const typename Tr::Fn fref  = ref_on ? Tr::fn(step_ref) : nullptr;
 
     res.p.assign(total_cells, 0.0);
     res.e1.assign(total_cells, 0.0);
@@ -330,11 +371,11 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
     if (total_steps <= 0.0) total_steps = 1.0;
     double done_steps = 0.0;
 
-    const numb floorEps = (numb)2 * std::numeric_limits<numb>::epsilon();
-    const numb maxValue = (numb)req.max_value;
+    const S floorEps = S(2) * std::numeric_limits<S>::epsilon();
+    const S maxValue = S(req.max_value);
 
-    std::vector<numb> a((size_t)amountOfValues);
-    std::vector<numb> Xc((size_t)n), Xm((size_t)n), Xf((size_t)n), Xr((size_t)n);
+    std::vector<S> a((size_t)amountOfValues);
+    std::vector<S> Xc((size_t)n), Xm((size_t)n), Xf((size_t)n), Xr((size_t)n);
 
     for (int iy = 0; iy < res.n_pts_y; ++iy) {
         for (int ix = 0; ix < res.n_pts_x; ++ix) {
@@ -345,20 +386,20 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
                 return res;
             }
 
-            for (int i = 0; i < amountOfValues; ++i) a[(size_t)i] = (numb)req.values[(size_t)i];
+            for (int i = 0; i < amountOfValues; ++i) a[(size_t)i] = S(req.values[(size_t)i]);
             double h = req.h;
             const double vx = res.axis_x_vals[(size_t)ix];
             if      (req.axis_x.kind == OrderAxisKind::H)     h = vx;
             else if (req.axis_x.kind == OrderAxisKind::Value) {
                 if (req.axis_x.index >= 0 && req.axis_x.index < amountOfValues)
-                    a[(size_t)req.axis_x.index] = (numb)vx;
+                    a[(size_t)req.axis_x.index] = S(vx);
             }
             if (req.axis_y.kind != OrderAxisKind::None) {
                 const double vy = res.axis_y_vals[(size_t)iy];
                 if      (req.axis_y.kind == OrderAxisKind::H)     h = vy;
                 else if (req.axis_y.kind == OrderAxisKind::Value) {
                     if (req.axis_y.index >= 0 && req.axis_y.index < amountOfValues)
-                        a[(size_t)req.axis_y.index] = (numb)vy;
+                        a[(size_t)req.axis_y.index] = S(vy);
                 }
             }
 
@@ -371,54 +412,54 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
             }
 
             long long N;
-            numb hEff = (numb)h;
+            S hEff = S(h);
             if (req.snap_steps) {
                 N = (long long)(req.t_max / h + 0.5);
                 if (N < 1) N = 1;
-                hEff = (numb)req.t_max / (numb)N;
+                hEff = S(req.t_max) / S((double)N);
             } else {
                 N = (long long)(req.t_max / h);
                 if (N < 1) N = 1;
             }
 
-            const numb h1 = hEff;
-            const numb h2 = hEff / (numb)2;
-            const numb h4 = hEff / (numb)4;
+            const S h1 = hEff;
+            const S h2 = hEff / S(2);
+            const S h4 = hEff / S(4);
 
             for (int i = 0; i < n; ++i) {
-                const numb x0 = (numb)req.initial_conditions[(size_t)i];
+                const S x0 = S(req.initial_conditions[(size_t)i]);
                 Xc[(size_t)i] = x0; Xm[(size_t)i] = x0; Xf[(size_t)i] = x0; Xr[(size_t)i] = x0;
             }
 
-            numb e1 = (numb)0, e2 = (numb)0, scale = (numb)0, eRef = (numb)0;
-            int  status = ORDER_ST_OK;
+            S   e1 = S(0), e2 = S(0), scale = S(0), eRef = S(0);
+            int status = ORDER_ST_OK;
 
-            const int  refM = (req.ref_substeps > 0) ? req.ref_substeps : 1;
-            const numb hRef = h1 / (numb)refM;
+            const int refM = (req.ref_substeps > 0) ? req.ref_substeps : 1;
+            const S   hRef = h1 / S(refM);
 
             bool cancelled_here = false;
             for (long long k = 0; k < N; ++k) {
-                fmain(Xc.data(), a.data(), h1);
-                fmain(Xm.data(), a.data(), h2);
-                fmain(Xm.data(), a.data(), h2);
-                fmain(Xf.data(), a.data(), h4);
-                fmain(Xf.data(), a.data(), h4);
-                fmain(Xf.data(), a.data(), h4);
-                fmain(Xf.data(), a.data(), h4);
+                Tr::call(fmain, Xc.data(), a.data(), h1);
+                Tr::call(fmain, Xm.data(), a.data(), h2);
+                Tr::call(fmain, Xm.data(), a.data(), h2);
+                Tr::call(fmain, Xf.data(), a.data(), h4);
+                Tr::call(fmain, Xf.data(), a.data(), h4);
+                Tr::call(fmain, Xf.data(), a.data(), h4);
+                Tr::call(fmain, Xf.data(), a.data(), h4);
                 if (fref)
-                    for (int q = 0; q < refM; ++q) fref(Xr.data(), a.data(), hRef);
+                    for (int q = 0; q < refM; ++q) Tr::call(fref, Xr.data(), a.data(), hRef);
 
                 const bool last = (k == N - 1);
                 if (!req.endpoint_only || last) {
                     for (int i = 0; i < n; ++i) {
-                        const numb d1 = std::fabs(Xc[(size_t)i] - Xm[(size_t)i]);
-                        const numb d2 = std::fabs(Xm[(size_t)i] - Xf[(size_t)i]);
+                        const S d1 = fabs(Xc[(size_t)i] - Xm[(size_t)i]);
+                        const S d2 = fabs(Xm[(size_t)i] - Xf[(size_t)i]);
                         if (d1 > e1) e1 = d1;
                         if (d2 > e2) e2 = d2;
-                        const numb sc = std::fabs(Xf[(size_t)i]);
+                        const S sc = fabs(Xf[(size_t)i]);
                         if (sc > scale) scale = sc;
                         if (fref) {
-                            const numb dr = std::fabs(Xc[(size_t)i] - Xr[(size_t)i]);
+                            const S dr = fabs(Xc[(size_t)i] - Xr[(size_t)i]);
                             if (dr > eRef) eRef = dr;
                         }
                     }
@@ -447,19 +488,19 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
             if (cancelled_here) { res.cancelled = true; return res; }
 
             double p;
-            double o1 = (double)e1, o2 = (double)e2;
+            double o1 = as_d(e1), o2 = as_d(e2);
             if (status == ORDER_ST_DIVERGED) {
                 p = o1 = o2 = std::numeric_limits<double>::quiet_NaN();
             } else {
                 // Полка округления — тот же порог, что в ядре: он растёт как
                 // sqrt(числа шагов), потому что шум вычитания копится
                 // случайным блужданием, а не держится в пределах пары ulp.
-                const numb nsteps = (numb)4 * (numb)N;
-                const numb tiny = floorEps * (scale > (numb)0 ? scale : (numb)1) * std::sqrt(nsteps);
+                const S nsteps = S(4.0 * (double)N);
+                const S tiny = floorEps * (scale > S(0) ? scale : S(1)) * sqrt(nsteps);
                 if (e2 <= tiny || e1 <= tiny) status = ORDER_ST_FLOOR;
                 else if (e2 >= e1)            status = ORDER_ST_NOCONTRACT;
-                p = (e2 > (numb)0 && e1 > (numb)0)
-                        ? std::log2((double)(e1 / e2))
+                p = (e2 > S(0) && e1 > S(0))
+                        ? std::log2(as_d(e1 / e2))
                         : std::numeric_limits<double>::quiet_NaN();
             }
 
@@ -468,9 +509,9 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
             res.e2[gcell]     = o2;
             res.e_ref[gcell]  = fref ? ((status == ORDER_ST_DIVERGED)
                                             ? std::numeric_limits<double>::quiet_NaN()
-                                            : (double)eRef)
+                                            : as_d(eRef))
                                      : std::numeric_limits<double>::quiet_NaN();
-            res.h_eff[gcell]  = (double)hEff;
+            res.h_eff[gcell]  = as_d(hEff);
             res.status[gcell] = status;
         }
     }
@@ -505,7 +546,14 @@ static OrderResult run_order_cpu(const OrderRequest& req) {
     return res;
 }
 
-static PerfResult run_performance_cpu(const PerfRequest& req) {
+static OrderResult run_order_cpu(const OrderRequest& req) {
+    return req.cpu_dd ? run_order_cpu_t<ucuda::dd>(req)
+                      : run_order_cpu_t<numb>(req);
+}
+
+template <class S>
+static PerfResult run_performance_cpu_t(const PerfRequest& req) {
+    using Tr = CpuScalarTraits<S>;
     PerfResult res;
     res.axis = req.axis;
     auto fail = [&](const std::string& msg) -> PerfResult { res.error = msg; return res; };
@@ -533,7 +581,7 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
     // Прогресс первого прохода наружу не отдаём: второй проход перезапишет
     // его с нуля, и бар дёргался бы назад. Своя шкала ставится ниже.
 
-    const OrderResult ores = run_order_cpu(oreq);
+    const OrderResult ores = run_order_cpu_t<S>(oreq);
     if (ores.cancelled) { res.cancelled = true; return res; }
     if (!ores.ok) return fail(ores.error);
 
@@ -565,11 +613,11 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
 
     std::string err;
     KrsCpuStep step;
-    if (!compile_cpu_step(req.krs_body, n, amountOfValues, "KRS", step, err)) return fail(err);
-    const KrsCpuStep::StepFn fstep = step.fn();
+    if (!compile_cpu_step<S>(req.krs_body, n, amountOfValues, "KRS", step, err)) return fail(err);
+    const typename Tr::Fn fstep = Tr::fn(step);
 
-    std::vector<numb> a((size_t)amountOfValues);
-    std::vector<numb> X((size_t)n);
+    std::vector<S> a((size_t)amountOfValues);
+    std::vector<S> X((size_t)n);
     // Сток для конечного состояния: тело КРС живёт в DLL, выбросить цикл
     // компилятор не может, но пусть и формально результат кто-то читает.
     volatile double sink = 0.0;
@@ -587,21 +635,21 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
         const double h_node = res.h_eff[(size_t)i];
         if (!(h_node > 0.0) || !std::isfinite(h_node)) continue;   // узел без времени: см. status
 
-        for (int k = 0; k < amountOfValues; ++k) a[(size_t)k] = (numb)req.values[(size_t)k];
+        for (int k = 0; k < amountOfValues; ++k) a[(size_t)k] = S(req.values[(size_t)k]);
         if (req.axis.kind == OrderAxisKind::Value) {
             const int vi = req.axis.index;
-            if (vi >= 0 && vi < amountOfValues) a[(size_t)vi] = (numb)res.axis_vals[(size_t)i];
+            if (vi >= 0 && vi < amountOfValues) a[(size_t)vi] = S(res.axis_vals[(size_t)i]);
         }
 
         const long long N = order_steps_for_cpu(h_node, req.t_max, req.snap_steps);
         res.n_steps[(size_t)i] = N;
 
         auto one_run = [&]() {
-            for (int k = 0; k < n; ++k) X[(size_t)k] = (numb)req.initial_conditions[(size_t)k];
-            const numb hh = (numb)h_node;
-            for (long long k = 0; k < N; ++k) fstep(X.data(), a.data(), hh);
+            for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+            const S hh = S(h_node);
+            for (long long k = 0; k < N; ++k) Tr::call(fstep, X.data(), a.data(), hh);
             double acc = 0.0;
-            for (int k = 0; k < n; ++k) acc += (double)X[(size_t)k];
+            for (int k = 0; k < n; ++k) acc += as_d(X[(size_t)k]);
             sink = acc;
         };
 
@@ -637,6 +685,11 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
     if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
     res.ok = true;
     return res;
+}
+
+static PerfResult run_performance_cpu(const PerfRequest& req) {
+    return req.cpu_dd ? run_performance_cpu_t<ucuda::dd>(req)
+                      : run_performance_cpu_t<numb>(req);
 }
 
 bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {

@@ -269,7 +269,7 @@ namespace {
 // пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
 // numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
 // подхватилась бы DLL, собранная в другой точности.
-constexpr int kPreludeVersion = 4;
+constexpr int kPreludeVersion = 5;
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
@@ -292,26 +292,44 @@ constexpr int kPreludeVersion = 4;
 //
 // AMOUNTOFX определяем ДО include: в configCUDA.h он под #ifndef, наш #define
 // выигрывает, как и в NVRTC-шаблонах.
-std::string make_source(const std::string& body, int amountOfX) {
+// В режиме DD подменяется РОВНО тип: тело схемы и заголовок те же, но numb
+// становится ucuda::dd. Переопределение идёт макросами до include configCUDA.h
+// — тем же способом, каким NVRTC-шаблоны переопределяют AMOUNTOFX. Константы
+// pi/euler подменяются вместе с типом: double-литерал обрезал бы их до 17
+// цифр, и расширенная точность кончалась бы на первом же pi в правой части.
+//
+// Сигнатура в DD другая — h приходит указателем (см. StepFnDD в krs_cpu.h),
+// поэтому первая строка функции распаковывает его в локальный h. Тело её не
+// видит: #line ниже, и нумерация ошибок остаётся в координатах схемы.
+std::string make_source(const std::string& body, int amountOfX, KrsCpuPrec prec) {
+    const bool dd = (prec == KrsCpuPrec::DD);
     std::ostringstream o;
     o << "#include <cmath>\n"
          "#include <cstdlib>\n"
-         "using std::abs;\n"
-         "#define AMOUNTOFX " << amountOfX << "\n"
+         "using std::abs;\n";
+    if (dd) {
+        o << "#include \"ucuda_hp.h\"\n"
+             "#define UCUDA_NUMB_TYPE ucuda::dd\n"
+             "#define UCUDA_PI    ucuda::c_pi\n"
+             "#define UCUDA_EULER ucuda::c_e\n";
+    }
+    o << "#define AMOUNTOFX " << amountOfX << "\n"
          "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
-         "extern \"C\" __declspec(dllexport)\n"
-         "void krs_step(numb* X, const numb* a, numb h) {\n"
+         "extern \"C\" __declspec(dllexport)\n";
+    if (dd) o << "void krs_step(numb* X, const numb* a, const numb* h_ptr) {\n"
+                 "    numb h = *h_ptr;\n";
+    else    o << "void krs_step(numb* X, const numb* a, numb h) {\n";
          // Дальше — код пользователя. #line переводит нумерацию компилятора
          // в координаты ТЕЛА, поэтому "krs(12): error" указывает ровно на
          // 12-ю строку в редакторе схемы.
-         "#line 1 \"krs\"\n"
+    o << "#line 1 \"krs\"\n"
       << body << "\n}\n";
     return o.str();
 }
 
-unsigned long long hash_key(const std::string& body, int nx, int nv) {
+unsigned long long hash_key(const std::string& body, int nx, int nv, KrsCpuPrec prec) {
     unsigned long long h = 1469598103934665603ULL;      // FNV-1a
     auto mix = [&](const void* p, size_t n) {
         const unsigned char* b = (const unsigned char*)p;
@@ -324,6 +342,10 @@ unsigned long long hash_key(const std::string& body, int nx, int nv) {
     mix(&ver, sizeof ver);
     const int numb_bytes = (int)sizeof(numb);
     mix(&numb_bytes, sizeof numb_bytes);
+    // Точность — часть ключа: double- и dd-сборки одного тела лежат рядом и
+    // не вытесняют друг друга при переключении режима в UI.
+    const int prec_code = (int)prec;
+    mix(&prec_code, sizeof prec_code);
     return h;
 }
 
@@ -381,13 +403,15 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
 KrsCpuStep::~KrsCpuStep() { release(); }
 
 KrsCpuStep::KrsCpuStep(KrsCpuStep&& o) noexcept
-    : module_(o.module_), fn_(o.fn_) { o.module_ = nullptr; o.fn_ = nullptr; }
+    : module_(o.module_), fn_(o.fn_), fn_dd_(o.fn_dd_) {
+    o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr;
+}
 
 KrsCpuStep& KrsCpuStep::operator=(KrsCpuStep&& o) noexcept {
     if (this != &o) {
         release();
-        module_ = o.module_; fn_ = o.fn_;
-        o.module_ = nullptr; o.fn_ = nullptr;
+        module_ = o.module_; fn_ = o.fn_; fn_dd_ = o.fn_dd_;
+        o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr;
     }
     return *this;
 }
@@ -396,10 +420,16 @@ void KrsCpuStep::release() {
     if (module_) FreeLibrary((HMODULE)module_);
     module_ = nullptr;
     fn_     = nullptr;
+    fn_dd_  = nullptr;
 }
 
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
                          std::vector<KrsCpuDiag>& diags) {
+    return compile(body, amountOfX, amountOfValues, KrsCpuPrec::Double, diags);
+}
+
+bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
+                         KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags) {
     release();
 
     // Индексы проверяем ДО компиляции: в нативном коде выход за границу X[]
@@ -416,7 +446,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 
     std::lock_guard<std::mutex> lock(g_compile_mtx);
 
-    const unsigned long long key = hash_key(body, amountOfX, amountOfValues);
+    const unsigned long long key = hash_key(body, amountOfX, amountOfValues, prec);
     const std::string dir = cache_dir(key);
     const std::string src = dir + "krs.cpp";
     const std::string dll = dir + "krs.dll";
@@ -424,7 +454,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 
     // Кэш: та же схема + та же размерность -> DLL уже собрана.
     if (GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const std::string source = make_source(body, amountOfX);
+        const std::string source = make_source(body, amountOfX, prec);
         FILE* f = nullptr;
         if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
             diags.push_back({ 0, "failed to write " + src });
@@ -446,7 +476,11 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         const std::string inc_dir = exe_dir() + "\\kernels";
 
         const std::string cmd =
-            "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /LD"
+            // /fp:precise — умолчание MSVC, но задано явно: double-double
+            // держится на безошибочных преобразованиях вида (s - a), и при
+            // /fp:fast компилятор вправе свернуть их в ноль. Тогда точность
+            // молча упала бы до обычного double, а сборка прошла бы успешно.
+            "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /fp:precise /LD"
             " /I\"" + inc_dir + "\""
             " /Fe:\"" + dll + "\""
             " /Fo:\"" + dir + "krs.obj\""
@@ -469,13 +503,14 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         diags.push_back({ 0, "failed to load " + dll });
         return false;
     }
-    auto p = (StepFn)GetProcAddress(m, "krs_step");
+    auto p = GetProcAddress(m, "krs_step");
     if (!p) {
         FreeLibrary(m);
         diags.push_back({ 0, "the built DLL has no krs_step" });
         return false;
     }
     module_ = m;
-    fn_     = p;
+    if (prec == KrsCpuPrec::DD) fn_dd_ = (StepFnDD)p;
+    else                        fn_    = (StepFn)p;
     return true;
 }

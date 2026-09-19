@@ -1,7 +1,8 @@
 ﻿#pragma once
 #include <string>
 #include <vector>
-#include "configCUDA.h"   // typedef numb — CPU считает в той же точности, что GPU
+#include "configCUDA.h"      // typedef numb — CPU считает в той же точности, что GPU
+#include "kernels/ucuda_hp.h" // double-double для режима расширенной точности
 
 // CPU-исполнение пользовательских КРС (custom KRS).
 //
@@ -17,6 +18,13 @@
 // (той же, которой собирается проект), находится через vswhere + vcvars64.
 // Компилируем как C++, а не как C: тогда abs(double), bool/true/false и
 // объявления в любом месте блока работают ровно как в CUDA.
+
+// Точность арифметики скомпилированного шага.
+//   Double — numb как везде в проекте (совпадает с GPU бит в бит);
+//   DD     — ucuda::dd, мантисса 106 бит (~32 цифры). То же тело КРС, тот же
+//            компилятор, подменён только тип: eps падает с 2.2e-16 до 4.9e-32,
+//            и оценка порядка перестаёт упираться в полку округления.
+enum class KrsCpuPrec { Double = 0, DD = 1 };
 
 // Диагностика по телу КРС. line — 1-based номер строки В ТЕЛЕ (0 = не
 // привязано к строке).
@@ -50,6 +58,10 @@ public:
     // тело обязано считаться в той же точности, иначе CPU и GPU разъедутся уже
     // на уровне типа, а не на уровне порядка операций.
     using StepFn = void (*)(numb* X, const numb* a, numb h);
+    // Тот же шаг в расширенной точности. h передаётся УКАЗАТЕЛЕМ: dd — это
+    // 16-байтовый агрегат, и его передача по значению через границу DLL
+    // зависит от соглашения вызова, а не от типа. Указатель убирает вопрос.
+    using StepFnDD = void (*)(ucuda::dd* X, const ucuda::dd* a, const ucuda::dd* h);
 
     KrsCpuStep() = default;
     ~KrsCpuStep();
@@ -65,12 +77,19 @@ public:
     // с той же схемой берёт готовую DLL и не платит за компиляцию.
     bool compile(const std::string& body, int amountOfX, int amountOfValues,
                  std::vector<KrsCpuDiag>& diags);
+    // То же, но с выбором точности. Кэш у режимов раздельный (точность входит
+    // в ключ), поэтому переключение туда-обратно не пересобирает.
+    bool compile(const std::string& body, int amountOfX, int amountOfValues,
+                 KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags);
 
-    StepFn fn() const { return fn_; }
-    explicit operator bool() const { return fn_ != nullptr; }
+    // Непустым будет ровно один из двух — тот, что отвечает точности сборки.
+    StepFn   fn()    const { return fn_; }
+    StepFnDD fn_dd() const { return fn_dd_; }
+    explicit operator bool() const { return fn_ != nullptr || fn_dd_ != nullptr; }
 
 private:
-    void   release();
-    void*  module_ = nullptr;   // HMODULE
-    StepFn fn_     = nullptr;
+    void     release();
+    void*    module_ = nullptr;   // HMODULE
+    StepFn   fn_     = nullptr;
+    StepFnDD fn_dd_  = nullptr;
 };
