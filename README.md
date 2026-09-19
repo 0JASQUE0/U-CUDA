@@ -1,240 +1,60 @@
-# U-CUDA — Chaotic Dynamics on CUDA
+# U-CUDA
 
-Анализ нелинейных динамических систем на CUDA + ImGui. Пользователь задаёт систему ОДУ (LaTeX или текст, можно с фото через OCR), приложение генерирует CUDA-код, интегрирует на GPU и рисует фазовые портреты 2D/3D.
+U-CUDA analyzes nonlinear dynamical systems. It parses ODEs, generates numerical schemes, compiles user-specific code for CPU or CUDA/NVRTC, runs analyses, persists sessions, and renders results through ImGui and OpenGL.
 
-## Адаптивный шаг
+## Start here
 
-В конфигурациях анализа доступны DOPRI5 и адаптация выбранной схемы через два полушага. Настройки, ограничения и проверки описаны в [ADAPTIVE_INTEGRATION.md](ADAPTIVE_INTEGRATION.md).
+Инструкция на русском: [установка проекта, правила кода, MCP и скиллы](SETUP.md).
 
-## CMake: Arch Linux и Windows
+| Goal | Read or edit |
+|---|---|
+| Understand module boundaries and data flow | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Change an executable entry point | [apps/README.md](apps/README.md) |
+| Find the correct library | [libs/README.md](libs/README.md) |
+| Change equations or generated schemes | [libs/equations/README.md](libs/equations/README.md) |
+| Change CPU integration or native KRS compilation | [libs/numerics/README.md](libs/numerics/README.md) |
+| Change CUDA, NVRTC, kernels, or caches | [libs/cuda/README.md](libs/cuda/README.md) |
+| Change sessions, queues, or background work | [libs/analysis/README.md](libs/analysis/README.md) and [libs/application/README.md](libs/application/README.md) |
+| Change JSON, system library, or CSV export | [libs/storage/README.md](libs/storage/README.md) |
+| Change plots or GUI | [libs/plotting/README.md](libs/plotting/README.md) and [libs/ui/README.md](libs/ui/README.md) |
+| Change packaged files | [resources/README.md](resources/README.md) and [cmake/README.md](cmake/README.md) |
+| Add or run checks | [tests/README.md](tests/README.md) |
+| Configure VS Code | [.vscode/README.md](.vscode/README.md) |
 
-Общая сборка описана в `CMakeLists.txt`, профили — в `CMakePresets.json`.
-Один набор исходников используется в VS Code на Windows/Linux и в Visual Studio 2022
-на Windows. Отдельные папки с копиями исходников не нужны: CMake складывает результаты
-Windows в `build/windows/` (Debug и Release внутри), Linux — в `build/linux-debug/`
-и `build/linux-release/`. На Windows C++ компилируется MSVC, CUDA — nvcc с MSVC;
-на Linux C++ компилируется GCC, CUDA — nvcc с тем же GCC. Windows GCC/MinGW
-в эту схему сборки не входит.
+Every documented directory also has an `AGENTS.md` with short, scoped rules for coding agents. The nearest file applies in addition to the root [AGENTS.md](AGENTS.md).
 
-В Visual Studio 2022 можно открыть корневую папку проекта и выбрать профиль `windows`.
-Другой вариант: выполнить `cmake --preset windows` и открыть сгенерированный
-`build/windows/U_CUDA.sln`. Это решение использует тот же CMake, что и VS Code;
-его не нужно редактировать или хранить в Git. Рукописный `U-CUDA.sln` в корне
-пока относится к старому способу сборки, описанному ниже.
+## Build matrix
 
-ImGui (docking), ImPlot и ImPlot3D загружаются автоматически в закреплённых версиях.
-GLFW берётся из системы либо собирается из исходников. При первой конфигурации нужен интернет.
+| Host | C++ compiler | CUDA compiler | Configure | Build |
+|---|---|---|---|---|
+| Windows | MSVC 2022 | nvcc with MSVC host | `cmake --preset windows` | `cmake --build --preset windows-debug` |
+| Windows Release | MSVC 2022 | nvcc with MSVC host | same tree | `cmake --build --preset windows-release` |
+| Linux Debug | GCC 15 | nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
+| Linux Release | GCC 15 | nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
 
-В CMake **Debug и Release собирают графическое приложение** `U-CUDA`.
-Старый расчётный сценарий включается отдельно: `-DU_CUDA_BUILD_LEGACY=ON`,
-цель `U-CUDA-legacy`. Исходная сборка через `.sln` также сохранена;
-в ней Debug по-прежнему означает старый сценарий.
+CUDA Toolkit is required in every configuration. CMake is the only source-controlled build system. Visual Studio can open the repository as a CMake project or open the generated `build/windows/U_CUDA.sln`.
 
-### Arch Linux
+The repository does not define a MinGW/GCC-on-Windows preset. The supported Windows CUDA host compiler is MSVC; GCC is used by the Linux presets.
 
-```bash
-sudo pacman -S --needed base-devel cmake ninja cuda glfw gdb zenity wl-clipboard xclip ttf-dejavu
-cmake --preset linux-debug
-cmake --build --preset linux-debug
-ctest --preset linux-debug
-./build/linux-debug/bin/U-CUDA
-```
+Useful options:
 
-Для оптимизированной сборки замени `linux-debug` на `linux-release`.
-Профили Arch используют `/opt/cuda/bin/nvcc` и `/usr/bin/g++-15`
-(пакет `gcc15` устанавливается как зависимость CUDA). CUDA 13.3 проверена
-с текущими заголовками Arch; более старый Toolkit может не поддерживать новую glibc.
-Для другого расположения Toolkit/компилятора создай `CMakeUserPresets.json`
-или передай `-DCMAKE_CUDA_COMPILER=... -DCMAKE_CUDA_HOST_COMPILER=... -DCUDAToolkit_ROOT=...`.
+- `-DU_CUDA_BUILD_GUI=OFF`: build computation, storage, the OCR client, and tests without fetching GUI dependencies; the legacy executable is also available when enabled separately.
+- `-DU_CUDA_BUILD_LEGACY=ON`: add the `U-CUDA-legacy` batch executable.
+- `-DBUILD_TESTING=OFF`: omit CTest executables.
 
-На этой рабочей копии дополнительно настроены локальные профили `linux-local`
-и `linux-local-release`: CUDA/GCC и библиотеки лежат в игнорируемом `build/`,
-системная установка для них не нужна. Запуск:
+## Applications and runtime files
 
-```bash
-cmake --preset linux-local
-cmake --build --preset linux-local
-ctest --preset linux-local
-./build/linux-local133/bin/U-CUDA
-```
+`U-CUDA` is the desktop application. `U-CUDA-legacy` preserves the old batch workflow. Post-build packaging places `kernels/`, `library_template/`, `ocr_server.py`, and required Windows DLLs beside each executable.
 
-Эти локальные профили и Toolkit не входят в Git. Для новой копии используй
-обычную установку Arch выше. `zenity` нужен для файловых диалогов,
-`wl-clipboard` — для PNG в буфере обмена Wayland, `xclip` — для X11.
-Графический запуск требует активной сессии Wayland/X11 и OpenGL 3.3;
-GPU-расчёты требуют работающего драйвера NVIDIA (`nvidia-smi`).
+The development user library remains in `U-CUDA/library/`. It is ignored, must not be overwritten, and can be relocated with `U_CUDA_LIBRARY`. OCR is optional; run `setup.ps1` to install [tools/ocr/requirements.txt](tools/ocr/requirements.txt).
 
-### Windows через CMake
-
-Нужны CMake 3.25+, Git, Visual Studio 2022 с C++ и CUDA Toolkit
-с интеграцией Visual Studio. `CUDA_PATH` должен указывать на Toolkit,
-а необходимые CUDA DLL автоматически копируются рядом с приложением
-(поддерживаются каталоги `bin` и `bin/x64`).
-vcpkg для этого способа не требуется.
+## Validation
 
 ```powershell
-cmake --preset windows
-cmake --build --preset windows-debug
 ctest --preset windows-debug
-.\build\windows\bin\Debug\U-CUDA.exe
-# Оптимизированная версия:
-cmake --build --preset windows-release
 ctest --preset windows-release
-.\build\windows\bin\Release\U-CUDA.exe
 ```
 
-Профили по умолчанию используют CUDA-архитектуру `75` (RTX 2080).
-Для другой видеокарты переопредели `CMAKE_CUDA_ARCHITECTURES` при конфигурации.
-На Windows проверены MSVC 19.44 (Visual Studio 2022), CUDA Toolkit 13.0
-и GPU-тест NVRTC в Debug/Release на NVIDIA GeForce RTX 4070 SUPER.
+`adaptive_gpu` and `gpu_smoke` require a working NVIDIA GPU. A skipped GPU test does not validate GPU calculations. Linux additionally builds the `platform` test.
 
-### VS Code / Code OSS
-
-1. Открой **корень репозитория**, установи рекомендованные расширения.
-2. Выполни **CMake: Select Configure Preset**: на Arch с системной CUDA
-   `linux-debug`, на Windows `windows`. Затем **CMake: Select Build Preset**:
-   для Windows `windows-debug` (отладка) или `windows-release`.
-3. Выбери цель запуска **U-CUDA** через **CMake: Set Debug Target**.
-4. **Ctrl+Shift+B** собирает приложение. В панели Run and Debug выбери
-   **U-CUDA (Linux)** или **U-CUDA (Windows)** и нажми **F5**.
-
-Linux использует Native Debug (`webfreak.debug`) и GDB, подсказки — clangd.
-CMake Tools копирует `compile_commands.json` в `build/` для clangd.
-Для Windows-профиля отладки нужен Microsoft C/C++ (`ms-vscode.cpptools`)
-из каталога обычного VS Code; в каталоге Code OSS он может отсутствовать.
-На Windows подсказки Microsoft C/C++ получают настройки от CMake Tools;
-clangd и Native Debug нужны для Linux. Генератор Visual Studio не создаёт
-`compile_commands.json`.
-Для отладки устройства CUDA нужен отдельный CUDA-отладчик; F5 здесь отлаживает CPU-код.
-
-Ресурсы `kernels/`, `library_template/` и `ocr_server.py` копируются рядом
-с исполняемым файлом. При работе из исходников пользовательская библиотека
-остаётся в `U-CUDA/library/`. `CUDA_PATH` может переопределить путь к заголовкам
-NVRTC; без него CMake передаёт путь найденного Toolkit.
-
-OCR опционален. На Linux можно создать `.venv` в корне проекта и установить
-зависимости из `requirements.txt`; при необходимости задай `U_CUDA_PYTHON`
-путём к Python с установленным pix2text. Windows-команды ниже относятся
-к исходному способу установки. Без Python-зависимостей приложение запускается,
-но распознавание изображений недоступно.
-
-Тест `platform` проверяет Linux IPC, протокол OCR с тестовым процессом,
-компиляцию и выполнение CPU-схем, ошибки компиляции. `gpu_smoke` проверяет
-NVRTC, траекторию и параметрическую развёртку на GPU; без доступной CUDA
-он помечается как пропущенный.
-
-## Исходная сборка Windows через Visual Studio
-
-## Обновление существующей копии
-
-Если проект уже клонирован и нужно подтянуть новые правки:
-
-```powershell
-cd <путь-к-репо>
-git checkout main
-git pull
-
-# почистить кэш VS и старые сборочные артефакты (gitignored, но мешают)
-Remove-Item -Recurse -Force .vs, x64 -ErrorAction SilentlyContinue
-```
-
-Открой `U-CUDA.sln` в Visual Studio → **Build → Rebuild Solution**.
-
-## Системные требования
-
-- **Windows 10/11 x64** (для исходной сборки `.sln`; Linux — см. CMake выше)
-- **Visual Studio 2022** (toolset v143, C++17)
-- **NVIDIA GPU** + **CUDA Toolkit** (см. ниже про версию)
-- **vcpkg** (manifest-режим — зависимости в [vcpkg.json](vcpkg.json))
-- **Python 3.10** (для OCR-сервера, опционально — без него работает всё, кроме распознавания с фото)
-
-## Установка
-
-### 0. Получить исходники
-
-```powershell
-# выбери папку, в которой будет лежать проект, например D:\
-cd D:\
-git clone https://github.com/0JASQUE0/U-CUDA.git
-cd U-CUDA
-```
-
-### 1. Зависимости C++ через vcpkg
-
-```powershell
-# если vcpkg ещё не установлен — клонируем в C:\vcpkg (можно в любое место):
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-C:\vcpkg\vcpkg integrate install
-```
-
-> **Важно:** перед `vcpkg integrate install` закрой Visual Studio, после — перезапусти. Иначе VS не подхватит интеграцию.
-
-После `integrate install` Visual Studio автоматически подхватит [vcpkg.json](vcpkg.json) при сборке и установит `glfw3`, `imgui`, `implot`, `implot3d` (5-15 минут при первом ребилде).
-
-**Если при сборке ловишь `cannot open source file "imgui.h"` или подобное** — интеграция vcpkg не сработала. Проверь:
-
-```powershell
-C:\vcpkg\vcpkg integrate install
-# должно вывести: "Applied user-wide integration for this vcpkg root."
-```
-
-Закрой VS, открой `U-CUDA.sln` заново, **Build → Rebuild Solution**. В Output-окне сборки сначала должно появиться `vcpkg install ...` (скачивание/компиляция зависимостей), и только потом твой код. Если этого нет — `vcpkg integrate install` не отработал (запущен под другим пользователем, не от твоего имени, или vcpkg сломан).
-
-### 2. CUDA Toolkit
-
-Проект собран под **CUDA 12.8**, но работает на любой версии **12.x и 13.x** — используются только стандартные Runtime API + NVRTC.
-
-> **CUDA 13:** в 13.0 у `cuCtxCreate` поменялась сигнатура (добавился параметр `CUctxCreateParams*`). В коде это разрулено через `#if CUDA_VERSION >= 13000` в [nvrtc_engine.cpp](U-CUDA/nvrtc_engine.cpp), так что собирается и на 12.x, и на 13.x без правок.
-
-Если у тебя другая версия CUDA, поменяй в `U-CUDA\U-CUDA.vcxproj` две строки (или через Visual Studio: **ПКМ на проекте → Build Dependencies → Build Customizations…** — снять `CUDA 12.8`, поставить установленную):
-
-```xml
-<Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props" />
-<Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets" />
-```
-
-Проверить установленные версии:
-```powershell
-ls "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-```
-
-### 3. Python OCR (опционально)
-
-OCR-сервер распознаёт уравнения с фото через `pix2text` (около 100 пакетов, включая torch — ~5 ГБ). Если OCR не нужен — пропусти этот шаг, приложение запустится без него.
-
-PowerShell по умолчанию запрещает выполнение локальных `.ps1` скриптов. Один раз разреши себе:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-Согласись на изменение (`Y`). После этого:
-
-```powershell
-.\setup.ps1
-```
-
-Скрипт создаст `.venv` в корне репо, поставит [requirements.txt](requirements.txt) и пропишет переменную `U_CUDA_PYTHON` для текущего пользователя.
-
-### 4. Сборка
-
-Открой `U-CUDA.sln` в Visual Studio 2022 → выбери конфигурацию **Release | x64** → **Build**.
-
-Исполняемый файл будет в `x64\Release\U-CUDA.exe`. Рядом с ним Post-Build Event автоматически положит `ocr_server.py` и `library\` — эта папка с .exe и сопутствующими файлами полностью переносима.
-
-## Как приложение находит Python
-
-В порядке приоритета:
-1. Переменная окружения **`U_CUDA_PYTHON`** (полный путь к `python.exe`) — это ставит `setup.ps1`
-2. **`<exe_dir>\.venv\Scripts\python.exe`** (если venv лежит рядом с .exe)
-3. **`python`** из `PATH`
-
-## Структура
-
-- `U-CUDA\` — исходники C++/CUDA
-- `U-CUDA\library\` — пресеты систем (Lorenz, Rossler, Chen, …)
-- `U-CUDA\ocr_server.py` — Python-сервер распознавания LaTeX с фото
-- `vcpkg.json` — манифест C++ зависимостей
-- `requirements.txt` — Python-зависимости OCR
-- `setup.ps1` — bootstrap Python venv + установка зависимостей
+Numerical adaptive integration details are documented in [ADAPTIVE_INTEGRATION.md](ADAPTIVE_INTEGRATION.md).
