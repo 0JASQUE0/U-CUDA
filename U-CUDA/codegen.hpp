@@ -94,6 +94,34 @@ std::string codegen_scheme(const System& s, Scheme sch);
 // divergence between the two paths.
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 
+// Вклад ОДНОГО ребра сети в правую часть узла-приёмника (вкладка Network).
+// exprs — по выражению на переменную системы; пустая строка = в это уравнение
+// связь не входит, строки для неё в выводе не будет.
+//
+// Имена в выражении:
+//   <var>, <var>_i — состояние приёмника      -> self_state[k]
+//   <var>_j        — состояние источника      -> nbr_state[k]
+//   <par>, <par>_i — параметры приёмника      -> self_par[1+k]
+//   <par>_j        — параметры источника      -> nbr_par[1+k]
+//   K, w           — вес ребра                -> weight
+// Отсутствие суффикса значит «приёмник»: K*(x_j - x) и K*(x_j - x_i) — одно и
+// то же. Имя системы перекрывает K: если в системе есть параметр K, то K в
+// выражении — это он, и вес доступен только как w.
+//
+// Разбор ВСЕГДА в обычном синтаксисе, даже если система задана LaTeX'ом: в
+// LaTeX подчёркивание — это индекс, и x_j читалось бы не как имя.
+// Результат — строки вида "C[0] += (...);". std::runtime_error при ошибке
+// разбора и на неизвестном имени.
+std::string codegen_coupling(const System& s,
+                             const std::vector<std::string>& exprs,
+                             const std::string& self_state = "Xi",
+                             const std::string& nbr_state  = "Xj",
+                             const std::string& self_par   = "ai",
+                             const std::string& nbr_par    = "aj",
+                             const std::string& weight     = "w",
+                             const std::string& dst        = "C",
+                             const std::string& indent     = "        ");
+
 // Maps UI scheme name ("Euler" / "RK4" / "CD" / ...) to the Scheme enum.
 // Unknown names fall back to Scheme::Euler.
 Scheme scheme_from_name(const std::string& name);

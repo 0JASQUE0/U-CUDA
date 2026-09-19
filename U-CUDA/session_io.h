@@ -55,6 +55,11 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
 std::string session_to_json_fastsync(const FastSyncAnalysisSession& s);
 bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s);
 
+// Network-сессия — конфиги вместе с топологией (узлы, рёбра, законы связи).
+// Result не пишется: он на порядки больше сессии и восстанавливается одним Run.
+std::string session_to_json_network(const NetworkSession& s);
+bool session_from_json_network(const std::string& json, NetworkSession& s);
+
 // Parametric plot windows (AppModel::parametric_plot_windows) — the dynamic
 // window list, spans all 3 sessions so it's its own file (`_last_parametric_windows.json`)
 // rather than living inside one of the per-kind files above.
