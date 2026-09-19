@@ -6,6 +6,7 @@
 #include "analysis_session.h"
 #include "custom_session.h"
 #include "order_session.h"
+#include "network_session.h"
 #include "prewarm_watch.h"
 #include <map>
 #include <string>
@@ -139,6 +140,30 @@ struct FastSyncQueueItem {
 // движок всё равно обслуживает её последовательно.
 struct OrderQueueItem {
     int index = 0;
+};
+
+// Аналогично для Network: индекс config'а в network_session.configs.
+struct NetworkQueueItem {
+    int index = 0;
+};
+
+// Состояние ОТОБРАЖЕНИЯ вкладки Network. В конфиг ему нельзя: конфиг — это
+// то, что уходит в расчёт, а выбранный узел, курсор времени и набор кривых
+// результат не меняют (и в очередь "Run all" не должны попадать).
+struct NetworkViewState {
+    int   selected_node = -1;
+    int   selected_edge = -1;
+    int   color_var  = 0;       // переменная для раскраски графа и растра
+    int   series_var = 0;       // переменная на кривых
+    int   time_index = 0;       // точка, по которой раскрашен граф
+    bool  playing = false;
+    float play_fps = 60.0f;     // точек в секунду при проигрывании
+    int   drag_from = -1;       // узел, из которого тянется новое ребро
+    // Сколько узлов рисовать кривыми и с какого начинать: 256 линий в одном
+    // плоте нечитаемы, а GPU-серии на них тратятся всерьёз.
+    int   series_count = 8;
+    int   first_series_node = 0;
+    bool  show_labels = true;
 };
 
 // Состояние распознавания (для UI-индикации).
@@ -356,13 +381,13 @@ public:
     // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
     // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
     // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network };
     AppMode app_mode = AppMode::Library;
 
     // Число элементов AppMode. Нужно для клампа last_app_mode из конфига:
     // литерал в app_main.cpp отставал от enum'а (стоял 8 при девяти режимах,
     // из-за чего Order не восстанавливался на старте).
-    static constexpr int kAppModeCount = 9;
+    static constexpr int kAppModeCount = 10;
 
     // Настройки видимости из Settings. Зеркалят AppConfig::hidden_tabs /
     // hidden_schemes: СКРЫТЫЕ идентификаторы вкладок (kModeTabs в gui.cpp) и
@@ -411,6 +436,10 @@ public:
 
     // Order — оценка порядка точности схемы (p по Эйткену/Ричардсону).
     OrderAnalysisSession       order_session;
+
+    // Network — сеть связанных осцилляторов на задаваемой топологии.
+    NetworkSession             network_session;
+    NetworkViewState           network_view;
 
     // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
     // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
@@ -622,6 +651,10 @@ public:
     std::deque<OrderQueueItem> order_queue;
     bool start_next_in_order_queue();
 
+    // Network batch queue — независимая (см. NetworkQueueItem).
+    std::deque<NetworkQueueItem> network_queue;
+    bool start_next_in_network_queue();
+
     // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
     // Items are pushed by the Run buttons and by drill-down clicks; drained
     // sequentially by start_next_in_custom_queue() so the shared engine
@@ -640,6 +673,7 @@ public:
     void remove_basins_config(int i);
     void remove_fastsync_config(int i);
     void remove_order_config(int i);
+    void remove_network_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
@@ -652,6 +686,7 @@ public:
     // Инициализирует basins-сессию из текущей системы.
     bool start_basins_analysis();
     bool start_order_analysis();
+    bool start_network_analysis();
     bool start_fastsync_analysis();
     // Initialise the Custom pipeline: seeds shared config from the record and
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).

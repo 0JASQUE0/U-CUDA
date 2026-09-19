@@ -171,6 +171,14 @@ extern "C" __global__ void networkIntegrateKernel(
     numb X[AMOUNTOFX];
     const numb* ai = values + (size_t)node * AMOUNTOFVALUES;
 
+    // Точка p = 0 — это состояние ПОСЛЕ skipSteps шагов, и в цикле ниже она
+    // ловится счётчиком done. При нулевом транзиенте done начинается с 1, и
+    // поймать её там нечем: p = 0 — это сами начальные условия.
+    if (live && skipSteps == 0 && stepBase == 0 && nPoints > 0) {
+        numb* dst = out + (size_t)node * AMOUNTOFX;
+        for (int k = 0; k < AMOUNTOFX; ++k) dst[k] = sh[(size_t)node * AMOUNTOFX + k];
+    }
+
     for (long long s = 0; s < stepsThisLaunch && !shStop; ++s) {
         if (live)
             networkCoupling(sh, values, edgeStart, edgeSrc, edgeW, edgeLaw, node, C);

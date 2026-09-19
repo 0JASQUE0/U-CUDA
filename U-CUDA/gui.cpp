@@ -731,6 +731,7 @@ static const ModeTab kModeTabs[] = {
     { "FastSync",   "Fast Synchro",   AppModel::AppMode::FastSync,   false },
     { "Custom",     "Custom",         AppModel::AppMode::Custom,     false },
     { "Order",      "Order",          AppModel::AppMode::Order,      false },
+    { "Network",    "Network",        AppModel::AppMode::Network,    false },
     { "Settings",   "Settings",       AppModel::AppMode::Settings,   true  },
 };
 
@@ -9752,6 +9753,722 @@ static void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Network — сеть связанных осцилляторов.
+//
+// Три окна: Controls (топология, связь, узлы, рёбра), Network Graph (сам граф,
+// раскрашенный состоянием на выбранный момент) и Node Series (кривые узлов) +
+// Spatiotemporal (растр узел x время).
+//
+// Редактор графа держит состояние в model.network_view, а НЕ в статиках:
+// перетаскивание узла и протяжка ребра живут между кадрами, и в immediate mode
+// им место в модели.
+
+static const char* const kNetTopologyNames[] = {
+    "Custom", "Chain", "Ring", "Star", "Grid", "King graph", "All-to-all", "Small world"
+};
+
+// Значение переменной var узла node в точке p.
+static double net_value_at(const NetworkResult& r, int p, int node, int var) {
+    if (p < 0 || p >= r.n_points || node < 0 || node >= r.n_nodes
+        || var < 0 || var >= r.n_vars) return std::numeric_limits<double>::quiet_NaN();
+    return r.data[((size_t)p * (size_t)r.n_nodes + (size_t)node) * (size_t)r.n_vars + (size_t)var];
+}
+
+// Степень узла по рёбрам конфига (для таблицы узлов). Считается по рёбрам, а
+// не по CSR: CSR строится под расчёт и знать про него редактору незачем.
+static int net_degree(const NetworkConfig& c, int node) {
+    int d = 0;
+    for (const NetEdge& e : c.edges) {
+        if (e.to == node) ++d;
+        if (e.bidirectional && e.from == node) ++d;
+    }
+    return d;
+}
+
+// Любая ручная правка топологии переводит конфиг в Custom: иначе следующее
+// нажатие Generate молча стёрло бы правку.
+static void net_mark_custom(NetworkConfig& c) { c.topology = NetTopology::Custom; }
+
+// Проверка выражений связи без запуска расчёта: тот же путь, что у Run.
+static std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c) {
+    try {
+        net_coupling_body(s.sys, c.laws);
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return {};
+}
+
+static void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
+    if (!ImGui::CollapsingHeader("Topology", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    int topo = (int)c.topology;
+    ImGui::SetNextItemWidth(kFieldW + 60.0f);
+    if (ImGui::Combo("preset", &topo, kNetTopologyNames, IM_ARRAYSIZE(kNetTopologyNames))) {
+        c.topology = (NetTopology)topo;
+        if (c.topology != NetTopology::Custom) {
+            const std::string err = net_generate_topology(c, s.vars);
+            if (!err.empty()) c.last_error = err;
+            model.network_view.selected_node = -1;
+            model.network_view.selected_edge = -1;
+        }
+    }
+
+    const bool is_grid = (c.topology == NetTopology::Grid || c.topology == NetTopology::King);
+    const bool is_ring = (c.topology == NetTopology::Ring || c.topology == NetTopology::SmallWorld);
+    if (c.topology != NetTopology::Custom) {
+        if (is_grid) {
+            InputNumStr("width",  c.gen_w_text, kFieldW);
+            InputNumStr("height", c.gen_h_text, kFieldW);
+            ImGui::Checkbox("periodic (torus)", &c.gen_periodic);
+        } else {
+            InputNumStr("nodes", c.gen_n_text, kFieldW);
+        }
+        if (is_ring) {
+            InputNumStr("neighbours each side", c.gen_k_text, kFieldW);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("k = 1 gives the plain ring; k > 1 connects every node\n"
+                                  "to k nearest neighbours on each side.");
+        }
+        if (c.topology == NetTopology::SmallWorld) {
+            InputNumStr("rewire probability", c.gen_p_text, kFieldW);
+            InputNumStr("topology seed", c.gen_seed_text, kFieldW);
+        }
+        ImGui::Checkbox("directed arcs", &c.gen_directed);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off: every edge pulls both ways.\n"
+                              "On: the generator emits one-way arcs from -> to.");
+        if (ImGui::Button("Generate", ImVec2(120, 0))) {
+            const std::string err = net_generate_topology(c, s.vars);
+            c.last_error = err;
+            model.network_view.selected_node = -1;
+            model.network_view.selected_edge = -1;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("rebuilds nodes and edges; per-node overrides are kept");
+    } else {
+        ImGui::TextDisabled("Custom: edges are yours, the generator will not touch them.");
+        ImGui::TextDisabled("Pick a preset above to rebuild the network from scratch.");
+    }
+
+    ImGui::Text("%d nodes, %d edges", (int)c.nodes.size(), (int)c.edges.size());
+    if ((int)c.nodes.size() > kMaxNetworkNodes)
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "over the %d-node cap: the run will be refused", kMaxNetworkNodes);
+}
+
+static void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
+    if (!ImGui::CollapsingHeader("Coupling", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    InputNumStr("coupling K", c.coupling_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Global multiplier: every edge weight is multiplied by it.\n"
+                          "Turn the whole network's coupling strength from one field.");
+
+    ImGui::TextDisabled("A law is one expression per equation; empty = no coupling there.");
+    ImGui::TextDisabled("Names: %s_j = source node, %s or %s_i = this node, K = edge weight.",
+                        s.vars.empty() ? "x" : s.vars[0].c_str(),
+                        s.vars.empty() ? "x" : s.vars[0].c_str(),
+                        s.vars.empty() ? "x" : s.vars[0].c_str());
+
+    int to_remove = -1;
+    for (size_t li = 0; li < c.laws.size(); ++li) {
+        NetCouplingLaw& law = c.laws[li];
+        ImGui::PushID((int)li);
+        law.expr.resize(s.vars.size());
+        const std::string head = std::to_string(li) + ": " + law.name + "###law";
+        if (ImGui::TreeNodeEx(head.c_str(), li == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+            InputTextStr("name", law.name);
+            for (size_t k = 0; k < s.vars.size(); ++k) {
+                const std::string lbl = "d" + s.vars[k] + " +=";
+                ImGui::SetNextItemWidth(260.0f);
+                InputTextStr(lbl.c_str(), law.expr[k]);
+            }
+            if (c.laws.size() > 1 && ImGui::SmallButton("Delete law")) to_remove = (int)li;
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (to_remove >= 0) {
+        c.laws.erase(c.laws.begin() + to_remove);
+        for (NetEdge& e : c.edges) {
+            if (e.law == to_remove) e.law = 0;
+            else if (e.law > to_remove) --e.law;
+        }
+    }
+    if (ImGui::Button("+ Add law")) {
+        NetCouplingLaw law = net_default_law(s.vars);
+        law.name = "law " + std::to_string(c.laws.size());
+        c.laws.push_back(std::move(law));
+    }
+
+    const std::string lerr = net_validate_laws(s, c);
+    if (!lerr.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", lerr.c_str());
+    (void)model;
+}
+
+static void draw_network_nodes_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
+    if (!ImGui::CollapsingHeader("Nodes")) return;
+    if (c.nodes.empty()) { ImGui::TextDisabled("No nodes."); return; }
+
+    ImGui::TextDisabled("Empty cell = the shared value below. Fill one to detune that node.");
+
+    const int n_cols = 2 + (int)s.params.size() + (int)s.vars.size();
+    const float height = ImGui::GetTextLineHeightWithSpacing() * 12.0f;
+    if (ImGui::BeginTable("##net_nodes", n_cols,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX |
+                          ImGuiTableFlags_SizingFixedFit,
+                          ImVec2(0.0f, height))) {
+        ImGui::TableSetupScrollFreeze(1, 1);
+        ImGui::TableSetupColumn("node");
+        ImGui::TableSetupColumn("deg");
+        for (const auto& p : s.params) ImGui::TableSetupColumn(p.c_str());
+        for (const auto& v : s.vars)   ImGui::TableSetupColumn((v + "0").c_str());
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)c.nodes.size());
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                NetNode& nd = c.nodes[(size_t)i];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                const bool sel = (model.network_view.selected_node == i);
+                if (ImGui::Selectable(nd.label.empty() ? std::to_string(i + 1).c_str()
+                                                       : nd.label.c_str(),
+                                      sel, ImGuiSelectableFlags_SpanAllColumns))
+                    model.network_view.selected_node = sel ? -1 : i;
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", net_degree(c, i));
+                for (const auto& p : s.params) {
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(p.c_str());
+                    ImGui::SetNextItemWidth(80.0f);
+                    InputTextStr("##p", nd.param_values[p]);
+                    ImGui::PopID();
+                }
+                for (const auto& v : s.vars) {
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(v.c_str());
+                    ImGui::SetNextItemWidth(80.0f);
+                    InputTextStr("##v", nd.initial_conditions[v]);
+                    ImGui::PopID();
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Clear all overrides")) {
+        for (NetNode& nd : c.nodes) { nd.param_values.clear(); nd.initial_conditions.clear(); }
+    }
+}
+
+static void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
+    if (!ImGui::CollapsingHeader("Edges")) return;
+
+    std::vector<std::string> law_names;
+    for (const NetCouplingLaw& l : c.laws) law_names.push_back(l.name);
+    const std::vector<const char*> law_items = c_str_list(law_names);
+
+    const float height = ImGui::GetTextLineHeightWithSpacing() * 10.0f;
+    int to_remove = -1;
+    if (ImGui::BeginTable("##net_edges", 6,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit,
+                          ImVec2(0.0f, height))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("from");
+        ImGui::TableSetupColumn("to");
+        ImGui::TableSetupColumn("both ways");
+        ImGui::TableSetupColumn("weight");
+        ImGui::TableSetupColumn("law");
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)c.edges.size());
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                NetEdge& e = c.edges[(size_t)i];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                if (model.network_view.selected_edge == i)
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 140, 120));
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(60.0f);
+                if (ImGui::InputInt("##f", &e.from, 0, 0)) { net_mark_custom(c); }
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(60.0f);
+                if (ImGui::InputInt("##t", &e.to, 0, 0)) { net_mark_custom(c); }
+                ImGui::TableNextColumn();
+                if (ImGui::Checkbox("##b", &e.bidirectional)) net_mark_custom(c);
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(80.0f);
+                InputTextStr("##w", e.weight_text);
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(120.0f);
+                if (!law_items.empty())
+                    ImGui::Combo("##l", &e.law, law_items.data(), (int)law_items.size());
+                ImGui::TableNextColumn();
+                if (ImGui::SmallButton("x")) to_remove = i;
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (to_remove >= 0) {
+        c.edges.erase(c.edges.begin() + to_remove);
+        net_mark_custom(c);
+        model.network_view.selected_edge = -1;
+    }
+    if (ImGui::Button("+ Add edge")) {
+        NetEdge e;
+        e.from = 0;
+        e.to   = (int)c.nodes.size() > 1 ? 1 : 0;
+        e.bidirectional = true;
+        c.edges.push_back(e);
+        net_mark_custom(c);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear edges")) { c.edges.clear(); net_mark_custom(c); }
+    ImGui::SameLine();
+    ImGui::TextDisabled("or drag from node to node in the graph window");
+    (void)s;
+}
+
+static void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
+    NetworkSession& s = model.network_session;
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+
+    {
+        const bool no_cfg = s.configs.empty();
+        RunAllGroup g;
+        g.pick_id = "pnet_";
+        g.n       = (int)s.configs.size();
+        g.label   = [&s](int i) { return s.configs[i].label; };
+        g.enqueue = [&model](int i) { model.network_queue.push_back({ i }); };
+        draw_run_and_run_all("##run_all_network", s.in_flight, no_cfg,
+                             s.in_flight || no_cfg, 160.0f,
+                             [&model, &s]() {
+                                 if (!model.parametric_engine)
+                                     model.parametric_engine = std::make_unique<ParametricEngine>();
+                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                             },
+                             [&s]() {
+                                 ImGui::SameLine();
+                                 if (!s.in_flight) ImGui::BeginDisabled();
+                                 if (ImGui::Button("Stop", ImVec2(90, 0))) s.request_cancel();
+                                 if (!s.in_flight) ImGui::EndDisabled();
+                             },
+                             { g },
+                             [&model]() { model.start_next_in_network_queue(); },
+                             model.network_queue.size());
+    }
+    ImGui::Separator();
+
+    const TabBarResult tabs = draw_config_tab_bar(
+        "##network_tabs", "network_tab_", (int)s.configs.size(),
+        s.in_flight, s.running_config_index,
+        [&s](int i) { return s.configs[i].label; },
+        {},
+        [&s]() { s.add_config(); });
+    if (tabs.active    >= 0) s.active_config_index = tabs.active;
+    if (tabs.to_remove >= 0) model.remove_network_config(tabs.to_remove);
+
+    if (s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = (int)s.configs.size() - 1;
+    NetworkConfig& c = s.configs[(size_t)s.active_config_index];
+
+    draw_label_rename("Label##net", c.label);
+
+    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {},
+                      s.enabled_builtin_schemes.empty() ? nullptr : &s.enabled_builtin_schemes,
+                      nullptr, s.sys.is_map, &s.wrapper_schemes);
+
+    IntegrationFields f;
+    f.h           = &c.h_text;
+    f.symmetry_s  = &c.symmetry_s;
+    f.t_max       = &c.t_max_text;
+    f.transient   = &c.transient_text;
+    f.pre_scaller = &c.pre_scaller_text;
+    f.max_value   = &c.max_value_text;
+    draw_integration_block("Integration", c.scheme, s.custom_schemes, f, nullptr, s.sys.is_map);
+    InputNumStr("max points", c.max_points_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Cap on recorded time points. The engine raises the decimator\n"
+                          "when the run would exceed it, and reports the value it used.");
+    // Связь интегрируется расщеплением — это свойство вкладки, а не настройка,
+    // и молчать о нём нельзя: порядок схемы на сети не держится.
+    ImGui::TextDisabled("Coupling is split off the step (first order), the node step is not.");
+
+    draw_network_topology_block(model, s, c);
+    draw_network_coupling_block(model, s, c);
+
+    draw_named_num_fields("Parameters##net", s.params, c.param_values,
+                          "Shared by every node unless the node overrides it.");
+    draw_named_num_fields("Initial conditions##net", s.vars, c.initial_conditions,
+                          "Shared base; the spread below is added on top.");
+    if (ImGui::CollapsingHeader("Initial spread", ImGuiTreeNodeFlags_DefaultOpen)) {
+        InputNumStr("spread", c.ic_spread_text, kFieldW);
+        InputNumStr("spread seed", c.ic_seed_text, kFieldW);
+        ImGui::TextDisabled("Uniform noise in [-spread, +spread] per node and variable.");
+        ImGui::TextDisabled("Zero spread means identical nodes: a diffusively coupled");
+        ImGui::TextDisabled("network then starts synchronised and stays that way.");
+    }
+
+    draw_network_nodes_table(model, s, c);
+    draw_network_edges_table(model, s, c);
+
+    if (c.last_run_ok && c.result.n_points > 0) {
+        ImGui::Separator();
+        ImGui::Text("%d points x %d nodes, dt = %g", c.result.n_points, c.result.n_nodes, c.result.dt);
+        if (c.result.pre_scaller != parse_num_int(c.pre_scaller_text, 1))
+            ImGui::TextDisabled("decimator raised to %d to fit max points", c.result.pre_scaller);
+        if (c.result.n_diverged > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+                               "%d node(s) diverged, the run stopped there", c.result.n_diverged);
+    }
+    if (!c.last_error.empty()) {
+        ImGui::Separator();
+        draw_error_box("##net_err", c.last_error);
+    }
+}
+
+// --- Окно графа ------------------------------------------------------------
+
+static void draw_network_graph_window(AppModel& model) {
+    NetworkSession& s = model.network_session;
+    if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) return;
+    NetworkConfig& c = s.configs[(size_t)s.active_config_index];
+    NetworkViewState& vs = model.network_view;
+    const NetworkResult& r = c.result;
+    const bool has_data = c.last_run_ok && r.n_points > 0 && r.n_nodes == (int)c.nodes.size();
+
+    // Панель над холстом: переменная раскраски, курсор времени, воспроизведение.
+    if (!s.vars.empty()) {
+        const std::vector<const char*> vitems = c_str_list(s.vars);
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("colour by", &vs.color_var, vitems.data(), (int)vitems.size());
+    }
+    if (has_data) {
+        ImGui::SameLine();
+        if (vs.time_index >= r.n_points) vs.time_index = r.n_points - 1;
+        if (vs.time_index < 0) vs.time_index = 0;
+        ImGui::SetNextItemWidth(260.0f);
+        ImGui::SliderInt("##net_t", &vs.time_index, 0, r.n_points - 1,
+                         "t index %d");
+        ImGui::SameLine();
+        ImGui::Text("t = %g", r.t0 + r.dt * (double)vs.time_index);
+        ImGui::SameLine();
+        if (ImGui::Button(vs.playing ? "Pause" : "Play", ImVec2(70, 0))) vs.playing = !vs.playing;
+        if (vs.playing) {
+            // Шаг по времени кадра, а не по кадру: на 144 Гц иначе всё улетает
+            // вчетверо быстрее, чем на 30.
+            const float dt = ImGui::GetIO().DeltaTime;
+            const int adv = (int)(vs.play_fps * dt + 0.5f);
+            vs.time_index += (adv > 0) ? adv : 1;
+            if (vs.time_index >= r.n_points) vs.time_index = 0;
+        }
+    } else {
+        ImGui::SameLine();
+        ImGui::TextDisabled("no data yet - press Run");
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("labels", &vs.show_labels);
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 size = ImGui::GetContentRegionAvail();
+    if (size.x < 50.0f) size.x = 50.0f;
+    if (size.y < 50.0f) size.y = 50.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                      IM_COL32(18, 18, 22, 255));
+    ImGui::InvisibleButton("##net_canvas", size,
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool canvas_hovered = ImGui::IsItemHovered();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+    const float pad = 24.0f;
+    auto to_screen = [&](const NetNode& nd) {
+        return ImVec2(origin.x + pad + nd.ui_x * (size.x - 2.0f * pad),
+                      origin.y + pad + nd.ui_y * (size.y - 2.0f * pad));
+    };
+    auto from_screen = [&](ImVec2 p) {
+        const float x = (p.x - origin.x - pad) / (size.x - 2.0f * pad);
+        const float y = (p.y - origin.y - pad) / (size.y - 2.0f * pad);
+        return ImVec2(x < 0 ? 0 : (x > 1 ? 1 : x), y < 0 ? 0 : (y > 1 ? 1 : y));
+    };
+
+    const float node_r = (c.nodes.size() > 64) ? 5.0f : ((c.nodes.size() > 24) ? 8.0f : 12.0f);
+
+    // Рёбра под узлами.
+    for (size_t i = 0; i < c.edges.size(); ++i) {
+        const NetEdge& e = c.edges[i];
+        if (e.from < 0 || e.to < 0 || e.from >= (int)c.nodes.size() || e.to >= (int)c.nodes.size())
+            continue;
+        const ImVec2 a = to_screen(c.nodes[(size_t)e.from]);
+        const ImVec2 b = to_screen(c.nodes[(size_t)e.to]);
+        const bool sel = ((int)i == vs.selected_edge);
+        dl->AddLine(a, b, sel ? IM_COL32(255, 200, 80, 255) : IM_COL32(120, 130, 150, 160),
+                    sel ? 2.5f : 1.4f);
+        if (!e.bidirectional) {
+            // Стрелка у приёмника: направление связи — не украшение, из
+            // картинки без него не прочитать, кто кого тянет.
+            const float dx = b.x - a.x, dy = b.y - a.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len > 1.0f) {
+                const float ux = dx / len, uy = dy / len;
+                const ImVec2 tip(b.x - ux * (node_r + 2.0f), b.y - uy * (node_r + 2.0f));
+                const ImVec2 l(tip.x - ux * 9.0f - uy * 5.0f, tip.y - uy * 9.0f + ux * 5.0f);
+                const ImVec2 rr(tip.x - ux * 9.0f + uy * 5.0f, tip.y - uy * 9.0f - ux * 5.0f);
+                dl->AddTriangleFilled(tip, l, rr, IM_COL32(150, 160, 180, 200));
+            }
+        }
+    }
+
+    // Протяжка нового ребра.
+    if (vs.drag_from >= 0 && vs.drag_from < (int)c.nodes.size())
+        dl->AddLine(to_screen(c.nodes[(size_t)vs.drag_from]), mouse, IM_COL32(255, 220, 120, 200), 2.0f);
+
+    double lo = 0.0, hi = 1.0;
+    if (has_data && vs.color_var < (int)r.vmin.size()) {
+        lo = r.vmin[(size_t)vs.color_var];
+        hi = r.vmax[(size_t)vs.color_var];
+        if (!(hi > lo)) { lo -= 0.5; hi += 0.5; }
+    }
+
+    int hovered_node = -1;
+    for (size_t i = 0; i < c.nodes.size(); ++i) {
+        const ImVec2 p = to_screen(c.nodes[i]);
+        const float dx = mouse.x - p.x, dy = mouse.y - p.y;
+        if (canvas_hovered && dx * dx + dy * dy <= (node_r + 3.0f) * (node_r + 3.0f))
+            hovered_node = (int)i;
+
+        ImU32 col = IM_COL32(110, 120, 140, 255);
+        if (has_data) {
+            const double v = net_value_at(r, vs.time_index, (int)i, vs.color_var);
+            if (std::isfinite(v)) {
+                const float t = (float)((v - lo) / (hi - lo));
+                col = cmap_sample_id(t < 0 ? 0.0f : (t > 1 ? 1.0f : t), model.heatmap_colormap);
+            } else {
+                col = IM_COL32(70, 70, 70, 255);   // разлетелось / не посчитано
+            }
+        }
+        dl->AddCircleFilled(p, node_r, col);
+        const bool sel = ((int)i == vs.selected_node);
+        dl->AddCircle(p, node_r, sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(30, 30, 35, 255),
+                      0, sel ? 2.5f : 1.5f);
+        if (has_data && (int)i < (int)r.status.size() && r.status[i] != NET_ST_OK)
+            dl->AddCircle(p, node_r + 3.0f, IM_COL32(255, 80, 80, 255), 0, 2.0f);
+        if (vs.show_labels && c.nodes.size() <= 64)
+            dl->AddText(ImVec2(p.x + node_r + 2.0f, p.y - 7.0f), IM_COL32(200, 200, 210, 220),
+                        c.nodes[i].label.c_str());
+    }
+
+    // Мышь: ЛКМ по узлу — выделить и тащить, Shift+ЛКМ — тянуть новое ребро,
+    // ПКМ по узлу — удалить его вместе с рёбрами.
+    if (canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (hovered_node >= 0) {
+            if (ImGui::GetIO().KeyShift) vs.drag_from = hovered_node;
+            else                          vs.selected_node = hovered_node;
+        } else {
+            vs.selected_node = -1;
+        }
+    }
+    if (vs.drag_from >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (hovered_node >= 0 && hovered_node != vs.drag_from) {
+            NetEdge e;
+            e.from = vs.drag_from;
+            e.to   = hovered_node;
+            e.bidirectional = !c.gen_directed;
+            c.edges.push_back(e);
+            net_mark_custom(c);
+        }
+        vs.drag_from = -1;
+    }
+    if (vs.drag_from < 0 && vs.selected_node >= 0 && vs.selected_node < (int)c.nodes.size()
+        && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && canvas_hovered) {
+        const ImVec2 uv = from_screen(mouse);
+        c.nodes[(size_t)vs.selected_node].ui_x = uv.x;
+        c.nodes[(size_t)vs.selected_node].ui_y = uv.y;
+    }
+    if (canvas_hovered && hovered_node >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        const int dead = hovered_node;
+        c.edges.erase(std::remove_if(c.edges.begin(), c.edges.end(),
+                                     [dead](const NetEdge& e) { return e.from == dead || e.to == dead; }),
+                      c.edges.end());
+        for (NetEdge& e : c.edges) {
+            if (e.from > dead) --e.from;
+            if (e.to   > dead) --e.to;
+        }
+        c.nodes.erase(c.nodes.begin() + dead);
+        net_mark_custom(c);
+        vs.selected_node = -1;
+    }
+
+    // Подсказка о значении под курсором.
+    if (canvas_hovered && hovered_node >= 0) {
+        ImGui::BeginTooltip();
+        ImGui::Text("node %d (%s)", hovered_node, c.nodes[(size_t)hovered_node].label.c_str());
+        ImGui::Text("degree %d", net_degree(c, hovered_node));
+        if (has_data)
+            for (size_t k = 0; k < s.vars.size() && (int)k < r.n_vars; ++k)
+                ImGui::Text("%s = %g", s.vars[k].c_str(),
+                            net_value_at(r, vs.time_index, hovered_node, (int)k));
+        ImGui::EndTooltip();
+    }
+
+    if (has_data) {
+        // Шкала цвета — та же, что у хитмап, и по тем же значениям.
+        const std::vector<ColorbarTick> ticks = colorbar_ticks((float)lo, (float)hi, 0);
+        const float cb_w = colorbar_total_width(ticks);
+        const ImVec2 cb_pos(origin.x + size.x - cb_w - 4.0f, origin.y + 8.0f);
+        draw_colorbar(dl, cb_pos, size.y - 16.0f, (float)lo, (float)hi,
+                      (HeatmapColormap)model.heatmap_colormap, false, 0, ticks);
+    }
+
+    ImGui::TextDisabled("drag node = move, shift+drag = new edge, right click = delete node");
+}
+
+// --- Кривые узлов ----------------------------------------------------------
+
+static void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view) {
+    NetworkSession& s = model.network_session;
+    if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) return;
+    NetworkConfig& c = s.configs[(size_t)s.active_config_index];
+    NetworkViewState& vs = model.network_view;
+    const NetworkResult& r = c.result;
+
+    if (!s.vars.empty()) {
+        const std::vector<const char*> vitems = c_str_list(s.vars);
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("variable", &vs.series_var, vitems.data(), (int)vitems.size());
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f);
+    ImGui::InputInt("first node", &vs.first_series_node, 1, 8);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f);
+    ImGui::InputInt("count", &vs.series_count, 1, 8);
+    if (vs.series_count < 1) vs.series_count = 1;
+    if (vs.first_series_node < 0) vs.first_series_node = 0;
+
+    if (!c.last_run_ok || r.n_points <= 0) {
+        ImGui::TextDisabled("No data yet - press Run on the Network tab.");
+        return;
+    }
+
+    // Буферы живут между кадрами: вид держит указатели на время render().
+    static std::vector<std::vector<double>> bufs;
+    int first = vs.first_series_node;
+    if (first >= r.n_nodes) first = r.n_nodes - 1;
+    int count = vs.series_count;
+    if (first + count > r.n_nodes) count = r.n_nodes - first;
+    if (count < 1) count = 1;
+    if ((int)bufs.size() != count) bufs.assign((size_t)count, {});
+
+    std::vector<PlotSeriesInput> series;
+    std::vector<bool> vis((size_t)count, true);
+    for (int k = 0; k < count; ++k) {
+        const int node = first + k;
+        std::vector<double>& b = bufs[(size_t)k];
+        b.clear();
+        b.reserve((size_t)r.n_points * 2);
+        for (int p = 0; p < r.n_points; ++p) {
+            const double v = net_value_at(r, p, node, vs.series_var);
+            if (!std::isfinite(v)) continue;     // хвост после разлёта не рисуем
+            b.push_back(r.t0 + r.dt * (double)p);
+            b.push_back(v);
+        }
+        PlotSeriesInput si;
+        si.points   = b.data();
+        si.n_points = (int)(b.size() / 2);
+        const float t = (count > 1) ? (float)k / (float)(count - 1) : 0.0f;
+        const ImU32 col = cmap_sample_id(t, model.heatmap_colormap);
+        si.color = ImGui::ColorConvertU32ToFloat4(col);
+        si.label = (node < (int)c.nodes.size() && !c.nodes[(size_t)node].label.empty())
+                       ? c.nodes[(size_t)node].label : std::to_string(node + 1);
+        series.push_back(si);
+    }
+
+    view.x_axis.name = "t";
+    view.y_axis.name = (vs.series_var < (int)s.vars.size()) ? s.vars[(size_t)vs.series_var] : "x";
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    // Поколение данных для вида включает НАСТРОЙКИ набора кривых, а не только
+    // номер расчёта: Plot2DView перезаливает VBO лишь на его изменение, и без
+    // этого смена переменной или диапазона узлов не доезжала бы до экрана.
+    const int series_gen = ((c.data_generation * 131 + vs.series_var) * 131 + first) * 131 + count
+                         + s.active_config_index * 7919;
+    view.render(renderer, origin, avail, /*owner_id*/ 0xBE7001, series_gen,
+                series, vis, vis, false);
+}
+
+// --- Растр узел x время ----------------------------------------------------
+
+static void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, HeatmapView& view) {
+    NetworkSession& s = model.network_session;
+    if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) return;
+    NetworkConfig& c = s.configs[(size_t)s.active_config_index];
+    NetworkViewState& vs = model.network_view;
+    const NetworkResult& r = c.result;
+
+    if (!s.vars.empty()) {
+        const std::vector<const char*> vitems = c_str_list(s.vars);
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("variable##raster", &vs.color_var, vitems.data(), (int)vitems.size());
+    }
+    if (!c.last_run_ok || r.n_points <= 0) {
+        ImGui::TextDisabled("No data yet - press Run on the Network tab.");
+        return;
+    }
+
+    // Хитмапе нужен row-major [node][time], у результата — [time][node][var].
+    // Транспонируем один раз на поколение данных, а не каждый кадр.
+    static std::vector<double> cache;
+    static int cache_gen = -1, cache_var = -1, cache_cfg = -1;
+    const int gen = c.data_generation;
+    if (cache_gen != gen || cache_var != vs.color_var || cache_cfg != s.active_config_index) {
+        cache.assign((size_t)r.n_nodes * (size_t)r.n_points, 0.0);
+        for (int i = 0; i < r.n_nodes; ++i)
+            for (int p = 0; p < r.n_points; ++p)
+                cache[(size_t)i * (size_t)r.n_points + (size_t)p] =
+                    net_value_at(r, p, i, vs.color_var);
+        cache_gen = gen; cache_var = vs.color_var; cache_cfg = s.active_config_index;
+    }
+
+    double vlo = 0.0, vhi = 1.0;
+    if (vs.color_var < (int)r.vmin.size()) {
+        vlo = r.vmin[(size_t)vs.color_var];
+        vhi = r.vmax[(size_t)vs.color_var];
+        if (!(vhi > vlo)) { vlo -= 0.5; vhi += 0.5; }
+    }
+
+    view.x_axis.name = "t";
+    view.y_axis.name = "node";
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    view.render(renderer, origin, avail, /*owner_id*/ 0xBE7002,
+                (gen * 64 + vs.color_var) * 131 + s.active_config_index,
+                r.n_points, r.n_nodes, cache.data(),
+                r.t0, r.t0 + r.dt * (double)(r.n_points - 1),
+                0.0, (double)(r.n_nodes - 1),
+                vlo, vhi, false);
+}
+
 static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Text("Parametric analysis");
     ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
@@ -12094,6 +12811,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.basins_session.custom_schemes      = model.custom_schemes;
     model.fastsync_session.custom_schemes    = model.custom_schemes;
     model.order_session.custom_schemes       = model.custom_schemes;
+    model.network_session.custom_schemes     = model.custom_schemes;
     // Custom tab owns 5 isolated sub-sessions — same per-frame sync applies.
     model.custom_session.custom_schemes                = model.custom_schemes;
     model.custom_session.bif_session.custom_schemes    = model.custom_schemes;
@@ -12111,6 +12829,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.basins_session.wrapper_schemes      = model.wrapper_schemes;
     model.fastsync_session.wrapper_schemes    = model.wrapper_schemes;
     model.order_session.wrapper_schemes       = model.wrapper_schemes;
+    model.network_session.wrapper_schemes     = model.wrapper_schemes;
     model.custom_session.wrapper_schemes                = model.wrapper_schemes;
     model.custom_session.bif_session.wrapper_schemes    = model.wrapper_schemes;
     model.custom_session.lle_session.wrapper_schemes    = model.wrapper_schemes;
@@ -12219,6 +12938,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             lib.save_session(model.loaded_name, "_last_order",
                              session_to_json_order(model.order_session));
     }
+    // Network: тот же контракт, что у Order — без poll() in_flight никогда не
+    // сбросится и "Running" повиснет навсегда.
+    if (model.network_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_network",
+                             session_to_json_network(model.network_session));
+    }
     if (model.order_plot_windows_dirty) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_order_windows",
@@ -12257,6 +12983,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.start_next_in_fastsync_queue();
     // То же для order-очереди (независимая).
     model.start_next_in_order_queue();
+    // То же для network-очереди (независимая).
+    model.start_next_in_network_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
     // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
@@ -12576,6 +13304,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
            || model.basins_session.in_flight
            || model.fastsync_session.in_flight
            || model.order_session.in_flight
+           || model.network_session.in_flight
            || model.custom_session.any_in_flight();
         const float combo_w = 240.0f;
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
@@ -12642,8 +13371,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Custom;
     bool entering_order  = (AppModel::AppMode)mode == AppModel::AppMode::Order &&
                            model.app_mode != AppModel::AppMode::Order;
+    bool entering_network = (AppModel::AppMode)mode == AppModel::AppMode::Network &&
+                            model.app_mode != AppModel::AppMode::Network;
     if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync
-        || entering_custom || entering_order) {
+        || entering_custom || entering_order || entering_network) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -12711,6 +13442,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
             std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
             model.load_or_init_order_plot_windows(jw);
+        }
+    }
+    auto network_need_init = model.network_session.loaded_system_name != model.name
+                          || model.network_session.vars.empty()
+                          || model.network_session.vars   != model.known_vars
+                          || model.network_session.params != model.known_params;
+    if (entering_network && network_need_init) {
+        model.start_network_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jn = lib.load_session(model.loaded_name, "_last_network");
+            apply_session_json(model, jn, model.network_session, session_from_json_network, "_last_network");
         }
     }
     // Окна могли не появиться вовсе: несохранённая система (loaded_name пуст,
@@ -12851,6 +13593,36 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         ImGui::End();
         draw_order_plot_windows(model, cb);
+    }
+    else if (model.app_mode == AppModel::AppMode::Network) {
+        // Network mode: панель настроек + граф + кривые узлов + растр.
+        // Окна фиксированные (в отличие от Order): собирать из них
+        // произвольные комбинации пока незачем, а смотреть на сеть сразу в
+        // трёх разрезах нужно всегда.
+        static std::map<int, std::unique_ptr<PlotRenderer>> net_renderers;
+        static Plot2DView   net_series_view;
+        static HeatmapView  net_raster_view;
+        auto& rnd_series = net_renderers[0];
+        if (!rnd_series) rnd_series = std::make_unique<PlotRenderer>();
+        auto& rnd_raster = net_renderers[1];
+        if (!rnd_raster) rnd_raster = std::make_unique<PlotRenderer>();
+
+        if (ImGui::Begin("Network Controls")) {
+            draw_network_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Network Graph")) {
+            draw_network_graph_window(model);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Node Series")) {
+            draw_network_series_window(model, *rnd_series, net_series_view);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Spatiotemporal")) {
+            draw_network_raster_window(model, *rnd_raster, net_raster_view);
+        }
+        ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

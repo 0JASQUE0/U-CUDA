@@ -329,6 +329,19 @@ bool AppModel::start_order_analysis() {
     return true;
 }
 
+bool AppModel::start_network_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    network_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        network_session.sys = built;
+    }
+    catch (...) {}
+    network_session.loaded_system_name = name;
+    return true;
+}
+
 bool AppModel::start_fastsync_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
@@ -1664,6 +1677,18 @@ void AppModel::remove_order_config(int i) {
         if (it.index > i) --it.index;
 }
 
+void AppModel::remove_network_config(int i) {
+    network_session.remove_config(i);
+    // Та же чистка очереди, что у Order: выкидываем элементы, указывающие на
+    // удалённый конфиг, и сдвигаем те, что были правее.
+    for (auto it = network_queue.begin(); it != network_queue.end(); ) {
+        if (it->index == i) it = network_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : network_queue)
+        if (it.index > i) --it.index;
+}
+
 bool AppModel::start_next_in_basins_queue() {
     if (basins_session.in_flight) return false;
     if (basins_queue.empty()) return false;
@@ -1689,6 +1714,21 @@ bool AppModel::start_next_in_order_queue() {
         order_queue.pop_front();
         if (it.index >= 0 && it.index < (int)order_session.configs.size()) {
             if (order_session.run_async(*parametric_engine, it.index)) return true;
+        }
+        // ok == false — last_error выставлен run_async; идём дальше.
+    }
+    return false;
+}
+
+bool AppModel::start_next_in_network_queue() {
+    if (network_session.in_flight) return false;
+    if (network_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!network_queue.empty()) {
+        NetworkQueueItem it = network_queue.front();
+        network_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)network_session.configs.size()) {
+            if (network_session.run_async(*parametric_engine, it.index)) return true;
         }
         // ok == false — last_error выставлен run_async; идём дальше.
     }
