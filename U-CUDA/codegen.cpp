@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <cctype>
+#include <climits>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
@@ -1801,6 +1802,128 @@ int extrapolation_order(int stages, int p, bool symmetric) {
     return symmetric ? p + 2 * (stages - 1) : p + stages - 1;
 }
 
+// Точная рациональная арифметика для весов экстраполяции.
+//
+// Веса — отношения небольших целых, но напечатанные десятичным литералом они
+// несут ошибку ~1e-16 ОТ СЕБЯ: литерал читается как double, в какой бы
+// точности ни считала схема. Экстраполяция складывает почти равные величины с
+// коэффициентами порядка единиц (у Extr(CD|1,2,3,4) это 16/45, -729/280,
+// 1024/315), так что ошибка коэффициентов не сокращается, а садится прямо в
+// результат макрошага. На dd-ветке вкладки Order это держало полку на уровне
+// double и сводило расширенную точность к нулю: p валился с 8 до -1 там, где
+// с точными дробями он остаётся 8.01 при E1 = 2e-18.
+//
+// Поэтому печатаем дробь, а не число: деление выполняется уже в numb.
+namespace {
+
+struct ExRat { long long n, d; };
+
+long long ex_gcd(long long a, long long b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b) { const long long t = a % b; a = b; b = t; }
+    return a ? a : 1;
+}
+
+// false — переполнение; вызывающий откатывается на печать литералом.
+bool ex_mul(long long a, long long b, long long& r) {
+    if (a == 0 || b == 0) { r = 0; return true; }
+    const long long q = a * b;
+    if (q / b != a) return false;
+    r = q;
+    return true;
+}
+
+bool ex_norm(ExRat& x) {
+    if (x.d == 0) return false;
+    if (x.d < 0) { x.d = -x.d; x.n = -x.n; }
+    const long long g = ex_gcd(x.n, x.d);
+    x.n /= g;
+    x.d /= g;
+    return true;
+}
+
+bool ex_mul_rat(ExRat a, ExRat b, ExRat& out) {
+    // Сокращаем крест-накрест ДО умножения: так переполнение наступает много
+    // позже, а знаменатели тут растут как произведение разностей n^q.
+    const long long g1 = ex_gcd(a.n, b.d), g2 = ex_gcd(b.n, a.d);
+    a.n /= g1; b.d /= g1;
+    b.n /= g2; a.d /= g2;
+    if (!ex_mul(a.n, b.n, out.n)) return false;
+    if (!ex_mul(a.d, b.d, out.d)) return false;
+    return ex_norm(out);
+}
+
+bool ex_add_rat(ExRat a, ExRat b, ExRat& out) {
+    const long long g = ex_gcd(a.d, b.d);
+    long long den, t1, t2;
+    if (!ex_mul(a.d, b.d / g, den)) return false;
+    if (!ex_mul(a.n, b.d / g, t1)) return false;
+    if (!ex_mul(b.n, a.d / g, t2)) return false;
+    if ((t2 > 0 && t1 > LLONG_MAX - t2) || (t2 < 0 && t1 < LLONG_MIN - t2)) return false;
+    out.n = t1 + t2;
+    out.d = den;
+    return ex_norm(out);
+}
+
+bool ex_pow(long long base, int e, long long& out) {
+    out = 1;
+    for (int i = 0; i < e; ++i)
+        if (!ex_mul(out, base, out)) return false;
+    return true;
+}
+
+// Те же alpha, что в extrapolation_weights, но без единого округления.
+// Подстановка u_k = 1/n_k^q в alpha_k ~ n_k^p * prod 1/(u_k - u_m) даёт
+// gamma_k = n_k^(p + q(K-2)) / prod_{m!=k} (n_m^q - n_k^q); общий множитель
+// сокращается нормировкой суммы в единицу.
+bool extrapolation_weights_rational(const std::vector<int>& n, int p, bool symmetric,
+                                    std::vector<ExRat>& out) {
+    const int K = (int)n.size();
+    if (K < 2) return false;
+    const int q = symmetric ? 2 : 1;
+    const int e = p + q * (K - 2);
+    if (e < 0) return false;
+
+    std::vector<ExRat> g((size_t)K);
+    ExRat sum{ 0, 1 };
+    for (int k = 0; k < K; ++k) {
+        long long num = 0, den = 1, pk = 1;
+        if (!ex_pow((long long)n[k], e, num)) return false;
+        if (!ex_pow((long long)n[k], q, pk))  return false;
+        for (int m = 0; m < K; ++m) {
+            if (m == k) continue;
+            long long pm = 1;
+            if (!ex_pow((long long)n[m], q, pm)) return false;
+            if (!ex_mul(den, pm - pk, den))      return false;
+        }
+        g[(size_t)k] = ExRat{ num, den };
+        if (!ex_norm(g[(size_t)k]))               return false;
+        if (!ex_add_rat(sum, g[(size_t)k], sum))  return false;
+    }
+    if (sum.n == 0) return false;
+
+    out.assign((size_t)K, ExRat{ 0, 1 });
+    for (int k = 0; k < K; ++k) {
+        const ExRat inv{ sum.d, sum.n };
+        if (!ex_mul_rat(g[(size_t)k], inv, out[(size_t)k])) return false;
+        // Числитель и знаменатель обязаны быть точны в double, иначе печать
+        // дробью ничего не меняет: литерал снова округлится.
+        constexpr long long kExact = 9007199254740992LL;   // 2^53
+        if (out[(size_t)k].n >  kExact || out[(size_t)k].n < -kExact ||
+            out[(size_t)k].d >  kExact) return false;
+    }
+    return true;
+}
+
+std::string ex_rat_expr(const ExRat& r) {
+    std::string s = "(numb)(" + std::to_string(r.n) + ".0)";
+    if (r.d != 1) s = "(" + s + "/(numb)(" + std::to_string(r.d) + ".0))";
+    return s;
+}
+
+} // namespace
+
 std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool symmetric) {
     const int K = (int)n.size();
     std::vector<double> u((size_t)K), alpha((size_t)K);
@@ -1832,6 +1955,9 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
 
     const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
+    // Точные дроби — если сошлись (см. extrapolation_weights_rational).
+    std::vector<ExRat> arat;
+    const bool alpha_exact = extrapolation_weights_rational(n, p, symmetric, arat);
     long long cost = 0;
     for (int k = 0; k < K; ++k) cost += n[k];
 
@@ -1842,8 +1968,11 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     o << "    // base: order " << p << ", " << (symmetric ? "symmetric" : "non-symmetric")
       << "  ->  extrapolated order " << extrapolation_order(K, p, symmetric) << "\n";
     o << "    // " << K << " stages, " << cost << " base steps per macro-step\n";
-    for (int k = 0; k < K; ++k)
-        o << "    //   n[" << k << "] = " << n[k] << "   alpha = " << fmtnum(alpha[k]) << "\n";
+    for (int k = 0; k < K; ++k) {
+        o << "    //   n[" << k << "] = " << n[k] << "   alpha = " << fmtnum(alpha[k]);
+        if (alpha_exact) o << " = " << arat[(size_t)k].n << "/" << arat[(size_t)k].d;
+        o << "\n";
+    }
 
     o << "    numb X0_ex[" << Ns << "], AC_ex[" << Ns << "];\n";
     o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { X0_ex[i_ex] = X[i_ex]; AC_ex[i_ex] = (numb)0; }\n\n";
@@ -1873,8 +2002,10 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
           << " of h/" << n[k] << "\n";
         o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h / (numb)"
           << fmtnum((double)n[k]) << ");\n";
-        o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] += (numb)("
-          << fmtnum(alpha[k]) << ") * X[i_ex];";
+        o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] += "
+          << (alpha_exact ? ex_rat_expr(arat[(size_t)k])
+                          : ("(numb)(" + fmtnum(alpha[k]) + ")"))
+          << " * X[i_ex];";
         // После последней стадии откатывать нечего — X сразу перезаписывается.
         if (k + 1 < K) o << " X[i_ex] = X0_ex[i_ex];";
         o << " }\n";
