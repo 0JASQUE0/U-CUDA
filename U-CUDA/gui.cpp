@@ -8833,6 +8833,32 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "Performance means something else here: the time of ONE trajectory,\n"
             "not the throughput of a loaded GPU - replicas are ignored.");
     c.use_gpu = (ord_dev == 0);
+
+    // Точность арифметики. Есть только у CPU: на GPU ядро собирается в numb,
+    // и выбор там был бы обманом — цифры те же, смысл другой.
+    ImGui::SameLine();
+    ImGui::TextDisabled("|"); ImGui::SameLine();
+    if (c.use_gpu) ImGui::BeginDisabled();
+    const char* prec_items[] = { "double", "double-double" };
+    ImGui::SetNextItemWidth(150.0f);
+    ImGui::Combo("precision##ord_prec", &c.cpu_precision, prec_items, IM_ARRAYSIZE(prec_items));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Arithmetic of the CPU branch.\n"
+            "double        - 16 digits, bit-for-bit the same as the GPU.\n"
+            "double-double - 32 digits (106-bit mantissa), about 35x slower.\n"
+            "\n"
+            "The order estimate subtracts nearby solutions, so it sits on a\n"
+            "rounding floor of about 2*eps*|y|*sqrt(N) - near 3e-13 in double.\n"
+            "A scheme of order p gives E1 ~ h^p, so from p = 8 on there is\n"
+            "almost no usable window in h left: the curve hits the floor before\n"
+            "the scheme reaches its asymptotic regime. double-double lowers the\n"
+            "floor by 16 decades and brings the window back up to p = 16.\n"
+            "\n"
+            "The same KRS body is rebuilt with numb = ucuda::dd; both builds are\n"
+            "cached separately, so switching back and forth does not recompile.");
+    if (c.use_gpu) ImGui::EndDisabled();
+
     if (!c.use_gpu) {
         std::string why;
         if (!krs_cpu_backend_available(&why))

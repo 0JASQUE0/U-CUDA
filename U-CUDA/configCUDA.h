@@ -14,7 +14,15 @@
 #include <math_constants.h>
 #endif
 
+// numb переопределяется макросом ДО include — тем же приёмом, что AMOUNTOFX
+// ниже. Так CPU-ветка вкладки Order собирает то же тело КРС в double-double
+// (kernels/ucuda_hp.h): в обычном double ричардсоновская разность E1 = |y_h -
+// y_h/2| садится на полку округления раньше, чем схема выходит на асимптотику.
+#ifdef UCUDA_NUMB_TYPE
+typedef UCUDA_NUMB_TYPE numb;
+#else
 typedef double numb;
+#endif
 
 // AMOUNTOFX оборачивается в #ifndef, чтобы NVRTC-вызывающие проекты могли
 // переопределить размерность системы через #define AMOUNTOFX N перед include.
@@ -185,8 +193,17 @@ constexpr int set_precision  = 15; // precision of numbers in writng final csv f
 // чтобы NVRTC-template мог их переопределить через #define перед include.
 
 constexpr int amount_GPU = 1920; // precision of numbers in writng final csv files
-constexpr numb pi	 = 3.1415926535897932384626433832795;
-constexpr numb euler = 2.7182818284590452353602874713527;
+// Значения тоже переопределяемы: в расширенной точности double-литерал обрезал
+// бы константу до 17 цифр, и весь выигрыш терялся бы на первом же pi в правой
+// части. Прелюдия krs_cpu подставляет сюда dd-константы из ucuda_hp.h.
+#ifndef UCUDA_PI
+#define UCUDA_PI 3.1415926535897932384626433832795
+#endif
+#ifndef UCUDA_EULER
+#define UCUDA_EULER 2.7182818284590452353602874713527
+#endif
+constexpr numb pi	 = UCUDA_PI;
+constexpr numb euler = UCUDA_EULER;
 //constexpr int blockSize_fixed = 1024;
 
 // ЗНАЧЕНИЕ УЗЛА ПАРАМЕТРИЧЕСКОЙ СЕТКИ — ЕДИНСТВЕННАЯ РЕАЛИЗАЦИЯ

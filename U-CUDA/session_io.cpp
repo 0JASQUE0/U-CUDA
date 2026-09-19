@@ -1504,6 +1504,7 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"t_max_text\":";      jstr(o, c.t_max_text);      o << ",";
     o << "\"max_value_text\":";  jstr(o, c.max_value_text);  o << ",";
     o << "\"use_gpu\":"          << (c.use_gpu ? "true" : "false") << ",";
+    o << "\"cpu_precision\":"    << c.cpu_precision << ",";
     o << "\"snap_steps\":"       << (c.snap_steps ? "true" : "false") << ",";
     o << "\"endpoint_only\":"    << (c.endpoint_only ? "true" : "false") << ",";
     o << "\"perf_repeats_text\":";  jstr(o, c.perf_repeats_text);  o << ",";
@@ -1538,6 +1539,10 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "t_max_text")       c.t_max_text       = p.str();
     else if (key == "max_value_text")   c.max_value_text   = p.str();
     else if (key == "use_gpu")          c.use_gpu          = p.boolean();
+    else if (key == "cpu_precision") {
+        const int k = std::stoi(p.str_or_num());
+        c.cpu_precision = (k == kOrderPrecDD) ? kOrderPrecDD : kOrderPrecDouble;
+    }
     else if (key == "snap_steps")       c.snap_steps       = p.boolean();
     else if (key == "endpoint_only")    c.endpoint_only    = p.boolean();
     else if (key == "perf_repeats_text")  c.perf_repeats_text  = p.str();

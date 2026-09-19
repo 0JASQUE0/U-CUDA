@@ -42,6 +42,19 @@ constexpr int kOrderTargetH = -1;
 constexpr int kOrderCalcOrder = 0;
 constexpr int kOrderCalcPerf  = 1;
 
+// Точность CPU-арифметики (OrderConfig::cpu_precision).
+//   kOrderPrecDouble — numb, как везде в проекте и как на GPU;
+//   kOrderPrecDD     — double-double из kernels/ucuda_hp.h: мантисса 106 бит,
+//                      eps 4.9e-32 вместо 2.2e-16, счёт медленнее раз в 35.
+// Зачем: полка округления в оценке порядка растёт как eps*|y|*sqrt(N), и в
+// double она приходит около 3e-13. Схема порядка p даёт E1 ~ h^p, поэтому при
+// p >= 8 пригодного окна по h почти не остаётся — кривая p(h) ложится на
+// полку раньше, чем схема выйдет на асимптотику. dd опускает полку на 16
+// десятичных порядков и возвращает окно вплоть до p = 16.
+// GPU-ветки это не касается: там всегда double.
+constexpr int kOrderPrecDouble = 0;
+constexpr int kOrderPrecDD     = 1;
+
 struct OrderConfig {
     std::string label  = "Order";
     std::string scheme = "Euler";
@@ -72,6 +85,9 @@ struct OrderConfig {
     // ничего и в UI гасятся. Формулы, пороги и коды статусов у обеих веток
     // общие — см. run_order_cpu в order_session.cpp.
     bool        use_gpu        = true;
+    // Точность CPU-арифметики: kOrderPrecDouble / kOrderPrecDD (см. выше).
+    // При use_gpu игнорируется.
+    int         cpu_precision  = kOrderPrecDouble;
 
     // ---- Интегрирование ----
     std::string h_text         = "0.01";   // базовый шаг, когда h не свипуется
