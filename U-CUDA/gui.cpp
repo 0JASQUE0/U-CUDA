@@ -9865,6 +9865,11 @@ static void draw_network_coupling_block(AppModel& model, NetworkSession& s, Netw
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Global multiplier: every edge weight is multiplied by it.\n"
                           "Turn the whole network's coupling strength from one field.");
+    ImGui::Checkbox("divide by node degree", &c.normalize_coupling);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("On: a node's coupling terms are divided by how many arcs reach it,\n"
+                          "so K is the pull per node and a hub is not dragged N times harder.\n"
+                          "Off: the plain Laplacian sum - the hub of a star will blow up first.");
 
     ImGui::TextDisabled("A law is one expression per equation; empty = no coupling there.");
     ImGui::TextDisabled("Names: %s_j = source node, %s or %s_i = this node, K = edge weight.",
@@ -9906,6 +9911,32 @@ static void draw_network_coupling_block(AppModel& model, NetworkSession& s, Netw
     const std::string lerr = net_validate_laws(s, c);
     if (!lerr.empty())
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", lerr.c_str());
+
+    // Предел устойчивости расщепления: вклад связи добавляется явным шагом
+    // h * sum(w), поэтому при h * sum|w| > 1 узел с наибольшей степенью
+    // перелетает через цель и сеть разносит независимо от схемы. Ровно это
+    // ловит центр звезды, у которого сумма весов в (N-1) раз больше лучевой.
+    {
+        std::vector<int> es, esrc, elaw;
+        std::vector<double> ew;
+        net_build_csr(c, parse_num(c.coupling_text, 1.0), es, esrc, ew, elaw);
+        double worst = 0.0;
+        int worst_node = -1;
+        for (size_t i = 0; i + 1 < es.size(); ++i) {
+            double sum = 0.0;
+            for (int e = es[i]; e < es[i + 1]; ++e) sum += std::fabs(ew[(size_t)e]);
+            if (sum > worst) { worst = sum; worst_node = (int)i; }
+        }
+        const double hK = parse_num(c.h_text, 0.01) * worst;
+        if (hK > 1.0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                               "h * coupling = %.2f at node %d: the split coupling step "
+                               "overshoots (needs < 1)", hK, worst_node);
+        else if (hK > 0.3)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+                               "h * coupling = %.2f at node %d - close to the split step's limit",
+                               hK, worst_node);
+    }
     (void)model;
 }
 
@@ -9915,7 +9946,10 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
 
     ImGui::TextDisabled("Empty cell = the shared value below. Fill one to detune that node.");
 
-    const int n_cols = 2 + (int)s.params.size() + (int)s.vars.size();
+    // Столбец s появляется только у схем, которые читают a[0]: у остальных он
+    // был бы полем, которое ни на что не влияет.
+    const bool has_s = scheme_uses_symmetry(c.scheme, s.custom_schemes);
+    const int n_cols = 2 + (has_s ? 1 : 0) + (int)s.params.size() + (int)s.vars.size();
     const float height = ImGui::GetTextLineHeightWithSpacing() * 12.0f;
     if (ImGui::BeginTable("##net_nodes", n_cols,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
@@ -9925,12 +9959,24 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
         ImGui::TableSetupScrollFreeze(1, 1);
         ImGui::TableSetupColumn("node");
         ImGui::TableSetupColumn("deg");
+        if (has_s) ImGui::TableSetupColumn("s");
         for (const auto& p : s.params) ImGui::TableSetupColumn(p.c_str());
         for (const auto& v : s.vars)   ImGui::TableSetupColumn((v + "0").c_str());
         ImGui::TableHeadersRow();
 
         ImGuiListClipper clipper;
         clipper.Begin((int)c.nodes.size());
+        // Прокрутка к узлу, выбранному кликом в графе. Клиппер рисует только
+        // видимые строки, поэтому просить SetScrollHereY у самой строки нельзя —
+        // её может не быть в этом кадре; считаем позицию по номеру строки.
+        if (model.network_view.scroll_nodes_to_selected) {
+            const int sel = model.network_view.selected_node;
+            if (sel >= 0 && sel < (int)c.nodes.size()) {
+                const float row_h = ImGui::GetTextLineHeightWithSpacing();
+                ImGui::SetScrollY((float)sel * row_h - height * 0.5f + row_h);
+            }
+            model.network_view.scroll_nodes_to_selected = false;
+        }
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 NetNode& nd = c.nodes[(size_t)i];
@@ -9938,17 +9984,27 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 const bool sel = (model.network_view.selected_node == i);
-                if (ImGui::Selectable(nd.label.empty() ? std::to_string(i + 1).c_str()
-                                                       : nd.label.c_str(),
-                                      sel, ImGuiSelectableFlags_SpanAllColumns))
+                // Подпись — индекс: им же узел адресуется в таблице рёбер и
+                // подписан на графе.
+                if (ImGui::Selectable(std::to_string(i).c_str(), sel,
+                                      ImGuiSelectableFlags_SpanAllColumns))
                     model.network_view.selected_node = sel ? -1 : i;
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", net_degree(c, i));
+                // Правка любой ячейки выделяет узел — так строка таблицы и
+                // кружок на графе всегда говорят об одном и том же узле.
+                if (has_s) {
+                    ImGui::TableNextColumn();
+                    ImGui::SetNextItemWidth(80.0f);
+                    InputTextStr("##s", nd.symmetry_s);
+                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
+                }
                 for (const auto& p : s.params) {
                     ImGui::TableNextColumn();
                     ImGui::PushID(p.c_str());
                     ImGui::SetNextItemWidth(80.0f);
                     InputTextStr("##p", nd.param_values[p]);
+                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
                     ImGui::PopID();
                 }
                 for (const auto& v : s.vars) {
@@ -9956,6 +10012,7 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
                     ImGui::PushID(v.c_str());
                     ImGui::SetNextItemWidth(80.0f);
                     InputTextStr("##v", nd.initial_conditions[v]);
+                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
                     ImGui::PopID();
                 }
                 ImGui::PopID();
@@ -9964,7 +10021,11 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
         ImGui::EndTable();
     }
     if (ImGui::Button("Clear all overrides")) {
-        for (NetNode& nd : c.nodes) { nd.param_values.clear(); nd.initial_conditions.clear(); }
+        for (NetNode& nd : c.nodes) {
+            nd.param_values.clear();
+            nd.initial_conditions.clear();
+            nd.symmetry_s.clear();
+        }
     }
 }
 
@@ -9992,24 +10053,36 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
 
         ImGuiListClipper clipper;
         clipper.Begin((int)c.edges.size());
+        // Прокрутка к ребру, выбранному кликом в графе — см. таблицу узлов.
+        if (model.network_view.scroll_edges_to_selected) {
+            const int sel = model.network_view.selected_edge;
+            if (sel >= 0 && sel < (int)c.edges.size()) {
+                const float row_h = ImGui::GetTextLineHeightWithSpacing();
+                ImGui::SetScrollY((float)sel * row_h - height * 0.5f + row_h);
+            }
+            model.network_view.scroll_edges_to_selected = false;
+        }
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 NetEdge& e = c.edges[(size_t)i];
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
                 if (model.network_view.selected_edge == i)
-                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 140, 120));
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 140, 160));
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(60.0f);
                 if (ImGui::InputInt("##f", &e.from, 0, 0)) { net_mark_custom(c); }
+                if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(60.0f);
                 if (ImGui::InputInt("##t", &e.to, 0, 0)) { net_mark_custom(c); }
+                if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
                 if (ImGui::Checkbox("##b", &e.bidirectional)) net_mark_custom(c);
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(80.0f);
                 InputTextStr("##w", e.weight_text);
+                if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(120.0f);
                 if (!law_items.empty())
@@ -10186,6 +10259,14 @@ static void draw_network_graph_window(AppModel& model) {
     }
     ImGui::SameLine();
     ImGui::Checkbox("labels", &vs.show_labels);
+    ImGui::SameLine();
+    {
+        // Своя колормапа графа: -1 значит «как в настройках приложения», и
+        // пока пользователь её не трогал, граф идёт вместе с хитмапами.
+        int cmap = (vs.graph_colormap >= 0) ? vs.graph_colormap : model.heatmap_colormap;
+        if (colormap_combo("##net_cmap", &cmap, ImGui::GetFontSize() * 10.0f))
+            vs.graph_colormap = cmap;
+    }
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImVec2 size = ImGui::GetContentRegionAvail();
@@ -10211,14 +10292,34 @@ static void draw_network_graph_window(AppModel& model) {
     };
 
     const float node_r = (c.nodes.size() > 64) ? 5.0f : ((c.nodes.size() > 24) ? 8.0f : 12.0f);
+    const int cmap_id = (vs.graph_colormap >= 0) ? vs.graph_colormap : model.heatmap_colormap;
+
+    // Расстояние от курсора до отрезка — попадание по ребру. Ребро тонкое, и
+    // ловить его кликом иначе нечем.
+    auto dist_to_segment = [](ImVec2 p, ImVec2 a, ImVec2 b) {
+        const float vx = b.x - a.x, vy = b.y - a.y;
+        const float wx = p.x - a.x, wy = p.y - a.y;
+        const float len2 = vx * vx + vy * vy;
+        float t = (len2 > 0.0f) ? (wx * vx + wy * vy) / len2 : 0.0f;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        const float dx = wx - t * vx, dy = wy - t * vy;
+        return std::sqrt(dx * dx + dy * dy);
+    };
 
     // Рёбра под узлами.
+    int hovered_edge = -1;
+    float hovered_edge_d = 6.0f;      // порог попадания в пикселях
     for (size_t i = 0; i < c.edges.size(); ++i) {
         const NetEdge& e = c.edges[i];
         if (e.from < 0 || e.to < 0 || e.from >= (int)c.nodes.size() || e.to >= (int)c.nodes.size())
             continue;
         const ImVec2 a = to_screen(c.nodes[(size_t)e.from]);
         const ImVec2 b = to_screen(c.nodes[(size_t)e.to]);
+        if (canvas_hovered) {
+            const float d = dist_to_segment(mouse, a, b);
+            if (d < hovered_edge_d) { hovered_edge_d = d; hovered_edge = (int)i; }
+        }
         const bool sel = ((int)i == vs.selected_edge);
         dl->AddLine(a, b, sel ? IM_COL32(255, 200, 80, 255) : IM_COL32(120, 130, 150, 160),
                     sel ? 2.5f : 1.4f);
@@ -10260,7 +10361,7 @@ static void draw_network_graph_window(AppModel& model) {
             const double v = net_value_at(r, vs.time_index, (int)i, vs.color_var);
             if (std::isfinite(v)) {
                 const float t = (float)((v - lo) / (hi - lo));
-                col = cmap_sample_id(t < 0 ? 0.0f : (t > 1 ? 1.0f : t), model.heatmap_colormap);
+                col = cmap_sample_id(t < 0 ? 0.0f : (t > 1 ? 1.0f : t), cmap_id);
             } else {
                 col = IM_COL32(70, 70, 70, 255);   // разлетелось / не посчитано
             }
@@ -10269,80 +10370,147 @@ static void draw_network_graph_window(AppModel& model) {
         const bool sel = ((int)i == vs.selected_node);
         dl->AddCircle(p, node_r, sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(30, 30, 35, 255),
                       0, sel ? 2.5f : 1.5f);
+        if ((int)i == vs.drag_from)
+            dl->AddCircle(p, node_r + 4.0f, IM_COL32(255, 220, 120, 255), 0, 2.0f);
         if (has_data && (int)i < (int)r.status.size() && r.status[i] != NET_ST_OK)
             dl->AddCircle(p, node_r + 3.0f, IM_COL32(255, 80, 80, 255), 0, 2.0f);
-        if (vs.show_labels && c.nodes.size() <= 64)
-            dl->AddText(ImVec2(p.x + node_r + 2.0f, p.y - 7.0f), IM_COL32(200, 200, 210, 220),
-                        c.nodes[i].label.c_str());
+        // Подпись — ИНДЕКС узла: тем же числом он адресуется в обеих таблицах.
+        if (vs.show_labels && c.nodes.size() <= 64) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%d", (int)i);
+            dl->AddText(ImVec2(p.x + node_r + 2.0f, p.y - 7.0f), IM_COL32(200, 200, 210, 220), buf);
+        }
     }
 
-    // Мышь: ЛКМ по узлу — выделить и тащить, Shift+ЛКМ — тянуть новое ребро,
-    // ПКМ по узлу — удалить его вместе с рёбрами.
-    if (canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        if (hovered_node >= 0) {
-            if (ImGui::GetIO().KeyShift) vs.drag_from = hovered_node;
-            else                          vs.selected_node = hovered_node;
+    // Мышь. Ребро строится ДВУМЯ кликами, а не протяжкой с зажатой кнопкой:
+    // двойной клик по узлу берёт его за источник, следующий клик по другому
+    // узлу замыкает ребро. Протяжка требовала держать кнопку через весь холст
+    // и срывалась на первом же промахе.
+    //
+    // Состояние на начало кадра: двойной клик приходит вместе с обычным (ImGui
+    // шлёт оба), и без снимка обработчик одиночного успел бы погасить то, что
+    // обработчик двойного только что поставил.
+    const int  pending      = vs.drag_from;
+    const bool dbl          = canvas_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+    const bool clicked      = canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+
+    if (clicked) {
+        if (pending >= 0) {
+            // Ждём второй конец: клик по другому узлу — ребро, всё остальное —
+            // отмена. Ребро-дубликат не проверяем: параллельные связи с разными
+            // законами имеют смысл, а лишнее видно в таблице.
+            if (hovered_node >= 0 && hovered_node != pending) {
+                NetEdge e;
+                e.from = pending;
+                e.to   = hovered_node;
+                e.bidirectional = !c.gen_directed;
+                c.edges.push_back(e);
+                net_mark_custom(c);
+                vs.selected_edge = (int)c.edges.size() - 1;
+                vs.scroll_edges_to_selected = true;
+            }
+            vs.drag_from = -1;
+        } else if (hovered_node >= 0) {
+            vs.selected_node = hovered_node;
+            vs.scroll_nodes_to_selected = true;
+        } else if (hovered_edge >= 0) {
+            vs.selected_edge = hovered_edge;
+            vs.scroll_edges_to_selected = true;
         } else {
             vs.selected_node = -1;
+            vs.selected_edge = -1;
         }
     }
-    if (vs.drag_from >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        if (hovered_node >= 0 && hovered_node != vs.drag_from) {
-            NetEdge e;
-            e.from = vs.drag_from;
-            e.to   = hovered_node;
-            e.bidirectional = !c.gen_directed;
-            c.edges.push_back(e);
+
+    if (dbl && pending < 0) {
+        if (hovered_node >= 0) {
+            vs.drag_from = hovered_node;          // взяли источник будущего ребра
+        } else if (hovered_edge < 0 && (int)c.nodes.size() < kMaxNetworkNodes) {
+            // Пустое место — новый узел ровно под курсором. Переопределений у
+            // него нет: он повторяет общие параметры конфига, как и все.
+            NetNode nd;
+            const ImVec2 uv = from_screen(mouse);
+            nd.ui_x = uv.x;
+            nd.ui_y = uv.y;
+            nd.label = std::to_string(c.nodes.size());
+            c.nodes.push_back(std::move(nd));
             net_mark_custom(c);
+            vs.selected_node = (int)c.nodes.size() - 1;
+            vs.scroll_nodes_to_selected = true;
         }
-        vs.drag_from = -1;
     }
+
+    // Esc — отменить незаконченное ребро.
+    if (vs.drag_from >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) vs.drag_from = -1;
+
     if (vs.drag_from < 0 && vs.selected_node >= 0 && vs.selected_node < (int)c.nodes.size()
         && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && canvas_hovered) {
         const ImVec2 uv = from_screen(mouse);
         c.nodes[(size_t)vs.selected_node].ui_x = uv.x;
         c.nodes[(size_t)vs.selected_node].ui_y = uv.y;
     }
-    if (canvas_hovered && hovered_node >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-        const int dead = hovered_node;
-        c.edges.erase(std::remove_if(c.edges.begin(), c.edges.end(),
-                                     [dead](const NetEdge& e) { return e.from == dead || e.to == dead; }),
-                      c.edges.end());
-        for (NetEdge& e : c.edges) {
-            if (e.from > dead) --e.from;
-            if (e.to   > dead) --e.to;
+
+    if (canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (hovered_node >= 0) {
+            const int dead = hovered_node;
+            c.edges.erase(std::remove_if(c.edges.begin(), c.edges.end(),
+                                         [dead](const NetEdge& e) { return e.from == dead || e.to == dead; }),
+                          c.edges.end());
+            for (NetEdge& e : c.edges) {
+                if (e.from > dead) --e.from;
+                if (e.to   > dead) --e.to;
+            }
+            c.nodes.erase(c.nodes.begin() + dead);
+            net_mark_custom(c);
+            vs.selected_node = -1;
+            vs.selected_edge = -1;
+            vs.drag_from = -1;
+            // Узла больше нет, а подсказка ниже ходит по индексу: без сброса она
+            // прочитала бы за концом вектора в этом же кадре.
+            hovered_node = -1;
+        } else if (hovered_edge >= 0 && hovered_edge < (int)c.edges.size()) {
+            c.edges.erase(c.edges.begin() + hovered_edge);
+            net_mark_custom(c);
+            vs.selected_edge = -1;
+            hovered_edge = -1;
         }
-        c.nodes.erase(c.nodes.begin() + dead);
-        net_mark_custom(c);
-        vs.selected_node = -1;
-        vs.selected_edge = -1;
-        // Узла больше нет, а подсказка ниже ходит по индексу: без сброса она
-        // прочитала бы за концом вектора в этом же кадре.
-        hovered_node = -1;
     }
 
     // Подсказка о значении под курсором.
     if (canvas_hovered && hovered_node >= 0) {
         ImGui::BeginTooltip();
-        ImGui::Text("node %d (%s)", hovered_node, c.nodes[(size_t)hovered_node].label.c_str());
+        ImGui::Text("node %d", hovered_node);
         ImGui::Text("degree %d", net_degree(c, hovered_node));
         if (has_data)
             for (size_t k = 0; k < s.vars.size() && (int)k < r.n_vars; ++k)
                 ImGui::Text("%s = %g", s.vars[k].c_str(),
                             net_value_at(r, vs.time_index, hovered_node, (int)k));
         ImGui::EndTooltip();
+    } else if (canvas_hovered && hovered_edge >= 0 && hovered_edge < (int)c.edges.size()) {
+        const NetEdge& e = c.edges[(size_t)hovered_edge];
+        ImGui::BeginTooltip();
+        ImGui::Text("edge %d: %d %s %d", hovered_edge, e.from,
+                    e.bidirectional ? "<->" : "->", e.to);
+        ImGui::Text("weight %s, law %s", e.weight_text.c_str(),
+                    (e.law >= 0 && e.law < (int)c.laws.size()) ? c.laws[(size_t)e.law].name.c_str() : "?");
+        ImGui::EndTooltip();
     }
 
     if (has_data) {
-        // Шкала цвета — та же, что у хитмап, и по тем же значениям.
+        // Шкала цвета — та же, что у графа, и по тем же значениям.
         const std::vector<ColorbarTick> ticks = colorbar_ticks((float)lo, (float)hi, 0);
         const float cb_w = colorbar_total_width(ticks);
         const ImVec2 cb_pos(origin.x + size.x - cb_w - 4.0f, origin.y + 8.0f);
         draw_colorbar(dl, cb_pos, size.y - 16.0f, (float)lo, (float)hi,
-                      (HeatmapColormap)model.heatmap_colormap, false, 0, ticks);
+                      (HeatmapColormap)cmap_id, false, 0, ticks);
     }
 
-    ImGui::TextDisabled("drag node = move, shift+drag = new edge, right click = delete node");
+    if (vs.drag_from >= 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.47f, 1.0f),
+                           "edge from node %d: click the other node (Esc cancels)", vs.drag_from);
+    else
+        ImGui::TextDisabled("double click node = start edge, double click empty = new node, "
+                            "drag = move, right click = delete");
 }
 
 // --- Кривые узлов ----------------------------------------------------------
@@ -10368,6 +10536,39 @@ static void draw_network_series_window(AppModel& model, PlotRenderer& renderer, 
     ImGui::InputInt("count", &vs.series_count, 1, 8);
     if (vs.series_count < 1) vs.series_count = 1;
     if (vs.first_series_node < 0) vs.first_series_node = 0;
+
+    {
+        int cmap = (vs.series_colormap >= 0) ? vs.series_colormap : model.heatmap_colormap;
+        ImGui::SameLine();
+        if (colormap_combo("##net_series_cmap", &cmap, ImGui::GetFontSize() * 10.0f))
+            vs.series_colormap = cmap;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Curves are coloured along this map in node order,\n"
+                              "so neighbours on the ring stay neighbours in colour.");
+    }
+    ImGui::SameLine();
+    // Стиль линий — тот же тулбар-с-попапом, что у точек бифуркационных
+    // диаграмм; выключенный режим даёт ровно прежний вид.
+    draw_style_toolbar("Custom line style", "netseries", vs.custom_line_style,
+        [&vs]() {
+            bool ch = false;
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat("Line width##netseries", &vs.line_width, 0.5f, 8.0f, "%.1f");
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat("Alpha##netseries", &vs.line_alpha, 0.05f, 1.0f, "%.2f");
+            ch |= ImGui::Checkbox("Points instead of lines##netseries", &vs.points_mode);
+            if (vs.points_mode) {
+                if (vs.point_marker < 0 || vs.point_marker >= kPointMarkerCount) vs.point_marker = 0;
+                ImGui::SetNextItemWidth(150);
+                ch |= ImGui::Combo("Marker##netseries", &vs.point_marker,
+                                   kPointMarkerNames, kPointMarkerCount);
+                ImGui::SetNextItemWidth(150);
+                ch |= ImGui::SliderFloat("Point size##netseries", &vs.point_size, 0.5f, 12.0f, "%.1f");
+            } else {
+                ch |= ImGui::Checkbox("Mark data points##netseries", &vs.node_markers);
+            }
+            return ch;
+        });
 
     if (!c.last_run_ok || r.n_points <= 0) {
         ImGui::TextDisabled("No data yet - press Run on the Network tab.");
@@ -10400,12 +10601,23 @@ static void draw_network_series_window(AppModel& model, PlotRenderer& renderer, 
         si.points   = b.data();
         si.n_points = (int)(b.size() / 2);
         const float t = (count > 1) ? (float)k / (float)(count - 1) : 0.0f;
-        const ImU32 col = cmap_sample_id(t, model.heatmap_colormap);
+        const ImU32 col = cmap_sample_id(t, (vs.series_colormap >= 0) ? vs.series_colormap
+                                                                     : model.heatmap_colormap);
         si.color = ImGui::ColorConvertU32ToFloat4(col);
-        si.label = (node < (int)c.nodes.size() && !c.nodes[(size_t)node].label.empty())
-                       ? c.nodes[(size_t)node].label : std::to_string(node + 1);
+        if (vs.custom_line_style) si.color.w = vs.line_alpha;
+        // Подпись — индекс узла, как на графе и в таблицах.
+        si.label = std::to_string(node);
         series.push_back(si);
     }
+
+    // Толщина > 1 px существует только на пути ImDrawList: glLineWidth в core
+    // OpenGL драйверы клампят до 1.0 (то же решение, что у LLE/LS).
+    view.points_mode       = vs.custom_line_style && vs.points_mode;
+    view.point_marker      = (vs.custom_line_style && vs.points_mode) ? vs.point_marker : -1;
+    view.point_size_px     = (vs.custom_line_style && vs.points_mode) ? vs.point_size : 2.0f;
+    view.line_thickness_px = vs.custom_line_style ? vs.line_width : 1.5f;
+    view.imdraw_lines      = vs.custom_line_style && !vs.points_mode && vs.line_width > 1.01f;
+    view.point_markers     = vs.custom_line_style && !vs.points_mode && vs.node_markers;
 
     view.x_axis.name = "t";
     view.y_axis.name = (vs.series_var < (int)s.vars.size()) ? s.vars[(size_t)vs.series_var] : "x";
@@ -10434,6 +10646,13 @@ static void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, 
         const std::vector<const char*> vitems = c_str_list(s.vars);
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo("variable##raster", &vs.color_var, vitems.data(), (int)vitems.size());
+    }
+    // Тот же тулбар, что у всех хитмап: колормапа, автоскейл, ручные vmin/vmax.
+    // Swap axes здесь нет — оси растра не взаимозаменяемы (время и номер узла).
+    {
+        HeatmapToolbarOpts o;
+        o.show_swap = false;
+        draw_heatmap_toolbar(view, o);
     }
     if (!c.last_run_ok || r.n_points <= 0) {
         ImGui::TextDisabled("No data yet - press Run on the Network tab.");

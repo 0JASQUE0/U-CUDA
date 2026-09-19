@@ -117,6 +117,11 @@ void net_build_csr(const NetworkConfig& c, double coupling,
     for (const Arc& a : arcs) ++count[(size_t)a.to];
     for (int i = 0; i < n; ++i) edge_start[(size_t)i + 1] = edge_start[(size_t)i] + count[(size_t)i];
 
+    // Нормировка на степень ПРИЁМНИКА (см. NetworkConfig::normalize_coupling).
+    if (c.normalize_coupling)
+        for (Arc& a : arcs)
+            if (count[(size_t)a.to] > 0) a.w /= (double)count[(size_t)a.to];
+
     const size_t total = arcs.size();
     edge_src.assign(total, 0);
     edge_w.assign(total, 0.0);
@@ -154,7 +159,9 @@ std::string net_generate_topology(NetworkConfig& c, const std::vector<std::strin
             c.nodes[(size_t)i].param_values       = std::move(old[(size_t)i].param_values);
             c.nodes[(size_t)i].initial_conditions = std::move(old[(size_t)i].initial_conditions);
         }
-        c.nodes[(size_t)i].label = std::to_string(i + 1);
+        // Подпись = индекс: рёбра адресуют узлы индексами, и нумерация
+        // с единицы заставляла бы пересчитывать в уме при каждой правке.
+        c.nodes[(size_t)i].label = std::to_string(i);
     }
 
     std::set<long long> seen;
@@ -290,7 +297,8 @@ NetworkRequest build_network_request(const NetworkSession& s, const NetworkConfi
     req.initial_conditions.assign((size_t)req.n_nodes * (size_t)req.amountOfX, 0.0);
     for (int i = 0; i < req.n_nodes; ++i) {
         const NetNode& nd = c.nodes[(size_t)i];
-        req.values[(size_t)i * req.amountOfValues] = parse_d(c.symmetry_s, 0.5);
+        req.values[(size_t)i * req.amountOfValues] =
+            parse_d(nd.symmetry_s.empty() ? c.symmetry_s : nd.symmetry_s, 0.5);
         for (size_t j = 0; j < s.params.size(); ++j) {
             const std::string v = node_value(nd.param_values, c.param_values, s.params[j]);
             req.values[(size_t)i * req.amountOfValues + j + 1] = parse_d(v, 0.0);

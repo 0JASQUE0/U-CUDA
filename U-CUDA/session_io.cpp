@@ -1334,6 +1334,7 @@ static void write_network_config(std::ostringstream& o, const NetworkConfig& c) 
     o << "\"max_value_text\":";   jstr(o, c.max_value_text);   o << ",";
     o << "\"max_points_text\":";  jstr(o, c.max_points_text);  o << ",";
     o << "\"coupling_text\":";    jstr(o, c.coupling_text);    o << ",";
+    o << "\"normalize_coupling\":" << (c.normalize_coupling ? "true" : "false") << ",";
     o << "\"topology\":"          << (int)c.topology         << ",";
     o << "\"gen_n_text\":";       jstr(o, c.gen_n_text);       o << ",";
     o << "\"gen_k_text\":";       jstr(o, c.gen_k_text);       o << ",";
@@ -1367,6 +1368,7 @@ static void write_network_config(std::ostringstream& o, const NetworkConfig& c) 
         const NetNode& nd = c.nodes[i];
         o << "{\"label\":"; jstr(o, nd.label);
         o << ",\"x\":" << nd.ui_x << ",\"y\":" << nd.ui_y;
+        if (!nd.symmetry_s.empty()) { o << ",\"s\":"; jstr(o, nd.symmetry_s); }
         o << ",\"params\":"; jmap_nonempty(o, nd.param_values);
         o << ",\"ic\":";     jmap_nonempty(o, nd.initial_conditions);
         o << "}";
@@ -1397,6 +1399,7 @@ static bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) 
     else if (key == "max_value_text")     c.max_value_text     = p.str();
     else if (key == "max_points_text")    c.max_points_text    = p.str();
     else if (key == "coupling_text")      c.coupling_text      = p.str();
+    else if (key == "normalize_coupling") c.normalize_coupling = p.boolean();
     else if (key == "topology")           c.topology           = (NetTopology)std::stoi(p.str_or_num());
     else if (key == "gen_n_text")         c.gen_n_text         = p.str();
     else if (key == "gen_k_text")         c.gen_k_text         = p.str();
@@ -1453,6 +1456,7 @@ static bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) 
                     while (true) {
                         std::string k = p.str(); p.expect(':');
                         if      (k == "label")  nd.label = p.str();
+                        else if (k == "s")      nd.symmetry_s = p.str();
                         else if (k == "x")      nd.ui_x  = (float)std::stod(p.str_or_num());
                         else if (k == "y")      nd.ui_y  = (float)std::stod(p.str_or_num());
                         else if (k == "params") nd.param_values = p.map_ss();
