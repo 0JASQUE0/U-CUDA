@@ -379,8 +379,11 @@ static void refresh_auto_labels(AppModel& model) {
 // ctx_menu — контекстное меню поля (ПКМ). Вызывается СРАЗУ после InputText:
 // ниже может встать предупреждение о невалидном числе, и BeginPopupContextItem
 // внутри колбэка привязался бы к нему, а не к самому полю.
+// allow_empty: пустая строка — осмысленное значение («как у всех», см. таблицу
+// узлов вкладки Network), и ругаться на неё как на нечисло нельзя.
 static bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
-                        const std::function<void()>& ctx_menu = {}) {
+                        const std::function<void()>& ctx_menu = {},
+                        bool allow_empty = false) {
     std::vector<char>& buf = input_scratch(str, 1024);
     if (width > 0) ImGui::SetNextItemWidth(width);
     // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_input_callback.
@@ -394,7 +397,7 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
     // Inline-предупреждение, если содержимое не парсится как число.
     // Default из engine'а (0) всё равно применится, но пользователю
     // явно сигналим, что введённое значение игнорируется.
-    if (!is_numeric_string(str)) {
+    if (!(allow_empty && str.empty()) && !is_numeric_string(str)) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
             "  invalid number, using default");
     }
@@ -9982,38 +9985,45 @@ static void draw_network_nodes_table(AppModel& model, NetworkSession& s, Network
                 NetNode& nd = c.nodes[(size_t)i];
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
-                ImGui::TableNextColumn();
                 const bool sel = (model.network_view.selected_node == i);
+                // Выделение строки — фоном, как в таблице рёбер. Selectable со
+                // SpanAllColumns рисовал подсветку ПОВЕРХ полей ввода и всего
+                // в одну строку текста, тогда как строка выше — в ней рамки.
+                if (sel)
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 140, 160));
+                ImGui::TableNextColumn();
                 // Подпись — индекс: им же узел адресуется в таблице рёбер и
-                // подписан на графе.
-                if (ImGui::Selectable(std::to_string(i).c_str(), sel,
-                                      ImGuiSelectableFlags_SpanAllColumns))
+                // подписан на графе. Высота — ровно как у полей ввода справа.
+                if (ImGui::Selectable(std::to_string(i).c_str(), sel, ImGuiSelectableFlags_None,
+                                      ImVec2(0.0f, ImGui::GetFrameHeight())))
                     model.network_view.selected_node = sel ? -1 : i;
                 if (want_scroll && i == scroll_to) ImGui::SetScrollHereY(0.5f);
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", net_degree(c, i));
                 // Правка любой ячейки выделяет узел — так строка таблицы и
                 // кружок на графе всегда говорят об одном и том же узле.
+                // Поля — через общий InputNumStr: запятая, выражения вроде
+                // 8/3 и шаг разряда по стрелкам работают здесь так же, как в
+                // остальных полях приложения. Пустое значение валидно (= общее),
+                // поэтому предупреждение о нечисле показываем только у непустых.
+                auto num_cell = [&](const char* id, std::string& v) {
+                    InputNumStr(id, v, 80.0f, {}, /*allow_empty*/ true);
+                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
+                };
                 if (has_s) {
                     ImGui::TableNextColumn();
-                    ImGui::SetNextItemWidth(80.0f);
-                    InputTextStr("##s", nd.symmetry_s);
-                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
+                    num_cell("##s", nd.symmetry_s);
                 }
                 for (const auto& p : s.params) {
                     ImGui::TableNextColumn();
                     ImGui::PushID(p.c_str());
-                    ImGui::SetNextItemWidth(80.0f);
-                    InputTextStr("##p", nd.param_values[p]);
-                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
+                    num_cell("##p", nd.param_values[p]);
                     ImGui::PopID();
                 }
                 for (const auto& v : s.vars) {
                     ImGui::TableNextColumn();
                     ImGui::PushID(v.c_str());
-                    ImGui::SetNextItemWidth(80.0f);
-                    InputTextStr("##v", nd.initial_conditions[v]);
-                    if (ImGui::IsItemActivated()) model.network_view.selected_node = i;
+                    num_cell("##v", nd.initial_conditions[v]);
                     ImGui::PopID();
                 }
                 ImGui::PopID();
@@ -10083,8 +10093,7 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
                 ImGui::TableNextColumn();
                 if (ImGui::Checkbox("##b", &e.bidirectional)) net_mark_custom(c);
                 ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(80.0f);
-                InputTextStr("##w", e.weight_text);
+                InputNumStr("##w", e.weight_text, 80.0f);
                 if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(120.0f);
@@ -10109,6 +10118,12 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
         e.bidirectional = true;
         c.edges.push_back(e);
         net_mark_custom(c);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all overrides##edges")) {
+        // Топология остаётся, сбрасываются только правки на рёбрах: вес в 1
+        // и закон в первый — ровно то, что выдаёт генератор.
+        for (NetEdge& e : c.edges) { e.weight_text = "1"; e.law = 0; }
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear edges")) { c.edges.clear(); net_mark_custom(c); }
@@ -10912,6 +10927,12 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
             std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
             model.load_or_init_order_plot_windows(jw);
+            break;
+        }
+        case AppModel::AppMode::Network: {
+            model.start_network_analysis();
+            std::string jn = lib.load_session(model.loaded_name, "_last_network");
+            apply_session_json(model, jn, model.network_session, session_from_json_network, "_last_network");
             break;
         }
         case AppModel::AppMode::Library:
