@@ -1685,6 +1685,42 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     throw std::runtime_error("unknown scheme");
 }
 
+std::string codegen_coupling(const System& s, const std::vector<std::string>& exprs,
+                             const std::string& self_state, const std::string& nbr_state,
+                             const std::string& self_par, const std::string& nbr_par,
+                             const std::string& weight, const std::string& dst,
+                             const std::string& indent) {
+    if (exprs.size() != s.vars.size())
+        throw std::runtime_error("coupling: expression count != number of variables");
+    NameMap nm;
+    // Вес кладём ПЕРВЫМ: имя из системы должно его перекрывать, а не наоборот.
+    nm.m["K"] = weight;
+    nm.m["w"] = weight;
+    for (const auto& c : math_constants()) nm.m[c] = c;
+    for (size_t i = 0; i < s.vars.size(); ++i) {
+        const std::string idx = "[" + std::to_string(i) + "]";
+        nm.m[s.vars[i]]        = self_state + idx;
+        nm.m[s.vars[i] + "_i"] = self_state + idx;
+        nm.m[s.vars[i] + "_j"] = nbr_state + idx;
+    }
+    for (size_t j = 0; j < s.params.size(); ++j) {
+        const std::string idx = "[" + std::to_string(1 + (int)j) + "]";
+        nm.m[s.params[j]]        = self_par + idx;
+        nm.m[s.params[j] + "_i"] = self_par + idx;
+        nm.m[s.params[j] + "_j"] = nbr_par + idx;
+    }
+    std::ostringstream o;
+    for (size_t i = 0; i < exprs.size(); ++i) {
+        if (exprs[i].empty()) continue;
+        Parser p(exprs[i], false);
+        PN ast = p.parse();
+        o << indent << dst << "[" << i << "] += (";
+        emit(ast, nm, o);
+        o << ");\n";
+    }
+    return o.str();
+}
+
 Scheme scheme_from_name(const std::string& name) {
     if (name == "Euler-Cromer")      return Scheme::EulerCromer;
     if (name == "Explicit Midpoint") return Scheme::ExplicitMidpoint;

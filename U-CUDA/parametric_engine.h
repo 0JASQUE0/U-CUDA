@@ -1169,6 +1169,79 @@ struct PerfResult {
     int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Network — сеть связанных осцилляторов (см. kernels/network.template.cu).
+//
+// Топология приходит УЖЕ развёрнутой в CSR по узлу-приёмнику: движок графов не
+// знает, он получает дуги. Двунаправленное ребро — две дуги, вес каждой уже
+// умножен на глобальный множитель связи.
+//
+// Параметры у каждого узла свои: values[i * amountOfValues + k]. Тело связи —
+// готовый C-код из codegen_coupling (набор case-веток switch по номеру закона),
+// ровно как krs_body — готовый код шага.
+
+// Потолок числа узлов: сеть считается одним блоком, узел = поток, и состояние
+// всей сети держится в shared. Больше — это уже другой раскладкой ядра.
+constexpr int kMaxNetworkNodes = 256;
+
+struct NetworkRequest {
+    std::string krs_body;
+    std::string coupling_body;      // case-ветки switch(law); пусто = сеть без связи
+    int amountOfX = 0;              // размерность ОДНОГО узла
+    int n_nodes   = 0;
+
+    std::vector<double> values;     // [n_nodes * amountOfValues], a[0] = symmetry s
+    int amountOfValues = 0;
+    std::vector<double> initial_conditions;  // [n_nodes * amountOfX]
+
+    // CSR по приёмнику: edge_start[n_nodes+1], остальное [n_arcs].
+    std::vector<int>    edge_start;
+    std::vector<int>    edge_src;
+    std::vector<double> edge_w;
+    std::vector<int>    edge_law;
+
+    double h = 0.01;
+    double t_max = 100.0;
+    double transient = 0.0;
+    int    pre_scaller = 1;         // писать каждую pre_scaller-ю точку
+    int    max_points = 20000;      // потолок точек по времени; движок поднимет
+                                    // pre_scaller, если при заданном не влезает
+    double max_value = 1.0e6;
+
+    // See Bifurcation1DRequest::cancel / ::progress.
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+// Статусы узла; совпадают с NET_* в шаблоне ядра.
+enum NetworkNodeStatus {
+    NET_ST_OK       = 0,
+    NET_ST_DIVERGED = 1,
+};
+
+struct NetworkResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_nodes = 0, n_vars = 0, n_points = 0;
+    double h = 0.0;
+    double t0 = 0.0;                // время первой записанной точки
+    double dt = 0.0;                // шаг по времени между точками = h * pre_scaller
+    int pre_scaller = 1;            // ФАКТИЧЕСКИЙ (движок мог поднять под max_points)
+
+    // [point][node][var], плоско: data[(p * n_nodes + i) * n_vars + k].
+    // Точки после разлёта — NaN: расчёт сети останавливается целиком, как
+    // только разлетелся хоть один узел.
+    std::vector<double> data;
+    std::vector<int>    status;     // [n_nodes], NetworkNodeStatus
+    int n_diverged = 0;
+
+    // Диапазоны по переменной, по КОНЕЧНЫМ значениям — для автоскейла кривых
+    // и раскраски графа.
+    std::vector<double> vmin, vmax;
+};
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -1217,6 +1290,9 @@ public:
 
     // Performance — время счёта vs ошибка по той же одномерной сетке.
     PerfResult run_performance(const PerfRequest& req);
+
+    // Network — интегрирование сети связанных осцилляторов.
+    NetworkResult run_network(const NetworkRequest& req);
 
     // Компилирует модуль под этот запрос, ничего не считая: тот же ключ кэша, что возьмёт
     // соответствующий run_*, поэтому Run потом просто найдёт готовый модуль. Зовётся из фонового
