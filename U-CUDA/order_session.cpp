@@ -43,9 +43,34 @@ OrderAxis to_engine_axis(int target, const std::string& lo, const std::string& h
     return ax;
 }
 
+// Неявные схемы решают шаг Ньютоном и останавливаются по ||dX|| < newton_tol.
+// Системная настройка (по умолчанию 1e-10) стала бы потолком РАНЬШЕ арифметики:
+// в dd полка округления лежит на 1e-29, то есть допуск съел бы девятнадцать
+// порядков и расширенная точность не дала бы ничего. На этой вкладке меряют
+// порядок СХЕМЫ, а не точность решателя, поэтому допуск подтягивается под
+// выбранную арифметику — но только в сторону ужесточения: если пользователь
+// поставил ещё туже, его значение остаётся.
+//
+// Итераций Ньютон требует немногим больше: сходимость квадратичная, каждый шаг
+// удваивает разряды, и с типовых 1e-3 до 1e-58 хватает шести.
+System order_newton_system(const System& sys, int prec) {
+    const double tol = order_newton_tol_for_precision(prec);
+    if (!(tol > 0.0)) return sys;
+    System out = sys;
+    if (!(out.newton_tol > 0.0) || out.newton_tol > tol) out.newton_tol = tol;
+    if (out.newton_max_iters < 12) out.newton_max_iters = 12;
+    return out;
+}
+
 OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfig& c) {
     OrderRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    // На GPU расширенной точности нет, и молча считать в double при выбранном
+    // dd было бы хуже, чем не дать выбрать: цифры на графике те же, а смысл
+    // другой. Поэтому UI гасит селектор при GPU, а здесь режим снимается.
+    req.cpu_prec  = c.use_gpu ? kOrderPrecDouble : c.cpu_precision;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes,
+                                           order_newton_system(s.sys, req.cpu_prec),
+                                           c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -76,10 +101,6 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     req.max_value     = parse_d(c.max_value_text, 1.0e6);
     req.snap_steps    = c.snap_steps;
     req.endpoint_only = c.endpoint_only;
-    // На GPU расширенной точности нет, и молча считать в double при выбранном
-    // dd было бы хуже, чем не дать выбрать: цифры на графике те же, а смысл
-    // другой. Поэтому UI гасит селектор при GPU, а здесь флаг снимается.
-    req.cpu_prec      = c.use_gpu ? kOrderPrecDouble : c.cpu_precision;
     return req;
 }
 
@@ -102,8 +123,12 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.max_value          = o.max_value;
     req.cpu_prec           = o.cpu_prec;
     req.ref_substeps       = std::max(0, parse_i(c.perf_ref_substeps_text, 4));
+    // Эталон собирается с тем же допуском Ньютона, что и испытуемая схема:
+    // иначе неявный эталон упёрся бы в 1e-10 и E_ref мерил бы его решатель.
     if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
-        req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes, s.sys, c.perf_ref_scheme);
+        req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes,
+                                                    order_newton_system(s.sys, req.cpu_prec),
+                                                    c.perf_ref_scheme);
     req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
     req.replicas           = std::max(1, parse_i(c.perf_replicas_text, 1));
@@ -127,6 +152,14 @@ void apply_order_result(OrderConfig& c, OrderResult&& r) {
 }
 
 } // namespace
+
+double order_newton_tol_for_precision(int prec) {
+    switch (prec) {
+        case kOrderPrecQD: return 1.0e-58;
+        case kOrderPrecDD: return 1.0e-28;
+        default:           return 0.0;
+    }
+}
 
 long long order_steps_for_h(double h, double t_max, bool snap) {
     if (!(h > 0.0) || !(t_max > 0.0)) return 0;

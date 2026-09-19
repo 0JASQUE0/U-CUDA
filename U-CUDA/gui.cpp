@@ -8902,6 +8902,26 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         if (!krs_cpu_backend_available(&why))
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
                                "CPU backend unavailable: %s", why.c_str());
+
+        // Подмена допуска Ньютона обязана быть видимой: это чужая настройка,
+        // и без строки пользователь не поймёт, почему неявная схема на этой
+        // вкладке считается иначе, чем на остальных.
+        const double ntol = order_newton_tol_for_precision(c.cpu_precision);
+        if (ntol > 0.0) {
+            ImGui::TextDisabled("Implicit schemes: Newton tolerance %.0e instead of the "
+                                "system setting (%s)", ntol, model.newton_tol.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Newton stops at ||dX|| < tol, so the system-wide setting would\n"
+                    "cap the result long before the arithmetic does: in double-double\n"
+                    "the rounding floor sits near 1e-29, and a 1e-10 tolerance would\n"
+                    "throw away nineteen decades of it.\n"
+                    "\n"
+                    "This tab measures the order of the SCHEME, not the accuracy of\n"
+                    "the solver, so the tolerance is tightened to match the chosen\n"
+                    "arithmetic - never loosened: a stricter setting of your own is\n"
+                    "kept. Explicit schemes are unaffected.");
+        }
     }
     // Дискретное отображение шага не имеет вовсе, уточнять нечего: обе
     // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =
