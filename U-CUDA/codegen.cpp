@@ -340,6 +340,16 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // integrator.cpp::step_complex_cd — the CPU path must use the same value.
     constexpr double CCD_IMAG = 0.28867513459481288225;
 
+    // В тело печатается ФОРМУЛА, а не это число: sqrt(3)/6 иррационален, и
+    // десятичный литерал нёс бы только 17 цифр независимо от того, в какой
+    // точности собрано тело. На dd/qd-ветке вкладки Order это держало бы
+    // полку округления на уровне double, то есть сводило бы расширенную
+    // точность к нулю на всех схемах семейства Complex CD.
+    // Один sqrt на шаг против четырёх обращений к константе — цена мелкая на
+    // фоне комплексной арифметики самой схемы.
+    const char* const kCcdImagDecl =
+        "    const numb ccd_im = sqrt((numb)3) / (numb)6;\n";
+
     bool pn_contains_var(const PN& n, const std::string& v) {
         if (!n) return false;
         switch (n->kind) {
@@ -1155,13 +1165,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    numb h2 = h * (1 - a[0]);\n";
         }
         else if (kind == CdKind::Cx) {
-            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << kCcdImagDecl;
+            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * ccd_im);\n";
+            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * ccd_im);\n";
         }
         else {
             // gamma*h and conj(gamma)*h; s splits each of them inside its pass.
-            o << "    ucmplx g  = ucmplx(0.5 * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx gc = ucmplx(0.5 * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << kCcdImagDecl;
+            o << "    ucmplx g  = ucmplx(0.5 * h,  h * ccd_im);\n";
+            o << "    ucmplx gc = ucmplx(0.5 * h, -h * ccd_im);\n";
             o << "    ucmplx h1 = g * a[0];\n";
             o << "    ucmplx h2 = g * (1 - a[0]);\n";
         }

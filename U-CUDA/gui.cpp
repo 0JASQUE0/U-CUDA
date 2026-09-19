@@ -8873,7 +8873,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
     if (c.use_gpu) ImGui::BeginDisabled();
-    const char* prec_items[] = { "double", "double-double" };
+    const char* prec_items[] = { "double", "double-double", "quad-double" };
     ImGui::SetNextItemWidth(150.0f);
     ImGui::Combo("precision##ord_prec", &c.cpu_precision, prec_items, IM_ARRAYSIZE(prec_items));
     if (ImGui::IsItemHovered())
@@ -8881,16 +8881,20 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "Arithmetic of the CPU branch.\n"
             "double        - 16 digits, bit-for-bit the same as the GPU.\n"
             "double-double - 32 digits (106-bit mantissa), about 35x slower.\n"
+            "quad-double   - 62 digits (212-bit mantissa), about 600x slower.\n"
             "\n"
             "The order estimate subtracts nearby solutions, so it sits on a\n"
             "rounding floor of about 2*eps*|y|*sqrt(N) - near 3e-13 in double.\n"
             "A scheme of order p gives E1 ~ h^p, so from p = 8 on there is\n"
             "almost no usable window in h left: the curve hits the floor before\n"
             "the scheme reaches its asymptotic regime. double-double lowers the\n"
-            "floor by 16 decades and brings the window back up to p = 16.\n"
+            "floor by 16 decades, quad-double by 47.\n"
             "\n"
-            "The same KRS body is rebuilt with numb = ucuda::dd; both builds are\n"
-            "cached separately, so switching back and forth does not recompile.");
+            "Measured on Extr(CD|1,2,3,4): the floor sits at 5e-13 in double,\n"
+            "2e-26 in double-double, below 1e-50 in quad-double.\n"
+            "\n"
+            "The same KRS body is rebuilt with numb = ucuda::dd / ucuda::qd;\n"
+            "each build is cached separately, so switching does not recompile.");
     if (c.use_gpu) ImGui::EndDisabled();
 
     if (!c.use_gpu) {
@@ -8898,6 +8902,26 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         if (!krs_cpu_backend_available(&why))
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
                                "CPU backend unavailable: %s", why.c_str());
+
+        // Подмена допуска Ньютона обязана быть видимой: это чужая настройка,
+        // и без строки пользователь не поймёт, почему неявная схема на этой
+        // вкладке считается иначе, чем на остальных.
+        const double ntol = order_newton_tol_for_precision(c.cpu_precision);
+        if (ntol > 0.0) {
+            ImGui::TextDisabled("Implicit schemes: Newton tolerance %.0e instead of the "
+                                "system setting (%s)", ntol, model.newton_tol.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Newton stops at ||dX|| < tol, so the system-wide setting would\n"
+                    "cap the result long before the arithmetic does: in double-double\n"
+                    "the rounding floor sits near 1e-29, and a 1e-10 tolerance would\n"
+                    "throw away nineteen decades of it.\n"
+                    "\n"
+                    "This tab measures the order of the SCHEME, not the accuracy of\n"
+                    "the solver, so the tolerance is tightened to match the chosen\n"
+                    "arithmetic - never loosened: a stricter setting of your own is\n"
+                    "kept. Explicit schemes are unaffected.");
+        }
     }
     // Дискретное отображение шага не имеет вовсе, уточнять нечего: обе
     // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =

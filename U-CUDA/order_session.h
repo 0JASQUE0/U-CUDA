@@ -45,7 +45,9 @@ constexpr int kOrderCalcPerf  = 1;
 // Точность CPU-арифметики (OrderConfig::cpu_precision).
 //   kOrderPrecDouble — numb, как везде в проекте и как на GPU;
 //   kOrderPrecDD     — double-double из kernels/ucuda_hp.h: мантисса 106 бит,
-//                      eps 4.9e-32 вместо 2.2e-16, счёт медленнее раз в 35.
+//                      eps 4.9e-32 вместо 2.2e-16, счёт медленнее раз в 35;
+//   kOrderPrecQD     — quad-double оттуда же: мантисса 212 бит, eps 1.2e-63,
+//                      медленнее раз в 600 — только когда dd уже не хватает.
 // Зачем: полка округления в оценке порядка растёт как eps*|y|*sqrt(N), и в
 // double она приходит около 3e-13. Схема порядка p даёт E1 ~ h^p, поэтому при
 // p >= 8 пригодного окна по h почти не остаётся — кривая p(h) ложится на
@@ -54,6 +56,7 @@ constexpr int kOrderCalcPerf  = 1;
 // GPU-ветки это не касается: там всегда double.
 constexpr int kOrderPrecDouble = 0;
 constexpr int kOrderPrecDD     = 1;
+constexpr int kOrderPrecQD     = 2;
 
 struct OrderConfig {
     std::string label  = "Order";
@@ -202,3 +205,10 @@ struct OrderAnalysisSession {
 // Сколько грубых шагов сделает ячейка при данных h и t_max — та же формула,
 // что в ядре. Нужна UI, чтобы показать N и предупредить о нецелом t_max/h.
 long long order_steps_for_h(double h, double t_max, bool snap);
+
+// Допуск Ньютона, с которым вкладка собирает неявные схемы при выбранной
+// точности; 0 — системная настройка не трогается (режим double). Неявная
+// схема останавливает Ньютон по ||dX|| < newton_tol, и системные 1e-10 стали
+// бы потолком раньше арифметики. Функция публичная, потому что UI показывает
+// подставленное значение: молча менять чужую настройку нельзя.
+double order_newton_tol_for_precision(int prec);
