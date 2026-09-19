@@ -21,10 +21,11 @@
 
 // Точность арифметики скомпилированного шага.
 //   Double — numb как везде в проекте (совпадает с GPU бит в бит);
-//   DD     — ucuda::dd, мантисса 106 бит (~32 цифры). То же тело КРС, тот же
-//            компилятор, подменён только тип: eps падает с 2.2e-16 до 4.9e-32,
-//            и оценка порядка перестаёт упираться в полку округления.
-enum class KrsCpuPrec { Double = 0, DD = 1 };
+//   DD     — ucuda::dd, мантисса 106 бит (~32 цифры), eps 4.9e-32;
+//   QD     — ucuda::qd, мантисса 212 бит (~62 цифры), eps 1.2e-63.
+// Тело КРС и компилятор во всех трёх случаях одни и те же, подменён только
+// тип: полка округления в оценке порядка опускается вместе с eps.
+enum class KrsCpuPrec { Double = 0, DD = 1, QD = 2 };
 
 // Диагностика по телу КРС. line — 1-based номер строки В ТЕЛЕ (0 = не
 // привязано к строке).
@@ -62,6 +63,7 @@ public:
     // 16-байтовый агрегат, и его передача по значению через границу DLL
     // зависит от соглашения вызова, а не от типа. Указатель убирает вопрос.
     using StepFnDD = void (*)(ucuda::dd* X, const ucuda::dd* a, const ucuda::dd* h);
+    using StepFnQD = void (*)(ucuda::qd* X, const ucuda::qd* a, const ucuda::qd* h);
 
     KrsCpuStep() = default;
     ~KrsCpuStep();
@@ -82,14 +84,18 @@ public:
     bool compile(const std::string& body, int amountOfX, int amountOfValues,
                  KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags);
 
-    // Непустым будет ровно один из двух — тот, что отвечает точности сборки.
+    // Непустым будет ровно один из трёх — тот, что отвечает точности сборки.
     StepFn   fn()    const { return fn_; }
     StepFnDD fn_dd() const { return fn_dd_; }
-    explicit operator bool() const { return fn_ != nullptr || fn_dd_ != nullptr; }
+    StepFnQD fn_qd() const { return fn_qd_; }
+    explicit operator bool() const {
+        return fn_ != nullptr || fn_dd_ != nullptr || fn_qd_ != nullptr;
+    }
 
 private:
     void     release();
     void*    module_ = nullptr;   // HMODULE
     StepFn   fn_     = nullptr;
     StepFnDD fn_dd_  = nullptr;
+    StepFnQD fn_qd_  = nullptr;
 };

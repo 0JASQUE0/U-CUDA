@@ -269,7 +269,7 @@ namespace {
 // пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
 // numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
 // подхватилась бы DLL, собранная в другой точности.
-constexpr int kPreludeVersion = 5;
+constexpr int kPreludeVersion = 6;
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
@@ -292,33 +292,38 @@ constexpr int kPreludeVersion = 5;
 //
 // AMOUNTOFX определяем ДО include: в configCUDA.h он под #ifndef, наш #define
 // выигрывает, как и в NVRTC-шаблонах.
-// В режиме DD подменяется РОВНО тип: тело схемы и заголовок те же, но numb
-// становится ucuda::dd. Переопределение идёт макросами до include configCUDA.h
-// — тем же способом, каким NVRTC-шаблоны переопределяют AMOUNTOFX. Константы
-// pi/euler подменяются вместе с типом: double-литерал обрезал бы их до 17
-// цифр, и расширенная точность кончалась бы на первом же pi в правой части.
+// В расширенных режимах подменяется РОВНО тип: тело схемы и заголовок те же,
+// но numb становится ucuda::dd или ucuda::qd. Переопределение идёт макросами
+// до include configCUDA.h — тем же способом, каким NVRTC-шаблоны
+// переопределяют AMOUNTOFX. Константы pi/euler подменяются вместе с типом:
+// double-литерал обрезал бы их до 17 цифр, и расширенная точность кончалась
+// бы на первом же pi в правой части.
 //
-// Сигнатура в DD другая — h приходит указателем (см. StepFnDD в krs_cpu.h),
-// поэтому первая строка функции распаковывает его в локальный h. Тело её не
-// видит: #line ниже, и нумерация ошибок остаётся в координатах схемы.
+// Сигнатура там другая — h приходит указателем (см. StepFnDD/StepFnQD в
+// krs_cpu.h), поэтому первая строка функции распаковывает его в локальный h.
+// Тело её не видит: #line ниже, и нумерация ошибок остаётся в координатах
+// схемы.
 std::string make_source(const std::string& body, int amountOfX, KrsCpuPrec prec) {
-    const bool dd = (prec == KrsCpuPrec::DD);
+    const bool hp = (prec != KrsCpuPrec::Double);
+    const char* type  = (prec == KrsCpuPrec::QD) ? "ucuda::qd"   : "ucuda::dd";
+    const char* c_pi  = (prec == KrsCpuPrec::QD) ? "ucuda::c_qd_pi" : "ucuda::c_pi";
+    const char* c_e   = (prec == KrsCpuPrec::QD) ? "ucuda::c_qd_e"  : "ucuda::c_e";
     std::ostringstream o;
     o << "#include <cmath>\n"
          "#include <cstdlib>\n"
          "using std::abs;\n";
-    if (dd) {
+    if (hp) {
         o << "#include \"ucuda_hp.h\"\n"
-             "#define UCUDA_NUMB_TYPE ucuda::dd\n"
-             "#define UCUDA_PI    ucuda::c_pi\n"
-             "#define UCUDA_EULER ucuda::c_e\n";
+             "#define UCUDA_NUMB_TYPE " << type  << "\n"
+             "#define UCUDA_PI    "     << c_pi  << "\n"
+             "#define UCUDA_EULER "     << c_e   << "\n";
     }
     o << "#define AMOUNTOFX " << amountOfX << "\n"
          "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
          "extern \"C\" __declspec(dllexport)\n";
-    if (dd) o << "void krs_step(numb* X, const numb* a, const numb* h_ptr) {\n"
+    if (hp) o << "void krs_step(numb* X, const numb* a, const numb* h_ptr) {\n"
                  "    numb h = *h_ptr;\n";
     else    o << "void krs_step(numb* X, const numb* a, numb h) {\n";
          // Дальше — код пользователя. #line переводит нумерацию компилятора
@@ -403,15 +408,15 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
 KrsCpuStep::~KrsCpuStep() { release(); }
 
 KrsCpuStep::KrsCpuStep(KrsCpuStep&& o) noexcept
-    : module_(o.module_), fn_(o.fn_), fn_dd_(o.fn_dd_) {
-    o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr;
+    : module_(o.module_), fn_(o.fn_), fn_dd_(o.fn_dd_), fn_qd_(o.fn_qd_) {
+    o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr;
 }
 
 KrsCpuStep& KrsCpuStep::operator=(KrsCpuStep&& o) noexcept {
     if (this != &o) {
         release();
-        module_ = o.module_; fn_ = o.fn_; fn_dd_ = o.fn_dd_;
-        o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr;
+        module_ = o.module_; fn_ = o.fn_; fn_dd_ = o.fn_dd_; fn_qd_ = o.fn_qd_;
+        o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr;
     }
     return *this;
 }
@@ -421,6 +426,7 @@ void KrsCpuStep::release() {
     module_ = nullptr;
     fn_     = nullptr;
     fn_dd_  = nullptr;
+    fn_qd_  = nullptr;
 }
 
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
@@ -510,7 +516,10 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         return false;
     }
     module_ = m;
-    if (prec == KrsCpuPrec::DD) fn_dd_ = (StepFnDD)p;
-    else                        fn_    = (StepFn)p;
+    switch (prec) {
+        case KrsCpuPrec::QD: fn_qd_ = (StepFnQD)p; break;
+        case KrsCpuPrec::DD: fn_dd_ = (StepFnDD)p; break;
+        default:             fn_    = (StepFn)p;   break;
+    }
     return true;
 }

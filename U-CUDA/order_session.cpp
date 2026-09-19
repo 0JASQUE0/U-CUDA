@@ -79,7 +79,7 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     // На GPU расширенной точности нет, и молча считать в double при выбранном
     // dd было бы хуже, чем не дать выбрать: цифры на графике те же, а смысл
     // другой. Поэтому UI гасит селектор при GPU, а здесь флаг снимается.
-    req.cpu_dd        = (!c.use_gpu && c.cpu_precision == kOrderPrecDD);
+    req.cpu_prec      = c.use_gpu ? kOrderPrecDouble : c.cpu_precision;
     return req;
 }
 
@@ -100,7 +100,7 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.snap_steps         = o.snap_steps;
     req.endpoint_only      = o.endpoint_only;
     req.max_value          = o.max_value;
-    req.cpu_dd             = o.cpu_dd;
+    req.cpu_prec           = o.cpu_prec;
     req.ref_substeps       = std::max(0, parse_i(c.perf_ref_substeps_text, 4));
     if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
         req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes, s.sys, c.perf_ref_scheme);
@@ -248,10 +248,18 @@ template <> struct CpuScalarTraits<ucuda::dd> {
     static void call(Fn f, ucuda::dd* X, const ucuda::dd* a, const ucuda::dd& h) { f(X, a, &h); }
 };
 
+template <> struct CpuScalarTraits<ucuda::qd> {
+    using Fn = KrsCpuStep::StepFnQD;
+    static constexpr KrsCpuPrec prec = KrsCpuPrec::QD;
+    static Fn   fn(const KrsCpuStep& s) { return s.fn_qd(); }
+    static void call(Fn f, ucuda::qd* X, const ucuda::qd* a, const ucuda::qd& h) { f(X, a, &h); }
+};
+
 // Результат наружу всегда double: p, e1, e2 — это логарифмы отношений, лишние
 // разряды в них смысла не несут, а график и CSV везде работают с double.
 static double as_d(numb x)             { return x; }
 static double as_d(const ucuda::dd& x) { return x.hi; }
+static double as_d(const ucuda::qd& x) { return x.x[0]; }
 
 // Тот же предикат «улетела», что orderBadVec в ядре.
 template <class S>
@@ -547,8 +555,11 @@ static OrderResult run_order_cpu_t(const OrderRequest& req) {
 }
 
 static OrderResult run_order_cpu(const OrderRequest& req) {
-    return req.cpu_dd ? run_order_cpu_t<ucuda::dd>(req)
-                      : run_order_cpu_t<numb>(req);
+    switch (req.cpu_prec) {
+        case kOrderPrecQD: return run_order_cpu_t<ucuda::qd>(req);
+        case kOrderPrecDD: return run_order_cpu_t<ucuda::dd>(req);
+        default:           return run_order_cpu_t<numb>(req);
+    }
 }
 
 template <class S>
@@ -688,8 +699,11 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
 }
 
 static PerfResult run_performance_cpu(const PerfRequest& req) {
-    return req.cpu_dd ? run_performance_cpu_t<ucuda::dd>(req)
-                      : run_performance_cpu_t<numb>(req);
+    switch (req.cpu_prec) {
+        case kOrderPrecQD: return run_performance_cpu_t<ucuda::qd>(req);
+        case kOrderPrecDD: return run_performance_cpu_t<ucuda::dd>(req);
+        default:           return run_performance_cpu_t<numb>(req);
+    }
 }
 
 bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {

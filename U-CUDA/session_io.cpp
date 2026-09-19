@@ -1541,7 +1541,7 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "use_gpu")          c.use_gpu          = p.boolean();
     else if (key == "cpu_precision") {
         const int k = std::stoi(p.str_or_num());
-        c.cpu_precision = (k == kOrderPrecDD) ? kOrderPrecDD : kOrderPrecDouble;
+        c.cpu_precision = (k == kOrderPrecDD || k == kOrderPrecQD) ? k : kOrderPrecDouble;
     }
     else if (key == "snap_steps")       c.snap_steps       = p.boolean();
     else if (key == "endpoint_only")    c.endpoint_only    = p.boolean();
