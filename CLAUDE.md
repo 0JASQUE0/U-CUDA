@@ -135,11 +135,21 @@ D:\U-CUDA\
 - `kernels/ls1d.template.cu` / `ls2d.template.cu`
 - `kernels/basins.template.cu`
 - `kernels/fastsync_attr.template.cu` / `fastsync_grid.template.cu`
+- `kernels/network.template.cu` — сеть связанных осцилляторов: блок на сеть,
+  поток на узел, состояние в shared. Два плейсхолдера вместо одного:
+  `{{KRS_BODY}}` (шаг узла) и `{{COUPLING_BODY}}` (case-ветки switch по
+  номеру закона связи, их печатает `codegen_coupling`).
 
 ### App Model / State
-- **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Basins / FastSync / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
+- **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Dft1D / Basins / FastSync / Custom / Order / Network / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
 - **app_config.cpp / .h** — App settings serialization
 - **analysis_session.cpp / .h** — Snapshot of parameters for one "analysis session"
+- **network_session.cpp / .h** — вкладка Network: топология (генераторы кольца,
+  цепи, звезды, решётки, королевского графа, полного графа и Уоттса-Строгаца),
+  узлы с переопределением параметров, рёбра с весом и законом связи. Связь
+  считается РАСЩЕПЛЕНИЕМ (шаг узла, затем `X += h*coupling`), как в
+  `calculateDiscreteModelforFastSynchro`, — поэтому на вкладке работают все
+  схемы, но сама связь интегрируется первым порядком
 - **session_io.cpp / .h** — Save/load sessions to JSON
 - **system_library.cpp / .h** — Working with `library/*/system.json`
 - **system_record.h** — Struct for one ODE system (name, latex, param_order, initial conditions, values, selected numerical schemes)
