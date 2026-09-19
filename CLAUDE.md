@@ -200,7 +200,15 @@ To add a new system to the library:
 - Add `system.json` with fields:
   - `name`
   - `latex_text` / `plain_text`
-  - `alphabet_text`
+  - `vars_text` / `params_text` — two comma-separated lists: state variables
+    (they become `X[0..N-1]` in the KRS) and parameters (`a[1..M]`, in this
+    exact order when `param_order` is `AsInAlphabet`). They must match what
+    the equation parser derives from the right-hand sides: `refresh_symbols`
+    takes the UI/session lists from here, while `build_system` re-derives the
+    kernel order from the equations, and a disagreement silently shifts `a[]`.
+  - `alphabet_text` — **legacy**, one mixed list; still read for old records,
+    and it still wins over `vars_text`/`params_text` in `parse_alphabet`.
+    Leave it empty in new presets.
   - `init_conditions`
   - `param_values`
   - `scheme_*` flags for available numerical schemes

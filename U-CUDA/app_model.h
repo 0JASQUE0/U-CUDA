@@ -1007,12 +1007,14 @@ private:
 
     // парсит алфавит из строки "x, y, z" -> вектор
     std::vector<std::string> parse_alphabet() const {
-        // Если alphabet_text пуст, но есть явные vars+params, склеиваем их
-        // (нужно для build_system / parse_system_from_latex с новым форматом).
+        // Если alphabet_text пуст, склеиваем явные vars+params (нужно для
+        // build_system / parse_system_from_latex с новым форматом). Хватает
+        // одного непустого списка: у системы без параметров params_text пуст,
+        // и требование «оба непустые» оставляло её вовсе без алфавита.
         const std::string& src =
             !alphabet_text.empty()
                 ? alphabet_text
-                : (!vars_text.empty() && !params_text.empty()
+                : (!vars_text.empty() || !params_text.empty()
                     ? (combined_alpha_ = vars_text + "," + params_text)
                     : alphabet_text);
         std::vector<std::string> out;

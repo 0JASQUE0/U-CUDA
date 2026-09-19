@@ -1258,8 +1258,13 @@ struct ViewRangeValues {
 // ВИЗУАЛЬНЫХ координатах: x_axis.view_min/max тогда описывают ось ДАННЫХ Y и
 // наоборот (имена осей при этом не свапаются — см. heatmap_view.cpp, шаг 0).
 // Без этой перестановки на свапнутой карте диапазоны писались бы крест-накрест.
+// src_has_y — ось Y ВИДА-ИСТОЧНИКА является входом расчёта. У 1D-диаграммы
+// по Y идёт посчитанная величина, у которой входа нет, и её границы в поле
+// свипа — мусор. apply_view_values страхует только ПРИЁМНИК (у 1D-цели y_lo
+// нулевой, и запись просто не делается), но рассылка с 1D-вида на 2D-цель,
+// у которой Y — настоящая ось свипа, клала туда диапазон значений.
 [[nodiscard]] static ViewRangeValues values_from_axes(const AxisInfo& x, const AxisInfo& y,
-                                                      bool swapped) {
+                                                      bool swapped, bool src_has_y) {
     const AxisInfo& ax = swapped ? y : x;   // ось ДАННЫХ X
     const AxisInfo& ay = swapped ? x : y;   // ось ДАННЫХ Y
     // invert — только про отрисовку, view_min/view_max остаются упорядоченными;
@@ -1271,7 +1276,7 @@ struct ViewRangeValues {
         v.x_lo = fmt_view_bound((std::min)(ax.view_min, ax.view_max), span);
         v.x_hi = fmt_view_bound((std::max)(ax.view_min, ax.view_max), span);
     }
-    {
+    if (src_has_y) {
         const double span = ay.view_max - ay.view_min;
         v.has_y = true;
         v.y_lo = fmt_view_bound((std::min)(ay.view_min, ay.view_max), span);
@@ -1368,6 +1373,13 @@ static void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size
     return !targets.empty() && (targets[0].x_lo != nullptr || targets[0].y_lo != nullptr);
 }
 
+// Есть ли у вида-источника вход расчёта по Y. Отдельного признака заводить не
+// нужно: ровно это и кодирует ненулевой y_lo его собственной цели (см.
+// all_view_range_targets — 1D-целям передаются только поля X).
+[[nodiscard]] static bool src_y_is_input(const std::vector<ViewRangeTarget>& targets) {
+    return !targets.empty() && targets[0].y_lo != nullptr;
+}
+
 // Пункты правого клика. Зовётся из popup_extras, т.е. уже внутри BeginPopup.
 // swapped и model — БЕЗ значений по умолчанию, и это принципиально. Пока они были
 // умолчательными, вызов с четырьмя аргументами компилировался молча: AppModel* приводился
@@ -1383,7 +1395,8 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
     std::string one = "Calculation range from view";
     if (targets.size() > 1) one += " (" + targets[0].name + ")";
     if (ImGui::MenuItem(one.c_str(), "Ctrl+T"))
-        run_view_range_cmd(targets, 1, values_from_axes(x, y, swapped), model);
+        run_view_range_cmd(targets, 1,
+                           values_from_axes(x, y, swapped, src_y_is_input(targets)), model);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Writes the visible axis range into this diagram's sweep\n"
                           "range fields. Press Run to recompute the zoomed region\n"
@@ -1405,8 +1418,9 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
                           from_fields ? "fields" : "view",
                           kin[0].kind.c_str(), (int)kin.size());
             if (ImGui::MenuItem(lbl, "Ctrl+Shift+T")) {
-                const ViewRangeValues v = from_fields ? values_from_target(kin[0])
-                                                      : values_from_axes(x, y, swapped);
+                const ViewRangeValues v = from_fields
+                        ? values_from_target(kin[0])
+                        : values_from_axes(x, y, swapped, src_y_is_input(targets));
                 run_view_range_cmd(kin, kin.size(), v, model);
             }
             if (from_fields && ImGui::IsItemHovered())
@@ -1444,8 +1458,8 @@ static void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
             if (sel.empty()) ImGui::BeginDisabled();
             if (ImGui::Button(btn)) {
                 const ViewRangeValues v = model->undo_just_happened()
-                                        ? values_from_target(targets[0])
-                                        : values_from_axes(x, y, swapped);
+                        ? values_from_target(targets[0])
+                        : values_from_axes(x, y, swapped, src_y_is_input(targets));
                 run_view_range_cmd(sel, sel.size(), v, model);
                 ImGui::CloseCurrentPopup();
             }
@@ -1493,11 +1507,12 @@ static void handle_view_range_keys(const std::vector<ViewRangeTarget>& targets,
         // Сразу после отката источник — поля, а не вид (см. меню).
         const ViewRangeValues v = model->undo_just_happened()
                                 ? values_from_target(dst[0])
-                                : values_from_axes(x, y, swapped);
+                                : values_from_axes(x, y, swapped, src_y_is_input(targets));
         run_view_range_cmd(dst, dst.size(), v, model);
         return;
     }
-    run_view_range_cmd(targets, 1, values_from_axes(x, y, swapped), model);
+    run_view_range_cmd(targets, 1,
+                       values_from_axes(x, y, swapped, src_y_is_input(targets)), model);
 }
 
 // Окно диаграммы под курсором — общее условие хоткея выше. Берём именно
@@ -2669,6 +2684,11 @@ static void draw_wrapper_list(AppModel& model) {
         return;
 
     int to_delete = -1;
+    // Своя область ID на весь список: строки нумеруются с нуля и здесь, и
+    // в "Custom KRS schemes" выше, а CollapsingHeader своей области не
+    // открывает (это TreeNodeBehavior без TreePush). Без этого PushID(0) +
+    // SmallButton("Delete") в обоих списках даёт один и тот же ID.
+    ImGui::PushID("wrapper_list");
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
         ImGui::PushID(i);
         const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
@@ -2696,6 +2716,7 @@ static void draw_wrapper_list(AppModel& model) {
         }
         ImGui::PopID();
     }
+    ImGui::PopID();
     if (to_delete >= 0) model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
 }
 
@@ -2931,6 +2952,8 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
         // существующие схемы
         int to_delete = -1;
+        // Парная к draw_wrapper_list область ID (см. комментарий там).
+        ImGui::PushID("custom_krs_list");
         for (int i = 0; i < (int)model.custom_schemes.size(); ++i) {
             auto& cs = model.custom_schemes[i];
             ImGui::PushID(i);
@@ -2987,6 +3010,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             ImGui::Spacing();
             ImGui::PopID();
         }
+        ImGui::PopID();
         if (to_delete >= 0) model.custom_schemes.erase(model.custom_schemes.begin() + to_delete);
 
         // блокируем добавление с уже существующим/built-in именем
@@ -4142,6 +4166,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
         for (size_t k = 0; k < s.projections.size(); ++k)
             renderers.push_back(std::make_unique<PlotRenderer>());
     }
+    // Запрос автоскейла раздаём по проекциям и сразу гасим сессионный: дальше
+    // каждая проекция отвечает за свой флаг сама (см. Projection::fit_pending).
+    if (s.fit_request) {
+        for (auto& p : s.projections) p.fit_pending = true;
+        s.fit_request = false;
+    }
     int pr_to_remove = -1;
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
@@ -4283,7 +4313,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Диаграмма признаков: точечный график (значение пика; интервал до
@@ -4413,7 +4443,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::TimeDomain) {
@@ -4533,7 +4563,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
@@ -4802,7 +4832,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                       (i ^ owner_id_delta) ^ 0x5251A0, data_gen,
                                       n, n, values,
                                       rq->t0, rq->t1, rq->t0, rq->t1,
-                                      vlo, vhi, s.fit_request);
+                                      vlo, vhi, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::Phase3D) {
@@ -4888,7 +4918,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
 
                     pr.view3d->popup_extras = phase_popup_extras;
                     pr.view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::ContinuationDiagram) {
@@ -4967,17 +4997,21 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     pr.view2d->popup_extras = phase_popup_extras;
                     pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             ImGui::PopID();
+            // Окно реально отрисовалось в этом кадре — автоскейл до него дошёл.
+            // Гасим здесь, а не после цикла: у невидимых окон Begin вернул
+            // false, и их запрос должен дожить до кадра, когда их покажут.
+            // Ветка "No data" тоже гасит: фитить нечего, а приход результата
+            // взведёт fit_request заново.
+            pr.fit_pending = false;
         }
         ImGui::End();
         if (!open) pr_to_remove = i; // окно закрыто крестиком
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
-    // автоскейл применён ко всем окнам в этом кадре — сбрасываем запрос
-    s.fit_request = false;
 }
 
 // Combo "Writable var": переменные + (через разделитель) комбинация
@@ -11328,6 +11362,29 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     if (!cs.ls_session.curves.empty())
         init_cmap_from_config(2, cs.ls_session.curves[0].colormap_idx);
 
+    // Автоскейл 2D-карт. Тот же узор, что в Parametric (draw_bifurcation_plot:
+    // "bool fit = bdact.fit_request_2d; if (fit) ... = false"): запрос живёт в
+    // конфиге подсессии и взводится приходом результата. Здесь в render уходило
+    // жёстко false, поэтому после первого прогона HeatmapView фиксировал вид
+    // (view_valid) и больше его не трогал: пересчёт в ДРУГОМ диапазоне рисовался
+    // в старых границах — при расширении диапазона это выглядело как "новый
+    // расчёт не сработал", потому что на экране оставался прежний узкий кусок.
+    //
+    // Забираем флаг у самой отрисовки, а не при сборке slots: карты сложены в
+    // один док, у невидимой вкладки Begin вернёт false, и съеденный за неё
+    // запрос пропал бы (ровно та же ловушка, что у Projection::fit_pending).
+    auto take_fit_2d = [&cs](int slot) {
+        bool* f = nullptr;
+        if      (slot == 0 && !cs.bif_session.diagrams.empty())
+            f = &cs.bif_session.diagrams[0].fit_request_2d;
+        else if (slot == 1 && !cs.lle_session.curves.empty())
+            f = &cs.lle_session.curves[0].fit_request_2d;
+        else if (slot == 2 && !cs.ls_session.curves.empty())
+            f = &cs.ls_session.curves[0].fit_request_2d;
+        if (!f || !*f) return false;
+        *f = false;
+        return true;
+    };
     for (int i = 0; i < 3; ++i) {
         if (!slots[i].show) continue;
         ensure_docked(slots[i].title);
@@ -11441,7 +11498,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                           slots[i].lo_x, slots[i].hi_x,
                           slots[i].lo_y, slots[i].hi_y,
                           vmin_use, vmax_use,
-                          /*fit_request*/ false);
+                          take_fit_2d(i));
                 handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
                                hv.swap_axes, &model);
                 ImGui::PopID();
@@ -11776,11 +11833,29 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         // всех 1D-графиков. В Custom его не было ни на одном из 6 слотов.
         // Ctrl+T: срез идёт по своей оси общего config'а (слот 1 — X, 2 — Y),
         // по Y — сама считаемая величина, входа в расчёте у неё нет.
+        //
+        // Писать нужно в ДЕЙСТВУЮЩИЕ поля, а не всегда в sweep_*. При
+        // inherit_sweep_from_2d (значение по умолчанию) effective_sweep_x/y
+        // читают axis_*, а sweep_* лежат мёртвым грузом: запись туда не меняла
+        // ни сам срез, ни 2D-карту, и Ctrl+T выглядел как ничего не делающий.
+        // Через axis_* диапазон заодно приезжает на соответствующую ось L2D —
+        // это и есть "та же зона" на двумерной диаграмме.
         const bool  vr_slice_is_x = (lslots[i].cfg_idx == 1);
+        const bool  vr_inherited  = cs.shared.inherit_sweep_from_2d
+                                 && cs.shared.level_2d_enabled;
         const std::vector<ViewRangeTarget> vrt = { vr_target_fixed(
-            vr_slice_is_x ? "Shared config (X slice)" : "Shared config (Y slice)",
-            vr_slice_is_x ? &cs.shared.sweep_x_lo_text : &cs.shared.sweep_y_lo_text,
-            vr_slice_is_x ? &cs.shared.sweep_x_hi_text : &cs.shared.sweep_y_hi_text) };
+            vr_inherited ? (vr_slice_is_x ? "Shared config (2D X axis)"
+                                          : "Shared config (2D Y axis)")
+                         : (vr_slice_is_x ? "Shared config (X slice)"
+                                          : "Shared config (Y slice)"),
+            vr_inherited ? (vr_slice_is_x ? &cs.shared.axis_x_lo_text
+                                          : &cs.shared.axis_y_lo_text)
+                         : (vr_slice_is_x ? &cs.shared.sweep_x_lo_text
+                                          : &cs.shared.sweep_y_lo_text),
+            vr_inherited ? (vr_slice_is_x ? &cs.shared.axis_x_hi_text
+                                          : &cs.shared.axis_y_hi_text)
+                         : (vr_slice_is_x ? &cs.shared.sweep_x_hi_text
+                                          : &cs.shared.sweep_y_hi_text)) };
         view.popup_extras = [i, &lslots, &cs, &cb, &vrt, &model, &view]() {
             const bool busy = (lslots[i].kind == L1Kind::Bif) ? cs.bif_session.in_flight
                             : (lslots[i].kind == L1Kind::LLE) ? cs.lle_session.in_flight
@@ -11849,6 +11924,16 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
     }
     // Level 3 Basins window (unchanged HeatmapView minimal renderer)
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
+        // Автоскейл — как у 2D-карт выше (см. take_fit_2d): сюда тоже уходило
+        // жёсткое false, и карта, посчитанная в новой сетке НУ, рисовалась в
+        // границах предыдущего прогона.
+        auto take_fit_basins = [&cs]() {
+            if (cs.basins_session.configs.empty()) return false;
+            bool& f = cs.basins_session.configs[0].fit_request;
+            if (!f) return false;
+            f = false;
+            return true;
+        };
         std::string basins_title = "Custom Basins" + suffix;
         ensure_docked(basins_title);
         if (ImGui::Begin(basins_title.c_str())) {
@@ -11909,7 +11994,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                       r.axis_x_lo, r.axis_x_hi,
                                       r.axis_y_lo, r.axis_y_hi,
                                       vmin, vmax,
-                                      /*fit_request*/ false);
+                                      take_fit_basins());
                     }
                 }
             }
