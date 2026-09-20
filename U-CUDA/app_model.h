@@ -272,6 +272,11 @@ public:
 
     // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
     PendingScreenshot pending_screenshot;
+    // Экспорт netlist'а откладывается до конца кадра по той же причине, что и
+    // скриншот: платформенный модальный диалог крутит СВОЙ цикл сообщений, и
+    // вызванный изнутри кадра ImGui он приводит к рекурсивной отрисовке —
+    // кадр начинается заново, не закончив предыдущий, состояние ImGui рушится.
+    bool pending_netlist_export = false;
 
     // редактируемые UI-поля (UI читает/пишет напрямую)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.

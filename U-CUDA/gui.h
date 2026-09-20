@@ -14,6 +14,10 @@ struct GuiCallbacks {
 };
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).
+// Отложенные действия кадра: то, что НЕЛЬЗЯ делать внутри кадра ImGui.
+// Зовётся из главного цикла ПОСЛЕ ImGui::Render().
+void gui_process_deferred(AppModel& model, const GuiCallbacks& cb);
+
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb);
 
 // Global system switch: loads the record from `lib` into `model` and re-inits

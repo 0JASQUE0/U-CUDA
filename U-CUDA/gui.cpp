@@ -1,5 +1,6 @@
 ﻿#include "gui.h"
 #include "circuit_netlist.h"
+#include "circuit_trace.h"
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
@@ -3697,26 +3698,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                 ImGui::SetTooltip("Multisim drops behavioural B sources on import, which leaves"
                                   " the multiplier nodes undriven\nand their resistors hanging by one"
                                   " end. POLY sources survive the trip.");
-            ImGui::BeginDisabled(!s.result.circuit_valid || !cbp || !cbp->pick_save_file_netlist);
-            if (ImGui::Button("Export SPICE netlist...")) {
-                const std::string path = cbp->pick_save_file_netlist();
-                if (!path.empty()) {
-                    NetlistOptions no;
-                    no.title      = "U-CUDA synthesized circuit";
-                    no.var_names  = s.vars;
-                    no.rhs_text   = s.sys.rhs;
-                    no.scale      = s.result.circuit_scale;
-                    no.x0_volts   = s.result.circuit_x0;
-                    no.opamp      = s.result.circuit_opamp;
-                    no.h_ode      = s.result.circuit_h_ode;
-                    no.t_end_ode  = s.result.circuit_t_end_ode;
-                    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly
-                                                           : NetlistDialect::Behavioral;
-                    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
-                    std::ofstream f(path, std::ios::binary);
-                    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
-                    else     s.result.circuit_status = "cannot write " + path;
-                }
+            ImGui::BeginDisabled(!s.result.circuit_valid || !bc);
+            // Только заявка. Диалог открывается после кадра: см.
+            // gui_process_deferred и AppModel::pending_netlist_export.
+            if (ImGui::Button("Export SPICE netlist...") && bc) {
+                bc->pending_netlist_export = true;
             }
             ImGui::EndDisabled();
         }
@@ -13125,6 +13111,37 @@ template <class Session>
 }
 
 // Главное окно: переключатель режимов Library / Analysis / Parametric
+void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
+    if (!model.pending_netlist_export) return;
+    model.pending_netlist_export = false;
+    if (!cb.pick_save_file_netlist) return;
+
+    PhaseAnalysisSession& s = model.phase_session;
+    if (!s.result.circuit_valid) return;
+
+    circuit_trace("export: dialog (deferred)");
+    const std::string path = cb.pick_save_file_netlist();
+    circuit_trace("export: dialog returned", path);
+    if (path.empty()) return;
+
+    NetlistOptions no;
+    no.title      = "U-CUDA synthesized circuit";
+    no.var_names  = s.vars;
+    no.rhs_text   = s.sys.rhs;
+    no.scale      = s.result.circuit_scale;
+    no.x0_volts   = s.result.circuit_x0;
+    no.opamp      = s.result.circuit_opamp;
+    no.h_ode      = s.result.circuit_h_ode;
+    no.t_end_ode  = s.result.circuit_t_end_ode;
+    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
+
+    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
+    std::ofstream f(path, std::ios::binary);
+    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
+    else     s.result.circuit_status = "cannot write " + path;
+    circuit_trace("export: written");
+}
+
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();

@@ -1,10 +1,12 @@
 ﻿#include "analysis_session.h"
 #include "circuit_synth.h"
 #include "circuit_solver.h"
+#include "circuit_trace.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -296,6 +298,7 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
                                       double h, double tsim, int dec,
                                       AnalysisResult& result) {
     auto note = [&](const std::string& m) { result.circuit_status = m; };
+    circuit_trace("append: enter");
 
     if (result.trajectories.empty() || result.trajectories[0].size() < 2) {
         note("circuit: no ODE trajectory to take the scale from");
@@ -306,6 +309,8 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     std::string err;
     std::vector<PolyRhs> poly;
     if (!extract_quadratic(in.sys, a, PolyExtractConfig(), poly, &err)) { note(err); return; }
+    circuit_trace("append: extracted", "dim=" + std::to_string(dim)
+                  + " sys.vars=" + std::to_string(in.sys.vars.size()));
 
     ScalePlan sp;
     if (!plan_amplitude_scaling(result.trajectories[0], parse_val(in.circuit_target_volt, 3.0),
@@ -316,6 +321,9 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
 
     CircuitGraph g;
     if (!synthesize_circuit(in.sys, scaled, SynthesisConfig(), g, &err)) { note(err); return; }
+    circuit_trace("append: synthesized", "nodes=" + std::to_string(g.nodes.size())
+                  + " var_node=" + std::to_string(g.var_node.size())
+                  + " scale=" + std::to_string(sp.s.size()));
 
     CircuitSolverConfig cfg;
     cfg.opamp.ideal  = in.circuit_ideal_opamp;
@@ -332,7 +340,9 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     std::vector<double> x0((size_t)dim, 0.0);
     {
         const std::vector<double>& p0 = result.trajectories[0][0];
-        for (int i = 0; i < dim && i < (int)p0.size(); ++i) {
+        // Границу берём по КАЖДОМУ контейнеру отдельно: sp.s и p0 сейчас одной
+        // длины по построению, но полагаться на это — значит оставить мину.
+        for (int i = 0; i < dim && i < (int)p0.size() && i < (int)sp.s.size(); ++i) {
             const double si = sp.s[(size_t)i] != 0.0 ? sp.s[(size_t)i] : 1.0;
             x0[(size_t)i] = p0[(size_t)i] / si;
         }
@@ -344,15 +354,34 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     const double hc = h / sub;
     CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tsim, sample);
     if (!run.ok) { note(run.error); return; }
+    circuit_trace("append: simulated", "x=" + std::to_string(run.x.size())
+                  + " samples=" + std::to_string(run.t.size()));
+
+    // Сколько координат реально можно взять. dim — из in.vars, то есть из списка
+    // переменных СЕССИИ, а run.x и sp.s сидят на in.sys.vars и на размерности точки
+    // траектории. Эти списки выводятся РАЗНЫМИ путями (см. CLAUDE.md про
+    // refresh_symbols против build_system) и способны разойтись; тогда обращение по
+    // dim читало бы за границей вектора векторов, доставая мусорный std::vector —
+    // то есть портило бы кучу, а падало бы позже и в чужом месте.
+    const int ndim = (int)std::min(std::min((size_t)dim, run.x.size()), sp.s.size());
+    if (ndim < dim)
+        note("circuit: session lists " + std::to_string(dim) + " variables but the system has "
+             + std::to_string(ndim) + "; the extra ones are left at zero");
 
     std::vector<std::vector<double>> traj;
     traj.reserve(run.t.size());
     for (size_t k = 0; k < run.t.size(); ++k) {
+        // Длина точки остаётся dim: проекции адресуют координаты по индексам из
+        // списка сессии, и короткая точка увела бы за границу уже отрисовку.
         std::vector<double> p((size_t)dim, 0.0);
-        for (int i = 0; i < dim; ++i) p[(size_t)i] = run.x[(size_t)i][k] * sp.s[(size_t)i];
+        for (int i = 0; i < ndim; ++i) {
+            if (k >= run.x[(size_t)i].size()) break;
+            p[(size_t)i] = run.x[(size_t)i][k] * sp.s[(size_t)i];
+        }
         traj.push_back(std::move(p));
     }
 
+    circuit_trace("append: trajectory built");
     result.circuit_valid     = true;
     result.circuit_graph     = g;
     result.circuit_scale     = sp.s;
@@ -386,7 +415,7 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
         const std::vector<std::vector<double>>& ode = result.trajectories[0];
         const std::vector<std::vector<double>>& cir = result.trajectories.back();
         double span = 0.0;
-        for (int i = 0; i < dim; ++i) span = std::max(span, sp.s[(size_t)i]);
+        for (int i = 0; i < ndim; ++i) span = std::max(span, sp.s[(size_t)i]);
         const double tol = 0.02 * span * 3.0;   // 2% от характерной амплитуды
         size_t k = 0;
         for (; k < ode.size() && k < cir.size(); ++k) {
@@ -399,6 +428,7 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
         msg += buf;
     }
     note(msg);
+    circuit_trace("append: done");
 }
 
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
