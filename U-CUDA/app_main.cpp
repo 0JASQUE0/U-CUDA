@@ -207,6 +207,20 @@ static std::string pick_save_csv_file_win() {
     return "";
 }
 
+// Save-file dialog for the SPICE netlist export. Mirrors pick_save_csv_file_win.
+static std::string pick_save_netlist_file_win() {
+    char filename[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "SPICE netlist\0*.cir;*.net\0All\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "cir";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOREADONLYRETURN;
+    if (GetSaveFileNameA(&ofn)) return std::string(filename);
+    return "";
+}
+
 static void set_clipboard_win(const std::string& text) {
     if (!OpenClipboard(nullptr)) return;
     EmptyClipboard();
@@ -268,6 +282,7 @@ int main() {
     cb.pick_image_file = pick_image_file_win;
     cb.set_clipboard_text = set_clipboard_win;
     cb.pick_save_file_csv = pick_save_csv_file_win;
+    cb.pick_save_file_netlist = pick_save_netlist_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).

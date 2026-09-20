@@ -10,6 +10,7 @@ struct GuiCallbacks {
     // plots. Returns the chosen absolute path, or empty string on cancel.
     // Default filter = CSV (.csv); the file may not exist yet.
     std::function<std::string()> pick_save_file_csv;
+    std::function<std::string()> pick_save_file_netlist;   // диалог сохранения .cir
 };
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).

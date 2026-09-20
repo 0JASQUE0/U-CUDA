@@ -25,6 +25,9 @@
     <ClCompile Include="circuit_emit.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
+    <ClCompile Include="circuit_netlist.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
     <ClCompile Include="circuit_nvrtc.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
@@ -124,6 +127,9 @@
       <Filter>Parser</Filter>
     </ClInclude>
     <ClInclude Include="circuit_codegen.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_netlist.h">
       <Filter>Circuit</Filter>
     </ClInclude>
     <ClInclude Include="circuit_nvrtc.h">

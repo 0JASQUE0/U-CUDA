@@ -1,4 +1,6 @@
 ﻿#include "gui.h"
+#include "circuit_netlist.h"
+#include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
 #include "implot.h"
@@ -3590,9 +3592,12 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 // метод (заглушка), кнопка пересчёта. Reset lambda — что делает «Reset to defaults»:
 // Analysis-tab передаёт model.from_record + start_phase_analysis, Custom-tab nullptr
 // (там перезагружаются из System tab или Run pipeline).
+// cbp — только ради диалога сохранения netlist'а. Необязателен: в Custom эту же
+// панель рисует уровень 3, где callbacks не прокинуты, и кнопка там неактивна.
 static void draw_phase_controls(PhaseAnalysisSession& s,
                                 std::function<void()> on_reset_defaults,
-                                AppModel* bc = nullptr) {
+                                AppModel* bc = nullptr,
+                                const GuiCallbacks* cbp = nullptr) {
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     // В Custom эту же панель рисует уровень 3, и источником там остаётся
     // Custom: его Shared config и есть то, что уйдёт в расчёт.
@@ -3685,6 +3690,27 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             }
             if (!s.result.circuit_status.empty())
                 ImGui::TextWrapped("%s", s.result.circuit_status.c_str());
+
+            ImGui::BeginDisabled(!s.result.circuit_valid || !cbp || !cbp->pick_save_file_netlist);
+            if (ImGui::Button("Export SPICE netlist...")) {
+                const std::string path = cbp->pick_save_file_netlist();
+                if (!path.empty()) {
+                    NetlistOptions no;
+                    no.title      = "U-CUDA synthesized circuit";
+                    no.var_names  = s.vars;
+                    no.rhs_text   = s.sys.rhs;
+                    no.scale      = s.result.circuit_scale;
+                    no.x0_volts   = s.result.circuit_x0;
+                    no.opamp      = s.result.circuit_opamp;
+                    no.h_ode      = s.result.circuit_h_ode;
+                    no.t_end_ode  = s.result.circuit_t_end_ode;
+                    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
+                    std::ofstream f(path, std::ios::binary);
+                    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
+                    else     s.result.circuit_status = "cannot write " + path;
+                }
+            }
+            ImGui::EndDisabled();
         }
         if (cch) changed = true;
     }
@@ -13845,7 +13871,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     model.from_record(lib.load(model.loaded_name));   // reference from disk
                     model.start_phase_analysis();
                 }
-            }, &model);
+            }, &model, &cb);
         }
         ImGui::End();
         draw_projection_windows(model.phase_session, cb);

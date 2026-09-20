@@ -2,6 +2,7 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+#include "circuit_solver.h"
 
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
@@ -227,6 +228,15 @@ struct AnalysisResult {
     int generation = 0;
     // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
     std::string circuit_status;
+    // Сама синтезированная схема — чтобы экспорт netlist'а выдавал РОВНО ТО,
+    // что считалось, а не пересобирал её заново по текущим полям UI.
+    bool                circuit_valid = false;
+    CircuitGraph        circuit_graph;
+    std::vector<double> circuit_scale;
+    std::vector<double> circuit_x0;
+    OpAmpModel          circuit_opamp;
+    double              circuit_h_ode = 0.0;
+    double              circuit_t_end_ode = 0.0;
 
     // RQA по проекциям типа RecurrencePlot. Пусто, если таких проекций нет или расчёт был
     // пропущен (continuation при снятой галочке). Внутри каждого — своя матрица n*n doubles,

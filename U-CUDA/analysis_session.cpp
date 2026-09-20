@@ -353,6 +353,14 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
         traj.push_back(std::move(p));
     }
 
+    result.circuit_valid     = true;
+    result.circuit_graph     = g;
+    result.circuit_scale     = sp.s;
+    result.circuit_x0        = x0;
+    result.circuit_opamp     = cfg.opamp;
+    result.circuit_h_ode     = hc;
+    result.circuit_t_end_ode = tsim;
+
     result.trajectories.push_back(std::move(traj));
     result.labels.push_back(in.circuit_ideal_opamp ? "circuit (ideal)" : "circuit (one-pole)");
     result.visible.push_back(true);
