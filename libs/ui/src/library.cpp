@@ -454,7 +454,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     ImGui::Separator();
     // Recompute по кнопке или Ctrl+R, дисейблится во время async-расчёта.
-    // Авто-сохранение _last делается в draw_gui::poll(), когда результат готов.
+    // Авто-сохранение _last делает AppModel::tick, когда результат готов.
     bool do_recompute = false;
     if (s.continuation_active) {
         // Stop supersedes Recomputing... — the loop is expected to keep an

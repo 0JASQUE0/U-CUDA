@@ -25,7 +25,7 @@ using OcrFn = std::function<std::string(const std::vector<unsigned char>&)>;
 enum class InputMode { Image, Latex, Plain };
 
 // Один элемент общей parametric-очереди: какой анализ + индекс в его сессии.
-// Очередь живёт в AppModel и драйнится в draw_gui после polls. См. план
+// Очередь живёт в AppModel и обрабатывается AppModel::tick после poll.
 // «Cross-analysis batch Run all».
 struct ParametricQueueItem {
     enum class Kind { Bifurcation, LLE, LS };

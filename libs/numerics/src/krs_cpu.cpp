@@ -1,8 +1,12 @@
 ﻿#include "ucuda/numerics/krs_cpu.h"
 #include "ucuda/equations/adaptive_codegen.h"
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include "ucuda/platform/platform_posix.h"

@@ -5,6 +5,12 @@ add_test(NAME adaptive_cpu COMMAND adaptive_test)
 add_test(NAME adaptive_gpu COMMAND adaptive_test --gpu)
 set_tests_properties(adaptive_gpu PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(adaptive_cpu adaptive_gpu PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
+
+add_executable(architecture_test architecture_test.cpp)
+target_link_libraries(architecture_test PRIVATE ucuda::application ucuda::storage)
+ucuda_runtime(architecture_test)
+add_test(NAME architecture COMMAND architecture_test)
+
 add_executable(gpu_smoke gpu_smoke.cpp)
 target_link_libraries(gpu_smoke PRIVATE ucuda::cuda ucuda::platform CUDA::cuda_driver)
 ucuda_runtime(gpu_smoke)

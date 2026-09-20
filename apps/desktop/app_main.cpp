@@ -1,4 +1,7 @@
 ﻿#include "ucuda/plotting/plot_renderer.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <vector>
 #include <cmath>
 #include "ucuda/plotting/gpu_line_series_3d.h"
@@ -78,20 +81,6 @@ static LibraryPaths resolve_library_paths(const std::string& exe_dir_with_sep) {
     p.library = std::string(U_CUDA_PROJECT_DIR) + "/U-CUDA/library";
     if (dir_exists(p.tmpl)) return p;
 #endif
-
-    std::string vcx_tmpl = exe_dir_with_sep + "../../library_template";
-    if (dir_exists(vcx_tmpl)) {
-        p.tmpl    = vcx_tmpl;
-        p.library = exe_dir_with_sep + "../../library";
-        return p;
-    }
-
-    std::string sln_tmpl = exe_dir_with_sep + "../../U-CUDA/library_template";
-    if (dir_exists(sln_tmpl)) {
-        p.tmpl    = sln_tmpl;
-        p.library = exe_dir_with_sep + "../../U-CUDA/library";
-        return p;
-    }
 
     p.library = exe_dir_with_sep + "library";
     p.tmpl    = exe_dir_with_sep + "library_template";

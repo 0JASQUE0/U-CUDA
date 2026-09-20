@@ -38,9 +38,6 @@ U-CUDA/imgui.ini
 # library_template/, seeded on first run by app_main::seed_library_if_missing.
 U-CUDA/library/
 
-# Local-only project docs (not shared via git)
-docs/
-
 # Local-only Claude session notes / tooling state
 CLAUDE_QUICKREF.md
 .understand-anything/

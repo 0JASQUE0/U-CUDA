@@ -282,7 +282,7 @@ void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     // диспатчится по parametric_active_analysis (0=Bif, 1=LLE, 2=LS) к соответствующему
     // active_*_index. Run all — глобальный по всем трём спискам: попап показывает чекбоксы
     // для каждой диаграммы / кривой / спектра, Run кладёт отмеченные в
-    // model.parametric_queue и стартует первый; draw_gui тикает очередь после poll'ов.
+    // model.parametric_queue; AppModel::tick запускает первый элемент после poll.
     {
         const int kind = model.parametric_active_analysis;
         int  active_idx = -1;

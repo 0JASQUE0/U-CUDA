@@ -249,7 +249,7 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
 
     // Run / Run all... — сразу под пикером системы, над таб-баром: управляют активным конфигом
     // и должны быть доступны без прокрутки. "Run all..." кладёт выбранные индексы в
-    // model.basins_queue; draw_gui тикает очередь после poll'ов.
+    // model.basins_queue; AppModel::tick запускает следующий элемент после poll.
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;

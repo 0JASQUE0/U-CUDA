@@ -1,4 +1,7 @@
 ﻿#pragma once
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <glad/glad.h>
 #include <cstdint>
 #include <string>

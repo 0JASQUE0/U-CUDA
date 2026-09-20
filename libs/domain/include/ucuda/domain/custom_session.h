@@ -300,7 +300,7 @@ struct CustomSession {
     // Called by the drainer when the pipeline drains (queue empty + no
     // sub-session in flight). Promotes each level's `pending` signature
     // → `committed` and marks committed_ok from the sub-session's
-    // last_run_* flags. Called from draw_gui after poll_all returns true.
+    // last_run_* flags. Called from AppModel::tick after poll_all returns true.
     void commit_pending_signatures();
 };
 

@@ -559,7 +559,7 @@ struct BifurcationAnalysisSession {
     // Cooperative cancel of the in-flight run. No-op if nothing is in flight.
     void request_cancel();
 
-    // Вызывается каждый кадр из GUI-потока. Если future готова — применяет
+    // Вызывается каждый тик из главного потока. Если future готова — применяет
     // результат к diagrams[running_diagram_index], сбрасывает in_flight.
     // Возвращает true в кадр завершения.
     bool poll();

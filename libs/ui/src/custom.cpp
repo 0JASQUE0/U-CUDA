@@ -87,7 +87,7 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
 // inside or outside a window) and unlikely to collide with other IDs. Includes a hash of the
 // loaded system name so imgui.ini keeps a separate dock layout per system — otherwise switching
 // systems leaked one system's plot placement into another's tabs.
-[[nodiscard]] inline ImGuiID ws_dock_id(int tab_id, const std::string& sys) {
+[[nodiscard]] ImGuiID ws_dock_id(int tab_id, const std::string& sys) {
     ImGuiID sys_hash = sys.empty() ? 0u : ImHashStr(sys.c_str());
     return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id ^ sys_hash;
 }
@@ -97,7 +97,7 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
 // its dock state per system. Empty when no system is loaded (edge case;
 // windows behave as before). "##sys_<name>" — the "##" makes ImGui strip
 // the suffix from the visible title while including it in the hashed ID.
-[[nodiscard]] inline std::string custom_win_suffix(const std::string& sys) {
+[[nodiscard]] std::string custom_win_suffix(const std::string& sys) {
     return sys.empty() ? std::string{} : ("##sys_" + sys);
 }
 }
