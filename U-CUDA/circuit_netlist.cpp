@@ -135,10 +135,23 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         s << buf;
     }
     s << "\n";
+    // Начальное условие ставится НА КОНДЕНСАТОР, а не только строкой .IC: директивы
+    // анализа при импорте нередко отбрасываются, а свойство компонента переживает
+    // дорогу. Без толчка схема стоит в нуле — начало координат у системы без
+    // свободных членов является точным равновесием, и решатель из него не выйдет.
     int ci = 0;
     for (const CircuitCapacitor& c : g.capacitors) {
-        std::snprintf(buf, sizeof(buf), "C%-3d %-8s %-8s %s\n", ++ci,
-                      node(g, c.a).c_str(), node(g, c.b).c_str(), eng(c.farad).c_str());
+        ++ci;
+        std::string ic;
+        for (size_t v = 0; v < g.var_node.size() && v < o.x0_volts.size(); ++v) {
+            if (c.b != g.var_node[v]) continue;
+            // Напряжение НА конденсаторе: V(a) - V(b) = 0 - x0 при виртуальной земле.
+            ic = " IC=" + eng(-o.x0_volts[v]);
+            break;
+        }
+        std::snprintf(buf, sizeof(buf), "C%-3d %-8s %-8s %-10s%s\n", ci,
+                      node(g, c.a).c_str(), node(g, c.b).c_str(),
+                      eng(c.farad).c_str(), ic.c_str());
         s << buf;
     }
     s << "\n";
@@ -196,14 +209,35 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
     }
 
     // --- начальные условия и анализ ---------------------------------------------
+    bool kick_hint = false;
     if (!o.x0_volts.empty() && !g.var_node.empty()) {
-        s << "\n* Without a kick the circuit sits in a fixed point: chaos needs a start.\n.IC";
+        s << "\n* The same start, as a directive. The origin is an exact equilibrium of this\n";
+        s << "* circuit, so WITHOUT it every node stays at 0 V forever - that is not a bug\n";
+        s << "* in the circuit but the absence of a kick.\n";
+        s << "*\n";
+        s << "* In Multisim the .IC line below is usually dropped on import. Set\n";
+        s << "* Simulate -> Analyses and Simulation -> Transient -> Initial conditions to\n";
+        s << "* \"User-defined\": it then uses the IC= values on the capacitors above.\n.IC";
+        kick_hint = true;
         for (size_t i = 0; i < o.x0_volts.size() && i < g.var_node.size(); ++i) {
             std::snprintf(buf, sizeof(buf), " V(%s)=%s",
                           node(g, g.var_node[i]).c_str(), eng(o.x0_volts[i]).c_str());
             s << buf;
         }
         s << "\n";
+    }
+
+    // Запасной толчок на случай симулятора, который игнорирует и IC=, и .IC:
+    // короткий импульс тока в суммирующий узел первого интегратора. Выводится
+    // ЗАКОММЕНТИРОВАННЫМ, чтобы не менять схему у тех, у кого всё и так работает.
+    if (kick_hint && !g.capacitors.empty()) {
+        const int s_first = g.capacitors[0].a;   // суммирующий узел первого интегратора
+        s << "\n* If the simulator ignores initial conditions altogether, uncomment these\n";
+        s << "* two lines instead: a 10 us current pulse knocks the circuit off the origin.\n";
+        std::snprintf(buf, sizeof(buf),
+                      "* Vkick nkick 0 PULSE(0 1 0 1n 1n 10u 1)\n* Rkick nkick %s 3.3k\n",
+                      node(g, s_first).c_str());
+        s << buf;
     }
 
     if (g.time_scale > 0.0) {
