@@ -100,13 +100,21 @@ def lle(t_transient=20.0, t_run=200.0, renorm_every=0.5, d0=1e-8):
 
 
 def ranges(rows, skip_frac=0.2):
-    """min/max/mean по установившемуся режиму — вход для масштабирования фазы 5."""
+    """Статистика установившегося режима.
+
+    min/max — вход для масштабирования фазы 5, но СРАВНИВАТЬ по ним нельзя:
+    на хаотическом аттракторе это выборочная величина, а не инвариант. Замер:
+    возмущение НУ на 1e-9 сдвигает min/max на 0.19 В, mean на 0.055 В, а std —
+    всего на 0.004 В. Для сверки решателей годится только std.
+    """
     tail = rows[int(len(rows) * skip_frac):]
     out = {}
     for j, name in enumerate(("u", "v", "w")):
         col = [r[2 + j] for r in tail]
+        mean = sum(col) / len(col)
+        var = sum((c - mean) ** 2 for c in col) / len(col)
         out[name] = {"min": min(col), "max": max(col),
-                     "mean": sum(col) / len(col)}
+                     "mean": mean, "std": math.sqrt(var)}
     return out
 
 
@@ -137,6 +145,9 @@ def main():
         "lle_per_second_circuit": l1 * RATE,
         "self_convergence_max_abs_diff_h_vs_h2": conv,
         "steady_state_ranges_V": ranges(rows),
+        "comparison_note": ("compare solvers by std only: a 1e-9 change of the initial "
+                            "condition moves min/max by 0.19 V and mean by 0.055 V, "
+                            "while std moves by 0.004 V"),
     }
     json_path = os.path.join(here, "lorenz_reference_invariants.json")
     with open(json_path, "w", encoding="utf-8", newline="\n") as f:
