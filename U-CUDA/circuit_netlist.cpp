@@ -35,6 +35,14 @@ std::string eng(double v) {
     return b;
 }
 
+// Чей моном питает этот умножитель: ищем резистор, висящий на его выходе, и берём
+// подпись оттуда. Без этого назначение умножителя в файле нигде не сказано.
+std::string mult_use(const CircuitGraph& g, int out) {
+    for (const CircuitResistor& r : g.resistors)
+        if (r.a == out || r.b == out) return r.origin;
+    return "(unused)";
+}
+
 }  // namespace
 
 std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
@@ -64,6 +72,25 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         }
         s << "*\n* Probe the integrator outputs n_<var> and multiply by the factor above to\n";
         s << "* get system units. A phase portrait is one such output against another.\n";
+    }
+
+    // Готовые значения для ручного ввода: Multisim теряет IC= при импорте, но
+    // принимает их, если вбить в свойства конденсатора. Считать -x0 в уме при
+    // этом не должен никто.
+    if (!o.x0_volts.empty() && !g.capacitors.empty()) {
+        s << "*\n* Multisim drops the IC= values below on import. Type them into each\n";
+        s << "* capacitor's \"Initial conditions\" property by hand, then set\n";
+        s << "* Transient -> Initial conditions to \"User-defined\":\n";
+        for (size_t ic = 0; ic < g.capacitors.size(); ++ic) {
+            for (size_t v = 0; v < g.var_node.size() && v < o.x0_volts.size(); ++v) {
+                if (g.capacitors[ic].b != g.var_node[v]) continue;
+                const std::string nm = v < o.var_names.size() ? o.var_names[v] : std::to_string(v);
+                std::snprintf(buf, sizeof(buf), "*   C%d (integrator %s): %s V\n",
+                              (int)ic + 1, nm.c_str(), eng(-o.x0_volts[v]).c_str());
+                s << buf;
+                break;
+            }
+        }
     }
     if (g.time_scale > 0.0) {
         std::snprintf(buf, sizeof(buf),
@@ -165,11 +192,30 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
     if (!g.vsources.empty()) s << "\n";
 
     // --- активные -------------------------------------------------------------
+    //
+    // Роль пишется в комментарий: после импорта в редактор схем от строки остаётся
+    // только номер экземпляра, и понять, с какого ОУ снимать переменную, уже неоткуда.
+    s << "\n* Op-amps: integrators first (one per state variable), then sign inverters.\n";
+    s << "* PROBE THE INTEGRATOR OUTPUTS - those carry the state variables.\n";
     int xi = 0;
     for (const CircuitOpAmp& a : g.opamps) {
-        std::snprintf(buf, sizeof(buf), "X%-3d %-8s %-8s %-8s uc_opamp\n", ++xi,
+        std::string role = "buffer";
+        for (size_t v = 0; v < g.var_node.size(); ++v) {
+            if (a.out == g.var_node[v]) {
+                role = "INTEGRATOR for "
+                     + (v < o.var_names.size() ? o.var_names[v] : std::to_string(v));
+                break;
+            }
+            if (v < g.var_node_inv.size() && g.var_node_inv[v] >= 0
+                && a.out == g.var_node_inv[v]) {
+                role = "inverter, output = -"
+                     + (v < o.var_names.size() ? o.var_names[v] : std::to_string(v));
+                break;
+            }
+        }
+        std::snprintf(buf, sizeof(buf), "X%-3d %-8s %-8s %-8s uc_opamp   ; %s\n", ++xi,
                       node(g, a.in_plus).c_str(), node(g, a.in_minus).c_str(),
-                      node(g, a.out).c_str());
+                      node(g, a.out).c_str(), role.c_str());
         s << buf;
     }
 
@@ -179,10 +225,10 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         ++mi;
         if (!poly) {
             const std::string zt = (m.z == 0) ? std::string() : " + V(" + node(g, m.z) + ")";
-            std::snprintf(buf, sizeof(buf), "BM%-2d %-8s 0 V = %s*%s/10%s\n", mi,
+            std::snprintf(buf, sizeof(buf), "BM%-2d %-8s 0 V = %s*%s/10%s   ; feeds %s\n", mi,
                           node(g, m.out).c_str(),
                           ndiff(g, m.x1, m.x2).c_str(), ndiff(g, m.y1, m.y2).c_str(),
-                          zt.c_str());
+                          zt.c_str(), mult_use(g, m.out).c_str());
             s << buf;
             continue;
         }
@@ -206,6 +252,8 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
                           node(g, m.z).c_str());
         }
         s << buf;
+        std::snprintf(buf, sizeof(buf), "*    ^ feeds %s\n", mult_use(g, m.out).c_str());
+        s << buf;
     }
 
     // --- начальные условия и анализ ---------------------------------------------
@@ -215,9 +263,8 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         s << "* circuit, so WITHOUT it every node stays at 0 V forever - that is not a bug\n";
         s << "* in the circuit but the absence of a kick.\n";
         s << "*\n";
-        s << "* In Multisim the .IC line below is usually dropped on import. Set\n";
-        s << "* Simulate -> Analyses and Simulation -> Transient -> Initial conditions to\n";
-        s << "* \"User-defined\": it then uses the IC= values on the capacitors above.\n.IC";
+        s << "* NGSpice and LTspice honour the line below. Multisim drops it, and drops the\n";
+        s << "* IC= on the capacitors too - enter those by hand, see the header.\n.IC";
         kick_hint = true;
         for (size_t i = 0; i < o.x0_volts.size() && i < g.var_node.size(); ++i) {
             std::snprintf(buf, sizeof(buf), " V(%s)=%s",
@@ -227,13 +274,26 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         s << "\n";
     }
 
-    // Запасной толчок на случай симулятора, который игнорирует и IC=, и .IC:
-    // короткий импульс тока в суммирующий узел первого интегратора. Выводится
-    // ЗАКОММЕНТИРОВАННЫМ, чтобы не менять схему у тех, у кого всё и так работает.
+    // Стартовый толчок: короткий импульс тока в суммирующий узел первого интегратора.
+    //
+    // В Multisim-диалекте он АКТИВЕН, а не закомментирован. Проверено на практике:
+    // Multisim при импорте netlist'а теряет и директиву .IC, и свойство IC= у
+    // конденсаторов, а начало координат у системы без свободных членов — точное
+    // равновесие, из которого детерминированный решатель не выйдет никогда. Схема,
+    // которая молча показывает ноль, бесполезнее схемы с лишним импульсным
+    // источником, поэтому по умолчанию выбран второй вариант.
+    //
+    // На вид аттрактора это не влияет: после толчка траектория садится на него
+    // независимо от того, куда именно её толкнули. Совпадения ТРАЕКТОРИЙ с U-CUDA
+    // ждать не нужно — на хаосе его не бывает и при точном совпадении начальных
+    // условий.
     if (kick_hint && !g.capacitors.empty()) {
         const int s_first = g.capacitors[0].a;   // суммирующий узел первого интегратора
-        s << "\n* If the simulator ignores initial conditions altogether, uncomment these\n";
-        s << "* two lines instead: a 10 us current pulse knocks the circuit off the origin.\n";
+        s << "\n* Fallback only, if a simulator supports no initial conditions at all:\n";
+        s << "* a 10 us pulse worth about 0.3 V of charge into the first integrator.\n";
+        s << "* Uncomment both lines. The attractor does not depend on where the kick\n";
+        s << "* lands, only the particular trajectory does - and that never matches\n";
+        s << "* anyway on a chaotic system.\n";
         std::snprintf(buf, sizeof(buf),
                       "* Vkick nkick 0 PULSE(0 1 0 1n 1n 10u 1)\n* Rkick nkick %s 3.3k\n",
                       node(g, s_first).c_str());
