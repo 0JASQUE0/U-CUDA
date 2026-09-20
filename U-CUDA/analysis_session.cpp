@@ -1,7 +1,6 @@
 ﻿#include "analysis_session.h"
 #include "circuit_synth.h"
 #include "circuit_solver.h"
-#include "circuit_trace.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
@@ -298,7 +297,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
                                       double h, double tsim, int dec,
                                       AnalysisResult& result) {
     auto note = [&](const std::string& m) { result.circuit_status = m; };
-    circuit_trace("append: enter");
 
     if (result.trajectories.empty() || result.trajectories[0].size() < 2) {
         note("circuit: no ODE trajectory to take the scale from");
@@ -309,8 +307,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     std::string err;
     std::vector<PolyRhs> poly;
     if (!extract_quadratic(in.sys, a, PolyExtractConfig(), poly, &err)) { note(err); return; }
-    circuit_trace("append: extracted", "dim=" + std::to_string(dim)
-                  + " sys.vars=" + std::to_string(in.sys.vars.size()));
 
     ScalePlan sp;
     if (!plan_amplitude_scaling(result.trajectories[0], parse_val(in.circuit_target_volt, 3.0),
@@ -321,9 +317,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
 
     CircuitGraph g;
     if (!synthesize_circuit(in.sys, scaled, SynthesisConfig(), g, &err)) { note(err); return; }
-    circuit_trace("append: synthesized", "nodes=" + std::to_string(g.nodes.size())
-                  + " var_node=" + std::to_string(g.var_node.size())
-                  + " scale=" + std::to_string(sp.s.size()));
 
     CircuitSolverConfig cfg;
     cfg.opamp.ideal  = in.circuit_ideal_opamp;
@@ -354,8 +347,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     const double hc = h / sub;
     CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tsim, sample);
     if (!run.ok) { note(run.error); return; }
-    circuit_trace("append: simulated", "x=" + std::to_string(run.x.size())
-                  + " samples=" + std::to_string(run.t.size()));
 
     // Сколько координат реально можно взять. dim — из in.vars, то есть из списка
     // переменных СЕССИИ, а run.x и sp.s сидят на in.sys.vars и на размерности точки
@@ -381,7 +372,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
         traj.push_back(std::move(p));
     }
 
-    circuit_trace("append: trajectory built");
     result.circuit_valid     = true;
     result.circuit_graph     = g;
     result.circuit_scale     = sp.s;
@@ -428,7 +418,6 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
         msg += buf;
     }
     note(msg);
-    circuit_trace("append: done");
 }
 
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {

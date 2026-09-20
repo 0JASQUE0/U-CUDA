@@ -1,6 +1,5 @@
 ﻿#include "gui.h"
 #include "circuit_netlist.h"
-#include "circuit_trace.h"
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
@@ -13119,9 +13118,7 @@ void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
     PhaseAnalysisSession& s = model.phase_session;
     if (!s.result.circuit_valid) return;
 
-    circuit_trace("export: dialog (deferred)");
     const std::string path = cb.pick_save_file_netlist();
-    circuit_trace("export: dialog returned", path);
     if (path.empty()) return;
 
     NetlistOptions no;
@@ -13139,7 +13136,6 @@ void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
     std::ofstream f(path, std::ios::binary);
     if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
     else     s.result.circuit_status = "cannot write " + path;
-    circuit_trace("export: written");
 }
 
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
