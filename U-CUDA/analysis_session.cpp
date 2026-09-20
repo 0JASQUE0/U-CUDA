@@ -293,7 +293,7 @@ const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job)
 // с чем было бы сравнивать.
 static void append_circuit_trajectory(const PhaseRunInputs& in,
                                       const std::vector<double>& a,
-                                      double h, double tsim, double tskip, int dec,
+                                      double h, double tsim, int dec,
                                       AnalysisResult& result) {
     auto note = [&](const std::string& m) { result.circuit_status = m; };
 
@@ -322,30 +322,32 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     cfg.opamp.gbw_hz = parse_val(in.circuit_gbw_mhz, 3.0) * 1.0e6;
     cfg.opamp.vsat   = parse_val(in.circuit_vsat, 13.0);
 
-    // НУ схемы — в её же масштабе, в вольтах.
+    // Схема стартует из ПЕРВОЙ ЗАПИСАННОЙ точки ОДУ, а не из НУ пользователя, и
+    // своего транзиента не проходит.
+    //
+    // Иначе обе траектории шли бы через transient (по умолчанию 100 единиц времени)
+    // каждая своим методом, и при положительном ляпуновском показателе к концу
+    // транзиента оказывались бы в НИКАК НЕ СВЯЗАННЫХ точках аттрактора. Поточечное
+    // сравнение там невозможно в принципе, и наложение теряло бы весь смысл.
     std::vector<double> x0((size_t)dim, 0.0);
-    if (!result.snapshot.ic_flat.empty()) {
-        const std::vector<double>& ic0 = result.snapshot.ic_flat[0];
-        for (int i = 0; i < dim && i < (int)ic0.size(); ++i) {
+    {
+        const std::vector<double>& p0 = result.trajectories[0][0];
+        for (int i = 0; i < dim && i < (int)p0.size(); ++i) {
             const double si = sp.s[(size_t)i] != 0.0 ? sp.s[(size_t)i] : 1.0;
-            x0[(size_t)i] = ic0[(size_t)i] / si;
+            x0[(size_t)i] = p0[(size_t)i] / si;
         }
     }
 
-    // Переходный участок схема проходит сама: выход на аттрактор у неё свой.
     const double sample = h * (dec > 0 ? dec : 1);
     int sub = (int)parse_val(in.circuit_substeps, 10.0);
     if (sub < 1) sub = 1;
     const double hc = h / sub;
-    CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tskip + tsim, sample);
+    CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tsim, sample);
     if (!run.ok) { note(run.error); return; }
 
-    const size_t drop = (size_t)(tskip / sample);
-    if (run.t.size() <= drop) { note("circuit: run is shorter than the transient"); return; }
-
     std::vector<std::vector<double>> traj;
-    traj.reserve(run.t.size() - drop);
-    for (size_t k = drop; k < run.t.size(); ++k) {
+    traj.reserve(run.t.size());
+    for (size_t k = 0; k < run.t.size(); ++k) {
         std::vector<double> p((size_t)dim, 0.0);
         for (int i = 0; i < dim; ++i) p[(size_t)i] = run.x[(size_t)i][k] * sp.s[(size_t)i];
         traj.push_back(std::move(p));
@@ -368,7 +370,27 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
                   hc, sub,
                   (double)run.stats.newton_iters /
                   (double)(run.stats.steps ? run.stats.steps : 1));
-    note(msg + buf);
+    msg += buf;
+
+    // Докуда кривые ещё совпадают. На хаосе это главная величина: дальше расхождение
+    // растёт по построению, и смотреть надо на форму аттрактора, а не на точки.
+    {
+        const std::vector<std::vector<double>>& ode = result.trajectories[0];
+        const std::vector<std::vector<double>>& cir = result.trajectories.back();
+        double span = 0.0;
+        for (int i = 0; i < dim; ++i) span = std::max(span, sp.s[(size_t)i]);
+        const double tol = 0.02 * span * 3.0;   // 2% от характерной амплитуды
+        size_t k = 0;
+        for (; k < ode.size() && k < cir.size(); ++k) {
+            double d = 0.0;
+            for (int i = 0; i < dim && i < (int)ode[k].size(); ++i)
+                d = std::max(d, std::fabs(ode[k][(size_t)i] - cir[k][(size_t)i]));
+            if (d > tol) break;
+        }
+        std::snprintf(buf, sizeof(buf), "; tracks the ODE for %.3g time units", (double)k * sample);
+        msg += buf;
+    }
+    note(msg);
 }
 
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
@@ -593,7 +615,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
 
     if (in.circuit_show && result.ok)
-        append_circuit_trajectory(in, a, h, tsim, tskip, dec, result);
+        append_circuit_trajectory(in, a, h, tsim, dec, result);
 
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
