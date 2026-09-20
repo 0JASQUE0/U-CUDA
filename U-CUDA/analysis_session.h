@@ -301,6 +301,9 @@ struct PhaseAnalysisSession {
     std::string circuit_substeps    = "10";
     std::string circuit_gbw_mhz     = "3";
     std::string circuit_vsat        = "13";
+    // Диалект экспорта. Multisim отбрасывает B-источники при импорте, и узлы
+    // умножителей остаются без источника — резисторы от них повисают.
+    bool        circuit_netlist_poly = false;
 
     // Continuation (live) mode — timer-driven chain of async recomputes that
     // seeds each new chunk from the last integrator state, so the attractor

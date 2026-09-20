@@ -3,14 +3,20 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <string>
 
 namespace {
 
 const double kPi = 3.14159265358979323846;
 
 // Земля в SPICE — всегда узел 0, как бы она ни звалась в графе.
+//
+// Индекс проверяется: эмиттер адресует g.nodes напрямую, и битый граф давал бы
+// не диагностику, а нарушение прав доступа. Маркер в файле найти несравнимо легче.
 std::string node(const CircuitGraph& g, int i) {
-    return i == 0 ? std::string("0") : g.nodes[(size_t)i].name;
+    if (i == 0) return "0";
+    if (i < 0 || (size_t)i >= g.nodes.size()) return "BAD_NODE_" + std::to_string(i);
+    return g.nodes[(size_t)i].name;
 }
 
 // Разность двух узлов без слагаемых-земли: "(V(a)-V(0))" читается хуже и лишний
@@ -18,9 +24,9 @@ std::string node(const CircuitGraph& g, int i) {
 std::string ndiff(const CircuitGraph& g, int a, int b) {
     const bool ga = (a == 0), gb = (b == 0);
     if (ga && gb) return "0";
-    if (gb) return "V(" + g.nodes[(size_t)a].name + ")";
-    if (ga) return "(-V(" + g.nodes[(size_t)b].name + "))";
-    return "(V(" + g.nodes[(size_t)a].name + ")-V(" + g.nodes[(size_t)b].name + "))";
+    if (gb) return "V(" + node(g, a) + ")";
+    if (ga) return "(-V(" + node(g, b) + "))";
+    return "(V(" + node(g, a) + ")-V(" + node(g, b) + "))";
 }
 
 std::string eng(double v) {
@@ -34,6 +40,12 @@ std::string eng(double v) {
 std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
     std::ostringstream s;
     char buf[320];
+
+    if (g.nodes.empty())
+        return "* U-CUDA: the circuit graph is empty - nothing to export.\n"
+               ".END\n";
+
+    const bool poly = (o.dialect == NetlistDialect::Poly);
 
     // Первая строка netlist'а в SPICE — всегда заголовок, её содержимое игнорируется.
     s << "* " << o.title << "\n";
@@ -50,6 +62,8 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
                           v.c_str(), o.scale[i], v.c_str());
             s << buf;
         }
+        s << "*\n* Probe the integrator outputs n_<var> and multiply by the factor above to\n";
+        s << "* get system units. A phase portrait is one such output against another.\n";
     }
     if (g.time_scale > 0.0) {
         std::snprintf(buf, sizeof(buf),
@@ -57,13 +71,17 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
             g.time_scale, 1.0 / g.time_scale);
         s << buf;
     }
+    s << "*\n* Dialect: " << (poly ? "SPICE 2 POLY sources (Multisim-friendly)"
+                                   : "behavioural B sources (NGSpice, LTspice)") << "\n";
     s << "*\n* Op-amps and multipliers are emitted as EXPLICIT subcircuits rather than\n";
     s << "* vendor models on purpose: an external simulator then runs the same model\n";
     s << "* the U-CUDA solver runs, so any difference is a solver bug and not a model\n";
-    s << "* mismatch. Swap in TL072 / AD633 subcircuits to compare against hardware.\n";
+    s << "* mismatch. Swap in TL072 / AD633 to compare against hardware - those need\n";
+    s << "* supply rails, which an ideal controlled source does not have, so there is\n";
+    s << "* deliberately no power supply anywhere in this file.\n";
     s << "*\n";
 
-    // --- модели ---------------------------------------------------------------
+    // --- модель ОУ ------------------------------------------------------------
     if (o.opamp.ideal) {
         s << ".subckt uc_opamp inp inn out\n";
         s << "* Ideal op-amp: the solver treats it as a nullor (inputs equalised, output\n";
@@ -74,21 +92,29 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
         const double gm = 2.0 * kPi * o.opamp.gbw_hz * o.opamp_cpole;
         const double rp = o.opamp.a0 / gm;
         std::snprintf(buf, sizeof(buf),
-            ".param uc_gm=%s uc_rp=%s uc_cp=%s uc_vsat=%s\n",
-            eng(gm).c_str(), eng(rp).c_str(), eng(o.opamp_cpole).c_str(),
-            eng(o.opamp.vsat).c_str());
-        s << buf;
-        std::snprintf(buf, sizeof(buf),
             "* One-pole op-amp: A0 = %.6g, GBW = %.6g Hz, Vsat = %.6g V\n",
             o.opamp.a0, o.opamp.gbw_hz, o.opamp.vsat);
         s << buf;
         s << ".subckt uc_opamp inp inn out\n";
-        s << "Gm  0 p inp inn {uc_gm}\n";
-        s << "Rp  p 0 {uc_rp}\n";
-        s << "Cp  p 0 {uc_cp}\n";
-        s << "* Soft limiter, not a hard clip: a hard clip has zero derivative and Newton\n";
-        s << "* stalls on it. The solver uses exactly this tanh.\n";
-        s << "Bout out 0 V = {uc_vsat}*tanh(V(p)/{uc_vsat})\n";
+        // Числа печатаются прямо, без .param и фигурных скобок: их понимают не все.
+        std::snprintf(buf, sizeof(buf), "Gm  0 p inp inn %s\n", eng(gm).c_str());    s << buf;
+        std::snprintf(buf, sizeof(buf), "Rp  p 0 %s\n", eng(rp).c_str());            s << buf;
+        std::snprintf(buf, sizeof(buf), "Cp  p 0 %s\n", eng(o.opamp_cpole).c_str()); s << buf;
+        if (poly) {
+            // tanh — поведенческое выражение, в этом диалекте его нет. Печатаем
+            // ЛИНЕЙНЫЙ буфер и говорим об этом прямо: молча отдать схему без
+            // ограничения хуже, чем отдать с предупреждением.
+            s << "* WARNING: the soft limiter has no POLY equivalent, so this model keeps\n";
+            s << "* the finite bandwidth but NOT the output saturation. For saturation use\n";
+            s << "* a vendor op-amp model with supply rails.\n";
+            s << "Ebuf out 0 p 0 1.0\n";
+        } else {
+            s << "* Soft limiter, not a hard clip: a hard clip has zero derivative and\n";
+            s << "* Newton stalls on it. The solver uses exactly this tanh.\n";
+            std::snprintf(buf, sizeof(buf), "Bout out 0 V = %s*tanh(V(p)/%s)\n",
+                          eng(o.opamp.vsat).c_str(), eng(o.opamp.vsat).c_str());
+            s << buf;
+        }
         s << ".ends uc_opamp\n\n";
     }
 
@@ -133,15 +159,39 @@ std::string emit_spice_netlist(const CircuitGraph& g, const NetlistOptions& o) {
                       node(g, a.out).c_str());
         s << buf;
     }
+
     s << "\n* Multipliers: AD633 transfer W = (X1-X2)(Y1-Y2)/10 + Z\n";
     int mi = 0;
     for (const CircuitMultiplier& m : g.multipliers) {
-        const std::string zt = (m.z == 0) ? std::string()
-                                          : " + V(" + g.nodes[(size_t)m.z].name + ")";
-        std::snprintf(buf, sizeof(buf), "BM%-2d %-8s 0 V = %s*%s/10%s\n", ++mi,
-                      node(g, m.out).c_str(),
-                      ndiff(g, m.x1, m.x2).c_str(), ndiff(g, m.y1, m.y2).c_str(),
-                      zt.c_str());
+        ++mi;
+        if (!poly) {
+            const std::string zt = (m.z == 0) ? std::string() : " + V(" + node(g, m.z) + ")";
+            std::snprintf(buf, sizeof(buf), "BM%-2d %-8s 0 V = %s*%s/10%s\n", mi,
+                          node(g, m.out).c_str(),
+                          ndiff(g, m.x1, m.x2).c_str(), ndiff(g, m.y1, m.y2).c_str(),
+                          zt.c_str());
+            s << buf;
+            continue;
+        }
+        // POLY(2) раскладывается как c0, c1*v1, c2*v2, c3*v1^2, c4*v1*v2, c5*v2^2 —
+        // нужен только c4 = 0.1. При ненулевом Z берём POLY(3), где порядок
+        // c0, c1*v1, c2*v2, c3*v3, c4*v1^2, c5*v1*v2, то есть c3 = 1 и c5 = 0.1.
+        if (m.z == 0) {
+            std::snprintf(buf, sizeof(buf), "EM%-2d %-8s 0 POLY(2) %s %s %s %s 0 0 0 0 0.1\n",
+                          mi, node(g, m.out).c_str(),
+                          node(g, m.x1).c_str(), node(g, m.x2).c_str(),
+                          node(g, m.y1).c_str(), node(g, m.y2).c_str());
+        } else {
+            // Три ПАРЫ узлов: у POLY(n) каждый вход задаётся парой, поэтому у Z
+            // обязана быть своя опора. Коэффициенты: c3 = 1 даёт слагаемое Z,
+            // c5 = 0.1 даёт произведение v1*v2.
+            std::snprintf(buf, sizeof(buf),
+                          "EM%-2d %-8s 0 POLY(3) %s %s %s %s %s 0 0 0 0 1 0 0.1\n",
+                          mi, node(g, m.out).c_str(),
+                          node(g, m.x1).c_str(), node(g, m.x2).c_str(),
+                          node(g, m.y1).c_str(), node(g, m.y2).c_str(),
+                          node(g, m.z).c_str());
+        }
         s << buf;
     }
 

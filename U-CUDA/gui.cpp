@@ -3691,6 +3691,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             if (!s.result.circuit_status.empty())
                 ImGui::TextWrapped("%s", s.result.circuit_status.c_str());
 
+            ImGui::Checkbox("Multisim dialect (POLY)", &s.circuit_netlist_poly);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Multisim drops behavioural B sources on import, which leaves"
+                                  " the multiplier nodes undriven\nand their resistors hanging by one"
+                                  " end. POLY sources survive the trip.");
             ImGui::BeginDisabled(!s.result.circuit_valid || !cbp || !cbp->pick_save_file_netlist);
             if (ImGui::Button("Export SPICE netlist...")) {
                 const std::string path = cbp->pick_save_file_netlist();
@@ -3704,6 +3710,8 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                     no.opamp      = s.result.circuit_opamp;
                     no.h_ode      = s.result.circuit_h_ode;
                     no.t_end_ode  = s.result.circuit_t_end_ode;
+                    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly
+                                                           : NetlistDialect::Behavioral;
                     const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
                     std::ofstream f(path, std::ios::binary);
                     if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
