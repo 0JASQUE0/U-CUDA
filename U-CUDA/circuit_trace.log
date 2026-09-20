@@ -27,3 +27,17 @@ append: simulated | x=3 samples=10000
 append: trajectory built
 append: done
 export: dialog (deferred)
+append: enter
+append: extracted | dim=3 sys.vars=3
+append: synthesized | nodes=13 var_node=3 scale=3
+append: simulated | x=3 samples=10000
+append: trajectory built
+append: done
+append: enter
+append: extracted | dim=3 sys.vars=3
+append: synthesized | nodes=13 var_node=3 scale=3
+append: simulated | x=3 samples=10000
+append: trajectory built
+append: done
+export: dialog (deferred)
+export: dialog returned
