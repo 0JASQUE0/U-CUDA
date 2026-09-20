@@ -1,4 +1,6 @@
 ﻿#include "analysis_session.h"
+#include "circuit_synth.h"
+#include "circuit_solver.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
@@ -240,6 +242,10 @@ struct PhaseRunInputs {
     std::vector<std::vector<double>>  ic_override;   // [ic][coord]; empty → use ic_sets text
     // RQA-расчёты, запрошенные окнами проекций. Уже дедуплицированы по (ic, cfg).
     std::vector<RqaJob>               rqa_jobs;
+    // Схемная траектория (фаза 4a).
+    bool        circuit_show        = false;
+    bool        circuit_ideal_opamp = true;
+    std::string circuit_target_volt, circuit_gbw_mhz, circuit_vsat, circuit_substeps;
 };
 } // namespace
 
@@ -278,6 +284,93 @@ const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job)
 
 // Чистая функция: входы → AnalysisResult. Не трогает session, поэтому её
 // безопасно звать с любого потока.
+// Схемная траектория поверх ОДУ. Кладётся ещё одной строкой в trajectories: оттуда
+// она сама доедет до всех проекций, легенды и экспорта, без правок в отрисовке.
+//
+// Масштаб ИЗМЕРЯЕТСЯ по уже посчитанной траектории ОДУ, а не подбирается: схема
+// живёт в вольтах, и у Лоренца из библиотеки без этого вышло бы +-45 В. Наружу
+// траектория домножается на масштаб обратно — иначе две кривые в одном окне не
+// с чем было бы сравнивать.
+static void append_circuit_trajectory(const PhaseRunInputs& in,
+                                      const std::vector<double>& a,
+                                      double h, double tsim, double tskip, int dec,
+                                      AnalysisResult& result) {
+    auto note = [&](const std::string& m) { result.circuit_status = m; };
+
+    if (result.trajectories.empty() || result.trajectories[0].size() < 2) {
+        note("circuit: no ODE trajectory to take the scale from");
+        return;
+    }
+    const int dim = (int)in.vars.size();
+
+    std::string err;
+    std::vector<PolyRhs> poly;
+    if (!extract_quadratic(in.sys, a, PolyExtractConfig(), poly, &err)) { note(err); return; }
+
+    ScalePlan sp;
+    if (!plan_amplitude_scaling(result.trajectories[0], parse_val(in.circuit_target_volt, 3.0),
+                                sp, &err)) { note(err); return; }
+
+    std::vector<PolyRhs> scaled;
+    apply_amplitude_scaling(poly, sp, scaled);
+
+    CircuitGraph g;
+    if (!synthesize_circuit(in.sys, scaled, SynthesisConfig(), g, &err)) { note(err); return; }
+
+    CircuitSolverConfig cfg;
+    cfg.opamp.ideal  = in.circuit_ideal_opamp;
+    cfg.opamp.gbw_hz = parse_val(in.circuit_gbw_mhz, 3.0) * 1.0e6;
+    cfg.opamp.vsat   = parse_val(in.circuit_vsat, 13.0);
+
+    // НУ схемы — в её же масштабе, в вольтах.
+    std::vector<double> x0((size_t)dim, 0.0);
+    if (!result.snapshot.ic_flat.empty()) {
+        const std::vector<double>& ic0 = result.snapshot.ic_flat[0];
+        for (int i = 0; i < dim && i < (int)ic0.size(); ++i) {
+            const double si = sp.s[(size_t)i] != 0.0 ? sp.s[(size_t)i] : 1.0;
+            x0[(size_t)i] = ic0[(size_t)i] / si;
+        }
+    }
+
+    // Переходный участок схема проходит сама: выход на аттрактор у неё свой.
+    const double sample = h * (dec > 0 ? dec : 1);
+    int sub = (int)parse_val(in.circuit_substeps, 10.0);
+    if (sub < 1) sub = 1;
+    const double hc = h / sub;
+    CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tskip + tsim, sample);
+    if (!run.ok) { note(run.error); return; }
+
+    const size_t drop = (size_t)(tskip / sample);
+    if (run.t.size() <= drop) { note("circuit: run is shorter than the transient"); return; }
+
+    std::vector<std::vector<double>> traj;
+    traj.reserve(run.t.size() - drop);
+    for (size_t k = drop; k < run.t.size(); ++k) {
+        std::vector<double> p((size_t)dim, 0.0);
+        for (int i = 0; i < dim; ++i) p[(size_t)i] = run.x[(size_t)i][k] * sp.s[(size_t)i];
+        traj.push_back(std::move(p));
+    }
+
+    result.trajectories.push_back(std::move(traj));
+    result.labels.push_back(in.circuit_ideal_opamp ? "circuit (ideal)" : "circuit (one-pole)");
+    result.visible.push_back(true);
+    result.ic_text.push_back("circuit");
+
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "circuit: %d nodes, %d op-amps, %d multipliers; scale",
+                  (int)g.nodes.size(), (int)g.opamps.size(), (int)g.multipliers.size());
+    std::string msg = buf;
+    for (int i = 0; i < dim && i < (int)sp.s.size(); ++i) {
+        std::snprintf(buf, sizeof(buf), " %s/%.3g", in.vars[(size_t)i].c_str(), sp.s[(size_t)i]);
+        msg += buf;
+    }
+    std::snprintf(buf, sizeof(buf), ", step %.3g (%dx), Newton %.2f iter/step",
+                  hc, sub,
+                  (double)run.stats.newton_iters /
+                  (double)(run.stats.steps ? run.stats.steps : 1));
+    note(msg + buf);
+}
+
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     AnalysisResult result;
     auto _t0 = std::chrono::high_resolution_clock::now();
@@ -499,6 +592,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         result.snapshot.ic_labels.push_back(in.ic_sets[k].label);
     }
 
+    if (in.circuit_show && result.ok)
+        append_circuit_trajectory(in, a, h, tsim, tskip, dec, result);
+
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
     if (result.error.empty())
@@ -541,6 +637,12 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     }
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
+    in.circuit_show        = s.circuit_show;
+    in.circuit_ideal_opamp = s.circuit_ideal_opamp;
+    in.circuit_target_volt = s.circuit_target_volt;
+    in.circuit_gbw_mhz     = s.circuit_gbw_mhz;
+    in.circuit_vsat        = s.circuit_vsat;
+    in.circuit_substeps    = s.circuit_substeps;
     // Continuation: on frames >= 1 resume from the previous chunk's final X[]
     // and skip the transient (already burned in). Size mismatch (user added or
     // removed an IC mid-run) falls back to first-frame semantics.

@@ -3658,6 +3658,37 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Checkbox("Legend shows initial conditions", &s.legend_show_ic); ImGui::SameLine();
     ImGui::Checkbox("GPU", &s.use_gpu);
 
+    // Схемная траектория (фаза 4a). Отдельной секцией, а не ещё одной галкой в ряд:
+    // настройки тут про ЖЕЛЕЗО, и путать их с параметрами интегрирования нельзя.
+    if (ImGui::CollapsingHeader("Analog circuit overlay")) {
+        bool cch = ImGui::Checkbox("Overlay circuit trajectory", &s.circuit_show);
+        if (s.circuit_show) {
+            cch |= ImGui::Checkbox("Ideal op-amp", &s.circuit_ideal_opamp);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("An ideal op-amp reproduces the ODE exactly, so the two curves"
+                                  " coincide.\nSwitch it off to see what the hardware actually does.");
+            ImGui::Text("Target amplitude (V):"); ImGui::SameLine();
+            cch |= InputNumStr("##ctgt", s.circuit_target_volt, 70);
+            ImGui::SameLine(); ImGui::Text("Substeps:"); ImGui::SameLine();
+            cch |= InputNumStr("##csub", s.circuit_substeps, 60);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The circuit is integrated with BDF2 (2nd order) while the ODE"
+                                  " uses your chosen scheme.\nAt the same step the circuit would"
+                                  " drift from the ODE by the method alone.");
+            if (!s.circuit_ideal_opamp) {
+                ImGui::SameLine(); ImGui::Text("GBW (MHz):"); ImGui::SameLine();
+                cch |= InputNumStr("##cgbw", s.circuit_gbw_mhz, 70);
+                ImGui::SameLine(); ImGui::Text("Vsat (V):"); ImGui::SameLine();
+                cch |= InputNumStr("##cvsat", s.circuit_vsat, 70);
+            }
+            if (!s.result.circuit_status.empty())
+                ImGui::TextWrapped("%s", s.result.circuit_status.c_str());
+        }
+        if (cch) changed = true;
+    }
+
     // Continuation is Analysis-only: Custom-tab phase is a pipeline stage
     // whose queue would fight a timer-driven re-run.
     if (on_reset_defaults) {

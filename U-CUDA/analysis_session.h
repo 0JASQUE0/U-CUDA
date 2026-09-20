@@ -225,6 +225,8 @@ struct AnalysisResult {
     bool ok = false;
     std::string error;
     int generation = 0;
+    // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
+    std::string circuit_status;
 
     // RQA по проекциям типа RecurrencePlot. Пусто, если таких проекций нет или расчёт был
     // пропущен (continuation при снятой галочке). Внутри каждого — своя матрица n*n doubles,
@@ -273,6 +275,22 @@ struct PhaseAnalysisSession {
     std::string decimation = "1";      // выводить каждую N-ю точку
     bool auto_recompute = false;       // пересчитывать сразу при изменении
     bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
+
+    // Схемная траектория поверх ОДУ (фаза 4a плана): та же система, посчитанная как
+    // аналоговая схема на ОУ. Расхождение с идеальной ОДУ видно глазом, и сразу ясно,
+    // режет ли полоса ОУ, насыщается ли выход, или дело в масштабах.
+    //
+    // Считает CPU-решатель: GPU-путь компилирует ядро на каждый запуск, что для одной
+    // траектории дороже самого счёта. Его место — ансамбль фазы 6.
+    bool        circuit_show        = false;
+    bool        circuit_ideal_opamp = true;   // идеальный ОУ даёт ровно исходную ОДУ
+    std::string circuit_target_volt = "3";    // желаемая амплитуда переменной, В
+    // Шаг схемы НЕ равен шагу ОДУ: у схемы BDF2 второго порядка против RK4
+    // четвёртого, и на общем h=0.01 идеальная схема разошлась бы с ОДУ на
+    // величину порядка самого аттрактора — чисто из-за метода.
+    std::string circuit_substeps    = "10";
+    std::string circuit_gbw_mhz     = "3";
+    std::string circuit_vsat        = "13";
 
     // Continuation (live) mode — timer-driven chain of async recomputes that
     // seeds each new chunk from the last integrator state, so the attractor

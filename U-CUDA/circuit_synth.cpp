@@ -193,6 +193,48 @@ bool extract_quadratic_union(const System& sys,
     return true;
 }
 
+// --- масштабирование по амплитуде --------------------------------------------
+
+bool plan_amplitude_scaling(const std::vector<std::vector<double>>& traj,
+                            double target_volt, ScalePlan& out, std::string* err) {
+    auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
+    if (traj.empty())      return fail("circuit scaling: trajectory is empty");
+    if (target_volt <= 0.0) return fail("circuit scaling: target amplitude must be positive");
+
+    const size_t n = traj[0].size();
+    if (n == 0) return fail("circuit scaling: trajectory has no coordinates");
+
+    std::vector<double> peak(n, 0.0);
+    for (const std::vector<double>& p : traj) {
+        if (p.size() != n) continue;
+        for (size_t i = 0; i < n; ++i) peak[i] = std::max(peak[i], std::fabs(p[i]));
+    }
+
+    out = ScalePlan();
+    out.target_volt = target_volt;
+    out.s.assign(n, 1.0);
+    for (size_t i = 0; i < n; ++i) {
+        // Вырожденную переменную не масштабируем: делить на её размах нельзя,
+        // а единичный масштаб для неё безвреден.
+        if (peak[i] > 1e-12) out.s[i] = peak[i] / target_volt;
+    }
+    return true;
+}
+
+void apply_amplitude_scaling(const std::vector<PolyRhs>& in, const ScalePlan& sp,
+                             std::vector<PolyRhs>& out) {
+    out = in;
+    for (size_t e = 0; e < out.size(); ++e) {
+        const double si = (e < sp.s.size() && sp.s[e] != 0.0) ? sp.s[e] : 1.0;
+        for (PolyTerm& t : out[e].terms) {
+            double f = 1.0 / si;
+            if (t.v1 >= 0 && (size_t)t.v1 < sp.s.size()) f *= sp.s[(size_t)t.v1];
+            if (t.v2 >= 0 && (size_t)t.v2 < sp.s.size()) f *= sp.s[(size_t)t.v2];
+            t.coeff *= f;
+        }
+    }
+}
+
 // --- синтез графа -------------------------------------------------------------
 
 int CircuitGraph::add_node(const std::string& name) {
