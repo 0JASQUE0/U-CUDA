@@ -8,7 +8,7 @@
 | Файл | Что это |
 |---|---|
 | `lorenz_reference.cir` | SPICE-netlist схемы на идеальных компонентах |
-| `lorenz_reference_trajectory.csv` | Эталонная траектория: `t_ode`, `t_circuit_s`, `u_V`, `v_V`, `w_V` |
+| `lorenz_reference_trajectory.csv` | Эталонная траектория: `t_ode`, `t_circuit_s`, `u_V`, `v_V`, `w_V`. **В репозитории не хранится** — 425 КБ точек, которые генератор воспроизводит побитово. Создать: `python gen_lorenz_reference.py` |
 | `lorenz_reference_invariants.json` | LLE, диапазоны переменных, самооценка точности |
 | `gen_lorenz_reference.py` | Чем сгенерированы два файла выше |
 
