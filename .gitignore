@@ -65,3 +65,11 @@ ucuda-dashboard/
 .claudeignore
 # Visual Studio: временная копия при сохранении файла, открытого в редакторе
 enc_temp_folder/
+
+# Отладочный лог схемного пути (создаётся приложением в рабочей папке)
+circuit_trace.log
+
+# Эталонная траектория фикстуры: 425 КБ, воспроизводится побитово
+# генератором tests/fixtures/gen_lorenz_reference.py, поэтому в репозитории
+# держим генератор и инварианты, а не сами точки.
+tests/fixtures/lorenz_reference_trajectory.csv

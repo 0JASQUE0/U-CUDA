@@ -21,7 +21,7 @@
 #include "image_source.h"     // copy_framebuffer_rect_to_clipboard
 
 #include <windows.h>
-#include <commdlg.h>          // GetOpenFileName
+#include <shobjidl.h>         // IFileDialog: современный диалог файлов
 #include <memory>
 #include <string>
 #include <cstdio>
@@ -179,32 +179,80 @@ static std::string resolve_python_exe(const std::string& project_dir) {
     return "python";
 }
 
-static std::string pick_image_file_win() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.bmp\0All\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn)) return std::string(filename);
-    return "";
+
+
+// Современный диалог файлов (Common Item Dialog, COM) вместо GetOpenFileName /
+// GetSaveFileName.
+//
+// Устаревшие общие диалоги загружают в процесс расширения оболочки, и сбойное
+// расширение роняет хозяина. Симптом был именно такой: падение ВНУТРИ диалога с
+// нарушением прав доступа, воспроизводившееся и на чистом main, где никакого
+// нового кода нет. Общий диалог единственный на все три вызова, чтобы разойтись
+// им было негде.
+static std::string com_file_dialog(bool save, const COMDLG_FILTERSPEC* filters,
+                                   UINT n_filters, const wchar_t* def_ext) {
+    // GLFW уже инициализирует COM apartment-threaded, но зависеть от чужого
+    // порядка инициализации не хочется. S_FALSE (уже инициализирован) тоже
+    // требует парного CoUninitialize, поэтому проверяем SUCCEEDED, а не S_OK.
+    const HRESULT ci = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool need_uninit = SUCCEEDED(ci);
+
+    std::string out;
+    IFileDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
+                                  nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
+    if (SUCCEEDED(hr) && dlg) {
+        if (n_filters) dlg->SetFileTypes(n_filters, filters);
+        if (def_ext)   dlg->SetDefaultExtension(def_ext);
+        DWORD opts = 0;
+        if (SUCCEEDED(dlg->GetOptions(&opts))) {
+            // FORCEFILESYSTEM: не отдавать виртуальные элементы оболочки, для
+            // которых нет пути на диске.
+            dlg->SetOptions(opts | FOS_FORCEFILESYSTEM
+                            | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+        }
+        if (SUCCEEDED(dlg->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+                PWSTR wpath = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wpath)) && wpath) {
+                    // В ANSI, как отдавал прежний диалог: остальной код открывает
+                    // файлы УЗКИМИ путями, и смена кодировки здесь сломала бы их.
+                    const int n = WideCharToMultiByte(CP_ACP, 0, wpath, -1, nullptr, 0, nullptr, nullptr);
+                    if (n > 1) {
+                        out.resize((size_t)n - 1);
+                        WideCharToMultiByte(CP_ACP, 0, wpath, -1, &out[0], n, nullptr, nullptr);
+                    }
+                    CoTaskMemFree(wpath);
+                }
+                item->Release();
+            }
+        }
+        dlg->Release();
+    }
+    if (need_uninit) CoUninitialize();
+    return out;
 }
 
-// Save-file dialog for plot CSV export. OFN_OVERWRITEPROMPT makes Windows
-// confirm before clobbering an existing file. Default extension is appended
-// when the user types a bare filename. Mirrors pick_image_file_win above.
+static std::string pick_image_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Images", L"*.png;*.jpg;*.jpeg;*.bmp" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
+// Диалог сохранения для правого клика "Export data..." на диаграммах.
+// Возвращает выбранный абсолютный путь либо пустую строку при отмене.
 static std::string pick_save_csv_file_win() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "CSV\0*.csv\0All\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = "csv";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOREADONLYRETURN;
-    if (GetSaveFileNameA(&ofn)) return std::string(filename);
-    return "";
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"CSV", L"*.csv" }, { L"All files", L"*.*" } };
+    return com_file_dialog(true, f, 2, L"csv");
+}
+
+// Диалог сохранения SPICE-netlist'а.
+static std::string pick_save_netlist_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"SPICE netlist", L"*.cir;*.net" }, { L"All files", L"*.*" } };
+    return com_file_dialog(true, f, 2, L"cir");
 }
 
 static void set_clipboard_win(const std::string& text) {
@@ -268,6 +316,7 @@ int main() {
     cb.pick_image_file = pick_image_file_win;
     cb.set_clipboard_text = set_clipboard_win;
     cb.pick_save_file_csv = pick_save_csv_file_win;
+    cb.pick_save_file_netlist = pick_save_netlist_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).
@@ -563,6 +612,10 @@ int main() {
                 model.pending_screenshot.active = false;
             }
         }
+
+        // Действия, которым нужен платформенный модальный диалог: только вне
+        // кадра ImGui, иначе его цикл сообщений вызовет рекурсивную отрисовку.
+        gui_process_deferred(model, cb);
 
         glfwSwapBuffers(window);
     }

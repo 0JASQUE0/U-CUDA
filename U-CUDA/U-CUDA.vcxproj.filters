@@ -19,6 +19,24 @@
     <ClCompile Include="sysparse.cpp">
       <Filter>Parser</Filter>
     </ClCompile>
+    <ClCompile Include="circuit_codegen.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_emit.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_netlist.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_nvrtc.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_solver.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_synth.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
     <ClCompile Include="codegen.cpp">
       <Filter>Parser</Filter>
     </ClCompile>
@@ -107,6 +125,21 @@
   <ItemGroup>
     <ClInclude Include="sysparse.hpp">
       <Filter>Parser</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_codegen.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_netlist.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_nvrtc.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_solver.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_synth.h">
+      <Filter>Circuit</Filter>
     </ClInclude>
     <ClInclude Include="codegen.hpp">
       <Filter>Parser</Filter>
@@ -244,6 +277,9 @@
     </Filter>
     <Filter Include="Compute">
       <UniqueIdentifier>{b193475e-8acb-4a0e-9148-43e4242ebb08}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Circuit">
+      <UniqueIdentifier>{92779a5e-4fe6-409f-8284-fe9d3e2252ec}</UniqueIdentifier>
     </Filter>
     <Filter Include="NVRTC">
       <UniqueIdentifier>{ea9812ed-ce54-4d9c-bb49-5942f266713a}</UniqueIdentifier>

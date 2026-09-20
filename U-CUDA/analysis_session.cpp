@@ -1,8 +1,11 @@
 ﻿#include "analysis_session.h"
+#include "circuit_synth.h"
+#include "circuit_solver.h"
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -240,6 +243,10 @@ struct PhaseRunInputs {
     std::vector<std::vector<double>>  ic_override;   // [ic][coord]; empty → use ic_sets text
     // RQA-расчёты, запрошенные окнами проекций. Уже дедуплицированы по (ic, cfg).
     std::vector<RqaJob>               rqa_jobs;
+    // Схемная траектория (фаза 4a).
+    bool        circuit_show        = false;
+    bool        circuit_ideal_opamp = true;
+    std::string circuit_target_volt, circuit_gbw_mhz, circuit_vsat, circuit_substeps;
 };
 } // namespace
 
@@ -278,6 +285,141 @@ const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job)
 
 // Чистая функция: входы → AnalysisResult. Не трогает session, поэтому её
 // безопасно звать с любого потока.
+// Схемная траектория поверх ОДУ. Кладётся ещё одной строкой в trajectories: оттуда
+// она сама доедет до всех проекций, легенды и экспорта, без правок в отрисовке.
+//
+// Масштаб ИЗМЕРЯЕТСЯ по уже посчитанной траектории ОДУ, а не подбирается: схема
+// живёт в вольтах, и у Лоренца из библиотеки без этого вышло бы +-45 В. Наружу
+// траектория домножается на масштаб обратно — иначе две кривые в одном окне не
+// с чем было бы сравнивать.
+static void append_circuit_trajectory(const PhaseRunInputs& in,
+                                      const std::vector<double>& a,
+                                      double h, double tsim, int dec,
+                                      AnalysisResult& result) {
+    auto note = [&](const std::string& m) { result.circuit_status = m; };
+
+    if (result.trajectories.empty() || result.trajectories[0].size() < 2) {
+        note("circuit: no ODE trajectory to take the scale from");
+        return;
+    }
+    const int dim = (int)in.vars.size();
+
+    std::string err;
+    std::vector<PolyRhs> poly;
+    if (!extract_quadratic(in.sys, a, PolyExtractConfig(), poly, &err)) { note(err); return; }
+
+    ScalePlan sp;
+    if (!plan_amplitude_scaling(result.trajectories[0], parse_val(in.circuit_target_volt, 3.0),
+                                sp, &err)) { note(err); return; }
+
+    std::vector<PolyRhs> scaled;
+    apply_amplitude_scaling(poly, sp, scaled);
+
+    CircuitGraph g;
+    if (!synthesize_circuit(in.sys, scaled, SynthesisConfig(), g, &err)) { note(err); return; }
+
+    CircuitSolverConfig cfg;
+    cfg.opamp.ideal  = in.circuit_ideal_opamp;
+    cfg.opamp.gbw_hz = parse_val(in.circuit_gbw_mhz, 3.0) * 1.0e6;
+    cfg.opamp.vsat   = parse_val(in.circuit_vsat, 13.0);
+
+    // Схема стартует из ПЕРВОЙ ЗАПИСАННОЙ точки ОДУ, а не из НУ пользователя, и
+    // своего транзиента не проходит.
+    //
+    // Иначе обе траектории шли бы через transient (по умолчанию 100 единиц времени)
+    // каждая своим методом, и при положительном ляпуновском показателе к концу
+    // транзиента оказывались бы в НИКАК НЕ СВЯЗАННЫХ точках аттрактора. Поточечное
+    // сравнение там невозможно в принципе, и наложение теряло бы весь смысл.
+    std::vector<double> x0((size_t)dim, 0.0);
+    {
+        const std::vector<double>& p0 = result.trajectories[0][0];
+        // Границу берём по КАЖДОМУ контейнеру отдельно: sp.s и p0 сейчас одной
+        // длины по построению, но полагаться на это — значит оставить мину.
+        for (int i = 0; i < dim && i < (int)p0.size() && i < (int)sp.s.size(); ++i) {
+            const double si = sp.s[(size_t)i] != 0.0 ? sp.s[(size_t)i] : 1.0;
+            x0[(size_t)i] = p0[(size_t)i] / si;
+        }
+    }
+
+    const double sample = h * (dec > 0 ? dec : 1);
+    int sub = (int)parse_val(in.circuit_substeps, 10.0);
+    if (sub < 1) sub = 1;
+    const double hc = h / sub;
+    CircuitRunResult run = circuit_simulate(g, cfg, x0, hc, tsim, sample);
+    if (!run.ok) { note(run.error); return; }
+
+    // Сколько координат реально можно взять. dim — из in.vars, то есть из списка
+    // переменных СЕССИИ, а run.x и sp.s сидят на in.sys.vars и на размерности точки
+    // траектории. Эти списки выводятся РАЗНЫМИ путями (см. CLAUDE.md про
+    // refresh_symbols против build_system) и способны разойтись; тогда обращение по
+    // dim читало бы за границей вектора векторов, доставая мусорный std::vector —
+    // то есть портило бы кучу, а падало бы позже и в чужом месте.
+    const int ndim = (int)std::min(std::min((size_t)dim, run.x.size()), sp.s.size());
+    if (ndim < dim)
+        note("circuit: session lists " + std::to_string(dim) + " variables but the system has "
+             + std::to_string(ndim) + "; the extra ones are left at zero");
+
+    std::vector<std::vector<double>> traj;
+    traj.reserve(run.t.size());
+    for (size_t k = 0; k < run.t.size(); ++k) {
+        // Длина точки остаётся dim: проекции адресуют координаты по индексам из
+        // списка сессии, и короткая точка увела бы за границу уже отрисовку.
+        std::vector<double> p((size_t)dim, 0.0);
+        for (int i = 0; i < ndim; ++i) {
+            if (k >= run.x[(size_t)i].size()) break;
+            p[(size_t)i] = run.x[(size_t)i][k] * sp.s[(size_t)i];
+        }
+        traj.push_back(std::move(p));
+    }
+
+    result.circuit_valid     = true;
+    result.circuit_graph     = g;
+    result.circuit_scale     = sp.s;
+    result.circuit_x0        = x0;
+    result.circuit_opamp     = cfg.opamp;
+    result.circuit_h_ode     = hc;
+    result.circuit_t_end_ode = tsim;
+
+    result.trajectories.push_back(std::move(traj));
+    result.labels.push_back(in.circuit_ideal_opamp ? "circuit (ideal)" : "circuit (one-pole)");
+    result.visible.push_back(true);
+    result.ic_text.push_back("circuit");
+
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "circuit: %d nodes, %d op-amps, %d multipliers; scale",
+                  (int)g.nodes.size(), (int)g.opamps.size(), (int)g.multipliers.size());
+    std::string msg = buf;
+    for (int i = 0; i < dim && i < (int)sp.s.size(); ++i) {
+        std::snprintf(buf, sizeof(buf), " %s/%.3g", in.vars[(size_t)i].c_str(), sp.s[(size_t)i]);
+        msg += buf;
+    }
+    std::snprintf(buf, sizeof(buf), ", step %.3g (%dx), Newton %.2f iter/step",
+                  hc, sub,
+                  (double)run.stats.newton_iters /
+                  (double)(run.stats.steps ? run.stats.steps : 1));
+    msg += buf;
+
+    // Докуда кривые ещё совпадают. На хаосе это главная величина: дальше расхождение
+    // растёт по построению, и смотреть надо на форму аттрактора, а не на точки.
+    {
+        const std::vector<std::vector<double>>& ode = result.trajectories[0];
+        const std::vector<std::vector<double>>& cir = result.trajectories.back();
+        double span = 0.0;
+        for (int i = 0; i < ndim; ++i) span = std::max(span, sp.s[(size_t)i]);
+        const double tol = 0.02 * span * 3.0;   // 2% от характерной амплитуды
+        size_t k = 0;
+        for (; k < ode.size() && k < cir.size(); ++k) {
+            double d = 0.0;
+            for (int i = 0; i < dim && i < (int)ode[k].size(); ++i)
+                d = std::max(d, std::fabs(ode[k][(size_t)i] - cir[k][(size_t)i]));
+            if (d > tol) break;
+        }
+        std::snprintf(buf, sizeof(buf), "; tracks the ODE for %.3g time units", (double)k * sample);
+        msg += buf;
+    }
+    note(msg);
+}
+
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     AnalysisResult result;
     auto _t0 = std::chrono::high_resolution_clock::now();
@@ -499,6 +641,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         result.snapshot.ic_labels.push_back(in.ic_sets[k].label);
     }
 
+    if (in.circuit_show && result.ok)
+        append_circuit_trajectory(in, a, h, tsim, dec, result);
+
     auto _t1 = std::chrono::high_resolution_clock::now();
     double _ms = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
     if (result.error.empty())
@@ -541,6 +686,12 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     }
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
+    in.circuit_show        = s.circuit_show;
+    in.circuit_ideal_opamp = s.circuit_ideal_opamp;
+    in.circuit_target_volt = s.circuit_target_volt;
+    in.circuit_gbw_mhz     = s.circuit_gbw_mhz;
+    in.circuit_vsat        = s.circuit_vsat;
+    in.circuit_substeps    = s.circuit_substeps;
     // Continuation: on frames >= 1 resume from the previous chunk's final X[]
     // and skip the transient (already burned in). Size mismatch (user added or
     // removed an IC mid-run) falls back to first-frame semantics.

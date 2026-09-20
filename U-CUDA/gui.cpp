@@ -1,4 +1,6 @@
 ﻿#include "gui.h"
+#include "circuit_netlist.h"
+#include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
 #include "implot.h"
@@ -3590,9 +3592,12 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
 // метод (заглушка), кнопка пересчёта. Reset lambda — что делает «Reset to defaults»:
 // Analysis-tab передаёт model.from_record + start_phase_analysis, Custom-tab nullptr
 // (там перезагружаются из System tab или Run pipeline).
+// cbp — только ради диалога сохранения netlist'а. Необязателен: в Custom эту же
+// панель рисует уровень 3, где callbacks не прокинуты, и кнопка там неактивна.
 static void draw_phase_controls(PhaseAnalysisSession& s,
                                 std::function<void()> on_reset_defaults,
-                                AppModel* bc = nullptr) {
+                                AppModel* bc = nullptr,
+                                const GuiCallbacks* cbp = nullptr) {
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     // В Custom эту же панель рисует уровень 3, и источником там остаётся
     // Custom: его Shared config и есть то, что уйдёт в расчёт.
@@ -3657,6 +3662,51 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Checkbox("Auto recompute", &s.auto_recompute); ImGui::SameLine();
     ImGui::Checkbox("Legend shows initial conditions", &s.legend_show_ic); ImGui::SameLine();
     ImGui::Checkbox("GPU", &s.use_gpu);
+
+    // Схемная траектория (фаза 4a). Отдельной секцией, а не ещё одной галкой в ряд:
+    // настройки тут про ЖЕЛЕЗО, и путать их с параметрами интегрирования нельзя.
+    if (ImGui::CollapsingHeader("Analog circuit overlay")) {
+        bool cch = ImGui::Checkbox("Overlay circuit trajectory", &s.circuit_show);
+        if (s.circuit_show) {
+            cch |= ImGui::Checkbox("Ideal op-amp", &s.circuit_ideal_opamp);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("An ideal op-amp reproduces the ODE exactly, so the two curves"
+                                  " coincide.\nSwitch it off to see what the hardware actually does.");
+            ImGui::Text("Target amplitude (V):"); ImGui::SameLine();
+            cch |= InputNumStr("##ctgt", s.circuit_target_volt, 70);
+            ImGui::SameLine(); ImGui::Text("Substeps:"); ImGui::SameLine();
+            cch |= InputNumStr("##csub", s.circuit_substeps, 60);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The circuit is integrated with BDF2 (2nd order) while the ODE"
+                                  " uses your chosen scheme.\nAt the same step the circuit would"
+                                  " drift from the ODE by the method alone.");
+            if (!s.circuit_ideal_opamp) {
+                ImGui::SameLine(); ImGui::Text("GBW (MHz):"); ImGui::SameLine();
+                cch |= InputNumStr("##cgbw", s.circuit_gbw_mhz, 70);
+                ImGui::SameLine(); ImGui::Text("Vsat (V):"); ImGui::SameLine();
+                cch |= InputNumStr("##cvsat", s.circuit_vsat, 70);
+            }
+            if (!s.result.circuit_status.empty())
+                ImGui::TextWrapped("%s", s.result.circuit_status.c_str());
+
+            ImGui::Checkbox("Multisim dialect (POLY)", &s.circuit_netlist_poly);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Multisim drops behavioural B sources on import, which leaves"
+                                  " the multiplier nodes undriven\nand their resistors hanging by one"
+                                  " end. POLY sources survive the trip.");
+            ImGui::BeginDisabled(!s.result.circuit_valid || !bc);
+            // Только заявка. Диалог открывается после кадра: см.
+            // gui_process_deferred и AppModel::pending_netlist_export.
+            if (ImGui::Button("Export SPICE netlist...") && bc) {
+                bc->pending_netlist_export = true;
+            }
+            ImGui::EndDisabled();
+        }
+        if (cch) changed = true;
+    }
 
     // Continuation is Analysis-only: Custom-tab phase is a pipeline stage
     // whose queue would fight a timer-driven re-run.
@@ -13060,6 +13110,34 @@ template <class Session>
 }
 
 // Главное окно: переключатель режимов Library / Analysis / Parametric
+void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
+    if (!model.pending_netlist_export) return;
+    model.pending_netlist_export = false;
+    if (!cb.pick_save_file_netlist) return;
+
+    PhaseAnalysisSession& s = model.phase_session;
+    if (!s.result.circuit_valid) return;
+
+    const std::string path = cb.pick_save_file_netlist();
+    if (path.empty()) return;
+
+    NetlistOptions no;
+    no.title      = "U-CUDA synthesized circuit";
+    no.var_names  = s.vars;
+    no.rhs_text   = s.sys.rhs;
+    no.scale      = s.result.circuit_scale;
+    no.x0_volts   = s.result.circuit_x0;
+    no.opamp      = s.result.circuit_opamp;
+    no.h_ode      = s.result.circuit_h_ode;
+    no.t_end_ode  = s.result.circuit_t_end_ode;
+    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
+
+    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
+    std::ofstream f(path, std::ios::binary);
+    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
+    else     s.result.circuit_status = "cannot write " + path;
+}
+
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -13814,7 +13892,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     model.from_record(lib.load(model.loaded_name));   // reference from disk
                     model.start_phase_analysis();
                 }
-            }, &model);
+            }, &model, &cb);
         }
         ImGui::End();
         draw_projection_windows(model.phase_session, cb);
