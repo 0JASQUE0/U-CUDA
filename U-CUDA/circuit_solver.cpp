@@ -11,54 +11,68 @@ namespace {
 const double kPi = 3.14159265358979323846;
 }
 
-bool CircuitSolver::build(const CircuitGraph& g, const CircuitSolverConfig& cfg, std::string* err) {
+bool build_mna_layout(const CircuitGraph& g, const CircuitSolverConfig& cfg,
+                      MnaLayout& lay, std::string* err) {
     auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
 
-    if (g.nodes.empty())   return fail("circuit solver: empty graph");
+    if (g.nodes.empty()) return fail("circuit solver: empty graph");
     if (cfg.opamp.slew != 0.0)
         return fail("circuit solver: slew rate is not modelled yet (phase 2.5 decides whether it is needed)");
 
-    g_   = g;
-    cfg_ = cfg;
-    stats_ = CircuitSolverStats();
+    lay = MnaLayout();
+    lay.graph   = g;
+    lay.n_nodes = (int)lay.graph.nodes.size();
 
-    n_nodes_ = (int)g_.nodes.size();
-    branches_.clear();
-    caps_.clear();
+    for (const CircuitCapacitor& c : lay.graph.capacitors)
+        lay.caps.push_back(MnaLayout::Cap{ c.a, c.b, c.farad });
 
-    for (const CircuitCapacitor& c : g_.capacitors)
-        caps_.push_back(Cap{ c.a, c.b, c.farad, 0.0, 0.0 });
+    for (size_t i = 0; i < lay.graph.vsources.size(); ++i)
+        lay.branches.push_back(MnaLayout::Branch{ MnaLayout::BranchKind::VSource,
+                                                  (int)i, lay.graph.vsources[i].node, -1 });
 
-    for (size_t i = 0; i < g_.vsources.size(); ++i)
-        branches_.push_back(Branch{ BranchKind::VSource, (int)i, g_.vsources[i].node, -1 });
-
-    for (size_t i = 0; i < g_.opamps.size(); ++i) {
-        if (cfg_.opamp.ideal) {
-            branches_.push_back(Branch{ BranchKind::OpAmpIdeal, (int)i, g_.opamps[i].out, -1 });
+    for (size_t i = 0; i < lay.graph.opamps.size(); ++i) {
+        if (cfg.opamp.ideal) {
+            lay.branches.push_back(MnaLayout::Branch{ MnaLayout::BranchKind::OpAmpIdeal,
+                                                      (int)i, lay.graph.opamps[i].out, -1 });
         } else {
             // Однополюсная модель разворачивается в gm-каскад на внутренний узел,
             // R_p и C_p на землю и ограниченный буфер — всё через обычные штампы.
-            const int pole = n_nodes_++;
-            g_.nodes.push_back(CircuitNode{ "p_" + g_.nodes[(size_t)g_.opamps[i].out].name });
-            caps_.push_back(Cap{ pole, 0, cfg_.opamp_cpole, 0.0, 0.0 });
-            branches_.push_back(Branch{ BranchKind::OpAmpReal, (int)i, g_.opamps[i].out, pole });
+            const int pole = lay.n_nodes++;
+            lay.graph.nodes.push_back(
+                CircuitNode{ "p_" + lay.graph.nodes[(size_t)lay.graph.opamps[i].out].name });
+            lay.caps.push_back(MnaLayout::Cap{ pole, 0, cfg.opamp_cpole });
+            lay.branches.push_back(MnaLayout::Branch{ MnaLayout::BranchKind::OpAmpReal,
+                                                      (int)i, lay.graph.opamps[i].out, pole });
         }
     }
 
-    for (size_t i = 0; i < g_.multipliers.size(); ++i)
-        branches_.push_back(Branch{ BranchKind::Multiplier, (int)i, g_.multipliers[i].out, -1 });
+    for (size_t i = 0; i < lay.graph.multipliers.size(); ++i)
+        lay.branches.push_back(MnaLayout::Branch{ MnaLayout::BranchKind::Multiplier,
+                                                  (int)i, lay.graph.multipliers[i].out, -1 });
 
-    if (!cfg_.opamp.ideal) {
-        if (cfg_.opamp.gbw_hz <= 0.0 || cfg_.opamp.a0 <= 0.0 || cfg_.opamp_cpole <= 0.0)
+    if (!cfg.opamp.ideal) {
+        if (cfg.opamp.gbw_hz <= 0.0 || cfg.opamp.a0 <= 0.0 || cfg.opamp_cpole <= 0.0)
             return fail("circuit solver: op-amp A0, GBW and pole capacitance must be positive");
-        gm_ = 2.0 * kPi * cfg_.opamp.gbw_hz * cfg_.opamp_cpole;
-        rp_ = cfg_.opamp.a0 / gm_;
+        lay.gm = 2.0 * kPi * cfg.opamp.gbw_hz * cfg.opamp_cpole;
+        lay.rp = cfg.opamp.a0 / lay.gm;
     }
 
-    n_v_  = n_nodes_ - 1;
-    size_ = n_v_ + (int)branches_.size();
-    if (size_ <= 0) return fail("circuit solver: nothing to solve");
+    lay.n_v  = lay.n_nodes - 1;
+    lay.size = lay.n_v + (int)lay.branches.size();
+    if (lay.size <= 0) return fail("circuit solver: nothing to solve");
+    return true;
+}
 
+bool CircuitSolver::build(const CircuitGraph& g, const CircuitSolverConfig& cfg, std::string* err) {
+    cfg_   = cfg;
+    stats_ = CircuitSolverStats();
+    if (!build_mna_layout(g, cfg, lay_, err)) return false;
+
+    n_v_  = lay_.n_v;
+    size_ = lay_.size;
+
+    q_prev_.assign(lay_.caps.size(), 0.0);
+    q_prev2_.assign(lay_.caps.size(), 0.0);
     x_.assign((size_t)size_, 0.0);
     jac_.assign((size_t)size_ * size_, 0.0);
     res_.assign((size_t)size_, 0.0);
@@ -71,12 +85,12 @@ bool CircuitSolver::build(const CircuitGraph& g, const CircuitSolverConfig& cfg,
 void CircuitSolver::set_initial_variables(const std::vector<double>& x0) {
     // Состояние живёт в заряде конденсатора обратной связи, а не в узле:
     // q = C*(V(s) - V(out)) = C*(0 - x0) при виртуальной земле на суммирующем.
-    const int n = (int)std::min(x0.size(), g_.var_node.size());
+    const int n = (int)std::min(x0.size(), lay_.graph.var_node.size());
     for (int i = 0; i < n; ++i) {
-        for (size_t c = 0; c < caps_.size(); ++c) {
-            if (caps_[c].b != g_.var_node[(size_t)i]) continue;
-            caps_[c].q_prev  = -caps_[c].farad * x0[(size_t)i];
-            caps_[c].q_prev2 = caps_[c].q_prev;
+        for (size_t c = 0; c < lay_.caps.size(); ++c) {
+            if (lay_.caps[c].b != lay_.graph.var_node[(size_t)i]) continue;
+            q_prev_[c]  = -lay_.caps[c].farad * x0[(size_t)i];
+            q_prev2_[c] = q_prev_[c];
         }
     }
     started_ = false;
@@ -88,7 +102,7 @@ void CircuitSolver::assemble(double alpha, bool bdf2, double h) {
 
     auto V = [&](int node) { return node > 0 ? x_[(size_t)(node - 1)] : 0.0; };
 
-    for (const CircuitResistor& r : g_.resistors) {
+    for (const CircuitResistor& r : lay_.graph.resistors) {
         const double g = r.siemens;
         if (g == 0.0) continue;                 // моном с нулевым коэффициентом = разрыв
         const double i = g * (V(r.a) - V(r.b));
@@ -98,11 +112,12 @@ void CircuitSolver::assemble(double alpha, bool bdf2, double h) {
         add_j(idx(r.b), idx(r.a), -g); add_j(idx(r.b), idx(r.b), +g);
     }
 
-    for (const Cap& c : caps_) {
+    for (size_t ci = 0; ci < lay_.caps.size(); ++ci) {
+        const MnaLayout::Cap& c = lay_.caps[ci];
         const double v    = V(c.a) - V(c.b);
         const double q    = c.farad * v;
-        const double hist = bdf2 ? (4.0 * c.q_prev - c.q_prev2) / (2.0 * h)
-                                 : c.q_prev / h;
+        const double hist = bdf2 ? (4.0 * q_prev_[ci] - q_prev2_[ci]) / (2.0 * h)
+                                 : q_prev_[ci] / h;
         const double i    = alpha * q - hist;
         const double g    = alpha * c.farad;
         add_f(idx(c.a), +i);
@@ -111,8 +126,8 @@ void CircuitSolver::assemble(double alpha, bool bdf2, double h) {
         add_j(idx(c.b), idx(c.a), -g); add_j(idx(c.b), idx(c.b), +g);
     }
 
-    for (size_t k = 0; k < branches_.size(); ++k) {
-        const Branch& br = branches_[k];
+    for (size_t k = 0; k < lay_.branches.size(); ++k) {
+        const MnaLayout::Branch& br = lay_.branches[k];
         const int     row = n_v_ + (int)k;
 
         // Ток ветви втекает в узел out — вклад в его КЗТ и столбец якобиана.
@@ -120,29 +135,29 @@ void CircuitSolver::assemble(double alpha, bool bdf2, double h) {
         add_j(idx(br.out), row, +1.0);
 
         switch (br.kind) {
-        case BranchKind::VSource: {
-            const CircuitVSource& s = g_.vsources[(size_t)br.elem];
+        case MnaLayout::BranchKind::VSource: {
+            const CircuitVSource& s = lay_.graph.vsources[(size_t)br.elem];
             res_[(size_t)row] += V(s.node) - s.volt;
             add_j(row, idx(s.node), 1.0);
             break;
         }
-        case BranchKind::OpAmpIdeal: {
+        case MnaLayout::BranchKind::OpAmpIdeal: {
             // Нуллор: входы уравнены, выход отдаёт любой ток.
-            const CircuitOpAmp& o = g_.opamps[(size_t)br.elem];
+            const CircuitOpAmp& o = lay_.graph.opamps[(size_t)br.elem];
             res_[(size_t)row] += V(o.in_plus) - V(o.in_minus);
             add_j(row, idx(o.in_plus),  +1.0);
             add_j(row, idx(o.in_minus), -1.0);
             break;
         }
-        case BranchKind::OpAmpReal: {
-            const CircuitOpAmp& o = g_.opamps[(size_t)br.elem];
+        case MnaLayout::BranchKind::OpAmpReal: {
+            const CircuitOpAmp& o = lay_.graph.opamps[(size_t)br.elem];
             // gm-каскад: ток gm*(V+ - V-) втекает во внутренний узел полюса.
-            const double gin = gm_ * (V(o.in_plus) - V(o.in_minus));
+            const double gin = lay_.gm * (V(o.in_plus) - V(o.in_minus));
             add_f(idx(br.pole), -gin);
-            add_j(idx(br.pole), idx(o.in_plus),  -gm_);
-            add_j(idx(br.pole), idx(o.in_minus), +gm_);
+            add_j(idx(br.pole), idx(o.in_plus),  -lay_.gm);
+            add_j(idx(br.pole), idx(o.in_minus), +lay_.gm);
             // R_p на землю задаёт усиление на постоянном токе вместе с gm.
-            const double gp = 1.0 / rp_;
+            const double gp = 1.0 / lay_.rp;
             add_f(idx(br.pole), +gp * V(br.pole));
             add_j(idx(br.pole), idx(br.pole), +gp);
             // Мягкое ограничение выхода: жёсткий клип обнуляет производную.
@@ -153,8 +168,8 @@ void CircuitSolver::assemble(double alpha, bool bdf2, double h) {
             add_j(row, idx(br.pole), -(1.0 - th * th));
             break;
         }
-        case BranchKind::Multiplier: {
-            const CircuitMultiplier& m = g_.multipliers[(size_t)br.elem];
+        case MnaLayout::BranchKind::Multiplier: {
+            const CircuitMultiplier& m = lay_.graph.multipliers[(size_t)br.elem];
             const double dx = V(m.x1) - V(m.x2);
             const double dy = V(m.y1) - V(m.y2);
             res_[(size_t)row] += V(m.out) - (dx * dy / 10.0 + V(m.z));
@@ -247,13 +262,19 @@ bool CircuitSolver::step(double h, std::string* err) {
     if (last_norm >= cfg_.newton_tol) stats_.converged_always = false;
 
     auto V = [&](int node) { return node > 0 ? x_[(size_t)(node - 1)] : 0.0; };
-    for (Cap& c : caps_) {
-        c.q_prev2 = c.q_prev;
-        c.q_prev  = c.farad * (V(c.a) - V(c.b));
+    for (size_t ci = 0; ci < lay_.caps.size(); ++ci) {
+        const MnaLayout::Cap& c = lay_.caps[ci];
+        q_prev2_[ci] = q_prev_[ci];
+        q_prev_[ci]  = c.farad * (V(c.a) - V(c.b));
     }
     started_ = true;
     ++stats_.steps;
     return true;
+}
+
+const std::vector<double>& CircuitSolver::debug_assemble_jacobian(double h) {
+    assemble(started_ ? 1.5 / h : 1.0 / h, started_, h);
+    return jac_;
 }
 
 double CircuitSolver::node_voltage(int node) const {
@@ -261,8 +282,8 @@ double CircuitSolver::node_voltage(int node) const {
 }
 
 double CircuitSolver::variable(int i) const {
-    if (i < 0 || i >= (int)g_.var_node.size()) return 0.0;
-    return node_voltage(g_.var_node[(size_t)i]);
+    if (i < 0 || i >= (int)lay_.graph.var_node.size()) return 0.0;
+    return node_voltage(lay_.graph.var_node[(size_t)i]);
 }
 
 // --- прогон ------------------------------------------------------------------

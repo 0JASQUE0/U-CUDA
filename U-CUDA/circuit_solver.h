@@ -46,6 +46,41 @@ struct CircuitSolverStats {
     bool      pivot_failed     = false;
 };
 
+// Раскладка неизвестных MNA. Вынесена наружу, потому что её обязаны разделять CPU-решатель
+// и GPU-кодогенератор: разъехавшись, они дадут разные индексы при одинаковой схеме, и
+// сверка GPU против CPU будет сравнивать разные вещи.
+//
+// Порядок неизвестных: [напряжения узлов 1..n_nodes-1][токи ветвей].
+struct MnaLayout {
+    enum class BranchKind { VSource, OpAmpIdeal, OpAmpReal, Multiplier };
+
+    struct Branch {
+        BranchKind kind;
+        int        elem = 0;      // индекс в соответствующем списке графа
+        int        out  = 0;      // узел, куда втекает ток ветви
+        int        pole = -1;     // внутренний узел полюса, только у OpAmpReal
+    };
+
+    struct Cap {
+        int    a = 0, b = 0;
+        double farad = 0.0;
+    };
+
+    CircuitGraph        graph;      // граф, расширенный внутренними узлами полюсов
+    std::vector<Branch> branches;
+    std::vector<Cap>    caps;
+
+    int    n_nodes = 0;   // включая землю и внутренние узлы
+    int    n_v     = 0;   // неизвестных-напряжений
+    int    size    = 0;   // полный размер системы
+    double gm = 0.0, rp = 0.0;   // параметры однополюсной модели
+
+    int idx(int node) const { return node > 0 ? node - 1 : -1; }
+};
+
+bool build_mna_layout(const CircuitGraph& g, const CircuitSolverConfig& cfg,
+                      MnaLayout& out, std::string* err);
+
 class CircuitSolver {
 public:
     // Раскладывает граф в MNA: узлы + токи ветвей элементов, заданных напряжением
@@ -67,42 +102,28 @@ public:
     const CircuitSolverStats& stats() const { return stats_; }
     void reset_stats() { stats_ = CircuitSolverStats(); }
 
+    const MnaLayout& layout() const { return lay_; }
+
+    // Пересобирает якобиан в текущей точке, не решая: после step() матрица
+    // разрушена LU на месте. Нужен проверке структурного портрета в codegen.
+    const std::vector<double>& debug_assemble_jacobian(double h);
+
 private:
-    enum class BranchKind { VSource, OpAmpIdeal, OpAmpReal, Multiplier };
-
-    struct Branch {
-        BranchKind kind;
-        int        elem = 0;      // индекс в соответствующем списке графа
-        int        out  = 0;      // узел, куда втекает ток ветви
-        int        pole = -1;     // внутренний узел полюса, только у OpAmpReal
-    };
-
-    struct Cap {
-        int    a = 0, b = 0;
-        double farad = 0.0;
-        double q_prev = 0.0, q_prev2 = 0.0;
-    };
-
-    int  idx(int node) const { return node > 0 ? node - 1 : -1; }
+    int  idx(int node) const { return lay_.idx(node); }
     void add_j(int r, int c, double v) { if (r >= 0 && c >= 0) jac_[(size_t)r * size_ + c] += v; }
     void add_f(int r, double v)        { if (r >= 0) res_[(size_t)r] += v; }
     void assemble(double alpha, bool bdf2, double h);
     bool solve_linear(std::string* err);
 
-    CircuitGraph        g_;
+    MnaLayout           lay_;
     CircuitSolverConfig cfg_;
     CircuitSolverStats  stats_;
 
-    int  n_nodes_ = 0;      // включая внутренние узлы полюсов и землю
-    int  n_v_     = 0;      // неизвестных-напряжений
-    int  size_    = 0;      // полный размер системы
+    int  n_v_  = 0;
+    int  size_ = 0;
 
-    double gm_ = 0.0, rp_ = 0.0;   // параметры однополюсной модели
-
-    std::vector<Branch> branches_;
-    std::vector<Cap>    caps_;
-
-    std::vector<double> x_;        // текущее решение
+    std::vector<double> q_prev_, q_prev2_;   // история зарядов, по одной на конденсатор
+    std::vector<double> x_;                  // текущее решение
     std::vector<double> jac_, res_, delta_;
     std::vector<int>    pivot_;
     bool                started_ = false;   // была ли уже хоть одна точка истории

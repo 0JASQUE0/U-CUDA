@@ -19,6 +19,9 @@
     <ClCompile Include="sysparse.cpp">
       <Filter>Parser</Filter>
     </ClCompile>
+    <ClCompile Include="circuit_codegen.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
     <ClCompile Include="circuit_solver.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
@@ -113,6 +116,9 @@
   <ItemGroup>
     <ClInclude Include="sysparse.hpp">
       <Filter>Parser</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_codegen.h">
+      <Filter>Circuit</Filter>
     </ClInclude>
     <ClInclude Include="circuit_solver.h">
       <Filter>Circuit</Filter>
