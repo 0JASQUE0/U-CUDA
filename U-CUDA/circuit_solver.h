@@ -29,6 +29,9 @@ struct OpAmpModel {
 struct CircuitSolverConfig {
     OpAmpModel opamp;
     int    newton_max_iters = 20;
+    // > 0 — ровно столько итераций, без выхода по невязке. Нужен сверке с GPU:
+    // там ветвление убрано, и алгоритмы обязаны совпадать операция в операцию.
+    int    newton_fixed     = 0;
     double newton_tol       = 1.0e-10;   // по бесконечной норме поправки, В
     double newton_max_step  = 5.0;       // limiting: потолок |dV| за итерацию
     double pivot_min        = 1.0e-14;

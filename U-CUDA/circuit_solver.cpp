@@ -236,9 +236,10 @@ bool CircuitSolver::step(double h, std::string* err) {
     const bool   bdf2  = started_;
     const double alpha = bdf2 ? 1.5 / h : 1.0 / h;
 
+    const int max_it = cfg_.newton_fixed > 0 ? cfg_.newton_fixed : cfg_.newton_max_iters;
     int    iter = 0;
     double last_norm = 0.0;
-    for (; iter < cfg_.newton_max_iters; ++iter) {
+    for (; iter < max_it; ++iter) {
         assemble(alpha, bdf2, h);
         // res_ несёт F(x); решаем J*delta = -F.
         for (double& v : res_) v = -v;
@@ -254,12 +255,12 @@ bool CircuitSolver::step(double h, std::string* err) {
         }
         last_norm = norm;
         ++stats_.newton_iters;
-        if (norm < cfg_.newton_tol) { ++iter; break; }
+        if (cfg_.newton_fixed <= 0 && norm < cfg_.newton_tol) { ++iter; break; }
     }
 
     stats_.max_iters_in_step = std::max(stats_.max_iters_in_step, iter);
     stats_.max_residual      = std::max(stats_.max_residual, last_norm);
-    if (last_norm >= cfg_.newton_tol) stats_.converged_always = false;
+    if (cfg_.newton_fixed <= 0 && last_norm >= cfg_.newton_tol) stats_.converged_always = false;
 
     auto V = [&](int node) { return node > 0 ? x_[(size_t)(node - 1)] : 0.0; };
     for (size_t ci = 0; ci < lay_.caps.size(); ++ci) {

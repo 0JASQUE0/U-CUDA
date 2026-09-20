@@ -22,6 +22,12 @@
     <ClCompile Include="circuit_codegen.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
+    <ClCompile Include="circuit_emit.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="circuit_nvrtc.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
     <ClCompile Include="circuit_solver.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
@@ -118,6 +124,9 @@
       <Filter>Parser</Filter>
     </ClInclude>
     <ClInclude Include="circuit_codegen.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="circuit_nvrtc.h">
       <Filter>Circuit</Filter>
     </ClInclude>
     <ClInclude Include="circuit_solver.h">

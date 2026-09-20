@@ -28,10 +28,10 @@ void mna_pattern(const MnaLayout& lay, std::vector<MatEntry>& out) {
     out.clear();
     PatternSink s{ &lay, &out };
 
-    for (const CircuitResistor& r : lay.graph.resistors) {
-        if (r.siemens == 0.0) continue;   // разрыв: клетки не появляются вовсе
-        s.block(r.a, r.b);
-    }
+    // Нулевую проводимость НЕ пропускаем: структура запекается в код, а число
+    // приходит в рантайме. Выкинув клетку сейчас, мы потребовали бы перекомпиляции
+    // от простой смены параметра системы.
+    for (const CircuitResistor& r : lay.graph.resistors) s.block(r.a, r.b);
     for (const MnaLayout::Cap& c : lay.caps) s.block(c.a, c.b);
 
     for (size_t k = 0; k < lay.branches.size(); ++k) {
@@ -91,6 +91,11 @@ bool plan_elimination(const std::vector<MatEntry>& pattern, int n,
         col[(size_t)e.col].insert(e.row);
     }
 
+    // Портрет ПОСЛЕ fill-in: row/col по ходу исключения опустошаются, а эмиттеру
+    // нужны все клетки, которые хоть раз существовали.
+    std::set<std::pair<int, int>> all_entries;
+    for (const MatEntry& e : pattern) all_entries.insert(std::make_pair(e.row, e.col));
+
     plan = EliminationPlan();
     plan.n = n;
     plan.nnz_original = (long long)pattern.size();
@@ -132,6 +137,7 @@ bool plan_elimination(const std::vector<MatEntry>& pattern, int n,
             for (int j : es.cols) {
                 if (row[(size_t)i].insert(j).second) {
                     col[(size_t)j].insert(i);
+                    all_entries.insert(std::make_pair(i, j));
                     ++plan.nnz_fill_in;
                 }
             }
@@ -150,6 +156,8 @@ bool plan_elimination(const std::vector<MatEntry>& pattern, int n,
         for (int i : col[(size_t)bj]) row[(size_t)i].erase(bj);
         plan.steps.push_back(std::move(es));
     }
+    for (const std::pair<int, int>& e : all_entries)
+        plan.filled.push_back(MatEntry{ e.first, e.second });
     return true;
 }
 

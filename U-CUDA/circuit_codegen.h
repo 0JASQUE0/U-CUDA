@@ -43,6 +43,7 @@ struct EliminationPlan {
     long long nnz_l        = 0;   // ненулей в L: при исключении на [A|b] хранить НЕ надо
     long long peak_active  = 0;   // пик ненулей активной подматрицы
     long long mul_ops      = 0;   // умножений-сложений в факторизации
+    std::vector<MatEntry> filled; // портрет ПОСЛЕ fill-in: эмиттер обязан объявить и их
     int       max_row_len  = 0;
     bool      diagonal_free = false;  // есть ли строки без диагонального элемента
 };
@@ -54,6 +55,28 @@ bool plan_elimination(const std::vector<MatEntry>& pattern, int n,
                       EliminationPlan& out, std::string* err);
 
 std::string elimination_report(const EliminationPlan& p);
+
+// --- эмиссия прямолинейного кода ---------------------------------------------
+
+struct EmitConfig {
+    // Фиксированное число итераций, а не выход по невязке: ветвление внутри варпа
+    // означало бы, что варп идёт по худшему потоку.
+    int    newton_iters    = 3;
+    double newton_max_step = 5.0;
+    double pivot_min       = 1.0e-14;
+};
+
+struct EmittedKernel {
+    std::string         body;    // тело шага под подстановку в шаблон
+    std::vector<double> comp;    // упакованные номиналы текущего графа
+    int size = 0, n_caps = 0, n_vars = 0, n_comp = 0;
+};
+
+// Печатает шаг решателя прямолинейным кодом по плану исключения. Номиналы
+// адресуются как comp[k], литералами НЕ печатаются: иначе каждая точка свипа
+// означала бы отдельную компиляцию.
+bool emit_circuit_step(const MnaLayout& lay, const EliminationPlan& plan,
+                       const EmitConfig& ec, EmittedKernel& out, std::string* err);
 
 // Проверка структурного портрета против реальной сборки: портрет обязан быть
 // НАДМНОЖЕСТВОМ фактических ненулей. Ловит расхождение между mna_pattern и
