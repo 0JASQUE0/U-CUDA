@@ -49,6 +49,15 @@ struct System {
 // симметрии мнимый и уходит с Re — глобальный порядок 4 (замерено 4.00 на
 // Лоренце и Рёсслере). Требует s = 1/2: иначе внутренний CD несимметричен и
 // порядок падает до первого.
+// ComplexCD4S3 / ComplexCD4S4 — "CCD4 (o4s3)" и "CCD4 (o4s4)", СИММЕТРИЧНЫЕ
+// схемы 4-го порядка из того же симметричного CD (s = 1/2). Complex CD4
+// самосопряжённой не является и быть не может: палиндром из двух стадий
+// требует g1 = g2, а тогда условия sum g = 1 и sum g^3 = 0 несовместны.
+// Минимум для симметричной комплексной композиции порядка 4 — три стадии:
+//   o4s3: (alpha, 1 - 2*alpha, alpha), alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3));
+//   o4s4: (gamma/2, conj/2, conj/2, gamma/2) — Complex CD4, симметризованная
+//         композицией с собственной сопряжённой на половинном шаге.
+// Подробности, замеры и цена — у CdKind в codegen.cpp.
 // ImplicitEuler / ImplicitMidpoint — the only A-stable methods here, and the only
 // ones that solve the FULL coupled system per step (CD is diagonally implicit: it
 // solves each equation for its own variable and never sees the cross terms).
@@ -79,6 +88,7 @@ struct System {
 // Map is not an integration scheme but the right-hand side of a discrete map
 // x_{n+1} = f(x_n) itself. The only emitter that never uses h.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
+                    ComplexCD4S3, ComplexCD4S4,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
@@ -132,11 +142,15 @@ Scheme scheme_from_name(const std::string& name);
 // списка схем по порядку, вкладка Order), и резолвер КРС при сборке
 // экстраполяционной обёртки — разъехаться копиям негде.
 // Симметричной ("разложение ошибки только по чётным степеням h") помечены
-// ровно две схемы: Implicit Midpoint и CD, обе как композиция Phi* ∘ Phi.
-// У CD это верно ТОЛЬКО при a[0] = 1/2 — проверить в кодогене нельзя, a[0]
-// приходит в рантайме, поэтому ответственность на UI-предупреждении.
+// четыре схемы: Implicit Midpoint и CD как композиция Phi* ∘ Phi, плюс
+// CCD4 (o4s3) и CCD4 (o4s4) как палиндромные композиции этого же CD.
+// У всех, кроме Implicit Midpoint, это верно ТОЛЬКО при a[0] = 1/2 — проверить
+// в кодогене нельзя, a[0] приходит в рантайме, поэтому ответственность на
+// UI-предупреждении.
 // Complex CD / Complex CD4 намеренно НЕ помечены: сопряжённые полушаги — это
-// не самосопряжённость, а структура разложения после взятия Re не замерена.
+// не самосопряжённость. У Complex CD4 замеренный дефект симметрии O(h^8)
+// (у палиндромных — O(h^10)), и флаг оставлен снятым, чтобы обёртка
+// экстраполяции не считала чётность разложения гарантированной.
 // Возвращает false для неизвестного имени (в т.ч. для кастомной КРС и для
 // "Extr(...)"), выходные параметры тогда не трогаются.
 bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric);

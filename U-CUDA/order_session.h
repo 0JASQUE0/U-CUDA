@@ -38,9 +38,15 @@ constexpr int kOrderTargetH = -1;
 // "Run all" обязан знать, что именно считать для каждой вкладки, а окна
 // графиков к моменту запуска могут быть вообще закрыты.
 //   kOrderCalcOrder — порядок/ошибка по сетке (order.template.cu);
-//   kOrderCalcPerf  — время счёта vs достигнутая ошибка (perfIntegrateKernel).
+//   kOrderCalcPerf  — время счёта vs достигнутая ошибка (perfIntegrateKernel);
+//   kOrderCalcStab  — область устойчивости на двумерной задаче Дальквиста
+//                     (stabilityRegionKernel). В отличие от первых двух этот
+//                     расчёт требует КОНКРЕТНОЙ системы — library/Dahlquist 2D:
+//                     сетка идёт по собственным числам тестовой матрицы, и
+//                     правая часть обязана быть линейной двумерной.
 constexpr int kOrderCalcOrder = 0;
 constexpr int kOrderCalcPerf  = 1;
+constexpr int kOrderCalcStab  = 2;
 
 // Точность CPU-арифметики (OrderConfig::cpu_precision).
 //   kOrderPrecDouble — numb, как везде в проекте и как на GPU;
@@ -145,6 +151,41 @@ struct OrderConfig {
     bool        perf_last_run_ok = false;
     int         perf_data_generation = 0;
     bool        perf_fit_request = false;
+
+    // ---- Stability ----
+    // Область устойчивости на двумерной задаче Дальквиста. Оси карты жёстко
+    // заданы смыслом расчёта (sigma и omega — вещественная и мнимая части
+    // собственных чисел тестовой матрицы), поэтому общий селектор осей выше
+    // здесь не участвует и в этом режиме гасится.
+    //
+    // Элементы матрицы НЕ вводятся: в каждом узле они пересчитываются из
+    // (sigma, omega) и двух настроек —
+    //   d = 2*sigma/(1+k),  c = -sqrt(-(1/r)*(sigma^2*(k-1)^2/(k+1)^2 + omega^2)),
+    //   b = r*c,            a = k*d,
+    // что при любом k даёт спектр ровно sigma +- i*omega. k гоняет матрицу по
+    // семейству с одним и тем же спектром, r масштабирует недиагонали.
+    std::string stab_k_text = "1";     // коэффициент несимметричности; -1 запрещён
+    std::string stab_r_text = "-1";    // обязан быть отрицательным, иначе c мнимое
+    // Шаг, чей оператор перехода диагонализуется. По умолчанию 1: тогда оси
+    // читаются прямо как h*sigma и h*omega — классическая безразмерная
+    // картинка, и ровно этот случай считает матлабовский скрипт.
+    std::string stab_h_text = "1";
+
+    std::string stab_sig_lo_text = "-4.1";
+    std::string stab_sig_hi_text = "0.1";
+    std::string stab_om_lo_text  = "-2.75";
+    std::string stab_om_hi_text  = "2.65";
+    std::string stab_n_text      = "256";   // ОБЩЕЕ на обе оси: карта N x N
+
+    // Индексы a[], в которые кладутся элементы матрицы. Для library/Dahlquist 2D
+    // это 1..4 (params a, b, c, d), но переименовать или переставить параметры
+    // пользователю никто не запрещает, поэтому индексы явные.
+    int stab_idx_a = 1, stab_idx_b = 2, stab_idx_c = 3, stab_idx_d = 4;
+
+    StabilityResult stab_result;
+    bool            stab_last_run_ok = false;
+    int             stab_data_generation = 0;
+    bool            stab_fit_request = false;
 };
 
 struct OrderAnalysisSession {
@@ -163,10 +204,11 @@ struct OrderAnalysisSession {
     int running_config_index = -1;
 
     std::future<OrderResult> run_future;
-    // Замер времени возвращает другой тип, поэтому у него своё future;
-    // running_is_perf говорит poll'у, какое из них забирать.
-    std::future<PerfResult>  perf_future;
-    bool running_is_perf = false;
+    // Каждый расчёт вкладки возвращает свой тип, поэтому у каждого своё
+    // future; running_kind (kOrderCalc*) говорит poll'у, какое забирать.
+    std::future<PerfResult>       perf_future;
+    std::future<StabilityResult>  stab_future;
+    int  running_kind = kOrderCalcOrder;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 

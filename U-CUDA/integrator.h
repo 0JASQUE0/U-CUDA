@@ -9,6 +9,7 @@
 // не трогая расчёт траектории и остальные схемы.
 // Map is not a scheme but the discrete-map step itself (h is unused).
 enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
+                       ComplexCD4S3, ComplexCD4S4,
                        ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
 
 IntScheme int_scheme_from_string(const std::string& s);

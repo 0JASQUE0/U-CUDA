@@ -149,7 +149,8 @@ struct Bifurcation1DRequest {
     // (par_or_var = 0) свип идёт по начальному условию: var_sweep_index — 0-based индекс в
     // initial_conditions.
     // param_index == 0 — свип по самому a[0], коэффициенту симметрии s (его читают
-    // CD / Complex CD / Complex CD4 / SEMP / SIMP). Отдельного флага для этого нет:
+    // CD / Complex CD / Complex CD4 / CCD4 (o4s3) / CCD4 (o4s4) / SEMP / SIMP).
+    // Отдельного флага для этого нет:
     // слот a[0] ничем не отличается от остальных, поэтому валидаторы просто
     // пропускают 0 (раньше он отвергался как "зарезервированный").
     int  param_index    = 0;
@@ -1170,6 +1171,83 @@ struct PerfResult {
 };
 
 // ---------------------------------------------------------------------------
+// Stability — область устойчивости схемы на двумерной задаче Дальквиста
+// (см. stabilityRegionKernel в kernels/order.template.cu).
+//
+// Сетка всегда двумерная и всегда линейная: по X — sigma, по Y — omega, то
+// есть вещественная и мнимая части собственных чисел тестовой матрицы. Сама
+// матрица в каждом узле строится из (sigma, omega, k, r) так, чтобы спектр
+// был ровно sigma +- i*omega, кладётся в a[] по индексам idx_* и прогоняется
+// ОДИН шаг схемы от двух базисных векторов. Результат ячейки — rho =
+// max|lambda| матрицы усиления; граница области там, где rho = 1.
+//
+// Тело КРС приходит то же самое, что на остальных расчётах вкладки, поэтому
+// анализ работает для любой схемы из списка, включая кастомные. Система
+// обязана быть именно двумерным линейным тестом (library/Dahlquist 2D):
+// amountOfX != 2 движок отвергает.
+struct StabilityRequest {
+    std::string krs_body;
+    int amountOfX = 0;                        // обязан быть 2
+
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    // Куда в a[] класть элементы матрицы. Для library/Dahlquist 2D это 1..4,
+    // но индексы явные: переименовать или переставить параметры системы
+    // пользователю никто не запрещает.
+    int idx_a = 1, idx_b = 2, idx_c = 3, idx_d = 4;
+
+    double k = 1.0;    // коэффициент несимметричности; k = -1 запрещён
+    double r = -1.0;   // отношение недиагоналей; обязан быть < 0, иначе c мнимое
+    double h = 1.0;    // шаг, чей оператор перехода диагонализуется
+
+    double sigma_lo = -4.1, sigma_hi = 0.1;
+    double omega_lo = -2.75, omega_hi = 2.65;
+    int    n_pts = 256;                       // ОБЩЕЕ на обе оси: карта n x n
+
+    // Точность CPU-ветки, коды kOrderPrec* из order_session.h. GPU игнорирует.
+    int cpu_prec = 0;
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+enum StabilityStatus {
+    STAB_ST_OK  = 0,
+    STAB_ST_BAD = 1,   // матрица не построилась или шаг дал nan/inf
+};
+
+struct StabilityResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_pts_x = 0, n_pts_y = 0;
+    std::vector<double> sigma_vals, omega_vals;
+    double sigma_lo = 0.0, sigma_hi = 0.0, omega_lo = 0.0, omega_hi = 0.0;
+
+    double k = 0.0, r = 0.0, h = 0.0;
+
+    // Размера n_pts_x * n_pts_y, row-major (iy*n_pts_x + ix).
+    std::vector<double> rho;
+    std::vector<int>    status;
+
+    int n_ok = 0, n_bad = 0;
+    int n_stable = 0;                 // ячеек с rho <= 1
+    double rho_min = 0.0, rho_max = 0.0;   // только по ячейкам со status OK
+};
+
+// Проверка запроса и раскладка сетки — общие для GPU- и CPU-ветки, иначе одни
+// и те же настройки принимались бы на одном устройстве и отвергались на
+// другом. stability_validate возвращает пустую строку, когда всё в порядке.
+std::string stability_validate(const StabilityRequest& req);
+void        stability_fill_axes(const StabilityRequest& req, StabilityResult& res);
+
+// Счётчики, число устойчивых ячеек и диапазон rho по чистым ячейкам. Функция
+// общая для GPU- и CPU-ветки: разойдись они здесь, одна и та же карта
+// подписывалась бы по-разному в зависимости от устройства.
+void stability_summarize(StabilityResult& res);
+
+// ---------------------------------------------------------------------------
 // Network — сеть связанных осцилляторов (см. kernels/network.template.cu).
 //
 // Топология приходит УЖЕ развёрнутой в CSR по узлу-приёмнику: движок графов не
@@ -1290,6 +1368,9 @@ public:
 
     // Performance — время счёта vs ошибка по той же одномерной сетке.
     PerfResult run_performance(const PerfRequest& req);
+
+    // Stability — область устойчивости схемы на двумерной задаче Дальквиста.
+    StabilityResult run_stability(const StabilityRequest& req);
 
     // Network — интегрирование сети связанных осцилляторов.
     NetworkResult run_network(const NetworkRequest& req);

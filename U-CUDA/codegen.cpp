@@ -351,6 +351,19 @@ namespace { // внутренняя линковка: всё ниже не ви�
     const char* const kCcdImagDecl =
         "    const numb ccd_im = sqrt((numb)3) / (numb)6;\n";
 
+    // Коэффициент палиндромной тройки CCD4 (o4s3): alpha — комплексный корень
+    // условий 2*alpha + beta = 1 и 2*alpha^3 + beta^3 = 0, то есть
+    // alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3)). Раскрыв знаменатель:
+    //   c = 2^(1/3),  D = 4 + 2c + c^2,
+    //   Re alpha = (2 + c/2) / D,   Im alpha = (c*sqrt(3)/2) / D.
+    // Считается в рантайме по той же причине, что и ccd_im: десятичный литерал
+    // обрезал бы константу до 17 цифр независимо от точности numb.
+    const char* const kCcd3Decl =
+        "    const numb ccd3_c  = cbrt((numb)2);\n"
+        "    const numb ccd3_d  = (numb)4 + (numb)2 * ccd3_c + ccd3_c * ccd3_c;\n"
+        "    const numb ccd3_re = ((numb)2 + (numb)0.5 * ccd3_c) / ccd3_d;\n"
+        "    const numb ccd3_im = (numb)0.5 * ccd3_c * sqrt((numb)3) / ccd3_d;\n";
+
     bool pn_contains_var(const PN& n, const std::string& v) {
         if (!n) return false;
         switch (n->kind) {
@@ -1132,7 +1145,38 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // ~1.3x of RK4 either way, at ~2.7x the operation count (205 vs 76 for a
     // 3D system). As with CD itself, s != 1/2 breaks the symmetry of the inner
     // block and drops the whole thing to first order.
-    enum class CdKind { Real, Cx, Cx4 };
+    //
+    // CdKind::Cx4s3 / Cx4s4 -- СИММЕТРИЧНЫЕ варианты того же построения.
+    // Complex CD4 симметричной НЕ является: у композиции из двух стадий
+    // палиндромность требует g1 = g2, а тогда sum g = 1 и sum g^3 = 0
+    // несовместны и порядок падает до второго. Её четвёртый порядок держится
+    // не на симметрии, а на том, что нарушенное условие веса 4 (координата при
+    // [E1,E3]) чисто мнимое и его снимает Re. Замеренный дефект симметрии
+    // ||Psi_{-h}(Psi_h(x)) - x|| у неё O(h^8) — ниже собственной ошибки, но не
+    // ноль. Настоящая самосопряжённость начинается с трёх стадий:
+    //
+    //   o4s3: (alpha, 1 - 2*alpha, alpha), alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3))
+    //         = 0.3243964040201712 + 0.1345862724908067i. Комплексная ветвь
+    //         того же кубического уравнения, что даёт вещественный тройной
+    //         прыжок Йошиды (1.3512, -1.7024, 1.3512), но без шага назад:
+    //         Re у всех трёх коэффициентов положительна (min Re = 0.3244), а
+    //         константа ошибки в 215 раз меньше (||err||2 = 0.0247 против 5.29).
+    //   o4s4: (g/2, gc/2, gc/2, g/2) — это Complex CD4, симметризованная
+    //         композицией с собственной сопряжённой на половинном шаге. Решение
+    //         условий для четырёх палиндромных стадий единственно с точностью
+    //         до сопряжения и выходит ровно этим. ||err||2 = 0.00759.
+    //
+    // Обе палиндромны, то есть самосопряжены как КОМПЛЕКСНЫЕ композиции; взятое
+    // в конце шага Re оставляет дефект симметрии O(h^10) против O(h^8) у
+    // Complex CD4. Разложение ошибки по чётным степеням h замерено у обеих
+    // (экстраполяция Ричардсона по h^2 даёт наклон 6.0), поэтому в
+    // builtin_scheme_traits они помечены symmetric = true.
+    // При РАВНОЙ работе (одинаковом суммарном числе проходов CD) все три схемы
+    // дают одну и ту же ошибку с точностью до 4%: симметрия здесь достаётся
+    // даром, но и выигрыша в точности не приносит — она нужна ради обратимости
+    // отображения и законной h^2-экстраполяции.
+    // Обе, как и Complex CD4, требуют s = a[0] = 1/2.
+    enum class CdKind { Real, Cx, Cx4, Cx4s3, Cx4s4 };
 
     std::string scheme_cd_common(const System& s, CdKind kind) {
         if (s.vars.size() != s.rhs.size())
@@ -1161,6 +1205,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
             for (int i = 0; i < N; ++i)
                 o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
         }
+        // Шаги подшагов композиции — именами объявленных выше переменных.
+        // Пусто у CD и Complex CD: у них ровно один проход на весь h.
+        std::vector<std::string> cgs;
         if (kind == CdKind::Real) {
             o << "    numb h1 = h * a[0];\n";
             o << "    numb h2 = h * (1 - a[0]);\n";
@@ -1171,12 +1218,36 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * ccd_im);\n";
         }
         else {
-            // gamma*h and conj(gamma)*h; s splits each of them inside its pass.
-            o << kCcdImagDecl;
-            o << "    ucmplx g  = ucmplx(0.5 * h,  h * ccd_im);\n";
-            o << "    ucmplx gc = ucmplx(0.5 * h, -h * ccd_im);\n";
-            o << "    ucmplx h1 = g * a[0];\n";
-            o << "    ucmplx h2 = g * (1 - a[0]);\n";
+            // Комплексная композиция: s делит уже СВОЙ комплексный подшаг
+            // внутри прохода, поэтому здесь объявляются только сами подшаги,
+            // а h1/h2 перевыставляются перед каждым проходом.
+            // ccd_im нужен всем, кроме o4s3: у той свой коэффициент, и лишняя
+            // константа в теле была бы неиспользованной.
+            if (kind != CdKind::Cx4s3) o << kCcdImagDecl;
+            if (kind == CdKind::Cx4) {
+                // gamma*h and conj(gamma)*h.
+                o << "    ucmplx g  = ucmplx(0.5 * h,  h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx(0.5 * h, -h * ccd_im);\n";
+                cgs = { "g", "gc" };
+            }
+            else if (kind == CdKind::Cx4s4) {
+                // (gamma/2, conj/2, conj/2, gamma/2) — палиндром.
+                o << "    ucmplx g  = ucmplx(0.25 * h,  0.5 * h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx(0.25 * h, -0.5 * h * ccd_im);\n";
+                cgs = { "g", "gc", "gc", "g" };
+            }
+            else {
+                // (alpha, 1 - 2*alpha, alpha) — палиндром. Средний коэффициент
+                // выражен через alpha, а не литералом: тогда сумма подшагов
+                // равна h ТОЧНО и в плавающей арифметике тоже.
+                o << kCcd3Decl;
+                o << "    ucmplx ga = ucmplx(ccd3_re * h, ccd3_im * h);\n";
+                o << "    ucmplx gb = ucmplx(((numb)1 - (numb)2 * ccd3_re) * h,"
+                     " -(numb)2 * ccd3_im * h);\n";
+                cgs = { "ga", "gb", "ga" };
+            }
+            o << "    ucmplx h1 = " << cgs[0] << " * a[0];\n";
+            o << "    ucmplx h2 = " << cgs[0] << " * (1 - a[0]);\n";
         }
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order. Сам разбор
@@ -1200,11 +1271,20 @@ namespace { // внутренняя линковка: всё ниже не ви�
                                   "h2", sty, "x" + std::to_string(i) + "_cd" + sfx);
         };  // emit_pass
 
-        emit_pass("");
-        if (kind == CdKind::Cx4) {
-            o << "    h1 = gc * a[0];\n";
-            o << "    h2 = gc * (1 - a[0]);\n";
-            emit_pass("_b");
+        if (cgs.empty()) {
+            emit_pass("");
+        }
+        else {
+            for (size_t k = 0; k < cgs.size(); ++k) {
+                if (k) {
+                    o << "    h1 = " << cgs[k] << " * a[0];\n";
+                    o << "    h2 = " << cgs[k] << " * (1 - a[0]);\n";
+                }
+                // Суффикс временных неявной ветки: без него второй проход
+                // переобъявил бы x0_cd в той же области видимости.
+                const std::string sfx = k ? ("_" + std::to_string(k)) : std::string();
+                emit_pass(sfx.c_str());
+            }
         }
 
         // Наружу — только действительная часть: X[] вещественный и на входе, и
@@ -1220,6 +1300,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
     std::string scheme_cd(const System& s)          { return scheme_cd_common(s, CdKind::Real); }
     std::string scheme_complex_cd(const System& s)  { return scheme_cd_common(s, CdKind::Cx); }
     std::string scheme_complex_cd4(const System& s) { return scheme_cd_common(s, CdKind::Cx4); }
+    std::string scheme_complex_cd4_s3(const System& s) { return scheme_cd_common(s, CdKind::Cx4s3); }
+    std::string scheme_complex_cd4_s4(const System& s) { return scheme_cd_common(s, CdKind::Cx4s4); }
 
     // SEMP / SIMP — методы средней точки, у которых СТАДИЯ считается
     // последовательно по компонентам (Гаусс-Зейдель) вместо полной неявной
@@ -1675,6 +1757,8 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::CD:               return scheme_cd(s);
     case Scheme::ComplexCD:        return scheme_complex_cd(s);
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
+    case Scheme::ComplexCD4S3:     return scheme_complex_cd4_s3(s);
+    case Scheme::ComplexCD4S4:     return scheme_complex_cd4_s4(s);
     case Scheme::ImplicitEuler:    return scheme_implicit_euler(s);
     case Scheme::ImplicitMidpoint: return scheme_implicit_midpoint(s);
     case Scheme::SEMP:             return scheme_semp(s);
@@ -1730,6 +1814,8 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "CD")                return Scheme::CD;
     if (name == "Complex CD")        return Scheme::ComplexCD;
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
+    if (name == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
+    if (name == "CCD4 (o4s4)")       return Scheme::ComplexCD4S4;
     if (name == "Implicit Euler")    return Scheme::ImplicitEuler;
     if (name == "Implicit Midpoint") return Scheme::ImplicitMidpoint;
     if (name == "SEMP")              return Scheme::SEMP;
@@ -1742,7 +1828,8 @@ Scheme scheme_from_name(const std::string& name) {
 
 // --- Паспорт встроенных схем -----------------------------------------------
 // Порядки — те, что замерены и записаны в подсказках чекбоксов (см. gui.cpp).
-// Напоминание про a[0] = 1/2: у CD, Complex CD, Complex CD4, SEMP и SIMP
+// Напоминание про a[0] = 1/2: у CD, Complex CD, Complex CD4, CCD4 (o4s3),
+// CCD4 (o4s4), SEMP и SIMP
 // заявленный порядок достигается только при этом значении, иначе все они
 // падают до первого. Здесь стоит паспортный (то есть при a[0] = 1/2) —
 // предупредить пользователя обязан UI.
@@ -1762,6 +1849,8 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
         { "SIMP",                   2, false },
         { "RK4",                    4, false },
         { "Complex CD4",            4, false },
+        { "CCD4 (o4s3)",            4, true  },  // палиндром (a, 1-2a, a)
+        { "CCD4 (o4s4)",            4, true  },  // палиндром (g/2, gc/2, gc/2, g/2)
         { "DOPRI78",                8, false },
     };
     for (const Row& r : kRows) {

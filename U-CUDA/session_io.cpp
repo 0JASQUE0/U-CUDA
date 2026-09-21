@@ -1775,6 +1775,18 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"perf_replicas_text\":"; jstr(o, c.perf_replicas_text); o << ",";
     o << "\"perf_ref_scheme\":";   jstr(o, c.perf_ref_scheme);   o << ",";
     o << "\"perf_ref_substeps_text\":"; jstr(o, c.perf_ref_substeps_text); o << ",";
+    o << "\"stab_k_text\":";      jstr(o, c.stab_k_text);      o << ",";
+    o << "\"stab_r_text\":";      jstr(o, c.stab_r_text);      o << ",";
+    o << "\"stab_h_text\":";      jstr(o, c.stab_h_text);      o << ",";
+    o << "\"stab_sig_lo_text\":"; jstr(o, c.stab_sig_lo_text); o << ",";
+    o << "\"stab_sig_hi_text\":"; jstr(o, c.stab_sig_hi_text); o << ",";
+    o << "\"stab_om_lo_text\":";  jstr(o, c.stab_om_lo_text);  o << ",";
+    o << "\"stab_om_hi_text\":";  jstr(o, c.stab_om_hi_text);  o << ",";
+    o << "\"stab_n_text\":";      jstr(o, c.stab_n_text);      o << ",";
+    o << "\"stab_idx_a\":" << c.stab_idx_a << ",";
+    o << "\"stab_idx_b\":" << c.stab_idx_b << ",";
+    o << "\"stab_idx_c\":" << c.stab_idx_c << ",";
+    o << "\"stab_idx_d\":" << c.stab_idx_d << ",";
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";       jmap(o, c.param_values);
     o << "}";
@@ -1786,8 +1798,20 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "symmetry_s")       c.symmetry_s       = p.str();
     else if (key == "calc_kind") {
         const int k = std::stoi(p.str_or_num());
-        c.calc_kind = (k == kOrderCalcPerf) ? kOrderCalcPerf : kOrderCalcOrder;
+        c.calc_kind = (k == kOrderCalcPerf || k == kOrderCalcStab) ? k : kOrderCalcOrder;
     }
+    else if (key == "stab_k_text")      c.stab_k_text      = p.str();
+    else if (key == "stab_r_text")      c.stab_r_text      = p.str();
+    else if (key == "stab_h_text")      c.stab_h_text      = p.str();
+    else if (key == "stab_sig_lo_text") c.stab_sig_lo_text = p.str();
+    else if (key == "stab_sig_hi_text") c.stab_sig_hi_text = p.str();
+    else if (key == "stab_om_lo_text")  c.stab_om_lo_text  = p.str();
+    else if (key == "stab_om_hi_text")  c.stab_om_hi_text  = p.str();
+    else if (key == "stab_n_text")      c.stab_n_text      = p.str();
+    else if (key == "stab_idx_a")       c.stab_idx_a       = std::stoi(p.str_or_num());
+    else if (key == "stab_idx_b")       c.stab_idx_b       = std::stoi(p.str_or_num());
+    else if (key == "stab_idx_c")       c.stab_idx_c       = std::stoi(p.str_or_num());
+    else if (key == "stab_idx_d")       c.stab_idx_d       = std::stoi(p.str_or_num());
     else if (key == "two_d")            c.two_d            = p.boolean();
     else if (key == "axis_x_target")    c.axis_x_target    = std::stoi(p.str_or_num());
     else if (key == "axis_x_lo_text")   c.axis_x_lo_text   = p.str();
@@ -1893,6 +1917,7 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"show_e2\":"      << (w.show_e2 ? "true" : "false");
         o << ",\"show_nominal\":" << (w.show_nominal ? "true" : "false");
         o << ",\"map_error\":"    << (w.map_error ? "true" : "false");
+        o << ",\"stab_view\":"     << w.stab_view;
         o << ",\"colormap_idx\":" << w.colormap_idx;
         o << ",\"error_source\":" << w.error_source;
         o << ",\"time_unit\":"    << w.time_unit;
@@ -1947,6 +1972,7 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "show_e2")         w.show_e2         = p.boolean();
                                 else if (k == "show_nominal")    w.show_nominal    = p.boolean();
                                 else if (k == "map_error")       w.map_error       = p.boolean();
+                                else if (k == "stab_view")       w.stab_view       = std::stoi(p.str_or_num());
                                 else if (k == "colormap_idx")    w.colormap_idx    = std::stoi(p.str_or_num());
                                 else if (k == "error_source")    w.error_source    = std::stoi(p.str_or_num());
                                 else if (k == "time_unit")       w.time_unit       = std::stoi(p.str_or_num());

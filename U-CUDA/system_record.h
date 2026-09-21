@@ -59,6 +59,8 @@ struct SystemRecord {
     bool scheme_cd       = false;
     bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
+    bool scheme_ccd4s3   = false;   // CCD4 (o4s3) — симметричная тройка (a, 1-2a, a)
+    bool scheme_ccd4s4   = false;   // CCD4 (o4s4) — симметричная четвёрка (g/2, gc/2, gc/2, g/2)
     bool scheme_ieuler   = false;   // Implicit Euler (Ньютон по символьному якобиану)
     bool scheme_imidpoint = false;  // Implicit Midpoint (то же, стадия Y = (X + X_next)/2)
     bool scheme_semp     = false;   // SEMP (средняя точка, явная стадия на h1 = s*h)

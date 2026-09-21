@@ -135,6 +135,43 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     return req;
 }
 
+StabilityRequest build_stability_request(const OrderAnalysisSession& s, const OrderConfig& c) {
+    // Всё общее с Order снова берётся из одного построителя: схема, допуск
+    // Ньютона под выбранную точность и раскладка a[] обязаны совпадать с
+    // остальными расчётами вкладки.
+    const OrderRequest o = build_order_request(s, c);
+
+    StabilityRequest req;
+    req.krs_body  = o.krs_body;
+    req.amountOfX = o.amountOfX;
+    req.values    = o.values;
+    req.cpu_prec  = o.cpu_prec;
+
+    req.idx_a = c.stab_idx_a; req.idx_b = c.stab_idx_b;
+    req.idx_c = c.stab_idx_c; req.idx_d = c.stab_idx_d;
+
+    req.k = parse_d(c.stab_k_text, 1.0);
+    req.r = parse_d(c.stab_r_text, -1.0);
+    req.h = parse_d(c.stab_h_text, 1.0);
+
+    req.sigma_lo = parse_d(c.stab_sig_lo_text, -4.1);
+    req.sigma_hi = parse_d(c.stab_sig_hi_text,  0.1);
+    req.omega_lo = parse_d(c.stab_om_lo_text,  -2.75);
+    req.omega_hi = parse_d(c.stab_om_hi_text,   2.65);
+    if (req.sigma_hi < req.sigma_lo) std::swap(req.sigma_lo, req.sigma_hi);
+    if (req.omega_hi < req.omega_lo) std::swap(req.omega_lo, req.omega_hi);
+    req.n_pts = std::max(1, parse_i(c.stab_n_text, 256));
+    return req;
+}
+
+void apply_stability_result(OrderConfig& c, StabilityResult&& r) {
+    c.stab_result = std::move(r);
+    c.stab_last_run_ok = c.stab_result.ok;
+    if (!c.stab_result.ok) c.last_error = c.stab_result.error;
+    c.stab_data_generation++;
+    c.stab_fit_request = true;
+}
+
 void apply_perf_result(OrderConfig& c, PerfResult&& r) {
     c.perf_result = std::move(r);
     c.perf_last_run_ok = c.perf_result.ok;
@@ -218,6 +255,10 @@ void OrderAnalysisSession::add_config() {
         c.perf_last_run_ok = false;
         c.perf_data_generation = 0;
         c.perf_fit_request = false;
+        c.stab_result = StabilityResult{};
+        c.stab_last_run_ok = false;
+        c.stab_data_generation = 0;
+        c.stab_fit_request = false;
     } else {
         for (const auto& p : params) c.param_values[p] = "";
         for (const auto& v : vars)   c.initial_conditions[v] = "";
@@ -739,6 +780,122 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CPU-ветка областей устойчивости.
+//
+// Спецификацией, как и у Order, служит ядро: stabilityRegionKernel в
+// kernels/order.template.cu. Формулы построения матрицы, порядок прогона
+// базисных векторов и коды статусов повторены оттуда один в один.
+//
+// Расширенная точность здесь нужна не ради полки округления, а ради ГРАНИЦЫ:
+// у схемы высокого порядка rho подходит к единице настолько полого, что в
+// double ширина переходной полосы сравнима с шумом, и линия rho = 1 на карте
+// начинает рваться.
+template <class S>
+static StabilityResult run_stability_cpu_t(const StabilityRequest& req) {
+    using Tr = CpuScalarTraits<S>;
+    using std::sqrt; using std::fabs;
+    using std::isnan; using std::isinf;
+
+    StabilityResult res;
+    const std::string bad = stability_validate(req);
+    if (!bad.empty()) { res.error = bad; return res; }
+    stability_fill_axes(req, res);
+
+    const int amountOfValues = (int)req.values.size();
+    KrsCpuStep step;
+    std::string err;
+    if (!compile_cpu_step<S>(req.krs_body, req.amountOfX, amountOfValues, "step", step, err)) {
+        res.error = err;
+        return res;
+    }
+    typename Tr::Fn fn = Tr::fn(step);
+    if (fn == nullptr) { res.error = "CPU step: the compiled body is unavailable"; return res; }
+
+    std::vector<S> a0((size_t)amountOfValues);
+    for (int i = 0; i < amountOfValues; ++i) a0[(size_t)i] = S(req.values[(size_t)i]);
+
+    const S k  = S(req.k);
+    const S r  = S(req.r);
+    const S h  = S(req.h);
+    const S kp1 = k + S(1);
+    const S km1 = k - S(1);
+
+    const size_t total_cells = (size_t)res.n_pts_x * (size_t)res.n_pts_y;
+    res.rho.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+    res.status.assign(total_cells, STAB_ST_BAD);
+
+    std::vector<S> a((size_t)amountOfValues);
+    std::vector<S> X((size_t)req.amountOfX);
+
+    for (int iy = 0; iy < res.n_pts_y; ++iy) {
+        for (int ix = 0; ix < res.n_pts_x; ++ix) {
+            const size_t cell = (size_t)iy * (size_t)res.n_pts_x + (size_t)ix;
+            const S sig = S(res.sigma_vals[(size_t)ix]);
+            const S om  = S(res.omega_vals[(size_t)iy]);
+
+            const S rad = -(S(1) / r) * (sig * sig * km1 * km1 / (kp1 * kp1) + om * om);
+            if (isnan(rad) || rad < S(0)) continue;   // статус уже BAD
+
+            const S dEl = S(2) * sig / kp1;
+            const S cEl = -sqrt(rad);
+            const S bEl = r * cEl;
+            const S aEl = k * dEl;
+
+            a = a0;
+            a[(size_t)req.idx_a] = aEl; a[(size_t)req.idx_b] = bEl;
+            a[(size_t)req.idx_c] = cEl; a[(size_t)req.idx_d] = dEl;
+
+            S R[4];
+            for (int col = 0; col < 2; ++col) {
+                for (int i = 0; i < req.amountOfX; ++i) X[(size_t)i] = S(0);
+                X[(size_t)col] = S(1);
+                Tr::call(fn, X.data(), a.data(), h);
+                R[col]     = X[0];
+                R[2 + col] = X[1];
+            }
+
+            const S tr   = R[0] + R[3];
+            const S det  = R[0] * R[3] - R[1] * R[2];
+            const S disc = tr * tr * S(0.25) - det;
+
+            S rho;
+            if (disc >= S(0)) {
+                const S sq = sqrt(disc);
+                const S l1 = fabs(tr * S(0.5) + sq);
+                const S l2 = fabs(tr * S(0.5) - sq);
+                rho = (l1 > l2) ? l1 : l2;
+            } else {
+                rho = sqrt(det);
+            }
+
+            if (isnan(rho) || isinf(rho)) continue;   // статус уже BAD
+            res.rho[cell]    = as_d(rho);
+            res.status[cell] = STAB_ST_OK;
+        }
+
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true;
+            return res;
+        }
+        if (req.progress)
+            req.progress->store((float)((double)(iy + 1) / (double)res.n_pts_y),
+                                std::memory_order_relaxed);
+    }
+
+    stability_summarize(res);
+    res.ok = true;
+    return res;
+}
+
+static StabilityResult run_stability_cpu(const StabilityRequest& req) {
+    switch (req.cpu_prec) {
+        case kOrderPrecQD: return run_stability_cpu_t<ucuda::qd>(req);
+        case kOrderPrecDD: return run_stability_cpu_t<ucuda::dd>(req);
+        default:           return run_stability_cpu_t<numb>(req);
+    }
+}
+
 bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     if (in_flight) return false;
     if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
@@ -748,6 +905,28 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     last_run_label.clear();
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
     progress_token = std::make_shared<std::atomic<float>>(0.0f);
+
+    if (c.calc_kind == kOrderCalcStab) {
+        StabilityRequest sreq = build_stability_request(*this, c);
+        if (sreq.krs_body.empty()) {
+            c.last_error = "krs_code is empty (no valid system or scheme)";
+            cancel_token.reset();
+            progress_token.reset();
+            return false;
+        }
+        sreq.cancel   = cancel_token;
+        sreq.progress = progress_token;
+
+        in_flight = true;
+        running_kind = kOrderCalcStab;
+        running_config_index = config_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        const bool on_gpu = c.use_gpu;
+        stab_future = std::async(std::launch::async, [&engine, on_gpu, sreq = std::move(sreq)]() {
+            return on_gpu ? engine.run_stability(sreq) : run_stability_cpu(sreq);
+        });
+        return true;
+    }
 
     if (c.calc_kind == kOrderCalcPerf) {
         PerfRequest preq = build_perf_request(*this, c);
@@ -761,7 +940,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
         preq.progress = progress_token;
 
         in_flight = true;
-        running_is_perf = true;
+        running_kind = kOrderCalcPerf;
         running_config_index = config_idx;
         compute_start_time = std::chrono::steady_clock::now();
         const bool on_gpu = c.use_gpu;
@@ -782,7 +961,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     req.progress = progress_token;
 
     in_flight = true;
-    running_is_perf = false;
+    running_kind = kOrderCalcOrder;
     running_config_index = config_idx;
     compute_start_time = std::chrono::steady_clock::now();
     const bool on_gpu = c.use_gpu;
@@ -798,32 +977,44 @@ void OrderAnalysisSession::request_cancel() {
 
 bool OrderAnalysisSession::poll() {
     if (!in_flight) return false;
-    std::future<OrderResult>& of = run_future;
-    std::future<PerfResult>&  pf = perf_future;
-    const bool is_perf = running_is_perf;
-    if (is_perf ? !pf.valid() : !of.valid()) {
+    // Три расчёта вкладки возвращают три разных типа, поэтому и future три;
+    // забирается то, что отвечает running_kind.
+    const int kind = running_kind;
+    const bool valid = (kind == kOrderCalcStab) ? stab_future.valid()
+                     : (kind == kOrderCalcPerf) ? perf_future.valid()
+                                                : run_future.valid();
+    if (!valid) {
         in_flight = false;
-        running_is_perf = false;
+        running_kind = kOrderCalcOrder;
         running_config_index = -1;
         cancel_token.reset(); progress_token.reset();
         return false;
     }
-    if ((is_perf ? pf.wait_for(std::chrono::seconds(0)) : of.wait_for(std::chrono::seconds(0)))
-        != std::future_status::ready) return false;
+    const std::future_status st =
+        (kind == kOrderCalcStab) ? stab_future.wait_for(std::chrono::seconds(0))
+      : (kind == kOrderCalcPerf) ? perf_future.wait_for(std::chrono::seconds(0))
+                                 : run_future.wait_for(std::chrono::seconds(0));
+    if (st != std::future_status::ready) return false;
 
     const int  idx = running_config_index;
     std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[(size_t)idx].label.empty())
                             ? configs[(size_t)idx].label : std::string("order");
+    const bool slot_ok = (idx >= 0 && idx < (int)configs.size());
     bool cancelled = false;
-    if (is_perf) {
-        PerfResult r = pf.get();
+    if (kind == kOrderCalcStab) {
+        StabilityResult r = stab_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)configs.size())
+        if (!cancelled && slot_ok)
+            apply_stability_result(configs[(size_t)idx], std::move(r));
+    } else if (kind == kOrderCalcPerf) {
+        PerfResult r = perf_future.get();
+        cancelled = r.cancelled;
+        if (!cancelled && slot_ok)
             apply_perf_result(configs[(size_t)idx], std::move(r));
     } else {
-        OrderResult r = of.get();
+        OrderResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)configs.size())
+        if (!cancelled && slot_ok)
             apply_order_result(configs[(size_t)idx], std::move(r));
     }
 
@@ -834,7 +1025,7 @@ bool OrderAnalysisSession::poll() {
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
 
     in_flight = false;
-    running_is_perf = false;
+    running_kind = kOrderCalcOrder;
     running_config_index = -1;
     cancel_token.reset();
     progress_token.reset();
