@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include <map>
 #include <string>
 #include <vector>
 #include "configCUDA.h"   // ucmplx — состояние комплексных схем (см. eval_complex)
@@ -180,6 +181,14 @@ int extrapolation_order(int stages, int p, bool symmetric);
 // порядок падает до исходного, а не даёт мусор.
 std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool symmetric);
 
+// Те же веса ТОЧНОЙ дробью: out[k] = "16/15", "-1/3", "1". Именно они уходят
+// в КРС литералами, когда сходятся, поэтому UI показывает их, а не только
+// double: "alpha = 1.0666666666666667" не даёт понять, что это 16/15.
+// false — точное представление не сошлось (переполнение или числитель со
+// знаменателем вне 2^53); тогда остаются только double выше.
+bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetric,
+                                 std::vector<std::string>* out);
+
 // Оборачивает ГОТОВОЕ тело шага (base_body — то, что вернул codegen_scheme
 // либо тело кастомной КРС) в K стадий. Тело вставляется дословно и ровно один
 // раз — внутрь локальной лямбды, параметр которой назван h и затеняет
@@ -233,6 +242,17 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
 // over a symmetric base. false when any coefficient is symbolic, in which case
 // neither sum is knowable at codegen time and the outputs are left alone.
 bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum);
+
+// Числовые значения коэффициентов при ЗАДАННЫХ значениях параметров. Нужно
+// потому, что символьный коэффициент ("g1", "1-2*g1") — это половина ответа:
+// сам шаг стадии известен только вместе с param_values (имя -> текст значения,
+// как в SystemRecord::param_values). Значение параметра тоже разбирается как
+// выражение, так что "8/3" работает; ссылка одного параметра на другой — нет.
+// out получает по элементу на стадию, нераскрывшаяся стадия получает NaN, а
+// err — причину ПЕРВОЙ такой. Возвращает false, если не посчиталась хоть одна.
+bool composition_gamma_values(const CompositionSpec& spec,
+                              const std::map<std::string, std::string>& param_values,
+                              std::vector<double>* out, std::string* err = nullptr);
 
 // Wraps a READY step body in K sequential stages. The body is inserted verbatim
 // and exactly once, inside a lambda whose parameter is named h -- same trick as
