@@ -1899,6 +1899,15 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"show_min\":" << (w.show_min ? "true" : "false");
         o << ",\"show_avg\":" << (w.show_avg ? "true" : "false");
         o << ",\"show_max\":" << (w.show_max ? "true" : "false");
+        o << ",\"custom_line_style\":" << (w.custom_line_style ? "true" : "false");
+        o << ",\"line_width\":"   << w.line_width;
+        o << ",\"line_alpha\":"   << w.line_alpha;
+        o << ",\"points_mode\":"  << (w.points_mode ? "true" : "false");
+        o << ",\"point_marker\":" << w.point_marker;
+        o << ",\"point_size\":"   << w.point_size;
+        o << ",\"node_markers\":" << (w.node_markers ? "true" : "false");
+        o << ",\"vary_markers\":" << (w.vary_markers ? "true" : "false");
+        o << ",\"palette\":"      << w.palette;
         o << ",\"members\":[";
         for (size_t k = 0; k < w.members.size(); ++k) { if (k) o << ","; o << w.members[k]; }
         o << "]}";
@@ -1944,6 +1953,15 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "show_min")        w.show_min        = p.boolean();
                                 else if (k == "show_avg")        w.show_avg        = p.boolean();
                                 else if (k == "show_max")        w.show_max        = p.boolean();
+                                else if (k == "custom_line_style") w.custom_line_style = p.boolean();
+                                else if (k == "line_width")      w.line_width      = std::stof(p.str_or_num());
+                                else if (k == "line_alpha")      w.line_alpha      = std::stof(p.str_or_num());
+                                else if (k == "points_mode")     w.points_mode     = p.boolean();
+                                else if (k == "point_marker")    w.point_marker    = std::stoi(p.str_or_num());
+                                else if (k == "point_size")      w.point_size      = std::stof(p.str_or_num());
+                                else if (k == "node_markers")    w.node_markers    = p.boolean();
+                                else if (k == "vary_markers")    w.vary_markers    = p.boolean();
+                                else if (k == "palette")         w.palette         = std::stoi(p.str_or_num());
                                 else if (k == "members") {
                                     w.members.clear();
                                     p.expect('[');

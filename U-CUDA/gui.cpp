@@ -62,6 +62,14 @@ static std::string get_exe_dir_with_sep() {
     return d;
 }
 
+// Полная раскладка коэффициентов схемы-обёртки (Extr / Comp). Определение
+// стоит рядом с конструкторами обёрток, а объявление здесь: тот же текст
+// показывает комбо выбора схемы, а оно в файле раньше.
+static std::string wrapper_coefficients_text(
+        const std::string& name,
+        const std::vector<CustomScheme>& custom_schemes,
+        const std::map<std::string, std::string>& param_values);
+
 // Базовый цвет траектории по индексу НУ (единый для 2D/3D/time domain).
 static ImVec4 ic_base_color(int ic_index) {
     return ImPlot::GetColormapColor(ic_index);
@@ -812,8 +820,17 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                 const std::string shown = wrapper_display_name(nm);
                 if (ImGui::Selectable((shown + "##" + nm).c_str(), scheme == nm))
                     choose(nm);
-                if (shown != nm && ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", nm.c_str());
+                // Коэффициенты прямо в списке выбора: именно здесь схему и
+                // выбирают, а знать, какие числа за ней стоят, надо ДО того.
+                // Значения параметров берутся у bc, когда он есть: символьная
+                // gamma без них раскрыта не будет, и отчёт честно скажет "?".
+                if (ImGui::IsItemHovered()) {
+                    static const std::map<std::string, std::string> kNoParams;
+                    const std::string rep = wrapper_coefficients_text(
+                        nm, custom_schemes, bc ? bc->param_values : kNoParams);
+                    if (!rep.empty())      ImGui::SetTooltip("%s", rep.c_str());
+                    else if (shown != nm)  ImGui::SetTooltip("%s", nm.c_str());
+                }
             }
         }
         ImGui::EndCombo();
@@ -2346,6 +2363,193 @@ static void draw_generated_code_block(AppModel& model, const GuiCallbacks& cb) {
     }
 }
 
+// --- Коэффициенты обёртки: то, что иначе остаётся чёрным ящиком -------------
+//
+// И у Extr, и у Comp имя схемы описывает ВХОД (база, подшаги, выражения для
+// gamma), а в КРС работают ВЫВЕДЕННЫЕ из него числа: веса Ричардсона alpha_k
+// вычисляются, символьные gamma раскрываются значениями параметров. Увидеть их
+// можно было ровно в одном месте — в конструкторе, и только пока в нём набран
+// ровно этот набор; в списке собранных схем и в комбо выбора не было ничего.
+//
+// Отчёт собирается ТЕКСТОМ, а не рисуется таблицей, по одной причине: одни и
+// те же числа нужны на экране, в тултипе комбо и в буфере обмена (коэффициенты
+// уезжают в статью). Три способа нарисовать одно и то же разъехались бы.
+static std::string wrapper_coefficients_text(
+        const std::string& name,
+        const std::vector<CustomScheme>& custom_schemes,
+        const std::map<std::string, std::string>& param_values) {
+    // Паспорт базы: встроенная — из таблицы, кастомная — со слов автора.
+    auto base_traits = [&](const std::string& base, int* p, bool* sym) {
+        if (builtin_scheme_traits(base, p, sym)) return true;
+        for (const auto& cs : custom_schemes)
+            if (cs.name == base) { *p = cs.order; *sym = cs.symmetric; return true; }
+        return false;
+    };
+    char buf[256];
+    std::string o;
+
+    ExtrapolationSpec esp;
+    CompositionSpec   csp;
+
+    if (parse_extrapolation_name(name, &esp)) {
+        int p = 1; bool sym = false;
+        const bool known = base_traits(esp.base, &p, &sym);
+        const int  K = (int)esp.n.size();
+        long long  cost = 0;
+        for (int v : esp.n) cost += v;
+
+        o += name;
+        o += "\n";
+        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
+                      esp.base.c_str(), p,
+                      sym ? "symmetric" : "non-symmetric",
+                      known ? "" : "  (UNRESOLVED - the figures below assume order 1)");
+        o += buf; o += "\n";
+        std::snprintf(buf, sizeof(buf),
+                      "%d stages, %lld base steps per macro-step  ->  order %d",
+                      K, cost, extrapolation_order(K, p, sym));
+        o += buf; o += "\n";
+        // Что именно гасят эти веса: разложение идёт по u_k = 1/n_k у обычной
+        // базы и по 1/n_k^2 у симметричной — отсюда и разный прирост порядка.
+        o += sym ? "the weights cancel h^p, h^(p+2), ... (expansion in even powers only)\n"
+                 : "the weights cancel h^p, h^(p+1), ...\n";
+        o += "\n";
+
+        const std::vector<double> alpha = extrapolation_weights(esp.n, p, sym);
+        std::vector<std::string>  exact;
+        const bool has_exact = extrapolation_weights_exact(esp.n, p, sym, &exact);
+
+        o += has_exact ? "  k   n_k   substep     alpha_k (exact)   alpha_k (double)\n"
+                       : "  k   n_k   substep     alpha_k\n";
+        double asum = 0.0, amax = 0.0;
+        for (int k = 0; k < K; ++k) {
+            asum += alpha[(size_t)k];
+            if (std::fabs(alpha[(size_t)k]) > amax) amax = std::fabs(alpha[(size_t)k]);
+            if (has_exact)
+                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %-17s %.17g",
+                              k, esp.n[(size_t)k], esp.n[(size_t)k],
+                              exact[(size_t)k].c_str(), alpha[(size_t)k]);
+            else
+                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %.17g",
+                              k, esp.n[(size_t)k], esp.n[(size_t)k], alpha[(size_t)k]);
+            o += buf; o += "\n";
+        }
+        std::snprintf(buf, sizeof(buf), "sum(alpha) = %.17g   max|alpha| = %.6g", asum, amax);
+        o += buf; o += "\n";
+        if (!has_exact)
+            o += "the exact fractions do not fit in 2^53 - the kernel gets the doubles above\n";
+        if (amax > 20.0) {
+            std::snprintf(buf, sizeof(buf),
+                          "cancellation: about %.1f decimal digits are lost in the weighted sum\n",
+                          std::log10(amax));
+            o += buf;
+        }
+        return o;
+    }
+
+    if (parse_composition_name(name, &csp)) {
+        int p = 1; bool sym = false;
+        const bool known = base_traits(csp.base, &p, &sym);
+        const int  K = (int)csp.gammas.size();
+
+        o += name;
+        o += "\n";
+        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
+                      csp.base.c_str(), p,
+                      sym ? "symmetric" : "non-symmetric",
+                      known ? "" : "  (UNRESOLVED)");
+        o += buf; o += "\n";
+        std::snprintf(buf, sizeof(buf), "%d stages, %d base steps per macro-step", K, K);
+        o += buf; o += "\n";
+        o += "\n";
+
+        // Значения — при ТЕКУЩИХ параметрах. Для постоянного коэффициента это
+        // то же самое число, для символьного — единственный способ его увидеть.
+        std::vector<double> val;
+        std::string         verr;
+        const bool all_val = composition_gamma_values(csp, param_values, &val, &verr);
+
+        o += "  k   gamma (as written)        value                 stage step\n";
+        double gsum = 0.0, gcube = 0.0, gmin = 0.0;
+        bool   sums_ok = true;
+        for (int k = 0; k < K; ++k) {
+            const double v = val[(size_t)k];
+            if (std::isfinite(v)) {
+                gsum += v; gcube += v * v * v;
+                if (v < gmin) gmin = v;
+            } else sums_ok = false;
+            char vb[64], sb[64];
+            if (std::isfinite(v)) {
+                std::snprintf(vb, sizeof(vb), "%.17g", v);
+                std::snprintf(sb, sizeof(sb), "%.6g*h", v);
+            } else {
+                std::snprintf(vb, sizeof(vb), "?");
+                std::snprintf(sb, sizeof(sb), "?");
+            }
+            std::snprintf(buf, sizeof(buf), "  %-3d %-25s %-21s %s",
+                          k, csp.gammas[(size_t)k].c_str(), vb, sb);
+            o += buf; o += "\n";
+        }
+        if (!all_val) {
+            o += "\n";
+            o += "not every stage is numeric: ";
+            o += verr.empty() ? std::string("a coefficient did not resolve") : verr;
+            o += "\n";
+            o += "(give the parameter a value on the tab, or type a number in its place)\n";
+        }
+        if (sums_ok) {
+            o += "\n";
+            std::snprintf(buf, sizeof(buf), "sum(gamma)   = %.17g%s",
+                          gsum, std::fabs(gsum - 1.0) < 1e-12
+                                    ? "   (consistent)"
+                                    : "   NOT 1 - this integrates a rescaled field");
+            o += buf; o += "\n";
+            std::snprintf(buf, sizeof(buf), "sum(gamma^3) = %.6g", gcube);
+            o += buf;
+            if (sym && std::fabs(gcube) < 1e-12) {
+                std::snprintf(buf, sizeof(buf), "   ->  expected order %d", p + 2);
+                o += buf;
+            } else if (sym) {
+                std::snprintf(buf, sizeof(buf), "   not 0 - the order stays %d", p);
+                o += buf;
+            } else {
+                o += "   (the base is not symmetric: the p+2 conditions do not apply)";
+            }
+            o += "\n";
+            if (gmin < 0.0) {
+                std::snprintf(buf, sizeof(buf),
+                              "most negative stage: %.6g*h - a step BACKWARD in time", gmin);
+                o += buf; o += "\n";
+            }
+        }
+        return o;
+    }
+
+    return std::string();   // не обёртка: выводить из имени нечего
+}
+
+// Отчёт на экран. Моноширинного шрифта в проекте нет, поэтому колонки держатся
+// пробелами, а блок печатается ПОСТРОЧНО через TextUnformatted: TextWrapped
+// сломал бы выравнивание переносом, а один многострочный Text — отступами.
+static void draw_wrapper_coefficients(const std::string& name,
+                                      const std::vector<CustomScheme>& custom_schemes,
+                                      const std::map<std::string, std::string>& param_values,
+                                      const char* id) {
+    const std::string rep = wrapper_coefficients_text(name, custom_schemes, param_values);
+    if (rep.empty()) return;
+    ImGui::PushID(id);
+    if (ImGui::SmallButton("Copy coefficients")) ImGui::SetClipboardText(rep.c_str());
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Copies the whole block below as plain text.");
+    for (size_t pos = 0; pos <= rep.size(); ) {
+        size_t eol = rep.find('\n', pos);
+        if (eol == std::string::npos) eol = rep.size();
+        ImGui::TextDisabled("%s", rep.substr(pos, eol - pos).c_str());
+        pos = eol + 1;
+    }
+    ImGui::PopID();
+}
+
 // Конструктор экстраполяционных обёрток. Собирает ИМЯ вида "Extr(RK4|1,2,4)" —
 // тела здесь нет и не хранится нигде: его пересобирает compute_krs_for_scheme
 // при каждом обращении, поэтому правка системы обёртку не протухает.
@@ -2459,23 +2663,17 @@ static void draw_extrapolation_builder(AppModel& model) {
         ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
     }
     else {
+        // Стоимость, порядок и сами веса печатает отчёт ниже; здесь остаётся
+        // только max|alpha| — по нему выводится предупреждение о сокращении.
         const std::vector<double> alpha = extrapolation_weights(n, base_p, base_sym);
-        long long cost = 0;
-        for (int k = 0; k < K; ++k) cost += n[k];
         double amax = 0.0;
         for (double v : alpha) if (std::fabs(v) > amax) amax = std::fabs(v);
 
-        ImGui::Text("%s", new_name.c_str());
-        ImGui::Text("base order %d%s  ->  order %d     cost %lld base steps per step",
-                    base_p, base_sym ? " (symmetric)" : "",
-                    extrapolation_order(K, base_p, base_sym), cost);
-        std::string wline = "weights:";
-        for (double v : alpha) {
-            char buf[48];
-            std::snprintf(buf, sizeof(buf), "  %.6g", v);
-            wline += buf;
-        }
-        ImGui::TextDisabled("%s", wline.c_str());
+        // Полная раскладка — та же, что у собранной обёртки в списке ниже и в
+        // тултипе комбо: пользователь видит ОДНИ И ТЕ ЖЕ числа до нажатия Add
+        // и после него.
+        draw_wrapper_coefficients(new_name, model.custom_schemes, model.param_values,
+                                  "extr_preview");
 
         // Знакопеременные веса усиливают шум округления пропорционально max|alpha|.
         // Для double и разумных наборов это ничто, но "1,2,3,100" пользователь
@@ -2620,42 +2818,25 @@ static void draw_composition_builder(AppModel& model) {
         ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
     }
     else {
-        // Полное имя, без округления: именно оно уедет в список по кнопке Add.
-        ImGui::TextWrapped("%s", new_name.c_str());
-        ImGui::Text("base order %d%s     cost %d base steps per step",
-                    base_p, base_sym ? " (symmetric)" : "", K);
+        // Имя, коэффициенты, их значения при текущих параметрах и обе суммы —
+        // одним блоком, тем же, что показывают список обёрток и тултип комбо.
+        draw_wrapper_coefficients(new_name, model.custom_schemes, model.param_values,
+                                  "comp_preview");
         if (!base_sym)
             ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
-                "  base is not self-adjoint: the p+2 conditions below do not apply to it,\n"
+                "  base is not self-adjoint: the p+2 conditions above do not apply to it,\n"
                 "  and the published coefficients were derived assuming they do.");
 
+        // Цветные строки — только АЛАРМ; сами числа печатает отчёт выше.
         double gsum = 0.0, gcube = 0.0;
-        if (!composition_sums(spec, &gsum, &gcube)) {
-            ImGui::TextDisabled("  coefficients are symbolic - measure the order in the Order tab");
-        }
-        else {
-            const bool consistent = std::fabs(gsum - 1.0) < 1e-12;
-            const bool cubic_ok   = std::fabs(gcube) < 1e-12;
-            ImGui::Text("  sum(gamma) = %.12g   sum(gamma^3) = %.3g", gsum, gcube);
-            if (!consistent)
+        if (composition_sums(spec, &gsum, &gcube)) {
+            if (std::fabs(gsum - 1.0) >= 1e-12)
                 ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
                     "  sum != 1: this integrates the field scaled by %.6g, i.e. a different\n"
                     "  problem. The measured order stays valid, the solution does not.", gsum);
-            else if (base_sym && cubic_ok)
+            else if (base_sym && std::fabs(gcube) < 1e-12)
                 ImGui::TextColored(ImVec4(0.5f, 1, 0.5f, 1), "  -> expected order %d", base_p + 2);
-            else if (base_sym)
-                ImGui::TextDisabled("  sum(gamma^3) != 0: order stays %d", base_p);
         }
-
-        double gmin = 0.0;
-        for (const std::string& t : g) {
-            double v = 0.0;
-            CompositionSpec one; one.gammas = { t, t };
-            if (composition_sums(one, &v, nullptr) && v / 2 < gmin) gmin = v / 2;
-        }
-        if (gmin < 0.0)
-            ImGui::TextDisabled("  most negative stage: %.4g*h - a backward step; stiff or strongly\n"
-                                "  dissipative systems may blow up there.", gmin);
 
         if (extr_base_needs_half_s(model.comp_builder_base)) {
             const double s_now = parse_num(model.symmetry_s, 0.5);
@@ -2698,11 +2879,19 @@ static void draw_wrapper_list(AppModel& model) {
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
         ImGui::PushID(i);
         const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
-        ImGui::TextUnformatted(shown.c_str());
+        // Строка-раскрывашка, а не просто текст: коэффициенты у пяти стадий
+        // занимают полэкрана, а список обычно просматривают целиком.
+        const bool open = ImGui::TreeNodeEx("##row", ImGuiTreeNodeFlags_SpanAvailWidth,
+                                            "%s", shown.c_str());
         if (shown != model.wrapper_schemes[i] && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", model.wrapper_schemes[i].c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Delete")) to_delete = i;
+        if (open) {
+            draw_wrapper_coefficients(model.wrapper_schemes[i], model.custom_schemes,
+                                      model.param_values, "coef");
+            ImGui::TreePop();
+        }
 
         // Отвалившаяся база (кастомную КРС переименовали или удалили) — на Run
         // это станет пустой КРС, поэтому говорим сразу.
@@ -9234,9 +9423,76 @@ static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k) {
 
 // Оттенок базового цвета серии: min темнее, max светлее, avg — как есть.
 // Три кривые одной вкладки обязаны читаться как одна группа.
+//
+// k < 1 — подмешать чёрного, k > 1 — БЕЛОГО, а не умножить на k с клампом:
+// умножение на светлых цветах палитры (жёлтый, голубой) упиралось в 1.0 по
+// каждому каналу, и max получался неотличим от avg — а у самых светлых карт
+// сливались все три. Примесь белого светлеет всегда, независимо от того, как
+// близко канал к насыщению.
 static ImVec4 order_shade(ImVec4 c, float k) {
-    auto ch = [k](float v) { return std::min(1.0f, std::max(0.0f, v * k)); };
+    auto mix = [](float v, float to, float t) { return v + (to - v) * t; };
+    auto ch  = [&](float v) {
+        const float t = std::min(1.0f, std::fabs(k - 1.0f));
+        return std::min(1.0f, std::max(0.0f, (k < 1.0f) ? mix(v, 0.0f, t) : mix(v, 1.0f, t)));
+    };
     return ImVec4(ch(c.x), ch(c.y), ch(c.z), c.w);
+}
+
+// Форма маркера по порядковому номеру кривой внутри вкладки (min/avg/max или
+// E1/E2). Второй признак принадлежности помимо оттенка: на плотной сетке узлов
+// и при десятке кривых в окне цвета всё равно сближаются.
+static int order_marker_for(int within) {
+    static const int kSeq[3] = { (int)PointMarker::Circle,
+                                 (int)PointMarker::TriangleDown,
+                                 (int)PointMarker::TriangleUp };
+    return kSeq[(within < 0 ? 0 : within) % 3];
+}
+
+// Имена палитр для комбо — в том же порядке, что константы kOrderPalette*.
+static const char* const kOrderPaletteNames[3] = {
+    "App palette", "High contrast", "Colorblind-safe"
+};
+
+// Базовый цвет члена окна. Палитры КАЧЕСТВЕННЫЕ (см. kOrderPalette* в
+// app_model.h): номер в списке — номер вкладки в окне, и соседние номера
+// обязаны читаться как разные цвета, а не как соседние оттенки.
+//
+// High contrast — двенадцать насыщенных тонов средней светлоты: слишком
+// светлые (лимон, розовый) из ходовых "distinct color" наборов выброшены,
+// потому что order_shade делает из них ещё и осветлённый вариант для max, а
+// тот на светлой теме плота уже не виден. Okabe-Ito взят целиком, кроме
+// чёрного: на тёмной теме он сливается с фоном, поэтому заменён на серый.
+static ImVec4 order_base_color(int idx, int palette) {
+    static const ImU32 kContrast[12] = {
+        IM_COL32(0xE6, 0x19, 0x4B, 255),   // алый
+        IM_COL32(0x43, 0x63, 0xD8, 255),   // синий
+        IM_COL32(0x3C, 0xB4, 0x4B, 255),   // зелёный
+        IM_COL32(0xF5, 0x82, 0x31, 255),   // оранжевый
+        IM_COL32(0x91, 0x1E, 0xB4, 255),   // фиолетовый
+        IM_COL32(0x00, 0xA0, 0xB0, 255),   // бирюзовый
+        IM_COL32(0xF0, 0x32, 0xE6, 255),   // пурпурный
+        IM_COL32(0x8B, 0x69, 0x14, 255),   // охра
+        IM_COL32(0x7F, 0xBF, 0x00, 255),   // травяной
+        IM_COL32(0x00, 0x77, 0xBB, 255),   // стальной
+        IM_COL32(0xA0, 0x52, 0x2D, 255),   // сиена
+        IM_COL32(0x60, 0x60, 0x60, 255),   // серый
+    };
+    static const ImU32 kOkabe[8] = {
+        IM_COL32(0xE6, 0x9F, 0x00, 255),
+        IM_COL32(0x56, 0xB4, 0xE9, 255),
+        IM_COL32(0x00, 0x9E, 0x73, 255),
+        IM_COL32(0xF0, 0xE4, 0x42, 255),
+        IM_COL32(0x00, 0x72, 0xB2, 255),
+        IM_COL32(0xD5, 0x5E, 0x00, 255),
+        IM_COL32(0xCC, 0x79, 0xA7, 255),
+        IM_COL32(0x55, 0x55, 0x55, 255),
+    };
+    if (idx < 0) idx = 0;
+    if (palette == kOrderPaletteContrast)
+        return ImGui::ColorConvertU32ToFloat4(kContrast[(size_t)(idx % 12)]);
+    if (palette == kOrderPaletteOkabe)
+        return ImGui::ColorConvertU32ToFloat4(kOkabe[(size_t)(idx % 8)]);
+    return ic_base_color(idx);
 }
 
 // Короткая сводка по статусам прогона — содержательная часть диаграммы:
@@ -9461,6 +9717,67 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         ImGui::Checkbox("max", &win.show_max);
     }
 
+    // Стиль кривых — тот же тулбар-с-попапом, что у точек бифуркационных
+    // диаграмм и у Node Series: выключенный режим даёт прежний вид.
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    {
+        const std::string sfx = "ordplot" + std::to_string(win.id);
+        // Палитра стоит В СТРОКЕ, а не в попапе: попап открывается только при
+        // включённом custom_line_style, а цвет кривых нужен и без него.
+        if (win.palette < 0 || win.palette > kOrderPaletteOkabe)
+            win.palette = kOrderPaletteContrast;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        ImGui::Combo(("##pal" + sfx).c_str(), &win.palette,
+                     kOrderPaletteNames, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The colour codes the TAB, the marker shape codes the curve inside it\n"
+                              "(min / avg / max). Both extra palettes are qualitative: adjacent\n"
+                              "numbers are deliberately far apart in hue, unlike the heatmap maps.");
+        ImGui::SameLine();
+        draw_style_toolbar("Custom line style", sfx.c_str(), win.custom_line_style,
+            [&win, &sfx]() {
+                bool ch = false;
+                ImGui::SetNextItemWidth(150);
+                ch |= ImGui::SliderFloat(("Line width##" + sfx).c_str(), &win.line_width,
+                                         0.5f, 8.0f, "%.1f");
+                ImGui::SetNextItemWidth(150);
+                ch |= ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &win.line_alpha,
+                                         0.05f, 1.0f, "%.2f");
+                ch |= ImGui::Checkbox(("Points instead of lines##" + sfx).c_str(), &win.points_mode);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Points go through GL_POINTS, and the hover tooltip hangs on\n"
+                                      "the ImDrawList markers - on the performance diagram it is\n"
+                                      "lost in this mode, together with the h / error / steps of a node.");
+                if (win.points_mode) {
+                    if (win.point_marker < 0 || win.point_marker >= kPointMarkerCount)
+                        win.point_marker = 0;
+                    ImGui::SetNextItemWidth(150);
+                    ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &win.point_marker,
+                                       kPointMarkerNames, kPointMarkerCount);
+                    ImGui::SetNextItemWidth(150);
+                    ch |= ImGui::SliderFloat(("Point size##" + sfx).c_str(), &win.point_size,
+                                             0.5f, 12.0f, "%.1f");
+                } else {
+                    ch |= ImGui::Checkbox(("Mark data points##" + sfx).c_str(), &win.node_markers);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("On the performance diagram the markers are always on:\n"
+                                          "neither the step nor the time itself lies on the axes,\n"
+                                          "and the tooltip is attached to the marker.");
+                    ImGui::SetNextItemWidth(150);
+                    ch |= ImGui::SliderFloat(("Marker size##" + sfx).c_str(), &win.point_size,
+                                             1.0f, 12.0f, "%.1f");
+                }
+                ch |= ImGui::Checkbox(("Marker shape per curve##" + sfx).c_str(), &win.vary_markers);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("min / avg / max (and E1 / E2) get different shapes:\n"
+                                      "one tab is one hue, and on a dense grid the hue alone\n"
+                                      "is not enough to tell the curves apart.");
+                return ch;
+            });
+    }
+
     const bool   ylog       = win.y_log && !is_p;
     const double time_scale = (is_perf && win.time_unit == 1) ? 1.0e-3 : 1.0;
 
@@ -9476,6 +9793,9 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     std::vector<std::vector<double>> tags;
     std::vector<std::string>         labels;
     std::vector<ImVec4>              colors;
+    // Форма маркера узла на кривую; выравнивание с bufs держится так же, как у
+    // colors — push_back в каждой точке добавления кривой.
+    std::vector<int>                 markers;
     std::vector<ViewRangeTarget>     vrt;
     bool   any_data = false, fit = false;
     double xlo = 0.0, xhi = 0.0;
@@ -9491,7 +9811,7 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         const int mi = win.members[j];
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
         OrderConfig& c = s.configs[(size_t)mi];
-        const ImVec4 base = ic_base_color((int)j);
+        const ImVec4 base = order_base_color((int)j, win.palette);
 
         if (is_perf) {
             const PerfResult& r = c.perf_result;
@@ -9503,7 +9823,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             // Точка существует, только когда есть ОБЕ координаты: ошибка узла
             // и его время. Сортировка по X обязательна — ось X здесь не сетка
             // узлов, а посчитанная величина, и монотонность её не гарантирована.
-            auto add_time_series = [&](const std::vector<double>& t, const char* suffix, float shade_k) {
+            auto add_time_series = [&](const std::vector<double>& t, const char* suffix,
+                                       float shade_k, int marker_slot) {
                 if (t.empty()) return;
                 // Третья компонента — шаг узла. Он обязан ехать вместе с точкой
                 // через сортировку по X: после неё позиция в массиве уже ничего
@@ -9555,10 +9876,11 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                 tags.back() = std::move(tg);
                 labels.push_back(c.label + " " + suffix);
                 colors.push_back(order_shade(base, shade_k));
+                markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
             };
-            if (win.show_min) add_time_series(r.t_min, "min", 0.62f);
-            if (win.show_avg) add_time_series(r.t_avg, "avg", 1.0f);
-            if (win.show_max) add_time_series(r.t_max, "max", 1.45f);
+            if (win.show_min) add_time_series(r.t_min, "min", 0.55f, 0);   // circle
+            if (win.show_avg) add_time_series(r.t_avg, "avg", 1.0f,  1);   // triangle down
+            if (win.show_max) add_time_series(r.t_max, "max", 1.5f,  2);   // triangle up
             continue;
         }
 
@@ -9574,7 +9896,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                 &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text));
 
         const int n = std::min((int)r.axis_x_vals.size(), (int)r.p.size());
-        auto add_node_series = [&](int which, const std::string& suffix, float shade_k) {
+        auto add_node_series = [&](int which, const std::string& suffix,
+                                   float shade_k, int marker_slot) {
             std::vector<double> xy;
             xy.reserve((size_t)n * 2);
             for (int i = 0; i < n; ++i) {
@@ -9598,13 +9921,14 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             bufs.push_back(std::move(xy));
             labels.push_back(suffix.empty() ? c.label : (c.label + " " + suffix));
             colors.push_back(order_shade(base, shade_k));
+            markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
         };
 
         if (is_error) {
-            add_node_series(1, "E1", 1.0f);
-            if (win.show_e2) add_node_series(2, "E2", 0.62f);
+            add_node_series(1, "E1", 1.0f,  0);   // circle
+            if (win.show_e2) add_node_series(2, "E2", 0.55f, 1);   // triangle down
         } else {
-            add_node_series(0, "", 1.0f);
+            add_node_series(0, "", 1.0f, 0);
             if (win.show_nominal) {
                 const int nom = builtin_scheme_order(c.scheme);
                 if (nom > 0 && !r.axis_x_vals.empty()) {
@@ -9615,6 +9939,7 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                         bufs.push_back(std::move(xy));
                         labels.push_back(c.label + " nominal " + std::to_string(nom));
                         colors.push_back(ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
+                        markers.push_back(-1);   // горизонталь, узлов у неё нет
                     }
                 }
             }
@@ -9660,13 +9985,19 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         return;
     }
 
-    view.imdraw_lines = true;
+    // Толщина > 1 px существует только на пути ImDrawList: glLineWidth в core
+    // OpenGL драйверы клампят до 1.0 (то же решение, что у LLE/LS и Network).
+    const bool pts = win.custom_line_style && win.points_mode;
+    view.imdraw_lines = !pts;
     view.show_zero_x  = false;
     // Линия y = 0 осмысленна только на графике порядка: ниже неё разности
     // перестали сокращаться. В логарифме ошибки нуль — это E = 1, рисовать
     // его незачем.
     view.show_zero_y  = is_p;
-    view.points_mode  = false;
+    view.points_mode  = pts;
+    view.point_marker  = pts ? win.point_marker : -1;
+    view.point_size_px = pts ? win.point_size : 2.0f;
+    view.line_thickness_px = win.custom_line_style ? win.line_width : 1.5f;
 
     // Подписи осей. У членов окна ось X по построению одна и та же величина,
     // поэтому имя берём у первого valid-члена.
@@ -9697,7 +10028,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // Маркеры узлов нужны именно на диаграмме производительности: ни шага, ни
     // самого времени в лог-режиме на осях нет. На диаграмме порядка h лежит
     // прямо на оси X, спрашивать нечего.
-    view.point_markers = is_perf;
+    view.point_markers = !pts && (is_perf || (win.custom_line_style && win.node_markers));
+    view.point_marker_px = win.custom_line_style ? win.point_size : 3.5f;
     if (is_perf) {
         const char* ename = (win.error_source == 2) ? "Eref"
                           : (win.error_source == 1) ? "E2" : "E1";
@@ -9714,7 +10046,9 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         si.points   = bufs[i].empty() ? nullptr : bufs[i].data();
         si.n_points = (int)(bufs[i].size() / 2);
         si.color    = colors[i];
+        if (win.custom_line_style) si.color.w = win.line_alpha;
         si.label    = labels[i];
+        if (i < markers.size()) si.node_marker = markers[i];
         // Длины обязаны сойтись: если кривая отфильтровалась иначе, чем
         // собирались теги, лучше остаться без подсказки, чем показать чужое h.
         const int tag_cols = (int)view.point_tag_names.size();
@@ -9735,6 +10069,9 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         + (win.show_nominal ? 8 : 0) + (win.show_min ? 16 : 0) + (win.show_avg ? 32 : 0)
         + (win.show_max ? 64 : 0) + win.error_source * 128 + win.time_unit * 256
         + (int)bufs.size() * 512;
+    // Стиль в сигнатуру НЕ входит намеренно: содержимое VBO от него не
+    // зависит (толщина, маркер, альфа — решения момента рисования), а смена
+    // сигнатуры тянет за собой autofit и сбросила бы текущий масштаб вида.
     if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
 
     // Ctrl+T есть только там, где по X лежит вход расчёта: на диаграмме

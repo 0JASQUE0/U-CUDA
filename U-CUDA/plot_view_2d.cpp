@@ -10,6 +10,57 @@
 // висящим в пустоте и подпись Y идёт по самому курсору.
 static constexpr double kTooltipSnapPx = 12.0;
 
+// Маркер узла на пути ImDrawList (режим point_markers). Формы и их номера — те
+// же, что у шейдерной маски GL-точек (PointMarker), поэтому один и тот же
+// комбо в UI годится обоим путям. marker вне диапазона — кружок, как было до
+// появления формы.
+//
+// Заливка идёт ПОД контуром, а контур — тёмный: светлый маркер на светлой
+// сетке иначе теряется. Cross/Plus заливки не имеют вовсе, у них контур и есть
+// сама фигура, поэтому рисуются толщиной в 2 px.
+static void draw_node_marker(ImDrawList* dl, ImVec2 p, float r, int marker,
+                             ImU32 col, ImU32 edge) {
+    switch (marker) {
+    case (int)PointMarker::Square:
+        dl->AddRectFilled(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), col);
+        dl->AddRect(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), edge, 0.0f, 0, 1.0f);
+        break;
+    case (int)PointMarker::Diamond: {
+        const ImVec2 a(p.x, p.y - r * 1.25f), b(p.x + r * 1.25f, p.y);
+        const ImVec2 c(p.x, p.y + r * 1.25f), d(p.x - r * 1.25f, p.y);
+        dl->AddQuadFilled(a, b, c, d, col);
+        dl->AddQuad(a, b, c, d, edge, 1.0f);
+        break;
+    }
+    case (int)PointMarker::TriangleUp: {
+        const ImVec2 a(p.x, p.y - r * 1.3f), b(p.x + r * 1.2f, p.y + r * 0.9f),
+                     c(p.x - r * 1.2f, p.y + r * 0.9f);
+        dl->AddTriangleFilled(a, b, c, col);
+        dl->AddTriangle(a, b, c, edge, 1.0f);
+        break;
+    }
+    case (int)PointMarker::TriangleDown: {
+        const ImVec2 a(p.x, p.y + r * 1.3f), b(p.x + r * 1.2f, p.y - r * 0.9f),
+                     c(p.x - r * 1.2f, p.y - r * 0.9f);
+        dl->AddTriangleFilled(a, b, c, col);
+        dl->AddTriangle(a, b, c, edge, 1.0f);
+        break;
+    }
+    case (int)PointMarker::Cross:
+        dl->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), col, 2.0f);
+        dl->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), col, 2.0f);
+        break;
+    case (int)PointMarker::Plus:
+        dl->AddLine(ImVec2(p.x - r * 1.3f, p.y), ImVec2(p.x + r * 1.3f, p.y), col, 2.0f);
+        dl->AddLine(ImVec2(p.x, p.y - r * 1.3f), ImVec2(p.x, p.y + r * 1.3f), col, 2.0f);
+        break;
+    default:
+        dl->AddCircleFilled(p, r, col, 12);
+        dl->AddCircle(p, r, edge, 12, 1.0f);
+        break;
+    }
+}
+
 // Единственное место, где заданы марджины 2D-плота (см. plot_view_2d.h).
 // margin_left/bottom увеличены, чтобы вместить тики + центрированное
 // название оси, и растут вместе с кеглем подписей (Settings -> Plot font
@@ -626,8 +677,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 if (!std::isfinite(px) || !std::isfinite(py)) continue;
                 if (px < img_pos.x - r || px > img_pos.x + plot_w + r) continue;
                 if (py < img_pos.y - r || py > img_pos.y + plot_h + r) continue;
-                dl->AddCircleFilled(ImVec2(px, py), r, col, 12);
-                dl->AddCircle(ImVec2(px, py), r, edge, 12, 1.0f);
+                draw_node_marker(dl, ImVec2(px, py), r, s.node_marker, col, edge);
                 if (plot_h_ov) {
                     const float dx = px - io.MousePos.x;
                     const float dy = py - io.MousePos.y;

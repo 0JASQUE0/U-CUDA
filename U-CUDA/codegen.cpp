@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <climits>
+#include <limits>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
@@ -1995,6 +1996,19 @@ std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool
     return alpha;
 }
 
+bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetric,
+                                 std::vector<std::string>* out) {
+    std::vector<ExRat> r;
+    if (!extrapolation_weights_rational(n, p, symmetric, r)) return false;
+    if (!out) return true;
+    out->clear();
+    out->reserve(r.size());
+    for (const ExRat& v : r)
+        out->push_back(v.d == 1 ? std::to_string(v.n)
+                                : std::to_string(v.n) + "/" + std::to_string(v.d));
+    return true;
+}
+
 std::string wrap_extrapolation(const std::string& base_body, int N,
                                const std::vector<int>& n, int p, bool symmetric,
                                const std::string& base_name) {
@@ -2191,6 +2205,59 @@ bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum
 
 namespace {
 
+    // comp_fold с окружением: Sym берётся из env, Call считается для функций,
+    // которые в коэффициенте шага вообще осмысленны (sqrt(2), cbrt(2) в
+    // классических композициях). Неизвестное имя — честный false, а не ноль:
+    // подставить ноль значило бы показать пользователю число, которого схема
+    // считать не будет.
+    bool comp_fold_env(const PN& n, const std::map<std::string, double>& env, double* v) {
+        if (!n) return false;
+        double a = 0, b = 0;
+        switch (n->kind) {
+        case Node::Num: *v = n->num; return true;
+        case Node::Sym: {
+            auto it = env.find(n->name);
+            if (it == env.end()) return false;
+            *v = it->second; return true;
+        }
+        case Node::Neg:
+            if (!comp_fold_env(n->a, env, &a)) return false;
+            *v = -a; return true;
+        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
+            if (!comp_fold_env(n->a, env, &a) || !comp_fold_env(n->b, env, &b)) return false;
+            switch (n->kind) {
+            case Node::Add: *v = a + b; break;
+            case Node::Sub: *v = a - b; break;
+            case Node::Mul: *v = a * b; break;
+            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
+            default:        *v = std::pow(a, b); break;
+            }
+            return true;
+        case Node::Call: {
+            if (n->args.size() == 1) {
+                if (!comp_fold_env(n->args[0], env, &a)) return false;
+                const std::string& f = n->name;
+                if (f == "sqrt") { if (a < 0) return false; *v = std::sqrt(a); return true; }
+                if (f == "cbrt")               { *v = std::cbrt(a); return true; }
+                if (f == "exp")                { *v = std::exp(a);  return true; }
+                if (f == "log")  { if (a <= 0) return false; *v = std::log(a); return true; }
+                if (f == "sin")                { *v = std::sin(a);  return true; }
+                if (f == "cos")                { *v = std::cos(a);  return true; }
+                if (f == "tan")                { *v = std::tan(a);  return true; }
+                if (f == "fabs" || f == "abs") { *v = std::fabs(a); return true; }
+                return false;
+            }
+            if (n->args.size() == 2 && n->name == "pow") {
+                if (!comp_fold_env(n->args[0], env, &a)) return false;
+                if (!comp_fold_env(n->args[1], env, &b)) return false;
+                *v = std::pow(a, b); return true;
+            }
+            return false;
+        }
+        default: return false;
+        }
+    }
+
     // Округляет КАЖДЫЙ числовой литерал в строке, не трогая имена и операторы.
     // Работает и на цельном числе, и на выражении: "-1.2599210498948732*g1"
     // укорачивается так же, как "1.3512071919596578".
@@ -2224,6 +2291,45 @@ namespace {
     }
 
 } // namespace
+
+bool composition_gamma_values(const CompositionSpec& spec,
+                              const std::map<std::string, std::string>& param_values,
+                              std::vector<double>* out, std::string* err) {
+    // Окружение: сначала константы, затем параметры. Значение параметра само
+    // разбирается выражением (в библиотеке лежат "8/3" и "1e-5"), но уже БЕЗ
+    // окружения: параметр, сосланный на другой параметр, — это цепочка, и
+    // раскрывать её молча значило бы угадывать порядок вычисления.
+    std::map<std::string, double> env;
+    env["pi"] = 3.14159265358979323846;
+    for (const auto& kv : param_values) {
+        if (kv.second.empty()) continue;
+        double v = 0.0;
+        PN ast;
+        try { ast = Parser(kv.second, false).parse(); } catch (...) { continue; }
+        if (comp_fold(ast, &v)) env[kv.first] = v;
+    }
+
+    const int K = (int)spec.gammas.size();
+    if (out) out->assign((size_t)K, std::numeric_limits<double>::quiet_NaN());
+    bool all_ok = true;
+    for (int k = 0; k < K; ++k) {
+        const std::string& g = spec.gammas[(size_t)k];
+        double v = 0.0;
+        PN ast;
+        try { ast = Parser(g, false).parse(); }
+        catch (...) {
+            if (all_ok && err) *err = "coefficient \"" + g + "\" does not parse";
+            all_ok = false; continue;
+        }
+        if (!comp_fold_env(ast, env, &v)) {
+            if (all_ok && err)
+                *err = "coefficient \"" + g + "\" needs a parameter value that is not set";
+            all_ok = false; continue;
+        }
+        if (out) (*out)[(size_t)k] = v;
+    }
+    return all_ok;
+}
 
 std::string wrapper_display_name(const std::string& name, int digits) {
     CompositionSpec spec;
