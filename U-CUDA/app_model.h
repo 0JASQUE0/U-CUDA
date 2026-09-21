@@ -119,6 +119,12 @@ struct OrderPlotWindow {
     bool show_e2 = false;       // Error: вторая разность рядом с первой
     bool show_nominal = false;  // P: паспортный порядок схемы горизонталью
     bool map_error = false;     // Map: log10 E1 вместо p
+    // Map, когда в окне лежит область устойчивости: что именно красить.
+    //   0 — rho (спектральный радиус матрицы усиления);
+    //   1 — 1 - rho: положительное = устойчиво. УМОЛЧАНИЕ, потому что именно
+    //       эту величину рисует исходный матлабовский скрипт;
+    //   2 — бинарная маска rho <= 1, то есть сама область без полутонов.
+    int  stab_view = 1;
     int  colormap_idx = -1;     // Map; -1 = взять app-дефолт
     int  error_source = 0;      // Perf: 0 = E1, 1 = E2 по оси X
     int  time_unit = 0;         // Perf: 0 = мкс, 1 = мс
@@ -341,6 +347,11 @@ public:
     // Complex CD4: два прохода CD с шагами gamma*h и conj(gamma)*h — порядок 4.
     // Требует s = 0.5 (иначе внутренний CD несимметричен и порядок падает до 1).
     bool scheme_ccd4 = false;
+    // CCD4 (o4s3) / CCD4 (o4s4): симметричные (палиндромные) композиции того же
+    // CD, тоже порядок 4 и тоже только при s = 0.5. Complex CD4 симметричной
+    // быть не может — палиндром из двух стадий даёт лишь порядок 2.
+    bool scheme_ccd4s3 = false;
+    bool scheme_ccd4s4 = false;
     // Неявные схемы: Ньютон по символьному якобиану, решается ВСЯ связанная
     // система (в отличие от CD, диагонально-неявного). Отсюда A-устойчивость.
     bool scheme_ieuler = false;
@@ -949,6 +960,8 @@ public:
                 { scheme_simp,     "SIMP",              Scheme::SIMP },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
                 { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
+                { scheme_ccd4s3,   "CCD4 (o4s3)",       Scheme::ComplexCD4S3 },
+                { scheme_ccd4s4,   "CCD4 (o4s4)",       Scheme::ComplexCD4S4 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
             };
             bool any = false;

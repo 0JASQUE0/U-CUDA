@@ -143,6 +143,8 @@ SystemRecord AppModel::to_record() const {
     r.scheme_cd = scheme_cd;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
+    r.scheme_ccd4s3 = scheme_ccd4s3;
+    r.scheme_ccd4s4 = scheme_ccd4s4;
     r.scheme_ieuler = scheme_ieuler;
     r.scheme_imidpoint = scheme_imidpoint;
     r.scheme_semp = scheme_semp;
@@ -187,6 +189,8 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_cd = r.scheme_cd;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
+    scheme_ccd4s3 = r.scheme_ccd4s3;
+    scheme_ccd4s4 = r.scheme_ccd4s4;
     scheme_ieuler = r.scheme_ieuler;
     scheme_imidpoint = r.scheme_imidpoint;
     scheme_semp = r.scheme_semp;
@@ -211,7 +215,8 @@ void AppModel::from_record(const SystemRecord& r) {
     // A map has no scheme_* flag set — its single body is always generated.
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
-        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ieuler || scheme_imidpoint
+        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4
+        || scheme_ieuler || scheme_imidpoint
         || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler)
         generate();
 }
@@ -232,7 +237,8 @@ void AppModel::clear() {
     mode = InputMode::Image;
     is_map = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
-        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ieuler = scheme_imidpoint
+        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4
+        = scheme_ieuler = scheme_imidpoint
         = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler = false;
     symmetry_s = "0.5";
     newton_full = false;
@@ -1642,9 +1648,12 @@ void AppModel::load_or_init_order_plot_windows(const std::string& json) {
     std::vector<int> curves, maps, perfs;
     for (size_t i = 0; i < order_session.configs.size(); ++i) {
         const OrderConfig& c = order_session.configs[i];
-        if (c.calc_kind == kOrderCalcPerf) perfs.push_back((int)i);
-        else if (c.two_d)                  maps.push_back((int)i);
-        else                               curves.push_back((int)i);
+        if (c.calc_kind == kOrderCalcPerf)      perfs.push_back((int)i);
+        // Область устойчивости — всегда карта, своего вида окна у неё нет:
+        // в окне Map лежит ровно один член, что хитмапе и нужно.
+        else if (c.calc_kind == kOrderCalcStab) maps.push_back((int)i);
+        else if (c.two_d)                       maps.push_back((int)i);
+        else                                    curves.push_back((int)i);
     }
     if (!curves.empty()) add_order_plot_window(OrderPlotWindow::Kind::P, curves);
     if (!perfs.empty())  add_order_plot_window(OrderPlotWindow::Kind::Perf, perfs);

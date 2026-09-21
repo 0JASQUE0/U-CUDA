@@ -1062,6 +1062,76 @@ bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::
     return true;
 }
 
+// Конфиг карты устойчивости. Отдельный от write_order_config не ради стиля:
+// у этого расчёта нет ни начальных условий (шаг делается от базисных
+// векторов), ни времени счёта, ни порога расхождения — печатать их значило бы
+// приписывать файлу настройки, которых в нём не было.
+static void write_stability_config(std::ofstream& out, const StabilityResult& r,
+                                   const OrderSnapshot& s)
+{
+    if (!out.is_open()) return;
+    out << std::setprecision(set_precision);
+    out << "Order / stability region (two-dimensional Dahlquist test)\n";
+    out << "scheme = " << s.scheme << "\n";
+    out << "h = " << r.h << "\n";
+    out << "asymmetry k = " << r.k << "\n";
+    out << "ratio r = "     << r.r << "\n";
+    out << "matrix: d = 2*sigma/(1+k), c = -sqrt(-(1/r)*(sigma^2*(k-1)^2/(k+1)^2 + omega^2)), "
+           "b = r*c, a = k*d\n";
+    out << "slots: " << s.stab_slots << "\n";
+    out << "sigma = [" << r.sigma_lo << ", " << r.sigma_hi << "], "
+        << r.n_pts_x << " points\n";
+    out << "omega = [" << r.omega_lo << ", " << r.omega_hi << "], "
+        << r.n_pts_y << " points\n";
+
+    // Параметры системы печатаются целиком, хотя четыре слота матрицы во время
+    // расчёта перезаписываются: остальные a[] (например коэффициенты обёртки)
+    // в счёт входят, и без них файл не воспроизводим.
+    out << "params: ";
+    for (size_t i = 0; i < s.values.size(); ++i) {
+        if (i) out << ", ";
+        if (i == 0) out << "s = ";
+        else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        out << s.values[i];
+    }
+    out << "\n";
+    out << "device = " << (s.use_gpu ? "GPU (NVRTC)" : "CPU (cl.exe, sequential)") << "\n";
+    if (s.use_gpu) out << "fmad = " << (s.gpu_fmad ? 1 : 0) << "\n";
+    out << "stable cells = " << r.n_stable << " of " << (r.n_ok + r.n_bad) << "\n";
+}
+
+bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
+                      const std::string& path)
+{
+    std::ofstream cfg(path + "_config.csv");
+    if (!cfg.is_open()) return false;
+    write_stability_config(cfg, res, snap);
+    cfg.close();
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+    out << "sigma,omega,rho,stable,status\n";
+
+    for (int iy = 0; iy < res.n_pts_y; ++iy) {
+        for (int ix = 0; ix < res.n_pts_x; ++ix) {
+            const size_t k = (size_t)iy * (size_t)res.n_pts_x + (size_t)ix;
+            out << ((size_t)ix < res.sigma_vals.size() ? res.sigma_vals[(size_t)ix] : 0.0)
+                << "," << ((size_t)iy < res.omega_vals.size() ? res.omega_vals[(size_t)iy] : 0.0);
+            // Непосчитанная ячейка оставляет rho и stable ПУСТЫМИ: ноль в rho
+            // читался бы как «усиления нет», то есть как самый устойчивый
+            // возможный ответ.
+            const bool good = (k < res.rho.size()) && std::isfinite(res.rho[k]);
+            out << ",";
+            if (good) out << res.rho[k];
+            out << ",";
+            if (good) out << (res.rho[k] <= 1.0 ? 1 : 0);
+            out << "," << (k < res.status.size() ? res.status[k] : 1) << "\n";
+        }
+    }
+    return true;
+}
+
 bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path)
 {
     std::ofstream cfg(path + "_config.csv");

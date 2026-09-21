@@ -28,6 +28,7 @@ struct BasinsResult;
 struct FastSyncResult;
 struct OrderResult;
 struct PerfResult;
+struct StabilityResult;
 // AnalysisResult is defined in analysis_session.h.
 struct AnalysisResult;
 
@@ -381,6 +382,12 @@ struct OrderSnapshot {
     int repeats = 0, warmup = 0, replicas = 0;
     std::string ref_scheme;          // пусто — эталон не считался
     int         ref_substeps = 0;
+
+    // Только Stability. Начальные условия и время счёта для неё смысла не
+    // имеют (шаг делается один, от базисных векторов), зато имеют смысл
+    // настройки теста и то, в какие a[] легли элементы матрицы.
+    double      stab_k = 0.0, stab_r = 0.0, stab_h = 0.0;
+    std::string stab_slots;          // "a = a[1], b = a[2], c = a[3], d = a[4]"
 };
 
 // Order: <path> — по строке на узел (1D) или на ячейку (2D):
@@ -396,6 +403,15 @@ bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::
 // (см. PerfRequest). Узел, на котором замера не было, оставляет ячейки времени
 // пустыми, а не нулями.
 bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path);
+
+// Stability: <path> — по строке на ячейку в row-major порядке сетки,
+//   "sigma,omega,rho,stable,status".
+// stable — 1 при rho <= 1, иначе 0; у непосчитанной ячейки поле пустое, как и
+// rho. status — код StabilityStatus (0 ok, 1 матрица не построилась или шаг
+// дал nan/inf). Настройки теста (k, r, h) и элементы матрицы в нём не
+// печатаются построчно: они одинаковы для всей карты и уходят в _config.csv.
+bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
+                      const std::string& path);
 
 // Phase / TimeSeries — there is no engine-side CSV; the format is defined
 // fresh here. <path>_config.csv carries scheme + params + ICs + integration

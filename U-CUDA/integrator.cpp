@@ -10,6 +10,8 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "CD")                return IntScheme::CD;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
+    if (s == "CCD4 (o4s3)")       return IntScheme::ComplexCD4S3;
+    if (s == "CCD4 (o4s4)")       return IntScheme::ComplexCD4S4;
     if (s == "Implicit Euler")    return IntScheme::ImplicitEuler;
     if (s == "Implicit Midpoint") return IntScheme::ImplicitMidpoint;
     if (s == "SEMP")              return IntScheme::SEMP;
@@ -194,6 +196,15 @@ constexpr double CCD_IMAG = 0.28867513459481288225;  // sqrt(3)/6, как в cod
 // Не настройка: 1/2 — единственное значение, гасящее h^2-член композиции.
 constexpr double CIE_IMAG = 0.5;
 
+// Коэффициент палиндромной тройки CCD4 (o4s3):
+// alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3)), раскрытое по формуле из kCcd3Decl
+// (codegen.cpp). Считается той же формулой, а не литералом, чтобы CPU и GPU
+// не разъехались в последнем разряде.
+static const double CCD3_C  = std::cbrt(2.0);
+static const double CCD3_D  = 4.0 + 2.0 * CCD3_C + CCD3_C * CCD3_C;
+static const double CCD3_RE = (2.0 + 0.5 * CCD3_C) / CCD3_D;
+static const double CCD3_IM = 0.5 * CCD3_C * std::sqrt(3.0) / CCD3_D;
+
 // Один проход CD в комплексной арифметике: явный полушаг h1 вперёд, неявный h2
 // назад. Complex CD зовёт его один раз, Complex CD4 — дважды с сопряжёнными
 // коэффициентами.
@@ -235,6 +246,43 @@ void step_complex_cd4(const SystemEvaluator& ev, const double* a, double h, int 
     for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
     complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
     complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
+    for (int i = 0; i < n; ++i) X[i] = Z[i].re;
+}
+
+// CCD4 (o4s3): СИММЕТРИЧНАЯ схема 4-го порядка — палиндромная тройка
+// (alpha, 1 - 2*alpha, alpha) проходов того же CD. Complex CD4 самосопряжённой
+// быть не может (палиндром из двух стадий даёт только порядок 2), поэтому
+// минимум для симметричной комплексной композиции — три прохода. Ветвь
+// комплексная, а не вещественная: у тройного прыжка Йошиды средний
+// коэффициент отрицателен, здесь Re положительна у всех трёх.
+// Зеркало CdKind::Cx4s3 в codegen.cpp, требует s = a[0] = 1/2.
+void step_complex_cd4_s3(const SystemEvaluator& ev, const double* a, double h, int n,
+                         double* X, ucmplx* Z, ucmplx* k1) {
+    const double s = a[0];
+    const ucmplx ga(CCD3_RE * h, CCD3_IM * h);
+    // Через alpha, а не литералом: сумма подшагов тогда равна h точно.
+    const ucmplx gb((1.0 - 2.0 * CCD3_RE) * h, -2.0 * CCD3_IM * h);
+    for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
+    complex_cd_pass(ev, a, n, Z, k1, ga * s, ga * (1.0 - s));
+    complex_cd_pass(ev, a, n, Z, k1, gb * s, gb * (1.0 - s));
+    complex_cd_pass(ev, a, n, Z, k1, ga * s, ga * (1.0 - s));
+    for (int i = 0; i < n; ++i) X[i] = Z[i].re;
+}
+
+// CCD4 (o4s4): та же Complex CD4, симметризованная композицией с собственной
+// сопряжённой на половинном шаге — палиндром (gamma/2, conj/2, conj/2, gamma/2).
+// Решение условий для четырёх палиндромных стадий единственно с точностью до
+// сопряжения и выходит ровно этим. Зеркало CdKind::Cx4s4 в codegen.cpp.
+void step_complex_cd4_s4(const SystemEvaluator& ev, const double* a, double h, int n,
+                         double* X, ucmplx* Z, ucmplx* k1) {
+    const double s = a[0];
+    const ucmplx g (0.25 * h,  0.5 * h * CCD_IMAG);
+    const ucmplx gc(0.25 * h, -0.5 * h * CCD_IMAG);
+    for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
+    complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
+    complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
+    complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
+    complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
     for (int i = 0; i < n; ++i) X[i] = Z[i].re;
 }
 
@@ -513,6 +561,7 @@ bool computePhasePortraitCPU(
     // пустых вектора, без аллокаций.
     std::vector<ucmplx> Zc, Kc;
     const bool cx_state = (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4
+                           || scheme == IntScheme::ComplexCD4S3 || scheme == IntScheme::ComplexCD4S4
                            || scheme == IntScheme::ComplexIEuler);
     if (cx_state) { Zc.resize(n); Kc.resize(n); }
     // Newton workspace, allocated only for the implicit schemes.
@@ -541,6 +590,8 @@ bool computePhasePortraitCPU(
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
+        case IntScheme::ComplexCD4S3:     step_complex_cd4_s3(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
+        case IntScheme::ComplexCD4S4:     step_complex_cd4_s4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ImplicitEuler:    step_implicit_euler(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         case IntScheme::ImplicitMidpoint: step_implicit_midpoint(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         case IntScheme::SEMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ false, k1.data(), tmp.data()); break;

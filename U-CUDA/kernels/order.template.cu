@@ -320,3 +320,122 @@ extern "C" __global__ void orderEstimateKernel(
     outH[gcell]      = hEff;
     outStatus[gcell] = status;
 }
+
+// ---------------------------------------------------------------------------
+// Область устойчивости на двумерной задаче Дальквиста.
+//
+// Тест: X' = A X, A = [[a, b], [c, d]], где элементы НЕ вводятся, а строятся в
+// каждом узле сетки из (sigma, omega) и двух настроек — коэффициента
+// несимметричности k и отношения недиагоналей r:
+//   d = 2*sigma/(1+k),  c = -sqrt(-(1/r)*(sigma^2*(k-1)^2/(k+1)^2 + omega^2)),
+//   b = r*c,            a = k*d.
+// При любом k это даёт tr A = 2*sigma и det A = sigma^2 + omega^2, то есть
+// собственные числа ровно sigma +- i*omega: k гоняет матрицу по семейству с
+// ОДНИМ И ТЕМ ЖЕ спектром, а r только масштабирует недиагонали. Поэтому
+// картинка в осях (sigma, omega) сравнима между разными k, и видно ровно то,
+// ради чего k заведён, — насколько схема чувствительна к несимметричности
+// задачи при неизменных собственных числах.
+//
+// Шаг делается ОДИН. Тест линеен и однороден (f(0) = 0), поэтому шаг любой
+// схемы — линейный оператор, и прогон от двух базисных векторов (1,0) и (0,1)
+// даёт столбцы матрицы усиления R целиком. Дальше rho = max|lambda(R)| через
+// след и определитель. Больше одного шага смысла не имеет: R_N = R^N, спектр
+// возводится в ту же степень, и корень N-й степени вернул бы то же число —
+// только с потерянными разрядами.
+//
+// Схема сюда не «вписывается» отдельно: гоняется ТО ЖЕ тело КРС, что и на
+// остальных вкладках, поэтому s = a[0], покомпонентный Гаусс-Зейдель неявных
+// полушагов, композиции и экстраполяции учитываются сами собой. Отсюда же
+// требование к кастомной КРС для этого режима — обращаться к a[1..4] как к
+// a, b, c, d.
+#define STAB_OK   0
+#define STAB_BAD  1   // матрица не построилась (k = -1, r = 0, r > 0) или R улетела
+
+extern "C" __global__ void stabilityRegionKernel(
+    const int    nPtsX,
+    const int    nPtsY,
+    const int    nCells,                  // ячеек в этом чанке
+    const int    cellOffset,              // сколько ячеек посчитано до чанка
+    const numb* __restrict__ sigVals,     // [nPtsX] — узлы по sigma
+    const numb* __restrict__ omVals,      // [nPtsY] — узлы по omega
+    const numb* __restrict__ values,      // [AMOUNTOFVALUES] базовые a[]
+    const int    idxA, const int idxB, const int idxC, const int idxD,  // куда в a[] класть элементы
+    const numb   k,                       // коэффициент несимметричности
+    const numb   r,                       // отношение недиагоналей, обязан быть < 0
+    const numb   h,                       // шаг, чей оператор перехода и диагонализуется
+    numb* __restrict__ outRho,
+    int*  __restrict__ outStatus)
+{
+    const int cell = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cell >= nCells) return;
+
+    const int gcell = cell + cellOffset;
+    const int ix = gcell % nPtsX;
+    const int iy = gcell / nPtsX;
+
+    const numb sig = sigVals[ix];
+    const numb om  = omVals[iy];
+
+    const numb kp1 = k + (numb)1;
+    const numb km1 = k - (numb)1;
+
+    // Подкоренное выражение отрицательно при r > 0: c тогда мнимое, и теста
+    // в вещественной арифметике не существует. Это не «плохая ячейка», а
+    // неверная настройка, но ловится она здесь — хост про sigma и omega узла
+    // не знает.
+    numb rad = (numb)0;
+    bool bad = (kp1 == (numb)0) || (r == (numb)0);
+    if (!bad) {
+        rad = -((numb)1 / r) * (sig * sig * km1 * km1 / (kp1 * kp1) + om * om);
+        if (rad < (numb)0 || isnan(rad)) bad = true;
+    }
+    if (bad) {
+        outRho[gcell] = (numb)nan("");
+        outStatus[gcell] = STAB_BAD;
+        return;
+    }
+
+    const numb dEl = (numb)2 * sig / kp1;
+    const numb cEl = -sqrt(rad);
+    const numb bEl = r * cEl;
+    const numb aEl = k * dEl;
+
+    numb a[AMOUNTOFVALUES];
+    for (int i = 0; i < AMOUNTOFVALUES; ++i) a[i] = values[i];
+    a[idxA] = aEl; a[idxB] = bEl; a[idxC] = cEl; a[idxD] = dEl;
+
+    // Столбцы матрицы усиления: шаг от (1,0) и от (0,1).
+    numb R[4];   // R[0]=R00 R[1]=R01 R[2]=R10 R[3]=R11
+    for (int col = 0; col < 2; ++col) {
+        numb X[AMOUNTOFX];
+        for (int i = 0; i < AMOUNTOFX; ++i) X[i] = (numb)0;
+        X[col] = (numb)1;
+        calculateDiscreteModel(X, a, h);
+        R[col]     = X[0];
+        R[2 + col] = X[1];
+    }
+
+    const numb tr  = R[0] + R[3];
+    const numb det = R[0] * R[3] - R[1] * R[2];
+    const numb disc = tr * tr * (numb)0.25 - det;
+
+    numb rho;
+    if (disc >= (numb)0) {
+        const numb sq = sqrt(disc);
+        const numb l1 = fabs(tr * (numb)0.5 + sq);
+        const numb l2 = fabs(tr * (numb)0.5 - sq);
+        rho = (l1 > l2) ? l1 : l2;
+    } else {
+        // Комплексно-сопряжённая пара: |lambda|^2 = tr^2/4 + (det - tr^2/4) = det,
+        // и при disc < 0 определитель заведомо положителен.
+        rho = sqrt(det);
+    }
+
+    if (isnan(rho) || isinf(rho)) {
+        outRho[gcell] = (numb)nan("");
+        outStatus[gcell] = STAB_BAD;
+    } else {
+        outRho[gcell] = rho;
+        outStatus[gcell] = STAB_OK;
+    }
+}

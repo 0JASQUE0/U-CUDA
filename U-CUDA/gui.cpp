@@ -247,6 +247,7 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     if (parse_composition_name(scheme_name, &cspec))
         return scheme_uses_symmetry(cspec.base, custom_schemes);
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+        || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
         || scheme_name == "Complex Implicit Euler"
         || scheme_name == "SEMP" || scheme_name == "SIMP"
         || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
@@ -716,6 +717,36 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
       "Requires s = a[0] = 0.5: for other s the inner CD is\n"
       "asymmetric and the order drops to first." },
+    { "CCD4 (o4s3)",              4, &AppModel::scheme_ccd4s3,
+      "SYMMETRIC order-4 composition of THREE symmetric CDs:\n"
+      "steps (alpha, 1-2*alpha, alpha)*h, palindromic, hence\n"
+      "self-adjoint as a complex composition.\n"
+      "alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3))\n"
+      "      = 0.3243964040201712 + 0.1345862724908067i.\n"
+      "Complex CD4 itself cannot be made symmetric: a palindrome\n"
+      "of two stages forces g1 = g2, and then sum g = 1 and\n"
+      "sum g^3 = 0 are incompatible -- three stages is the minimum.\n"
+      "Same cubic as Yoshida's real triple jump, but the complex\n"
+      "branch: no backward substep (min Re = 0.324) and an error\n"
+      "constant 215x smaller (0.0247 against 5.29).\n"
+      "Re is taken once at the end of the step; the symmetry defect\n"
+      "that leaves is O(h^10), against O(h^8) for Complex CD4.\n"
+      "Error expands in EVEN powers of h (measured: Richardson on\n"
+      "h^2 gives order 6), so it is a legitimate extrapolation base.\n"
+      "Requires s = a[0] = 0.5, like every CD-family scheme.\n"
+      "Costs 3 CD passes against 2; at equal total work the error\n"
+      "matches Complex CD4 to within 4%." },
+    { "CCD4 (o4s4)",              4, &AppModel::scheme_ccd4s4,
+      "SYMMETRIC order-4 composition of FOUR symmetric CDs:\n"
+      "steps (gamma/2, conj/2, conj/2, gamma/2)*h, palindromic.\n"
+      "This is Complex CD4 symmetrized by composing it with its own\n"
+      "adjoint on the half step; the palindromic four-stage order\n"
+      "conditions have exactly this solution, up to conjugation.\n"
+      "Smallest error constant of the three (0.00759), but 4 CD\n"
+      "passes per step -- at equal total work it is identical to\n"
+      "Complex CD4 and 4% better than CCD4 (o4s3).\n"
+      "Same properties otherwise: symmetry defect O(h^10) after Re,\n"
+      "even-power error expansion, requires s = a[0] = 0.5." },
     { "DOPRI78",                  8, &AppModel::scheme_dopri78, nullptr },
 };
 static constexpr int kBuiltinSchemeCount =
@@ -857,7 +888,8 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
 //
 // allow_s — показывать ли пункт "s (a[0])", свип по коэффициенту симметрии. Он
 // имеет смысл только у схем, которые a[0] читают (CD / Complex CD / Complex CD4 /
-// SEMP / SIMP и custom с a[0] в теле — см. scheme_uses_symmetry), иначе свип шёл
+// CCD4 (o4s3) / CCD4 (o4s4) / SEMP / SIMP и custom с a[0] в теле —
+// см. scheme_uses_symmetry), иначе свип шёл
 // бы по значению, которого КРС не видит, и дал бы плоскую картинку. Выбор
 // кодируется par_index = -1: в a[] это слот 0, поэтому отдельного флага (в
 // отличие от over_h) не нужно — движок свипует a[0] как любой другой параметр.
@@ -989,13 +1021,22 @@ static void draw_named_num_fields(const char* header,
                                   std::map<std::string, std::string>& values,
                                   const char* note = nullptr,
                                   AppModel* bc = nullptr,
-                                  BroadcastField field = BroadcastField::Param) {
+                                  BroadcastField field = BroadcastField::Param,
+                                  // Поля, которые расчёт ПЕРЕЗАПИШЕТ сам (область
+                                  // устойчивости строит четыре элемента матрицы в
+                                  // каждом узле сетки). Такие гасятся, а не молча
+                                  // игнорируются: живое поле, ни на что не влияющее,
+                                  // читается как настройка, которой оно не является.
+                                  const std::function<bool(const std::string&)>& overwritten = {}) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (note) ImGui::TextDisabled("%s", note);
     for (const auto& n : names) {
         ImGui::PushID(n.c_str());
+        const bool off = overwritten && overwritten(n);
+        if (off) ImGui::BeginDisabled();
         InputNumStr(n.c_str(), values[n], kFieldW,
                     [&] { field_apply_all_menu(bc, field, n, n, values[n]); });
+        if (off) ImGui::EndDisabled();
         ImGui::PopID();
     }
 }
@@ -2558,6 +2599,7 @@ static void draw_wrapper_coefficients(const std::string& name,
 // рантайме), поэтому предупреждаем здесь.
 static bool extr_base_needs_half_s(const std::string& nm) {
     return nm == "CD" || nm == "Complex CD" || nm == "Complex CD4"
+        || nm == "CCD4 (o4s3)" || nm == "CCD4 (o4s4)"
         || nm == "SEMP" || nm == "SIMP";
 }
 
@@ -2881,7 +2923,14 @@ static void draw_wrapper_list(AppModel& model) {
         const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
         // Строка-раскрывашка, а не просто текст: коэффициенты у пяти стадий
         // занимают полэкрана, а список обычно просматривают целиком.
-        const bool open = ImGui::TreeNodeEx("##row", ImGuiTreeNodeFlags_SpanAvailWidth,
+        // AllowOverlap обязателен в паре со SpanAvailWidth: тот растягивает
+        // хитбокс строки до правого края, и без него Delete оказывается ПОД
+        // раскрывашкой — клик по кнопке уходил ей и просто раскрывал строку.
+        // С флагом приоритет получает предмет, выданный на строке позже,
+        // то есть сама кнопка.
+        const bool open = ImGui::TreeNodeEx("##row",
+                                            ImGuiTreeNodeFlags_SpanAvailWidth
+                                                | ImGuiTreeNodeFlags_AllowOverlap,
                                             "%s", shown.c_str());
         if (shown != model.wrapper_schemes[i] && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", model.wrapper_schemes[i].c_str());
@@ -8953,6 +9002,113 @@ static void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSessi
     }
 }
 
+// ---------------------------------------------------------------------------
+// Блок настроек области устойчивости.
+//
+// Элементы тестовой матрицы здесь НЕ вводятся — вводятся k, r и h, а a, b, c, d
+// пересчитываются в каждом узле сетки так, чтобы спектр был ровно
+// sigma +- i*omega (формулы в kernels/order.template.cu). Поэтому поля матрицы
+// в этом блоке отсутствуют, а вместо них стоят селекторы «в какой a[] класть
+// какой элемент»: пресет library/Dahlquist 2D даёт 1..4, но переименовать или
+// переставить параметры системы пользователю никто не запрещает, и молча
+// промахнуться мимо индекса — это неверная картинка без единого сообщения.
+static void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
+                                       OrderConfig& c) {
+    if (!ImGui::CollapsingHeader("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    if ((int)s.vars.size() != 2) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+            "This computation needs the linear two-dimensional test system: %d state "
+            "variables are loaded.", (int)s.vars.size());
+        ImGui::TextDisabled("Library -> Dahlquist 2D. Run will be refused until then.");
+        ImGui::Separator();
+    }
+
+    InputNumStr("asymmetry k", c.stab_k_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Drives the test matrix along the family with the SAME spectrum:\n"
+            "a = k*d and d = 2*sigma/(1+k), so the trace stays 2*sigma and the\n"
+            "determinant stays sigma^2 + omega^2 whatever k is. k = 1 gives the\n"
+            "symmetric case a = d; the further from 1, the stronger the\n"
+            "asymmetry the scheme has to cope with at unchanged eigenvalues.\n"
+            "k = -1 is forbidden: it makes d infinite.");
+    InputNumStr("ratio r", c.stab_r_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Scales the off-diagonal entries: b = r*c, and c itself is built so\n"
+            "that the spectrum does not move. Must be NEGATIVE - with r >= 0 the\n"
+            "radicand of c is not positive and no real test matrix exists.");
+    InputNumStr("step h", c.stab_h_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "The step whose transition operator is diagonalised. Exactly ONE\n"
+            "step is taken: the test is linear and homogeneous, so R_N = R^N and\n"
+            "more steps would only raise the same spectrum to a power.\n"
+            "\n"
+            "At h = 1 (the default) the axes read directly as h*sigma and\n"
+            "h*omega - the classic dimensionless picture.");
+
+    const double k_val = parse_num(c.stab_k_text, 1.0);
+    const double r_val = parse_num(c.stab_r_text, -1.0);
+    if (k_val == -1.0)
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "k = -1: d = 2*sigma/(1+k) is undefined, the run will be refused.");
+    if (!(r_val < 0.0))
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "r must be negative: with r >= 0 the matrix has no real form.");
+
+    ImGui::Separator();
+    InputNumStr("sigma from", c.stab_sig_lo_text, kFieldW);
+    ImGui::SameLine();
+    InputNumStr("to##sigma", c.stab_sig_hi_text, kFieldW);
+    InputNumStr("omega from", c.stab_om_lo_text, kFieldW);
+    ImGui::SameLine();
+    InputNumStr("to##omega", c.stab_om_hi_text, kFieldW);
+    InputNumStr("resolution (both axes)", c.stab_n_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "The map is always N x N: a cell costs two steps of the scheme, so\n"
+            "even 512 x 512 is cheaper than a single node of the p(h) curve.");
+
+    // Селекторы индексов a[]. Подписи те же, что у селектора оси свипа, минус
+    // "h" и минус a[0] — коэффициент симметрии s занят схемой.
+    ImGui::Separator();
+    std::vector<std::string> items;
+    items.reserve(s.params.size());
+    for (size_t i = 0; i < s.params.size(); ++i)
+        items.push_back(s.params[i] + " (a[" + std::to_string(i + 1) + "])");
+    std::vector<const char*> item_ptrs;
+    item_ptrs.reserve(items.size());
+    for (const auto& it : items) item_ptrs.push_back(it.c_str());
+
+    auto idx_combo = [&](const char* label, int& target) {
+        int sel = target - 1;   // a[1] — первый элемент списка
+        if (sel < 0 || sel >= (int)item_ptrs.size()) sel = -1;
+        ImGui::SetNextItemWidth(kFieldW + 60.0f);
+        if (ImGui::Combo(label, &sel, item_ptrs.empty() ? nullptr : item_ptrs.data(),
+                         (int)item_ptrs.size()))
+            target = sel + 1;
+    };
+    idx_combo("matrix a##stab", c.stab_idx_a);
+    idx_combo("matrix b##stab", c.stab_idx_b);
+    idx_combo("matrix c##stab", c.stab_idx_c);
+    idx_combo("matrix d##stab", c.stab_idx_d);
+    ImGui::TextDisabled("Which parameter of the system carries which entry of "
+                        "[[a, b], [c, d]].");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "The entries are recomputed in every node from (sigma, omega, k, r)\n"
+            "and written into these a[] slots, so whatever you set here is\n"
+            "overwritten during the run - the values on the Parameters panel are\n"
+            "not used for them.\n"
+            "\n"
+            "For Library -> Dahlquist 2D this is a, b, c, d = a[1..4]. A custom\n"
+            "KRS for this computation must address exactly these slots.");
+
+    (void)model;
+}
+
 // Определено ниже, вместе с окнами графиков: панель настроек раздаёт по ним
 // вкладки и обязана знать, какой вид окна какие конфиги принимает.
 static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k);
@@ -8960,6 +9116,8 @@ static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k);
 // Вид окна, в котором конфигу место по его текущим настройкам.
 static OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
     if (c.calc_kind == kOrderCalcPerf) return OrderPlotWindow::Kind::Perf;
+    // Область устойчивости — карта по построению: сетка всегда (sigma, omega).
+    if (c.calc_kind == kOrderCalcStab) return OrderPlotWindow::Kind::Map;
     return c.two_d ? OrderPlotWindow::Kind::Map : OrderPlotWindow::Kind::P;
 }
 
@@ -9087,6 +9245,19 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "integrates a single trajectory with that node's step is launched\n"
             "several times under cudaEvents. The plot then shows time against\n"
             "the error achieved - what that accuracy costs.");
+    ImGui::SameLine();
+    ImGui::RadioButton("stability", &c.calc_kind, kOrderCalcStab);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Stability region on the two-dimensional Dahlquist test problem.\n"
+            "The grid runs over the eigenvalues of the test matrix: sigma along\n"
+            "X, omega along Y. In every node the matrix is rebuilt from\n"
+            "(sigma, omega) and the settings k and r, one step of the scheme is\n"
+            "taken from each basis vector, and the map shows the spectral radius\n"
+            "of the resulting amplification matrix. The boundary is rho = 1.\n"
+            "\n"
+            "Needs the linear two-dimensional test system - Library ->\n"
+            "Dahlquist 2D. Any other system is refused.");
     if (c.calc_kind != calc_kind_before) order_rehome_config(model, idx);
 
     // Устройство расчёта. Обе ветки считают по одним формулам и одним порогам,
@@ -9180,6 +9351,14 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                           &model, model.is_map, &s.wrapper_schemes);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+        // Область устойчивости берёт из этого блока только схему и s: она
+        // делает ОДИН шаг, поэтому ни времени счёта, ни порога расхождения,
+        // ни подгонки числа шагов у неё нет, а собственный шаг живёт в своём
+        // блоке ниже — рядом с k и r, от которых зависит смысл осей.
+        if (c.calc_kind == kOrderCalcStab) {
+            ImGui::TextDisabled("The step and the grid of the stability region live in "
+                                "\"Stability region\" below.");
+        } else {
         const bool h_swept = (c.axis_x_target == kOrderTargetH)
                           || (c.two_d && c.axis_y_target == kOrderTargetH);
         if (!model.is_map) {
@@ -9209,7 +9388,11 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "quickly starts reflecting divergence rather than the order of the scheme.");
 
         draw_order_steps_hint(c, s);
+        }
     }
+
+    // ---- Stability region ----
+    if (c.calc_kind == kOrderCalcStab) draw_order_stability_block(model, s, c);
 
     // ---- Performance ----
     if (c.calc_kind == kOrderCalcPerf &&
@@ -9284,7 +9467,12 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     }
 
     // ---- Оси ----
-    if (ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // У области устойчивости оси заданы смыслом расчёта (sigma и omega —
+    // вещественная и мнимая части собственных чисел тестовой матрицы), и
+    // общий селектор «h + элементы a[]» к ней неприменим: показывать его
+    // рядом с настоящими границами значило бы предлагать выбор, которого нет.
+    if (c.calc_kind != kOrderCalcStab &&
+        ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
         if (perf_mode) ImGui::BeginDisabled();
         if (ImGui::Checkbox("2D map", &c.two_d)) order_rehome_config(model, idx);
@@ -9309,14 +9497,40 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep the same thing");
     }
 
-    draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
-                          nullptr, &model, BroadcastField::InitCondition);
-    draw_named_num_fields("Parameters", s.params, c.param_values,
+    // Что из этих двух блоков расчёт задаёт сам. У области устойчивости это
+    // ВСЕ начальные условия (шаг делается от базисных векторов) и четыре
+    // параметра, несущих элементы тестовой матрицы: они пересчитываются из
+    // (sigma, omega, k, r) в каждом узле сетки. Остальные параметры — скажем,
+    // коэффициенты обёртки или s_i у комплексных схем — работают как обычно.
+    std::function<bool(const std::string&)> ic_overwritten, par_overwritten;
+    const char* ic_note  = nullptr;
+    const char* par_note =
         "Declare METHOD parameters (for composition schemes) right here as ordinary "
         "system parameters: they need not be used in the right-hand sides, "
         "and the body of a custom KRS reads them as a[k]. In the axis selector they "
-        "will appear alongside the rest.",
-        &model, BroadcastField::Param);
+        "will appear alongside the rest.";
+    if (c.calc_kind == kOrderCalcStab) {
+        ic_overwritten = [](const std::string&) { return true; };
+        ic_note = "Not used: the step is taken from the basis vectors (1, 0) and (0, 1) - "
+                  "that is what makes the result a fundamental matrix.";
+        par_note = "The four entries of the test matrix are greyed out: they are rebuilt from "
+                   "(sigma, omega) and k, r in every node of the grid, exactly as the "
+                   "reference script does it. The rest of the parameters work as usual.";
+        std::vector<std::string> taken;
+        const int slots[4] = { c.stab_idx_a, c.stab_idx_b, c.stab_idx_c, c.stab_idx_d };
+        for (int i = 0; i < 4; ++i) {
+            const int pi = slots[i] - 1;
+            if (pi >= 0 && pi < (int)s.params.size()) taken.push_back(s.params[(size_t)pi]);
+        }
+        par_overwritten = [taken](const std::string& n) {
+            return std::find(taken.begin(), taken.end(), n) != taken.end();
+        };
+    }
+
+    draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
+                          ic_note, &model, BroadcastField::InitCondition, ic_overwritten);
+    draw_named_num_fields("Parameters", s.params, c.param_values,
+                          par_note, &model, BroadcastField::Param, par_overwritten);
 
     if (!c.last_error.empty())
         draw_error_box("##order_err", c.last_error);
@@ -9405,7 +9619,7 @@ static const char* order_window_kind_name(OrderPlotWindow::Kind k) {
     switch (k) {
         case OrderPlotWindow::Kind::P:     return "Order p";
         case OrderPlotWindow::Kind::Error: return "Error";
-        case OrderPlotWindow::Kind::Map:   return "Order map 2D";
+        case OrderPlotWindow::Kind::Map:   return "Map 2D";
         case OrderPlotWindow::Kind::Perf:  return "Performance";
     }
     return "Order";
@@ -9416,7 +9630,8 @@ static const char* order_window_kind_name(OrderPlotWindow::Kind k) {
 static bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k) {
     switch (k) {
         case OrderPlotWindow::Kind::Perf: return c.calc_kind == kOrderCalcPerf;
-        case OrderPlotWindow::Kind::Map:  return c.calc_kind == kOrderCalcOrder && c.two_d;
+        case OrderPlotWindow::Kind::Map:  return c.calc_kind == kOrderCalcStab
+                                              || (c.calc_kind == kOrderCalcOrder && c.two_d);
         default:                          return c.calc_kind == kOrderCalcOrder && !c.two_d;
     }
 }
@@ -9554,6 +9769,25 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
         sn.ref_scheme   = c.perf_ref_scheme;
         sn.ref_substeps = std::max(0, (int)parse_num(c.perf_ref_substeps_text, 4.0));
     }
+    // Настройки теста устойчивости — тоже фактические, из результата; в снимке
+    // остаётся лишь раскладка слотов, которой в результате нет.
+    sn.stab_k = c.stab_result.k;
+    sn.stab_r = c.stab_result.r;
+    sn.stab_h = c.stab_result.h;
+    {
+        const int slots[4] = { c.stab_idx_a, c.stab_idx_b, c.stab_idx_c, c.stab_idx_d };
+        const char* names[4] = { "a", "b", "c", "d" };
+        std::string acc;
+        for (int i = 0; i < 4; ++i) {
+            if (i) acc += ", ";
+            acc += names[i];
+            acc += " = ";
+            const int pi = slots[i] - 1;
+            if (pi >= 0 && pi < (int)s.params.size()) acc += s.params[(size_t)pi] + " ";
+            acc += "a[" + std::to_string(slots[i]) + "]";
+        }
+        sn.stab_slots = acc;
+    }
     return sn;
 }
 
@@ -9566,7 +9800,8 @@ static void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
     for (int mi : win.members) {
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
         const OrderConfig& c = s.configs[(size_t)mi];
-        const bool has = perf ? c.perf_last_run_ok : c.last_run_ok;
+        const bool stab = (c.calc_kind == kOrderCalcStab);
+        const bool has = stab ? c.stab_last_run_ok : (perf ? c.perf_last_run_ok : c.last_run_ok);
         const std::string item = "Export " + c.label + "...";
         if (!ImGui::MenuItem(item.c_str(), nullptr, false, has && !busy)) continue;
         if (!cb.pick_save_file_csv) continue;
@@ -9575,9 +9810,125 @@ static void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
         const data_export::OrderSnapshot sn =
             order_snapshot(s, c, win.kind == OrderPlotWindow::Kind::Map,
                            model.nvrtc_fmad, model.nvrtc_rdc);
-        if (perf) data_export::export_perf(c.perf_result, sn, path);
-        else      data_export::export_order(c.result, sn, path);
+        if      (stab) data_export::export_stability(c.stab_result, sn, path);
+        else if (perf) data_export::export_perf(c.perf_result, sn, path);
+        else           data_export::export_order(c.result, sn, path);
     }
+}
+
+// Карта области устойчивости. Живёт в окне того же вида (Map): хитмапа с одним
+// членом — ровно то, что ей нужно, заводить ради неё отдельный вид окна было бы
+// дублированием всей развески вкладок по окнам.
+static void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
+                                     const GuiCallbacks& cb,
+                                     PlotRenderer& renderer, HeatmapView& hv,
+                                     OrderConfig& c, int mi) {
+    OrderAnalysisSession& s = model.order_session;
+    const StabilityResult& r = c.stab_result;
+
+    ImGui::TextDisabled("show:"); ImGui::SameLine();
+    ImGui::RadioButton("1 - rho##stabview", &win.stab_view, 1); ImGui::SameLine();
+    ImGui::RadioButton("rho##stabview", &win.stab_view, 0); ImGui::SameLine();
+    ImGui::RadioButton("region##stabview", &win.stab_view, 2);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "1 - rho  - positive means stable. The default, because this is the\n"
+            "           quantity the reference MATLAB script plots, and the\n"
+            "           colour scale is capped at [0, 1] the same way its\n"
+            "           contour levels are: everything unstable collapses into\n"
+            "           the bottom band, which makes the rho = 1 boundary a\n"
+            "           sharp edge instead of a gradient.\n"
+            "rho      - the spectral radius itself, scaled over the computed\n"
+            "           range: use it to see HOW unstable the outside is.\n"
+            "region   - the plain mask rho <= 1: the stability region itself.\n"
+            "\n"
+            "The colour range of any of them can be pinned by hand in the\n"
+            "toolbar below.");
+
+    if (!c.stab_last_run_ok || r.rho.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("|"); ImGui::SameLine();
+    const int n_cells = r.n_ok + r.n_bad;
+    ImGui::Text("%s: %d stable of %d", c.label.c_str(), r.n_stable, n_cells);
+    if (r.n_bad > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(%d not computed)", r.n_bad);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Cells where the test matrix could not be built or the step\n"
+                              "returned nan/inf.");
+    }
+    ImGui::TextDisabled("k = %g, r = %g, h = %g; the boundary is rho = 1", r.k, r.r, r.h);
+
+    {
+        HeatmapToolbarOpts topts;
+        topts.persist_colormap = [&win](int cm) { win.colormap_idx = cm; };
+        draw_heatmap_toolbar(hv, topts);
+    }
+
+    // Потолок шкалы. Неустойчивые углы карты уходят в rho на много порядков, и
+    // без ограничения вся рабочая окрестность границы становится одноцветной.
+    // Ячейки выше потолка не пропадают — упираются в край палитры, ровно как
+    // на карте порядка.
+    const double rho_cap = (r.rho_max > 2.0) ? 2.0 : r.rho_max;
+
+    std::vector<double> buf(r.rho.size());
+    double vmin = 0.0, vmax = 1.0;
+    if (win.stab_view == 2) {
+        for (size_t i = 0; i < r.rho.size(); ++i)
+            buf[i] = std::isfinite(r.rho[i]) ? (r.rho[i] <= 1.0 ? 1.0 : 0.0)
+                                             : std::numeric_limits<double>::quiet_NaN();
+        vmin = 0.0; vmax = 1.0;
+    } else if (win.stab_view == 1) {
+        for (size_t i = 0; i < r.rho.size(); ++i) buf[i] = 1.0 - r.rho[i];
+        // Диапазон ровно тот, что задают уровни contourf(X, Y, 1-Rh, [1 0:0.01:1])
+        // в исходном скрипте: шкала кончается на нуле, и всё неустойчивое
+        // (1 - rho < 0) ложится в нижнюю полосу одним цветом. Это не потеря
+        // данных, а то, ради чего картинка и строится: граница rho = 1
+        // становится краем палитры, а не серединой градиента. Кому нужна
+        // глубина неустойчивости — рядом есть вид rho.
+        vmin = 0.0;
+        vmax = 1.0;
+    } else {
+        buf = r.rho;
+        vmin = r.rho_min;
+        vmax = rho_cap;
+    }
+    if (!(vmax > vmin)) { vmin -= 0.5; vmax += 0.5; }
+
+    hv.x_axis.name = "sigma";
+    hv.y_axis.name = "omega";
+    hv.x_axis.log_scale = false;
+    hv.y_axis.log_scale = false;
+
+    const int sig = c.stab_data_generation * 8 + win.stab_view;
+    bool fit = c.stab_fit_request;
+    if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
+    if (c.stab_fit_request) c.stab_fit_request = false;
+
+    // Ctrl+T меняет сами границы сетки: у этой карты оси и есть диапазоны расчёта.
+    const std::vector<ViewRangeTarget> vrt = {
+        vr_target(s.configs, mi,
+                  &OrderConfig::stab_sig_lo_text, &OrderConfig::stab_sig_hi_text,
+                  &OrderConfig::stab_om_lo_text,  &OrderConfig::stab_om_hi_text) };
+    hv.popup_extras = [&vrt, &model, &hv, &win, &cb, &s]() {
+        draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
+        ImGui::Separator();
+        draw_order_export_items(model, win, cb, s.in_flight);
+    };
+
+    ImVec2 avail  = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    hv.render(renderer, origin, avail,
+              /*owner_id*/ 0x0BDE0000 + win.id,
+              sig,
+              r.n_pts_x, r.n_pts_y, buf.data(),
+              r.sigma_lo, r.sigma_hi, r.omega_lo, r.omega_hi,
+              vmin, vmax, fit);
+    handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(), hv.swap_axes, &model);
 }
 
 // 2D-карта: ровно один член, хитмапа p или log10 E1.
@@ -9589,6 +9940,10 @@ static void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
     const int mi = win.members[0];
     if (mi < 0 || mi >= (int)s.configs.size()) { ImGui::TextDisabled("The tab has been removed."); return; }
     OrderConfig& c = s.configs[(size_t)mi];
+    if (c.calc_kind == kOrderCalcStab) {
+        draw_order_stability_map(model, win, cb, renderer, hv, c, mi);
+        return;
+    }
     const OrderResult& r = c.result;
 
     ImGui::Checkbox("show error", &win.map_error);
@@ -9854,10 +10209,11 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                         ? (double)r.n_steps[(size_t)i]
                                         : std::numeric_limits<double>::quiet_NaN();
                     // e и tv кладём в теги ОТДЕЛЬНО от координат: по X может
-                    // стоять любой из трёх источников ошибки, а по Y в
-                    // лог-режиме лежит log10(t). В подсказке хочется исходные
-                    // числа, а не то, во что их превратил режим осей.
-                    pts.push_back({ e, ylog ? std::log10(tv) : tv, hv, e, tv, ns });
+                    // стоять любой из трёх источников ошибки, а в лог-режиме в
+                    // координатах лежат log10(e) и log10(t). В подсказке хочется
+                    // исходные числа, а не то, во что их превратил режим осей.
+                    pts.push_back({ win.x_log ? std::log10(e) : e,
+                                    ylog ? std::log10(tv) : tv, hv, e, tv, ns });
                 }
                 if (pts.empty()) return;
                 std::sort(pts.begin(), pts.end(),
@@ -10009,7 +10365,14 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                         : s.axis_target_label(s.configs[(size_t)mi].axis_x_target);
         break;
     }
-    if (is_perf && win.x_log) { /* ось логарифмическая, имя величины не меняется */ }
+    // На диаграмме производительности лог по X берётся ЛОГАРИФМОМ ДАННЫХ, а не
+    // логарифмическим масштабом оси — как это давно сделано по Y. Причина в
+    // подписях: на лог-оси тики печатаются как сами значения, и на
+    // double-double ошибка уходит к 1e-30, где формат схлопывает их в "0" и
+    // ось становится нечитаемой. log10(E) — обычные числа вроде -16, они
+    // помещаются всегда. Исходное E остаётся в подсказке узла (тег "E1").
+    // На диаграмме порядка по X лежит сетка свипа, там масштаб оси и остаётся.
+    if (is_perf && win.x_log) xname = "log10 " + xname;
     view.x_axis.name = xname;
     if (is_perf) {
         const char* unit = (win.time_unit == 1) ? "ms" : "us";
@@ -10017,10 +10380,12 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     } else {
         view.y_axis.name = is_error ? (ylog ? "log10 E" : "E") : "p";
     }
-    view.x_axis.log_scale = win.x_log;
+    view.x_axis.log_scale = !is_perf && win.x_log;
 
     // Явный X-диапазон по всем кривым окна: без него Plot2DView берёт границы
-    // клампа из bbox VBO, а там на лог-оси лежит log10(x).
+    // клампа из bbox VBO, а там на лог-оси лежит log10(x). На диаграмме
+    // производительности ось линейная, и note_x собирал уже те же значения,
+    // что легли в VBO, — единицы сходятся и тут.
     view.x_fit_use_explicit = got_x && (xhi > xlo);
     view.x_fit_min = xlo;
     view.x_fit_max = xhi;

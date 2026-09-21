@@ -1638,6 +1638,7 @@ struct ParametricEngine::Impl {
         CUmodule    module = nullptr;
         CUfunction  kernel = nullptr;        // orderEstimateKernel
         CUfunction  kernel_perf = nullptr;   // perfIntegrateKernel (вкладка Performance)
+        CUfunction  kernel_stab = nullptr;   // stabilityRegionKernel (области устойчивости)
     };
     CachedOrderModule cached_order;
 
@@ -6981,6 +6982,10 @@ struct ParametricEngine::Impl {
             // Ядро замера лежит в том же модуле: Performance нужны ОБА прохода,
             // и второй компиляции ради этого быть не должно.
             if (!module_fn(mod, "perfIntegrateKernel", fresh.kernel_perf, err)) { cuModuleUnload(mod); return false; }
+            // И ядро областей устойчивости — оттуда же. Отдельного модуля ему не
+            // нужно: тело КРС в этом уже лежит, а регистров чужим расчётам оно
+            // не стоит, регистровый бюджет считается на ядро.
+            if (!module_fn(mod, "stabilityRegionKernel", fresh.kernel_stab, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -7331,6 +7336,120 @@ struct ParametricEngine::Impl {
                            if (res.e_ref[i] > res.eref_max) res.eref_max = res.e_ref[i]; }
                 }
             }
+        }
+
+        res.ok = true;
+        return res;
+    }
+
+    // Stability — область устойчивости схемы на двумерной задаче Дальквиста.
+    //
+    // Считать тут почти нечего: ячейка — это ДВА шага схемы (по одному от
+    // каждого базисного вектора), поэтому вся карта 512x512 стоит столько же,
+    // сколько один узел p(h) при t_max/h = 1000. Чанкование оставлено только
+    // ради отмены и прогресса: экстраполяционная обёртка с десятком стадий на
+    // мелкой сетке всё-таки набирает заметное время.
+    StabilityResult run_stability(const StabilityRequest& req) {
+        StabilityResult res;
+        auto fail = [&](const std::string& msg) -> StabilityResult& { res.error = msg; return res; };
+
+        const std::string bad = stability_validate(req);
+        if (!bad.empty()) return fail(bad);
+        stability_fill_axes(req, res);
+
+        const int    amountOfValues = (int)req.values.size();
+        const size_t total_cells    = (size_t)res.n_pts_x * (size_t)res.n_pts_y;
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_order
+
+        // Модуль общий с Order: тот же ключ, та же компиляция, эталон выключен.
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body,
+                                  std::string(), err)) return fail(err);
+        if (cached_order.kernel_stab == nullptr)
+            return fail("stabilityRegionKernel not found in the module");
+
+        OrderDevBuf d_sig, d_om, d_values, d_rho, d_status;
+        if (!d_sig   .alloc(res.sigma_vals.size() * sizeof(numb), "sigmaVals", err)) return fail(err);
+        if (!d_om    .alloc(res.omega_vals.size() * sizeof(numb), "omegaVals", err)) return fail(err);
+        if (!d_values.alloc((size_t)amountOfValues * sizeof(numb), "values",   err)) return fail(err);
+        if (!d_rho   .alloc(total_cells * sizeof(numb), "outRho",    err)) return fail(err);
+        if (!d_status.alloc(total_cells * sizeof(int),  "outStatus", err)) return fail(err);
+
+        {
+            const std::vector<numb> hs = to_numb(res.sigma_vals);
+            const std::vector<numb> ho = to_numb(res.omega_vals);
+            const std::vector<numb> va = to_numb(req.values);
+            auto up = [&](void* dst, const void* src, size_t bytes, const char* what) -> bool {
+                cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
+                if (e != cudaSuccess) { err = std::string("memcpy ") + what + ": " + cudaGetErrorString(e); return false; }
+                return true;
+            };
+            if (!up(d_sig.p,    hs.data(), hs.size() * sizeof(numb), "sigmaVals")) return fail(err);
+            if (!up(d_om.p,     ho.data(), ho.size() * sizeof(numb), "omegaVals")) return fail(err);
+            if (!up(d_values.p, va.data(), va.size() * sizeof(numb), "values"))    return fail(err);
+        }
+
+        const size_t cellsPerLaunch = 1u << 16;
+        const size_t nLaunches = (total_cells + cellsPerLaunch - 1) / cellsPerLaunch;
+        for (size_t L = 0; L < nLaunches; ++L) {
+            const size_t offset = L * cellsPerLaunch;
+            const size_t count  = (offset + cellsPerLaunch > total_cells) ? (total_cells - offset) : cellsPerLaunch;
+
+            int   nPtsX_arg  = res.n_pts_x;
+            int   nPtsY_arg  = res.n_pts_y;
+            int   nCells_arg = (int)count;
+            int   offset_arg = (int)offset;
+            numb* sig_arg    = d_sig.as<numb>();
+            numb* om_arg     = d_om.as<numb>();
+            numb* values_arg = d_values.as<numb>();
+            int   ia_arg = req.idx_a, ib_arg = req.idx_b, ic_arg = req.idx_c, id_arg = req.idx_d;
+            numb  k_arg = (numb)req.k, r_arg = (numb)req.r, h_arg = (numb)req.h;
+            numb* rho_arg = d_rho.as<numb>();
+            int*  st_arg  = d_status.as<int>();
+
+            void* args[] = {
+                &nPtsX_arg, &nPtsY_arg, &nCells_arg, &offset_arg,
+                &sig_arg, &om_arg, &values_arg,
+                &ia_arg, &ib_arg, &ic_arg, &id_arg,
+                &k_arg, &r_arg, &h_arg,
+                &rho_arg, &st_arg
+            };
+
+            const int blockSize = 64;
+            const int gridSize  = (int)((count + blockSize - 1) / blockSize);
+            CUresult r = cuLaunchKernel(cached_order.kernel_stab, gridSize, 1, 1, blockSize, 1, 1,
+                                        0, nullptr, args, nullptr);
+            if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(stability): " + cu_err(r));
+            cudaDeviceSynchronize();
+            cudaError_t ce = cudaGetLastError();
+            if (ce != cudaSuccess) return fail(std::string("stability kernel: ") + cudaGetErrorString(ce));
+
+            if (req.progress)
+                req.progress->store((float)((double)(offset + count) / (double)total_cells),
+                                    std::memory_order_relaxed);
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+                res.cancelled = true;
+                return res;
+            }
+        }
+
+        {
+            std::vector<numb> hrho(total_cells);
+            res.status.assign(total_cells, 0);
+            auto dn = [&](void* src, void* dst, size_t bytes, const char* what) -> bool {
+                cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+                if (e != cudaSuccess) { err = std::string("memcpy D2H ") + what + ": " + cudaGetErrorString(e); return false; }
+                return true;
+            };
+            if (!dn(d_rho.p,    hrho.data(),       total_cells * sizeof(numb), "rho"))    return fail(err);
+            if (!dn(d_status.p, res.status.data(), total_cells * sizeof(int),  "status")) return fail(err);
+
+            res.rho.resize(total_cells);
+            for (size_t i = 0; i < total_cells; ++i) res.rho[i] = (double)hrho[i];
+            stability_summarize(res);
         }
 
         res.ok = true;
@@ -8382,6 +8501,77 @@ PerfResult ParametricEngine::run_performance(const PerfRequest& req) {
 
 OrderResult ParametricEngine::run_order(const OrderRequest& req) {
     return impl_->run_order(req);
+}
+
+StabilityResult ParametricEngine::run_stability(const StabilityRequest& req) {
+    return impl_->run_stability(req);
+}
+
+std::string stability_validate(const StabilityRequest& req) {
+    if (req.krs_body.empty()) return "krs_body is empty";
+    if (req.amountOfX != 2)
+        return "the stability region needs the two-dimensional Dahlquist test system "
+               "(Library -> Dahlquist 2D): this one has " + std::to_string(req.amountOfX)
+               + " state variables";
+    if (req.values.empty())                          return "values is empty (at least a[0] is required)";
+    if ((int)req.values.size() > kMaxAmountOfValues) return "too many values";
+
+    const int   amountOfValues = (int)req.values.size();
+    const int   idx[4]      = { req.idx_a, req.idx_b, req.idx_c, req.idx_d };
+    const char* idx_name[4] = { "a", "b", "c", "d" };
+    for (int i = 0; i < 4; ++i) {
+        // a[0] занят коэффициентом симметрии s во всех расчётах проекта, и
+        // положить туда элемент матрицы значило бы молча сломать схему.
+        if (idx[i] < 1 || idx[i] >= amountOfValues)
+            return std::string("matrix element ") + idx_name[i]
+                 + ": a[" + std::to_string(idx[i]) + "] is outside the parameters "
+                   "(a[0] is the symmetry s and cannot hold a matrix element)";
+        for (int j = 0; j < i; ++j)
+            if (idx[i] == idx[j])
+                return std::string("matrix elements ") + idx_name[j] + " and " + idx_name[i]
+                     + " point at the same a[" + std::to_string(idx[i]) + "]";
+    }
+    if (req.k == -1.0) return "k = -1 makes the matrix undefined: d = 2*sigma/(1+k)";
+    if (!(req.r < 0.0))
+        return "r must be negative: with r >= 0 the radicand of c is not positive and "
+               "the test matrix has no real form";
+    if (!(req.h > 0.0))   return "h must be > 0";
+    if (req.n_pts <= 0)   return "the number of points must be > 0";
+    if (req.n_pts > 8192) return "the number of points is too large";
+    return {};
+}
+
+void stability_fill_axes(const StabilityRequest& req, StabilityResult& res) {
+    res.n_pts_x = res.n_pts_y = req.n_pts;
+    res.sigma_lo = req.sigma_lo; res.sigma_hi = req.sigma_hi;
+    res.omega_lo = req.omega_lo; res.omega_hi = req.omega_hi;
+    res.k = req.k; res.r = req.r; res.h = req.h;
+
+    auto nodes = [](double lo, double hi, int n, std::vector<double>& out) {
+        out.assign((size_t)n, lo);
+        if (n < 2) return;
+        const double d = (hi - lo) / (double)(n - 1);
+        for (int i = 0; i < n; ++i) out[(size_t)i] = lo + d * (double)i;
+    };
+    nodes(req.sigma_lo, req.sigma_hi, res.n_pts_x, res.sigma_vals);
+    nodes(req.omega_lo, req.omega_hi, res.n_pts_y, res.omega_vals);
+}
+
+void stability_summarize(StabilityResult& res) {
+    res.n_ok = res.n_bad = res.n_stable = 0;
+    res.rho_min = res.rho_max = 0.0;
+    bool first = true;
+    for (size_t i = 0; i < res.rho.size(); ++i) {
+        if (i < res.status.size() && res.status[i] != STAB_ST_OK) { ++res.n_bad; continue; }
+        if (!std::isfinite(res.rho[i])) { ++res.n_bad; continue; }
+        ++res.n_ok;
+        if (res.rho[i] <= 1.0) ++res.n_stable;
+        if (first) { res.rho_min = res.rho_max = res.rho[i]; first = false; }
+        else {
+            if (res.rho[i] < res.rho_min) res.rho_min = res.rho[i];
+            if (res.rho[i] > res.rho_max) res.rho_max = res.rho[i];
+        }
+    }
 }
 
 NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
