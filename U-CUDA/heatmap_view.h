@@ -111,6 +111,19 @@ public:
     // неколебательные режимы, и они не должны читаться как «очень слабый сигнал» на шкале в дБ.
     float  nodata_color[3] = { 0.12f, 0.12f, 0.14f };
 
+    // Подмена палитры на время отрисовки: 0 — рисовать выбранной `colormap`,
+    // иначе этим id (картинка и colorbar). Выбор пользователя в `colormap` при
+    // этом не трогается и возвращается, как только caller снимет подмену.
+    // Нужна карте устойчивости в Order: вид «как в статье» — это конкретная
+    // серая шкала, а не пользовательская палитра.
+    int    colormap_override = 0;
+    // Значения вне [vmin, vmax]: false — прижим к краю палитры (как было), true —
+    // свои цвета oor_below / oor_above. Вне диапазона — это вне ТЕКУЩЕЙ шкалы,
+    // то есть с учётом ручных min/max из toolbar'а.
+    bool   oor_custom = false;
+    float  oor_below[3] = { 1.0f, 1.0f, 1.0f };
+    float  oor_above[3] = { 1.0f, 1.0f, 1.0f };
+
     // Индекс отображаемой экспоненты (λ1/λ2/...) — актуально только для LS2D: draw_ls_plot держит
     // свою копию здесь, а не в общем LSCurveConfig::display_exponent_idx, чтобы два окна с одной
     // кривой не дёргали одну переменную. Остальные потребители HeatmapView
@@ -156,6 +169,27 @@ public:
     // on the corresponding 1D slice plot.
     unsigned crosshair_x_color = 0xFF50A0FFu;  // blue-ish (X sweep)
     unsigned crosshair_y_color = 0xFFFF9028u;  // orange   (Y sweep)
+
+    // Слой-маска поверх карты: ячейки с ненулевым значением заливаются
+    // overlay_fill_color, а те из них, у кого хоть один из четырёх соседей
+    // снаружи, — overlay_edge_color, так что граница области читается даже
+    // при бледной заливке. Используется вкладкой Order: область
+    // предпочтительности поверх области устойчивости.
+    // Маска — nx*ny row-major в координатах ДАННЫХ, как values; swap_axes вью
+    // учитывает сама. Указатель ОДНОРАЗОВЫЙ: render() его не хранит и
+    // сбрасывает в nullptr, поэтому caller назначает его перед каждым render(),
+    // как popup_extras, и буфер обязан жить только до конца вызова.
+    // Текстура перезаливается, когда меняется overlay_generation, один из
+    // цветов или толщина контура: всё это запечено в текстуру, и caller не обязан вести для него
+    // отдельное поколение. Цвета — IM_COL32 (альфа в старшем байте).
+    const unsigned char* overlay_mask = nullptr;
+    int      overlay_generation = 0;
+    unsigned overlay_fill_color = 0x5A40E070u;   // зелёный, альфа ~0.35
+    unsigned overlay_edge_color = 0xE660FF90u;   // тот же, светлее и плотнее
+    // Толщина контура в ЯЧЕЙКАХ сетки: контуром считаются ячейки области,
+    // до которых от ячейки снаружи не больше этого числа шагов по четырём
+    // соседям. 1 — только соседи внешних ячеек, 0 — контура нет, одна заливка.
+    int      overlay_edge_width = 1;
 
     HeatmapView() = default;
     ~HeatmapView();
@@ -206,7 +240,19 @@ private:
     // редко и отставание на кадр не заметно. Старт — прежняя константа.
     float  left_margin_px_ = 78.0f;
 
+    // Слой-маска (см. overlay_mask): RGBA8, GL_NEAREST — ячейки совпадают с
+    // ячейками основной текстуры.
+    GLuint overlay_tex_ = 0;
+    int    overlay_tex_w_ = 0, overlay_tex_h_ = 0;
+    int    overlay_gen_cached_ = -1;
+    unsigned overlay_fill_cached_ = 0, overlay_edge_cached_ = 0;   // запечённые в текстуру
+    int      overlay_edge_width_cached_ = -1;
+    std::vector<int> overlay_dist_;   // шагов до ближайшей внешней ячейки (upload_overlay)
+    std::vector<unsigned> overlay_buf_;
+
     void ensure_tex(int w, int h);
     void upload_data(int nx, int ny, const double* values);
+    // nx, ny — уже в визуальной (после swap) раскладке.
+    void upload_overlay(int nx, int ny, const unsigned char* mask);
     void do_autofit(double lo_x, double hi_x, double lo_y, double hi_y);
 };

@@ -1787,6 +1787,7 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"stab_idx_b\":" << c.stab_idx_b << ",";
     o << "\"stab_idx_c\":" << c.stab_idx_c << ",";
     o << "\"stab_idx_d\":" << c.stab_idx_d << ",";
+    o << "\"stab_pref_tol_text\":"; jstr(o, c.stab_pref_tol_text); o << ",";
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";       jmap(o, c.param_values);
     o << "}";
@@ -1812,6 +1813,7 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "stab_idx_b")       c.stab_idx_b       = std::stoi(p.str_or_num());
     else if (key == "stab_idx_c")       c.stab_idx_c       = std::stoi(p.str_or_num());
     else if (key == "stab_idx_d")       c.stab_idx_d       = std::stoi(p.str_or_num());
+    else if (key == "stab_pref_tol_text") c.stab_pref_tol_text = p.str();
     else if (key == "two_d")            c.two_d            = p.boolean();
     else if (key == "axis_x_target")    c.axis_x_target    = std::stoi(p.str_or_num());
     else if (key == "axis_x_lo_text")   c.axis_x_lo_text   = p.str();
@@ -1918,6 +1920,11 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"show_nominal\":" << (w.show_nominal ? "true" : "false");
         o << ",\"map_error\":"    << (w.map_error ? "true" : "false");
         o << ",\"stab_view\":"     << w.stab_view;
+        o << ",\"stab_show_pref\":" << (w.stab_show_pref ? "true" : "false");
+        o << ",\"stab_pref_fill\":" << w.stab_pref_fill;
+        o << ",\"stab_pref_edge\":" << w.stab_pref_edge;
+        o << ",\"stab_pref_edge_w\":" << w.stab_pref_edge_w;
+        o << ",\"stab_paper_cmap\":" << (w.stab_paper_cmap ? "true" : "false");
         o << ",\"colormap_idx\":" << w.colormap_idx;
         o << ",\"error_source\":" << w.error_source;
         o << ",\"time_unit\":"    << w.time_unit;
@@ -1973,6 +1980,13 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "show_nominal")    w.show_nominal    = p.boolean();
                                 else if (k == "map_error")       w.map_error       = p.boolean();
                                 else if (k == "stab_view")       w.stab_view       = std::stoi(p.str_or_num());
+                                else if (k == "stab_show_pref")  w.stab_show_pref  = p.boolean();
+                                // Цвет IM_COL32 с альфой в старшем байте не
+                                // влезает в int — stoul, не stoi.
+                                else if (k == "stab_pref_fill")  w.stab_pref_fill  = (unsigned)std::stoul(p.str_or_num());
+                                else if (k == "stab_pref_edge")  w.stab_pref_edge  = (unsigned)std::stoul(p.str_or_num());
+                                else if (k == "stab_paper_cmap") w.stab_paper_cmap = p.boolean();
+                                else if (k == "stab_pref_edge_w") w.stab_pref_edge_w = std::max(0, std::stoi(p.str_or_num()));
                                 else if (k == "colormap_idx")    w.colormap_idx    = std::stoi(p.str_or_num());
                                 else if (k == "error_source")    w.error_source    = std::stoi(p.str_or_num());
                                 else if (k == "time_unit")       w.time_unit       = std::stoi(p.str_or_num());

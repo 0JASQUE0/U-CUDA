@@ -123,8 +123,23 @@ struct OrderPlotWindow {
     //   0 — rho (спектральный радиус матрицы усиления);
     //   1 — 1 - rho: положительное = устойчиво. УМОЛЧАНИЕ, потому что именно
     //       эту величину рисует исходный матлабовский скрипт;
-    //   2 — бинарная маска rho <= 1, то есть сама область без полутонов.
+    //   2 — бинарная маска rho <= 1, то есть сама область без полутонов;
+    //   3 — log10 err, относительная ошибка шага против e^{hA}.
     int  stab_view = 1;
+    // Область предпочтительности (rho <= 1 и err <= допуска конфига)
+    // полупрозрачной заливкой поверх любого из видов выше.
+    bool stab_show_pref = true;
+    // Цвета этого слоя, IM_COL32 (R в младшем байте, альфа в старшем):
+    // заливка области и её контур. Умолчания — те же, что у HeatmapView.
+    unsigned stab_pref_fill = 0x5A40E070u;   // зелёный, альфа ~0.35
+    unsigned stab_pref_edge = 0xE660FF90u;   // светлее и плотнее
+    int      stab_pref_edge_w = 1;           // толщина контура в ячейках сетки, 0 = без контура
+    // Раскраска «как в статье» (Fedoseev et al., 2022, рис. 3-4): серая шкала
+    // от чёрного к белому на [vmin, vmax], всё вне шкалы — белое. На виде
+    // 1 - rho это даёт белый фон неустойчивого, чёрную границу rho = 1 и
+    // светлеющую к rho = 0 внутренность. Пока включено, выбранная колормапа
+    // окна не используется, но и не забывается.
+    bool stab_paper_cmap = true;
     int  colormap_idx = -1;     // Map; -1 = взять app-дефолт
     int  error_source = 0;      // Perf: 0 = E1, 1 = E2 по оси X
     int  time_unit = 0;         // Perf: 0 = мкс, 1 = мс
@@ -720,6 +735,12 @@ public:
     int  next_order_plot_window_id = 1;
     int  order_layout_generation = 0;
     bool order_plot_windows_dirty = false;
+    // Автосохранение Order (autosave_order_session в gui.cpp): что и для какой
+    // системы записано последним. Файл пишется, как только сериализация
+    // расходится с записанной, — а не только по завершении расчёта.
+    std::string order_autosave_target;
+    std::string order_autosave_json;
+    std::string order_windows_autosave_json;
 
     void add_order_plot_window(OrderPlotWindow::Kind kind, std::vector<int> initial_members);
     void remove_order_plot_window(int pos);

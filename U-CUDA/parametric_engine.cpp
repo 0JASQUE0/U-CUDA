@@ -7371,12 +7371,13 @@ struct ParametricEngine::Impl {
         if (cached_order.kernel_stab == nullptr)
             return fail("stabilityRegionKernel not found in the module");
 
-        OrderDevBuf d_sig, d_om, d_values, d_rho, d_status;
+        OrderDevBuf d_sig, d_om, d_values, d_rho, d_status, d_R;
         if (!d_sig   .alloc(res.sigma_vals.size() * sizeof(numb), "sigmaVals", err)) return fail(err);
         if (!d_om    .alloc(res.omega_vals.size() * sizeof(numb), "omegaVals", err)) return fail(err);
         if (!d_values.alloc((size_t)amountOfValues * sizeof(numb), "values",   err)) return fail(err);
         if (!d_rho   .alloc(total_cells * sizeof(numb), "outRho",    err)) return fail(err);
         if (!d_status.alloc(total_cells * sizeof(int),  "outStatus", err)) return fail(err);
+        if (!d_R     .alloc(4 * total_cells * sizeof(numb), "outR",  err)) return fail(err);
 
         {
             const std::vector<numb> hs = to_numb(res.sigma_vals);
@@ -7409,13 +7410,14 @@ struct ParametricEngine::Impl {
             numb  k_arg = (numb)req.k, r_arg = (numb)req.r, h_arg = (numb)req.h;
             numb* rho_arg = d_rho.as<numb>();
             int*  st_arg  = d_status.as<int>();
+            numb* R_arg   = d_R.as<numb>();
 
             void* args[] = {
                 &nPtsX_arg, &nPtsY_arg, &nCells_arg, &offset_arg,
                 &sig_arg, &om_arg, &values_arg,
                 &ia_arg, &ib_arg, &ic_arg, &id_arg,
                 &k_arg, &r_arg, &h_arg,
-                &rho_arg, &st_arg
+                &rho_arg, &st_arg, &R_arg
             };
 
             const int blockSize = 64;
@@ -7446,9 +7448,22 @@ struct ParametricEngine::Impl {
             };
             if (!dn(d_rho.p,    hrho.data(),       total_cells * sizeof(numb), "rho"))    return fail(err);
             if (!dn(d_status.p, res.status.data(), total_cells * sizeof(int),  "status")) return fail(err);
+            std::vector<numb> hR(4 * total_cells);
+            if (!dn(d_R.p, hR.data(), hR.size() * sizeof(numb), "R")) return fail(err);
 
             res.rho.resize(total_cells);
             for (size_t i = 0; i < total_cells; ++i) res.rho[i] = (double)hrho[i];
+
+            // Ошибка шага — на хосте, той же функцией, что в CPU-ветке.
+            res.err.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+            for (size_t i = 0; i < total_cells; ++i) {
+                if (res.status[i] != STAB_ST_OK) continue;
+                const size_t ix = i % (size_t)res.n_pts_x, iy = i / (size_t)res.n_pts_x;
+                res.err[i] = stability_step_error(res.sigma_vals[ix], res.omega_vals[iy],
+                                                  req.k, req.r, req.h,
+                                                  (double)hR[i],                   (double)hR[total_cells + i],
+                                                  (double)hR[2 * total_cells + i], (double)hR[3 * total_cells + i]);
+            }
             stability_summarize(res);
         }
 
@@ -8560,7 +8575,8 @@ void stability_fill_axes(const StabilityRequest& req, StabilityResult& res) {
 void stability_summarize(StabilityResult& res) {
     res.n_ok = res.n_bad = res.n_stable = 0;
     res.rho_min = res.rho_max = 0.0;
-    bool first = true;
+    res.err_min = res.err_max = 0.0;
+    bool first = true, first_err = true;
     for (size_t i = 0; i < res.rho.size(); ++i) {
         if (i < res.status.size() && res.status[i] != STAB_ST_OK) { ++res.n_bad; continue; }
         if (!std::isfinite(res.rho[i])) { ++res.n_bad; continue; }
@@ -8571,7 +8587,70 @@ void stability_summarize(StabilityResult& res) {
             if (res.rho[i] < res.rho_min) res.rho_min = res.rho[i];
             if (res.rho[i] > res.rho_max) res.rho_max = res.rho[i];
         }
+        if (i < res.err.size() && std::isfinite(res.err[i])) {
+            const double e = res.err[i];
+            if (first_err) { res.err_min = res.err_max = e; first_err = false; }
+            else {
+                if (e < res.err_min) res.err_min = e;
+                if (e > res.err_max) res.err_max = e;
+            }
+        }
     }
+}
+
+// Спектральная норма 2x2 в замкнутом виде: sigma_max = hypot(E, H) + hypot(F, G)
+// с E, F — полусуммой и полуразностью диагонали, G, H — то же для
+// недиагонали. В отличие от sqrt((|M|_F^2 + sqrt(|M|_F^4 - 4 det^2)) / 2) здесь
+// нет вычитания близких чисел.
+static double stab_norm2(double m00, double m01, double m10, double m11) {
+    const double E = 0.5 * (m00 + m11), F = 0.5 * (m00 - m11);
+    const double G = 0.5 * (m10 + m01), H = 0.5 * (m10 - m01);
+    return std::hypot(E, H) + std::hypot(F, G);
+}
+
+double stability_step_error(double sigma, double omega, double k, double r, double h,
+                            double R00, double R01, double R10, double R11) {
+    const double qnan = std::numeric_limits<double>::quiet_NaN();
+    if (!(std::isfinite(R00) && std::isfinite(R01) && std::isfinite(R10) && std::isfinite(R11)))
+        return qnan;
+
+    // Матрица — ровно та, что в stabilityRegionKernel.
+    const double kp1 = k + 1.0, km1 = k - 1.0;
+    if (kp1 == 0.0 || r == 0.0) return qnan;
+    const double rad = -(1.0 / r) * (sigma * sigma * km1 * km1 / (kp1 * kp1) + omega * omega);
+    if (!(rad >= 0.0)) return qnan;
+    const double dEl = 2.0 * sigma / kp1;
+    const double cEl = -std::sqrt(rad);
+    const double bEl = r * cEl;
+    const double aEl = k * dEl;
+
+    // (A - sigma I)^2 = -omega^2 I (Кэли-Гамильтон при tr A = 2 sigma,
+    // det A = sigma^2 + omega^2), отсюда замкнутая форма экспоненты. При
+    // omega -> 0 множитель sin(h omega)/omega -> h; ряд до x^4 держит там
+    // полную точность double.
+    const double x = h * omega;
+    const double sinc = (std::fabs(x) < 1e-4) ? 1.0 - x * x / 6.0 * (1.0 - x * x / 20.0)
+                                              : std::sin(x) / x;
+    const double co = std::cos(x);
+    const double sc = h * sinc;
+    const double g  = std::exp(h * sigma);
+    const double E00 = g * (co + sc * (aEl - sigma));
+    const double E01 = g * (sc * bEl);
+    const double E10 = g * (sc * cEl);
+    const double E11 = g * (co + sc * (dEl - sigma));
+
+    const double ne = stab_norm2(E00, E01, E10, E11);
+    if (!(ne > 0.0) || !std::isfinite(ne)) return std::numeric_limits<double>::infinity();
+    const double nd = stab_norm2(E00 - R00, E01 - R01, E10 - R10, E11 - R11);
+    if (!std::isfinite(nd)) return std::numeric_limits<double>::infinity();
+    return nd / ne;
+}
+
+int stability_count_preferred(const StabilityResult& res, double tol) {
+    int n = 0;
+    for (size_t i = 0; i < res.rho.size(); ++i)
+        if (stability_cell_preferred(res, i, tol)) ++n;
+    return n;
 }
 
 NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {

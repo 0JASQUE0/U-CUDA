@@ -9,6 +9,74 @@
 
 HeatmapView::~HeatmapView() {
     if (data_tex_) glDeleteTextures(1, &data_tex_);
+    if (overlay_tex_) glDeleteTextures(1, &overlay_tex_);
+}
+
+void HeatmapView::upload_overlay(int nx, int ny, const unsigned char* mask) {
+    if (overlay_tex_ == 0 || overlay_tex_w_ != nx || overlay_tex_h_ != ny) {
+        if (overlay_tex_) { glDeleteTextures(1, &overlay_tex_); overlay_tex_ = 0; }
+        glGenTextures(1, &overlay_tex_);
+        glBindTexture(GL_TEXTURE_2D, overlay_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, nx, ny, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        overlay_tex_w_ = nx; overlay_tex_h_ = ny;
+    }
+    // Маска приходит в координатах данных. После swap ширина визуальной сетки
+    // равна высоте исходной, и ячейка (ix, iy) берётся из исходной (iy, ix) —
+    // та же перестановка, что у values в render().
+    auto inside = [&](int ix, int iy) -> bool {
+        if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) return false;
+        return swap_axes ? mask[(size_t)ix * (size_t)ny + (size_t)iy] != 0
+                         : mask[(size_t)iy * (size_t)nx + (size_t)ix] != 0;
+    };
+    // Контур толщиной w — ячейки области не дальше w шагов (по четырём
+    // соседям) от ячейки снаружи. Расстояние — BFS сразу от всех внешних
+    // ячеек, обрезанный на w: работа O(nx*ny) при любой толщине. Край СЕТКИ
+    // источником не служит: что за пределами посчитанного диапазона, неизвестно,
+    // и область, упёршаяся в край карты, контура там не получает.
+    const size_t n = (size_t)nx * (size_t)ny;
+    const int w = std::max(0, overlay_edge_width);
+    overlay_dist_.assign(n, std::numeric_limits<int>::max());
+    std::vector<int> frontier, next;
+    if (w > 0) {
+        for (int iy = 0; iy < ny; ++iy)
+            for (int ix = 0; ix < nx; ++ix)
+                if (!inside(ix, iy)) {
+                    overlay_dist_[(size_t)iy * (size_t)nx + (size_t)ix] = 0;
+                    frontier.push_back(iy * nx + ix);
+                }
+        for (int d = 1; d <= w && !frontier.empty(); ++d) {
+            next.clear();
+            for (int id : frontier) {
+                const int ix = id % nx, iy = id / nx;
+                const int nb[4][2] = { { ix - 1, iy }, { ix + 1, iy }, { ix, iy - 1 }, { ix, iy + 1 } };
+                for (const auto& q : nb) {
+                    if (q[0] < 0 || q[1] < 0 || q[0] >= nx || q[1] >= ny) continue;
+                    const size_t k = (size_t)q[1] * (size_t)nx + (size_t)q[0];
+                    if (overlay_dist_[k] <= d) continue;
+                    overlay_dist_[k] = d;
+                    next.push_back(q[1] * nx + q[0]);
+                }
+            }
+            frontier.swap(next);
+        }
+    }
+    overlay_buf_.assign(n, 0u);
+    for (int iy = 0; iy < ny; ++iy)
+        for (int ix = 0; ix < nx; ++ix) {
+            if (!inside(ix, iy)) continue;
+            const size_t k = (size_t)iy * (size_t)nx + (size_t)ix;
+            overlay_buf_[k] = (overlay_dist_[k] <= w) ? overlay_edge_color : overlay_fill_color;
+        }
+    // IM_COL32 кладёт R в младший байт, то есть в памяти little-endian байты
+    // идут R, G, B, A — ровно GL_RGBA / GL_UNSIGNED_BYTE.
+    glBindTexture(GL_TEXTURE_2D, overlay_tex_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RGBA, GL_UNSIGNED_BYTE, overlay_buf_.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void HeatmapView::ensure_tex(int w, int h) {
@@ -174,6 +242,7 @@ void HeatmapView::render(PlotRenderer& renderer,
                          bool fit_request)
 {
     if (nx <= 0 || ny <= 0 || !values) {
+        overlay_mask = nullptr;   // одноразовый и на этом пути
         ImGui::Dummy(avail_size);
         return;
     }
@@ -184,6 +253,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // autofit (визуальный X теперь соответствует исходному data Y).
     if (swap_axes != swap_axes_cached_) {
         data_gen_cached = -1;
+        overlay_gen_cached_ = -1;
         view_valid = false;
         swap_axes_cached_ = swap_axes;
     }
@@ -387,9 +457,13 @@ void HeatmapView::render(PlotRenderer& renderer,
         plot_bg_color(br, bg, bb, ba);
         renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
     }
-    renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
+    // Палитра этого кадра: подмена caller'а (colormap_override) важнее выбора пользователя.
+    const HeatmapColormap cmap_eff = colormap_override ? (HeatmapColormap)colormap_override : colormap;
+    renderer.draw_heatmap(data_tex_, vmin, vmax, (int)cmap_eff,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
-                          n_disc, reverse_colormap, nodata_color);
+                          n_disc, reverse_colormap, nodata_color,
+                          oor_custom ? oor_below : nullptr,
+                          oor_custom ? oor_above : nullptr);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
@@ -400,6 +474,44 @@ void HeatmapView::render(PlotRenderer& renderer,
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
                  img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
                  ImVec2(0, 1), ImVec2(1, 0));
+
+    // 6b. Слой-маска. Рисуется прямо в draw list поверх FBO-картинки тем же
+    //     маппингом view -> UV, что у основной текстуры: доля t ширины плота
+    //     смотрит в u = uv_off + t*uv_scale. Прямоугольник данных (u, v в
+    //     [0, 1]) обрезается по плоту аналитически, а не clip-rect'ом: при
+    //     сильном зуме его экранные углы уходили бы на миллионы пикселей, где
+    //     float-вершины теряют точность и ячейки слоя съезжали бы с ячеек карты.
+    if (overlay_mask) {
+        if (overlay_generation != overlay_gen_cached_ || overlay_tex_ == 0
+            || overlay_tex_w_ != nx || overlay_tex_h_ != ny
+            || overlay_fill_color != overlay_fill_cached_
+            || overlay_edge_color != overlay_edge_cached_
+            || overlay_edge_width != overlay_edge_width_cached_) {
+            upload_overlay(nx, ny, overlay_mask);
+            overlay_gen_cached_  = overlay_generation;
+            overlay_fill_cached_ = overlay_fill_color;
+            overlay_edge_cached_ = overlay_edge_color;
+            overlay_edge_width_cached_ = overlay_edge_width;
+        }
+        // t-диапазон, который занимают данные по оси, пересечённый с [0, 1].
+        auto span = [](float off, float scale, float& t_lo, float& t_hi) -> bool {
+            if (scale == 0.0f) return false;
+            const float a = (0.0f - off) / scale, b = (1.0f - off) / scale;
+            t_lo = std::max(0.0f, std::min(a, b));
+            t_hi = std::min(1.0f, std::max(a, b));
+            return t_hi > t_lo;
+        };
+        float tx0, tx1, ty0, ty1;
+        if (span(uv_off_x, uv_scale_x, tx0, tx1) && span(uv_off_y, uv_scale_y, ty0, ty1)) {
+            // Экранный Y растёт вниз, t_y — вверх: верх прямоугольника — ty1.
+            const ImVec2 p_min(img_pos.x + tx0 * (float)plot_w, img_pos.y + (1.0f - ty1) * (float)plot_h);
+            const ImVec2 p_max(img_pos.x + tx1 * (float)plot_w, img_pos.y + (1.0f - ty0) * (float)plot_h);
+            const ImVec2 uv_min(uv_off_x + tx0 * uv_scale_x, uv_off_y + ty1 * uv_scale_y);
+            const ImVec2 uv_max(uv_off_x + tx1 * uv_scale_x, uv_off_y + ty0 * uv_scale_y);
+            dl->AddImage((ImTextureID)(intptr_t)overlay_tex_, p_min, p_max, uv_min, uv_max);
+        }
+    }
+    overlay_mask = nullptr;   // одноразовый: см. heatmap_view.h
 
     // 7. Hit-test'ы — отдельные кнопки для плота и для зон осей. Pan по X / Y
     //    через drag ЛКМ в самой оси (как у Plot2DView), общий pan/zoom — ЛКМ
@@ -1061,7 +1173,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 9. Colorbar справа — общая реализация (см. draw_colorbar). tick_vals те
     //    же, по которым выше зарезервирован margin_right.
     draw_colorbar(dl, ImVec2(img_pos.x + plot_w + kColorbarGap, img_pos.y),
-                  (float)plot_h, vmin, vmax, colormap,
+                  (float)plot_h, vmin, vmax, cmap_eff,
                   reverse_colormap, n_disc, tick_vals);
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.

@@ -182,6 +182,12 @@ struct OrderConfig {
     // пользователю никто не запрещает, поэтому индексы явные.
     int stab_idx_a = 1, stab_idx_b = 2, stab_idx_c = 3, stab_idx_d = 4;
 
+    // Допуск области предпочтительности: ячейка устойчива И относительная
+    // ошибка шага ||e^{hA} - R|| / ||e^{hA}|| не больше этого числа. 1 — порог
+    // из статьи (Fedoseev et al., 2022). В расчёт не входит: применяется при
+    // отрисовке и экспорте, поэтому его правка пересчёта не требует.
+    std::string stab_pref_tol_text = "1";
+
     StabilityResult stab_result;
     bool            stab_last_run_ok = false;
     int             stab_data_generation = 0;

@@ -1231,9 +1231,20 @@ struct StabilityResult {
     std::vector<double> rho;
     std::vector<int>    status;
 
+    // Относительная ошибка одного шага против точного оператора перехода:
+    //   err = ||e^{hA} - R||_2 / ||e^{hA}||_2
+    // (спектральная норма, см. stability_step_error). Размер и раскладка те же,
+    // что у rho; непосчитанная ячейка — NaN, ячейка, где точная экспонента
+    // ушла в ноль или бесконечность, — +inf. Области предпочтительности
+    // (Fedoseev, Karimov, Legat, Butusov, Mathematics 10:4327, 2022) — это
+    // ячейки с rho <= 1 и err <= tol. Допуск в результат НЕ входит: он
+    // применяется при отрисовке, и его можно крутить без пересчёта.
+    std::vector<double> err;
+
     int n_ok = 0, n_bad = 0;
     int n_stable = 0;                 // ячеек с rho <= 1
     double rho_min = 0.0, rho_max = 0.0;   // только по ячейкам со status OK
+    double err_min = 0.0, err_max = 0.0;   // только по конечным err ячеек со status OK
 };
 
 // Проверка запроса и раскладка сетки — общие для GPU- и CPU-ветки, иначе одни
@@ -1246,6 +1257,28 @@ void        stability_fill_axes(const StabilityRequest& req, StabilityResult& re
 // общая для GPU- и CPU-ветки: разойдись они здесь, одна и та же карта
 // подписывалась бы по-разному в зависимости от устройства.
 void stability_summarize(StabilityResult& res);
+
+// Относительная ошибка одного шага на тестовой матрице узла (sigma, omega):
+// ||e^{hA} - R||_2 / ||e^{hA}||_2, где A строится из (sigma, omega, k, r) по
+// тем же формулам, что в ядре, а R = [[R00, R01], [R10, R11]] — матрица
+// усиления схемы. Спектр A ровно sigma +- i*omega, поэтому экспонента берётся
+// в замкнутом виде:
+//   e^{hA} = e^{h*sigma} * (cos(h*omega) I + h*sinc(h*omega) (A - sigma I)).
+// Считается в double при любой точности CPU-ветки: сравнение идёт с допуском
+// порядка единицы, и разрядов double здесь с запасом.
+// Возвращает +inf, когда e^{hA} вырождается в 0 или inf, и NaN, когда
+// матрицу построить нельзя или R не конечна.
+double stability_step_error(double sigma, double omega, double k, double r, double h,
+                            double R00, double R01, double R10, double R11);
+
+// Ячейка области предпочтительности: посчитана, устойчива (rho <= 1) и
+// ошибка шага не больше допуска. Одно определение на карту, счётчик и экспорт.
+inline bool stability_cell_preferred(const StabilityResult& res, size_t i, double tol) {
+    if (i >= res.rho.size() || i >= res.err.size()) return false;
+    if (i < res.status.size() && res.status[i] != STAB_ST_OK) return false;
+    return res.rho[i] <= 1.0 && res.err[i] <= tol;   // NaN даёт false в обоих
+}
+int stability_count_preferred(const StabilityResult& res, double tol);
 
 // ---------------------------------------------------------------------------
 // Network — сеть связанных осцилляторов (см. kernels/network.template.cu).

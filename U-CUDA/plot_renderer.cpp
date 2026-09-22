@@ -272,6 +272,9 @@ uniform int   u_colormap;
 uniform int   u_discrete_n;  // 0 = continuous, N>0 = quantize t into N bands
 uniform int   u_reverse;     // 1 = t := 1-t before colormap sampling
 uniform vec3  u_nodata;      // цвет спец-значений (>=1e30/NaN/Inf), см. draw_heatmap
+uniform int   u_oor;         // 1 = значения вне [vmin, vmax] красятся u_below/u_above, а не краем палитры
+uniform vec3  u_below;
+uniform vec3  u_above;
 uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
 out vec4 frag_color;
@@ -290,6 +293,10 @@ void main() {
         return;
     }
     float range = u_vmax - u_vmin;
+    if (u_oor != 0 && range > 1e-30) {
+        if (v < u_vmin) { frag_color = vec4(u_below, 1.0); return; }
+        if (v > u_vmax) { frag_color = vec4(u_above, 1.0); return; }
+    }
     float t = (range > 1e-30) ? clamp((v - u_vmin) / range, 0.0, 1.0) : 0.5;
     // Discrete mode: quantize t into u_discrete_n bands. Sample the colormap
     // at the band's edge-aligned position k/(N-1) so the first band picks
@@ -460,6 +467,9 @@ void PlotRenderer::compile_shaders() {
             loc_heatmap_discrete_n_ = glGetUniformLocation(program_heatmap_, "u_discrete_n");
             loc_heatmap_reverse_   = glGetUniformLocation(program_heatmap_, "u_reverse");
             loc_heatmap_nodata_    = glGetUniformLocation(program_heatmap_, "u_nodata");
+            loc_heatmap_oor_       = glGetUniformLocation(program_heatmap_, "u_oor");
+            loc_heatmap_below_     = glGetUniformLocation(program_heatmap_, "u_below");
+            loc_heatmap_above_     = glGetUniformLocation(program_heatmap_, "u_above");
         }
     }
     if (vs2)  glDeleteShader(vs2);
@@ -606,7 +616,9 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
                                 float uv_off_x, float uv_off_y,
                                 float uv_scale_x, float uv_scale_y,
                                 int n_discrete, bool reverse,
-                                const float* nodata_rgb) {
+                                const float* nodata_rgb,
+                                const float* below_rgb,
+                                const float* above_rgb) {
     if (!program_heatmap_ || !tex) return;
     if (!heatmap_vbo_) {
         // Fullscreen triangle-strip: 4 точки × (pos.xy, uv.xy). Текстурные
@@ -644,6 +656,14 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
         static const float kDefaultNoData[3] = { 0.12f, 0.12f, 0.14f };
         const float* nd = nodata_rgb ? nodata_rgb : kDefaultNoData;
         glUniform3f(loc_heatmap_nodata_, nd[0], nd[1], nd[2]);
+    }
+    // Uniform'ы программы живут между вызовами, поэтому флаг ставится КАЖДЫЙ раз:
+    // иначе режим, включённый одной картой, протёк бы на все следующие.
+    const bool oor = below_rgb && above_rgb;
+    if (loc_heatmap_oor_ >= 0) glUniform1i(loc_heatmap_oor_, oor ? 1 : 0);
+    if (oor) {
+        if (loc_heatmap_below_ >= 0) glUniform3f(loc_heatmap_below_, below_rgb[0], below_rgb[1], below_rgb[2]);
+        if (loc_heatmap_above_ >= 0) glUniform3f(loc_heatmap_above_, above_rgb[0], above_rgb[1], above_rgb[2]);
     }
 
     glBindVertexArray(vao_);
