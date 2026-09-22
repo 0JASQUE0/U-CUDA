@@ -1639,6 +1639,27 @@ void AppModel::load_or_init_order_plot_windows(const std::string& json) {
             if (w.id > max_id) max_id = w.id;
         if (max_id >= next_order_plot_window_id)
             next_order_plot_window_id = max_id + 1;
+
+        // Сверка с конфигами. Прежние сборки писали окна и конфиги в разные
+        // моменты (окна — по правке, конфиги — только после Run), и файлы
+        // расходились: окно ссылалось на вкладку, которой в сохранённых
+        // конфигах нет. Ссылки за пределы — выбросить (окно, оставшееся от
+        // этого пустым, тоже), дубликаты — схлопнуть, у карты — один член.
+        // Вкладку, не лежащую ни в одном окне, НЕ возвращаем: её могли убрать
+        // из окон намеренно, через Members.
+        const int nc = (int)order_session.configs.size();
+        for (auto it = order_plot_windows.begin(); it != order_plot_windows.end(); ) {
+            auto& m = it->members;
+            const bool had = !m.empty();
+            std::vector<int> kept;
+            for (int idx : m)
+                if (idx >= 0 && idx < nc && std::find(kept.begin(), kept.end(), idx) == kept.end())
+                    kept.push_back(idx);
+            if (it->kind == OrderPlotWindow::Kind::Map && kept.size() > 1) kept.resize(1);
+            m = std::move(kept);
+            if (had && m.empty()) { it = order_plot_windows.erase(it); continue; }
+            ++it;
+        }
         if (!order_plot_windows.empty()) return;
     }
     order_plot_windows.clear();

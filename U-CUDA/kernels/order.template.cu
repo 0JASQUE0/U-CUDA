@@ -348,6 +348,11 @@ extern "C" __global__ void orderEstimateKernel(
 // полушагов, композиции и экстраполяции учитываются сами собой. Отсюда же
 // требование к кастомной КРС для этого режима — обращаться к a[1..4] как к
 // a, b, c, d.
+//
+// Сама R тоже уходит наружу (outR): по ней хост считает относительную ошибку
+// шага против точной экспоненты e^{hA} — области предпочтительности. Ошибка
+// считается на хосте одной функцией для GPU- и CPU-ветки (stability_step_error
+// в parametric_engine.cpp), чтобы карта не зависела от устройства.
 #define STAB_OK   0
 #define STAB_BAD  1   // матрица не построилась (k = -1, r = 0, r > 0) или R улетела
 
@@ -364,12 +369,16 @@ extern "C" __global__ void stabilityRegionKernel(
     const numb   r,                       // отношение недиагоналей, обязан быть < 0
     const numb   h,                       // шаг, чей оператор перехода и диагонализуется
     numb* __restrict__ outRho,
-    int*  __restrict__ outStatus)
+    int*  __restrict__ outStatus,
+    // [4 * nPtsX*nPtsY], SoA: плоскость q (R00, R01, R10, R11) начинается с
+    // q * nPtsX*nPtsY — соседние нити пишут соседние адреса.
+    numb* __restrict__ outR)
 {
     const int cell = blockIdx.x * blockDim.x + threadIdx.x;
     if (cell >= nCells) return;
 
     const int gcell = cell + cellOffset;
+    const int plane = nPtsX * nPtsY;
     const int ix = gcell % nPtsX;
     const int iy = gcell / nPtsX;
 
@@ -392,6 +401,7 @@ extern "C" __global__ void stabilityRegionKernel(
     if (bad) {
         outRho[gcell] = (numb)nan("");
         outStatus[gcell] = STAB_BAD;
+        for (int q = 0; q < 4; ++q) outR[q * plane + gcell] = (numb)nan("");
         return;
     }
 
@@ -414,6 +424,7 @@ extern "C" __global__ void stabilityRegionKernel(
         R[col]     = X[0];
         R[2 + col] = X[1];
     }
+    for (int q = 0; q < 4; ++q) outR[q * plane + gcell] = R[q];
 
     const numb tr  = R[0] + R[3];
     const numb det = R[0] * R[3] - R[1] * R[2];

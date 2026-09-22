@@ -823,6 +823,7 @@ static StabilityResult run_stability_cpu_t(const StabilityRequest& req) {
 
     const size_t total_cells = (size_t)res.n_pts_x * (size_t)res.n_pts_y;
     res.rho.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+    res.err.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
     res.status.assign(total_cells, STAB_ST_BAD);
 
     std::vector<S> a((size_t)amountOfValues);
@@ -872,6 +873,10 @@ static StabilityResult run_stability_cpu_t(const StabilityRequest& req) {
             if (isnan(rho) || isinf(rho)) continue;   // статус уже BAD
             res.rho[cell]    = as_d(rho);
             res.status[cell] = STAB_ST_OK;
+            // Ошибка шага — в double при любой точности (см. stability_step_error).
+            res.err[cell] = stability_step_error(res.sigma_vals[(size_t)ix], res.omega_vals[(size_t)iy],
+                                                 req.k, req.r, req.h,
+                                                 as_d(R[0]), as_d(R[1]), as_d(R[2]), as_d(R[3]));
         }
 
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {

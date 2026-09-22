@@ -1098,6 +1098,10 @@ static void write_stability_config(std::ofstream& out, const StabilityResult& r,
     out << "device = " << (s.use_gpu ? "GPU (NVRTC)" : "CPU (cl.exe, sequential)") << "\n";
     if (s.use_gpu) out << "fmad = " << (s.gpu_fmad ? 1 : 0) << "\n";
     out << "stable cells = " << r.n_stable << " of " << (r.n_ok + r.n_bad) << "\n";
+    out << "step error: err = ||e^{hA} - R||_2 / ||e^{hA}||_2 (spectral norm)\n";
+    out << "preference tolerance = " << s.stab_pref_tol << "\n";
+    out << "preferred cells (rho <= 1 and err <= tolerance) = "
+        << stability_count_preferred(r, s.stab_pref_tol) << " of " << (r.n_ok + r.n_bad) << "\n";
 }
 
 bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
@@ -1111,7 +1115,8 @@ bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
     std::ofstream out(path);
     if (!out.is_open()) return false;
     out << std::setprecision(set_precision);
-    out << "sigma,omega,rho,stable,status\n";
+    // err и preferred — в конце строки: столбцы до status остаются на прежних местах.
+    out << "sigma,omega,rho,stable,status,err,preferred\n";
 
     for (int iy = 0; iy < res.n_pts_y; ++iy) {
         for (int ix = 0; ix < res.n_pts_x; ++ix) {
@@ -1126,7 +1131,15 @@ bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
             if (good) out << res.rho[k];
             out << ",";
             if (good) out << (res.rho[k] <= 1.0 ? 1 : 0);
-            out << "," << (k < res.status.size() ? res.status[k] : 1) << "\n";
+            out << "," << (k < res.status.size() ? res.status[k] : 1);
+            // Непосчитанная ошибка — пустая ячейка, по той же причине, что rho.
+            // +inf (точная экспонента выродилась) пишется как есть.
+            const bool has_err = good && k < res.err.size() && !std::isnan(res.err[k]);
+            out << ",";
+            if (has_err) out << res.err[k];
+            out << ",";
+            if (has_err) out << (stability_cell_preferred(res, k, snap.stab_pref_tol) ? 1 : 0);
+            out << "\n";
         }
     }
     return true;

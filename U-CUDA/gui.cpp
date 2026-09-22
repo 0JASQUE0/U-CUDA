@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <map>
@@ -9071,6 +9072,28 @@ static void draw_order_stability_block(AppModel& model, const OrderAnalysisSessi
             "The map is always N x N: a cell costs two steps of the scheme, so\n"
             "even 512 x 512 is cheaper than a single node of the p(h) curve.");
 
+    ImGui::Separator();
+    InputNumStr("preference tolerance", c.stab_pref_tol_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Preference region (Fedoseev, Karimov, Legat, Butusov, Mathematics\n"
+            "10:4327, 2022): the part of the stability region where one step is\n"
+            "also ACCURATE. A cell is preferred when rho <= 1 and\n"
+            "\n"
+            "    err = ||e^{hA} - R||_2 / ||e^{hA}||_2 <= tolerance,\n"
+            "\n"
+            "e^{hA} being the exact transition operator of the test problem and\n"
+            "R the one of the scheme (spectral norm). The paper uses 1, i.e. up\n"
+            "to 100%% error per step - a 'not nonsense' boundary rather than an\n"
+            "accuracy target; 0.1 or 0.01 show where the scheme is actually good.\n"
+            "\n"
+            "Applied when drawing, not during the run: change it and the overlay\n"
+            "follows at once, no rerun needed.");
+    const double tol_val = parse_num(c.stab_pref_tol_text, 1.0);
+    if (!(tol_val > 0.0))
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                           "tolerance <= 0: the preference region is empty by definition.");
+
     // Селекторы индексов a[]. Подписи те же, что у селектора оси свипа, минус
     // "h" и минус a[0] — коэффициент симметрии s занят схемой.
     ImGui::Separator();
@@ -9774,6 +9797,7 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
     sn.stab_k = c.stab_result.k;
     sn.stab_r = c.stab_result.r;
     sn.stab_h = c.stab_result.h;
+    sn.stab_pref_tol = parse_num(c.stab_pref_tol_text, 1.0);
     {
         const int slots[4] = { c.stab_idx_a, c.stab_idx_b, c.stab_idx_c, c.stab_idx_d };
         const char* names[4] = { "a", "b", "c", "d" };
@@ -9829,31 +9853,128 @@ static void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
     ImGui::TextDisabled("show:"); ImGui::SameLine();
     ImGui::RadioButton("1 - rho##stabview", &win.stab_view, 1); ImGui::SameLine();
     ImGui::RadioButton("rho##stabview", &win.stab_view, 0); ImGui::SameLine();
-    ImGui::RadioButton("region##stabview", &win.stab_view, 2);
+    ImGui::RadioButton("region##stabview", &win.stab_view, 2); ImGui::SameLine();
+    ImGui::RadioButton("log10 err##stabview", &win.stab_view, 3);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "1 - rho  - positive means stable. The default, because this is the\n"
-            "           quantity the reference MATLAB script plots, and the\n"
-            "           colour scale is capped at [0, 1] the same way its\n"
-            "           contour levels are: everything unstable collapses into\n"
-            "           the bottom band, which makes the rho = 1 boundary a\n"
-            "           sharp edge instead of a gradient.\n"
-            "rho      - the spectral radius itself, scaled over the computed\n"
-            "           range: use it to see HOW unstable the outside is.\n"
-            "region   - the plain mask rho <= 1: the stability region itself.\n"
+            "1 - rho   - positive means stable. The default, because this is the\n"
+            "            quantity the reference MATLAB script plots, and the\n"
+            "            colour scale is capped at [0, 1] the same way its\n"
+            "            contour levels are: everything unstable collapses into\n"
+            "            the bottom band, which makes the rho = 1 boundary a\n"
+            "            sharp edge instead of a gradient.\n"
+            "rho       - the spectral radius itself, scaled over the computed\n"
+            "            range: use it to see HOW unstable the outside is.\n"
+            "region    - the plain mask rho <= 1: the stability region itself.\n"
+            "log10 err - the relative error of one step against the exact\n"
+            "            operator, ||e^{hA} - R|| / ||e^{hA}||: the field the\n"
+            "            preference region is cut from.\n"
             "\n"
             "The colour range of any of them can be pinned by hand in the\n"
             "toolbar below.");
+
+    // Цвета слоя берутся у самой вью: образец рядом с чекбоксом обязан
+    // совпадать с тем, что нарисовано на карте.
+    ImGui::Checkbox("preference region##stabpref", &win.stab_show_pref);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Overlay the preference region on the map: cells with rho <= 1 AND\n"
+            "a one-step relative error ||e^{hA} - R|| / ||e^{hA}|| not above the\n"
+            "tolerance set in \"Stability region\" (Fedoseev et al., 2022).\n"
+            "The stability region says the solution does not blow up; the\n"
+            "preference region says it also still resembles the exact one.\n"
+            "For A-stable schemes the difference is dramatic: the whole left\n"
+            "half-plane is stable, only a small part of it is preferred.");
+    // Цвета слоя живут на окне (сохраняются вместе с ним) и отдаются вью каждый
+    // кадр; перезаливку текстуры при смене цвета вью делает сама.
+    hv.overlay_fill_color = win.stab_pref_fill;
+    hv.overlay_edge_color = win.stab_pref_edge;
+    hv.overlay_edge_width = win.stab_pref_edge_w;
+    ImGui::SameLine();
+    // Образец — контур поверх заливки, как область и выглядит на карте.
+    if (ImGui::ColorButton("##stabpref_swatch", ImGui::ColorConvertU32ToFloat4(win.stab_pref_edge),
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_AlphaPreviewHalf,
+                           ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight())))
+        ImGui::OpenPopup("stabpref_colors");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Colour of the preference region - click to change.");
+    if (ImGui::BeginPopup("stabpref_colors")) {
+        // Редактор работает с float[4]; источник правды — IM_COL32 на окне,
+        // обратно он пишется только при правке.
+        auto edit = [](const char* label, unsigned& col) {
+            ImVec4 v = ImGui::ColorConvertU32ToFloat4(col);
+            float f[4] = { v.x, v.y, v.z, v.w };
+            if (ImGui::ColorEdit4(label, f, ImGuiColorEditFlags_AlphaBar
+                                          | ImGuiColorEditFlags_AlphaPreviewHalf))
+                col = ImGui::ColorConvertFloat4ToU32(ImVec4(f[0], f[1], f[2], f[3]));
+        };
+        edit("fill##stabpref", win.stab_pref_fill);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Inside of the region. Keep the alpha low: the map\n"
+                              "underneath has to stay readable.");
+        edit("edge##stabpref", win.stab_pref_edge);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Cells on the boundary of the region (a neighbour is\n"
+                              "outside it) - the outline.");
+        ImGui::SetNextItemWidth(ImGui::CalcItemWidth());
+        ImGui::SliderInt("edge width##stabpref", &win.stab_pref_edge_w, 0, 10, "%d cells",
+                         ImGuiSliderFlags_AlwaysClamp);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Thickness of the outline in cells of the grid: a cell\n"
+                              "of the region is painted with the edge colour when it is\n"
+                              "at most this many steps from a cell outside. 0 = fill only.\n"
+                              "Counted in cells, not pixels, so the outline stays glued\n"
+                              "to the grid at any zoom; at a coarse grid 1 is already thick.");
+        if (ImGui::Button("Reset##stabpref")) {
+            const OrderPlotWindow defaults;
+            win.stab_pref_fill   = defaults.stab_pref_fill;
+            win.stab_pref_edge   = defaults.stab_pref_edge;
+            win.stab_pref_edge_w = defaults.stab_pref_edge_w;
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("|"); ImGui::SameLine();
+    ImGui::Checkbox("paper colours##stabpaper", &win.stab_paper_cmap);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Colour the map the way the figures of Fedoseev et al. (2022) do:\n"
+            "a grey scale from black to white over the colour range, and WHITE\n"
+            "for everything outside it - below as well as above.\n"
+            "\n"
+            "On the \"1 - rho\" view (range [0, 1]) this gives a white unstable\n"
+            "outside, a black rho = 1 boundary and an inside that lightens\n"
+            "towards rho = 0: the darker, the closer to losing stability.\n"
+            "\n"
+            "While this is on, the colormap chosen in the toolbar is not used\n"
+            "(it is kept and comes back when you turn this off).");
+    // Раскраска отдаётся вью каждый кадр: HeatmapView общий для всех видов
+    // окна, и снятая галочка обязана вернуть пользовательскую палитру сразу.
+    // Серая шкала — slanCM #28 "gray", чистое чёрное -> белое.
+    hv.colormap_override = win.stab_paper_cmap ? slancm_id(28) : 0;
+    hv.oor_custom        = win.stab_paper_cmap;
+    for (int q = 0; q < 3; ++q) hv.oor_below[q] = hv.oor_above[q] = 1.0f;
 
     if (!c.stab_last_run_ok || r.rho.empty()) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
 
+    // Маска предпочтительности нужна и для счётчика, поэтому строится всегда, а
+    // не только при включённом слое. Допуск читается с вкладки каждый кадр:
+    // в расчёт он не входит, и его правка обязана доходить до карты сразу.
+    const double pref_tol = parse_num(c.stab_pref_tol_text, 1.0);
+    std::vector<unsigned char> pref_mask(r.rho.size(), 0);
+    int n_pref = 0;
+    for (size_t i = 0; i < r.rho.size(); ++i)
+        if (stability_cell_preferred(r, i, pref_tol)) { pref_mask[i] = 1; ++n_pref; }
+
     ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
     const int n_cells = r.n_ok + r.n_bad;
-    ImGui::Text("%s: %d stable of %d", c.label.c_str(), r.n_stable, n_cells);
+    ImGui::Text("%s: %d stable, %d preferred (err <= %g) of %d",
+                c.label.c_str(), r.n_stable, n_pref, pref_tol, n_cells);
     if (r.n_bad > 0) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(%d not computed)", r.n_bad);
@@ -9892,12 +10013,39 @@ static void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
         // глубина неустойчивости — рядом есть вид rho.
         vmin = 0.0;
         vmax = 1.0;
+    } else if (win.stab_view == 3) {
+        // Точный ноль ошибки бывает (в начале координат шаг любой схемы — это
+        // I), и log10 превратил бы его в -inf, то есть в «нет данных». Пол
+        // 1e-17 — ниже eps double, отличить его от настоящего нуля нечем.
+        // +inf (точная экспонента выродилась) остаётся нечисловым и красится
+        // как непосчитанная ячейка. Потолок 1e2 — по той же причине, что rho_cap:
+        // иначе дальний край карты съедает всю шкалу, а интересна окрестность
+        // допуска.
+        const double floor_err = 1e-17;
+        for (size_t i = 0; i < r.rho.size(); ++i) {
+            const double e = (i < r.err.size()) ? r.err[i] : std::numeric_limits<double>::quiet_NaN();
+            buf[i] = std::isfinite(e) ? std::log10(std::max(e, floor_err))
+                                      : std::numeric_limits<double>::quiet_NaN();
+        }
+        vmin = std::log10(std::max(r.err_min, floor_err));
+        vmax = std::min(std::log10(std::max(r.err_max, floor_err)), 2.0);
     } else {
         buf = r.rho;
         vmin = r.rho_min;
         vmax = rho_cap;
     }
     if (!(vmax > vmin)) { vmin -= 0.5; vmax += 0.5; }
+
+    // Слой предпочтительности. Поколение текстуры слоя меняется и с данными,
+    // и с допуском: допуск правится на лету, и без него в ключе слой остался
+    // бы от старого порога.
+    if (win.stab_show_pref) {
+        std::uint64_t tol_bits = 0;
+        std::memcpy(&tol_bits, &pref_tol, sizeof(tol_bits));
+        hv.overlay_mask = pref_mask.data();
+        hv.overlay_generation = (int)((unsigned)c.stab_data_generation * 1000003u
+                                      ^ (unsigned)(tol_bits ^ (tol_bits >> 32)));
+    }
 
     hv.x_axis.name = "sigma";
     hv.y_axis.name = "omega";
@@ -9940,6 +10088,11 @@ static void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
     const int mi = win.members[0];
     if (mi < 0 || mi >= (int)s.configs.size()) { ImGui::TextDisabled("The tab has been removed."); return; }
     OrderConfig& c = s.configs[(size_t)mi];
+    // Раскраску «как в статье» ставит только карта устойчивости, а вью у окна
+    // одна на все его члены: без сброса подмена палитры пережила бы смену
+    // члена окна на обычную карту порядка.
+    hv.colormap_override = 0;
+    hv.oor_custom        = false;
     if (c.calc_kind == kOrderCalcStab) {
         draw_order_stability_map(model, win, cb, renderer, hv, c, mi);
         return;
@@ -11643,6 +11796,17 @@ static bool apply_session_json(AppModel& model,
     return true;
 }
 
+// Загрузка Order из файлов засевает кэш автосохранения (autosave_order_session)
+// только что загруженным состоянием: файл перепишется при первой настоящей
+// правке, а не сразу после загрузки. Иначе битый файл, отвергнутый
+// apply_session_json, молча заменился бы умолчаниями, хотя пользователь ещё
+// ничего не менял.
+static void order_autosave_seed(AppModel& model) {
+    model.order_autosave_target       = model.loaded_name;
+    model.order_autosave_json         = session_to_json_order(model.order_session);
+    model.order_windows_autosave_json = session_to_json_order_windows(model.order_plot_windows);
+}
+
 // Global system switch — fired from the top-bar combo. Loads the record and re-inits the
 // CURRENT tab (mirrors what each per-tab combo used to do); other tabs re-init on entry via
 // the block in draw_gui. Non-static: also called from app_main.cpp on startup to restore the
@@ -11709,6 +11873,7 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
             std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
             model.load_or_init_order_plot_windows(jw);
+            order_autosave_seed(model);
             break;
         }
         case AppModel::AppMode::Network: {
@@ -13840,6 +14005,45 @@ void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
     else     s.result.circuit_status = "cannot write " + path;
 }
 
+// Автосохранение вкладки Order. Раньше _last_order.json писался только по
+// завершении расчёта, а _last_order_windows.json — по флагу, который ставили
+// лишь добавление/удаление окон и правка их членов. Всё прочее — новая или
+// удалённая вкладка, переименование, схема, поля, вид карты, колормапа,
+// лог-оси — до файла не доходило, пока не досчитается очередной Run, а при
+// выходе без Run терялось. Хуже того, файлы расходились между собой: окна
+// сохранялись со ссылкой на вкладку, которой в сохранённых конфигах ещё нет.
+//
+// Теперь оба файла пишутся, как только сериализация отличается от последней
+// записанной. Сериализация Order — несколько килобайт текста, сравнивать её
+// каждый кадр дешевле, чем расставлять флаг по сотне мест правки (включая
+// ПКМ-рассылку в конфиги Order с чужих вкладок).
+//
+// Писать можно только сессию ТЕКУЩЕЙ системы: после смены системы на другой
+// вкладке order_session держит старую, пока в Order не зайдут снова, и без
+// этой проверки её содержимое легло бы в файл новой системы.
+static void autosave_order_session(AppModel& model, SystemLibrary& lib) {
+    model.order_plot_windows_dirty = false;   // флаг поглощён сравнением ниже
+    if (model.loaded_name.empty()) return;
+    const OrderAnalysisSession& s = model.order_session;
+    if (s.loaded_system_name.empty() || s.loaded_system_name != model.name) return;
+
+    if (model.order_autosave_target != model.loaded_name) {
+        model.order_autosave_target = model.loaded_name;
+        model.order_autosave_json.clear();
+        model.order_windows_autosave_json.clear();
+    }
+    std::string jo = session_to_json_order(s);
+    if (jo != model.order_autosave_json) {
+        lib.save_session(model.loaded_name, "_last_order", jo);
+        model.order_autosave_json = std::move(jo);
+    }
+    std::string jw = session_to_json_order_windows(model.order_plot_windows);
+    if (jw != model.order_windows_autosave_json) {
+        lib.save_session(model.loaded_name, "_last_order_windows", jw);
+        model.order_windows_autosave_json = std::move(jw);
+    }
+}
+
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -13989,24 +14193,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                              session_to_json_fastsync(model.fastsync_session));
     }
     // Order: тот же контракт, что у FastSync — без poll() in_flight никогда не
-    // сбросится и "Running" повиснет навсегда. По завершении пишем сессию.
-    if (model.order_session.poll()) {
-        if (!model.loaded_name.empty())
-            lib.save_session(model.loaded_name, "_last_order",
-                             session_to_json_order(model.order_session));
-    }
+    // сбросится и "Running" повиснет навсегда. Сессию и окна пишет
+    // autosave_order_session — по любому изменению, а не по завершении.
+    model.order_session.poll();
+    autosave_order_session(model, lib);
     // Network: тот же контракт, что у Order — без poll() in_flight никогда не
     // сбросится и "Running" повиснет навсегда.
     if (model.network_session.poll()) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_network",
                              session_to_json_network(model.network_session));
-    }
-    if (model.order_plot_windows_dirty) {
-        if (!model.loaded_name.empty())
-            lib.save_session(model.loaded_name, "_last_order_windows",
-                             session_to_json_order_windows(model.order_plot_windows));
-        model.order_plot_windows_dirty = false;
     }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
     // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
@@ -14499,6 +14695,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
             std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
             model.load_or_init_order_plot_windows(jw);
+            order_autosave_seed(model);
         }
     }
     auto network_need_init = model.network_session.loaded_system_name != model.name

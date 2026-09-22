@@ -150,11 +150,16 @@ public:
     // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер отображает отдельным цветом
     // (используется engine'ом для diverged/spec). nodata_rgb — указатель на float[3] с этим
     // цветом; nullptr = тёмно-серый по умолчанию (0.12/0.12/0.14).
+    // Значения вне [vmin, vmax] по умолчанию прижимаются к краю палитры. below_rgb/above_rgb
+    // (float[3], оба или ни одного) вместо этого красят v < vmin и v > vmax своим цветом — так
+    // рисуется область устойчивости «как в статье»: неустойчивое белое, а не чёрное.
     void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                       float uv_off_x, float uv_off_y,
                       float uv_scale_x, float uv_scale_y,
                       int n_discrete = 0, bool reverse = false,
-                      const float* nodata_rgb = nullptr);
+                      const float* nodata_rgb = nullptr,
+                      const float* below_rgb = nullptr,
+                      const float* above_rgb = nullptr);
 
     // Рисует 3D-линию (vbo с float[3] на вершину). thick_style=false — старый быстрый путь:
     // program_3d_ + glLineWidth (в core-profile драйвер обычно клампит до 1px, α не блендится).
@@ -207,7 +212,8 @@ private:
            loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
            loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1,
            loc_heatmap_discrete_n_ = -1, loc_heatmap_lut_ = -1,
-           loc_heatmap_reverse_ = -1, loc_heatmap_nodata_ = -1;
+           loc_heatmap_reverse_ = -1, loc_heatmap_nodata_ = -1,
+           loc_heatmap_oor_ = -1, loc_heatmap_below_ = -1, loc_heatmap_above_ = -1;
     GLuint heatmap_vbo_ = 0;     // ленивая инициализация fullscreen quad
     GLuint lut_tex_ = 0;         // 256x200 RGB8, см. ensure_lut_texture()
 
