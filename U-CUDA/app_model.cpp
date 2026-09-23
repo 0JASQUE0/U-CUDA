@@ -279,6 +279,7 @@ bool AppModel::start_parametric_analysis() {
     bifurcation_session.load_from_record(r, known_vars, known_params);
     lle_session.load_from_record(r, known_vars, known_params);
     ls_session.load_from_record(r, known_vars, known_params);
+    metrics_session.load_from_record(r, known_vars, known_params);
     try {
         // sys общий — всем трём сессиям нужен для compute_krs_for_scheme.
         // (KRS резолвится per-«прогон» в момент Run.)
@@ -286,6 +287,7 @@ bool AppModel::start_parametric_analysis() {
         bifurcation_session.sys = built;
         lle_session.sys         = built;
         ls_session.sys          = built;
+        metrics_session.sys     = built;
     }
     catch (...) {
         // система неполна — Run покажет ошибку
@@ -293,6 +295,7 @@ bool AppModel::start_parametric_analysis() {
     bifurcation_session.loaded_system_name = name;
     lle_session.loaded_system_name         = name;
     ls_session.loaded_system_name          = name;
+    metrics_session.loaded_system_name     = name;
     return true;
 }
 
@@ -466,6 +469,7 @@ constexpr BroadcastTab kBroadcastTabs[] = {
     BroadcastTab::Phase,  BroadcastTab::Bifurcation, BroadcastTab::LLE,
     BroadcastTab::LS,     BroadcastTab::Dft1D,       BroadcastTab::Basins,
     BroadcastTab::FastSync, BroadcastTab::Custom,    BroadcastTab::Order,
+    BroadcastTab::Metrics,
 };
 
 // Элемент вектора конфигов или nullptr (пустая сессия, индекс из битого
@@ -630,6 +634,26 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
                         &c.axis_y_over_h, &m.custom_session.params, &m.custom_session.vars };
         return true;
     }
+    case BroadcastTab::Metrics: {
+        auto& v = m.metrics_session.configs;
+        resolved_idx = (idx < 0) ? m.metrics_session.active_config_index : idx;
+        auto* c = config_at(v, resolved_idx);
+        if (!c) return false;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.t_max = &c->t_max_text; out.transient = &c->transient_text;
+        out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
+        out.params = &c->param_values; out.ics = &c->initial_conditions;
+        out.scheme = &c->scheme;
+        out.sweep_lo = &c->param_lo_text;     out.sweep_hi = &c->param_hi_text;
+        out.sweep_lo_2 = &c->param_lo_2_text; out.sweep_hi_2 = &c->param_hi_2_text;
+        out.resolution = &c->n_pts_text;
+        out.sweep   = { &c->param_index,   &c->sweep_over_var,   &c->var_sweep_index,
+                        &c->sweep_over_h,   &m.metrics_session.params, &m.metrics_session.vars };
+        out.sweep_2 = { &c->param_index_2, &c->sweep_over_var_2, &c->var_sweep_index_2,
+                        &c->sweep_over_h_2, &m.metrics_session.params, &m.metrics_session.vars };
+        out.label = &c->label;
+        return true;
+    }
     case BroadcastTab::Order: {
         auto& v = m.order_session.configs;
         resolved_idx = (idx < 0) ? m.order_session.active_config_index : idx;
@@ -688,6 +712,7 @@ int config_count(AppModel& m, BroadcastTab tab) {
         case BroadcastTab::FastSync:    return (int)m.fastsync_session.configs.size();
         case BroadcastTab::Custom:      return 1;
         case BroadcastTab::Order:       return (int)m.order_session.configs.size();
+        case BroadcastTab::Metrics:     return (int)m.metrics_session.configs.size();
     }
     return 0;
 }
@@ -714,6 +739,10 @@ std::string group_of(AppModel& m, BroadcastTab tab, int idx) {
         case BroadcastTab::FastSync: return "Fast Synchro";
         case BroadcastTab::Custom:   return "Custom";
         case BroadcastTab::Order:    return "Order";
+        case BroadcastTab::Metrics: {
+            auto* c = config_at(m.metrics_session.configs, idx);
+            return (c && c->mode_2d) ? "Metrics 2D" : "Metrics 1D";
+        }
     }
     return {};
 }
@@ -963,6 +992,7 @@ void AppModel::propagate_to_sessions() {
     bifurcation_session.custom_schemes = custom_schemes;
     lle_session.custom_schemes         = custom_schemes;
     ls_session.custom_schemes          = custom_schemes;
+    metrics_session.custom_schemes     = custom_schemes;
     dft1d_session.custom_schemes       = custom_schemes;
     basins_session.custom_schemes      = custom_schemes;
     fastsync_session.custom_schemes    = custom_schemes;
@@ -979,6 +1009,7 @@ void AppModel::propagate_to_sessions() {
     bifurcation_session.wrapper_schemes = wrapper_schemes;
     lle_session.wrapper_schemes         = wrapper_schemes;
     ls_session.wrapper_schemes          = wrapper_schemes;
+    metrics_session.wrapper_schemes     = wrapper_schemes;
     dft1d_session.wrapper_schemes       = wrapper_schemes;
     basins_session.wrapper_schemes      = wrapper_schemes;
     fastsync_session.wrapper_schemes    = wrapper_schemes;
@@ -995,6 +1026,7 @@ void AppModel::propagate_to_sessions() {
     bifurcation_session.enabled_builtin_schemes = enabled_now;
     lle_session.enabled_builtin_schemes         = enabled_now;
     ls_session.enabled_builtin_schemes          = enabled_now;
+    metrics_session.enabled_builtin_schemes     = enabled_now;
     dft1d_session.enabled_builtin_schemes       = enabled_now;
     basins_session.enabled_builtin_schemes      = enabled_now;
     fastsync_session.enabled_builtin_schemes    = enabled_now;
@@ -1015,6 +1047,7 @@ void AppModel::propagate_to_sessions() {
         bifurcation_session.sys = built;
         lle_session.sys         = built;
         ls_session.sys          = built;
+        metrics_session.sys     = built;
         dft1d_session.sys       = built;
         basins_session.sys      = built;
         fastsync_session.sys    = built;
@@ -1100,7 +1133,8 @@ std::string prewarm_sig(const std::string& session_id, const Cfg& c) {
 void AppModel::poll_parametric_prewarm() {
     // Не соревнуемся с идущим расчётом: пока он считает, хвост очереди греет
     // prewarm_rest_of_parametric_queue, а лишняя компиляция отняла бы у него CPU.
-    if (bifurcation_session.in_flight || lle_session.in_flight || ls_session.in_flight) return;
+    if (bifurcation_session.in_flight || lle_session.in_flight || ls_session.in_flight ||
+        metrics_session.in_flight) return;
     if (!parametric_queue.empty()) return;
     if (parametric_prewarm_future.valid() &&
         parametric_prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
@@ -1140,6 +1174,11 @@ void AppModel::poll_parametric_prewarm() {
          ls_session.curves.size(),
          [&](size_t i, const std::string& id) { return prewarm_sig(id, ls_session.curves[i]); },
          [&](int i) { return ls_session.prewarm_task(i); });
+    scan(prewarm_watch_metrics,
+         prewarm_session_id(metrics_session.sys, metrics_session.vars, metrics_session.custom_schemes),
+         metrics_session.configs.size(),
+         [&](size_t i, const std::string& id) { return prewarm_sig(id, metrics_session.configs[i]); },
+         [&](int i) { return metrics_session.prewarm_task(i); });
 
     if (!task) return;
     // Движок создаётся тут же: CUDA-контекст он поднимает лениво, уже в фоновом потоке.
@@ -1166,6 +1205,7 @@ void AppModel::prewarm_rest_of_parametric_queue() {
         case ParametricQueueItem::Kind::Bifurcation: t = bifurcation_session.prewarm_task(it.index); break;
         case ParametricQueueItem::Kind::LLE:         t = lle_session.prewarm_task(it.index);         break;
         case ParametricQueueItem::Kind::LS:          t = ls_session.prewarm_task(it.index);          break;
+        case ParametricQueueItem::Kind::Metrics:     t = metrics_session.prewarm_task(it.index);     break;
         }
         if (t) tasks.push_back(std::move(t));
         if ((int)tasks.size() >= kPrewarmAhead) break;
@@ -1181,7 +1221,8 @@ void AppModel::prewarm_rest_of_parametric_queue() {
 bool AppModel::start_next_in_parametric_queue() {
     if (bifurcation_session.in_flight ||
         lle_session.in_flight ||
-        ls_session.in_flight) return false;
+        ls_session.in_flight ||
+        metrics_session.in_flight) return false;
     if (parametric_queue.empty()) return false;
     if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
     while (!parametric_queue.empty()) {
@@ -1200,6 +1241,10 @@ bool AppModel::start_next_in_parametric_queue() {
         case ParametricQueueItem::Kind::LS:
             if (it.index >= 0 && it.index < (int)ls_session.curves.size())
                 ok = ls_session.run_async(*parametric_engine, it.index);
+            break;
+        case ParametricQueueItem::Kind::Metrics:
+            if (it.index >= 0 && it.index < (int)metrics_session.configs.size())
+                ok = metrics_session.run_async(*parametric_engine, it.index);
             break;
         }
         if (ok) { prewarm_rest_of_parametric_queue(); return true; }
@@ -1426,6 +1471,13 @@ void AppModel::remove_lle_curve(int i) {
     parametric_plot_windows_dirty = true;
 }
 
+void AppModel::remove_metrics_config(int i) {
+    metrics_session.remove_config(i);
+    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::Metrics, i);
+    cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::Metrics, i);
+    parametric_plot_windows_dirty = true;
+}
+
 void AppModel::remove_ls_curve(int i) {
     ls_session.remove_curve(i);
     cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LS, i);
@@ -1505,6 +1557,15 @@ void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
             ls1.push_back((int)i);
     }
     if (!ls1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::LS, false, ls1);
+
+    std::vector<int> met1;
+    for (size_t i = 0; i < metrics_session.configs.size(); ++i) {
+        if (metrics_session.configs[i].mode_2d)
+            add_parametric_plot_window(ParametricPlotWindow::Kind::Metrics, true, { (int)i });
+        else
+            met1.push_back((int)i);
+    }
+    if (!met1.empty()) add_parametric_plot_window(ParametricPlotWindow::Kind::Metrics, false, met1);
 }
 
 void AppModel::remove_dft1d_config(int i) {

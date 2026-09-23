@@ -1502,3 +1502,119 @@ struct LyapunovSpectrumAnalysisSession {
     void request_cancel();
     bool poll();
 };
+
+// Signal metrics — вкладка Parametric -> Metrics. Числовые характеристики
+// записанного сигнала writable_var на каждой точке свипа: max / min / размах /
+// среднее, средняя и медианная частота по пикам, параметры Хьорта. UX зеркалит
+// LLECurveConfig (тот же свип, те же 1D-кривые и 2D-хитмапы), результат —
+// сразу несколько величин на точку, их выбирает таб-бар окна графика
+// (ParametricPlotWindow::metric).
+struct SignalMetricsConfig {
+    std::string label   = "Metrics 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+
+    // Свип по X — см. BifurcationDiagramConfig.
+    int         param_index     = 0;
+    bool        sweep_over_var  = false;
+    int         var_sweep_index = 0;
+    bool        sweep_over_h    = false;
+    bool        log_scale       = false;
+    std::string param_lo_text   = "0";
+    std::string param_hi_text   = "1";
+    std::string n_pts_text      = "500";
+
+    // Continuation и устройство — как у LLECurveConfig: цепочка только в 1D и
+    // только по параметру или h; CPU тоже только в 1D (в 2D выбор заблокирован).
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    bool        use_gpu              = true;
+
+    // Какой сигнал меряем (-1 = x0 + pi*x1 + e*x2, как у БД).
+    int         writable_var   = 0;
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string pre_scaller_text   = "1";
+    std::string max_value_text     = "1e6";
+
+    // Биты SignalMetric (parametric_engine.h): какие метрики считать и
+    // показывать. По умолчанию все.
+    int         metric_mask = kSignalMetricAllMask;
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    SignalMetricsResult result;           // 1D
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим — квадратная сетка, Resolution на обе оси (см. LLECurveConfig).
+    bool        mode_2d           = false;
+    int         param_index_2     = 0;
+    bool        sweep_over_var_2  = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2    = false;
+    bool        log_scale_2       = false;
+    std::string param_lo_2_text   = "0";
+    std::string param_hi_2_text   = "1";
+
+    SignalMetricsResult result_2d;
+    bool        last_run_2d_ok     = false;
+    int         data_generation_2d = 0;
+    bool        fit_request_2d     = false;
+    int         colormap_idx       = -1;   // -1 = AppModel::heatmap_colormap
+};
+
+// Сессия Metrics — копия LLEAnalysisSession по устройству (одна задача в
+// полёте, свой future). 1D и 2D отдаёт один и тот же run_signal_metrics,
+// поэтому future один.
+struct SignalMetricsAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<SignalMetricsConfig> configs;
+    int active_config_index  = 0;
+    int running_config_index = -1;
+
+    std::future<SignalMetricsResult> run_future;
+    bool is_2d_run = false;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    std::shared_ptr<std::atomic<bool>>  cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
+    SignalMetricsAnalysisSession() = default;
+    SignalMetricsAnalysisSession(SignalMetricsAnalysisSession&&) = default;
+    SignalMetricsAnalysisSession& operator=(SignalMetricsAnalysisSession&&) = default;
+    SignalMetricsAnalysisSession(const SignalMetricsAnalysisSession&) = delete;
+    SignalMetricsAnalysisSession& operator=(const SignalMetricsAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    void add_config();
+    void remove_config(int i);
+    bool run_async(ParametricEngine& engine, int config_idx);
+    std::function<void(ParametricEngine&)> prewarm_task(int config_idx) const;
+    void request_cancel();
+    bool poll();
+};

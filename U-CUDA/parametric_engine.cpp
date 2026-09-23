@@ -205,7 +205,8 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
                    int writableVar, numb maxValue,
-                   numb* data)
+                   numb* data,
+                   numb* boxMin = nullptr, numb* boxMax = nullptr)
 {
     for (size_t i = 0; i < iterations; ++i) {
         if (data != nullptr) {
@@ -216,6 +217,14 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                 else                     data[i] = x[0];
             } else {
                 data[i] = x[writableVar];
+            }
+            // Описанный параллелепипед по всем переменным (Metrics -> Volume),
+            // в тех же сэмплах, что пишутся в data.
+            if (boxMin != nullptr) {
+                for (int j = 0; j < amountOfX; ++j) {
+                    if (i == 0 || x[j] < boxMin[j]) boxMin[j] = x[j];
+                    if (i == 0 || x[j] > boxMax[j]) boxMax[j] = x[j];
+                }
             }
             for (int j = 0; j < preScaller; ++j) step(x, a, h);
         }
@@ -1418,6 +1427,234 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
 
 }  // namespace
 
+// Signal metrics: общий хвост всех трёх веток (GPU-классика, GPU-continuation,
+// CPU) — автошкала по конечным значениям, CSV, ok.
+void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
+    for (int m = 0; m < SIGM_COUNT; ++m) {
+        double lo =  std::numeric_limits<double>::infinity();
+        double hi = -std::numeric_limits<double>::infinity();
+        for (double v : res.values[m]) {
+            if (!std::isfinite(v)) continue;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        res.min_val[m] = std::isfinite(lo) ? lo : 0.0;
+        res.max_val[m] = std::isfinite(hi) ? hi : 0.0;
+    }
+    if (!req.csv_output_path.empty()) {
+        std::string e;
+        if (!signal_metrics_write_csv(res, req.csv_output_path, e))
+            std::fprintf(stderr, "[metrics] CSV: %s\n", e.c_str());
+    }
+    res.ok = true;
+}
+
+// Host-двойник MetricsAccum из signal_metrics.template.cu: те же суммы в том же
+// порядке, поэтому CPU и GPU расходятся только арифметикой шага, не метрик.
+struct CpuMetricsAccum {
+    size_t n = 0;
+    numb   shift = 0, s1 = 0, s2 = 0;
+    numb   mn = 0, mx = 0;
+    numb   yPrev = 0, dPrev = 0;
+    numb   sd = 0, sd2 = 0, sdd = 0, sdd2 = 0;
+
+    void push(numb y) {
+        if (n == 0) { shift = y; mn = y; mx = y; }
+        const numb c = y - shift;
+        s1 += c; s2 += c * c;
+        if (y < mn) mn = y;
+        if (y > mx) mx = y;
+        if (n >= 1) {
+            const numb d = y - yPrev;
+            sd += d; sd2 += d * d;
+            if (n >= 2) {
+                const numb dd = d - dPrev;
+                sdd += dd; sdd2 += dd * dd;
+            }
+            dPrev = d;
+        }
+        yPrev = y;
+        ++n;
+    }
+};
+
+inline numb cpu_sm_variance(numb s1, numb s2, size_t n) {
+    if (n == 0) return (numb)0;
+    const numb inv = (numb)1 / (numb)n;
+    const numb v = (s2 - s1 * s1 * inv) * inv;
+    return v < (numb)0 ? (numb)0 : v;
+}
+
+// run_metrics_cpu — CPU-ветка Metrics (только 1D). continuation = false: точки
+// независимы, как у calculateDiscreteModelMetricsCUDA (тот же выбор длин
+// транзиента и блока). continuation = true: цепочка с переносом x[], как у
+// signalMetricsContinuationKernel. Пики — cpu_peak_finder, батч-порт peakFinder;
+// PeakStream на GPU по построению ему эквивалентен (см. cudaLibrary.cu), поэтому
+// интервалы, а с ними и частоты, те же. Итог точки — копия smFinalize.
+SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool continuation) {
+    SignalMetricsResult res;
+    auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+
+    KrsCpuStep step;
+    std::vector<KrsCpuDiag> diags;
+    if (!step.compile(req.krs_body, req.amountOfX, (int)req.base_values.size(), diags)) {
+        std::string msg = "CPU KRS:";
+        for (const auto& d : diags) {
+            msg += "\n";
+            if (d.line > 0) msg += "line " + std::to_string(d.line) + ": ";
+            msg += d.message;
+        }
+        return fail(msg);
+    }
+
+    // (std::min в скобках не пишем: windows.h тянет макрос min)
+    const double worstCaseH = req.sweep_over_h
+                            ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                            : req.h;
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
+    const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+    if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+    const int  nPts = req.n_pts;
+    const int  mask = req.metric_mask & kSignalMetricAllMask;
+    const bool rev  = continuation && req.continuation_reverse;
+    res.dimension   = 1;
+    res.n_pts       = nPts;
+    res.param_lo    = req.param_lo;
+    res.param_hi    = req.param_hi;
+    res.log_scale   = req.log_scale;
+    res.metric_mask = mask;
+    res.continuation         = continuation;
+    res.continuation_reverse = rev;
+    res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+    const double NaN = std::numeric_limits<double>::quiet_NaN();
+    for (int m = 0; m < SIGM_COUNT; ++m)
+        if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, NaN);
+
+    const PeakConfig pc = get_peak_config();
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> block((size_t)maxPointsInBlock);
+    std::vector<numb> peaks((size_t)maxPointsInBlock);
+    std::vector<numb> times((size_t)maxPointsInBlock);
+    std::vector<numb> boxMin((size_t)req.amountOfX), boxMax((size_t)req.amountOfX);
+
+    for (int j = 0; j < nPts; ++j) {
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true;
+            res.error = "Cancelled by user";
+            return res;
+        }
+        const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi, rev, req.log_scale);
+        if (!continuation) {
+            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            a.assign(req.base_values.begin(), req.base_values.end());
+        }
+        numb h_local = (numb)req.h;
+        if (req.sweep_over_h)        h_local = (numb)p;
+        else if (req.sweep_over_var) x[(size_t)req.var_sweep_index] = (numb)p;
+        else                         a[(size_t)req.param_index]     = (numb)p;
+
+        // Длины — как у соответствующего GPU-ядра: у классики ucudaSetupSweepPoint
+        // (ceil при h-свипе, иначе общие на запуск), у цепочки — усечение.
+        int    pointsInBlock = 0;
+        size_t pointsForSkip = 0;
+        if (h_local > (numb)0) {
+            if (continuation) {
+                pointsInBlock = (int)(req.t_max / h_local / req.pre_scaller);
+                pointsForSkip = steps_from_time_size_t(req.transient_time, (double)h_local);
+            } else if (req.sweep_over_h) {
+                pointsInBlock = (int)std::ceil(req.t_max / h_local / req.pre_scaller);
+                pointsForSkip = (size_t)std::ceil(req.transient_time / h_local);
+            } else {
+                pointsInBlock = maxPointsInBlock;
+                pointsForSkip = steps_from_time_size_t(req.transient_time, req.h);
+            }
+        }
+        if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
+
+        auto done = [&]() {
+            if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+        };
+        if (h_local <= (numb)0 || pointsInBlock <= 0) { done(); continue; }
+
+        int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                                  pointsForSkip, req.amountOfX,
+                                  continuation ? 1 : req.pre_scaller, /*writableVar*/ 0,
+                                  (numb)req.max_value, nullptr);
+        if (flag == REGIME_UNBOUND) { done(); continue; }
+
+        const bool wantBox = ((mask >> SIGM_VOLUME) & 1) != 0;
+        flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                              (size_t)pointsInBlock, req.amountOfX,
+                              req.pre_scaller, req.writable_var,
+                              (numb)req.max_value, block.data(),
+                              wantBox ? boxMin.data() : nullptr,
+                              wantBox ? boxMax.data() : nullptr);
+        if (flag != REGIME_OSCILLATION && flag != REGIME_FIXED_POINT) { done(); continue; }
+
+        CpuMetricsAccum acc;
+        for (int i = 0; i < pointsInBlock; ++i) acc.push(block[(size_t)i]);
+
+        const numb dt = h_local * (numb)req.pre_scaller;
+        double r[SIGM_COUNT];
+        for (int m = 0; m < SIGM_COUNT; ++m) r[m] = NaN;
+        r[SIGM_MAX]   = (double)acc.mx;
+        r[SIGM_MIN]   = (double)acc.mn;
+        r[SIGM_RANGE] = (double)(acc.mx - acc.mn);
+        r[SIGM_MEAN]  = (double)(acc.shift + acc.s1 / (numb)acc.n);
+        if (wantBox) {
+            numb vol = (numb)1;
+            for (int jx = 0; jx < req.amountOfX; ++jx) vol *= boxMax[(size_t)jx] - boxMin[(size_t)jx];
+            r[SIGM_VOLUME] = (double)vol;
+        }
+        const numb varY  = cpu_sm_variance(acc.s1,  acc.s2,   acc.n);
+        const numb varD  = cpu_sm_variance(acc.sd,  acc.sd2,  acc.n > 1 ? acc.n - 1 : 0);
+        const numb varDD = cpu_sm_variance(acc.sdd, acc.sdd2, acc.n > 2 ? acc.n - 2 : 0);
+        r[SIGM_VARIANCE] = (double)varY;
+        if (varY > (numb)0 && varD > (numb)0) {
+            const numb mobRaw = std::sqrt(varD / varY);
+            r[SIGM_HJORTH_MOBILITY]   = (double)(mobRaw / dt);
+            r[SIGM_HJORTH_COMPLEXITY] = (double)(std::sqrt(varDD / varD) / mobRaw);
+        }
+        if (pc.do_calculate_peaks) {
+            const int nI = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
+                                           peaks.data(), times.data(), dt, false);
+            if (nI > 0) {
+                // Тот же порядок сумм, что у IntervalStats в ядре.
+                numb sumInv = 0, sumT = 0, mnT = times[0], mxT = times[0];
+                for (int i = 0; i < nI; ++i) {
+                    const numb Ti = times[(size_t)i];
+                    if (Ti < mnT) mnT = Ti;
+                    if (Ti > mxT) mxT = Ti;
+                    sumT += Ti;
+                    if (Ti > (numb)0) sumInv += (numb)1 / Ti;
+                }
+                r[SIGM_MEAN_FREQ] = (double)(sumInv / (numb)nI);
+                r[SIGM_INT_MAX]   = (double)mxT;
+                r[SIGM_INT_MIN]   = (double)mnT;
+                r[SIGM_INT_RANGE] = (double)(mxT - mnT);
+                r[SIGM_INT_MEAN]  = (double)(sumT / (numb)nI);
+                std::sort(times.begin(), times.begin() + nI);
+                const numb med = (nI & 1) ? times[(size_t)(nI / 2)]
+                                          : (numb)0.5 * (times[(size_t)(nI / 2 - 1)] + times[(size_t)(nI / 2)]);
+                if (med > (numb)0) r[SIGM_MEDIAN_FREQ] = (double)((numb)1 / med);
+            } else if (flag == REGIME_FIXED_POINT) {
+                r[SIGM_MEAN_FREQ]   = 0.0;
+                r[SIGM_MEDIAN_FREQ] = 0.0;
+            }
+        }
+
+        res.flags[(size_t)j] = flag;
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((mask >> m) & 1) res.values[m][(size_t)j] = r[m];
+        done();
+    }
+
+    metrics_finish(res, req);
+    return res;
+}
+
 struct ParametricEngine::Impl {
     bool       inited   = false;
     CUcontext  context  = nullptr;
@@ -1530,6 +1767,7 @@ struct ParametricEngine::Impl {
     std::string src_template_fs_grid; // fastsync_grid.template.cu (mode 1)
     std::string src_template_order;   // order.template.cu
     std::string src_template_network; // network.template.cu
+    std::string src_template_metrics; // signal_metrics.template.cu
     bool     srcs_loaded     = false;
     uint64_t srcs_peak_epoch = 0;   // != peak_config_epoch() -> пересобрать configCUDA.h
 
@@ -1652,6 +1890,15 @@ struct ParametricEngine::Impl {
     };
     CachedNetworkModule cached_network;
 
+    // Signal metrics — свой шаблон и одно ядро; ключ как у bif2d (+ par_or_var).
+    struct CachedMetricsModule {
+        std::string key;
+        CUmodule    module = nullptr;
+        CUfunction  kernel = nullptr;        // calculateDiscreteModelMetricsCUDA
+        CUfunction  kernel_cont = nullptr;   // signalMetricsContinuationKernel
+    };
+    CachedMetricsModule cached_metrics;
+
     // Every cached_* above is just a view on the active entry of its pool; the pool owns the
     // modules. One slot per analysis type meant recompiling on every switch back to a scheme that
     // had already been built minutes ago -- 6 seconds of NVRTC for nothing on an implicit scheme.
@@ -1676,6 +1923,7 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
     ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
     ModuleLru<CachedNetworkModule>     pool_network   { kModuleCacheCapacity };
+    ModuleLru<CachedMetricsModule>     pool_metrics   { kModuleCacheCapacity };
 
     // Activates the module already built for this key, if the pool still holds it.
     template <class T>
@@ -1768,6 +2016,7 @@ struct ParametricEngine::Impl {
             drain_pool(pool_fs_grid);
             drain_pool(pool_order);
             drain_pool(pool_network);
+            drain_pool(pool_metrics);
             cuCtxDestroy(context);
         }
     }
@@ -1829,6 +2078,7 @@ struct ParametricEngine::Impl {
         src_template_fs_grid  = read_text_file(root + "fastsync_grid.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_template_order    = read_text_file(root + "order.template.cu",            e); if (!e.empty()) { err = e; return false; }
         src_template_network  = read_text_file(root + "network.template.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_template_metrics  = read_text_file(root + "signal_metrics.template.cu",   e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
@@ -6218,6 +6468,508 @@ struct ParametricEngine::Impl {
         return res;
     }
 
+    // compile_metrics_if_needed — шаблон signal_metrics.template.cu, одно ядро
+    // calculateDiscreteModelMetricsCUDA. Cache key: ":metrics:" + par_or_var.
+    bool compile_metrics_if_needed(const std::string& krs_body, int amountOfX,
+                                   int par_or_var, std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string key = hash_key(krs_body, amountOfX) + ":metrics:" + std::to_string(par_or_var);
+        return compile_into(pool_metrics, key, cached_metrics, activate, [&](CachedMetricsModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            if (!build_module(snapshot_sources(src_template_metrics), "signal_metrics.cu",
+                              { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",    krs_body },
+                                { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
+                              { "calculateDiscreteModelMetricsCUDA", "signalMetricsContinuationKernel" },
+                              mod, mg, err))
+                return false;
+
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel,      err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_cont, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
+
+    // Раскладка осей свипа для метрик: par_or_var, индексы, диапазоны, h-ось и
+    // транспонирование. 1D — как у run_bif1d, 2D — дословно логика run_bif2d
+    // (смешанный свип X = param, Y = IC ядро умеет только наоборот, отсюда swap_xy).
+    struct MetricsAxes {
+        int    par_or_var = 1;
+        int    idx_x = 0, idx_y = 0;
+        double lo_x = 0, hi_x = 1, lo_y = 0, hi_y = 1;
+        bool   swap_xy = false;
+        int    hSweepAxis = -1;
+        int    logAxisMask = 0;
+    };
+
+    static std::string metrics_axes(const SignalMetricsRequest& req, MetricsAxes& a) {
+        auto check_param = [&](int p) { return p >= 0 && p < (int)req.base_values.size(); };
+        auto check_var   = [&](int v) { return v >= 0 && v < req.amountOfX; };
+
+        if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
+            return "log scale requires param lo/hi > 0 (X axis)";
+
+        if (req.dimension == 1) {
+            if (req.sweep_over_h) {
+                if (req.param_lo <= 0.0 || req.param_hi <= 0.0) return "h lo/hi must be > 0 with sweep over dt (h)";
+                a.hSweepAxis = 0;
+                a.par_or_var = 1;
+                a.idx_x = 0;
+            } else if (req.sweep_over_var) {
+                if (!check_var(req.var_sweep_index)) return "var_sweep_index out of range";
+                a.par_or_var = 0;
+                a.idx_x = req.var_sweep_index;
+            } else {
+                if (!check_param(req.param_index)) return "param_index out of range";
+                a.par_or_var = 1;
+                a.idx_x = req.param_index;
+            }
+            a.lo_x = req.param_lo; a.hi_x = req.param_hi;
+            a.lo_y = 0.0;          a.hi_y = 1.0;
+            a.logAxisMask = req.log_scale ? 1 : 0;
+            return {};
+        }
+
+        if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
+            return "log scale requires param lo/hi > 0 (Y axis)";
+        if (req.sweep_over_h && req.sweep_over_h_2)
+            return "only one axis can sweep over dt (h)";
+
+        bool log_x = req.log_scale, log_y = req.log_scale_2;
+        a.par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                     req.sweep_over_var, req.sweep_over_var_2);
+        if (req.sweep_over_h || req.sweep_over_h_2) {
+            a.hSweepAxis = req.sweep_over_h ? 0 : 1;
+            if (req.sweep_over_h) {
+                if (a.par_or_var == 1) { if (!check_param(req.param_index_2))   return "param_index_2 (Y axis) out of range"; a.idx_y = req.param_index_2; }
+                else                   { if (!check_var(req.var_sweep_index_2)) return "var_sweep_index_2 (Y axis) out of range"; a.idx_y = req.var_sweep_index_2; }
+                a.idx_x = 0;
+            } else {
+                if (a.par_or_var == 1) { if (!check_param(req.param_index))     return "param_index (X axis) out of range"; a.idx_x = req.param_index; }
+                else                   { if (!check_var(req.var_sweep_index))   return "var_sweep_index (X axis) out of range"; a.idx_x = req.var_sweep_index; }
+                a.idx_y = 0;
+            }
+            const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
+            const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
+            if (h_lo <= 0.0 || h_hi <= 0.0)
+                return std::string("h lo/hi must be > 0 when sweeping over dt (h) (axis ")
+                       + (req.sweep_over_h ? "X" : "Y") + ")";
+            a.lo_x = req.param_lo;   a.hi_x = req.param_hi;
+            a.lo_y = req.param_lo_2; a.hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var == req.sweep_over_var_2) {
+            if (a.par_or_var == 1) {
+                if (!check_param(req.param_index))   return "param_index (X axis) out of range";
+                if (!check_param(req.param_index_2)) return "param_index_2 (Y axis) out of range";
+                a.idx_x = req.param_index; a.idx_y = req.param_index_2;
+            } else {
+                if (!check_var(req.var_sweep_index))   return "var_sweep_index (X axis) out of range";
+                if (!check_var(req.var_sweep_index_2)) return "var_sweep_index_2 (Y axis) out of range";
+                a.idx_x = req.var_sweep_index; a.idx_y = req.var_sweep_index_2;
+            }
+            a.lo_x = req.param_lo;   a.hi_x = req.param_hi;
+            a.lo_y = req.param_lo_2; a.hi_y = req.param_hi_2;
+        } else if (req.sweep_over_var && !req.sweep_over_var_2) {
+            if (!check_var(req.var_sweep_index))  return "var_sweep_index (X axis) out of range";
+            if (!check_param(req.param_index_2))  return "param_index_2 (Y axis) out of range";
+            a.idx_x = req.var_sweep_index; a.idx_y = req.param_index_2;
+            a.lo_x = req.param_lo;   a.hi_x = req.param_hi;
+            a.lo_y = req.param_lo_2; a.hi_y = req.param_hi_2;
+        } else {
+            if (!check_var(req.var_sweep_index_2)) return "var_sweep_index_2 (Y axis) out of range";
+            if (!check_param(req.param_index))     return "param_index (X axis) out of range";
+            a.idx_x = req.var_sweep_index_2; a.idx_y = req.param_index;
+            a.lo_x = req.param_lo_2; a.hi_x = req.param_hi_2;
+            a.lo_y = req.param_lo;   a.hi_y = req.param_hi;
+            a.swap_xy = true;
+            log_x = req.log_scale_2; log_y = req.log_scale;
+        }
+        a.logAxisMask = (log_x ? 1 : 0) | (log_y ? 2 : 0);
+        return {};
+    }
+
+    // run_signal_metrics — одно fused-ядро на чанк (интегрирование + суммы +
+    // PeakStream), результат — SIGM_COUNT строк SoA на ячейку. Бюджет памяти как
+    // у run_bif2d: траектории нет, на ячейку — выходные строки, флаг и (только
+    // под медианную частоту) строка межпиковых интервалов.
+    SignalMetricsResult run_signal_metrics(const SignalMetricsRequest& req) {
+        SignalMetricsResult res;
+        auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.dimension != 1 && req.dimension != 2)                return fail("dimension must be 1 or 2");
+        if (req.n_pts <= 0)          return fail("n_pts must be > 0");
+        if (req.h <= 0.0)            return fail("h must be > 0");
+        if (req.t_max <= 0.0)        return fail("t_max must be > 0");
+        if (req.transient_time < 0)  return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)    return fail("pre_scaller must be > 0");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
+        const int mask = req.metric_mask & kSignalMetricAllMask;
+        if (mask == 0)               return fail("no metrics selected");
+
+        MetricsAxes ax;
+        {
+            const std::string e = metrics_axes(req, ax);
+            if (!e.empty()) return fail(e);
+        }
+
+        // Continuation и CPU — только 1D; обе ветки уходят до ensure_init
+        // (CPU-ветке CUDA не нужна вовсе).
+        if (req.continuation) {
+            if (req.dimension != 1)  return fail("continuation works in 1D only");
+            if (req.sweep_over_var)  return fail("continuation requires a param or h sweep, not an IC sweep");
+            if (req.use_cpu)         return run_metrics_cpu(req, true);
+            return run_metrics_continuation_gpu(req);
+        }
+        if (req.use_cpu) {
+            if (req.dimension != 1)  return fail("CPU computation works in 1D only");
+            return run_metrics_cpu(req, false);
+        }
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err)) return fail(err);
+
+        const int    nPts          = req.n_pts;
+        const int    dimension     = req.dimension;
+        const int    amountOfIC    = req.amountOfX;
+        const int    amountOfValues= (int)req.base_values.size();
+        const int    preScaller    = req.pre_scaller;
+        const std::vector<numb> ic_staged     = to_numb(req.initial_conditions);
+        const std::vector<numb> values_staged = to_numb(req.base_values);
+        numb ranges[4]           = { (numb)ax.lo_x, (numb)ax.hi_x, (numb)ax.lo_y, (numb)ax.hi_y };
+        int  indicesOfMutVars[2] = { ax.idx_x, ax.idx_y };
+
+        // Буфер — под худший случай шага (минимальный h на h-оси), см. run_bif2d.
+        const double worstCaseH = (ax.hSweepAxis == 0) ? ranges[0] : (ax.hSweepAxis == 1) ? ranges[2] : req.h;
+        const int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / preScaller);
+        const size_t amountOfPointsForSkip = steps_from_time_size_t(req.transient_time, req.h);
+        if (amountOfPointsInBlock <= 0)
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
+
+        // Интервалы нужны одной медиане; "+1" — стадия интервалов съедает один
+        // сырой пик (см. run_bif2d).
+        const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
+        const size_t peakStride    = (size_t)amountOfPointsInBlock < (size_t)max_amount_of_peaks + 1
+                                   ? (size_t)amountOfPointsInBlock
+                                   : (size_t)max_amount_of_peaks + 1;
+        const int    peakCapacity  = (int)peakStride;
+
+        const size_t total_cells = dimension == 2 ? (size_t)nPts * (size_t)nPts : (size_t)nPts;
+
+        size_t freeMemory = 0;
+        if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
+        const size_t memPerCell  = (size_t)SIGM_COUNT * sizeof(numb) + sizeof(int)
+                                 + (needIntervals ? peakStride * sizeof(numb) : 0);
+        const size_t memConstants = (4 + (size_t)amountOfIC + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
+        if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
+
+        size_t nPtsLimiter = (freeMemory - memConstants) / memPerCell;
+        if (nPtsLimiter < 32)          nPtsLimiter = 32;
+        if (nPtsLimiter > total_cells) nPtsLimiter = total_cells;
+        const size_t chunk = nPtsLimiter;
+        const size_t amountOfIteration = (total_cells + chunk - 1) / chunk;
+
+        const size_t stepsPerCell   = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const int    progressStride = progress_stride_for(stepsPerCell);
+        const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
+        const double ticksTotal     = (double)total_cells * ticksPerCell;
+
+        numb* d_ranges    = nullptr;
+        int*  d_indices   = nullptr;
+        numb* d_ic        = nullptr;
+        numb* d_values    = nullptr;
+        numb* d_intervals = nullptr;
+        numb* d_out       = nullptr;
+        int*  d_flags     = nullptr;
+        RunSignals sig;
+        CUstream stream = nullptr;
+
+        auto cleanup = [&]() {
+            if (d_ranges)    cudaFree(d_ranges);
+            if (d_indices)   cudaFree(d_indices);
+            if (d_ic)        cudaFree(d_ic);
+            if (d_values)    cudaFree(d_values);
+            if (d_intervals) cudaFree(d_intervals);
+            if (d_out)       cudaFree(d_out);
+            if (d_flags)     cudaFree(d_flags);
+            sig.release();
+            if (stream)      cuStreamDestroy(stream);
+        };
+
+        #define SIGM_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define SIGM_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                res.error = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return res; \
+            } \
+        } while(0)
+        #define SIGM_CANCEL_CHECK() do { \
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
+                res.cancelled = true; \
+                res.error = "Cancelled by user"; \
+                cleanup(); return res; \
+            } \
+        } while(0)
+
+        SIGM_CHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(numb)),                           "cudaMalloc d_ranges");
+        SIGM_CHECK(cudaMalloc((void**)&d_indices, 2 * sizeof(int)),                            "cudaMalloc d_indices");
+        SIGM_CHECK(cudaMalloc((void**)&d_ic,      (size_t)amountOfIC * sizeof(numb)),          "cudaMalloc d_ic");
+        SIGM_CHECK(cudaMalloc((void**)&d_values,  (size_t)amountOfValues * sizeof(numb)),      "cudaMalloc d_values");
+        SIGM_CHECK(cudaMalloc((void**)&d_out,     chunk * (size_t)SIGM_COUNT * sizeof(numb)),  "cudaMalloc d_out");
+        SIGM_CHECK(cudaMalloc((void**)&d_flags,   chunk * sizeof(int)),                        "cudaMalloc d_flags");
+        if (needIntervals)
+            SIGM_CHECK(cudaMalloc((void**)&d_intervals, chunk * peakStride * sizeof(numb)),    "cudaMalloc d_intervals");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+
+        SIGM_CHECK(cudaMemcpy(d_ranges,  ranges,               4 * sizeof(numb),                      cudaMemcpyHostToDevice), "memcpy d_ranges");
+        SIGM_CHECK(cudaMemcpy(d_indices, indicesOfMutVars,     2 * sizeof(int),                       cudaMemcpyHostToDevice), "memcpy d_indices");
+        SIGM_CHECK(cudaMemcpy(d_ic,      ic_staged.data(),     (size_t)amountOfIC * sizeof(numb),     cudaMemcpyHostToDevice), "memcpy d_ic");
+        SIGM_CHECK(cudaMemcpy(d_values,  values_staged.data(), (size_t)amountOfValues * sizeof(numb), cudaMemcpyHostToDevice), "memcpy d_values");
+        SIGM_CHECK_CU(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
+
+        res.dimension   = dimension;
+        res.n_pts       = nPts;
+        res.param_lo    = req.param_lo;   res.param_hi   = req.param_hi;
+        res.param_lo_2  = req.param_lo_2; res.param_hi_2 = req.param_hi_2;
+        res.log_scale   = req.log_scale;  res.log_scale_2 = req.log_scale_2;
+        res.metric_mask = mask;
+        res.flags.assign(total_cells, REGIME_UNBOUND);
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((mask >> m) & 1) res.values[m].assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+
+        std::vector<numb> h_row(chunk);
+        std::vector<int>  h_flags(chunk);
+
+        for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            SIGM_CANCEL_CHECK();
+            if (req.progress) req.progress->store((float)((double)(chunk * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
+            const size_t cur = (iter == amountOfIteration - 1) ? total_cells - chunk * iter : chunk;
+
+            const size_t sharedPerThread = (size_t)ucuda_shared_stride(amountOfIC, amountOfValues) * sizeof(numb);
+            const int blockSize = launch_block_size(sharedPerThread);
+            const int gridSize  = (int)((cur + blockSize - 1) / blockSize);
+
+            int    nPts_arg        = nPts;
+            int    limiter_arg     = (int)cur;
+            size_t calculated_arg  = iter * chunk;
+            size_t skip_arg        = amountOfPointsForSkip;
+            int    dimension_arg   = dimension;
+            numb   h_arg           = (numb)req.h;
+            int    amountOfIC_arg  = amountOfIC;
+            int    amountOfVal_arg = amountOfValues;
+            size_t iterations_arg  = (size_t)amountOfPointsInBlock;
+            int    preScaller_arg  = preScaller;
+            int    writableVar_arg = req.writable_var;
+            numb   maxValue_arg    = (numb)req.max_value;
+            size_t peakStride_arg  = peakStride;
+            int    peakCap_arg     = peakCapacity;
+            size_t metricStride_arg= cur;
+            int    mask_arg        = mask;
+            int    hSweep_arg      = ax.hSweepAxis;
+            numb   transient_arg   = (numb)req.transient_time;
+            numb   tMax_arg        = (numb)req.t_max;
+            int    logMask_arg     = ax.logAxisMask;
+            int*   d_cancel_arg    = sig.cancelArg();
+            int*   d_progress_arg  = sig.progressArg();
+            int    progStride_arg  = progressStride;
+
+            void* args[] = {
+                &nPts_arg, &limiter_arg, &calculated_arg, &skip_arg, &dimension_arg,
+                &d_ranges, &h_arg, &d_indices, &d_ic, &amountOfIC_arg,
+                &d_values, &amountOfVal_arg, &iterations_arg, &preScaller_arg,
+                &writableVar_arg, &maxValue_arg,
+                &d_intervals, &peakStride_arg, &peakCap_arg,
+                &d_out, &metricStride_arg, &mask_arg, &d_flags,
+                &hSweep_arg, &transient_arg, &tMax_arg, &logMask_arg,
+                &d_cancel_arg, &d_progress_arg, &progStride_arg
+            };
+            sig.resetTicks();
+            const unsigned int shared = (unsigned int)(sharedPerThread * blockSize);
+            SIGM_CHECK_CU(cuLaunchKernel(cached_metrics.kernel,
+                                         gridSize, 1, 1, blockSize, 1, 1,
+                                         shared, stream, args, nullptr),
+                          "cuLaunchKernel(signal metrics)");
+
+            if (!wait_with_signals(stream, sig, req.cancel, req.progress,
+                                   (double)(chunk * iter) * ticksPerCell,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
+            SIGM_CHECK(cudaStreamSynchronize(stream), "sync stream");
+            SIGM_CANCEL_CHECK();
+
+            // Индекс ядра -> индекс результата: в 2D при swap_xy ядро шло по осям
+            // в обратном порядке, результат всегда в раскладке GUI [iy*n + ix].
+            auto out_index = [&](size_t k) -> size_t {
+                const size_t kernel_idx = chunk * iter + k;
+                if (!ax.swap_xy) return kernel_idx;
+                const size_t kix = kernel_idx % (size_t)nPts;
+                const size_t kiy = kernel_idx / (size_t)nPts;
+                return kix * (size_t)nPts + kiy;
+            };
+
+            SIGM_CHECK(cudaMemcpy(h_flags.data(), d_flags, cur * sizeof(int), cudaMemcpyDeviceToHost), "memcpy flags");
+            for (size_t k = 0; k < cur; ++k) res.flags[out_index(k)] = h_flags[k];
+
+            for (int m = 0; m < SIGM_COUNT; ++m) {
+                if (!((mask >> m) & 1)) continue;
+                SIGM_CHECK(cudaMemcpy(h_row.data(), d_out + (size_t)m * cur, cur * sizeof(numb),
+                                      cudaMemcpyDeviceToHost), "memcpy metrics");
+                std::vector<double>& dst = res.values[m];
+                for (size_t k = 0; k < cur; ++k) dst[out_index(k)] = (double)h_row[k];
+            }
+        }
+
+        cleanup();
+        #undef SIGM_CHECK
+        #undef SIGM_CHECK_CU
+        #undef SIGM_CANCEL_CHECK
+
+        metrics_finish(res, req);
+        return res;
+    }
+
+    // GPU-continuation Metrics: одно однопоточное ядро на весь свип (точки
+    // зависят друг от друга). Буфер интервалов — одна строка, ядро
+    // переиспользует её от точки к точке.
+    SignalMetricsResult run_metrics_continuation_gpu(const SignalMetricsRequest& req) {
+        SignalMetricsResult res;
+        auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, 1, err)) return fail(err);
+
+        const double worstCaseH = req.sweep_over_h
+                                ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                                : req.h;
+        if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
+        const int sizeOfBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+        if (sizeOfBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+        const int    nPts  = req.n_pts;
+        const int    mask  = req.metric_mask & kSignalMetricAllMask;
+        const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
+        const size_t peakStride    = (size_t)sizeOfBlock < (size_t)max_amount_of_peaks + 1
+                                   ? (size_t)sizeOfBlock : (size_t)max_amount_of_peaks + 1;
+
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_intervals  = nullptr;
+        numb* d_out        = nullptr;
+        int*  d_flags      = nullptr;
+        RunSignals sig;   // однопоточное ядро: тик на точку
+        auto cleanup = [&]() {
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_intervals)  cudaFree(d_intervals);
+            if (d_out)        cudaFree(d_out);
+            if (d_flags)      cudaFree(d_flags);
+            sig.release();
+        };
+        #define SMC_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define SMC_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        SMC_CHECK(cudaMalloc((void**)&d_baseValues, req.base_values.size() * sizeof(numb)),        "cudaMalloc d_baseValues");
+        SMC_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(numb)),         "cudaMalloc d_baseX");
+        SMC_CHECK(cudaMalloc((void**)&d_out,        (size_t)SIGM_COUNT * (size_t)nPts * sizeof(numb)), "cudaMalloc d_out");
+        SMC_CHECK(cudaMalloc((void**)&d_flags,      (size_t)nPts * sizeof(int)),                   "cudaMalloc d_flags");
+        if (needIntervals)
+            SMC_CHECK(cudaMalloc((void**)&d_intervals, peakStride * sizeof(numb)),                 "cudaMalloc d_intervals");
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+
+        const std::vector<numb> baseValues_staged = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged      = to_numb(req.initial_conditions);
+        SMC_CHECK(cudaMemcpy(d_baseValues, baseValues_staged.data(), req.base_values.size() * sizeof(numb),
+                             cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        SMC_CHECK(cudaMemcpy(d_baseX, baseX_staged.data(), (size_t)req.amountOfX * sizeof(numb),
+                             cudaMemcpyHostToDevice), "memcpy d_baseX");
+        SMC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        int  nPts_arg        = nPts;
+        numb lo_arg          = (numb)req.param_lo;
+        numb hi_arg          = (numb)req.param_hi;
+        int  reverse_arg     = req.continuation_reverse ? 1 : 0;
+        int  logScale_arg    = req.log_scale ? 1 : 0;
+        int  sweepIsH_arg    = req.sweep_over_h ? 1 : 0;
+        int  mutParamIdx_arg = req.param_index;
+        int  amountOfVal_arg = (int)req.base_values.size();
+        int  amountOfX_arg   = req.amountOfX;
+        numb h_arg           = (numb)req.h;
+        numb tMax_arg        = (numb)req.t_max;
+        numb transient_arg   = (numb)req.transient_time;
+        int  sizeOfBlock_arg = sizeOfBlock;
+        int  preScaller_arg  = req.pre_scaller;
+        int  writableVar_arg = req.writable_var;
+        numb maxValue_arg    = (numb)req.max_value;
+        int  peakCap_arg     = (int)peakStride;
+        int  mask_arg        = mask;
+        int* d_cancel_arg    = sig.cancelArg();
+        int* d_progress_arg  = sig.progressArg();
+        void* args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &sweepIsH_arg, &mutParamIdx_arg,
+            &d_baseValues, &amountOfVal_arg, &d_baseX, &amountOfX_arg,
+            &h_arg, &tMax_arg, &transient_arg, &sizeOfBlock_arg, &preScaller_arg,
+            &writableVar_arg, &maxValue_arg,
+            &d_intervals, &peakCap_arg,
+            &d_out, &mask_arg, &d_flags,
+            &d_cancel_arg, &d_progress_arg
+        };
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+        SMC_CHECK_CU(cuLaunchKernel(cached_metrics.kernel_cont, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
+                     "cuLaunchKernel(metrics cont)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
+        SMC_CHECK(cudaDeviceSynchronize(), "sync after metrics cont");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+
+        res.dimension   = 1;
+        res.n_pts       = nPts;
+        res.param_lo    = req.param_lo;
+        res.param_hi    = req.param_hi;
+        res.log_scale   = req.log_scale;
+        res.metric_mask = mask;
+        res.continuation         = true;
+        res.continuation_reverse = req.continuation_reverse;
+
+        std::vector<int>  h_flags((size_t)nPts);
+        std::vector<numb> h_row((size_t)nPts);
+        SMC_CHECK(cudaMemcpy(h_flags.data(), d_flags, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy flags");
+        res.flags.assign(h_flags.begin(), h_flags.end());
+        for (int m = 0; m < SIGM_COUNT; ++m) {
+            if (!((mask >> m) & 1)) continue;
+            SMC_CHECK(cudaMemcpy(h_row.data(), d_out + (size_t)m * (size_t)nPts, (size_t)nPts * sizeof(numb),
+                                 cudaMemcpyDeviceToHost), "memcpy metrics");
+            res.values[m].assign(h_row.begin(), h_row.end());
+        }
+
+        cleanup();
+        #undef SMC_CHECK
+        #undef SMC_CHECK_CU
+        metrics_finish(res, req);
+        return res;
+    }
+
+
     // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
     // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
     // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
@@ -6999,6 +7751,15 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         if (req.continuation && !req.use_cpu) compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err, false);
         else compile_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+    }
+    void prewarm_metrics(const SignalMetricsRequest& req) {
+        if (req.use_cpu) return;   // CPU-шаг собирает cl.exe при Run, греть тут нечего
+        MetricsAxes ax;
+        if (!metrics_axes(req, ax).empty()) return;
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err, false);
     }
     void prewarm_bif2d(const Bifurcation2DRequest& req) {
         std::string err;
@@ -8653,6 +9414,10 @@ int stability_count_preferred(const StabilityResult& res, double tol) {
     return n;
 }
 
+SignalMetricsResult ParametricEngine::run_signal_metrics(const SignalMetricsRequest& req) {
+    return impl_->run_signal_metrics(req);
+}
+
 NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
     return impl_->run_network(req);
 }
@@ -8668,3 +9433,89 @@ void ParametricEngine::prewarm(const LLE2DRequest& req)         { impl_->prewarm
 void ParametricEngine::prewarm(const LS1DRequest& req)          { impl_->prewarm_ls1d(req); }
 void ParametricEngine::prewarm(const LS2DRequest& req)          { impl_->prewarm_ls2d(req); }
 void ParametricEngine::prewarm(const BasinsRequest& req)        { impl_->prewarm_basins(req); }
+void ParametricEngine::prewarm(const SignalMetricsRequest& req) { impl_->prewarm_metrics(req); }
+
+// ---------------------------------------------------------------------------
+// Signal metrics: имена и CSV.
+
+const char* signal_metric_name(int m) {
+    switch (m) {
+        case SIGM_MAX:               return "Max";
+        case SIGM_MIN:               return "Min";
+        case SIGM_RANGE:             return "Max - Min";
+        case SIGM_MEAN:              return "Mean";
+        case SIGM_MEAN_FREQ:         return "Mean freq";
+        case SIGM_MEDIAN_FREQ:       return "Median freq";
+        case SIGM_VARIANCE:   return "Variance";
+        case SIGM_HJORTH_MOBILITY:   return "Mobility";
+        case SIGM_HJORTH_COMPLEXITY: return "Complexity";
+        case SIGM_INT_MAX:           return "Int. max";
+        case SIGM_INT_MIN:           return "Int. min";
+        case SIGM_INT_RANGE:         return "Int. max - min";
+        case SIGM_INT_MEAN:          return "Int. mean";
+        case SIGM_VOLUME:            return "Volume";
+        default:                     return "?";
+    }
+}
+
+const char* signal_metric_axis_label(int m) {
+    switch (m) {
+        case SIGM_MAX:               return "max(x)";
+        case SIGM_MIN:               return "min(x)";
+        case SIGM_RANGE:             return "max(x) - min(x)";
+        case SIGM_MEAN:              return "mean(x)";
+        case SIGM_MEAN_FREQ:         return "mean freq, 1/t";
+        case SIGM_MEDIAN_FREQ:       return "median freq, 1/t";
+        case SIGM_VARIANCE:   return "variance = var(x)";
+        case SIGM_HJORTH_MOBILITY:   return "Hjorth mobility, rad/t";
+        case SIGM_HJORTH_COMPLEXITY: return "Hjorth complexity";
+        case SIGM_INT_MAX:           return "max(T), t";
+        case SIGM_INT_MIN:           return "min(T), t";
+        case SIGM_INT_RANGE:         return "max(T) - min(T), t";
+        case SIGM_INT_MEAN:          return "mean(T), t";
+        case SIGM_VOLUME:            return "volume = prod(max x_i - min x_i)";
+        default:                     return "";
+    }
+}
+
+// Одна таблица на прогон, «длинный» формат: строка = точка свипа,
+// колонки x [, y], regime, затем посчитанные метрики. Значения осей — те же
+// узлы сетки, что видело ядро (ucuda_node_value / _log), а не интерполяция
+// поверх них — см. getValueByIdx_local.
+bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err) {
+    std::ofstream out(path);
+    if (!out.is_open()) { err = "cannot open " + path; return false; }
+    out << std::setprecision(15);
+
+    const int n = r.n_pts;
+    auto node = [n, &r](int i, double lo, double hi, bool lg) {
+        if (r.continuation) return cont_sweep_value(i, n, lo, hi, r.continuation_reverse, lg);
+        return lg ? getValueByIdx_log_local((size_t)i, n, lo, hi)
+                  : getValueByIdx_local((size_t)i, n, lo, hi);
+    };
+
+    out << (r.dimension == 2 ? "x,y,regime" : "x,regime");
+    for (int m : kSignalMetricDisplayOrder)
+        if ((r.metric_mask >> m) & 1) out << "," << signal_metric_name(m);
+    out << "\n";
+
+    const size_t total = r.dimension == 2 ? (size_t)n * (size_t)n : (size_t)n;
+    for (size_t k = 0; k < total; ++k) {
+        const int ix = (int)(k % (size_t)n);
+        const int iy = (int)(k / (size_t)n);
+        out << node(ix, r.param_lo, r.param_hi, r.log_scale);
+        if (r.dimension == 2) out << "," << node(iy, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        out << "," << (k < r.flags.size() ? r.flags[k] : REGIME_UNBOUND);
+        for (int m : kSignalMetricDisplayOrder) {
+            if (!((r.metric_mask >> m) & 1)) continue;
+            const double v = k < r.values[m].size() ? r.values[m][k]
+                                                    : std::numeric_limits<double>::quiet_NaN();
+            out << ",";
+            if (std::isfinite(v)) out << v;
+            else                  out << "NaN";
+        }
+        out << "\n";
+    }
+    if (!out.good()) { err = "write failed: " + path; return false; }
+    return true;
+}

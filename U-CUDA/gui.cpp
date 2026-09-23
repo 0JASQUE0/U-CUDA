@@ -321,7 +321,8 @@ template <class Cfg>
 
 [[nodiscard]] static std::string auto_label_window(const ParametricPlotWindow& w) {
     const char* kn = w.kind == ParametricPlotWindow::Kind::Bifurcation ? "Bifurcation"
-                    : w.kind == ParametricPlotWindow::Kind::LLE ? "LLE" : "LS";
+                    : w.kind == ParametricPlotWindow::Kind::LLE ? "LLE"
+                    : w.kind == ParametricPlotWindow::Kind::LS  ? "LS" : "Metrics";
     const char* suffix = w.colored_1d ? "Colored 1D" : (w.mode_2d ? "2D" : "1D");
     return std::string(kn) + " " + suffix;
 }
@@ -346,6 +347,9 @@ static void refresh_auto_labels(AppModel& model) {
     for (auto& c : model.ls_session.curves)
         if (!c.label_is_manual)
             c.label = auto_label_sweep(c, model.ls_session.params, model.ls_session.vars);
+    for (auto& c : model.metrics_session.configs)
+        if (!c.label_is_manual)
+            c.label = auto_label_sweep(c, model.metrics_session.params, model.metrics_session.vars);
     for (auto& c : model.dft1d_session.configs)
         if (!c.label_is_manual)
             c.label = auto_label_dft1d(c, model.dft1d_session.params, model.dft1d_session.vars);
@@ -1243,6 +1247,18 @@ template <class T>
                 "Parametric 1D", "LS 1D");
     }
 
+    using M = SignalMetricsConfig;
+    auto& met = model.metrics_session.configs;
+    for (int i = 0; i < (int)met.size(); ++i) {
+        if (met[(size_t)i].mode_2d)
+            add(vr_target(met, i, &M::param_lo_text, &M::param_hi_text,
+                          &M::param_lo_2_text, &M::param_hi_2_text),
+                "Parametric 2D", "Metrics 2D");
+        else
+            add(vr_target(met, i, &M::param_lo_text, &M::param_hi_text),
+                "Parametric 1D", "Metrics 1D");
+    }
+
     // DFT — свой тип: по X свип параметра, а по Y частоты, и подставлять туда
     // диапазон параметра со второй оси 2D-карты нельзя.
     using D = Dft1DConfig;
@@ -1744,7 +1760,7 @@ static void draw_run_and_run_all(const char* popup_id,
 // Тип 1D-диаграммы параметрического семейства. Нейтрален к вкладке — им
 // пользуются и Parametric (ParametricPlotWindow::Kind), и Custom (L1Kind),
 // чтобы конфигурация Plot2DView шла из ОДНОГО места.
-enum class ParamPlotKind { Bifurcation, LLE, LS };
+enum class ParamPlotKind { Bifurcation, LLE, LS, Metrics };
 
 // Единая конфигурация Plot2DView под параметрический 1D-график. Вызывается и из
 // Parametric, и из Custom — иначе одинаковые диаграммы расходятся по отрисовке.
@@ -1779,6 +1795,16 @@ static void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
         view.show_zero_y       = true;    // λ=0 — граница хаос/порядок
         view.x_axis.name       = "parameter";
         view.y_axis.name       = "lambda";
+        break;
+    case ParamPlotKind::Metrics:
+        // Линия, как у LLE, но без нулевой линии: у амплитуд и частот ноль
+        // ничего не разделяет. Имя Y ставит draw_metrics_plot по выбранной метрике.
+        view.points_mode       = false;
+        view.line_thickness_px = 1.5f;
+        view.imdraw_lines      = true;
+        view.show_zero_y       = false;
+        view.x_axis.name       = "parameter";
+        view.y_axis.name       = "metric";
         break;
     }
 }
@@ -5550,6 +5576,7 @@ static ParamPlotKind to_param_plot_kind(ParametricPlotWindow::Kind kind) {
     switch (kind) {
     case ParametricPlotWindow::Kind::LLE: return ParamPlotKind::LLE;
     case ParametricPlotWindow::Kind::LS:  return ParamPlotKind::LS;
+    case ParametricPlotWindow::Kind::Metrics: return ParamPlotKind::Metrics;
     case ParametricPlotWindow::Kind::Bifurcation:
     default:                              return ParamPlotKind::Bifurcation;
     }
@@ -6751,6 +6778,420 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
     handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
 
+// Metrics: контролы (per-config в табе) + графики. UX зеркалит LLE: те же
+// свип, 2D-режим и блок интегрирования, плюс выбор сигнала и набора метрик.
+// Какую из посчитанных метрик рисовать, решает таб-бар окна графика
+// (ParametricPlotWindow::metric) — как вид в окне Basins.
+
+// Подсказка к чекбоксу метрики — определение ровно в том виде, как считает ядро.
+static const char* signal_metric_tooltip(int m) {
+    switch (m) {
+    case SIGM_MAX:   return "Maximum of the recorded signal over the window after the transient.";
+    case SIGM_MIN:   return "Minimum of the recorded signal.";
+    case SIGM_RANGE: return "Max - Min: peak-to-peak amplitude.";
+    case SIGM_MEAN:  return "Time average of the recorded signal.";
+    case SIGM_MEAN_FREQ:
+        return "Mean of 1/T_i over the inter-peak intervals T_i.\n"
+               "Peaks are found exactly as for bifurcation diagrams\n"
+               "(Settings -> Peaks). Fixed point: 0. No interval in the window: NaN.";
+    case SIGM_MEDIAN_FREQ:
+        return "1 / median(T_i) over the inter-peak intervals.\n"
+               "Needs every interval stored on the GPU, so it is the only\n"
+               "metric that costs memory (up to max_amount_of_peaks per point).";
+    case SIGM_VARIANCE:
+        return "Variance var(x) - Hjorth activity, the signal power.";
+    case SIGM_HJORTH_MOBILITY:
+        return "Hjorth mobility = sqrt(var(x') / var(x)), rad per time unit.\n"
+               "x' is the finite difference of the recorded samples,\n"
+               "so the sample step is h * pre_scaller.";
+    case SIGM_HJORTH_COMPLEXITY:
+        return "Hjorth complexity = mobility(x') / mobility(x).\n"
+               "Equals 1 for a pure sine, grows as the spectrum widens.";
+    case SIGM_VOLUME:
+        return "Volume of the box the attractor fits in:\n"
+               "prod over ALL state variables of (max x_i - min x_i).\n"
+               "3rd order: (x_max - x_min)(y_max - y_min)(z_max - z_min).\n"
+               "Does not depend on the Signal choice.";
+    case SIGM_INT_MAX:   return "Longest inter-peak interval T_i (time units).\nNo interval in the window: NaN.";
+    case SIGM_INT_MIN:   return "Shortest inter-peak interval T_i (time units).\nNo interval in the window: NaN.";
+    case SIGM_INT_RANGE: return "max(T_i) - min(T_i): 0 on a period-1 orbit, grows with period and chaos.";
+    case SIGM_INT_MEAN:  return "Mean inter-peak interval (time units).\n"
+                                "Peaks are the same as for the frequencies.";
+    default: return "";
+    }
+}
+
+static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession& s, int idx) {
+    SignalMetricsConfig& c = s.configs[idx];
+    model.broadcast_source_tab = BroadcastTab::Metrics;
+    model.broadcast_source_idx = idx;
+
+    ImGui::SetNextItemWidth(kComboW);
+    if (InputTextStr("Label", c.label))
+        c.label_is_manual = !c.label.empty();   // empty → back to auto
+    ImGui::Separator();
+
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
+    ImGui::Separator();
+
+    draw_sweep_target_combo("Sweep", s.params, s.vars,
+                            c.param_index, c.sweep_over_var, c.var_sweep_index,
+                            c.sweep_over_h,
+                            c.mode_2d ? &c.sweep_over_h_2 : nullptr,
+                            /*note_when_empty*/ true, kComboW,
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget, !model.is_map);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
+    ImGui::Checkbox("Log scale##met_log", &c.log_scale);
+    if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
+
+    draw_continuation_device_block(c, "met", c.mode_2d || c.sweep_over_var, c.mode_2d);
+
+    ImGui::Separator();
+    ImGui::Checkbox("2D mode (heatmap)##met_2d", &c.mode_2d);
+    if (c.mode_2d) {
+        ImGui::Indent();
+        if (!s.params.empty() || !s.vars.empty())
+            draw_sweep_target_combo("Sweep Y", s.params, s.vars,
+                                    c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
+                                    c.sweep_over_h_2, &c.sweep_over_h,
+                                    /*note_when_empty*/ false, kComboW,
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2, !model.is_map);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text); });
+        ImGui::Checkbox("Log scale##met_log2", &c.log_scale_2);
+        if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
+        ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
+        ImGui::Unindent();
+    }
+
+    ImGui::Separator();
+    draw_writable_var_combo(s.vars, c.writable_var, "Signal##met_wv");
+
+    // Набор метрик. Суммы под все, кроме медианы, почти бесплатны — галки в
+    // первую очередь решают, что попадёт в табы графика и в CSV.
+    if (ImGui::CollapsingHeader("Metrics##met_sel", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto box = [&c](int m) {
+            ImGui::CheckboxFlags(signal_metric_name(m), &c.metric_mask, 1 << m);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", signal_metric_tooltip(m));
+        };
+        ImGui::TextDisabled("Amplitude");
+        box(SIGM_MAX);   ImGui::SameLine(); box(SIGM_MIN);
+        box(SIGM_RANGE); ImGui::SameLine(); box(SIGM_MEAN);
+        ImGui::SameLine(); box(SIGM_VOLUME);
+        ImGui::TextDisabled("Inter-peak intervals");
+        box(SIGM_INT_MAX);   ImGui::SameLine(); box(SIGM_INT_MIN);
+        box(SIGM_INT_RANGE); ImGui::SameLine(); box(SIGM_INT_MEAN);
+        ImGui::TextDisabled("Frequency (by peaks)");
+        box(SIGM_MEAN_FREQ); ImGui::SameLine(); box(SIGM_MEDIAN_FREQ);
+        ImGui::TextDisabled("Hjorth parameters");
+        box(SIGM_VARIANCE); ImGui::SameLine(); box(SIGM_HJORTH_MOBILITY);
+        ImGui::SameLine(); box(SIGM_HJORTH_COMPLEXITY);
+        if (ImGui::SmallButton("All##met_all"))  c.metric_mask = kSignalMetricAllMask;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("None##met_none")) c.metric_mask = 0;
+        if (c.metric_mask == 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Select at least one metric.");
+    }
+
+    {
+        IntegrationFields f;
+        f.h           = &c.h_text;
+        f.symmetry_s  = &c.symmetry_s;
+        f.t_max       = &c.t_max_text;
+        f.transient   = &c.transient_text;
+        f.pre_scaller = &c.pre_scaller_text;
+        f.max_value   = &c.max_value_text;
+        draw_integration_block("Integration##met_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
+    }
+
+    draw_named_num_fields("Initial conditions##met_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##met_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
+    draw_csv_output_block("CSV output##met_csv", "Save to file", c.csv_save_enabled,
+                          "##met_csv_path", c.csv_output_path,
+                          "One table: x [, y], regime, then every selected metric.");
+
+    const bool ok = c.mode_2d ? c.last_run_2d_ok : c.last_run_ok;
+    const SignalMetricsResult& r = c.mode_2d ? c.result_2d : c.result;
+    if (ok) {
+        if (c.mode_2d)
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d grid", r.n_pts, r.n_pts);
+        else
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: n_pts=%d", r.n_pts);
+        draw_regime_summary(r.flags);
+    }
+    else if (!c.last_error.empty()) {
+        draw_error_box("##met_err", c.last_error);
+    }
+}
+
+static void draw_metrics_controls(AppModel& model, SystemLibrary& /*lib*/) {
+    SignalMetricsAnalysisSession& s = model.metrics_session;
+    const TabBarResult tabs = draw_config_tab_bar(
+        "##met_tabs", "met_tab_", (int)s.configs.size(),
+        s.in_flight, s.running_config_index,
+        [&s](int i) { return s.configs[i].label; },
+        [&model, &s](int i) { draw_metrics_config_controls(model, s, i); },
+        [&s]() { s.add_config(); });
+    if (tabs.active    >= 0) s.active_config_index = tabs.active;
+    if (tabs.to_remove >= 0) model.remove_metrics_config(tabs.to_remove);
+}
+
+// Таб-бар выбора метрики над графиком. Табы — метрики, посчитанные хотя бы у
+// одного члена окна (до первого прогона — отмеченные в конфигах). Выбор живёт
+// в win.metric и сохраняется вместе с окнами; ImGui помнит выбранный таб сам,
+// поэтому при расхождении (окно только что загружено, выбранной метрики больше
+// нет) таб выставляется явно через SetSelected.
+static void draw_metric_tab_bar(AppModel& model, ParametricPlotWindow& win, int avail_mask) {
+    static std::map<int, int> shown;   // win.id -> метрика, которую таб-бар показывал
+    if (avail_mask == 0) avail_mask = kSignalMetricAllMask;
+    bool force = false;
+    if (win.metric < 0 || win.metric >= SIGM_COUNT || !((avail_mask >> win.metric) & 1)) {
+        for (int m : kSignalMetricDisplayOrder)
+            if ((avail_mask >> m) & 1) { win.metric = m; break; }
+        model.parametric_plot_windows_dirty = true;
+        force = true;
+    }
+    auto it = shown.find(win.id);
+    if (it == shown.end() || it->second != win.metric) force = true;
+
+    if (ImGui::BeginTabBar("##metric_tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int m : kSignalMetricDisplayOrder) {
+            if (!((avail_mask >> m) & 1)) continue;
+            const ImGuiTabItemFlags fl = (force && m == win.metric) ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem(signal_metric_name(m), nullptr, fl)) {
+                if (!force && win.metric != m) {
+                    win.metric = m;
+                    model.parametric_plot_windows_dirty = true;
+                }
+                ImGui::EndTabItem();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", signal_metric_tooltip(m));
+        }
+        ImGui::EndTabBar();
+    }
+    shown[win.id] = win.metric;
+}
+
+static void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
+                              ParametricPlotWindow& win,
+                              PlotRenderer& renderer, Plot2DView& view,
+                              std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
+    SignalMetricsAnalysisSession& s = model.metrics_session;
+
+    if (win.members.empty()) {
+        ImGui::TextDisabled("No configs assigned to this window.");
+        return;
+    }
+
+    // Какие метрики есть у членов окна: у посчитанных — маска прогона, у ещё не
+    // посчитанных — маска конфига (чтобы табы были видны до первого Run).
+    int avail = 0;
+    for (int idx : win.members) {
+        if (idx < 0 || idx >= (int)s.configs.size()) continue;
+        const SignalMetricsConfig& c = s.configs[idx];
+        const bool ok = win.mode_2d ? c.last_run_2d_ok : c.last_run_ok;
+        avail |= ok ? (win.mode_2d ? c.result_2d.metric_mask : c.result.metric_mask) : c.metric_mask;
+    }
+    draw_metric_tab_bar(model, win, avail);
+    const int m = win.metric;
+
+    if (win.mode_2d) {
+        for (size_t mi = 0; mi < win.members.size(); ++mi) {
+            const int idx = win.members[mi];
+            if (idx < 0 || idx >= (int)s.configs.size()) continue;
+            SignalMetricsConfig& cact = s.configs[idx];
+            if (mi > 0) ImGui::Separator();
+            ImGui::PushID(idx);
+
+            HeatmapView& heatmap = get_or_create_heatmap(heatmap_map, idx, cact.colormap_idx,
+                                                          model.heatmap_colormap);
+            {
+                HeatmapToolbarOpts topts;
+                topts.persist_colormap = [&](int cm) {
+                    cact.colormap_idx = cm;
+                    if (!model.loaded_name.empty())
+                        lib.save_session(model.loaded_name, "_last_metrics",
+                                         session_to_json_metrics(model.metrics_session));
+                };
+                draw_heatmap_toolbar(heatmap, topts);
+            }
+
+            const SignalMetricsResult& r = cact.result_2d;
+            if (!cact.last_run_2d_ok || r.values[m].empty()) {
+                ImGui::TextDisabled(cact.last_run_2d_ok ? "This metric was not computed in the last run."
+                                                        : "No 2D data yet. Press Run.");
+                ImGui::PopID();
+                continue;
+            }
+
+            heatmap.x_axis.name = auto_axis_name(s.params, s.vars, cact.param_index,
+                                                 cact.sweep_over_var, cact.var_sweep_index,
+                                                 cact.sweep_over_h);
+            heatmap.y_axis.name = auto_axis_name(s.params, s.vars, cact.param_index_2,
+                                                 cact.sweep_over_var_2, cact.var_sweep_index_2,
+                                                 cact.sweep_over_h_2);
+            heatmap.x_axis.log_scale = r.log_scale;
+            heatmap.y_axis.log_scale = r.log_scale_2;
+
+            bool fit = cact.fit_request_2d;
+            if (fit) cact.fit_request_2d = false;
+
+            const bool busy = s.in_flight && s.is_2d_run && idx == s.running_config_index;
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, idx,
+                &SignalMetricsConfig::param_lo_text,   &SignalMetricsConfig::param_hi_text,
+                &SignalMetricsConfig::param_lo_2_text, &SignalMetricsConfig::param_hi_2_text) };
+            heatmap.popup_extras = [&cact, &cb, busy, &vrt, &model, &heatmap]() {
+                draw_export_menu_item(busy, cb, [&cact](const std::string& p) {
+                    std::string e;
+                    signal_metrics_write_csv(cact.result_2d, p, e);
+                });
+                draw_view_range_menu(vrt, heatmap.x_axis, heatmap.y_axis, heatmap.swap_axes, &model);
+            };
+
+            // Поколение данных несёт и номер метрики: смена таба — это другие
+            // значения в той же ячейке, и текстура обязана перестроиться.
+            const int gen = cact.data_generation_2d * SIGM_COUNT + m;
+            ImVec2 avail_sz = ImGui::GetContentRegionAvail();
+            ImVec2 origin   = ImGui::GetCursorScreenPos();
+            heatmap.render(renderer, origin, avail_sz,
+                           /*owner_id*/ 0x516E0000u + (unsigned)idx, gen,
+                           r.n_pts, r.n_pts, r.values[m].data(),
+                           r.param_lo,   r.param_hi,
+                           r.param_lo_2, r.param_hi_2,
+                           r.min_val[m], r.max_val[m],
+                           fit);
+            handle_view_range_keys(vrt, heatmap.x_axis, heatmap.y_axis, plot_window_active(),
+                                   heatmap.swap_axes, &model);
+            ImGui::PopID();
+        }
+        return;
+    }
+
+    bool any_data = false;
+    for (int idx : win.members) {
+        if (idx < 0 || idx >= (int)s.configs.size()) continue;
+        const auto& c = s.configs[idx];
+        if (c.last_run_ok && !c.result.values[m].empty()) { any_data = true; break; }
+    }
+    if (!any_data) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars,
+        [](const SignalMetricsConfig& c, double& lo, double& hi) {
+            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
+                                    c.param_lo_text, c.param_hi_text, lo, hi);
+        });
+    view.y_axis.name = signal_metric_axis_label(m);
+
+    auto& bufs = window_point_bufs(win.id, win.members.size());
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
+
+    std::vector<PlotSeriesInput> series_in;
+    std::vector<bool> init_vis, glob_vis;
+    series_in.reserve(win.members.size());
+    init_vis.reserve(win.members.size());
+    glob_vis.reserve(win.members.size());
+
+    bool any_fit = false;
+    int  data_gen = m;
+
+    for (size_t mi = 0; mi < win.members.size(); ++mi) {
+        const int idx = win.members[mi];
+        if (idx < 0 || idx >= (int)s.configs.size()) continue;
+        SignalMetricsConfig& c = s.configs[idx];
+        auto& buf = bufs[mi];
+        buf.clear();
+        int total_pts = 0;
+
+        const std::vector<double>& ys = c.result.values[m];
+        if (c.last_run_ok && !ys.empty()) {
+            const double lo = c.result.param_lo;
+            const double hi = c.result.param_hi;
+            const int npts  = c.result.n_pts;
+            // Continuation: точка k лежит в узле цепочки (при backward — от hi).
+            const bool rev  = c.result.continuation_reverse;
+            const bool cont = c.result.continuation;
+            if (view.snap_x_node_count == 0)
+                set_snap_nodes(view, win.id, npts, lo, hi, c.result.log_scale, rev, cont);
+            for (int k = 0; k < npts && k < (int)ys.size(); ++k) {
+                const double y = ys[k];
+                if (!std::isfinite(y)) continue;
+                buf.push_back(sweep_value_at(k, npts, lo, hi, c.result.log_scale, rev, cont));
+                buf.push_back(y);
+                ++total_pts;
+            }
+        }
+
+        PlotSeriesInput si;
+        si.points   = buf.empty() ? nullptr : buf.data();
+        si.n_points = total_pts;
+        si.color    = ic_base_color((int)mi);
+        si.label    = c.label;
+        series_in.push_back(si);
+        init_vis.push_back(true);
+        glob_vis.push_back(true);
+
+        data_gen = data_gen * 31 + c.data_generation;
+        if (c.fit_request) { any_fit = true; c.fit_request = false; }
+    }
+
+    // Смена метрики — другие единицы по Y: без автоподгонки кривая уехала бы
+    // за пределы старого вида.
+    {
+        static std::map<int, int> last_metric;
+        auto it = last_metric.find(win.id);
+        if (it == last_metric.end() || it->second != m) any_fit = true;
+        last_metric[win.id] = m;
+    }
+
+    std::vector<ViewRangeTarget> vrt;
+    for (int idx : win.members)
+        if (idx >= 0 && idx < (int)s.configs.size())
+            vrt.push_back(vr_target(s.configs, idx,
+                &SignalMetricsConfig::param_lo_text, &SignalMetricsConfig::param_hi_text));
+
+    view.popup_extras = [&s, &cb, &vrt, &model, &view]() {
+        draw_export_submenu("met", (int)s.configs.size(),
+            [&s](int i) { return s.configs[i].label; },
+            [&s](int i) { return s.configs[i].last_run_ok; },
+            [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_config_index; },
+            [&s](int i, const std::string& p) {
+                std::string e;
+                signal_metrics_write_csv(s.configs[i].result, p, e);
+            },
+            cb);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
+    };
+
+    apply_snap_x_from_first_member(view, win.members, s.configs);
+
+    ImVec2 avail_sz = ImGui::GetContentRegionAvail();
+    ImVec2 origin   = ImGui::GetCursorScreenPos();
+    view.render(renderer, origin, avail_sz, /*owner_id*/ 0x516E1D, data_gen,
+                series_in, init_vis, glob_vis, any_fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
+}
+
 // Parametric plot windows — shared setup-row helper. The row (Label | Type | Members... | X)
 // is rendered both in the Plot windows manager on the settings panel and at the top of each
 // per-window Begin(), so users can retype the chart without going back to the panel; the
@@ -6768,8 +7209,12 @@ parametric_matching_items(AppModel& model, ParametricPlotWindow::Kind kind, bool
         auto& cs = model.lle_session.curves;
         for (int i = 0; i < (int)cs.size(); ++i)
             if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
-    } else {
+    } else if (kind == ParametricPlotWindow::Kind::LS) {
         auto& cs = model.ls_session.curves;
+        for (int i = 0; i < (int)cs.size(); ++i)
+            if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
+    } else {
+        auto& cs = model.metrics_session.configs;
         for (int i = 0; i < (int)cs.size(); ++i)
             if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
     }
@@ -6779,18 +7224,21 @@ parametric_matching_items(AppModel& model, ParametricPlotWindow::Kind kind, bool
 // Colored 1D is not a distinct combo entry — it's a toggle inside the
 // plot body (see draw_bifurcation_plot). The Type combo only splits 1D/2D.
 static const char* kParametricTypeNames[] = {
-    "Bifurcation 1D", "Bifurcation 2D", "LLE 1D", "LLE 2D", "LS 1D", "LS 2D"
+    "Bifurcation 1D", "Bifurcation 2D", "LLE 1D", "LLE 2D", "LS 1D", "LS 2D",
+    "Metrics 1D", "Metrics 2D"
 };
 
 static int parametric_type_index_of(ParametricPlotWindow::Kind kind, bool mode_2d) {
     int base = kind == ParametricPlotWindow::Kind::Bifurcation ? 0
-             : kind == ParametricPlotWindow::Kind::LLE ? 2 : 4;
+             : kind == ParametricPlotWindow::Kind::LLE ? 2
+             : kind == ParametricPlotWindow::Kind::LS  ? 4 : 6;
     return base + (mode_2d ? 1 : 0);
 }
 
 static void parametric_type_from_index(int t, ParametricPlotWindow::Kind& kind, bool& mode_2d) {
     kind    = (t < 2) ? ParametricPlotWindow::Kind::Bifurcation
-            : (t < 4) ? ParametricPlotWindow::Kind::LLE : ParametricPlotWindow::Kind::LS;
+            : (t < 4) ? ParametricPlotWindow::Kind::LLE
+            : (t < 6) ? ParametricPlotWindow::Kind::LS : ParametricPlotWindow::Kind::Metrics;
     mode_2d = (t % 2) == 1;
 }
 
@@ -6916,6 +7364,9 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
                 break;
             case ParametricPlotWindow::Kind::LS:
                 draw_ls_plot(model, lib, cb, win, *renderer, *view, hm_map);
+                break;
+            case ParametricPlotWindow::Kind::Metrics:
+                draw_metrics_plot(model, lib, cb, win, *renderer, *view, hm_map);
                 break;
             }
             ImGui::PopID();
@@ -11655,7 +12106,8 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     // wider union across all 7 sessions.
     bool any_in_flight = model.bifurcation_session.in_flight
                       || model.lle_session.in_flight
-                      || model.ls_session.in_flight;
+                      || model.ls_session.in_flight
+                      || model.metrics_session.in_flight;
 
     // Run (active sub-tab, active config) + batch Run all. Кнопка Run единая для Bif/LLE/LS,
     // диспатчится по parametric_active_analysis (0=Bif, 1=LLE, 2=LS) к соответствующему
@@ -11675,6 +12127,9 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         } else if (kind == 2) {
             active_idx = model.ls_session.active_curve_index;
             no_active  = model.ls_session.curves.empty();
+        } else if (kind == 3) {
+            active_idx = model.metrics_session.active_config_index;
+            no_active  = model.metrics_session.configs.empty();
         }
 
         std::vector<RunAllGroup> groups;
@@ -11696,6 +12151,12 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
             [&model](int i) {
                 model.parametric_queue.push_back({ParametricQueueItem::Kind::LS, i});
             } });
+        groups.push_back(RunAllGroup{
+            "Metrics", "pmet_", (int)model.metrics_session.configs.size(),
+            [&model](int i) { return model.metrics_session.configs[i].label; },
+            [&model](int i) {
+                model.parametric_queue.push_back({ParametricQueueItem::Kind::Metrics, i});
+            } });
 
         // Run all блокируется ТОЛЬКО на время расчёта: списков три, и пустой
         // активный не повод запрещать запуск остальных (в отличие от вкладок
@@ -11709,6 +12170,7 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
                                  if      (kind == 0) model.bifurcation_session.run_async(*model.parametric_engine, active_idx);
                                  else if (kind == 1) model.lle_session.run_async(*model.parametric_engine, active_idx);
                                  else if (kind == 2) model.ls_session.run_async(*model.parametric_engine, active_idx);
+                                 else if (kind == 3) model.metrics_session.run_async(*model.parametric_engine, active_idx);
                              },
                              {}, groups,
                              [&model]() { model.start_next_in_parametric_queue(); },
@@ -11730,6 +12192,11 @@ static void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
         if (ImGui::BeginTabItem("LS")) {
             model.parametric_active_analysis = 2;
             draw_ls_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Metrics")) {
+            model.parametric_active_analysis = 3;
+            draw_metrics_controls(model, lib);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -11831,6 +12298,8 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jl, model.lle_session, session_from_json_lle, "_last_lle");
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
             apply_session_json(model, js, model.ls_session, session_from_json_ls, "_last_ls");
+            std::string jm = lib.load_session(model.loaded_name, "_last_metrics");
+            apply_session_json(model, jm, model.metrics_session, session_from_json_metrics, "_last_metrics");
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
             break;
@@ -13941,7 +14410,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
 // почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
 // запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
 // три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
-enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order };
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics };
 
 struct BusyInfo {
     BusyKind    kind = BusyKind::None;
@@ -14118,6 +14587,40 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_ls",
                              session_to_json_ls(model.ls_session));
+    }
+    {
+        // Индекс запоминаем ДО poll: он сбрасывает running_config_index.
+        const int met_idx = model.metrics_session.running_config_index;
+        if (model.metrics_session.poll()) {
+            if (!model.loaded_name.empty())
+                lib.save_session(model.loaded_name, "_last_metrics",
+                                 session_to_json_metrics(model.metrics_session));
+            // Вкладка новая: у сохранённых раскладок окон под неё окна нет, и
+            // посчитанный результат иначе некуда было бы смотреть. Окно заводится,
+            // только если конфиг не показан ни в одном окне своей размерности.
+            auto& cfgs = model.metrics_session.configs;
+            if (met_idx >= 0 && met_idx < (int)cfgs.size() &&
+                (cfgs[met_idx].mode_2d ? cfgs[met_idx].last_run_2d_ok : cfgs[met_idx].last_run_ok)) {
+                const bool m2d = cfgs[met_idx].mode_2d;
+                bool shown = false;
+                for (const auto& w : model.parametric_plot_windows)
+                    if (w.kind == ParametricPlotWindow::Kind::Metrics && w.mode_2d == m2d &&
+                        std::find(w.members.begin(), w.members.end(), met_idx) != w.members.end())
+                        shown = true;
+                if (!shown) {
+                    ParametricPlotWindow* target = nullptr;
+                    if (!m2d)   // 1D-окно оверлеит кривые — дописываемся в имеющееся
+                        for (auto& w : model.parametric_plot_windows)
+                            if (w.kind == ParametricPlotWindow::Kind::Metrics && !w.mode_2d) { target = &w; break; }
+                    if (target) {
+                        target->members.push_back(met_idx);
+                        model.parametric_plot_windows_dirty = true;
+                    } else {
+                        model.add_parametric_plot_window(ParametricPlotWindow::Kind::Metrics, m2d, { met_idx });
+                    }
+                }
+            }
+        }
     }
     // Plot windows list is UI-only (not tied to any session's poll()) — save
     // whenever add/remove/membership-edit touched it this frame, rather than
@@ -14330,6 +14833,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (lsp.in_flight)
         busy = busy_from(lsp, BusyKind::LS,
                          running_label(lsp.curves, lsp.running_curve_index, "LS"));
+    else if (model.metrics_session.in_flight)
+        busy = busy_from(model.metrics_session, BusyKind::Metrics,
+                         running_label(model.metrics_session.configs,
+                                       model.metrics_session.running_config_index, "metrics"));
     else if (dft.in_flight)
         busy = busy_from(dft, BusyKind::Dft1D,
                          running_label(dft.configs, dft.running_config_index, "dft1d"));
@@ -14387,7 +14894,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
         // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[10] = {
+        DoneCand candidates[11] = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -14400,6 +14907,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               &model.ls_session.last_run_label,
               model.ls_session.last_run_succeeded,
               model.ls_session.last_run_seconds },
+            { BusyKind::Metrics, model.metrics_session.last_run_completed_at,
+              &model.metrics_session.last_run_label,
+              model.metrics_session.last_run_succeeded,
+              model.metrics_session.last_run_seconds },
             { BusyKind::Dft1D,  model.dft1d_session.last_run_completed_at,
               &model.dft1d_session.last_run_label,
               model.dft1d_session.last_run_succeeded,
@@ -14524,6 +15035,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Bif:      model.bifurcation_session.request_cancel(); break;
                     case BusyKind::LLE:      model.lle_session.request_cancel();         break;
                     case BusyKind::LS:       model.ls_session.request_cancel();          break;
+                    case BusyKind::Metrics:  model.metrics_session.request_cancel();     break;
                     case BusyKind::Dft1D:    model.dft1d_session.request_cancel();       break;
                     case BusyKind::Basins:   model.basins_session.request_cancel();      break;
                     case BusyKind::FastSync: model.fastsync_session.request_cancel();    break;
@@ -14553,6 +15065,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
            || model.bifurcation_session.in_flight
            || model.lle_session.in_flight
            || model.ls_session.in_flight
+           || model.metrics_session.in_flight
            || model.dft1d_session.in_flight
            || model.basins_session.in_flight
            || model.fastsync_session.in_flight
@@ -14656,6 +15169,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jl, model.lle_session, session_from_json_lle, "_last_lle");
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
             apply_session_json(model, js, model.ls_session, session_from_json_ls, "_last_ls");
+            std::string jm = lib.load_session(model.loaded_name, "_last_metrics");
+            apply_session_json(model, jm, model.metrics_session, session_from_json_metrics, "_last_metrics");
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
         }

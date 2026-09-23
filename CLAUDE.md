@@ -135,6 +135,10 @@ D:\U-CUDA\
 - `kernels/ls1d.template.cu` / `ls2d.template.cu`
 - `kernels/basins.template.cu`
 - `kernels/fastsync_attr.template.cu` / `fastsync_grid.template.cu`
+- `kernels/signal_metrics.template.cu` — Parametric → Metrics: max/min/mean,
+  частоты по пикам (тот же `PeakStream`, что у БД) и параметры Хьорта,
+  потоково, без хранения траектории. Номера строк выхода (`SIGM_*`) обязаны
+  совпадать с `SignalMetric` в `parametric_engine.h`
 - `kernels/network.template.cu` — сеть связанных осцилляторов: блок на сеть,
   поток на узел, состояние в shared. Два плейсхолдера вместо одного:
   `{{KRS_BODY}}` (шаг узла) и `{{COUPLING_BODY}}` (case-ветки switch по
