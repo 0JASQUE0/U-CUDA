@@ -536,6 +536,7 @@ int main() {
             model.bifurcation_session.in_flight ||
             model.lle_session.in_flight ||
             model.ls_session.in_flight ||
+            model.metrics_session.in_flight ||
             model.basins_session.in_flight ||
             model.dft1d_session.in_flight ||
             model.fastsync_session.in_flight ||

@@ -1353,6 +1353,136 @@ struct NetworkResult {
     std::vector<double> vmin, vmax;
 };
 
+// Signal metrics — числовые характеристики записанного сигнала writable_var на
+// каждой точке свипа (1D-отрезок или 2D-сетка), вкладка Parametric -> Metrics.
+// Ядро calculateDiscreteModelMetricsCUDA (kernels/signal_metrics.template.cu)
+// интегрирует и считает всё на лету, траекторию не хранит.
+//
+// Номер метрики = строка выходного буфера ядра: порядок обязан совпадать с
+// SIGM_* в signal_metrics.template.cu.
+enum SignalMetric : int {
+    SIGM_MAX = 0,            // максимум сигнала на окне записи
+    SIGM_MIN,                // минимум
+    SIGM_RANGE,              // max - min
+    SIGM_MEAN,               // среднее
+    SIGM_MEAN_FREQ,          // средняя частота: mean(1/T_i) по межпиковым интервалам
+    SIGM_MEDIAN_FREQ,        // медианная частота: 1/median(T_i)
+    SIGM_VARIANCE,         // var(y) = Hjorth activity
+    SIGM_HJORTH_MOBILITY,    // sqrt(var(y')/var(y)), рад/время
+    SIGM_HJORTH_COMPLEXITY,  // mobility(y')/mobility(y)
+    // Межпиковые интервалы T_i (те же, что у частот). Номера — в конец, чтобы
+    // не сдвинуть сохранённые win.metric / metric_mask.
+    SIGM_INT_MAX,            // max(T_i)
+    SIGM_INT_MIN,            // min(T_i)
+    SIGM_INT_RANGE,          // max(T_i) - min(T_i)
+    SIGM_INT_MEAN,           // mean(T_i)
+    SIGM_COUNT
+};
+// Порядок показа (табы, CSV): номера метрик — это раскладка буфера ядра, а не
+// порядок, в котором их удобно читать.
+constexpr int kSignalMetricDisplayOrder[SIGM_COUNT] = {
+    SIGM_MAX, SIGM_MIN, SIGM_RANGE, SIGM_MEAN,
+    SIGM_INT_MAX, SIGM_INT_MIN, SIGM_INT_RANGE, SIGM_INT_MEAN,
+    SIGM_MEAN_FREQ, SIGM_MEDIAN_FREQ,
+    SIGM_VARIANCE, SIGM_HJORTH_MOBILITY, SIGM_HJORTH_COMPLEXITY,
+};
+constexpr int kSignalMetricAllMask = (1 << SIGM_COUNT) - 1;
+
+// Короткое имя для таба/легенды и подпись оси (с единицами). Для отображений,
+// где время — это номер итерации (дискретные отображения), единицы те же по смыслу.
+const char* signal_metric_name(int m);
+const char* signal_metric_axis_label(int m);
+
+struct SignalMetricsRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;  // длина == amountOfX
+    std::vector<double> base_values;         // все параметры системы (с a[0])
+
+    // 1 — отрезок по оси X (n_pts точек), 2 — квадратная сетка n_pts × n_pts.
+    int dimension = 1;
+
+    // Ось X — см. Bifurcation1DRequest.
+    int  param_index     = 0;
+    bool sweep_over_var  = false;
+    int  var_sweep_index = 0;
+    bool sweep_over_h    = false;
+    bool log_scale       = false;
+    double param_lo = 0.0;
+    double param_hi = 1.0;
+    // Ось Y (только dimension == 2) — см. Bifurcation2DRequest.
+    int  param_index_2     = 0;
+    bool sweep_over_var_2  = false;
+    int  var_sweep_index_2 = 0;
+    bool sweep_over_h_2    = false;
+    bool log_scale_2       = false;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    int n_pts = 500;
+
+    // Continuation (только 1D, свип по параметру или h): точка стартует с
+    // конечного x[] предыдущей; reverse — обход hi -> lo (гистерезис).
+    bool continuation = false;
+    bool continuation_reverse = false;
+    // Считать на CPU (только 1D). Для continuation это реальный выбор: GPU-ветка
+    // там однопоточная, и ядро процессора на цепочке быстрее.
+    bool use_cpu = false;
+
+    int writable_var = 0;                    // -1 = x0 + pi*x1 + e*x2, как у БД
+
+    double h = 0.01;
+    double transient_time = 0.0;
+    double t_max = 0.0;
+    int pre_scaller = 1;
+    double max_value = 1.0e6;
+
+    // Биты SignalMetric. Считаются всегда все (суммы почти бесплатны), маска
+    // решает, что отдать наружу и нужен ли буфер интервалов под медиану —
+    // единственную метрику, которой мало потоковых сумм.
+    int metric_mask = kSignalMetricAllMask;
+
+    // Если не пусто — <path>_config.csv + <path>_<metric>.csv на каждую метрику.
+    std::string csv_output_path;
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct SignalMetricsResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int dimension = 1;
+    int n_pts = 0;
+    // Снапшот диапазонов на момент Run — X/Y точек считаются по ним, а не по
+    // полям GUI (иначе график «прыгает» при правке до следующего Run).
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    bool   log_scale   = false;
+    bool   log_scale_2 = false;
+    int    metric_mask = 0;
+    // Снапшот continuation: точка k лежит в ucuda_node_value_cont(k, reverse).
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+
+    // values[m] — метрика m: n_pts значений (1D) или n_pts² (2D, [iy*n_pts + ix]).
+    // Пусто, если бит m не стоял в маске. NaN — «не измерить» (см. ядро).
+    std::vector<double> values[SIGM_COUNT];
+    // REGIME_*: 1 = oscillation, -1 = fixed point, 0 = unbound.
+    std::vector<int> flags;
+    // Автошкала по конечным значениям каждой метрики (обе 0, если таких нет).
+    double min_val[SIGM_COUNT] = {};
+    double max_val[SIGM_COUNT] = {};
+};
+
+// CSV одной таблицей: x [, y], regime, метрики из маски. Зовёт и движок
+// (csv_output_path), и ПКМ-экспорт с графика.
+bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
+
 class ParametricEngine {
 public:
     ParametricEngine();
@@ -1408,6 +1538,10 @@ public:
     // Network — интегрирование сети связанных осцилляторов.
     NetworkResult run_network(const NetworkRequest& req);
 
+    // Signal metrics — max/min/mean, частоты по пикам и параметры Хьорта
+    // на 1D-отрезке или 2D-сетке свипа.
+    SignalMetricsResult run_signal_metrics(const SignalMetricsRequest& req);
+
     // Компилирует модуль под этот запрос, ничего не считая: тот же ключ кэша, что возьмёт
     // соответствующий run_*, поэтому Run потом просто найдёт готовый модуль. Зовётся из фонового
     // потока, пока пользователь ещё настраивает параметры или пока считается предыдущая задача;
@@ -1420,6 +1554,7 @@ public:
     void prewarm(const LS1DRequest& req);
     void prewarm(const LS2DRequest& req);
     void prewarm(const BasinsRequest& req);
+    void prewarm(const SignalMetricsRequest& req);
 
 private:
     struct Impl;

@@ -31,7 +31,7 @@ enum class InputMode { Image, Latex, Plain };
 // Очередь живёт в AppModel и драйнится в draw_gui после polls. См. план
 // «Cross-analysis batch Run all».
 struct ParametricQueueItem {
-    enum class Kind { Bifurcation, LLE, LS };
+    enum class Kind { Bifurcation, LLE, LS, Metrics };
     Kind kind = Kind::Bifurcation;
     int  index = 0;
 };
@@ -43,9 +43,15 @@ struct ParametricQueueItem {
 // the only source of "what's shown here", since the same diagram/curve can belong to zero, one, or
 // several windows at once.
 struct ParametricPlotWindow {
-    enum class Kind { Bifurcation, LLE, LS };
+    // Номера сериализуются в _last_parametric_windows (int), новые — только в конец.
+    enum class Kind { Bifurcation, LLE, LS, Metrics };
     Kind        kind    = Kind::Bifurcation;
     bool        mode_2d = false;
+    // Kind::Metrics: какая метрика (SignalMetric) показана — выбирается таб-баром
+    // над графиком, как вид в окне Basins. Живёт на окне, а не на конфиге: в 1D
+    // окно оверлеит кривые нескольких конфигов, и показывать они обязаны одну
+    // и ту же величину — у разных метрик разные единицы по Y.
+    int         metric  = 0;
     // "Colored 1D diagram" (density-хитмапа) — 3-й display kind, только для
     // Bifurcation. Никогда не true одновременно с mode_2d (см.
     // draw_bifurcation_plot). Для LLE/LS остаётся false и не используется.
@@ -291,7 +297,7 @@ enum class BroadcastField {
 // заголовке, потому что адресом цели (вкладка + индекс конфига) оперирует и UI:
 // в меню можно выбрать, в какие именно конфиги применять.
 enum class BroadcastTab {
-    Phase, Bifurcation, LLE, LS, Dft1D, Basins, FastSync, Custom, Order
+    Phase, Bifurcation, LLE, LS, Dft1D, Basins, FastSync, Custom, Order, Metrics
 };
 
 // Одна цель рассылки — КОНКРЕТНЫЙ конфиг конкретной вкладки, а не вкладка
@@ -524,6 +530,8 @@ public:
     BifurcationAnalysisSession bifurcation_session;
     LLEAnalysisSession         lle_session;
     LyapunovSpectrumAnalysisSession ls_session;
+    // Metrics — max/min/mean, частоты по пикам и параметры Хьорта по свипу.
+    SignalMetricsAnalysisSession metrics_session;
 
     // 1D DFT — отдельный AppMode (между Parametric и Basins), своя очередь и
     // список конфигов (см. Dft1DAnalysisSession в analysis_session.h).
@@ -548,7 +556,7 @@ public:
     // parametric_/phase_/basins_session above.
     CustomSession              custom_session;
 
-    // 0=Bifurcation, 1=LLE, 2=LS. Активный sub-tab; используется для top-bar
+    // 0=Bifurcation, 1=LLE, 2=LS, 3=Metrics. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
     int parametric_active_analysis = 0;
 
@@ -670,7 +678,7 @@ public:
     // Прогрев ПЕРВОГО запуска: очередь помогает со второго элемента, а первый Run платит
     // компиляцию сам. Поэтому следим за настройками, влияющими на ключ модуля (схема, система,
     // вид свипа по осям), и прогреваем, пока пользователь ещё возится с диапазонами.
-    PrewarmWatch prewarm_watch_bif, prewarm_watch_lle, prewarm_watch_ls;
+    PrewarmWatch prewarm_watch_bif, prewarm_watch_lle, prewarm_watch_ls, prewarm_watch_metrics;
     void poll_parametric_prewarm();
 
     // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
@@ -776,6 +784,7 @@ public:
     void remove_bifurcation_diagram(int i);
     void remove_lle_curve(int i);
     void remove_ls_curve(int i);
+    void remove_metrics_config(int i);
     void remove_dft1d_config(int i);
     void remove_basins_config(int i);
     void remove_fastsync_config(int i);

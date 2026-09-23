@@ -40,6 +40,11 @@ bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);
 std::string session_to_json_ls(const LyapunovSpectrumAnalysisSession& s);
 bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSession& s);
 
+// Metrics-сессия (`_last_metrics.json`) — список конфигов с маской метрик.
+// Result не хранится.
+std::string session_to_json_metrics(const SignalMetricsAnalysisSession& s);
+bool session_from_json_metrics(const std::string& json, SignalMetricsAnalysisSession& s);
+
 // Dft1D-сессия — multi-config layout как у Basins/FastSync. Сохраняем
 // sweep/integration/IC/params/frequency-range/display/normalize/CSV.
 // Result и display_cache* в JSON не пишутся.
