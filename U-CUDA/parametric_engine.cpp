@@ -205,7 +205,8 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
                    int writableVar, numb maxValue,
-                   numb* data)
+                   numb* data,
+                   numb* boxMin = nullptr, numb* boxMax = nullptr)
 {
     for (size_t i = 0; i < iterations; ++i) {
         if (data != nullptr) {
@@ -216,6 +217,14 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                 else                     data[i] = x[0];
             } else {
                 data[i] = x[writableVar];
+            }
+            // Описанный параллелепипед по всем переменным (Metrics -> Volume),
+            // в тех же сэмплах, что пишутся в data.
+            if (boxMin != nullptr) {
+                for (int j = 0; j < amountOfX; ++j) {
+                    if (i == 0 || x[j] < boxMin[j]) boxMin[j] = x[j];
+                    if (i == 0 || x[j] > boxMax[j]) boxMax[j] = x[j];
+                }
             }
             for (int j = 0; j < preScaller; ++j) step(x, a, h);
         }
@@ -1528,6 +1537,7 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
     std::vector<numb> block((size_t)maxPointsInBlock);
     std::vector<numb> peaks((size_t)maxPointsInBlock);
     std::vector<numb> times((size_t)maxPointsInBlock);
+    std::vector<numb> boxMin((size_t)req.amountOfX), boxMax((size_t)req.amountOfX);
 
     for (int j = 0; j < nPts; ++j) {
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
@@ -1574,10 +1584,13 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
                                   (numb)req.max_value, nullptr);
         if (flag == REGIME_UNBOUND) { done(); continue; }
 
+        const bool wantBox = ((mask >> SIGM_VOLUME) & 1) != 0;
         flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                               (size_t)pointsInBlock, req.amountOfX,
                               req.pre_scaller, req.writable_var,
-                              (numb)req.max_value, block.data());
+                              (numb)req.max_value, block.data(),
+                              wantBox ? boxMin.data() : nullptr,
+                              wantBox ? boxMax.data() : nullptr);
         if (flag != REGIME_OSCILLATION && flag != REGIME_FIXED_POINT) { done(); continue; }
 
         CpuMetricsAccum acc;
@@ -1590,6 +1603,11 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
         r[SIGM_MIN]   = (double)acc.mn;
         r[SIGM_RANGE] = (double)(acc.mx - acc.mn);
         r[SIGM_MEAN]  = (double)(acc.shift + acc.s1 / (numb)acc.n);
+        if (wantBox) {
+            numb vol = (numb)1;
+            for (int jx = 0; jx < req.amountOfX; ++jx) vol *= boxMax[(size_t)jx] - boxMin[(size_t)jx];
+            r[SIGM_VOLUME] = (double)vol;
+        }
         const numb varY  = cpu_sm_variance(acc.s1,  acc.s2,   acc.n);
         const numb varD  = cpu_sm_variance(acc.sd,  acc.sd2,  acc.n > 1 ? acc.n - 1 : 0);
         const numb varDD = cpu_sm_variance(acc.sdd, acc.sdd2, acc.n > 2 ? acc.n - 2 : 0);
@@ -9435,6 +9453,7 @@ const char* signal_metric_name(int m) {
         case SIGM_INT_MIN:           return "Int. min";
         case SIGM_INT_RANGE:         return "Int. max - min";
         case SIGM_INT_MEAN:          return "Int. mean";
+        case SIGM_VOLUME:            return "Volume";
         default:                     return "?";
     }
 }
@@ -9454,6 +9473,7 @@ const char* signal_metric_axis_label(int m) {
         case SIGM_INT_MIN:           return "min(T), t";
         case SIGM_INT_RANGE:         return "max(T) - min(T), t";
         case SIGM_INT_MEAN:          return "mean(T), t";
+        case SIGM_VOLUME:            return "volume = prod(max x_i - min x_i)";
         default:                     return "";
     }
 }

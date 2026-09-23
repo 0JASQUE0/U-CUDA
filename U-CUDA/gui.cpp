@@ -6807,6 +6807,11 @@ static const char* signal_metric_tooltip(int m) {
     case SIGM_HJORTH_COMPLEXITY:
         return "Hjorth complexity = mobility(x') / mobility(x).\n"
                "Equals 1 for a pure sine, grows as the spectrum widens.";
+    case SIGM_VOLUME:
+        return "Volume of the box the attractor fits in:\n"
+               "prod over ALL state variables of (max x_i - min x_i).\n"
+               "3rd order: (x_max - x_min)(y_max - y_min)(z_max - z_min).\n"
+               "Does not depend on the Signal choice.";
     case SIGM_INT_MAX:   return "Longest inter-peak interval T_i (time units).\nNo interval in the window: NaN.";
     case SIGM_INT_MIN:   return "Shortest inter-peak interval T_i (time units).\nNo interval in the window: NaN.";
     case SIGM_INT_RANGE: return "max(T_i) - min(T_i): 0 on a period-1 orbit, grows with period and chaos.";
@@ -6887,6 +6892,7 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         ImGui::TextDisabled("Amplitude");
         box(SIGM_MAX);   ImGui::SameLine(); box(SIGM_MIN);
         box(SIGM_RANGE); ImGui::SameLine(); box(SIGM_MEAN);
+        ImGui::SameLine(); box(SIGM_VOLUME);
         ImGui::TextDisabled("Inter-peak intervals");
         box(SIGM_INT_MAX);   ImGui::SameLine(); box(SIGM_INT_MIN);
         box(SIGM_INT_RANGE); ImGui::SameLine(); box(SIGM_INT_MEAN);

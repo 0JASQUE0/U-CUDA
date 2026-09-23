@@ -72,7 +72,8 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 #define SIGM_INT_MIN           10
 #define SIGM_INT_RANGE         11
 #define SIGM_INT_MEAN          12
-#define SIGM_COUNT             13
+#define SIGM_VOLUME            13
+#define SIGM_COUNT             14
 
 // Потоковые суммы для экстремумов, среднего и параметров Хьорта.
 //
@@ -83,6 +84,10 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 // Дисперсия y считается от сдвига на первый сэмпл: сумма квадратов в лоб
 // теряет знаки, когда колебание мало по сравнению со средним (x ~ 1e3 ± 1).
 // У d1 и d2 среднее почти ноль само по себе, им сдвиг не нужен.
+//
+// box — описанный прямоугольный параллелепипед по ВСЕМ переменным состояния
+// (для Volume), в тех же записанных сэмплах. Ведётся, только если Volume
+// выбран: это 2*AMOUNTOFX сравнений на сэмпл.
 struct MetricsAccum
 {
 	size_t n;
@@ -91,14 +96,31 @@ struct MetricsAccum
 	numb   yPrev, dPrev;
 	numb   sd, sd2;
 	numb   sdd, sdd2;
+	bool   box;
+	numb   bMin[AMOUNTOFX], bMax[AMOUNTOFX];
 
-	__device__ __host__ void init()
+	__device__ __host__ void init(bool trackBox)
 	{
 		n = 0;
 		shift = s1 = s2 = (numb)0;
 		mn = mx = (numb)0;
 		yPrev = dPrev = (numb)0;
 		sd = sd2 = sdd = sdd2 = (numb)0;
+		box = trackBox;
+		for (int j = 0; j < AMOUNTOFX; ++j) bMin[j] = bMax[j] = (numb)0;
+	}
+
+	// Зовётся ДО push(): первый сэмпл узнаётся по n == 0.
+	__device__ __host__ void pushBox(const numb* x)
+	{
+		if (n == 0) {
+			for (int j = 0; j < AMOUNTOFX; ++j) { bMin[j] = x[j]; bMax[j] = x[j]; }
+			return;
+		}
+		for (int j = 0; j < AMOUNTOFX; ++j) {
+			if (x[j] < bMin[j]) bMin[j] = x[j];
+			if (x[j] > bMax[j]) bMax[j] = x[j];
+		}
 	}
 
 	__device__ __host__ void push(numb y)
@@ -183,6 +205,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 			sample = x[writableVar];
 		}
 
+		if (acc.box) acc.pushBox(x);
 		acc.push(sample);
 
 		if (peaks.emitAll) {
@@ -265,6 +288,11 @@ __device__ int smFinalize(int flag, const MetricsAccum& acc, const PeakStream& p
 	res[SIGM_MIN]   = acc.mn;
 	res[SIGM_RANGE] = acc.mx - acc.mn;
 	res[SIGM_MEAN]  = acc.shift + acc.s1 / (numb)acc.n;
+	if (acc.box) {
+		numb vol = (numb)1;
+		for (int j = 0; j < AMOUNTOFX; ++j) vol *= acc.bMax[j] - acc.bMin[j];
+		res[SIGM_VOLUME] = vol;
+	}
 
 	const numb varY  = smVariance(acc.s1,  acc.s2,   acc.n);
 	const numb varD  = smVariance(acc.sd,  acc.sd2,  acc.n > 1 ? acc.n - 1 : 0);
@@ -369,7 +397,7 @@ __global__ void calculateDiscreteModelMetricsCUDA(
 			peaks.init(nullptr, intervals, (size_t)idx * peakStride,
 				dt, iters_local, peakCapacity, false);
 			MetricsAccum acc;
-			acc.init();
+			acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
 			IntervalStats ist;
 			ist.init();
 
@@ -465,7 +493,7 @@ __global__ void signalMetricsContinuationKernel(
 				PeakStream peaks;
 				peaks.init(nullptr, intervals, 0, dt, (size_t)blockLen, peakCapacity, false);
 				MetricsAccum acc;
-				acc.init();
+				acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
 				IntervalStats ist;
 				ist.init();
 				flag = loopCalculateDiscreteModelMetrics_int(x, a, hLocal, (size_t)blockLen,

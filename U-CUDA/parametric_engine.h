@@ -1376,12 +1376,13 @@ enum SignalMetric : int {
     SIGM_INT_MIN,            // min(T_i)
     SIGM_INT_RANGE,          // max(T_i) - min(T_i)
     SIGM_INT_MEAN,           // mean(T_i)
+    SIGM_VOLUME,             // prod_i (max x_i - min x_i) по всем переменным состояния
     SIGM_COUNT
 };
 // Порядок показа (табы, CSV): номера метрик — это раскладка буфера ядра, а не
 // порядок, в котором их удобно читать.
 constexpr int kSignalMetricDisplayOrder[SIGM_COUNT] = {
-    SIGM_MAX, SIGM_MIN, SIGM_RANGE, SIGM_MEAN,
+    SIGM_MAX, SIGM_MIN, SIGM_RANGE, SIGM_MEAN, SIGM_VOLUME,
     SIGM_INT_MAX, SIGM_INT_MIN, SIGM_INT_RANGE, SIGM_INT_MEAN,
     SIGM_MEAN_FREQ, SIGM_MEDIAN_FREQ,
     SIGM_VARIANCE, SIGM_HJORTH_MOBILITY, SIGM_HJORTH_COMPLEXITY,
