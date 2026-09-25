@@ -1863,12 +1863,61 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
     return false;
 }
 
+// --- Имя обёртки: необязательная метка --------------------------------------
+
+namespace {
+
+    std::string wrap_trim(const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && std::isspace((unsigned char)s[a])) ++a;
+        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+
+    // Голова имени — то, что стоит до ПОСЛЕДНЕЙ '|', то есть до коэффициентов.
+    // Метка, если она есть, идёт первой: "s17o8|Short CD". Режем по ПЕРВОЙ
+    // черте, тогда как база берётся по последней, — старое имя без метки
+    // ("Short CD") головы с чертой не имеет и разбирается ровно как раньше.
+    bool wrap_split_head(const std::string& head, std::string* label,
+                         std::string* base, std::string* err) {
+        const size_t bar = head.find('|');
+        if (bar == std::string::npos) { label->clear(); *base = wrap_trim(head); return true; }
+        *label = wrap_trim(head.substr(0, bar));
+        *base  = wrap_trim(head.substr(bar + 1));
+        if (label->empty()) { if (err) *err = "empty scheme label"; return false; }
+        if (!wrapper_label_ok(*label)) {
+            if (err) *err = "scheme label must not contain '|', ',', '(' or ')'";
+            return false;
+        }
+        return true;
+    }
+
+} // namespace
+
+bool wrapper_label_ok(const std::string& label) {
+    if (label.empty()) return false;
+    if (wrap_trim(label) != label) return false;
+    for (char c : label)
+        if (c == '|' || c == ',' || c == '(' || c == ')') return false;
+    return true;
+}
+
+std::string wrapper_sanitize_label(const std::string& label) {
+    std::string out;
+    for (char c : label)
+        if (c != '|' && c != ',' && c != '(' && c != ')') out += c;
+    return wrap_trim(out);
+}
+
 // --- Экстраполяция Ричардсона ----------------------------------------------
 
 static const char* const kExtrPrefix = "Extr(";
 
-std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n) {
-    std::string s = kExtrPrefix + base + "|";
+std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
+                                    const std::string& label) {
+    std::string s = kExtrPrefix;
+    if (!label.empty()) s += label + "|";
+    s += base + "|";
     for (size_t k = 0; k < n.size(); ++k) {
         if (k) s += ",";
         s += std::to_string(n[k]);
@@ -1906,7 +1955,9 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
     if (bar == std::string::npos) return fail("missing '|' between base and substep list");
 
     ExtrapolationSpec spec;
-    spec.base = inner.substr(0, bar);
+    // Голова — "<база>" либо "<метка>|<база>": метку добавили позже, и имена
+    // без неё обязаны разбираться как прежде.
+    if (!wrap_split_head(inner.substr(0, bar), &spec.label, &spec.base, err)) return false;
     if (spec.base.empty()) return fail("empty base scheme name");
     // Вложенность запрещена: порядок обёртки над обёрткой считается не как
     // p + K - 1, и заодно это отрезает бесконечную рекурсию в резолвере.
@@ -2178,8 +2229,11 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
 static const char* const kCompPrefix = "Comp(";
 
 std::string make_composition_name(const std::string& base,
-                                  const std::vector<std::string>& gammas) {
-    std::string s = kCompPrefix + base + "|";
+                                  const std::vector<std::string>& gammas,
+                                  const std::string& label) {
+    std::string s = kCompPrefix;
+    if (!label.empty()) s += label + "|";
+    s += base + "|";
     for (size_t k = 0; k < gammas.size(); ++k) {
         if (k) s += ",";
         s += gammas[k];
@@ -2254,7 +2308,8 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
     if (bar == std::string::npos) return fail("missing '|' between base and coefficients");
 
     CompositionSpec spec;
-    spec.base = comp_trim(inner.substr(0, bar));
+    // Голова — "<база>" либо "<метка>|<база>", как у Extr.
+    if (!wrap_split_head(inner.substr(0, bar), &spec.label, &spec.base, err)) return false;
     if (spec.base.empty()) return fail("empty base scheme name");
     // Обёртка над обёрткой отрезает рекурсию в резолвере, как и у Extr.
     if (spec.base.compare(0, pref.size(), pref) == 0 ||
@@ -2524,8 +2579,15 @@ bool composition_gamma_values(const CompositionSpec& spec,
 }
 
 std::string wrapper_display_name(const std::string& name, int digits) {
+    // Метка пользователя ЗАМЕНЯЕТ описание целиком: её задавали ровно затем,
+    // чтобы в списке и в комбо стояло "S17o8", а не семнадцать коэффициентов.
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp))
+        return esp.label.empty() ? name : esp.label;
+
     CompositionSpec spec;
     if (!parse_composition_name(name, &spec)) return name;
+    if (!spec.label.empty()) return spec.label;
     if (digits < 1)  digits = 1;
     if (digits > 17) digits = 17;
 
@@ -2534,6 +2596,31 @@ std::string wrapper_display_name(const std::string& name, int digits) {
     for (const std::string& g : spec.gammas)
         shown.push_back(comp_round_literals(g, digits));
     return make_composition_name(spec.base, shown);
+}
+
+std::string wrapper_canonical_name(const std::string& name) {
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n);
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas);
+    return name;
+}
+
+std::string wrapper_relabel(const std::string& name, const std::string& label) {
+    const std::string lb = wrapper_sanitize_label(label);
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n, lb);
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas, lb);
+    return name;
+}
+
+std::string wrapper_label(const std::string& name) {
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return esp.label;
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return csp.label;
+    return {};
 }
 
 std::string wrap_composition(const std::string& base_body, const System& sys,

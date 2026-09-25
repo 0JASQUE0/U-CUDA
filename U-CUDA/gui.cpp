@@ -170,6 +170,18 @@ static bool InputTextStr(const char* label, std::string& str, float width = 0.0f
     return changed;
 }
 
+// То же с подсказкой в пустом поле. Нужна там, где пустое поле означает не
+// "ничего", а "значение по умолчанию": имя схемы-обёртки пустым берётся из
+// её же описания, и подсказка показывает, какое имя получится.
+static bool InputTextStrHint(const char* label, std::string& str, const char* hint,
+                             float width = 0.0f) {
+    std::vector<char>& buf = input_scratch(str, 1024);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    bool changed = ImGui::InputTextWithHint(label, hint, buf.data(), buf.size());
+    if (changed) str = buf.data();
+    return changed;
+}
+
 // Перехватываем символы ДО того, как ImGui положит их в буфер: замена ',' → '.'
 // идёт в момент ввода и не подменяет строку между кадрами. Иначе InputText на
 // каждом кадре видит внешнюю правку буфера, возвращает changed=true, и
@@ -2629,6 +2641,29 @@ static void begin_coeff_column(const char* id, int rows, int max_rows) {
                                        + ImGui::GetStyle().FramePadding.y * 2.0f), true);
 }
 
+// Поле имени схемы-обёртки, общее для обоих конструкторов. Пустое поле — это
+// не "без имени", а "имя по умолчанию", поэтому подсказкой в нём стоит ровно то
+// описание, которое иначе и встанет в список. Возвращает готовую метку: края
+// подрезаны, разделители самого имени выброшены.
+static std::string wrapper_name_field(const char* id, std::string& text,
+                                      const std::string& default_name) {
+    if (InputTextStrHint(id, text, default_name.c_str(), ImGui::GetFontSize() * 18.0f)) {
+        // Чистим ПРЯМО В ПОЛЕ, иначе '|' виден пользователю, а в имя не
+        // попадает. Пробелы по краям при этом не трогаем: их режет только
+        // сборка имени, а то "S17 " нельзя было бы набрать.
+        std::string keep;
+        for (char c : text)
+            if (c != '|' && c != ',' && c != '(' && c != ')') keep += c;
+        text = keep;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Name shown in the scheme combo, the wrapper list and the\n"
+                          "Order tab instead of the coefficients. Leave empty to keep\n"
+                          "the generated description. The name is COSMETIC: the step is\n"
+                          "rebuilt from the base and the coefficients either way.");
+    return wrapper_sanitize_label(text);
+}
+
 // Конструктор экстраполяционных обёрток. Собирает ИМЯ вида "Extr(RK4|1,2,4)" —
 // тела здесь нет и не хранится нигде: его пересобирает compute_krs_for_scheme
 // при каждом обращении, поэтому правка системы обёртку не протухает.
@@ -2748,9 +2783,15 @@ static void draw_extrapolation_builder(AppModel& model) {
         if (n[k] <= n[k - 1]) { problem = "substep counts must strictly increase"; break; }
     if (!base_known) problem = "base scheme is not resolvable";
 
-    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n);
+    const std::string deflt = make_extrapolation_name(model.extr_builder_base, n);
+    const std::string label = wrapper_name_field("scheme name##extr",
+                                                 model.extr_builder_label, deflt);
+    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n, label);
+    // Совпадение ищем по имени БЕЗ метки: две обёртки с одной базой и одними
+    // подшагами — это одна схема, как бы её ни подписали.
     bool duplicate = false;
-    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
+    for (const auto& nm : model.wrapper_schemes)
+        if (wrapper_canonical_name(nm) == deflt) duplicate = true;
 
     ImGui::Separator();
     if (!problem.empty()) {
@@ -2986,7 +3027,10 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     const int Kn = model.comp_builder_stages;
     std::vector<std::string> g;
     for (int k = 0; k < Kn; ++k) g.push_back(model.comp_builder_g[k]);
-    const std::string new_name = make_composition_name(model.comp_builder_base, g);
+    const std::string deflt = make_composition_name(model.comp_builder_base, g);
+    const std::string label = wrapper_name_field("scheme name##comp",
+                                                 model.comp_builder_label, deflt);
+    const std::string new_name = make_composition_name(model.comp_builder_base, g, label);
 
     CompositionSpec spec;
     std::string problem;
@@ -2994,8 +3038,10 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     else if (!base_known) problem = "base scheme is not resolvable";
     else problem.clear();
 
+    // Совпадение — по имени БЕЗ метки: подпись схему не меняет.
     bool duplicate = false;
-    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
+    for (const auto& nm : model.wrapper_schemes)
+        if (wrapper_canonical_name(nm) == deflt) duplicate = true;
 
     ImGui::Separator();
     if (!problem.empty()) {
@@ -3077,7 +3123,39 @@ static void draw_wrapper_list(AppModel& model) {
         if (shown != model.wrapper_schemes[i] && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", model.wrapper_schemes[i].c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("Delete")) to_delete = i;
+        if (model.wrapper_rename_index == i) {
+            // Имя записываем в схему по выходу из поля (Enter или клик мимо),
+            // а не на каждый символ: имя — это удостоверение схемы, и менять
+            // его на каждой набранной букве незачем.
+            const std::string deflt = wrapper_canonical_name(model.wrapper_schemes[i]);
+            // Фокус ставим ОДИН раз, на первом кадре после нажатия Rename:
+            // иначе поле перехватывало бы клавиатуру у всей вкладки.
+            if (model.wrapper_rename_focus) {
+                ImGui::SetKeyboardFocusHere();
+                model.wrapper_rename_focus = false;
+            }
+            InputTextStrHint("##rename", model.wrapper_rename_text, deflt.c_str(),
+                             ImGui::GetFontSize() * 18.0f);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                model.wrapper_schemes[i] =
+                    wrapper_relabel(model.wrapper_schemes[i], model.wrapper_rename_text);
+                model.wrapper_rename_index = -1;
+            }
+            else if (ImGui::IsItemDeactivated()) model.wrapper_rename_index = -1;
+        }
+        else {
+            if (ImGui::SmallButton("Rename")) {
+                model.wrapper_rename_index = i;
+                model.wrapper_rename_text  = wrapper_label(model.wrapper_schemes[i]);
+                model.wrapper_rename_focus = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Give the scheme a short name. Empty restores the\n"
+                                  "generated one. Sessions saved under the old name keep\n"
+                                  "computing the same thing - the name is cosmetic.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) to_delete = i;
+        }
         if (open) {
             draw_wrapper_coefficients(model.wrapper_schemes[i], model.custom_schemes,
                                       model.param_values, "coef");
@@ -3103,7 +3181,12 @@ static void draw_wrapper_list(AppModel& model) {
         ImGui::PopID();
     }
     ImGui::PopID();
-    if (to_delete >= 0) model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
+    if (to_delete >= 0) {
+        model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
+        // Индексы за удалённой строкой съехали — переименование бросаем, иначе
+        // введённое имя досталось бы соседней схеме.
+        model.wrapper_rename_index = -1;
+    }
 }
 
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {

@@ -408,6 +408,13 @@ public:
     // combinator cost no new plumbing. The body is not stored -- it is rebuilt
     // from the name, so editing the system never leaves a stale wrapper.
     std::vector<std::string> wrapper_schemes;
+    // Строка списка обёрток, которую сейчас переименовывают, и набираемое имя.
+    // Держать его в самом имени схемы по ходу набора нельзя: имя нормализуется
+    // при разборе, и пробел, набранный в "Suzuki 17", исчезал бы на следующем
+    // же кадре. -1 — никого не переименовывают.
+    int         wrapper_rename_index = -1;
+    std::string wrapper_rename_text;
+    bool        wrapper_rename_focus = false;   // поставить фокус в поле на след. кадре
 
     // Состояние конструктора обёрток в System tab. Живёт здесь, а не в
     // рисующей функции: ImGui перерисовывает панель каждый кадр, локальные
@@ -421,6 +428,9 @@ public:
     // extr_builder_stages элементов, и потолок стадий и потолок массива
     // обязаны быть одним и тем же числом.
     int         extr_builder_n[kExtrMaxStages] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    // Имя собираемой обёртки. Пустое — имени не давали, и в списке схема будет
+    // называться своим описанием, как до появления этого поля.
+    std::string extr_builder_label;
 
     // Composition builder. Coefficients are TEXT, not numbers: a stage may be
     // a parameter name or an expression over parameters ("g1", "1-2*g1"), and
@@ -430,6 +440,10 @@ public:
     std::string comp_builder_base = "CD";
     int         comp_builder_stages = 3;
     std::string comp_builder_g[kCompMaxStages] = { "g1", "1-2*g1", "g1" };
+    // Имя собираемой композиции; см. extr_builder_label. Для опубликованных
+    // методов оно и есть единственная читаемая подпись: семнадцать
+    // коэффициентов по восемнадцать цифр ни в комбо, ни в легенду не влезают.
+    std::string comp_builder_label;
     // Итог последней загрузки коэффициентов из файла: текст строки статуса под
     // кнопкой и её цвет. Живёт здесь, а не в рисующей функции: ImGui
     // перерисовывает панель каждый кадр, локальная переменная не доживёт.

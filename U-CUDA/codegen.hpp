@@ -171,10 +171,13 @@ constexpr int kExtrMaxSubsteps = 1024;
 struct ExtrapolationSpec {
     std::string      base;   // имя опорной схемы (built-in или кастомная КРС)
     std::vector<int> n;      // подшаги на стадию; строго возрастает
+    std::string      label;  // имя от пользователя; пусто = имени не давали
 };
 
-// Собирает имя обёртки. Обратная к parse_extrapolation_name.
-std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n);
+// Собирает имя обёртки. Обратная к parse_extrapolation_name. Непустая label
+// добавляет метку первым полем: "Extr(<метка>|<база>|n1,n2,...)".
+std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
+                                    const std::string& label = {});
 
 // Разбирает "Extr(RK4|1,2,4)". false, если имя не экстраполяционное ИЛИ
 // нарушены ограничения (число стадий, монотонность n, диапазон). err, если
@@ -241,11 +244,14 @@ constexpr int kCompMaxStages = 40;
 struct CompositionSpec {
     std::string              base;    // base scheme name (built-in or custom KRS)
     std::vector<std::string> gammas;  // step coefficient per stage
+    std::string              label;   // имя от пользователя; пусто = имени не давали
 };
 
-// Builds the wrapper name. Inverse of parse_composition_name.
+// Builds the wrapper name. Inverse of parse_composition_name. Непустая label
+// добавляет метку первым полем: "Comp(<метка>|<база>|g1,...)".
 std::string make_composition_name(const std::string& base,
-                                  const std::vector<std::string>& gammas);
+                                  const std::vector<std::string>& gammas,
+                                  const std::string& label = {});
 
 // Parses "Comp(CD|g1,1-2*g1,g1)". false when the name is not a composition OR
 // the limits are broken (stage count, empty or unparsable coefficient); err, if
@@ -299,13 +305,44 @@ std::string wrap_composition(const std::string& base_body, const System& sys,
                              const std::vector<std::string>& gammas,
                              int p, bool symmetric, const std::string& base_name);
 
-// Short form of a wrapper name, FOR DISPLAY ONLY: constant coefficients are
-// rounded to `digits` significant figures, symbolic ones are printed as typed.
+// --- Имя обёртки, данное пользователем --------------------------------------
+// Метка живёт ВНУТРИ имени ("Comp(S17o8|Short CD|0.127,...)"), а не рядом с
+// ним: имя обёртки — это её единственное удостоверение, оно уезжает в сессии,
+// в JSON библиотеки и в резолвер КРС, и отдельная таблица "имя -> подпись"
+// потребовала бы протащить себя в каждую из них. Метка при этом чисто
+// косметическая: резолвер читает только базу и коэффициенты, поэтому старое
+// имя без метки и новое с меткой дают ОДИН И ТОТ ЖЕ шаг.
+//
+// Плата за это — переименование меняет удостоверение: сессия, сохранённая со
+// старым именем, продолжит считать ровно то же самое, но в её комбо останется
+// старая подпись, пока схему не выберут заново.
+bool wrapper_label_ok(const std::string& label);
+
+// Готовит пользовательский ввод к тому, чтобы стать меткой: выбрасывает
+// символы, из которых собрано само имя ('|', ',', '(', ')'), и края-пробелы.
+std::string wrapper_sanitize_label(const std::string& label);
+
+// Метка имени ("" — её нет или имя не обёрточное).
+std::string wrapper_label(const std::string& name);
+
+// Имя БЕЗ метки. Им сравнивают схемы по существу: две обёртки с разными
+// подписями и одной и той же базой с коэффициентами — это одна схема.
+std::string wrapper_canonical_name(const std::string& name);
+
+// Имя с ДРУГОЙ меткой (пустая label метку снимает). Не обёрточное имя
+// возвращается как есть.
+std::string wrapper_relabel(const std::string& name, const std::string& label);
+
+// Short form of a wrapper name, FOR DISPLAY ONLY: a user label, when the name
+// carries one, stands in for the whole description -- that is what it is for.
+// Without a label, constant coefficients are rounded to `digits` significant
+// figures, and symbolic ones are printed as typed.
 // "Comp(CD|1.3512071919596578,-1.7024143839193155,1.3512071919596578)" becomes
 // "Comp(CD|1.3512,-1.7024,1.3512)", which is the difference between a readable
 // combo row and one that needs a scrollbar at five stages.
-// Anything that is not a composition (a built-in, a custom KRS, an "Extr(...)"
-// whose substeps are short integers anyway) comes back unchanged.
+// Anything that is neither labelled nor a composition (a built-in, a custom
+// KRS, an unlabelled "Extr(...)" whose substeps are short integers anyway)
+// comes back unchanged.
 // NEVER use the result as a key: the full name is the scheme's identity, and
 // two different methods can round to the same short form.
 std::string wrapper_display_name(const std::string& name, int digits = 5);
