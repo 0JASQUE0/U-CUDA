@@ -417,7 +417,10 @@ public:
     // Подшаги стадий; используются первые extr_builder_stages элементов.
     // Дефолт — гармоническая последовательность: при равном порядке она
     // дешевле удвоения (сумма n меньше).
-    int         extr_builder_n[6] = { 1, 2, 3, 4, 5, 6 };
+    // Размер массива — kExtrMaxStages: конструктор пишет в первые
+    // extr_builder_stages элементов, и потолок стадий и потолок массива
+    // обязаны быть одним и тем же числом.
+    int         extr_builder_n[kExtrMaxStages] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
 
     // Composition builder. Coefficients are TEXT, not numbers: a stage may be
     // a parameter name or an expression over parameters ("g1", "1-2*g1"), and
@@ -426,7 +429,12 @@ public:
     // base, written symbolically so the map works out of the box.
     std::string comp_builder_base = "CD";
     int         comp_builder_stages = 3;
-    std::string comp_builder_g[9] = { "g1", "1-2*g1", "g1", "", "", "", "", "", "" };
+    std::string comp_builder_g[kCompMaxStages] = { "g1", "1-2*g1", "g1" };
+    // Итог последней загрузки коэффициентов из файла: текст строки статуса под
+    // кнопкой и её цвет. Живёт здесь, а не в рисующей функции: ImGui
+    // перерисовывает панель каждый кадр, локальная переменная не доживёт.
+    std::string comp_load_status;
+    bool        comp_load_failed = false;
 
     // порядок индексации параметров a[1..]
     ParamOrder param_order = ParamOrder::AsInAlphabet;

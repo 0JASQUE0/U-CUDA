@@ -165,7 +165,7 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
 // из ОДНОГО И ТОГО ЖЕ состояния n_k подшагами h/n_k. Результаты складываются
 // с весами alpha_k, гасящими K-1 первых членов разложения ошибки.
 constexpr int kExtrMinStages   = 2;
-constexpr int kExtrMaxStages   = 6;
+constexpr int kExtrMaxStages   = 10;
 constexpr int kExtrMaxSubsteps = 1024;
 
 struct ExtrapolationSpec {
@@ -233,7 +233,10 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
 // (composition_sums); a symbolic one is known at run time only, and measuring
 // it is the Order tab's job.
 constexpr int kCompMinStages = 2;
-constexpr int kCompMaxStages = 9;
+// 40 стадий: столько нужно опубликованным композициям высокого порядка
+// (S17o8 — 17 стадий, порядок 10 и выше — 31 и 35). Потолок упирается
+// только в ширину таблицы коэффициентов в UI, генератор не ограничен.
+constexpr int kCompMaxStages = 40;
 
 struct CompositionSpec {
     std::string              base;    // base scheme name (built-in or custom KRS)
@@ -251,6 +254,25 @@ std::string make_composition_name(const std::string& base,
 // purpose, and rejecting that would rule out the p(g1, g2) map.
 bool parse_composition_name(const std::string& name, CompositionSpec* out,
                             std::string* err = nullptr);
+
+// Разбирает СПИСОК коэффициентов композиции из ТЕКСТА ФАЙЛА — по одному
+// коэффициенту на строку, как их печатают таблицы опубликованных методов:
+//
+//   0.127136927734878585
+//   0.561702537988802652
+//   ...
+//
+// Допускаются CRLF, табуляции и пробелы по краям, пустые строки, комментарии
+// ('#', '%', '//'), нумерующий первый столбец ("3<tab>-0.3825...") и несколько
+// коэффициентов в одной строке через запятую. Коэффициент берётся ТЕКСТОМ как
+// есть и НЕ округляется: 18 значащих цифр published-таблицы — это ровно то,
+// чем композиция высокого порядка держит свой порядок. По той же причине
+// символьный коэффициент ("g1", "1-2*g1") в файле тоже допустим.
+// false — коэффициентов меньше kCompMinStages, больше kCompMaxStages либо один
+// из них не разбирается; err получает причину.
+bool parse_composition_coeff_file(const std::string& text,
+                                  std::vector<std::string>* out,
+                                  std::string* err = nullptr);
 
 // Sum(g) and Sum(g^3) -- the two order conditions of a palindromic composition
 // over a symmetric base. false when any coefficient is symbolic, in which case
