@@ -170,6 +170,18 @@ static bool InputTextStr(const char* label, std::string& str, float width = 0.0f
     return changed;
 }
 
+// То же с подсказкой в пустом поле. Нужна там, где пустое поле означает не
+// "ничего", а "значение по умолчанию": имя схемы-обёртки пустым берётся из
+// её же описания, и подсказка показывает, какое имя получится.
+static bool InputTextStrHint(const char* label, std::string& str, const char* hint,
+                             float width = 0.0f) {
+    std::vector<char>& buf = input_scratch(str, 1024);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    bool changed = ImGui::InputTextWithHint(label, hint, buf.data(), buf.size());
+    if (changed) str = buf.data();
+    return changed;
+}
+
 // Перехватываем символы ДО того, как ImGui положит их в буфер: замена ',' → '.'
 // идёт в момент ввода и не подменяет строку между кадрами. Иначе InputText на
 // каждом кадре видит внешнюю правку буфера, возвращает changed=true, и
@@ -2618,6 +2630,40 @@ static void draw_wrapper_coefficients(const std::string& name,
     ImGui::PopID();
 }
 
+// Таблица коэффициентов — СТОЛБЦОМ, по строке на стадию: в ряд она не читается
+// уже на пяти полях, а у Comp их до сорока. Высота ограничена max_rows
+// строками, дальше список прокручивается, иначе сорок полей выдавливают со
+// вкладки всё остальное. Открывает child — парный EndChild обязателен.
+static void begin_coeff_column(const char* id, int rows, int max_rows) {
+    const float row_h = ImGui::GetFrameHeightWithSpacing();
+    const int   vis   = rows < max_rows ? rows : max_rows;
+    ImGui::BeginChild(id, ImVec2(0.0f, row_h * (float)(vis < 1 ? 1 : vis)
+                                       + ImGui::GetStyle().FramePadding.y * 2.0f), true);
+}
+
+// Поле имени схемы-обёртки, общее для обоих конструкторов. Пустое поле — это
+// не "без имени", а "имя по умолчанию", поэтому подсказкой в нём стоит ровно то
+// описание, которое иначе и встанет в список. Возвращает готовую метку: края
+// подрезаны, разделители самого имени выброшены.
+static std::string wrapper_name_field(const char* id, std::string& text,
+                                      const std::string& default_name) {
+    if (InputTextStrHint(id, text, default_name.c_str(), ImGui::GetFontSize() * 18.0f)) {
+        // Чистим ПРЯМО В ПОЛЕ, иначе '|' виден пользователю, а в имя не
+        // попадает. Пробелы по краям при этом не трогаем: их режет только
+        // сборка имени, а то "S17 " нельзя было бы набрать.
+        std::string keep;
+        for (char c : text)
+            if (c != '|' && c != ',' && c != '(' && c != ')') keep += c;
+        text = keep;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Name shown in the scheme combo, the wrapper list and the\n"
+                          "Order tab instead of the coefficients. Leave empty to keep\n"
+                          "the generated description. The name is COSMETIC: the step is\n"
+                          "rebuilt from the base and the coefficients either way.");
+    return wrapper_sanitize_label(text);
+}
+
 // Конструктор экстраполяционных обёрток. Собирает ИМЯ вида "Extr(RK4|1,2,4)" —
 // тела здесь нет и не хранится нигде: его пересобирает compute_krs_for_scheme
 // при каждом обращении, поэтому правка системы обёртку не протухает.
@@ -2684,19 +2730,33 @@ static void draw_extrapolation_builder(AppModel& model) {
     if (ImGui::InputInt("stages K", &model.extr_builder_stages)) {
         if (model.extr_builder_stages < kExtrMinStages) model.extr_builder_stages = kExtrMinStages;
         if (model.extr_builder_stages > kExtrMaxStages) model.extr_builder_stages = kExtrMaxStages;
+        // Слоты, открывшиеся при увеличении K, хранят прошлое значение (после
+        // пресета "1,2,4" это 4 в слоте 3) и рвали бы строгое возрастание.
+        // Правим ТОЛЬКО здесь, при смене K: набранное руками n не трогаем.
+        for (int k = 1; k < model.extr_builder_stages; ++k)
+            if (model.extr_builder_n[k] <= model.extr_builder_n[k - 1])
+                model.extr_builder_n[k] = model.extr_builder_n[k - 1] + 1;
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%d..%d stages. Each stage adds an order (two over a symmetric\n"
+                          "base), but the weights grow with K: past ~8 stages the\n"
+                          "cancellation warning below is the real limit, not this one.",
+                          kExtrMinStages, kExtrMaxStages);
     const int K = model.extr_builder_stages;
 
     ImGui::TextUnformatted("substeps n:");
+    begin_coeff_column("##extr_n_column", K, kExtrMaxStages);
     for (int k = 0; k < K; ++k) {
-        ImGui::SameLine();
         ImGui::PushID(k);
-        ImGui::SetNextItemWidth(70);
-        ImGui::InputInt("##n", &model.extr_builder_n[k], 0, 0);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "n[%d]", k);
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::InputInt(lbl, &model.extr_builder_n[k], 0, 0);
         if (model.extr_builder_n[k] < 1) model.extr_builder_n[k] = 1;
         if (model.extr_builder_n[k] > kExtrMaxSubsteps) model.extr_builder_n[k] = kExtrMaxSubsteps;
         ImGui::PopID();
     }
+    ImGui::EndChild();
 
     auto preset = [&](const char* label, const int* vals, int cnt, const char* tip) {
         if (ImGui::SmallButton(label)) {
@@ -2723,9 +2783,15 @@ static void draw_extrapolation_builder(AppModel& model) {
         if (n[k] <= n[k - 1]) { problem = "substep counts must strictly increase"; break; }
     if (!base_known) problem = "base scheme is not resolvable";
 
-    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n);
+    const std::string deflt = make_extrapolation_name(model.extr_builder_base, n);
+    const std::string label = wrapper_name_field("scheme name##extr",
+                                                 model.extr_builder_label, deflt);
+    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n, label);
+    // Совпадение ищем по имени БЕЗ метки: две обёртки с одной базой и одними
+    // подшагами — это одна схема, как бы её ни подписали.
     bool duplicate = false;
-    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
+    for (const auto& nm : model.wrapper_schemes)
+        if (wrapper_canonical_name(nm) == deflt) duplicate = true;
 
     ImGui::Separator();
     if (!problem.empty()) {
@@ -2777,9 +2843,43 @@ static void draw_extrapolation_builder(AppModel& model) {
 
 }
 
+// Читает таблицу коэффициентов композиции из файла в конструктор. Число стадий
+// берётся ИЗ ФАЙЛА: у опубликованных методов высокого порядка их 17, 31, 35 —
+// выставлять K руками перед загрузкой значило бы считать строки глазами.
+// Разбор — parse_composition_coeff_file, здесь только файл и строка статуса.
+static void comp_load_coeffs_from_file(AppModel& model, const std::string& path) {
+    std::ifstream in(path);
+    if (!in) {
+        model.comp_load_status = "cannot open " + path;
+        model.comp_load_failed = true;
+        return;
+    }
+    std::string text, line;
+    while (std::getline(in, line)) { text += line; text += '\n'; }
+
+    std::vector<std::string> g;
+    std::string err;
+    if (!parse_composition_coeff_file(text, &g, &err)) {
+        model.comp_load_status = err;
+        model.comp_load_failed = true;
+        return;
+    }
+
+    model.comp_builder_stages = (int)g.size();
+    // Хвост чистим: иначе после файла на 17 стадий в слотах 18.. осталась бы
+    // прошлая раскладка и всплыла бы при следующем увеличении K.
+    for (int k = 0; k < kCompMaxStages; ++k)
+        model.comp_builder_g[k] = (k < (int)g.size()) ? g[(size_t)k] : std::string();
+
+    const size_t slash = path.find_last_of("\\/");
+    model.comp_load_status = "loaded " + std::to_string(g.size()) + " coefficients from "
+        + (slash == std::string::npos ? path : path.substr(slash + 1));
+    model.comp_load_failed = false;
+}
+
 // Конструктор композиций. Имя вида "Comp(CD|g1,1-2*g1,g1)"; тела, как и у Extr,
 // нигде нет — резолвер пересобирает его из имени.
-static void draw_composition_builder(AppModel& model) {
+static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Composed schemes (triple jump / Suzuki)"))
         return;
@@ -2827,21 +2927,73 @@ static void draw_composition_builder(AppModel& model) {
     if (ImGui::InputInt("stages K##comp", &model.comp_builder_stages)) {
         if (model.comp_builder_stages < kCompMinStages) model.comp_builder_stages = kCompMinStages;
         if (model.comp_builder_stages > kCompMaxStages) model.comp_builder_stages = kCompMaxStages;
+        // Правка руками обесценивает строку "loaded N coefficients from ...":
+        // в таблице уже не то, что приехало из файла.
+        model.comp_load_status.clear();
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%d..%d stages. Tables of published high-order compositions\n"
+                          "are long - load them with the button below instead of typing.",
+                          kCompMinStages, kCompMaxStages);
+    // Кнопка стоит на строке заголовка таблицы, а не под пресетами: заполнение
+    // из файла — это АЛЬТЕРНАТИВА набору коэффициентов руками, и искать её надо
+    // там же, где таблица, а не ниже неё.
+    ImGui::TextUnformatted("gamma:");
+    ImGui::SameLine();
+    if (ImGui::Button("Load coefficients from file...")) {
+        if (cb.pick_open_file_text) {
+            const std::string path = cb.pick_open_file_text();
+            if (!path.empty()) comp_load_coeffs_from_file(model, path);
+        }
+        else {
+            model.comp_load_status = "no file dialog available in this build";
+            model.comp_load_failed = true;
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Plain text, one coefficient per line:\n"
+                          "  0.127136927734878585\n"
+                          "  0.561702537988802652\n"
+                          "  ...\n"
+                          "Blank lines, '#'/'%%'/'//' comments, a leading index column\n"
+                          "and several comma-separated values per line are all accepted.\n"
+                          "Digits are taken VERBATIM - nothing is rounded.\n"
+                          "The stage count comes from the file (max %d).", kCompMaxStages);
+    if (!model.comp_load_status.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(model.comp_load_failed ? ImVec4(1, 0.5f, 0.3f, 1)
+                                                  : ImVec4(0.5f, 1, 0.5f, 1),
+                           "%s", model.comp_load_status.c_str());
+    }
+
+    // Число стадий читаем ПОСЛЕ кнопки: загрузка файла меняет его прямо в этом
+    // кадре, и таблица должна показать семнадцать строк сразу, а не со
+    // следующего кадра.
     const int K = model.comp_builder_stages;
 
-    ImGui::TextUnformatted("gamma:");
+    // Двенадцать строк на виду: семнадцать стадий S17o8 уже не влезают, а
+    // прокрутка внутри блока оставляет на экране остальной конструктор.
+    begin_coeff_column("##comp_gamma_column", K, 12);
     for (int k = 0; k < K; ++k) {
-        ImGui::SameLine();
         ImGui::PushID(k);
-        InputTextStr("##g", model.comp_builder_g[k], 110.0f);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "gamma[%d]", k);
+        // Ширина под 18 значащих цифр: "-0.606074483235848116" не должен
+        // прокручиваться внутри поля, его читают глазами и сверяют со статьёй.
+        if (InputTextStr(lbl, model.comp_builder_g[k], ImGui::GetFontSize() * 14.0f))
+            model.comp_load_status.clear();
         ImGui::PopID();
     }
+    ImGui::EndChild();
 
     auto preset = [&](const char* label, const char* const* vals, int cnt, const char* tip) {
         if (ImGui::SmallButton(label)) {
             model.comp_builder_stages = cnt;
             for (int k = 0; k < cnt; ++k) model.comp_builder_g[k] = vals[k];
+            // Хвост за cnt чистим по той же причине, что и при загрузке файла:
+            // иначе увеличение K вытащит наружу прошлую раскладку.
+            for (int k = cnt; k < kCompMaxStages; ++k) model.comp_builder_g[k].clear();
+            model.comp_load_status.clear();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
         ImGui::SameLine();
@@ -2869,9 +3021,16 @@ static void draw_composition_builder(AppModel& model) {
     ImGui::NewLine();
 
     // --- валидация и превью ------------------------------------------------
+    // Число стадий читаем ЗАНОВО: пресет и загрузка из файла выше меняют его
+    // прямо в этом кадре, а K захвачен до них — иначе превью один кадр
+    // показывало бы 3 коэффициента вместо семнадцати только что загруженных.
+    const int Kn = model.comp_builder_stages;
     std::vector<std::string> g;
-    for (int k = 0; k < K; ++k) g.push_back(model.comp_builder_g[k]);
-    const std::string new_name = make_composition_name(model.comp_builder_base, g);
+    for (int k = 0; k < Kn; ++k) g.push_back(model.comp_builder_g[k]);
+    const std::string deflt = make_composition_name(model.comp_builder_base, g);
+    const std::string label = wrapper_name_field("scheme name##comp",
+                                                 model.comp_builder_label, deflt);
+    const std::string new_name = make_composition_name(model.comp_builder_base, g, label);
 
     CompositionSpec spec;
     std::string problem;
@@ -2879,8 +3038,10 @@ static void draw_composition_builder(AppModel& model) {
     else if (!base_known) problem = "base scheme is not resolvable";
     else problem.clear();
 
+    // Совпадение — по имени БЕЗ метки: подпись схему не меняет.
     bool duplicate = false;
-    for (const auto& nm : model.wrapper_schemes) if (nm == new_name) duplicate = true;
+    for (const auto& nm : model.wrapper_schemes)
+        if (wrapper_canonical_name(nm) == deflt) duplicate = true;
 
     ImGui::Separator();
     if (!problem.empty()) {
@@ -2962,7 +3123,39 @@ static void draw_wrapper_list(AppModel& model) {
         if (shown != model.wrapper_schemes[i] && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", model.wrapper_schemes[i].c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("Delete")) to_delete = i;
+        if (model.wrapper_rename_index == i) {
+            // Имя записываем в схему по выходу из поля (Enter или клик мимо),
+            // а не на каждый символ: имя — это удостоверение схемы, и менять
+            // его на каждой набранной букве незачем.
+            const std::string deflt = wrapper_canonical_name(model.wrapper_schemes[i]);
+            // Фокус ставим ОДИН раз, на первом кадре после нажатия Rename:
+            // иначе поле перехватывало бы клавиатуру у всей вкладки.
+            if (model.wrapper_rename_focus) {
+                ImGui::SetKeyboardFocusHere();
+                model.wrapper_rename_focus = false;
+            }
+            InputTextStrHint("##rename", model.wrapper_rename_text, deflt.c_str(),
+                             ImGui::GetFontSize() * 18.0f);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                model.wrapper_schemes[i] =
+                    wrapper_relabel(model.wrapper_schemes[i], model.wrapper_rename_text);
+                model.wrapper_rename_index = -1;
+            }
+            else if (ImGui::IsItemDeactivated()) model.wrapper_rename_index = -1;
+        }
+        else {
+            if (ImGui::SmallButton("Rename")) {
+                model.wrapper_rename_index = i;
+                model.wrapper_rename_text  = wrapper_label(model.wrapper_schemes[i]);
+                model.wrapper_rename_focus = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Give the scheme a short name. Empty restores the\n"
+                                  "generated one. Sessions saved under the old name keep\n"
+                                  "computing the same thing - the name is cosmetic.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) to_delete = i;
+        }
         if (open) {
             draw_wrapper_coefficients(model.wrapper_schemes[i], model.custom_schemes,
                                       model.param_values, "coef");
@@ -2988,7 +3181,12 @@ static void draw_wrapper_list(AppModel& model) {
         ImGui::PopID();
     }
     ImGui::PopID();
-    if (to_delete >= 0) model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
+    if (to_delete >= 0) {
+        model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
+        // Индексы за удалённой строкой съехали — переименование бросаем, иначе
+        // введённое имя досталось бы соседней схеме.
+        model.wrapper_rename_index = -1;
+    }
 }
 
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
@@ -3340,7 +3538,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     }
 
     draw_extrapolation_builder(model);
-    draw_composition_builder(model);
+    draw_composition_builder(model, cb);
     draw_wrapper_list(model);
 
     draw_generated_code_block(model, cb);

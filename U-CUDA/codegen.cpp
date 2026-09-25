@@ -1863,12 +1863,61 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
     return false;
 }
 
+// --- Имя обёртки: необязательная метка --------------------------------------
+
+namespace {
+
+    std::string wrap_trim(const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && std::isspace((unsigned char)s[a])) ++a;
+        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+
+    // Голова имени — то, что стоит до ПОСЛЕДНЕЙ '|', то есть до коэффициентов.
+    // Метка, если она есть, идёт первой: "s17o8|Short CD". Режем по ПЕРВОЙ
+    // черте, тогда как база берётся по последней, — старое имя без метки
+    // ("Short CD") головы с чертой не имеет и разбирается ровно как раньше.
+    bool wrap_split_head(const std::string& head, std::string* label,
+                         std::string* base, std::string* err) {
+        const size_t bar = head.find('|');
+        if (bar == std::string::npos) { label->clear(); *base = wrap_trim(head); return true; }
+        *label = wrap_trim(head.substr(0, bar));
+        *base  = wrap_trim(head.substr(bar + 1));
+        if (label->empty()) { if (err) *err = "empty scheme label"; return false; }
+        if (!wrapper_label_ok(*label)) {
+            if (err) *err = "scheme label must not contain '|', ',', '(' or ')'";
+            return false;
+        }
+        return true;
+    }
+
+} // namespace
+
+bool wrapper_label_ok(const std::string& label) {
+    if (label.empty()) return false;
+    if (wrap_trim(label) != label) return false;
+    for (char c : label)
+        if (c == '|' || c == ',' || c == '(' || c == ')') return false;
+    return true;
+}
+
+std::string wrapper_sanitize_label(const std::string& label) {
+    std::string out;
+    for (char c : label)
+        if (c != '|' && c != ',' && c != '(' && c != ')') out += c;
+    return wrap_trim(out);
+}
+
 // --- Экстраполяция Ричардсона ----------------------------------------------
 
 static const char* const kExtrPrefix = "Extr(";
 
-std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n) {
-    std::string s = kExtrPrefix + base + "|";
+std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
+                                    const std::string& label) {
+    std::string s = kExtrPrefix;
+    if (!label.empty()) s += label + "|";
+    s += base + "|";
     for (size_t k = 0; k < n.size(); ++k) {
         if (k) s += ",";
         s += std::to_string(n[k]);
@@ -1890,6 +1939,7 @@ static bool extr_parse_substeps(const std::string& s, int* out) {
 bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
                               std::string* err) {
     auto fail = [&](const char* msg) { if (err) *err = msg; return false; };
+    auto fail_s = [&](const std::string& msg) { if (err) *err = msg; return false; };
 
     const std::string pref = kExtrPrefix;
     if (name.size() <= pref.size() || name.compare(0, pref.size(), pref) != 0)
@@ -1905,7 +1955,9 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
     if (bar == std::string::npos) return fail("missing '|' between base and substep list");
 
     ExtrapolationSpec spec;
-    spec.base = inner.substr(0, bar);
+    // Голова — "<база>" либо "<метка>|<база>": метку добавили позже, и имена
+    // без неё обязаны разбираться как прежде.
+    if (!wrap_split_head(inner.substr(0, bar), &spec.label, &spec.base, err)) return false;
     if (spec.base.empty()) return fail("empty base scheme name");
     // Вложенность запрещена: порядок обёртки над обёрткой считается не как
     // p + K - 1, и заодно это отрезает бесконечную рекурсию в резолвере.
@@ -1919,15 +1971,21 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
         const std::string tok = tail.substr(pos, comma == std::string::npos
                                                 ? std::string::npos : comma - pos);
         int v = 0;
-        if (!extr_parse_substeps(tok, &v)) return fail("substep counts must be integers in 1..1024");
+        if (!extr_parse_substeps(tok, &v))
+            return fail_s("substep counts must be integers in 1.."
+                          + std::to_string(kExtrMaxSubsteps));
         spec.n.push_back(v);
         if (comma == std::string::npos) break;
         pos = comma + 1;
     }
 
     const int K = (int)spec.n.size();
-    if (K < kExtrMinStages) return fail("at least 2 stages are needed");
-    if (K > kExtrMaxStages) return fail("at most 6 stages are supported");
+    // Сообщения печатаются из констант, а не из букв: потолок стадий уже
+    // поднимали, и расхождение текста с проверкой врёт пользователю.
+    if (K < kExtrMinStages)
+        return fail_s("at least " + std::to_string(kExtrMinStages) + " stages are needed");
+    if (K > kExtrMaxStages)
+        return fail_s("at most " + std::to_string(kExtrMaxStages) + " stages are supported");
     for (int k = 1; k < K; ++k)
         if (spec.n[k] <= spec.n[k - 1]) return fail("substep counts must strictly increase");
 
@@ -2171,8 +2229,11 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
 static const char* const kCompPrefix = "Comp(";
 
 std::string make_composition_name(const std::string& base,
-                                  const std::vector<std::string>& gammas) {
-    std::string s = kCompPrefix + base + "|";
+                                  const std::vector<std::string>& gammas,
+                                  const std::string& label) {
+    std::string s = kCompPrefix;
+    if (!label.empty()) s += label + "|";
+    s += base + "|";
     for (size_t k = 0; k < gammas.size(); ++k) {
         if (k) s += ",";
         s += gammas[k];
@@ -2232,6 +2293,7 @@ namespace {
 bool parse_composition_name(const std::string& name, CompositionSpec* out,
                             std::string* err) {
     auto fail = [&](const char* msg) { if (err) *err = msg; return false; };
+    auto fail_s = [&](const std::string& msg) { if (err) *err = msg; return false; };
 
     const std::string pref = kCompPrefix;
     if (name.size() <= pref.size() || name.compare(0, pref.size(), pref) != 0)
@@ -2246,7 +2308,8 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
     if (bar == std::string::npos) return fail("missing '|' between base and coefficients");
 
     CompositionSpec spec;
-    spec.base = comp_trim(inner.substr(0, bar));
+    // Голова — "<база>" либо "<метка>|<база>", как у Extr.
+    if (!wrap_split_head(inner.substr(0, bar), &spec.label, &spec.base, err)) return false;
     if (spec.base.empty()) return fail("empty base scheme name");
     // Обёртка над обёрткой отрезает рекурсию в резолвере, как и у Extr.
     if (spec.base.compare(0, pref.size(), pref) == 0 ||
@@ -2270,10 +2333,105 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
     }
 
     const int K = (int)spec.gammas.size();
-    if (K < kCompMinStages) return fail("at least 2 stages are needed");
-    if (K > kCompMaxStages) return fail("at most 9 stages are supported");
+    if (K < kCompMinStages)
+        return fail_s("at least " + std::to_string(kCompMinStages) + " stages are needed");
+    if (K > kCompMaxStages)
+        return fail_s("at most " + std::to_string(kCompMaxStages) + " stages are supported");
 
     if (out) *out = spec;
+    return true;
+}
+
+namespace {
+
+    // Чистый числовой литерал: знак, цифры, точка, экспонента — и ничего
+    // больше. Нужен ровно одному месту: решить, был ли первый столбец строки
+    // нумерующим. Поэтому и такая строгость — "- 2*g1" числом не считается,
+    // и "1 - 2*g1" не теряет свою единицу.
+    bool comp_is_plain_number(const std::string& s) {
+        if (s.empty()) return false;
+        size_t i = 0;
+        if (s[i] == '+' || s[i] == '-') ++i;
+        bool digits = false, dot = false;
+        while (i < s.size() && (std::isdigit((unsigned char)s[i]) || s[i] == '.')) {
+            if (s[i] == '.') { if (dot) return false; dot = true; }
+            else digits = true;
+            ++i;
+        }
+        if (!digits) return false;
+        if (i == s.size()) return true;
+        if (s[i] != 'e' && s[i] != 'E') return false;
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+        if (i == s.size()) return false;
+        while (i < s.size()) { if (!std::isdigit((unsigned char)s[i])) return false; ++i; }
+        return true;
+    }
+
+    // Срезает нумерующий первый столбец: "3<tab>-0.3825" -> "-0.3825".
+    // Разделителем считаются пробелы/табы и ')' ';' ':' — но НЕ точка (иначе
+    // "1.35" распалось бы на индекс 1 и коэффициент 35) и НЕ запятая (её
+    // разбирает разделение строки на коэффициенты).
+    std::string comp_strip_index(const std::string& line) {
+        size_t i = 0;
+        while (i < line.size() && std::isdigit((unsigned char)line[i])) ++i;
+        if (i == 0 || i == line.size()) return line;
+        size_t j = i;
+        while (j < line.size() && (std::isspace((unsigned char)line[j])
+                                   || line[j] == ')' || line[j] == ';' || line[j] == ':')) ++j;
+        if (j == i || j == line.size()) return line;
+        const std::string rest = comp_trim(line.substr(j));
+        return comp_is_plain_number(rest) ? rest : line;
+    }
+
+} // namespace
+
+bool parse_composition_coeff_file(const std::string& text,
+                                  std::vector<std::string>* out, std::string* err) {
+    auto fail = [&](const std::string& msg) { if (err) *err = msg; return false; };
+
+    std::vector<std::string> coeffs;
+    size_t pos = 0;
+    int line_no = 0;
+    while (pos <= text.size()) {
+        size_t eol = text.find('\n', pos);
+        const std::string raw = text.substr(pos, eol == std::string::npos
+                                                     ? std::string::npos : eol - pos);
+        pos = (eol == std::string::npos) ? text.size() + 1 : eol + 1;
+        ++line_no;
+
+        // comp_trim снимает и '\r' от CRLF, и табуляцию в конце строки —
+        // именно в таком виде таблицы коэффициентов обычно и лежат.
+        std::string line = comp_trim(raw);
+        if (line.empty()) continue;
+        if (line[0] == '#' || line[0] == '%' || line.compare(0, 2, "//") == 0) continue;
+
+        line = comp_strip_index(line);
+
+        // Запятые верхнего уровня — тем же расщепителем, что у имени схемы:
+        // так "g1, 1-2*g1, g1" в одну строку работает, а pow(g,2) не рвётся.
+        std::vector<std::string> toks;
+        if (!comp_split(line, toks))
+            return fail("line " + std::to_string(line_no) + ": unbalanced parentheses");
+        for (const std::string& t : toks) {
+            const std::string g = comp_trim(t);
+            if (g.empty()) continue;   // хвостовая запятая — не ошибка
+            try { Parser(g, false).parse(); }
+            catch (const std::exception& e) {
+                return fail("line " + std::to_string(line_no) + ": \"" + g + "\": " + e.what());
+            }
+            coeffs.push_back(g);
+        }
+    }
+
+    if ((int)coeffs.size() < kCompMinStages)
+        return fail("found " + std::to_string(coeffs.size()) + " coefficient(s), at least "
+                    + std::to_string(kCompMinStages) + " are needed");
+    if ((int)coeffs.size() > kCompMaxStages)
+        return fail("found " + std::to_string(coeffs.size()) + " coefficients, at most "
+                    + std::to_string(kCompMaxStages) + " stages are supported");
+
+    if (out) *out = coeffs;
     return true;
 }
 
@@ -2421,8 +2579,15 @@ bool composition_gamma_values(const CompositionSpec& spec,
 }
 
 std::string wrapper_display_name(const std::string& name, int digits) {
+    // Метка пользователя ЗАМЕНЯЕТ описание целиком: её задавали ровно затем,
+    // чтобы в списке и в комбо стояло "S17o8", а не семнадцать коэффициентов.
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp))
+        return esp.label.empty() ? name : esp.label;
+
     CompositionSpec spec;
     if (!parse_composition_name(name, &spec)) return name;
+    if (!spec.label.empty()) return spec.label;
     if (digits < 1)  digits = 1;
     if (digits > 17) digits = 17;
 
@@ -2431,6 +2596,31 @@ std::string wrapper_display_name(const std::string& name, int digits) {
     for (const std::string& g : spec.gammas)
         shown.push_back(comp_round_literals(g, digits));
     return make_composition_name(spec.base, shown);
+}
+
+std::string wrapper_canonical_name(const std::string& name) {
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n);
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas);
+    return name;
+}
+
+std::string wrapper_relabel(const std::string& name, const std::string& label) {
+    const std::string lb = wrapper_sanitize_label(label);
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n, lb);
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas, lb);
+    return name;
+}
+
+std::string wrapper_label(const std::string& name) {
+    ExtrapolationSpec esp;
+    if (parse_extrapolation_name(name, &esp)) return esp.label;
+    CompositionSpec csp;
+    if (parse_composition_name(name, &csp)) return csp.label;
+    return {};
 }
 
 std::string wrap_composition(const std::string& base_body, const System& sys,

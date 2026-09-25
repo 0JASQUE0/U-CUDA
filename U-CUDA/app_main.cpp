@@ -248,6 +248,16 @@ static std::string pick_save_csv_file_win() {
     return com_file_dialog(true, f, 2, L"csv");
 }
 
+// Диалог открытия текстового файла: таблица коэффициентов композиции в
+// конструкторе схем. Расширения перечислены те, в которых такие таблицы
+// обычно и лежат; "All files" оставлен, потому что у выписанной из статьи
+// таблицы расширения может не быть вовсе.
+static std::string pick_open_text_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Coefficient tables", L"*.txt;*.dat;*.csv" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
 // Диалог сохранения SPICE-netlist'а.
 static std::string pick_save_netlist_file_win() {
     static const COMDLG_FILTERSPEC f[] = {
@@ -317,6 +327,7 @@ int main() {
     cb.set_clipboard_text = set_clipboard_win;
     cb.pick_save_file_csv = pick_save_csv_file_win;
     cb.pick_save_file_netlist = pick_save_netlist_file_win;
+    cb.pick_open_file_text = pick_open_text_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).

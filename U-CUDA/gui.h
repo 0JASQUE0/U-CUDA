@@ -11,6 +11,10 @@ struct GuiCallbacks {
     // Default filter = CSV (.csv); the file may not exist yet.
     std::function<std::string()> pick_save_file_csv;
     std::function<std::string()> pick_save_file_netlist;   // диалог сохранения .cir
+    // Диалог ОТКРЫТИЯ текстового файла. Пока один потребитель — таблица
+    // коэффициентов композиции в конструкторе схем (System tab). Возвращает
+    // абсолютный путь либо пустую строку при отмене.
+    std::function<std::string()> pick_open_file_text;
 };
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).
