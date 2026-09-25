@@ -2618,14 +2618,15 @@ static void draw_wrapper_coefficients(const std::string& name,
     ImGui::PopID();
 }
 
-// Сколько полей коэффициентов влезает в ряд при текущей ширине панели.
-// Общий для обоих конструкторов: у Extr их до 10, у Comp до 40, и в один
-// SameLine-ряд не помещаются ни те, ни другие.
-static int coeff_grid_per_row(float item_w) {
-    const float step_w = item_w + ImGui::GetStyle().ItemSpacing.x;
-    const float avail  = ImGui::GetContentRegionAvail().x;
-    int per_row = (int)(avail / (step_w > 1.0f ? step_w : 1.0f));
-    return per_row < 1 ? 1 : per_row;
+// Таблица коэффициентов — СТОЛБЦОМ, по строке на стадию: в ряд она не читается
+// уже на пяти полях, а у Comp их до сорока. Высота ограничена max_rows
+// строками, дальше список прокручивается, иначе сорок полей выдавливают со
+// вкладки всё остальное. Открывает child — парный EndChild обязателен.
+static void begin_coeff_column(const char* id, int rows, int max_rows) {
+    const float row_h = ImGui::GetFrameHeightWithSpacing();
+    const int   vis   = rows < max_rows ? rows : max_rows;
+    ImGui::BeginChild(id, ImVec2(0.0f, row_h * (float)(vis < 1 ? 1 : vis)
+                                       + ImGui::GetStyle().FramePadding.y * 2.0f), true);
 }
 
 // Конструктор экстраполяционных обёрток. Собирает ИМЯ вида "Extr(RK4|1,2,4)" —
@@ -2709,22 +2710,18 @@ static void draw_extrapolation_builder(AppModel& model) {
     const int K = model.extr_builder_stages;
 
     ImGui::TextUnformatted("substeps n:");
-    {
-        // Ряд переносится по ДОСТУПНОЙ ширине, а не тянется одной строкой:
-        // при десяти стадиях последние поля уезжали за правый край панели.
-        const float item_w = 70.0f;
-        const int   per_row = coeff_grid_per_row(item_w);
-        for (int k = 0; k < K; ++k) {
-            if (k % per_row) ImGui::SameLine();
-            ImGui::PushID(k);
-            ImGui::SetNextItemWidth(item_w);
-            ImGui::InputInt("##n", &model.extr_builder_n[k], 0, 0);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("n[%d]", k);
-            if (model.extr_builder_n[k] < 1) model.extr_builder_n[k] = 1;
-            if (model.extr_builder_n[k] > kExtrMaxSubsteps) model.extr_builder_n[k] = kExtrMaxSubsteps;
-            ImGui::PopID();
-        }
+    begin_coeff_column("##extr_n_column", K, kExtrMaxStages);
+    for (int k = 0; k < K; ++k) {
+        ImGui::PushID(k);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "n[%d]", k);
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::InputInt(lbl, &model.extr_builder_n[k], 0, 0);
+        if (model.extr_builder_n[k] < 1) model.extr_builder_n[k] = 1;
+        if (model.extr_builder_n[k] > kExtrMaxSubsteps) model.extr_builder_n[k] = kExtrMaxSubsteps;
+        ImGui::PopID();
     }
+    ImGui::EndChild();
 
     auto preset = [&](const char* label, const int* vals, int cnt, const char* tip) {
         if (ImGui::SmallButton(label)) {
@@ -2897,24 +2894,56 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
         ImGui::SetTooltip("%d..%d stages. Tables of published high-order compositions\n"
                           "are long - load them with the button below instead of typing.",
                           kCompMinStages, kCompMaxStages);
-    const int K = model.comp_builder_stages;
-
+    // Кнопка стоит на строке заголовка таблицы, а не под пресетами: заполнение
+    // из файла — это АЛЬТЕРНАТИВА набору коэффициентов руками, и искать её надо
+    // там же, где таблица, а не ниже неё.
     ImGui::TextUnformatted("gamma:");
-    {
-        // Сорок полей в один ряд не помещаются никуда, поэтому таблица
-        // коэффициентов переносится по доступной ширине. Номер стадии — в
-        // тултипе: подпись у каждого поля съела бы всю ширину.
-        const float item_w = 110.0f;
-        const int   per_row = coeff_grid_per_row(item_w);
-        for (int k = 0; k < K; ++k) {
-            if (k % per_row) ImGui::SameLine();
-            ImGui::PushID(k);
-            if (InputTextStr("##g", model.comp_builder_g[k], item_w))
-                model.comp_load_status.clear();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("gamma[%d]", k);
-            ImGui::PopID();
+    ImGui::SameLine();
+    if (ImGui::Button("Load coefficients from file...")) {
+        if (cb.pick_open_file_text) {
+            const std::string path = cb.pick_open_file_text();
+            if (!path.empty()) comp_load_coeffs_from_file(model, path);
+        }
+        else {
+            model.comp_load_status = "no file dialog available in this build";
+            model.comp_load_failed = true;
         }
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Plain text, one coefficient per line:\n"
+                          "  0.127136927734878585\n"
+                          "  0.561702537988802652\n"
+                          "  ...\n"
+                          "Blank lines, '#'/'%%'/'//' comments, a leading index column\n"
+                          "and several comma-separated values per line are all accepted.\n"
+                          "Digits are taken VERBATIM - nothing is rounded.\n"
+                          "The stage count comes from the file (max %d).", kCompMaxStages);
+    if (!model.comp_load_status.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(model.comp_load_failed ? ImVec4(1, 0.5f, 0.3f, 1)
+                                                  : ImVec4(0.5f, 1, 0.5f, 1),
+                           "%s", model.comp_load_status.c_str());
+    }
+
+    // Число стадий читаем ПОСЛЕ кнопки: загрузка файла меняет его прямо в этом
+    // кадре, и таблица должна показать семнадцать строк сразу, а не со
+    // следующего кадра.
+    const int K = model.comp_builder_stages;
+
+    // Двенадцать строк на виду: семнадцать стадий S17o8 уже не влезают, а
+    // прокрутка внутри блока оставляет на экране остальной конструктор.
+    begin_coeff_column("##comp_gamma_column", K, 12);
+    for (int k = 0; k < K; ++k) {
+        ImGui::PushID(k);
+        char lbl[24];
+        std::snprintf(lbl, sizeof(lbl), "gamma[%d]", k);
+        // Ширина под 18 значащих цифр: "-0.606074483235848116" не должен
+        // прокручиваться внутри поля, его читают глазами и сверяют со статьёй.
+        if (InputTextStr(lbl, model.comp_builder_g[k], ImGui::GetFontSize() * 14.0f))
+            model.comp_load_status.clear();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
 
     auto preset = [&](const char* label, const char* const* vals, int cnt, const char* tip) {
         if (ImGui::SmallButton(label)) {
@@ -2949,36 +2978,6 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     preset("sweep g1,g2", kFree, 3, "Both coefficients free: gives the p(g1, g2) map.\n"
                                     "Declare g1 and g2 as parameters unused by the RHS.");
     ImGui::NewLine();
-
-    // --- таблица коэффициентов из файла ------------------------------------
-    // Пресеты закрывают три-пять стадий; у опубликованных методов порядка 8 и
-    // выше их 17 и больше, и вбивать по 18 значащих цифр в поле — это ошибка
-    // в одной цифре и порядок, упавший обратно.
-    if (ImGui::Button("Load coefficients from file...")) {
-        if (cb.pick_open_file_text) {
-            const std::string path = cb.pick_open_file_text();
-            if (!path.empty()) comp_load_coeffs_from_file(model, path);
-        }
-        else {
-            model.comp_load_status = "no file dialog available in this build";
-            model.comp_load_failed = true;
-        }
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Plain text, one coefficient per line:\n"
-                          "  0.127136927734878585\n"
-                          "  0.561702537988802652\n"
-                          "  ...\n"
-                          "Blank lines, '#'/'%%'/'//' comments, a leading index column\n"
-                          "and several comma-separated values per line are all accepted.\n"
-                          "Digits are taken VERBATIM - nothing is rounded.\n"
-                          "The stage count comes from the file (max %d).", kCompMaxStages);
-    if (!model.comp_load_status.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(model.comp_load_failed ? ImVec4(1, 0.5f, 0.3f, 1)
-                                                  : ImVec4(0.5f, 1, 0.5f, 1),
-                           "%s", model.comp_load_status.c_str());
-    }
 
     // --- валидация и превью ------------------------------------------------
     // Число стадий читаем ЗАНОВО: пресет и загрузка из файла выше меняют его
