@@ -216,6 +216,19 @@ float plot_font_scale();
 ImVec2 plot_text_size(const char* s);
 void   plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s);
 
+// Тот же верстальщик для формулы вне плота — превью LaTeX-поля в Library.
+// Отличия от plot_text: набирает всегда (не смотрит на plot_math_enabled),
+// кегль задаётся явно, и строка читается как формула TeX: пробелы исходника
+// игнорируются, отступы вокруг = + − ставятся сами, "ab" — курсив, \left,
+// \right, \quad, \begin{...} понимаются. Серифная пара шрифтов грузится
+// только при включённом LaTeX-режиме подписей, иначе набор идёт UI-шрифтом.
+//
+// ascent/descent — фактический габарит над и под базовой линией, с
+// дробями, точками \dot и индексами; pos у math_formula_draw — верх габарита.
+struct MathExtent { float width = 0, ascent = 0, descent = 0; };
+MathExtent math_formula_extent(const char* s, float size);
+void       math_formula_draw(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s, float size);
+
 // Высота строки подписей. То же, что GetTextLineHeight() до появления кегля, —
 // вызывать вместо него везде, где считается вёрстка вокруг подписей плота.
 float  plot_text_line_height();

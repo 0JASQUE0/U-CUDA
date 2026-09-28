@@ -105,6 +105,13 @@ std::string codegen_scheme(const System& s, Scheme sch);
 // divergence between the two paths.
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 
+// Правые части системы в том виде, из которого codegen_scheme собирает шаг
+// ЛЮБОЙ схемы: выражения над X[0..N-1] и a[1..M], по строке на переменную
+// (у отображения — сразу x_{n+1}). Это тот же rhs_over, что внутри схем, а не
+// отдельный путь, — превью в Library показывает ровно то, что уйдёт в ядро.
+// std::runtime_error при ошибке разбора.
+std::vector<std::string> codegen_rhs(const System& s);
+
 // Вклад ОДНОГО ребра сети в правую часть узла-приёмника (вкладка Network).
 // exprs — по выражению на переменную системы; пустая строка = в это уравнение
 // связь не входит, строки для неё в выводе не будет.
