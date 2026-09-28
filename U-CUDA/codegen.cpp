@@ -1176,9 +1176,52 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // даром, но и выигрыша в точности не приносит — она нужна ради обратимости
     // отображения и законной h^2-экстраполяции.
     // Обе, как и Complex CD4, требуют s = a[0] = 1/2.
-    enum class CdKind { Real, Cx, Cx4, Cx4s3, Cx4s4 };
+    //
+    // CdKind::Cx4ss01 -- CCD4 (s-split)_{0-1}, двойственная к Complex CD4: там
+    // комплексны внешние шаги, а CD внутри симметричен; здесь внешние шаги
+    // вещественные (h/2 и h/2), а комплексно само разбиение CD:
+    //   проход 1: h1 = (1-i)h/6, h2 = (2+i)h/6    (s1 = (1-i)/3)
+    //   проход 2: h1 = (2+i)h/6, h2 = (1-i)h/6    (s2 = 1 - s1)
+    // Полушаги a, b, b, a с a + b = 1/2 -- палиндром в смысле Phi/Phi*, поэтому
+    // КОМПЛЕКСНАЯ композиция самосопряжена и в log Psi нет h^2 и h^4. Оба
+    // коэффициента при h^3 чисто мнимые: 2(a^3 + b^3) = i/12 при N3 и
+    // -7i/72 при [N1, N2] (N_k -- ряд полушага Эйлера; знак -- для записи
+    // M = E*_a E_b E*_b E_a, правый множитель применяется первым),
+    // Re их снимает, первый вещественный член -- h^5, глобальный порядок 4.
+    // Среди двухпроходных CD со своими комплексными s_k решений порядка 4
+    // ровно две сопряжённые пары: Complex CD4 и эта.
+    // Замерено 4.0 на Лоренце и Рёсслере. Константа ошибки против Complex CD4
+    // зависит от задачи: Лоренц -- в 2.9 раза меньше, Рёсслер -- в 3.1 раза
+    // больше; по норме главного члена (веса 5) 0.0242 против 0.0134.
+    // Симметричной НЕ помечена, хотя комплексная композиция самосопряжена:
+    // мнимая часть появляется уже при h^3, и Re посреди пары шагов даёт дефект
+    // симметрии O(h^6) (у Complex CD4 -- O(h^8)); в глобальной ошибке есть h^5,
+    // экстраполяция Ричардсона по h^2 даёт 5, а не 6.
+    // Коэффициенты фиксированы, a[0] не читается: s здесь -- часть метода, а
+    // не ручка, и любое другое разбиение теряет порядок. Перестановка
+    // b, a, a, b тоже: коммутаторный член получает вещественную часть 1/12,
+    // и порядок падает до 2 -- на краях обязан стоять (1-i)/6.
+    //
+    // CdKind::Cx4ss10 -- CCD4 (s-split)_{1-0}: те же полушаги a, b, b, a, но в
+    // каждом проходе ПЕРВОЙ идёт неявная половина (обратный порядок), затем
+    // явная: E*_a, E_b | E*_b, E_a. Это та же композиция над сопряжённым
+    // базовым методом: N_2 меняет знак, член при N3 остаётся i/12, при
+    // [N1, N2] знак меняется на +7i/72 -- оба по-прежнему мнимые, порядок 4
+    // (замерено 4.0 на Лоренце и Рёсслере). Главный член ошибки на
+    // осцилляторе зеркален {0-1}, на нелинейных задачах выигрыш разный:
+    // Лоренц -- {0-1} в 10 раз точнее, Рёсслер -- {1-0} в 2.8 раза точнее.
+    enum class CdKind { Real, Cx, Cx4, Cx4s3, Cx4s4, Cx4ss01, Cx4ss10 };
 
-    std::string scheme_cd_common(const System& s, CdKind kind) {
+    // core_only -- ядро для ExtrZ: только проходы над Z[], объявленным снаружи,
+    // без перехода X -> Z на входе и без Re на выходе (см. codegen.hpp).
+    // flip_halves -- вариант {1-0} любой CD-схемы: в каждом проходе сначала
+    // неявная половина (h1, обратный порядок), потом явная (h2, прямой). Это
+    // та же композиция над сопряжённым базовым методом: условия порядка
+    // переходят в себя заменой N_k -> (-1)^(k+1) N_k, порядок и симметрия не
+    // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
+    // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
+    std::string scheme_cd_common(const System& s, CdKind kind, bool core_only = false,
+                                 bool flip_halves = false) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
@@ -1200,14 +1243,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
             for (int i = 0; i < N; ++i) cd_check_complex_safe(rhs_ast[i]);
 
         std::ostringstream o;
-        if (cx) {
+        if (cx && !core_only) {
             o << "    ucmplx Z[" << N << "];\n";
             for (int i = 0; i < N; ++i)
                 o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
         }
-        // Шаги подшагов композиции — именами объявленных выше переменных.
-        // Пусто у CD и Complex CD: у них ровно один проход на весь h.
-        std::vector<std::string> cgs;
+        // Полушаги h1/h2 каждого прохода композиции — выражениями над
+        // объявленными выше переменными. Пусто у CD и Complex CD: у них ровно
+        // один проход на весь h.
+        std::vector<std::string> pass_h1, pass_h2;
         if (kind == CdKind::Real) {
             o << "    numb h1 = h * a[0];\n";
             o << "    numb h2 = h * (1 - a[0]);\n";
@@ -1217,12 +1261,24 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    ucmplx h1 = ucmplx(a[0] * h,  h * ccd_im);\n";
             o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * ccd_im);\n";
         }
+        else if (kind == CdKind::Cx4ss01 || kind == CdKind::Cx4ss10) {
+            // Разбиение комплексное и фиксированное, a[0] не участвует:
+            // проход 1 -- (p, q), проход 2 -- (q, p). У {1-0} h1 -- это
+            // неявная половина, она идёт первой (см. emit_pass).
+            o << "    ucmplx cp = ucmplx(h / (numb)6, -h / (numb)6);   // (1-i)h/6\n";
+            o << "    ucmplx cq = ucmplx(h / (numb)3,  h / (numb)6);   // (2+i)h/6\n";
+            pass_h1 = { "cp", "cq" };
+            pass_h2 = { "cq", "cp" };
+            o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
+            o << "    ucmplx h2 = " << pass_h2[0] << ";\n";
+        }
         else {
             // Комплексная композиция: s делит уже СВОЙ комплексный подшаг
             // внутри прохода, поэтому здесь объявляются только сами подшаги,
             // а h1/h2 перевыставляются перед каждым проходом.
             // ccd_im нужен всем, кроме o4s3: у той свой коэффициент, и лишняя
             // константа в теле была бы неиспользованной.
+            std::vector<std::string> cgs;
             if (kind != CdKind::Cx4s3) o << kCcdImagDecl;
             if (kind == CdKind::Cx4) {
                 // gamma*h and conj(gamma)*h.
@@ -1246,8 +1302,12 @@ namespace { // внутренняя линковка: всё ниже не ви�
                      " -(numb)2 * ccd3_im * h);\n";
                 cgs = { "ga", "gb", "ga" };
             }
-            o << "    ucmplx h1 = " << cgs[0] << " * a[0];\n";
-            o << "    ucmplx h2 = " << cgs[0] << " * (1 - a[0]);\n";
+            for (const std::string& g : cgs) {
+                pass_h1.push_back(g + " * a[0]");
+                pass_h2.push_back(g + " * (1 - a[0])");
+            }
+            o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
+            o << "    ucmplx h2 = " << pass_h2[0] << ";\n";
         }
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order. Сам разбор
@@ -1258,27 +1318,36 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // Complex CD4 зовёт его дважды с разными h1/h2, поэтому имена временных
         // переменных неявной ветки получают суффикс — иначе второй проход
         // переобъявил бы x0_cd в той же области видимости.
+        // У вариантов {1-0} (CCD4 (s-split)_{1-0} и flip_halves) половины
+        // меняются местами: неявная (h1, обратный порядок) первой, явная (h2,
+        // прямой порядок) второй.
+        const bool implicit_first = flip_halves || (kind == CdKind::Cx4ss10);
         auto emit_pass = [&](const char* sfx) {
         // Phi_{h1}: explicit half-step, forward order. Each X[i] update sees
         // the just-written values of X[0..i-1] (Euler-Cromer coupling).
-        for (int i = 0; i < N; ++i)
-            o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + h1 * ("
-              << emit_to_str(rhs_ast[i], nm) << ");\n";
-
-        for (int i = N - 1; i >= 0; --i)
-            emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
-                                  stv + ("[" + std::to_string(i) + "]"), nm,
-                                  "h2", sty, "x" + std::to_string(i) + "_cd" + sfx);
+        auto emit_explicit = [&](const char* step) {
+            for (int i = 0; i < N; ++i)
+                o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + "
+                  << step << " * (" << emit_to_str(rhs_ast[i], nm) << ");\n";
+        };
+        auto emit_implicit = [&](const char* step) {
+            for (int i = N - 1; i >= 0; --i)
+                emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
+                                      stv + ("[" + std::to_string(i) + "]"), nm,
+                                      step, sty, "x" + std::to_string(i) + "_cd" + sfx);
+        };
+        if (implicit_first) { emit_implicit("h1"); emit_explicit("h2"); }
+        else                { emit_explicit("h1"); emit_implicit("h2"); }
         };  // emit_pass
 
-        if (cgs.empty()) {
+        if (pass_h1.empty()) {
             emit_pass("");
         }
         else {
-            for (size_t k = 0; k < cgs.size(); ++k) {
+            for (size_t k = 0; k < pass_h1.size(); ++k) {
                 if (k) {
-                    o << "    h1 = " << cgs[k] << " * a[0];\n";
-                    o << "    h2 = " << cgs[k] << " * (1 - a[0]);\n";
+                    o << "    h1 = " << pass_h1[k] << ";\n";
+                    o << "    h2 = " << pass_h2[k] << ";\n";
                 }
                 // Суффикс временных неявной ветки: без него второй проход
                 // переобъявил бы x0_cd в той же области видимости.
@@ -1290,7 +1359,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // Наружу — только действительная часть: X[] вещественный и на входе, и
         // на выходе, поэтому вся обвязка (ядра, LLE/LS, бассейны, рендер) о
         // комплексности не знает.
-        if (cx)
+        if (cx && !core_only)
             for (int i = 0; i < N; ++i)
                 o << "    X[" << i << "] = Z[" << i << "].re;\n";
 
@@ -1302,6 +1371,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
     std::string scheme_complex_cd4(const System& s) { return scheme_cd_common(s, CdKind::Cx4); }
     std::string scheme_complex_cd4_s3(const System& s) { return scheme_cd_common(s, CdKind::Cx4s3); }
     std::string scheme_complex_cd4_s4(const System& s) { return scheme_cd_common(s, CdKind::Cx4s4); }
+    std::string scheme_complex_cd4_ss01(const System& s) { return scheme_cd_common(s, CdKind::Cx4ss01); }
+    std::string scheme_complex_cd4_ss10(const System& s) { return scheme_cd_common(s, CdKind::Cx4ss10); }
 
     // SEMP / SIMP — методы средней точки, у которых СТАДИЯ считается
     // последовательно по компонентам (Гаусс-Зейдель) вместо полной неявной
@@ -1746,6 +1817,31 @@ void SystemEvaluator::eval_complex(const ucmplx* X, const double* a, ucmplx* der
         deriv[i] = run_program(impl_->programs[i], X, a, st);
 }
 
+bool scheme_has_complex_core(const std::string& name) {
+    return name == "Complex CD" || name == "Complex CD4" || name == "CCD4 (o4s3)"
+        || name == "CCD4 (o4s4)" || name == "CCD4 (s-split)_{0-1}"
+        || name == "CCD4 (s-split)_{1-0}" || name == "Complex CD_{1-0}"
+        || name == "Complex CD4_{1-0}" || name == "CCD4 (o4s3)_{1-0}"
+        || name == "CCD4 (o4s4)_{1-0}";
+}
+
+std::string codegen_scheme_complex_core(const System& s, Scheme sch) {
+    switch (sch) {
+    case Scheme::ComplexCD:    return scheme_cd_common(s, CdKind::Cx,    true);
+    case Scheme::ComplexCD4:   return scheme_cd_common(s, CdKind::Cx4,   true);
+    case Scheme::ComplexCD4S3: return scheme_cd_common(s, CdKind::Cx4s3, true);
+    case Scheme::ComplexCD4S4: return scheme_cd_common(s, CdKind::Cx4s4, true);
+    case Scheme::ComplexCD4SS01: return scheme_cd_common(s, CdKind::Cx4ss01, true);
+    case Scheme::ComplexCD4SS10: return scheme_cd_common(s, CdKind::Cx4ss10, true);
+    case Scheme::ComplexCD10:     return scheme_cd_common(s, CdKind::Cx,    true, true);
+    case Scheme::ComplexCD4_10:   return scheme_cd_common(s, CdKind::Cx4,   true, true);
+    case Scheme::ComplexCD4S3_10: return scheme_cd_common(s, CdKind::Cx4s3, true, true);
+    case Scheme::ComplexCD4S4_10: return scheme_cd_common(s, CdKind::Cx4s4, true, true);
+    default: break;
+    }
+    throw std::runtime_error("scheme has no complex core (ExtrZ needs a built-in complex CD scheme)");
+}
+
 // Публичная функция
 std::string codegen_scheme(const System& s, Scheme sch) {
     switch (sch) {
@@ -1759,6 +1855,13 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
     case Scheme::ComplexCD4S3:     return scheme_complex_cd4_s3(s);
     case Scheme::ComplexCD4S4:     return scheme_complex_cd4_s4(s);
+    case Scheme::ComplexCD4SS01:   return scheme_complex_cd4_ss01(s);
+    case Scheme::ComplexCD4SS10:   return scheme_complex_cd4_ss10(s);
+    case Scheme::CD10:             return scheme_cd_common(s, CdKind::Real,  false, true);
+    case Scheme::ComplexCD10:      return scheme_cd_common(s, CdKind::Cx,    false, true);
+    case Scheme::ComplexCD4_10:    return scheme_cd_common(s, CdKind::Cx4,   false, true);
+    case Scheme::ComplexCD4S3_10:  return scheme_cd_common(s, CdKind::Cx4s3, false, true);
+    case Scheme::ComplexCD4S4_10:  return scheme_cd_common(s, CdKind::Cx4s4, false, true);
     case Scheme::ImplicitEuler:    return scheme_implicit_euler(s);
     case Scheme::ImplicitMidpoint: return scheme_implicit_midpoint(s);
     case Scheme::SEMP:             return scheme_semp(s);
@@ -1816,6 +1919,13 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
     if (name == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
     if (name == "CCD4 (o4s4)")       return Scheme::ComplexCD4S4;
+    if (name == "CCD4 (s-split)_{0-1}") return Scheme::ComplexCD4SS01;
+    if (name == "CCD4 (s-split)_{1-0}") return Scheme::ComplexCD4SS10;
+    if (name == "CD_{1-0}")          return Scheme::CD10;
+    if (name == "Complex CD_{1-0}")  return Scheme::ComplexCD10;
+    if (name == "Complex CD4_{1-0}") return Scheme::ComplexCD4_10;
+    if (name == "CCD4 (o4s3)_{1-0}") return Scheme::ComplexCD4S3_10;
+    if (name == "CCD4 (o4s4)_{1-0}") return Scheme::ComplexCD4S4_10;
     if (name == "Implicit Euler")    return Scheme::ImplicitEuler;
     if (name == "Implicit Midpoint") return Scheme::ImplicitMidpoint;
     if (name == "SEMP")              return Scheme::SEMP;
@@ -1829,7 +1939,7 @@ Scheme scheme_from_name(const std::string& name) {
 // --- Паспорт встроенных схем -----------------------------------------------
 // Порядки — те, что замерены и записаны в подсказках чекбоксов (см. gui.cpp).
 // Напоминание про a[0] = 1/2: у CD, Complex CD, Complex CD4, CCD4 (o4s3),
-// CCD4 (o4s4), SEMP и SIMP
+// CCD4 (o4s4) (и их вариантов _{1-0}), SEMP и SIMP
 // заявленный порядок достигается только при этом значении, иначе все они
 // падают до первого. Здесь стоит паспортный (то есть при a[0] = 1/2) —
 // предупредить пользователя обязан UI.
@@ -1851,6 +1961,14 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
         { "Complex CD4",            4, false },
         { "CCD4 (o4s3)",            4, true  },  // палиндром (a, 1-2a, a)
         { "CCD4 (o4s4)",            4, true  },  // палиндром (g/2, gc/2, gc/2, g/2)
+        { "CCD4 (s-split)_{0-1}",   4, false },  // самосопряжена до Re, после Re дефект O(h^6)
+        { "CCD4 (s-split)_{1-0}",   4, false },  // то же над сопряжённым базовым методом
+        // {1-0}: неявная половина первой; порядок и симметрия как у исходных.
+        { "CD_{1-0}",               2, true  },
+        { "Complex CD_{1-0}",       2, false },
+        { "Complex CD4_{1-0}",      4, false },
+        { "CCD4 (o4s3)_{1-0}",      4, true  },
+        { "CCD4 (o4s4)_{1-0}",      4, true  },
         { "DOPRI78",                8, false },
     };
     for (const Row& r : kRows) {
@@ -1911,11 +2029,17 @@ std::string wrapper_sanitize_label(const std::string& label) {
 
 // --- Экстраполяция Ричардсона ----------------------------------------------
 
-static const char* const kExtrPrefix = "Extr(";
+static const char* const kExtrPrefix  = "Extr(";
+static const char* const kExtrZPrefix = "ExtrZ(";   // Re только на выходе
+
+static bool starts_with(const std::string& s, const char* pref) {
+    const size_t n = std::strlen(pref);
+    return s.size() >= n && s.compare(0, n, pref) == 0;
+}
 
 std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
-                                    const std::string& label) {
-    std::string s = kExtrPrefix;
+                                    const std::string& label, bool re_at_output) {
+    std::string s = re_at_output ? kExtrZPrefix : kExtrPrefix;
     if (!label.empty()) s += label + "|";
     s += base + "|";
     for (size_t k = 0; k < n.size(); ++k) {
@@ -1941,7 +2065,8 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
     auto fail = [&](const char* msg) { if (err) *err = msg; return false; };
     auto fail_s = [&](const std::string& msg) { if (err) *err = msg; return false; };
 
-    const std::string pref = kExtrPrefix;
+    const bool re_out = starts_with(name, kExtrZPrefix);
+    const std::string pref = re_out ? kExtrZPrefix : kExtrPrefix;
     if (name.size() <= pref.size() || name.compare(0, pref.size(), pref) != 0)
         return fail("not an extrapolated scheme name");
     if (name.back() != ')')
@@ -1955,13 +2080,14 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
     if (bar == std::string::npos) return fail("missing '|' between base and substep list");
 
     ExtrapolationSpec spec;
+    spec.re_at_output = re_out;
     // Голова — "<база>" либо "<метка>|<база>": метку добавили позже, и имена
     // без неё обязаны разбираться как прежде.
     if (!wrap_split_head(inner.substr(0, bar), &spec.label, &spec.base, err)) return false;
     if (spec.base.empty()) return fail("empty base scheme name");
     // Вложенность запрещена: порядок обёртки над обёрткой считается не как
     // p + K - 1, и заодно это отрезает бесконечную рекурсию в резолвере.
-    if (spec.base.compare(0, pref.size(), pref) == 0)
+    if (starts_with(spec.base, kExtrPrefix) || starts_with(spec.base, kExtrZPrefix))
         return fail("base scheme cannot itself be extrapolated");
 
     const std::string tail = inner.substr(bar + 1);
@@ -2224,6 +2350,76 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     return o.str();
 }
 
+// ExtrZ. Отличие от wrap_extrapolation ровно одно: состояние стадий,
+// начальная точка и накопитель — ucmplx, ядро базы работает прямо на Z[] без
+// Re, а Re берётся один раз после суммы. Тогда стадия из n подшагов —
+// это exp(n * log Psi_{h/n}) целиком, её разложение по 1/n идёт с
+// вещественными членами только при чётных степенях, и симметричные веса
+// гасят их через одну (см. ExtrapolationSpec в codegen.hpp).
+std::string wrap_extrapolation_complex(const std::string& core_body, int N,
+                                       const std::vector<int>& n, int p,
+                                       const std::string& base_name) {
+    const int K = (int)n.size();
+    if (K < 1) throw std::runtime_error("extrapolation needs at least one stage");
+    if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
+
+    const bool symmetric = extrapolation_symmetric(true, false);
+    const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
+    std::vector<ExRat> arat;
+    const bool alpha_exact = extrapolation_weights_rational(n, p, symmetric, arat);
+    long long cost = 0;
+    for (int k = 0; k < K; ++k) cost += n[k];
+
+    const std::string Ns = std::to_string(N);
+    std::ostringstream o;
+
+    o << "    // --- " << make_extrapolation_name(base_name, n, {}, true) << " ---\n";
+    o << "    // base: order " << p << ", complex state across substeps, Re only on output\n";
+    o << "    //   ->  extrapolated order " << extrapolation_order(K, p, symmetric) << "\n";
+    o << "    // " << K << " stages, " << cost << " base steps per macro-step\n";
+    for (int k = 0; k < K; ++k) {
+        o << "    //   n[" << k << "] = " << n[k] << "   alpha = " << fmtnum(alpha[k]);
+        if (alpha_exact) o << " = " << arat[(size_t)k].n << "/" << arat[(size_t)k].d;
+        o << "\n";
+    }
+
+    // Z — то самое имя, над которым работает ядро базы.
+    o << "    ucmplx Z[" << Ns << "], Z0_ex[" << Ns << "], AC_ex[" << Ns << "];\n";
+    o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) {\n"
+      << "        Z0_ex[i_ex] = ucmplx(X[i_ex], 0.0); Z[i_ex] = Z0_ex[i_ex];"
+      << " AC_ex[i_ex] = ucmplx(0.0, 0.0);\n    }\n\n";
+
+    o << "    auto step_ex = [&](const numb h) {\n";
+    {
+        size_t pos = 0;
+        while (pos < core_body.size()) {
+            size_t eol = core_body.find('\n', pos);
+            if (eol == std::string::npos) eol = core_body.size();
+            const std::string line = core_body.substr(pos, eol - pos);
+            if (!line.empty()) o << "    " << line;
+            o << "\n";
+            pos = eol + 1;
+        }
+    }
+    o << "    };\n\n";
+
+    for (int k = 0; k < K; ++k) {
+        o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s")
+          << " of h/" << n[k] << ", no Re in between\n";
+        o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h / (numb)"
+          << fmtnum((double)n[k]) << ");\n";
+        o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] = AC_ex[i_ex] + "
+          << (alpha_exact ? ex_rat_expr(arat[(size_t)k])
+                          : ("(numb)(" + fmtnum(alpha[k]) + ")"))
+          << " * Z[i_ex];";
+        if (k + 1 < K) o << " Z[i_ex] = Z0_ex[i_ex];";
+        o << " }\n";
+    }
+
+    o << "\n    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) X[i_ex] = AC_ex[i_ex].re;\n";
+    return o.str();
+}
+
 // --- Композиция -------------------------------------------------------------
 
 static const char* const kCompPrefix = "Comp(";
@@ -2313,7 +2509,7 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
     if (spec.base.empty()) return fail("empty base scheme name");
     // Обёртка над обёрткой отрезает рекурсию в резолвере, как и у Extr.
     if (spec.base.compare(0, pref.size(), pref) == 0 ||
-        spec.base.compare(0, 5, "Extr(") == 0)
+        spec.base.compare(0, 5, "Extr(") == 0 || spec.base.compare(0, 6, "ExtrZ(") == 0)
         return fail("base scheme cannot itself be a wrapper");
 
     std::vector<std::string> toks;
@@ -2600,7 +2796,8 @@ std::string wrapper_display_name(const std::string& name, int digits) {
 
 std::string wrapper_canonical_name(const std::string& name) {
     ExtrapolationSpec esp;
-    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n);
+    if (parse_extrapolation_name(name, &esp))
+        return make_extrapolation_name(esp.base, esp.n, {}, esp.re_at_output);
     CompositionSpec csp;
     if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas);
     return name;
@@ -2609,7 +2806,8 @@ std::string wrapper_canonical_name(const std::string& name) {
 std::string wrapper_relabel(const std::string& name, const std::string& label) {
     const std::string lb = wrapper_sanitize_label(label);
     ExtrapolationSpec esp;
-    if (parse_extrapolation_name(name, &esp)) return make_extrapolation_name(esp.base, esp.n, lb);
+    if (parse_extrapolation_name(name, &esp))
+        return make_extrapolation_name(esp.base, esp.n, lb, esp.re_at_output);
     CompositionSpec csp;
     if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas, lb);
     return name;

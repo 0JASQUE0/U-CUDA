@@ -373,6 +373,18 @@ public:
     // быть не может — палиндром из двух стадий даёт лишь порядок 2.
     bool scheme_ccd4s3 = false;
     bool scheme_ccd4s4 = false;
+    // CCD4 (s-split)_{0-1} / _{1-0}: два прохода CD с вещественными шагами h/2
+    // и комплексным разбиением s1 = (1-i)/3, s2 = 1 - s1 — порядок 4. {0-1}:
+    // в проходе явная половина первой, {1-0}: неявная. a[0] не читают.
+    bool scheme_ccd4ss01 = false;
+    bool scheme_ccd4ss10 = false;
+    // Варианты {1-0} (неявная половина первой) для CD, Complex CD, Complex CD4,
+    // CCD4 (o4s3), CCD4 (o4s4); порядок и требование s = 0.5 те же.
+    bool scheme_cd10 = false;
+    bool scheme_ccd10 = false;
+    bool scheme_ccd4_10 = false;
+    bool scheme_ccd4s3_10 = false;
+    bool scheme_ccd4s4_10 = false;
     // Неявные схемы: Ньютон по символьному якобиану, решается ВСЯ связанная
     // система (в отличие от CD, диагонально-неявного). Отсюда A-устойчивость.
     bool scheme_ieuler = false;
@@ -431,6 +443,9 @@ public:
     // Имя собираемой обёртки. Пустое — имени не давали, и в списке схема будет
     // называться своим описанием, как до появления этого поля.
     std::string extr_builder_label;
+    // ExtrZ: Re только на выходе экстраполяции (база — встроенная комплексная
+    // CD-схема). См. ExtrapolationSpec::re_at_output.
+    bool        extr_builder_re_output = false;
 
     // Composition builder. Coefficients are TEXT, not numbers: a stage may be
     // a parameter name or an expression over parameters ("g1", "1-2*g1"), and
@@ -1018,14 +1033,21 @@ public:
                 { scheme_midpoint, "Explicit Midpoint", Scheme::ExplicitMidpoint },
                 { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
                 { scheme_cd,       "CD",                Scheme::CD },
+                { scheme_cd10, "CD_{1-0}", Scheme::CD10 },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
+                { scheme_ccd10, "Complex CD_{1-0}", Scheme::ComplexCD10 },
                 { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },
                 { scheme_semp,     "SEMP",              Scheme::SEMP },
                 { scheme_simp,     "SIMP",              Scheme::SIMP },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
                 { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
+                { scheme_ccd4_10, "Complex CD4_{1-0}", Scheme::ComplexCD4_10 },
                 { scheme_ccd4s3,   "CCD4 (o4s3)",       Scheme::ComplexCD4S3 },
+                { scheme_ccd4s3_10, "CCD4 (o4s3)_{1-0}", Scheme::ComplexCD4S3_10 },
                 { scheme_ccd4s4,   "CCD4 (o4s4)",       Scheme::ComplexCD4S4 },
+                { scheme_ccd4s4_10, "CCD4 (o4s4)_{1-0}", Scheme::ComplexCD4S4_10 },
+                { scheme_ccd4ss01, "CCD4 (s-split)_{0-1}", Scheme::ComplexCD4SS01 },
+                { scheme_ccd4ss10, "CCD4 (s-split)_{1-0}", Scheme::ComplexCD4SS10 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
             };
             bool any = false;

@@ -12,6 +12,13 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
     if (s == "CCD4 (o4s3)")       return IntScheme::ComplexCD4S3;
     if (s == "CCD4 (o4s4)")       return IntScheme::ComplexCD4S4;
+    if (s == "CCD4 (s-split)_{0-1}") return IntScheme::ComplexCD4SS01;
+    if (s == "CCD4 (s-split)_{1-0}") return IntScheme::ComplexCD4SS10;
+    if (s == "CD_{1-0}")          return IntScheme::CD10;
+    if (s == "Complex CD_{1-0}")  return IntScheme::ComplexCD10;
+    if (s == "Complex CD4_{1-0}") return IntScheme::ComplexCD4_10;
+    if (s == "CCD4 (o4s3)_{1-0}") return IntScheme::ComplexCD4S3_10;
+    if (s == "CCD4 (o4s4)_{1-0}") return IntScheme::ComplexCD4S4_10;
     if (s == "Implicit Euler")    return IntScheme::ImplicitEuler;
     if (s == "Implicit Midpoint") return IntScheme::ImplicitMidpoint;
     if (s == "SEMP")              return IntScheme::SEMP;
@@ -159,12 +166,23 @@ void solve_diag_implicit_cx(const SystemEvaluator& ev, ucmplx* Z, const double* 
 // Полу-шаг 1 (явный, прямой порядок): для каждой i обновляем X[i] += h1*f_i(X).
 // Полу-шаг 2 (неявный, обратный порядок): для каждой i (от n-1 к 0) решаем
 // уравнение относительно X[i] — см. solve_diag_implicit.
+// flip -- вариант CD_{1-0}: сначала неявный полушаг h1 (обратный порядок),
+// затем явный h2 (прямой).
 void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
-             int n, double* k1) {
+             int n, double* k1, bool flip = false) {
     const double s = a[0];
     const double h1 = h * s;
     const double h2 = h * (1.0 - s);
 
+    if (flip) {
+        for (int i = n - 1; i >= 0; --i)
+            solve_diag_implicit(ev, X, a, h1, i, k1);
+        for (int i = 0; i < n; ++i) {
+            ev.eval(X, a, k1);
+            X[i] += h2 * k1[i];
+        }
+        return;
+    }
     // Φ_h1: явный полушаг, прямой порядок (как Euler-Cromer).
     for (int i = 0; i < n; ++i) {
         ev.eval(X, a, k1);
@@ -220,12 +238,31 @@ static void complex_cd_pass(const SystemEvaluator& ev, const double* a, int n,
         solve_diag_implicit_cx(ev, Z, a, h2, i, k1);
 }
 
+// Проход CD с переставленными половинами: сначала неявный полушаг h1 (обратный
+// порядок), затем явный h2 (прямой). Варианты {1-0}.
+static void complex_cd_pass_implicit_first(const SystemEvaluator& ev, const double* a, int n,
+                                           ucmplx* Z, ucmplx* k1, ucmplx h1, ucmplx h2) {
+    for (int i = n - 1; i >= 0; --i)
+        solve_diag_implicit_cx(ev, Z, a, h1, i, k1);
+    for (int i = 0; i < n; ++i) {
+        ev.eval_complex(Z, a, k1);
+        Z[i] = Z[i] + h2 * k1[i];
+    }
+}
+
+// Проход {0-1} или {1-0} -- по флагу.
+static void complex_cd_pass_any(const SystemEvaluator& ev, const double* a, int n,
+                                ucmplx* Z, ucmplx* k1, ucmplx h1, ucmplx h2, bool flip) {
+    if (flip) complex_cd_pass_implicit_first(ev, a, n, Z, k1, h1, h2);
+    else      complex_cd_pass(ev, a, n, Z, k1, h1, h2);
+}
+
 void step_complex_cd(const SystemEvaluator& ev, const double* a, double h, int n,
-                     double* X, ucmplx* Z, ucmplx* k1) {
+                     double* X, ucmplx* Z, ucmplx* k1, bool flip = false) {
     const double s = a[0];
     for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
-    complex_cd_pass(ev, a, n, Z, k1,
-                    ucmplx(s * h, h * CCD_IMAG), ucmplx((1.0 - s) * h, -h * CCD_IMAG));
+    complex_cd_pass_any(ev, a, n, Z, k1,
+                    ucmplx(s * h, h * CCD_IMAG), ucmplx((1.0 - s) * h, -h * CCD_IMAG), flip);
     for (int i = 0; i < n; ++i) X[i] = Z[i].re;
 }
 
@@ -239,13 +276,13 @@ void step_complex_cd(const SystemEvaluator& ev, const double* a, double h, int n
 // Re берётся ОДИН раз в конце: мнимая часть переносится между проходами (её
 // вклад O(h³), порядка это не меняет, но и обнулять её посреди шага незачем).
 void step_complex_cd4(const SystemEvaluator& ev, const double* a, double h, int n,
-                      double* X, ucmplx* Z, ucmplx* k1) {
+                      double* X, ucmplx* Z, ucmplx* k1, bool flip = false) {
     const double s = a[0];
     const ucmplx g (0.5 * h,  h * CCD_IMAG);
     const ucmplx gc(0.5 * h, -h * CCD_IMAG);
     for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
-    complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
+    complex_cd_pass_any(ev, a, n, Z, k1, g  * s, g  * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, gc * s, gc * (1.0 - s), flip);
     for (int i = 0; i < n; ++i) X[i] = Z[i].re;
 }
 
@@ -257,15 +294,15 @@ void step_complex_cd4(const SystemEvaluator& ev, const double* a, double h, int 
 // коэффициент отрицателен, здесь Re положительна у всех трёх.
 // Зеркало CdKind::Cx4s3 в codegen.cpp, требует s = a[0] = 1/2.
 void step_complex_cd4_s3(const SystemEvaluator& ev, const double* a, double h, int n,
-                         double* X, ucmplx* Z, ucmplx* k1) {
+                         double* X, ucmplx* Z, ucmplx* k1, bool flip = false) {
     const double s = a[0];
     const ucmplx ga(CCD3_RE * h, CCD3_IM * h);
     // Через alpha, а не литералом: сумма подшагов тогда равна h точно.
     const ucmplx gb((1.0 - 2.0 * CCD3_RE) * h, -2.0 * CCD3_IM * h);
     for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
-    complex_cd_pass(ev, a, n, Z, k1, ga * s, ga * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, gb * s, gb * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, ga * s, ga * (1.0 - s));
+    complex_cd_pass_any(ev, a, n, Z, k1, ga * s, ga * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, gb * s, gb * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, ga * s, ga * (1.0 - s), flip);
     for (int i = 0; i < n; ++i) X[i] = Z[i].re;
 }
 
@@ -274,15 +311,35 @@ void step_complex_cd4_s3(const SystemEvaluator& ev, const double* a, double h, i
 // Решение условий для четырёх палиндромных стадий единственно с точностью до
 // сопряжения и выходит ровно этим. Зеркало CdKind::Cx4s4 в codegen.cpp.
 void step_complex_cd4_s4(const SystemEvaluator& ev, const double* a, double h, int n,
-                         double* X, ucmplx* Z, ucmplx* k1) {
+                         double* X, ucmplx* Z, ucmplx* k1, bool flip = false) {
     const double s = a[0];
     const ucmplx g (0.25 * h,  0.5 * h * CCD_IMAG);
     const ucmplx gc(0.25 * h, -0.5 * h * CCD_IMAG);
     for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
-    complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, gc * s, gc * (1.0 - s));
-    complex_cd_pass(ev, a, n, Z, k1, g  * s, g  * (1.0 - s));
+    complex_cd_pass_any(ev, a, n, Z, k1, g  * s, g  * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, gc * s, gc * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, gc * s, gc * (1.0 - s), flip);
+    complex_cd_pass_any(ev, a, n, Z, k1, g  * s, g  * (1.0 - s), flip);
+    for (int i = 0; i < n; ++i) X[i] = Z[i].re;
+}
+
+// CCD4 (s-split)_{0-1} / _{1-0}: двойственная к Complex CD4 — внешние шаги
+// вещественные (h/2 и h/2), комплексно разбиение внутри CD: s1 = (1-i)/3,
+// s2 = 1 - s1. Полушаги (1-i)h/6, (2+i)h/6 | (2+i)h/6, (1-i)h/6, Re один раз в
+// конце — порядок 4. implicit_first — вариант {1-0}. a[0] не читает.
+// Зеркало CdKind::Cx4ss01 / Cx4ss10 в codegen.cpp.
+void step_complex_cd4_ss(const SystemEvaluator& ev, const double* a, double h, int n,
+                         double* X, ucmplx* Z, ucmplx* k1, bool implicit_first) {
+    const ucmplx p(h / 6.0, -h / 6.0);   // (1-i)h/6
+    const ucmplx q(h / 3.0,  h / 6.0);   // (2+i)h/6
+    for (int i = 0; i < n; ++i) Z[i] = ucmplx(X[i], 0.0);
+    if (implicit_first) {
+        complex_cd_pass_implicit_first(ev, a, n, Z, k1, p, q);
+        complex_cd_pass_implicit_first(ev, a, n, Z, k1, q, p);
+    } else {
+        complex_cd_pass(ev, a, n, Z, k1, p, q);
+        complex_cd_pass(ev, a, n, Z, k1, q, p);
+    }
     for (int i = 0; i < n; ++i) X[i] = Z[i].re;
 }
 
@@ -562,6 +619,9 @@ bool computePhasePortraitCPU(
     std::vector<ucmplx> Zc, Kc;
     const bool cx_state = (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4
                            || scheme == IntScheme::ComplexCD4S3 || scheme == IntScheme::ComplexCD4S4
+                           || scheme == IntScheme::ComplexCD4SS01 || scheme == IntScheme::ComplexCD4SS10
+                           || scheme == IntScheme::ComplexCD10 || scheme == IntScheme::ComplexCD4_10
+                           || scheme == IntScheme::ComplexCD4S3_10 || scheme == IntScheme::ComplexCD4S4_10
                            || scheme == IntScheme::ComplexIEuler);
     if (cx_state) { Zc.resize(n); Kc.resize(n); }
     // Newton workspace, allocated only for the implicit schemes.
@@ -592,6 +652,13 @@ bool computePhasePortraitCPU(
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4S3:     step_complex_cd4_s3(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4S4:     step_complex_cd4_s4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
+        case IntScheme::ComplexCD4SS01:   step_complex_cd4_ss(ev, a, h, n, X.data(), Zc.data(), Kc.data(), false); break;
+        case IntScheme::ComplexCD4SS10:   step_complex_cd4_ss(ev, a, h, n, X.data(), Zc.data(), Kc.data(), true); break;
+        case IntScheme::CD10:             step_cd(ev, X.data(), a, h, n, k1.data(), true); break;
+        case IntScheme::ComplexCD10:      step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data(), true); break;
+        case IntScheme::ComplexCD4_10:    step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data(), true); break;
+        case IntScheme::ComplexCD4S3_10:  step_complex_cd4_s3(ev, a, h, n, X.data(), Zc.data(), Kc.data(), true); break;
+        case IntScheme::ComplexCD4S4_10:  step_complex_cd4_s4(ev, a, h, n, X.data(), Zc.data(), Kc.data(), true); break;
         case IntScheme::ImplicitEuler:    step_implicit_euler(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         case IntScheme::ImplicitMidpoint: step_implicit_midpoint(ev, X.data(), a, h, n, Xn.data(), Fv.data(), Am.data(), piv.data(), k1.data()); break;
         case IntScheme::SEMP:             step_semi_midpoint(ev, X.data(), a, h, n, /*implicit_stage*/ false, k1.data(), tmp.data()); break;

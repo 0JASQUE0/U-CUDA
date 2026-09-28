@@ -58,6 +58,22 @@ struct System {
 //   o4s4: (gamma/2, conj/2, conj/2, gamma/2) — Complex CD4, симметризованная
 //         композицией с собственной сопряжённой на половинном шаге.
 // Подробности, замеры и цена — у CdKind в codegen.cpp.
+// ComplexCD4SS01 — "CCD4 (s-split)_{0-1}", двойственная к Complex CD4: внешние
+// шаги вещественные (h/2 и h/2), а комплексно само разбиение внутри CD —
+// s1 = (1 - i)/3, s2 = 1 - s1 = (2 + i)/3. Полушаги (1-i)h/6, (2+i)h/6 |
+// (2+i)h/6, (1-i)h/6, Re один раз в конце, глобальный порядок 4. Коэффициенты
+// фиксированы, a[0] НЕ читает. Индекс {0-1}: в проходе сначала явная (0),
+// затем неявная (1) половина, как во всех CD-схемах проекта.
+// ComplexCD4SS10 — "CCD4 (s-split)_{1-0}": те же полушаги, но в каждом
+// проходе первой идёт неявная половина. Тоже порядок 4.
+// Подробности — у CdKind::Cx4ss01 / Cx4ss10 в codegen.cpp.
+// CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10 —
+// "CD_{1-0}", "Complex CD_{1-0}", "Complex CD4_{1-0}", "CCD4 (o4s3)_{1-0}",
+// "CCD4 (o4s4)_{1-0}": те же схемы, но в каждом проходе CD первой идёт
+// неявная половина (шаг h1 = s*h, обратный порядок), затем явная (h2, прямой).
+// Это та же композиция над сопряжённым базовым методом, порядки и симметрия
+// те же, что у исходных (исходные — это {0-1}, их имена не менялись, чтобы не
+// ломать сохранённые библиотеки и сессии).
 // ImplicitEuler / ImplicitMidpoint — the only A-stable methods here, and the only
 // ones that solve the FULL coupled system per step (CD is diagonally implicit: it
 // solves each equation for its own variable and never sees the cross terms).
@@ -88,7 +104,8 @@ struct System {
 // Map is not an integration scheme but the right-hand side of a discrete map
 // x_{n+1} = f(x_n) itself. The only emitter that never uses h.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
-                    ComplexCD4S3, ComplexCD4S4,
+                    ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
+                    CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
@@ -175,18 +192,48 @@ constexpr int kExtrMinStages   = 2;
 constexpr int kExtrMaxStages   = 10;
 constexpr int kExtrMaxSubsteps = 1024;
 
+// ExtrZ — та же экстраполяция, но Re берётся ОДИН раз, на выходе взвешенной
+// суммы: стадии идут в комплексной арифметике, и мнимая часть переносится
+// между подшагами. Имя "ExtrZ(<база>|n1,n2,...)". База — только встроенная
+// комплексная CD-схема (scheme_has_complex_core): у кастомной КРС ядро без
+// перехода X -> Z и без Re не выделить.
+// Паспорт в этом режиме: порядок базы p и ВСЕГДА symmetric = true. У любой
+// комплексной CD-базы член n^-j разложения стадии по подшагам вещественен
+// ровно при чётном j (нечётные несут нечётное число мнимых множителей), а
+// мнимые снимает Re на выходе. Отсюда p + 2(K-1), замерено в 40 знаках на
+// Лоренце: ExtrZ(1,2) / ExtrZ(1,2,3) дают 4 / 6 у Complex CD, 6 / 8 у
+// Complex CD4 и у CCD4 (s-split)_{0-1}. Обычный Extr с Re в каждом шаге базы у
+// тех же баз даёт 3 / 3, 6 / 7 и 5 / 5.
 struct ExtrapolationSpec {
     std::string      base;   // имя опорной схемы (built-in или кастомная КРС)
     std::vector<int> n;      // подшаги на стадию; строго возрастает
     std::string      label;  // имя от пользователя; пусто = имени не давали
+    bool re_at_output = false;   // ExtrZ: Re только на выходе, см. выше
 };
 
 // Собирает имя обёртки. Обратная к parse_extrapolation_name. Непустая label
-// добавляет метку первым полем: "Extr(<метка>|<база>|n1,n2,...)".
+// добавляет метку первым полем: "Extr(<метка>|<база>|n1,n2,...)";
+// re_at_output меняет префикс на "ExtrZ(".
 std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
-                                    const std::string& label = {});
+                                    const std::string& label = {},
+                                    bool re_at_output = false);
 
-// Разбирает "Extr(RK4|1,2,4)". false, если имя не экстраполяционное ИЛИ
+// Симметричность базы, по которой считаются веса и порядок обёртки. Одна
+// функция на резолвер КРС и на UI — иначе показанные веса разъехались бы с
+// теми, что ушли в ядро.
+inline bool extrapolation_symmetric(bool re_at_output, bool base_symmetric) {
+    return re_at_output || base_symmetric;
+}
+
+// true — у встроенной схемы есть комплексное ядро для ExtrZ.
+bool scheme_has_complex_core(const std::string& name);
+
+// Ядро комплексной схемы: тот же шаг, но над ucmplx Z[N], объявленным СНАРУЖИ,
+// без перехода X -> Z на входе и без Re на выходе. std::runtime_error для схемы
+// без такого ядра.
+std::string codegen_scheme_complex_core(const System& s, Scheme sch);
+
+// Разбирает "Extr(RK4|1,2,4)" и "ExtrZ(...)". false, если имя не экстраполяционное ИЛИ
 // нарушены ограничения (число стадий, монотонность n, диапазон). err, если
 // передан, получает причину — она же показывается в конструкторе схемы.
 // Вложенность запрещена: база не может сама быть "Extr(...)".
@@ -221,6 +268,13 @@ bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetri
 std::string wrap_extrapolation(const std::string& base_body, int N,
                                const std::vector<int>& n, int p, bool symmetric,
                                const std::string& base_name);
+
+// То же для ExtrZ: core_body — codegen_scheme_complex_core базы. Стадии,
+// начальное состояние и накопитель — ucmplx, Re берётся после суммы.
+// Веса — симметричные (extrapolation_symmetric).
+std::string wrap_extrapolation_complex(const std::string& core_body, int N,
+                                       const std::vector<int>& n, int p,
+                                       const std::string& base_name);
 
 // --- Composition of a base scheme with itself -------------------------------
 //

@@ -195,6 +195,13 @@ SystemRecord AppModel::to_record() const {
     r.scheme_ccd4 = scheme_ccd4;
     r.scheme_ccd4s3 = scheme_ccd4s3;
     r.scheme_ccd4s4 = scheme_ccd4s4;
+    r.scheme_ccd4ss01 = scheme_ccd4ss01;
+    r.scheme_ccd4ss10 = scheme_ccd4ss10;
+    r.scheme_cd10 = scheme_cd10;
+    r.scheme_ccd10 = scheme_ccd10;
+    r.scheme_ccd4_10 = scheme_ccd4_10;
+    r.scheme_ccd4s3_10 = scheme_ccd4s3_10;
+    r.scheme_ccd4s4_10 = scheme_ccd4s4_10;
     r.scheme_ieuler = scheme_ieuler;
     r.scheme_imidpoint = scheme_imidpoint;
     r.scheme_semp = scheme_semp;
@@ -241,6 +248,13 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_ccd4 = r.scheme_ccd4;
     scheme_ccd4s3 = r.scheme_ccd4s3;
     scheme_ccd4s4 = r.scheme_ccd4s4;
+    scheme_ccd4ss01 = r.scheme_ccd4ss01;
+    scheme_ccd4ss10 = r.scheme_ccd4ss10;
+    scheme_cd10 = r.scheme_cd10;
+    scheme_ccd10 = r.scheme_ccd10;
+    scheme_ccd4_10 = r.scheme_ccd4_10;
+    scheme_ccd4s3_10 = r.scheme_ccd4s3_10;
+    scheme_ccd4s4_10 = r.scheme_ccd4s4_10;
     scheme_ieuler = r.scheme_ieuler;
     scheme_imidpoint = r.scheme_imidpoint;
     scheme_semp = r.scheme_semp;
@@ -265,7 +279,9 @@ void AppModel::from_record(const SystemRecord& r) {
     // A map has no scheme_* flag set — its single body is always generated.
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
-        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4
+        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
+        || scheme_ccd4ss10
+        || scheme_cd10 || scheme_ccd10 || scheme_ccd4_10 || scheme_ccd4s3_10 || scheme_ccd4s4_10
         || scheme_ieuler || scheme_imidpoint
         || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler)
         generate();
@@ -287,7 +303,9 @@ void AppModel::clear() {
     mode = InputMode::Image;
     is_map = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
-        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4
+        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
+        = scheme_ccd4ss10
+        = scheme_cd10 = scheme_ccd10 = scheme_ccd4_10 = scheme_ccd4s3_10 = scheme_ccd4s4_10
         = scheme_ieuler = scheme_imidpoint
         = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler = false;
     symmetry_s = "0.5";

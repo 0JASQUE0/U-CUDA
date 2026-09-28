@@ -61,6 +61,14 @@ struct SystemRecord {
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
     bool scheme_ccd4s3   = false;   // CCD4 (o4s3) — симметричная тройка (a, 1-2a, a)
     bool scheme_ccd4s4   = false;   // CCD4 (o4s4) — симметричная четвёрка (g/2, gc/2, gc/2, g/2)
+    bool scheme_ccd4ss01 = false;   // CCD4 (s-split)_{0-1} — два CD по h/2, s1 = (1-i)/3, s2 = 1 - s1
+    bool scheme_ccd4ss10 = false;   // CCD4 (s-split)_{1-0} — то же, неявная половина первой
+    // Варианты {1-0} схем на CD: в каждом проходе неявная половина первой.
+    bool scheme_cd10 = false;   // CD_{1-0}
+    bool scheme_ccd10 = false;   // Complex CD_{1-0}
+    bool scheme_ccd4_10 = false;   // Complex CD4_{1-0}
+    bool scheme_ccd4s3_10 = false;   // CCD4 (o4s3)_{1-0}
+    bool scheme_ccd4s4_10 = false;   // CCD4 (o4s4)_{1-0}
     bool scheme_ieuler   = false;   // Implicit Euler (Ньютон по символьному якобиану)
     bool scheme_imidpoint = false;  // Implicit Midpoint (то же, стадия Y = (X + X_next)/2)
     bool scheme_semp     = false;   // SEMP (средняя точка, явная стадия на h1 = s*h)
