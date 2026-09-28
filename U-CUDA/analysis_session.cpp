@@ -171,14 +171,21 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_midpoint) out.emplace_back("Explicit Midpoint");
     if (r.scheme_imidpoint) out.emplace_back("Implicit Midpoint");
     if (r.scheme_cd)       out.emplace_back("CD");
+    if (r.scheme_cd10) out.emplace_back("CD_{1-0}");
     if (r.scheme_ccd)      out.emplace_back("Complex CD");
+    if (r.scheme_ccd10) out.emplace_back("Complex CD_{1-0}");
     if (r.scheme_cieuler)  out.emplace_back("Complex Implicit Euler");
     if (r.scheme_semp)     out.emplace_back("SEMP");
     if (r.scheme_simp)     out.emplace_back("SIMP");
     if (r.scheme_rk4)      out.emplace_back("RK4");
     if (r.scheme_ccd4)     out.emplace_back("Complex CD4");
+    if (r.scheme_ccd4_10) out.emplace_back("Complex CD4_{1-0}");
     if (r.scheme_ccd4s3)   out.emplace_back("CCD4 (o4s3)");
+    if (r.scheme_ccd4s3_10) out.emplace_back("CCD4 (o4s3)_{1-0}");
     if (r.scheme_ccd4s4)   out.emplace_back("CCD4 (o4s4)");
+    if (r.scheme_ccd4s4_10) out.emplace_back("CCD4 (o4s4)_{1-0}");
+    if (r.scheme_ccd4ss01) out.emplace_back("CCD4 (s-split)_{0-1}");
+    if (r.scheme_ccd4ss10) out.emplace_back("CCD4 (s-split)_{1-0}");
     if (r.scheme_dopri78)  out.emplace_back("DOPRI78");
     return out;
 }
@@ -828,6 +835,13 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "Complex CD4")       return Scheme::ComplexCD4;
     if (s == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
     if (s == "CCD4 (o4s4)")       return Scheme::ComplexCD4S4;
+    if (s == "CCD4 (s-split)_{0-1}") return Scheme::ComplexCD4SS01;
+    if (s == "CCD4 (s-split)_{1-0}") return Scheme::ComplexCD4SS10;
+    if (s == "CD_{1-0}") return Scheme::CD10;
+    if (s == "Complex CD_{1-0}") return Scheme::ComplexCD10;
+    if (s == "Complex CD4_{1-0}") return Scheme::ComplexCD4_10;
+    if (s == "CCD4 (o4s3)_{1-0}") return Scheme::ComplexCD4S3_10;
+    if (s == "CCD4 (o4s4)_{1-0}") return Scheme::ComplexCD4S4_10;
     if (s == "Implicit Euler")    return Scheme::ImplicitEuler;
     if (s == "Implicit Midpoint") return Scheme::ImplicitMidpoint;
     if (s == "SEMP")              return Scheme::SEMP;
@@ -906,6 +920,21 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     };
 
     ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme, &spec) && spec.re_at_output) {
+        // ExtrZ: нужно комплексное ядро базы, а оно есть только у встроенных
+        // комплексных CD-схем. Кастомная КРС с тем же именем перекрыла бы
+        // встроенную (см. выше) — её ядро не выделить, поэтому отказ.
+        for (const auto& cs : custom_schemes)
+            if (cs.name == spec.base) return {};
+        int p = 1; bool sym = false;
+        if (!scheme_has_complex_core(spec.base) || !builtin_scheme_traits(spec.base, &p, &sym))
+            return {};
+        try {
+            const std::string core = codegen_scheme_complex_core(sys, scheme_from_string(spec.base));
+            return wrap_extrapolation_complex(core, (int)sys.vars.size(), spec.n, p, spec.base);
+        }
+        catch (...) { return {}; }
+    }
     if (parse_extrapolation_name(scheme, &spec)) {
         int  p = 1; bool sym = false; std::string base_body;
         if (!resolve_base(spec.base, base_body, p, sym)) return {};

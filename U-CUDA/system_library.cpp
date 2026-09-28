@@ -150,6 +150,13 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
     kvbool(o, "scheme_ccd4s3", r.scheme_ccd4s3);
     kvbool(o, "scheme_ccd4s4", r.scheme_ccd4s4);
+    kvbool(o, "scheme_ccd4ss01", r.scheme_ccd4ss01);
+    kvbool(o, "scheme_ccd4ss10", r.scheme_ccd4ss10);
+    kvbool(o, "scheme_cd10", r.scheme_cd10);
+    kvbool(o, "scheme_ccd10", r.scheme_ccd10);
+    kvbool(o, "scheme_ccd4_10", r.scheme_ccd4_10);
+    kvbool(o, "scheme_ccd4s3_10", r.scheme_ccd4s3_10);
+    kvbool(o, "scheme_ccd4s4_10", r.scheme_ccd4s4_10);
     kvbool(o, "scheme_ieuler", r.scheme_ieuler);
     kvbool(o, "scheme_imidpoint", r.scheme_imidpoint);
     kvbool(o, "scheme_semp", r.scheme_semp);
@@ -212,6 +219,13 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
         else if (key == "scheme_ccd4s3") r.scheme_ccd4s3 = p.parse_bool();
         else if (key == "scheme_ccd4s4") r.scheme_ccd4s4 = p.parse_bool();
+        else if (key == "scheme_ccd4ss01") r.scheme_ccd4ss01 = p.parse_bool();
+        else if (key == "scheme_ccd4ss10") r.scheme_ccd4ss10 = p.parse_bool();
+        else if (key == "scheme_cd10") r.scheme_cd10 = p.parse_bool();
+        else if (key == "scheme_ccd10") r.scheme_ccd10 = p.parse_bool();
+        else if (key == "scheme_ccd4_10") r.scheme_ccd4_10 = p.parse_bool();
+        else if (key == "scheme_ccd4s3_10") r.scheme_ccd4s3_10 = p.parse_bool();
+        else if (key == "scheme_ccd4s4_10") r.scheme_ccd4s4_10 = p.parse_bool();
         else if (key == "scheme_ieuler") r.scheme_ieuler = p.parse_bool();
         else if (key == "scheme_imidpoint") r.scheme_imidpoint = p.parse_bool();
         else if (key == "scheme_semp") r.scheme_semp = p.parse_bool();

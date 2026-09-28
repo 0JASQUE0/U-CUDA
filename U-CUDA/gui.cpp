@@ -326,6 +326,9 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
         return scheme_uses_symmetry(cspec.base, custom_schemes);
     return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
         || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
+        || scheme_name == "CD_{1-0}" || scheme_name == "Complex CD_{1-0}"
+        || scheme_name == "Complex CD4_{1-0}" || scheme_name == "CCD4 (o4s3)_{1-0}"
+        || scheme_name == "CCD4 (o4s4)_{1-0}"
         || scheme_name == "Complex Implicit Euler"
         || scheme_name == "SEMP" || scheme_name == "SIMP"
         || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
@@ -761,12 +764,26 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Order 2 (measured 2.00 on Lorenz), A-stable, symmetric\n"
       "and symplectic. Same Newton solver as Implicit Euler." },
     { "CD",                       2, &AppModel::scheme_cd, nullptr },
+    { "CD_{1-0}",                   2, &AppModel::scheme_cd10,
+      "Variant {1-0} of CD: each CD pass runs the IMPLICIT\n"
+      "half first (h1 = s*h, reverse order), then the explicit one\n"
+      "(h2, forward order). The same composition over the adjoint\n"
+      "basic method: order 2 and symmetry as in CD.\n"
+      "Measured: Lorenz 1.03x, Rossler 1.6x larger error than CD.\n"
+      "The plain name is the {0-1} variant (explicit half first)." },
     { "Complex CD",               2, &AppModel::scheme_ccd,
       "CD with complex half-steps:\n"
       "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
       "s = a[0] is the same symmetry coefficient as in CD.\n"
       "The step is evaluated in complex arithmetic; only Re is kept.\n"
       "At s = 0.5 (default) the half-steps are conjugate and order is 2." },
+    { "Complex CD_{1-0}",           2, &AppModel::scheme_ccd10,
+      "Variant {1-0} of Complex CD: each CD pass runs the IMPLICIT\n"
+      "half first (h1 = s*h, reverse order), then the explicit one\n"
+      "(h2, forward order). The same composition over the adjoint\n"
+      "basic method: order 2 and symmetry as in Complex CD.\n"
+      "Error about the same as Complex CD.\n"
+      "The plain name is the {0-1} variant (explicit half first)." },
     { "Complex Implicit Euler",   2, &AppModel::scheme_cieuler,
       "Composition of TWO implicit Euler steps with conjugate\n"
       "complex steps: tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2),\n"
@@ -799,6 +816,13 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Order 4 (measured 4.00 on Lorenz and Rossler).\n"
       "Requires s = a[0] = 0.5: for other s the inner CD is\n"
       "asymmetric and the order drops to first." },
+    { "Complex CD4_{1-0}",          4, &AppModel::scheme_ccd4_10,
+      "Variant {1-0} of Complex CD4: each CD pass runs the IMPLICIT\n"
+      "half first (h1 = s*h, reverse order), then the explicit one\n"
+      "(h2, forward order). The same composition over the adjoint\n"
+      "basic method: order 4 and symmetry as in Complex CD4.\n"
+      "Measured: 4.0x smaller error on Lorenz, 1.5x on Rossler.\n"
+      "The plain name is the {0-1} variant (explicit half first)." },
     { "CCD4 (o4s3)",              4, &AppModel::scheme_ccd4s3,
       "SYMMETRIC order-4 composition of THREE symmetric CDs:\n"
       "steps (alpha, 1-2*alpha, alpha)*h, palindromic, hence\n"
@@ -818,6 +842,13 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Requires s = a[0] = 0.5, like every CD-family scheme.\n"
       "Costs 3 CD passes against 2; at equal total work the error\n"
       "matches Complex CD4 to within 4%." },
+    { "CCD4 (o4s3)_{1-0}",          4, &AppModel::scheme_ccd4s3_10,
+      "Variant {1-0} of CCD4 (o4s3): each CD pass runs the IMPLICIT\n"
+      "half first (h1 = s*h, reverse order), then the explicit one\n"
+      "(h2, forward order). The same composition over the adjoint\n"
+      "basic method: order 4 and symmetry as in CCD4 (o4s3).\n"
+      "Measured: 3.8x smaller error on Lorenz, 2.4x on Rossler.\n"
+      "The plain name is the {0-1} variant (explicit half first)." },
     { "CCD4 (o4s4)",              4, &AppModel::scheme_ccd4s4,
       "SYMMETRIC order-4 composition of FOUR symmetric CDs:\n"
       "steps (gamma/2, conj/2, conj/2, gamma/2)*h, palindromic.\n"
@@ -829,6 +860,37 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Complex CD4 and 4% better than CCD4 (o4s3).\n"
       "Same properties otherwise: symmetry defect O(h^10) after Re,\n"
       "even-power error expansion, requires s = a[0] = 0.5." },
+    { "CCD4 (o4s4)_{1-0}",          4, &AppModel::scheme_ccd4s4_10,
+      "Variant {1-0} of CCD4 (o4s4): each CD pass runs the IMPLICIT\n"
+      "half first (h1 = s*h, reverse order), then the explicit one\n"
+      "(h2, forward order). The same composition over the adjoint\n"
+      "basic method: order 4 and symmetry as in CCD4 (o4s4).\n"
+      "Measured: 4.0x smaller error on Lorenz, 1.5x on Rossler.\n"
+      "The plain name is the {0-1} variant (explicit half first)." },
+    { "CCD4 (s-split)_{0-1}",     4, &AppModel::scheme_ccd4ss01,
+      "Dual of Complex CD4: TWO CD passes with REAL steps h/2,\n"
+      "the complex part moved into the split inside each CD:\n"
+      "pass 1: h1 = (1-i)h/6, h2 = (2+i)h/6  (s1 = (1-i)/3),\n"
+      "pass 2: h1 = (2+i)h/6, h2 = (1-i)h/6  (s2 = 1 - s1).\n"
+      "Both h^3 coefficients are purely imaginary and Re removes\n"
+      "them: order 4 (measured 4.0 on Lorenz and Rossler).\n"
+      "Same cost as Complex CD4; the error constant depends on\n"
+      "the problem (2.9x smaller on Lorenz, 3.1x larger on\n"
+      "Rossler). Slightly larger stability regions.\n"
+      "NOT symmetric after Re (defect O(h^6)): Richardson on h^2\n"
+      "gives order 5, not 6 (ExtrZ restores 6 and 8).\n"
+      "{0-1}: explicit half first in each pass, as in every CD here.\n"
+      "The split is part of the method: a[0] is NOT read." },
+    { "CCD4 (s-split)_{1-0}",     4, &AppModel::scheme_ccd4ss10,
+      "Same half-steps as CCD4 (s-split)_{0-1}, but each pass runs\n"
+      "the IMPLICIT half first (reverse order), then the explicit one:\n"
+      "E*_a, E_b | E*_b, E_a with a = (1-i)/6, b = (2+i)/6.\n"
+      "This is the same composition over the adjoint basic method:\n"
+      "the [N1,N2] coefficient flips sign but stays imaginary, so the\n"
+      "order is still 4 (measured 4.0 on Lorenz and Rossler).\n"
+      "Error constant differs from {0-1} and depends on the problem:\n"
+      "10x larger on Lorenz, 2.8x smaller on Rossler.\n"
+      "a[0] is NOT read." },
     { "DOPRI78",                  8, &AppModel::scheme_dopri78, nullptr },
 };
 static constexpr int kBuiltinSchemeCount =
@@ -1717,8 +1779,12 @@ static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_
         // ID завязан на индекс, а видимая часть — на label: пользователь видит
         // свежее имя сразу после редактирования.
         const std::string tab_id = label(i) + "###" + item_id_prefix + std::to_string(i);
-        // Запрещаем закрывать вкладку, чей расчёт сейчас идёт.
-        const bool can_close = !(in_flight && running_index == i);
+        // Запрещаем закрывать вкладку, чей расчёт сейчас идёт, и ЕДИНСТВЕННУЮ
+        // вкладку. Пустой список ни одна сессия не переживает: загрузчики при
+        // следующем входе (перезапуск, смена системы) кладут дефолтный конфиг,
+        // "+" на пустом списке — тоже дефолт, и настройки последней вкладки
+        // терялись. Так же давно устроен NetworkSession::remove_config.
+        const bool can_close = !(in_flight && running_index == i) && n > 1;
         ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
         if (request_select == i) flags |= ImGuiTabItemFlags_SetSelected;
         if (ImGui::BeginTabItem(tab_id.c_str(), can_close ? &open : nullptr, flags)) {
@@ -2539,12 +2605,16 @@ static std::string wrapper_coefficients_text(
     if (parse_extrapolation_name(name, &esp)) {
         int p = 1; bool sym = false;
         const bool known = base_traits(esp.base, &p, &sym);
+        sym = extrapolation_symmetric(esp.re_at_output, sym);
         const int  K = (int)esp.n.size();
         long long  cost = 0;
         for (int v : esp.n) cost += v;
 
         o += name;
         o += "\n";
+        if (esp.re_at_output)
+            o += "ExtrZ: complex state across all substeps, Re taken ONCE on the output;\n"
+                 "the real part expands in even powers only, so the weights are symmetric\n";
         std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
                       esp.base.c_str(), p,
                       sym ? "symmetric" : "non-symmetric",
@@ -2738,6 +2808,8 @@ static std::string wrapper_name_field(const char* id, std::string& text,
 static bool extr_base_needs_half_s(const std::string& nm) {
     return nm == "CD" || nm == "Complex CD" || nm == "Complex CD4"
         || nm == "CCD4 (o4s3)" || nm == "CCD4 (o4s4)"
+        || nm == "CD_{1-0}" || nm == "Complex CD_{1-0}" || nm == "Complex CD4_{1-0}"
+        || nm == "CCD4 (o4s3)_{1-0}" || nm == "CCD4 (o4s4)_{1-0}"
         || nm == "SEMP" || nm == "SIMP";
 }
 
@@ -2789,6 +2861,20 @@ static void draw_extrapolation_builder(AppModel& model) {
             }
         }
     }
+
+    ImGui::Checkbox("Re only on output (ExtrZ)", &model.extr_builder_re_output);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Run every stage in complex arithmetic and take Re ONCE, after the\n"
+            "weighted sum - not after each base step. Needs a built-in complex\n"
+            "CD scheme as the base (Complex CD, Complex CD4, CCD4 ...).\n"
+            "The real part of the stage expansion then has even powers only,\n"
+            "so the order is p + 2(K-1) for any such base. Measured on Lorenz:\n"
+            "  CCD4 (s-split)_{0-1}: 1,2 -> 6, 1,2,3 -> 8   (plain Extr: 5, 5)\n"
+            "  Complex CD4:    1,2 -> 6, 1,2,3 -> 8   (plain Extr: 6, 7)\n"
+            "  Complex CD:     1,2 -> 4, 1,2,3 -> 6   (plain Extr: 3, 3)");
+    const bool re_out = model.extr_builder_re_output;
+    const bool eff_sym = extrapolation_symmetric(re_out, base_sym);
 
     // --- число стадий и сами n -------------------------------------------
     ImGui::SetNextItemWidth(120);
@@ -2847,11 +2933,13 @@ static void draw_extrapolation_builder(AppModel& model) {
     for (int k = 1; k < K; ++k)
         if (n[k] <= n[k - 1]) { problem = "substep counts must strictly increase"; break; }
     if (!base_known) problem = "base scheme is not resolvable";
+    else if (re_out && !scheme_has_complex_core(model.extr_builder_base))
+        problem = "Re only on output needs a built-in complex CD scheme as the base";
 
-    const std::string deflt = make_extrapolation_name(model.extr_builder_base, n);
+    const std::string deflt = make_extrapolation_name(model.extr_builder_base, n, {}, re_out);
     const std::string label = wrapper_name_field("scheme name##extr",
                                                  model.extr_builder_label, deflt);
-    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n, label);
+    const std::string new_name = make_extrapolation_name(model.extr_builder_base, n, label, re_out);
     // Совпадение ищем по имени БЕЗ метки: две обёртки с одной базой и одними
     // подшагами — это одна схема, как бы её ни подписали.
     bool duplicate = false;
@@ -2865,7 +2953,7 @@ static void draw_extrapolation_builder(AppModel& model) {
     else {
         // Стоимость, порядок и сами веса печатает отчёт ниже; здесь остаётся
         // только max|alpha| — по нему выводится предупреждение о сокращении.
-        const std::vector<double> alpha = extrapolation_weights(n, base_p, base_sym);
+        const std::vector<double> alpha = extrapolation_weights(n, base_p, eff_sym);
         double amax = 0.0;
         for (double v : alpha) if (std::fabs(v) > amax) amax = std::fabs(v);
 
@@ -9901,29 +9989,64 @@ static OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
 // Конфиг сменил вид расчёта (или размерность сетки) — перевесить его на окно,
 // которое такое умеет показывать. Без этого переключение на performance
 // вынимало вкладку из всех окон, и Run выглядел как «ничего не произошло».
+//
+// Новое окно заводится только в крайнем случае. Раньше карта (а с ней и
+// область устойчивости) ВСЕГДА получала своё окно, а окно, из которого
+// конфиг ушёл, оставалось пустым, — и каждое переключение Order p /
+// Performance / Stability плодило по окну. Теперь порядок такой:
+//   1) конфиг уже лежит в подходящем окне — ничего не делать;
+//   2) есть окно нужного вида: для одномерных — любое (оверлей), для карты —
+//      только пустое (хитмапа одиночна);
+//   3) иначе окно, которое опустело от этого ухода, просто меняет вид;
+//   4) иначе — новое окно.
+// Окно, опустевшее от ухода и не пригодившееся в 3), убирается: пустым оно
+// лишь занимает место в раскладке. Окна с ручной подписью не трогаются.
 static void order_rehome_config(AppModel& model, int idx) {
     OrderAnalysisSession& s = model.order_session;
     if (idx < 0 || idx >= (int)s.configs.size()) return;
     const OrderConfig& c = s.configs[(size_t)idx];
     const OrderPlotWindow::Kind want = order_kind_for(c);
+    auto& wins = model.order_plot_windows;
+
     bool placed = false;
-    for (auto& w : model.order_plot_windows) {
+    std::vector<int> vacated;   // id окон, опустевших от этого ухода
+    for (auto& w : wins) {
         auto& mem = w.members;
-        const bool has  = std::find(mem.begin(), mem.end(), idx) != mem.end();
-        const bool fits = order_member_fits(c, w.kind);
-        if (has && !fits) {
-            mem.erase(std::remove(mem.begin(), mem.end(), idx), mem.end());
-            continue;
-        }
-        if (has) { placed = true; continue; }
-        // Доложить в ПЕРВОЕ подходящее окно нужного вида; карты одиночны, для
-        // них всегда заводится своё окно.
-        if (fits && !placed && w.kind == want && want != OrderPlotWindow::Kind::Map) {
-            mem.push_back(idx);
+        const bool has = std::find(mem.begin(), mem.end(), idx) != mem.end();
+        if (!has) continue;
+        if (order_member_fits(c, w.kind)) { placed = true; continue; }
+        mem.erase(std::remove(mem.begin(), mem.end(), idx), mem.end());
+        w.plot_sig = -1;
+        if (mem.empty()) vacated.push_back(w.id);
+    }
+    if (!placed) {
+        for (auto& w : wins) {
+            if (w.kind != want) continue;
+            if (want == OrderPlotWindow::Kind::Map && !w.members.empty()) continue;
+            w.members.push_back(idx);
+            w.plot_sig = -1;
             placed = true;
+            break;
         }
     }
+    if (!placed && !vacated.empty()) {
+        for (auto& w : wins) {
+            if (w.id != vacated.front()) continue;
+            // То же, что делает смена вида в комбо "Plot windows".
+            w.kind = want;
+            w.members.assign(1, idx);
+            if (want == OrderPlotWindow::Kind::P) w.y_log = false;
+            w.plot_sig = -1;
+            placed = true;
+            break;
+        }
+        vacated.erase(vacated.begin());
+    }
     if (!placed) model.add_order_plot_window(want, { idx });
+    wins.erase(std::remove_if(wins.begin(), wins.end(), [&](const OrderPlotWindow& w) {
+                   return w.members.empty() && !w.label_is_manual
+                       && std::find(vacated.begin(), vacated.end(), w.id) != vacated.end();
+               }), wins.end());
     model.order_plot_windows_dirty = true;
 }
 
@@ -9933,7 +10056,19 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     model.broadcast_source_tab = BroadcastTab::Order;
     model.broadcast_source_idx = s.active_config_index;
     if (s.configs.empty()) {
-        ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
+        // Система загружена, а вкладок нет: так остаются сессии, у которых
+        // удалили последнюю вкладку до запрета на это (см. draw_config_tab_bar).
+        // Таб-бара с "+" здесь нет, поэтому без этой кнопки вкладку было не
+        // вернуть ничем. Новая вкладка строится из записи системы — теми же
+        // умолчаниями, что и при первом входе в Order.
+        if (s.loaded_system_name.empty() || s.loaded_system_name != model.name) {
+            ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
+            return;
+        }
+        ImGui::TextDisabled("This system has no Order tabs.");
+        if (ImGui::Button("New tab from system defaults") && model.start_order_analysis()
+            && !s.configs.empty())
+            order_rehome_config(model, 0);
         return;
     }
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
