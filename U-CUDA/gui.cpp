@@ -4059,13 +4059,44 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                 s.continuation_active  = false;
                 s.continuation_paused  = false;
                 s.continuation_elapsed = 0.0;
-                s.continuation_peaks.clear();
-                ++s.continuation_peaks_gen;
+                // Диаграмма возвращается к пикам одного (последнего) прогона.
+                s.rebuild_peaks_from_result();
             }
         }
         ImGui::SameLine();
         ImGui::Text("Frame delay (ms):"); ImGui::SameLine();
         InputNumStr("##cdelay", s.continuation_delay_ms, 70);
+        ImGui::SameLine();
+        ImGui::Text("Max peaks:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        // Правится по Enter/уходу фокуса: иначе, набирая 500000, пользователь
+        // на промежуточном "5" обрезал бы накопленный буфер до минимума.
+        if (ImGui::InputInt("##ccap", &s.continuation_peaks_cap, 0, 0,
+                            ImGuiInputTextFlags_EnterReturnsTrue)
+            || ImGui::IsItemDeactivatedAfterEdit()) {
+            s.continuation_peaks_cap = std::clamp(s.continuation_peaks_cap,
+                PhaseAnalysisSession::kContPeaksCapMin, PhaseAnalysisSession::kContPeaksCapMax);
+            s.trim_continuation_peaks();
+            ++s.continuation_peaks_gen;
+        }
+        if (ImGui::IsItemHovered()) {
+            // Буферов на IC — переменные плюс комбинированный ряд x0 + pi*x1 + e*x2
+            // (тот же, что у DBSCAN в 2D-бифуркации); пик — пара double (t, peak).
+            const int n_ic  = std::max(1, (int)s.ic_sets.size());
+            const int n_buf = (int)s.vars.size() + 1;
+            const double mb = (double)s.continuation_peaks_cap * 16.0 * n_ic * n_buf / 1.0e6;
+            ImGui::SetTooltip("Continuation diagram keeps the last N peaks per buffer;\n"
+                              "older ones are dropped. Range %d .. %d.\n"
+                              "\n"
+                              "Memory = N x 16 B x ICs x (variables + 1)\n"
+                              "  16 B: a peak is two doubles (time, value)\n"
+                              "  +1: the combined series x0 + pi*x1 + e*x2\n"
+                              "Now: %d x 16 B x %d x %d = %.1f MB\n"
+                              "(up to ~2x briefly while a buffer grows).",
+                              PhaseAnalysisSession::kContPeaksCapMin,
+                              PhaseAnalysisSession::kContPeaksCapMax,
+                              s.continuation_peaks_cap, n_ic, n_buf, mb);
+        }
     }
 
     ImGui::Separator();
@@ -5317,7 +5348,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
             else if (pr.type == ProjType::ContinuationDiagram) {
                 const int av = pr.axis_x;
                 if (s.continuation_peaks.empty()) {
-                    ImGui::TextDisabled("No data. Enable Continuation (live) and press Recompute.");
+                    ImGui::TextDisabled("No data. Press Recompute (Continuation (live) accumulates across runs).");
                 }
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();

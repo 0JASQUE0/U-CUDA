@@ -161,6 +161,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     // rebuilt from scratch on Start so a load never resurrects a running loop.
     o << "  \"continuation_mode\":" << (s.continuation_mode ? "true" : "false") << ",\n";
     o << "  \"continuation_delay_ms\":"; jstr(o, s.continuation_delay_ms); o << ",\n";
+    o << "  \"continuation_peaks_cap\":" << s.continuation_peaks_cap << ",\n";
     o << "  \"param_values\":"; jmap(o, s.param_values); o << ",\n";
     // ic_sets: [ {label, visible, values{...}} ]
     o << "  \"ic_sets\":[";
@@ -211,6 +212,9 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "use_gpu")        s.use_gpu = p.boolean();
             else if (key == "continuation_mode")     s.continuation_mode = p.boolean();
             else if (key == "continuation_delay_ms") s.continuation_delay_ms = p.str();
+            else if (key == "continuation_peaks_cap") {
+                try { s.continuation_peaks_cap = std::stoi(p.str_or_num()); } catch (...) {}
+            }
             else if (key == "param_values")   s.param_values = p.map_ss();
             else if (key == "ic_sets") {
                 s.ic_sets.clear();
