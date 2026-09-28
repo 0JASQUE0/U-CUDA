@@ -46,6 +46,56 @@ System AppModel::build_system() const {
     return s;
 }
 
+const AppModel::RhsPreview& AppModel::rhs_preview() const {
+    // Ключ — всё, что читает build_system(), кроме настроек Ньютона: на
+    // правые части они не влияют. Разделитель \x1f в тексте не встречается.
+    const bool latex = (mode == InputMode::Image || mode == InputMode::Latex);
+    std::string key;
+    key += latex ? 'L' : 'P';
+    key += is_map ? 'M' : 'O';
+    key += (char)('0' + (int)param_order);
+    key += use_aux_funcs ? 'F' : '-';
+    for (const std::string* s : { latex ? &latex_text : &plain_text, &alphabet_text,
+                                  &vars_text, &params_text, &func_defs_text }) {
+        key += '\x1f';
+        key += *s;
+    }
+    if (key == rhs_preview_.key) return rhs_preview_;
+
+    rhs_preview_ = RhsPreview{};
+    rhs_preview_.key = key;
+    try {
+        const System sys = build_system();
+        const std::vector<std::string> rhs = codegen_rhs(sys);
+
+        // Легенда: какое имя в какую ячейку ушло. Порядок a[] зависит от
+        // param_order и от разбора, поэтому показывать его стоит всегда.
+        std::string out;
+        auto legend = [&out](const char* arr, int base, const std::vector<std::string>& names) {
+            for (size_t i = 0; i < names.size(); ++i) {
+                out += (i % 6 == 0) ? (i ? "\n//   " : "// ") : "   ";
+                out += arr;
+                out += "[" + std::to_string(base + (int)i) + "] = " + names[i];
+            }
+            if (!names.empty()) out += "\n";
+        };
+        legend("X", 0, sys.vars);
+        legend("a", 1, sys.params);
+
+        for (size_t i = 0; i < rhs.size(); ++i) {
+            const std::string idx = std::to_string(i);
+            out += sys.is_map ? "X_next[" + idx + "] = " : "dX[" + idx + "] = ";
+            out += rhs[i];
+            out += ";\n";
+        }
+        rhs_preview_.text = out;
+    }
+    catch (const std::exception& e) {
+        rhs_preview_.error = e.what();
+    }
+    return rhs_preview_;
+}
+
 // Парсит систему, обновляет списки символов и синхронизирует словари значений.
 bool AppModel::refresh_symbols() {
     error_message.clear();

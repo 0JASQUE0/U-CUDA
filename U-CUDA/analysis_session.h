@@ -324,7 +324,20 @@ struct PhaseAnalysisSession {
     double continuation_elapsed = 0.0;
     // [ic][var] xy-pairs: X = global time, Y = peak. Fed to ProjType::ContinuationDiagram.
     std::vector<std::vector<std::vector<double>>> continuation_peaks;
-    int continuation_peaks_cap = 200000;   // pairs per (ic, var); oldest drop on overflow
+    // Pairs per (ic, var); oldest drop on overflow. Persisted, set in the
+    // Continuation row. Clamped to [kContPeaksCapMin, kContPeaksCapMax]: every
+    // variable is buffered, so memory = cap * 16 B * ICs * vars.
+    static constexpr int kContPeaksCapMin = 1000;
+    static constexpr int kContPeaksCapMax = 10000000;
+    int continuation_peaks_cap = 200000;
+    // Drop the oldest pairs above continuation_peaks_cap in every buffer. Called
+    // after each chunk and when the cap is lowered, so a paused loop shrinks too.
+    void trim_continuation_peaks();
+    // Append result.features' peaks with time offset `base` (continuation chunk).
+    void append_result_peaks(double base);
+    // Continuation off: the diagram shows the peaks of the last single run,
+    // rebuilt from result (not accumulated). Called after every result.
+    void rebuild_peaks_from_result();
     int continuation_peaks_gen = 0;        // bumped on every accumulation → Plot2DView reuploads
 
     // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.

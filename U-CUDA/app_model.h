@@ -944,6 +944,18 @@ public:
     std::string generated_code;    // итоговый код всех выбранных схем
     std::string error_message;     // ошибка парсинга/генерации (для показа в UI)
 
+    // Превью правых частей над X[..]/a[..] под полем ввода Library — то, из
+    // чего кодогенератор собирает шаг любой схемы (codegen_rhs). Считается
+    // лениво: разбор уравнений на каждом кадре дорог, поэтому пересчёт идёт
+    // только когда меняется что-то из входов build_system() (см. key).
+    struct RhsPreview {
+        std::string key;     // снимок входов, по которому посчитано
+        std::string text;    // листинг: легенда X[i]/a[j] и по строке на уравнение
+        std::string error;   // ошибка разбора, если text пуст
+    };
+    const RhsPreview& rhs_preview() const;
+    mutable RhsPreview rhs_preview_;
+
     // запуск фонового OCR
     // Не блокирует UI. Источник изображения передаётся владением.
     void start_ocr(std::unique_ptr<ImageSource> src) {

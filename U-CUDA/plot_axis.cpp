@@ -166,7 +166,18 @@ struct MathLayout {
     std::vector<MathMark> marks;
 };
 // Форсированное начертание внутри \mathrm{...} / \mathit{...}.
-struct Style { bool upright = false; bool italic = false; };
+//
+// tex — набор формулы, а не подписи (превью LaTeX-поля в Library): пробелы
+// исходника не печатаются, отступы вокруг = + − ставит сам верстальщик, как
+// TeX, а слово из нескольких букв — произведение переменных, а не название.
+// В подписях плотов пробелы значимы ("h=1e-3, RK4"), поэтому там режим
+// выключен. script — внутри индекса/степени: TeX не разрежает там операции.
+struct Style {
+    bool upright = false;
+    bool italic  = false;
+    bool tex     = false;
+    bool script  = false;
+};
 
 ImFont* math_roman()  { return g_math_roman  ? g_math_roman  : ImGui::GetFont(); }
 ImFont* math_italic() { return g_math_italic ? g_math_italic : math_roman(); }
@@ -247,6 +258,9 @@ const char* group_end(const char* b, const char* e) {
 // Аргумент команды или индекса: {...} целиком, \cmd целиком либо один символ
 // (UTF-8 — вместе с продолжающими байтами).
 void take_arg(const char*& p, const char* e, const char*& ab, const char*& ae) {
+    // Пробелы перед аргументом TeX пропускает: "\frac{dx} {dt}" из OCR иначе
+    // получал знаменателем пробел, а {dt} уезжал в строку.
+    while (p < e && *p == ' ') ++p;
     if (p >= e) { ab = ae = p; return; }
     if (*p == '{') {
         ab = p + 1;
@@ -261,6 +275,57 @@ void take_arg(const char*& p, const char* e, const char*& ab, const char*& ae) {
 }
 
 float typeset(MathLayout& L, const char* b, const char* e, float size, Style st);
+
+// Габарит «чернил» набранного фрагмента относительно его начала и базовой
+// линии: по метрикам самих глифов, а не по advance и ascent шрифта.
+//   top        — верх самого высокого глифа (отрицательный: над базовой);
+//   top_center — середина ВЕРХНЕЙ кромки: у курсива глиф наклонён, и верх
+//                сдвинут вправо от середины бокса на полнаклона;
+//   skew       — этот же сдвиг целиком (для левого края \bar).
+struct InkBox { float x0 = 0, x1 = 0, top = 0, top_center = 0, skew = 0; };
+
+unsigned decode_utf8(const char*& p, const char* e) {
+    const unsigned char c = (unsigned char)*p++;
+    if (c < 0x80) return c;
+    int n = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 0;
+    unsigned cp = c & (0x3Fu >> n);
+    for (; n > 0 && p < e && ((unsigned char)*p & 0xC0) == 0x80; --n)
+        cp = (cp << 6) | ((unsigned char)*p++ & 0x3Fu);
+    return cp;
+}
+
+bool ink_box(const MathLayout& L, InkBox& out) {
+    bool any = false;
+    float slant_h = 0.0f;
+    for (const MathRun& r : L.runs) {
+        ImFontBaked* fb = r.font ? r.font->GetFontBaked(r.size) : nullptr;
+        if (!fb) continue;
+        const float asc = font_ascent(r.font, r.size);
+        // Наклон курсива CM/Times ~14°: tan ≈ 0.25.
+        const float slant = (r.font == g_math_italic && g_math_italic) ? 0.25f : 0.0f;
+        float pen = r.x;
+        for (const char* p = r.text.data(), *e = p + r.text.size(); p < e; ) {
+            const ImFontGlyph* g = fb->FindGlyph((ImWchar)decode_utf8(p, e));
+            if (!g) continue;
+            if (g->Visible) {
+                const float gx0 = pen + g->X0, gx1 = pen + g->X1;
+                const float gtop = r.dy - asc + g->Y0;
+                const float gbot = r.dy - asc + g->Y1;
+                if (!any) { out.x0 = gx0; out.x1 = gx1; out.top = gtop; }
+                out.x0  = std::min(out.x0, gx0);
+                out.x1  = std::max(out.x1, gx1);
+                out.top = std::min(out.top, gtop);
+                slant_h = std::max(slant_h, slant * (gbot - gtop));
+                any = true;
+            }
+            pen += g->AdvanceX;
+        }
+    }
+    if (!any) return false;
+    out.skew       = slant_h;
+    out.top_center = (out.x0 + out.x1) * 0.5f + slant_h * 0.5f;
+    return true;
+}
 
 void append_layout(MathLayout& dst, const MathLayout& src, float dx, float dy) {
     for (MathRun r : src.runs)   { r.x  += dx; r.dy += dy; dst.runs.push_back(r); }
@@ -298,6 +363,63 @@ std::string upright_text(const char* b, const char* e) {
     return t;
 }
 
+// Имена функций, которые в TeX-режиме остаются прямыми и без слеша: OCR
+// нередко отдаёт "sin x" вместо "\sin x".
+bool is_func_name(const std::string& w) {
+    static const char* const kFn[] = {
+        "sin", "cos", "tan", "cot", "sec", "csc", "sinh", "cosh", "tanh", "coth",
+        "arcsin", "arccos", "arctan", "exp", "ln", "log", "lg", "sign", "sgn",
+        "max", "min", "abs", "mod",
+    };
+    for (const char* f : kFn) if (w == f) return true;
+    return false;
+}
+
+// Тонкий пробел после имени функции, если дальше идёт аргумент без скобок:
+// \sin x, но \sin(x) и \sin^{2} x — вплотную.
+bool func_arg_follows(const char* p, const char* e) {
+    while (p < e && *p == ' ') ++p;
+    return p < e && (is_alpha(*p) || is_digit(*p) || *p == '\\');
+}
+
+// Прямой отрезок формулы в TeX-режиме: пробелы и '&' выравнивания выкинуты,
+// отношения окружены толстыми пробелами, бинарные +/− — средними. Минус
+// унарный, если слева нет операнда: начало группы, '(' или другой знак.
+void emit_tex_run(MathLayout& L, float& x, const char* rs, const char* re,
+                  const char* b, float size, Style st) {
+    const float rel = st.script ? 0.0f : size * 0.28f;
+    const float bin = st.script ? 0.0f : size * 0.22f;
+    std::string buf;
+    auto flush = [&] {
+        if (buf.empty()) return;
+        emit(L, x, math_roman(), size, upright_text(buf.data(), buf.data() + buf.size()));
+        buf.clear();
+    };
+    auto spaced = [&](char c, float gap) {
+        flush();
+        x += gap;
+        emit(L, x, math_roman(), size, upright_text(&c, &c + 1));
+        x += gap;
+    };
+    for (const char* q = rs; q < re; ++q) {
+        const char c = *q;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '&') continue;
+        if (c == '=' || c == '<' || c == '>') { spaced(c, rel); continue; }
+        if (c == '+' || c == '-') {
+            const char* k = q;
+            while (k > b && (k[-1] == ' ' || k[-1] == '\t')) --k;
+            const char prev = (k > b) ? k[-1] : '\0';
+            const bool unary = prev == '\0' || std::strchr("(=[,+-<>{&", prev) != nullptr;
+            if (unary) buf += c;
+            else       spaced(c, bin);
+            continue;
+        }
+        if (c == ',' || c == ';') { buf += c; flush(); x += size * 0.17f; continue; }
+        buf += c;
+    }
+    flush();
+}
+
 float typeset(MathLayout& L, const char* b, const char* e, float size, Style st) {
     float x = 0.0f;
     const char* p = b;
@@ -316,12 +438,20 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
         if (c == '}') { ++p; continue; }
 
         if (c == '_' || c == '^') {
-            ++p;
-            const char *ab, *ae;
-            take_arg(p, e, ab, ae);
-            MathLayout sub;
-            const float w = typeset(sub, ab, ae, size * 0.72f, st);
-            append_layout(L, sub, x, (c == '^') ? -size * 0.42f : size * 0.20f);
+            // Индекс и степень подряд (y_{m}^{2}) стоят друг над другом, как в
+            // TeX, а не цепочкой y_m², — поэтому обе ставятся от одного x.
+            Style ss = st;
+            ss.script = true;
+            float w = 0.0f;
+            for (int k = 0; k < 2 && p < e && (*p == '_' || *p == '^'); ++k) {
+                const char sc = *p++;
+                const char *ab, *ae;
+                take_arg(p, e, ab, ae);
+                MathLayout sub;
+                w = std::max(w, typeset(sub, ab, ae, size * 0.72f, ss));
+                append_layout(L, sub, x, (sc == '^') ? -size * 0.42f : size * 0.20f);
+                if (p < e && *p == sc) break;   // x^a^b — второй не того рода
+            }
             x += w + size * 0.02f;
             continue;
         }
@@ -339,6 +469,25 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
             while (p < e && is_alpha(*p)) ++p;
             const std::string cmd(cs, p);
 
+            // Разметка вокруг формулы: размер скобок, окружения, метки.
+            if (cmd == "left" || cmd == "right") {
+                if (p < e && *p == '.') ++p;   // \right. — пустой разделитель
+                continue;
+            }
+            if (cmd == "big" || cmd == "Big" || cmd == "bigg" || cmd == "Bigg" ||
+                cmd == "bigl" || cmd == "bigr" || cmd == "Bigl" || cmd == "Bigr" ||
+                cmd == "displaystyle" || cmd == "nonumber" || cmd == "notag") continue;
+            if (cmd == "begin" || cmd == "end" || cmd == "label") {
+                const char *ab, *ae;
+                take_arg(p, e, ab, ae);
+                // \begin{array}{ll}: спецификация колонок — тоже не текст.
+                if (cmd == "begin" && std::string(ab, ae) == "array" && p < e && *p == '{')
+                    take_arg(p, e, ab, ae);
+                continue;
+            }
+            if (cmd == "quad")  { x += size;        continue; }
+            if (cmd == "qquad") { x += size * 2.0f; continue; }
+
             if (const char* g = lookup(kGreek, IM_ARRAYSIZE(kGreek), cmd)) {
                 const bool it = st.italic || (!st.upright && is_lower(cmd[0]));
                 emit(L, x, font_with_glyph(it ? math_italic() : math_roman(), g), size, g);
@@ -355,9 +504,20 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
                 MathLayout sub;
                 const float w = typeset(sub, ab, ae, size, st);
                 append_layout(L, sub, x, 0.0f);
-                const float top = -font_ascent(math_italic(), size) * 0.86f;
-                const float cx  = x + w * 0.5f;
-                if (cmd == "bar")      L.marks.push_back({ x + w * 0.05f, x + w * 0.95f, top, 0.0f });
+                // Накладка садится по чернилам глифа, а не по advance: у
+                // курсива глиф сдвинут и наклонён, центр advance приходился
+                // левее буквы, а высота заглавных поднимала точку над строчной.
+                InkBox ink;
+                float top = -font_ascent(math_italic(), size) * 0.86f;
+                float cx  = x + w * 0.5f;
+                float bx0 = x + w * 0.05f, bx1 = x + w * 0.95f;
+                if (ink_box(sub, ink)) {
+                    top = ink.top - size * (cmd == "bar" ? 0.10f : 0.13f);
+                    cx  = x + ink.top_center;
+                    bx0 = x + ink.x0 + ink.skew;
+                    bx1 = x + ink.x1;
+                }
+                if (cmd == "bar")      L.marks.push_back({ bx0, bx1, top, 0.0f });
                 else if (cmd == "dot") L.marks.push_back({ cx, cx, top, size * 0.055f });
                 else {
                     const float d = size * 0.12f;
@@ -405,8 +565,10 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
                 x += w;
                 continue;
             }
-            // Неизвестная команда: печатаем её имя прямым, без слеша.
+            // Неизвестная команда: печатаем её имя прямым, без слеша. Это же
+            // и путь \sin, \exp, \ln — функции в TeX прямые.
             emit(L, x, math_roman(), size, cmd);
+            if (st.tex && !st.script && func_arg_follows(p, e)) x += size * 0.17f;
             continue;
         }
 
@@ -428,12 +590,16 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
             const char* g = lookup(kGreek, IM_ARRAYSIZE(kGreek), w);
             // Слово из нескольких букв — это не произведение переменных, а
             // название ("parameter", "max", "IC"): TeX набирает такое прямым.
-            bool it = g ? is_lower(w[0]) : (w.size() == 1);
+            // В формуле (TeX-режим) "ab" — произведение, курсив; прямыми
+            // остаются только имена функций.
+            const bool fn = st.tex && !g && is_func_name(w);
+            bool it = g ? is_lower(w[0]) : (st.tex ? !fn : w.size() == 1);
             if (st.upright) it = false;
             if (st.italic)  it = true;
             ImFont* wf = it ? math_italic() : math_roman();
             emit(L, x, g ? font_with_glyph(wf, g) : wf, size, g ? g : w);
             if (g || w.size() == 1) emit_trailing_digits(L, x, p, e, size);
+            if (fn && !st.script && func_arg_follows(p, e)) x += size * 0.17f;
             continue;
         }
 
@@ -441,7 +607,8 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
         while (p < e && !is_alpha(*p) && *p != '\\' && *p != '{' && *p != '}'
                      && *p != '_' && *p != '^') ++p;
         if (p == rs) ++p;   // одиночный спецсимвол в хвосте строки: не зациклиться
-        emit(L, x, math_roman(), size, upright_text(rs, p));
+        if (st.tex) emit_tex_run(L, x, rs, p, b, size, st);
+        else        emit(L, x, math_roman(), size, upright_text(rs, p));
     }
     return x;
 }
@@ -481,6 +648,29 @@ bool rewrite_scientific(const char* s, std::string& out) {
     return true;
 }
 
+// Отрисовка набранной строки от базовой линии `base`.
+//
+// Каждый прогон садится на ЦЕЛЫЙ пиксель. Дробная позиция глифа означает
+// билинейную выборку из атласа, то есть мыло: ascent прямого и курсивного
+// начертаний отличается на доли пикселя, а подписи тиков вдобавок
+// центрируются по px - ширина/2. Снап — по обеим осям и до поворота
+// Y-подписи: на -90° целые координаты остаются целыми.
+void draw_layout(ImDrawList* dl, float x0, float base, ImU32 col,
+                 const MathLayout& L, float size) {
+    for (const MathRun& r : L.runs) {
+        const ImVec2 rp(snap_px(x0 + r.x),
+                        snap_px(base + r.dy - font_ascent(r.font, r.size)));
+        dl->AddText(r.font, r.size, rp, col, r.text.c_str());
+    }
+    for (const MathMark& m : L.marks) {
+        const float my = snap_px(base + m.y);
+        const ImVec2 a(snap_px(x0 + m.x0), my);
+        if (m.r > 0.0f) dl->AddCircleFilled(a, std::max(1.0f, m.r), col, 8);
+        else dl->AddLine(a, ImVec2(snap_px(x0 + m.x1), my), col,
+                         std::max(1.0f, size * 0.055f));
+    }
+}
+
 }  // namespace
 
 ImVec2 plot_text_size(const char* s) {
@@ -517,25 +707,51 @@ void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
 
     // AddText кладёт pos в верх строки, значит базовая линия = pos.y + ascent
     // базового шрифта. Прогоны другого кегля выравниваются по ней же.
-    //
-    // Каждый прогон садится на ЦЕЛЫЙ пиксель. Дробная позиция глифа означает
-    // билинейную выборку из атласа, то есть мыло: ascent прямого и курсивного
-    // начертаний отличается на доли пикселя, а подписи тиков вдобавок
-    // центрируются по px - ширина/2. Снап — по обеим осям и до поворота
-    // Y-подписи: на -90° целые координаты остаются целыми.
-    const float base = snap_px(pos.y + font_ascent(math_roman(), size));
+    draw_layout(dl, pos.x, snap_px(pos.y + font_ascent(math_roman(), size)), col, L, size);
+}
+
+// Формула вне плота: всегда набирается (от чекбокса Settings не зависит) и в
+// TeX-режиме. Габарит считается по фактическим прогонам и накладкам: дробь и
+// точка над \dot{x} выше строки, индекс — ниже, а строки превью не должны
+// наезжать друг на друга.
+namespace {
+MathExtent layout_extent(const MathLayout& L, float width, float size) {
+    float top = -font_ascent(math_roman(), size);
+    float bot = size - font_ascent(math_roman(), size);
     for (const MathRun& r : L.runs) {
-        const ImVec2 rp(snap_px(pos.x + r.x),
-                        snap_px(base + r.dy - font_ascent(r.font, r.size)));
-        dl->AddText(r.font, r.size, rp, col, r.text.c_str());
+        ImFontBaked* fb = r.font ? r.font->GetFontBaked(r.size) : nullptr;
+        const float asc  = font_ascent(r.font, r.size);
+        const float desc = (fb && fb->Descent < 0.0f) ? -fb->Descent : r.size * 0.25f;
+        top = std::min(top, r.dy - asc);
+        bot = std::max(bot, r.dy + desc);
     }
+    const float stroke = std::max(1.0f, size * 0.055f);
     for (const MathMark& m : L.marks) {
-        const float my = snap_px(base + m.y);
-        const ImVec2 a(snap_px(pos.x + m.x0), my);
-        if (m.r > 0.0f) dl->AddCircleFilled(a, std::max(1.0f, m.r), col, 8);
-        else dl->AddLine(a, ImVec2(snap_px(pos.x + m.x1), my), col,
-                         std::max(1.0f, size * 0.055f));
+        const float half = std::max(stroke, m.r);
+        top = std::min(top, m.y - half);
+        bot = std::max(bot, m.y + half);
     }
+    return MathExtent{ width, std::ceil(-top), std::ceil(bot) };
+}
+}  // namespace
+
+MathExtent math_formula_extent(const char* s, float size) {
+    if (!s || !*s) return MathExtent{};
+    MathLayout L;
+    Style st;
+    st.tex = true;
+    const float w = typeset(L, s, s + std::strlen(s), size, st);
+    return layout_extent(L, w, size);
+}
+
+void math_formula_draw(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s, float size) {
+    if (!dl || !s || !*s) return;
+    MathLayout L;
+    Style st;
+    st.tex = true;
+    const float w = typeset(L, s, s + std::strlen(s), size, st);
+    const MathExtent ext = layout_extent(L, w, size);
+    draw_layout(dl, pos.x, snap_px(pos.y + ext.ascent), col, L, size);
 }
 
 float plot_left_margin_for_width(float max_tick_w, bool has_axis_name) {

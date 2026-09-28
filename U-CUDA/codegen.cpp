@@ -2705,6 +2705,10 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     return codegen_scheme(s, sch);
 }
 
+std::vector<std::string> codegen_rhs(const System& s) {
+    return rhs_over(s, "X");
+}
+
 // Нормализация значения параметра
 std::string normalize_value(const std::string& value) {
     // trim

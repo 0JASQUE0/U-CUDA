@@ -162,6 +162,71 @@ static void draw_resize_handle(const char* id, float& height,
     const float y = (pmin.y + pmax.y) * 0.5f;
     ImGui::GetWindowDrawList()->AddLine(ImVec2(pmin.x, y), ImVec2(pmax.x, y), col, 3.0f);
 }
+
+// Превью LaTeX-поля: те же уравнения, набранные верстальщиком подписей графиков
+// (math_formula_draw в plot_axis.cpp). Уравнения делятся по `\\` и переводам
+// строки; строка, от которой после разметки (\begin{cases} и т.п.) ничего не
+// осталось, пропускается. Состояния нет — всё считается из текста каждый кадр.
+static void draw_latex_preview(const char* id, const std::string& src, ImVec2 size) {
+    std::vector<std::string> lines;
+    std::string cur;
+    auto push = [&] {
+        const size_t a = cur.find_first_not_of(" \t\r");
+        if (a != std::string::npos) lines.push_back(cur.substr(a));
+        cur.clear();
+    };
+    for (size_t i = 0; i < src.size(); ++i) {
+        if (src[i] == '\n') { push(); continue; }
+        if (src[i] == '\\' && i + 1 < src.size() && src[i + 1] == '\\') { push(); ++i; continue; }
+        cur += src[i];
+    }
+    push();
+
+    ImGui::BeginChild(id, size, ImGuiChildFlags_Borders | ImGuiChildFlags_FrameStyle,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    const float fs  = std::floor(ImGui::GetFontSize() * 1.3f + 0.5f);
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    ImDrawList* dl  = ImGui::GetWindowDrawList();
+    bool any = false;
+    for (const std::string& ln : lines) {
+        const MathExtent ext = math_formula_extent(ln.c_str(), fs);
+        if (ext.width <= 0.0f) continue;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(ext.width, ext.ascent + ext.descent + fs * 0.2f));
+        if (ImGui::IsItemVisible()) math_formula_draw(dl, p, col, ln.c_str(), fs);
+        any = true;
+    }
+    if (!any) ImGui::TextDisabled("(formula preview)");
+    ImGui::EndChild();
+}
+
+// Правые части в том виде, в каком их получает кодогенератор: над X[..] и
+// a[..], с легендой имён. Это вход ВСЕХ схем (codegen_rhs), поэтому здесь
+// видно и порядок параметров в a[], и ошибку разбора — до Generate/Run.
+// Поле только для чтения, но выделяется и копируется; высота — по строкам.
+static void draw_rhs_preview(const AppModel& model) {
+    const std::string& src =
+        (model.mode == InputMode::Plain) ? model.plain_text : model.latex_text;
+    if (src.find_first_not_of(" \t\r\n") == std::string::npos) return;
+    if (!ImGui::CollapsingHeader("Kernel form: X[..], a[..]", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+    const AppModel::RhsPreview& pv = model.rhs_preview();
+    if (pv.text.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Parse error: %s", pv.error.c_str());
+        return;
+    }
+    // Длинная правая часть переносится, а не уезжает за край, поэтому высоту
+    // меряем с тем же переносом (ширина поля минус отступы и полоса прокрутки).
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float wrap_w = ImGui::GetContentRegionAvail().x - st.FramePadding.x * 2.0f
+                       - st.ScrollbarSize;
+    const float text_h = ImGui::CalcTextSize(pv.text.c_str(), nullptr, false,
+                                             std::max(wrap_w, 50.0f)).y;
+    const float h = std::min(text_h + st.FramePadding.y * 2.0f + 2.0f, 320.0f);
+    ImGui::InputTextMultiline("##rhs_preview", (char*)pv.text.c_str(), pv.text.size() + 1,
+                              ImVec2(-1, h),
+                              ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_WordWrap);
+}
 static bool InputTextStr(const char* label, std::string& str, float width = 0.0f) {
     std::vector<char>& buf = input_scratch(str, 1024);
     if (width > 0) ImGui::SetNextItemWidth(width);
@@ -3232,8 +3297,16 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
     // поле ввода
     if (model.mode == InputMode::Image || model.mode == InputMode::Latex) {
+        // Поле ввода слева, набранные формулы справа — поровну.
+        const float gap   = ImGui::GetStyle().ItemSpacing.x;
+        const float x0    = ImGui::GetCursorPosX();
+        const float half  = std::floor((ImGui::GetContentRegionAvail().x - gap) * 0.5f);
         ImGui::Text("LaTeX (editable - fix OCR errors here):");
-        InputTextMultilineStr("##latex", model.latex_text, ImVec2(-1, model.latex_editor_h));
+        ImGui::SameLine(x0 + half + gap);
+        ImGui::Text("Preview:");
+        InputTextMultilineStr("##latex", model.latex_text, ImVec2(half, model.latex_editor_h));
+        ImGui::SameLine(0.0f, gap);
+        draw_latex_preview("##latex_preview", model.latex_text, ImVec2(-1, model.latex_editor_h));
         draw_resize_handle("##latex_resize", model.latex_editor_h);
         if (ImGui::CollapsingHeader("LaTeX format examples")) {
             if (model.is_map)
@@ -3265,6 +3338,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                     "Use * for multiplication, ^ for powers. LHS needs \\dot{x}= or x'=.");
         }
     }
+    draw_rhs_preview(model);
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
@@ -4183,13 +4257,44 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
                 s.continuation_active  = false;
                 s.continuation_paused  = false;
                 s.continuation_elapsed = 0.0;
-                s.continuation_peaks.clear();
-                ++s.continuation_peaks_gen;
+                // Диаграмма возвращается к пикам одного (последнего) прогона.
+                s.rebuild_peaks_from_result();
             }
         }
         ImGui::SameLine();
         ImGui::Text("Frame delay (ms):"); ImGui::SameLine();
         InputNumStr("##cdelay", s.continuation_delay_ms, 70);
+        ImGui::SameLine();
+        ImGui::Text("Max peaks:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        // Правится по Enter/уходу фокуса: иначе, набирая 500000, пользователь
+        // на промежуточном "5" обрезал бы накопленный буфер до минимума.
+        if (ImGui::InputInt("##ccap", &s.continuation_peaks_cap, 0, 0,
+                            ImGuiInputTextFlags_EnterReturnsTrue)
+            || ImGui::IsItemDeactivatedAfterEdit()) {
+            s.continuation_peaks_cap = std::clamp(s.continuation_peaks_cap,
+                PhaseAnalysisSession::kContPeaksCapMin, PhaseAnalysisSession::kContPeaksCapMax);
+            s.trim_continuation_peaks();
+            ++s.continuation_peaks_gen;
+        }
+        if (ImGui::IsItemHovered()) {
+            // Буферов на IC — переменные плюс комбинированный ряд x0 + pi*x1 + e*x2
+            // (тот же, что у DBSCAN в 2D-бифуркации); пик — пара double (t, peak).
+            const int n_ic  = std::max(1, (int)s.ic_sets.size());
+            const int n_buf = (int)s.vars.size() + 1;
+            const double mb = (double)s.continuation_peaks_cap * 16.0 * n_ic * n_buf / 1.0e6;
+            ImGui::SetTooltip("Continuation diagram keeps the last N peaks per buffer;\n"
+                              "older ones are dropped. Range %d .. %d.\n"
+                              "\n"
+                              "Memory = N x 16 B x ICs x (variables + 1)\n"
+                              "  16 B: a peak is two doubles (time, value)\n"
+                              "  +1: the combined series x0 + pi*x1 + e*x2\n"
+                              "Now: %d x 16 B x %d x %d = %.1f MB\n"
+                              "(up to ~2x briefly while a buffer grows).",
+                              PhaseAnalysisSession::kContPeaksCapMin,
+                              PhaseAnalysisSession::kContPeaksCapMax,
+                              s.continuation_peaks_cap, n_ic, n_buf, mb);
+        }
     }
 
     ImGui::Separator();
@@ -5441,7 +5546,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
             else if (pr.type == ProjType::ContinuationDiagram) {
                 const int av = pr.axis_x;
                 if (s.continuation_peaks.empty()) {
-                    ImGui::TextDisabled("No data. Enable Continuation (live) and press Recompute.");
+                    ImGui::TextDisabled("No data. Press Recompute (Continuation (live) accumulates across runs).");
                 }
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();

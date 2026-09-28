@@ -725,6 +725,7 @@ void PhaseAnalysisSession::recompute() {
     result = compute_phase_portrait(in);
     fit_request = true;
     data_generation++;
+    if (!continuation_mode) rebuild_peaks_from_result();
 }
 
 bool PhaseAnalysisSession::recompute_async() {
@@ -736,6 +737,56 @@ bool PhaseAnalysisSession::recompute_async() {
         return compute_phase_portrait(in);
     });
     return true;
+}
+
+void PhaseAnalysisSession::trim_continuation_peaks() {
+    const size_t cap_pairs = (size_t)std::clamp(continuation_peaks_cap,
+                                                kContPeaksCapMin, kContPeaksCapMax);
+    for (auto& per_var : continuation_peaks)
+        for (std::vector<double>& buf : per_var) {
+            const size_t cur_pairs = buf.size() / 2;
+            if (cur_pairs <= cap_pairs) continue;
+            const size_t drop_pairs = cur_pairs - cap_pairs;
+            buf.erase(buf.begin(), buf.begin() + (std::ptrdiff_t)(drop_pairs * 2));
+        }
+}
+
+// Пики result.features -> continuation_peaks, время сдвинуто на base.
+// Буферы по IC пересоздаются, если число IC или переменных поменялось.
+void PhaseAnalysisSession::append_result_peaks(double base) {
+    const int N = (int)ic_sets.size();
+    if ((int)continuation_peaks.size() != N) continuation_peaks.assign((size_t)N, {});
+    for (int k = 0; k < N && k < (int)result.features.size(); ++k) {
+        auto& per_var_out = continuation_peaks[(size_t)k];
+        const auto& per_var_in = result.features[(size_t)k];
+        if (per_var_out.size() != per_var_in.size())
+            per_var_out.assign(per_var_in.size(), {});
+        for (size_t v = 0; v < per_var_in.size(); ++v) {
+            const FeaturePoints& fp = per_var_in[v];
+            std::vector<double>& buf = per_var_out[v];
+            double cumt = base;
+            const size_t n = fp.peaks.size() < fp.intervals.size()
+                           ? fp.peaks.size() : fp.intervals.size();
+            buf.reserve(buf.size() + n * 2);
+            for (size_t p = 0; p < n; ++p) {
+                if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p])) continue;
+                cumt += fp.intervals[p];
+                buf.push_back((double)cumt);
+                buf.push_back((double)fp.peaks[p]);
+            }
+        }
+    }
+    trim_continuation_peaks();
+}
+
+// Без continuation диаграмма показывает пики ОДНОГО прогона: время от начала
+// записи (после transient), как у первого кадра continuation. Буфер при этом
+// собирается заново, а не копится, — иначе каждый Recompute склеивал бы
+// прогоны с разными параметрами в одну ось времени.
+void PhaseAnalysisSession::rebuild_peaks_from_result() {
+    continuation_peaks.clear();
+    if (result.ok) append_result_peaks(0.0);
+    ++continuation_peaks_gen;
 }
 
 bool PhaseAnalysisSession::poll() {
@@ -753,39 +804,15 @@ bool PhaseAnalysisSession::poll() {
         const double chunk_t = result.snapshot.t_max;
         const double base    = continuation_elapsed;
         continuation_elapsed += chunk_t;
-
-        const int N = (int)ic_sets.size();
-        if ((int)continuation_peaks.size() != N) continuation_peaks.assign((size_t)N, {});
-        for (int k = 0; k < N && k < (int)result.features.size(); ++k) {
-            auto& per_var_out = continuation_peaks[(size_t)k];
-            const auto& per_var_in = result.features[(size_t)k];
-            if (per_var_out.size() != per_var_in.size())
-                per_var_out.assign(per_var_in.size(), {});
-            for (size_t v = 0; v < per_var_in.size(); ++v) {
-                const FeaturePoints& fp = per_var_in[v];
-                std::vector<double>& buf = per_var_out[v];
-                double cumt = base;
-                const size_t n = fp.peaks.size() < fp.intervals.size()
-                               ? fp.peaks.size() : fp.intervals.size();
-                buf.reserve(buf.size() + n * 2);
-                for (size_t p = 0; p < n; ++p) {
-                    if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p])) continue;
-                    cumt += fp.intervals[p];
-                    buf.push_back((double)cumt);
-                    buf.push_back((double)fp.peaks[p]);
-                }
-                const size_t cap_pairs = (size_t)std::max(1, continuation_peaks_cap);
-                const size_t cur_pairs = buf.size() / 2;
-                if (cur_pairs > cap_pairs) {
-                    const size_t drop_pairs = cur_pairs - cap_pairs;
-                    buf.erase(buf.begin(), buf.begin() + (std::ptrdiff_t)(drop_pairs * 2));
-                }
-            }
-        }
+        append_result_peaks(base);
         ++continuation_peaks_gen;
 
         continuation_state       = std::move(result.final_states);
         continuation_first_frame = false;
+    }
+    // Режим включён, но цикл остановлен (Stop): накопленное не трогаем.
+    else if (!continuation_mode) {
+        rebuild_peaks_from_result();
     }
     return true;
 }
