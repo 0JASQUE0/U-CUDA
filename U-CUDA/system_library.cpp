@@ -145,6 +145,7 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_midpoint", r.scheme_midpoint);
     kvbool(o, "scheme_rk4", r.scheme_rk4);
     kvbool(o, "scheme_dopri78", r.scheme_dopri78);
+    kvbool(o, "scheme_dopri78_legacy", r.scheme_dopri78_legacy);
     kvbool(o, "scheme_cd", r.scheme_cd);
     kvbool(o, "scheme_ccd", r.scheme_ccd);
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
@@ -163,6 +164,12 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_simp", r.scheme_simp);
     kvbool(o, "scheme_d", r.scheme_dmethod);
     kvbool(o, "scheme_cieuler", r.scheme_cieuler);
+    kvbool(o, "scheme_gbs", r.scheme_gbs);
+    kvbool(o, "scheme_gbs24", r.scheme_gbs24);
+    kvbool(o, "scheme_gbs246", r.scheme_gbs246);
+    kvbool(o, "scheme_gbs2468", r.scheme_gbs2468);
+    kvbool(o, "scheme_gbs246810", r.scheme_gbs246810);
+    kvbool(o, "scheme_gbs24681012", r.scheme_gbs24681012);
     kvbool(o, "newton_full", r.newton_full);
     kv(o, "newton_tol", r.newton_tol);
     kv(o, "newton_max_iters", r.newton_max_iters);
@@ -180,7 +187,8 @@ std::string record_to_json(const SystemRecord& r) {
         o << "{\"name\": \"" << esc(cs.name)
           << "\", \"body\": \"" << esc(cs.body)
           << "\", \"order\": \"" << cs.order
-          << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0) << "\"}";
+          << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0)
+          << "\", \"enabled\": \"" << (cs.enabled ? 1 : 0) << "\"}";
     }
     o << "],\n";
     // Wrapper scheme names only ("Extr(RK4|1,2,4)", "Comp(CD|g1,g2,g1)"); the
@@ -190,6 +198,12 @@ std::string record_to_json(const SystemRecord& r) {
     for (size_t k = 0; k < r.wrapper_schemes.size(); ++k) {
         if (k) o << ", ";
         o << "\"" << esc(r.wrapper_schemes[k]) << "\"";
+    }
+    o << "],\n";
+    o << "  \"disabled_wrappers\": [";
+    for (size_t k = 0; k < r.disabled_wrappers.size(); ++k) {
+        if (k) o << ", ";
+        o << "\"" << esc(r.disabled_wrappers[k]) << "\"";
     }
     o << "]\n";
     o << "}\n";
@@ -214,6 +228,7 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_midpoint") r.scheme_midpoint = p.parse_bool();
         else if (key == "scheme_rk4") r.scheme_rk4 = p.parse_bool();
         else if (key == "scheme_dopri78") r.scheme_dopri78 = p.parse_bool();
+        else if (key == "scheme_dopri78_legacy") r.scheme_dopri78_legacy = p.parse_bool();
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
         else if (key == "scheme_ccd") r.scheme_ccd = p.parse_bool();
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
@@ -232,6 +247,12 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_simp") r.scheme_simp = p.parse_bool();
         else if (key == "scheme_d") r.scheme_dmethod = p.parse_bool();
         else if (key == "scheme_cieuler") r.scheme_cieuler = p.parse_bool();
+        else if (key == "scheme_gbs") r.scheme_gbs = p.parse_bool();
+        else if (key == "scheme_gbs24") r.scheme_gbs24 = p.parse_bool();
+        else if (key == "scheme_gbs246") r.scheme_gbs246 = p.parse_bool();
+        else if (key == "scheme_gbs2468") r.scheme_gbs2468 = p.parse_bool();
+        else if (key == "scheme_gbs246810") r.scheme_gbs246810 = p.parse_bool();
+        else if (key == "scheme_gbs24681012") r.scheme_gbs24681012 = p.parse_bool();
         else if (key == "newton_full") r.newton_full = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();
@@ -264,6 +285,8 @@ SystemRecord record_from_json(const std::string& json) {
                             if (digits && v >= 1) cs.order = v;
                         }
                         else if (ck == "symmetric") cs.symmetric = (cv == "1" || cv == "true");
+                        // Нет ключа — включена: так читаются старые system.json.
+                        else if (ck == "enabled") cs.enabled = !(cv == "0" || cv == "false");
                         p.ws();
                         if (p.peek() == ',') { ++p.i; continue; }
                         if (p.peek() == '}') { ++p.i; break; }
@@ -287,6 +310,21 @@ SystemRecord record_from_json(const std::string& json) {
             if (p.peek() != ']') {
                 while (true) {
                     r.wrapper_schemes.push_back(p.parse_string());
+                    p.ws();
+                    if (p.peek() == ',') { ++p.i; continue; }
+                    if (p.peek() == ']') { ++p.i; break; }
+                    break;
+                }
+            } else { ++p.i; }
+        }
+        else if (key == "disabled_wrappers") {
+            // Тот же плоский массив строк, что у extr_schemes.
+            p.ws();
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for disabled_wrappers");
+            ++p.i; p.ws();
+            if (p.peek() != ']') {
+                while (true) {
+                    r.disabled_wrappers.push_back(p.parse_string());
                     p.ws();
                     if (p.peek() == ',') { ++p.i; continue; }
                     if (p.peek() == ']') { ++p.i; break; }

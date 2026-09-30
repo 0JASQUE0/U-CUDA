@@ -716,8 +716,10 @@ static void field_apply_all_menu(AppModel* model, BroadcastField f,
 // имён пользовательских схем.
 // order — порядок точности: по нему схемы сгруппированы и в комбо, и в
 // чекбоксах System tab, поэтому таблица отсортирована по нему и порядок строк
-// здесь = порядок в UI. У CD, Complex CD, SEMP и SIMP заявленный порядок
-// достигается только при s = a[0] = 0.5 (см. codegen.cpp).
+// здесь = порядок в UI. Исключение — схемы со своей группой (group, сейчас
+// только ГБШ): они идут блоком в конце, со своим заголовком.
+// У CD, Complex CD, SEMP и SIMP заявленный порядок достигается только при
+// s = a[0] = 0.5 (см. codegen.cpp).
 struct BuiltinScheme {
     const char* name;
     int         order;
@@ -728,7 +730,15 @@ struct BuiltinScheme {
     bool AppModel::*flag;
     // Подсказка чекбокса; nullptr — схема говорит сама за себя.
     const char* tooltip;
+    // Своя группа вместо "Order N" (nullptr — группа по порядку). Схемы одной
+    // группы стоят в таблице подряд: шапка печатается на смене заголовка.
+    const char* group = nullptr;
 };
+
+// Заголовок группы в комбо и чекбоксах: своя группа или "Order N".
+[[nodiscard]] static std::string scheme_group_title(const BuiltinScheme& b) {
+    return b.group ? std::string(b.group) : "Order " + std::to_string(b.order);
+}
 // Scheme name for a discrete map. Deliberately NOT in kBuiltinSchemes: it is
 // never picked from the combo, but it is reserved as a custom-KRS name.
 static const char* const kMapSchemeName = "Map";
@@ -891,7 +901,61 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Error constant differs from {0-1} and depends on the problem:\n"
       "10x larger on Lorenz, 2.8x smaller on Rossler.\n"
       "a[0] is NOT read." },
-    { "DOPRI78",                  8, &AppModel::scheme_dopri78, nullptr },
+    { "DOPRI78",                  8, &AppModel::scheme_dopri78,
+      "Dormand-Prince RK8(7)13M, 13 stages, order 8 (the 7th-order\n"
+      "embedded solution is computed but not used).\n"
+      "Coefficients refined from the published fractions by solving\n"
+      "all 200 order conditions to 1.8e-39 and stored to ~62 digits:\n"
+      "double uses the nearest double, dd/qd in the Order tab get\n"
+      "the full precision. Error floor ~1e-38 in dd (was ~1e-17).\n"
+      "Note: the leading error term is minimized (the M in 13M), so\n"
+      "the observed order at practical steps is ~9-10, reaching 8\n"
+      "only at small h." },
+    { "DOPRI78 (legacy)",         8, &AppModel::scheme_dopri78_legacy,
+      "RK8(7)13M with the published rational coefficients of\n"
+      "Prince & Dormand (1981), taken as is (no refinement).\n"
+      "They satisfy the order conditions only to ~1e-18: in double\n"
+      "this is indistinguishable from DOPRI78, in dd the error\n"
+      "floors at ~1e-17. Kept for comparison." },
+    { "GBS (n=2)",               2, &AppModel::scheme_gbs,
+      "Gragg's modified midpoint with n = 2 substeps of h/2, the\n"
+      "base of the Gragg-Bulirsch-Stoer family:\n"
+      "z1 = X + (h/2) f(X),  z2 = X + h f(z1),\n"
+      "X_next = (z1 + z2 + (h/2) f(z2)) / 2   (Gragg smoothing).\n"
+      "Order 2, 3 RHS evaluations per step. NOT self-adjoint as a\n"
+      "one-step method (defect O(h^6)), so Extr(GBS (n=2)|1,2,3)\n"
+      "reaches only 5; the GBS 2-4-6 ... entries below keep ONE\n"
+      "leapfrog chain per stage and reach the full 2K.", "GBS" },
+    { "GBS 2-4",                 4, &AppModel::scheme_gbs24,
+      "Gragg-Bulirsch-Stoer, stages n = 2, 4: stage k is ONE\n"
+      "leapfrog chain of n substeps h/n started by Euler and closed\n"
+      "by Gragg smoothing; stages run from the same X and are\n"
+      "combined with Richardson weights in 1/n^2.\n"
+      "Order 4 (measured 4.1 on Rossler), 8 RHS evaluations per step.", "GBS" },
+    { "GBS 2-4-6",               6, &AppModel::scheme_gbs246,
+      "Gragg-Bulirsch-Stoer, stages n = 2, 4, 6: stage k is ONE\n"
+      "leapfrog chain of n substeps h/n started by Euler and closed\n"
+      "by Gragg smoothing; stages run from the same X and are\n"
+      "combined with Richardson weights in 1/n^2.\n"
+      "Order 6 (measured 6.1 on Rossler), 15 RHS evaluations per step.", "GBS" },
+    { "GBS 2-4-6-8",             8, &AppModel::scheme_gbs2468,
+      "Gragg-Bulirsch-Stoer, stages n = 2, 4, 6, 8: stage k is ONE\n"
+      "leapfrog chain of n substeps h/n started by Euler and closed\n"
+      "by Gragg smoothing; stages run from the same X and are\n"
+      "combined with Richardson weights in 1/n^2.\n"
+      "Order 8, 24 RHS evaluations per step.", "GBS" },
+    { "GBS 2-4-6-8-10",          10, &AppModel::scheme_gbs246810,
+      "Gragg-Bulirsch-Stoer, stages n = 2, 4, 6, 8, 10: stage k is ONE\n"
+      "leapfrog chain of n substeps h/n started by Euler and closed\n"
+      "by Gragg smoothing; stages run from the same X and are\n"
+      "combined with Richardson weights in 1/n^2.\n"
+      "Order 10, 35 RHS evaluations per step.", "GBS" },
+    { "GBS 2-4-6-8-10-12",       12, &AppModel::scheme_gbs24681012,
+      "Gragg-Bulirsch-Stoer, stages n = 2, 4, 6, 8, 10, 12: stage k is ONE\n"
+      "leapfrog chain of n substeps h/n started by Euler and closed\n"
+      "by Gragg smoothing; stages run from the same X and are\n"
+      "combined with Richardson weights in 1/n^2.\n"
+      "Order 12, 48 RHS evaluations per step.", "GBS" },
 };
 static constexpr int kBuiltinSchemeCount =
     (int)(sizeof(kBuiltinSchemes) / sizeof(kBuiltinSchemes[0]));
@@ -945,7 +1009,8 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                               const std::vector<std::string>* enabled_builtins = nullptr,
                               AppModel* bc = nullptr,
                               bool is_map = false,
-                              const std::vector<std::string>* wrapper_schemes = nullptr) {
+                              const std::vector<std::string>* wrapper_schemes = nullptr,
+                              bool broadcast = true) {
     // Nothing to choose for a discrete map: the step is the right-hand side.
     if (is_map) {
         scheme = kMapSchemeName;
@@ -970,28 +1035,54 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
     if (ImGui::BeginCombo(label, wrapper_display_name(scheme).c_str())) {
         // Заголовок порядка печатаем лениво — перед ПЕРВОЙ видимой схемой
         // группы, иначе отфильтрованная группа оставила бы пустую шапку.
-        int shown_order = 0;
+        std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
             if (!is_enabled(b.name) && scheme != b.name) continue;
-            if (b.order != shown_order) {
-                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
-                shown_order = b.order;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, scheme == b.name)) choose(b.name);
         }
         // Своя шапка, а не голая черта: у групп порядка и у обёрток заголовки
         // есть, и без неё кастомные читались как хвост последней Order-группы.
-        if (!custom_schemes.empty()) ImGui::SeparatorText("Custom");
-        for (const auto& cs : custom_schemes)
+        // Выключенная галочкой КРС не предлагается, но уже выбранная остаётся
+        // видна — как и у встроенных, чтобы сессия не осиротела.
+        bool custom_header = false;
+        for (const auto& cs : custom_schemes) {
+            if (!cs.enabled && scheme != cs.name) continue;
+            if (!custom_header) { ImGui::SeparatorText("Custom"); custom_header = true; }
             if (ImGui::Selectable((cs.name + "##custom").c_str(), scheme == cs.name))
                 choose(cs.name);
+        }
         // Обёртки — отдельной группой: паспортного порядка в таблице у них
         // нет (у Extr он считается из базы и числа стадий, у Comp вообще
         // известен только в рантайме), поэтому в группировку по Order выше
         // они не встают.
-        if (wrapper_schemes && !wrapper_schemes->empty()) {
+        // Сессии получают только включённые обёртки; выбранная, но выключенная
+        // добавляется обратно по той же причине, что и КРС выше.
+        std::vector<std::string> sorted;
+        if (wrapper_schemes) sorted = *wrapper_schemes;
+        {
+            ExtrapolationSpec esp;
+            CompositionSpec   csp;
+            if ((parse_extrapolation_name(scheme, &esp) || parse_composition_name(scheme, &csp))
+                && std::find(sorted.begin(), sorted.end(), scheme) == sorted.end())
+                sorted.push_back(scheme);
+        }
+        if (!sorted.empty()) {
             ImGui::SeparatorText("Wrappers");
-            for (const auto& nm : *wrapper_schemes) {
+            // Порядок sort_wrapper_schemes: список сессии мог приехать из файла
+            // в старом порядке добавления. Подзаголовок — на смене группы
+            // "тип + опорник".
+            sort_wrapper_schemes(sorted);
+            std::string shown_wgroup;
+            for (const auto& nm : sorted) {
+                const std::string wg = wrapper_group_title(nm);
+                if (wg != shown_wgroup) {
+                    if (!wg.empty()) ImGui::TextDisabled("%s", wg.c_str());
+                    shown_wgroup = wg;
+                }
                 const std::string shown = wrapper_display_name(nm);
                 if (ImGui::Selectable((shown + "##" + nm).c_str(), scheme == nm))
                     choose(nm);
@@ -1012,7 +1103,16 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
     }
     // Меню вешаем ПОСЛЕ комбо: последним элементом остаётся оно само, и ПКМ
     // попадает по нему, а не по строке раскрытого списка.
-    field_apply_all_menu(bc, BroadcastField::Scheme, {}, "scheme", scheme);
+    // broadcast = false — комбо не основной схемы (эталон вкладки Order):
+    // рассылка BroadcastField::Scheme записала бы значение в ОСНОВНУЮ схему
+    // чужих конфигов. PushID(label): ID popup'а собирается из "scheme", и две
+    // комбо схемы на одном уровне ID-стека склеивали бы меню в одно окно,
+    // рисуя его содержимое дважды (конфликт ID у галочек "Apply to...").
+    if (broadcast) {
+        ImGui::PushID(label);
+        field_apply_all_menu(bc, BroadcastField::Scheme, {}, "scheme", scheme);
+        ImGui::PopID();
+    }
     return picked;
 }
 
@@ -2828,12 +2928,12 @@ static void draw_extrapolation_builder(AppModel& model) {
     // --- выбор базы -------------------------------------------------------
     ImGui::SetNextItemWidth(kComboW);
     if (ImGui::BeginCombo("base scheme", model.extr_builder_base.c_str())) {
-        int shown_order = 0;
+        std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
             if (!(model.*(b.flag)) && model.extr_builder_base != b.name) continue;
-            if (b.order != shown_order) {
-                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
-                shown_order = b.order;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, model.extr_builder_base == b.name))
                 model.extr_builder_base = b.name;
@@ -2986,8 +3086,13 @@ static void draw_extrapolation_builder(AppModel& model) {
     }
 
     ImGui::BeginDisabled(!problem.empty() || duplicate);
-    if (ImGui::Button("+ Add extrapolated scheme"))
+    if (ImGui::Button("+ Add extrapolated scheme")) {
         model.wrapper_schemes.push_back(new_name);
+        // Список держим упорядоченным (тип, опорник, стадии), а не по
+        // времени добавления; индексы съезжают — переименование бросаем.
+        sort_wrapper_schemes(model.wrapper_schemes);
+        model.wrapper_rename_index = -1;
+    }
     ImGui::EndDisabled();
     if (duplicate) {
         ImGui::SameLine();
@@ -3046,12 +3151,12 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     // --- база -------------------------------------------------------------
     ImGui::SetNextItemWidth(kComboW);
     if (ImGui::BeginCombo("base scheme##comp", model.comp_builder_base.c_str())) {
-        int shown_order = 0;
+        std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
             if (!(model.*(b.flag)) && model.comp_builder_base != b.name) continue;
-            if (b.order != shown_order) {
-                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
-                shown_order = b.order;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, model.comp_builder_base == b.name))
                 model.comp_builder_base = b.name;
@@ -3139,7 +3244,11 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     }
     ImGui::EndChild();
 
-    auto preset = [&](const char* label, const char* const* vals, int cnt, const char* tip) {
+    // name_suffix != nullptr — пресет опубликованного метода: без имени схема в
+    // комбо читалась бы строкой из семнадцати чисел, поэтому пустое имя
+    // заполняется "<база> <суффикс>" (так их и называли руками: "CD S17o8").
+    auto preset = [&](const char* label, const char* const* vals, int cnt, const char* tip,
+                      const char* name_suffix = nullptr) {
         if (ImGui::SmallButton(label)) {
             model.comp_builder_stages = cnt;
             for (int k = 0; k < cnt; ++k) model.comp_builder_g[k] = vals[k];
@@ -3147,6 +3256,9 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
             // иначе увеличение K вытащит наружу прошлую раскладку.
             for (int k = cnt; k < kCompMaxStages; ++k) model.comp_builder_g[k].clear();
             model.comp_load_status.clear();
+            if (name_suffix && model.comp_builder_label.empty())
+                model.comp_builder_label =
+                    wrapper_sanitize_label(model.comp_builder_base + " " + name_suffix);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
         ImGui::SameLine();
@@ -3159,6 +3271,16 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     static const char* const kSuzuki[]  = { "0.41449077179437573", "0.41449077179437573",
                                             "-0.6579630871775029",
                                             "0.41449077179437573", "0.41449077179437573" };
+    // S17o8 (Kahan & Li, 1997): палиндром из 17 стадий, порядок 8 над
+    // симметричной базой 2-го порядка. 18 значащих цифр, как в статье: на них
+    // sum(g) = 1 и sum(g^3) = sum(g^5) = sum(g^7) = 0 держатся до ~1e-17.
+    static const char* const kS17o8[] = {
+        "0.127136927734878585", "0.561702537988802652", "-0.382534719948830204",
+        "0.16007605629464744",  "-0.401816374326806946", "0.187366716542278489",
+        "0.260708709207792377", "0.290397388125161637",  "-0.606074483235848116",
+        "0.290397388125161637", "0.260708709207792377",  "0.187366716542278489",
+        "-0.401816374326806946", "0.16007605629464744",  "-0.382534719948830204",
+        "0.561702537988802652", "0.127136927734878585" };
     static const char* const kLine[]    = { "g1", "1-2*g1", "g1" };
     static const char* const kFree[]    = { "g1", "g2", "g1" };
     ImGui::TextUnformatted("presets:"); ImGui::SameLine();
@@ -3167,6 +3289,11 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
                                    "which is what a real composition pays to kill the h^3 term.");
     preset("Suzuki",  kSuzuki,  5, "Suzuki 5-fold, also order 4 but with a much smaller\n"
                                    "negative step (-0.66 h) - 5 base steps instead of 3.");
+    preset("S17o8",   kS17o8,  17, "Kahan & Li (1997): 17-stage palindromic composition,\n"
+                                   "order 8 from a symmetric order-2 base (CD at s = 0.5,\n"
+                                   "Implicit Midpoint, ...). 17 base steps per step.\n"
+                                   "Fills an empty scheme name with \"<base> S17o8\".",
+           "S17o8");
     preset("sweep g1", kLine,   3, "Consistency 2*g1 + g2 = 1 built in, so a 1D sweep of g1\n"
                                    "in the Order tab stays inside the triple-jump family.");
     preset("sweep g1,g2", kFree, 3, "Both coefficients free: gives the p(g1, g2) map.\n"
@@ -3236,8 +3363,13 @@ static void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
     }
 
     ImGui::BeginDisabled(!problem.empty() || duplicate);
-    if (ImGui::Button("+ Add composed scheme"))
+    if (ImGui::Button("+ Add composed scheme")) {
         model.wrapper_schemes.push_back(new_name);
+        // Список держим упорядоченным (тип, опорник, стадии), а не по
+        // времени добавления; индексы съезжают — переименование бросаем.
+        sort_wrapper_schemes(model.wrapper_schemes);
+        model.wrapper_rename_index = -1;
+    }
     ImGui::EndDisabled();
     if (duplicate) {
         ImGui::SameLine();
@@ -3259,8 +3391,24 @@ static void draw_wrapper_list(AppModel& model) {
     // открывает (это TreeNodeBehavior без TreePush). Без этого PushID(0) +
     // SmallButton("Delete") в обоих списках даёт один и тот же ID.
     ImGui::PushID("wrapper_list");
+    std::string shown_wgroup;   // список отсортирован, см. sort_wrapper_schemes
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
+        const std::string wg = wrapper_group_title(model.wrapper_schemes[i]);
+        if (wg != shown_wgroup) {
+            if (!wg.empty()) ImGui::SeparatorText(wg.c_str());
+            shown_wgroup = wg;
+        }
         ImGui::PushID(i);
+        {
+            bool on = model.wrapper_enabled(model.wrapper_schemes[i]);
+            if (ImGui::Checkbox("##wr_on", &on))
+                model.set_wrapper_enabled(model.wrapper_schemes[i], on);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Offer this wrapper in the scheme lists of the tabs\n"
+                                  "and include its code in Generate. A tab that already\n"
+                                  "uses it keeps it.");
+            ImGui::SameLine();
+        }
         const std::string shown = wrapper_display_name(model.wrapper_schemes[i]);
         // Строка-раскрывашка, а не просто текст: коэффициенты у пяти стадий
         // занимают полэкрана, а список обычно просматривают целиком.
@@ -3335,6 +3483,8 @@ static void draw_wrapper_list(AppModel& model) {
     }
     ImGui::PopID();
     if (to_delete >= 0) {
+        // Галочку тоже забываем: заново собранная та же обёртка — включена.
+        model.set_wrapper_enabled(model.wrapper_schemes[(size_t)to_delete], true);
         model.wrapper_schemes.erase(model.wrapper_schemes.begin() + to_delete);
         // Индексы за удалённой строкой съехали — переименование бросаем, иначе
         // введённое имя досталось бы соседней схеме.
@@ -3516,13 +3666,13 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
     // s = a[0] = 0.5; при других s все четыре падают до первого.
     {
-        int  shown_order   = 0;
+        std::string  shown_group;
         bool first_in_line = true;
         for (const auto& b : kBuiltinSchemes) {
             if (!scheme_shown(b)) continue;
-            if (b.order != shown_order) {
-                ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
-                shown_order   = b.order;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group   = scheme_group_title(b);
                 first_in_line = true;
             }
             if (!first_in_line) ImGui::SameLine();
@@ -3588,6 +3738,21 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
         for (int i = 0; i < (int)model.custom_schemes.size(); ++i) {
             auto& cs = model.custom_schemes[i];
             ImGui::PushID(i);
+            // Свернуть/развернуть код. Состояние в модели по имени схемы, как
+            // и высота редактора: индекс съехал бы при удалении соседней.
+            bool& collapsed = model.custom_scheme_code_collapsed[cs.name];
+            if (ImGui::ArrowButton("##cs_fold", collapsed ? ImGuiDir_Right : ImGuiDir_Down))
+                collapsed = !collapsed;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(collapsed ? "Show the code" : "Hide the code");
+            ImGui::SameLine();
+            ImGui::Checkbox("##cs_on", &cs.enabled);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Offer this scheme in the scheme lists of the tabs\n"
+                                  "and include it in Generate. Unticked, it stays here\n"
+                                  "and can still be the base of a wrapper; a tab that\n"
+                                  "already uses it keeps it.");
+            ImGui::SameLine();
             ImGui::SetNextItemWidth(220);
             std::string name_label = "name##cs_name_" + std::to_string(i);
             InputTextStr(name_label.c_str(), cs.name);
@@ -3619,11 +3784,17 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                                   "NOT true for explicit midpoint / RK4 / predictor-corrector.\n"
                                   "A symmetric base gains 2 orders per extrapolation stage\n"
                                   "instead of 1. Same as above: a wrong tick only costs order.");
-            std::string body_label = "##cs_body_" + std::to_string(i);
-            float& body_h = model.custom_scheme_editor_h.try_emplace(cs.name, 100.0f).first->second;
-            InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, body_h));
-            const std::string resize_id = "##cs_body_resize_" + std::to_string(i);
-            draw_resize_handle(resize_id.c_str(), body_h);
+            if (collapsed) {
+                const int n_lines = cs.body.empty()
+                    ? 0 : 1 + (int)std::count(cs.body.begin(), cs.body.end(), '\n');
+                ImGui::TextDisabled("  code hidden (%d line%s)", n_lines, n_lines == 1 ? "" : "s");
+            } else {
+                std::string body_label = "##cs_body_" + std::to_string(i);
+                float& body_h = model.custom_scheme_editor_h.try_emplace(cs.name, 100.0f).first->second;
+                InputTextMultilineStr(body_label.c_str(), cs.body, ImVec2(-1, body_h));
+                const std::string resize_id = "##cs_body_resize_" + std::to_string(i);
+                draw_resize_handle(resize_id.c_str(), body_h);
+            }
             // Проверка обращений X[k] / a[k] с константным индексом против
             // размерности ТЕКУЩЕЙ системы. Статическая и живая — тела короткие,
             // проход по строке стоит копейки. Пока система не распознана
@@ -9062,7 +9233,7 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
     // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
     s.custom_schemes = model.custom_schemes;
-    s.wrapper_schemes   = model.wrapper_schemes;
+    s.wrapper_schemes   = model.enabled_wrapper_schemes();
 
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
@@ -10324,7 +10495,8 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::Separator();
         // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
         draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes);
+                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
+                          /*broadcast*/ false);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "The method that stands for the exact answer in Eref =\n"
@@ -14989,21 +15161,51 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.custom_session.basins_session.custom_schemes = model.custom_schemes;
     // Экстраполяционные обёртки — тем же покадровым синком и по тем же
     // причинам: собранная в Library схема должна появиться в комбо сразу.
-    model.phase_session.wrapper_schemes       = model.wrapper_schemes;
-    model.bifurcation_session.wrapper_schemes = model.wrapper_schemes;
-    model.lle_session.wrapper_schemes         = model.wrapper_schemes;
-    model.ls_session.wrapper_schemes          = model.wrapper_schemes;
-    model.dft1d_session.wrapper_schemes       = model.wrapper_schemes;
-    model.basins_session.wrapper_schemes      = model.wrapper_schemes;
-    model.fastsync_session.wrapper_schemes    = model.wrapper_schemes;
-    model.order_session.wrapper_schemes       = model.wrapper_schemes;
-    model.network_session.wrapper_schemes     = model.wrapper_schemes;
-    model.custom_session.wrapper_schemes                = model.wrapper_schemes;
-    model.custom_session.bif_session.wrapper_schemes    = model.wrapper_schemes;
-    model.custom_session.lle_session.wrapper_schemes    = model.wrapper_schemes;
-    model.custom_session.ls_session.wrapper_schemes     = model.wrapper_schemes;
-    model.custom_session.phase_session.wrapper_schemes  = model.wrapper_schemes;
-    model.custom_session.basins_session.wrapper_schemes = model.wrapper_schemes;
+    const std::vector<std::string> wrappers_on = model.enabled_wrapper_schemes();   // галочки списка обёрток
+    model.phase_session.wrapper_schemes       = wrappers_on;
+    model.bifurcation_session.wrapper_schemes = wrappers_on;
+    model.lle_session.wrapper_schemes         = wrappers_on;
+    model.ls_session.wrapper_schemes          = wrappers_on;
+    model.dft1d_session.wrapper_schemes       = wrappers_on;
+    model.basins_session.wrapper_schemes      = wrappers_on;
+    model.fastsync_session.wrapper_schemes    = wrappers_on;
+    model.order_session.wrapper_schemes       = wrappers_on;
+    model.network_session.wrapper_schemes     = wrappers_on;
+    model.custom_session.wrapper_schemes                = wrappers_on;
+    model.custom_session.bif_session.wrapper_schemes    = wrappers_on;
+    model.custom_session.lle_session.wrapper_schemes    = wrappers_on;
+    model.custom_session.ls_session.wrapper_schemes     = wrappers_on;
+    model.custom_session.phase_session.wrapper_schemes  = wrappers_on;
+    model.custom_session.basins_session.wrapper_schemes = wrappers_on;
+    // Включённые встроенные схемы — тем же покадровым синком. Раньше они
+    // доезжали до сессий только через propagate_to_sessions (сохранение
+    // активной системы в Library) или load_from_record, а Order и Network
+    // propagate не видел вовсе: отмеченная и сохранённая схема не появлялась
+    // в их комбо до перезагрузки системы. Пустой список = фильтра нет, как и
+    // у enabled_builtins_from_record.
+    {
+        std::vector<std::string> enabled_now;
+        for (const auto& b : kBuiltinSchemes)
+            if (model.*b.flag) enabled_now.push_back(b.name);
+        for (std::vector<std::string>* dst : {
+                 &model.phase_session.enabled_builtin_schemes,
+                 &model.bifurcation_session.enabled_builtin_schemes,
+                 &model.lle_session.enabled_builtin_schemes,
+                 &model.ls_session.enabled_builtin_schemes,
+                 &model.metrics_session.enabled_builtin_schemes,
+                 &model.dft1d_session.enabled_builtin_schemes,
+                 &model.basins_session.enabled_builtin_schemes,
+                 &model.fastsync_session.enabled_builtin_schemes,
+                 &model.order_session.enabled_builtin_schemes,
+                 &model.network_session.enabled_builtin_schemes,
+                 &model.custom_session.enabled_builtin_schemes,
+                 &model.custom_session.bif_session.enabled_builtin_schemes,
+                 &model.custom_session.lle_session.enabled_builtin_schemes,
+                 &model.custom_session.ls_session.enabled_builtin_schemes,
+                 &model.custom_session.phase_session.enabled_builtin_schemes,
+                 &model.custom_session.basins_session.enabled_builtin_schemes })
+            if (*dst != enabled_now) *dst = enabled_now;
+    }
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.
@@ -16000,12 +16202,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
                 // Раскладка — как в System tab: группа порядка одной строкой,
                 // чтобы список читался теми же блоками, что и там.
-                int  shown_order   = 0;
+                std::string  shown_group;
                 bool first_in_line = true;
                 for (const auto& b : kBuiltinSchemes) {
-                    if (b.order != shown_order) {
-                        ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
-                        shown_order   = b.order;
+                    if (scheme_group_title(b) != shown_group) {
+                        ImGui::SeparatorText(scheme_group_title(b).c_str());
+                        shown_group   = scheme_group_title(b);
                         first_in_line = true;
                     }
                     if (!first_in_line) ImGui::SameLine();

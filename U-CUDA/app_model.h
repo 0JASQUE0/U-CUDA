@@ -361,6 +361,7 @@ public:
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
     bool scheme_dopri78 = false;
+    bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy): дроби статьи без уточнения
     bool scheme_cd = false;
     // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
     // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
@@ -401,6 +402,14 @@ public:
     // комплексными шагами tau1 = h*(s + i/2), tau2 = h*(1 - s - i/2), s = a[0].
     // Порядок 2 только при s = 0.5 — коэффициенты вынуждены, см. codegen.hpp.
     bool scheme_cieuler = false;
+    // ГБШ: GBS (n=2) — опорник, GBS 2-4 ... 2-4-6-8-10-12 — экстраполяторы
+    // с одной цепочкой leapfrog на стадию (см. Scheme::GBS в codegen.hpp).
+    bool scheme_gbs = false;
+    bool scheme_gbs24 = false;
+    bool scheme_gbs246 = false;
+    bool scheme_gbs2468 = false;
+    bool scheme_gbs246810 = false;
+    bool scheme_gbs24681012 = false;
 
     // Настройки Ньютона (см. SystemRecord). Едут в System через build_system().
     bool        newton_full      = false;
@@ -420,6 +429,28 @@ public:
     // combinator cost no new plumbing. The body is not stored -- it is rebuilt
     // from the name, so editing the system never leaves a stale wrapper.
     std::vector<std::string> wrapper_schemes;
+    // Выключенные обёртки, канонические имена (см. SystemRecord::disabled_wrappers).
+    std::vector<std::string> disabled_wrappers;
+    bool wrapper_enabled(const std::string& name) const {
+        const std::string c = wrapper_canonical_name(name);
+        for (const auto& d : disabled_wrappers) if (d == c) return false;
+        return true;
+    }
+    void set_wrapper_enabled(const std::string& name, bool on) {
+        const std::string c = wrapper_canonical_name(name);
+        disabled_wrappers.erase(std::remove(disabled_wrappers.begin(), disabled_wrappers.end(), c),
+                                disabled_wrappers.end());
+        if (!on) disabled_wrappers.push_back(c);
+    }
+    // То, что видят комбо схем во вкладках: только включённые обёртки.
+    std::vector<std::string> enabled_wrapper_schemes() const {
+        std::vector<std::string> out;
+        for (const auto& w : wrapper_schemes) if (wrapper_enabled(w)) out.push_back(w);
+        return out;
+    }
+    // Свёрнут ли код кастомной КРС в System tab; ключ — имя схемы, как у
+    // custom_scheme_editor_h. Нет записи — развёрнут.
+    std::map<std::string, bool> custom_scheme_code_collapsed;
     // Строка списка обёрток, которую сейчас переименовывают, и набираемое имя.
     // Держать его в самом имени схемы по ходу набора нельзя: имя нормализуется
     // при разборе, и пробел, набранный в "Suzuki 17", исчезал бы на следующем
@@ -1049,6 +1080,13 @@ public:
                 { scheme_ccd4ss01, "CCD4 (s-split)_{0-1}", Scheme::ComplexCD4SS01 },
                 { scheme_ccd4ss10, "CCD4 (s-split)_{1-0}", Scheme::ComplexCD4SS10 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
+                { scheme_dopri78_legacy, "DOPRI78 (legacy)", Scheme::DOPRI78Legacy },
+                { scheme_gbs, "GBS (n=2)", Scheme::GBS },
+                { scheme_gbs24, "GBS 2-4", Scheme::GBS24 },
+                { scheme_gbs246, "GBS 2-4-6", Scheme::GBS246 },
+                { scheme_gbs2468, "GBS 2-4-6-8", Scheme::GBS2468 },
+                { scheme_gbs246810, "GBS 2-4-6-8-10", Scheme::GBS246810 },
+                { scheme_gbs24681012, "GBS 2-4-6-8-10-12", Scheme::GBS24681012 },
             };
             bool any = false;
             for (const auto& it : items) {
@@ -1062,12 +1100,28 @@ public:
             }
             // custom-схемы — добавляем их код как есть для preview
             for (const auto& cs : custom_schemes) {
-                if (cs.body.empty()) continue;
+                if (cs.body.empty() || !cs.enabled) continue;
                 any = true;
                 out += "// ===== ";
                 out += cs.name;
                 out += " (custom) =====\n";
                 out += cs.body;
+                out += "\n";
+            }
+            // Обёртки Extr/ExtrZ/Comp — тем же резолвером, что уходит в ядро на
+            // Run, поэтому превью совпадает с тем, что посчитается. Пустое тело —
+            // база не нашлась или не разобралась; говорим об этом прямо.
+            for (const auto& w : wrapper_schemes) {
+                if (!wrapper_enabled(w)) continue;
+                any = true;
+                const std::string shown = wrapper_display_name(w);
+                out += "// ===== ";
+                out += shown;
+                out += " (wrapper) =====\n";
+                if (shown != w) { out += "// "; out += w; out += "\n"; }
+                const std::string body = compute_krs_for_scheme(custom_schemes, sys, w);
+                out += body.empty() ? std::string("// (could not build: base scheme missing or invalid)\n")
+                                    : body;
                 out += "\n";
             }
             if (!any) { error_message = "no scheme selected"; return false; }

@@ -187,6 +187,13 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_ccd4ss01) out.emplace_back("CCD4 (s-split)_{0-1}");
     if (r.scheme_ccd4ss10) out.emplace_back("CCD4 (s-split)_{1-0}");
     if (r.scheme_dopri78)  out.emplace_back("DOPRI78");
+    if (r.scheme_dopri78_legacy) out.emplace_back("DOPRI78 (legacy)");
+    if (r.scheme_gbs) out.emplace_back("GBS (n=2)");
+    if (r.scheme_gbs24) out.emplace_back("GBS 2-4");
+    if (r.scheme_gbs246) out.emplace_back("GBS 2-4-6");
+    if (r.scheme_gbs2468) out.emplace_back("GBS 2-4-6-8");
+    if (r.scheme_gbs246810) out.emplace_back("GBS 2-4-6-8-10");
+    if (r.scheme_gbs24681012) out.emplace_back("GBS 2-4-6-8-10-12");
     return out;
 }
 
@@ -830,6 +837,7 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
     if (s == "RK4")               return Scheme::RK4;
     if (s == "DOPRI78")           return Scheme::DOPRI78;
+    if (s == "DOPRI78 (legacy)")  return Scheme::DOPRI78Legacy;
     if (s == "CD")                return Scheme::CD;
     if (s == "Complex CD")        return Scheme::ComplexCD;
     if (s == "Complex CD4")       return Scheme::ComplexCD4;
@@ -848,6 +856,12 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "SIMP")              return Scheme::SIMP;
     if (s == "D")                 return Scheme::D;
     if (s == "Complex Implicit Euler") return Scheme::ComplexIEuler;
+    if (s == "GBS (n=2)") return Scheme::GBS;
+    if (s == "GBS 2-4") return Scheme::GBS24;
+    if (s == "GBS 2-4-6") return Scheme::GBS246;
+    if (s == "GBS 2-4-6-8") return Scheme::GBS2468;
+    if (s == "GBS 2-4-6-8-10") return Scheme::GBS246810;
+    if (s == "GBS 2-4-6-8-10-12") return Scheme::GBS24681012;
     if (s == "Map")               return Scheme::Map;
     return Scheme::Euler;
 }

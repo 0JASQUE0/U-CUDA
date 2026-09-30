@@ -190,6 +190,7 @@ SystemRecord AppModel::to_record() const {
     r.scheme_midpoint = scheme_midpoint;
     r.scheme_rk4 = scheme_rk4;
     r.scheme_dopri78 = scheme_dopri78;
+    r.scheme_dopri78_legacy = scheme_dopri78_legacy;
     r.scheme_cd = scheme_cd;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
@@ -208,6 +209,12 @@ SystemRecord AppModel::to_record() const {
     r.scheme_simp = scheme_simp;
     r.scheme_dmethod = scheme_dmethod;
     r.scheme_cieuler = scheme_cieuler;
+    r.scheme_gbs = scheme_gbs;
+    r.scheme_gbs24 = scheme_gbs24;
+    r.scheme_gbs246 = scheme_gbs246;
+    r.scheme_gbs2468 = scheme_gbs2468;
+    r.scheme_gbs246810 = scheme_gbs246810;
+    r.scheme_gbs24681012 = scheme_gbs24681012;
     r.newton_full = newton_full;
     r.newton_tol = newton_tol;
     r.newton_max_iters = newton_max_iters;
@@ -217,6 +224,7 @@ SystemRecord AppModel::to_record() const {
     r.param_values = param_values;
     r.custom_schemes = custom_schemes;
     r.wrapper_schemes = wrapper_schemes;
+    r.disabled_wrappers = disabled_wrappers;
     return r;
 }
 
@@ -243,6 +251,7 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_midpoint = r.scheme_midpoint;
     scheme_rk4 = r.scheme_rk4;
     scheme_dopri78 = r.scheme_dopri78;
+    scheme_dopri78_legacy = r.scheme_dopri78_legacy;
     scheme_cd = r.scheme_cd;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
@@ -261,6 +270,12 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_simp = r.scheme_simp;
     scheme_dmethod = r.scheme_dmethod;
     scheme_cieuler = r.scheme_cieuler;
+    scheme_gbs = r.scheme_gbs;
+    scheme_gbs24 = r.scheme_gbs24;
+    scheme_gbs246 = r.scheme_gbs246;
+    scheme_gbs2468 = r.scheme_gbs2468;
+    scheme_gbs246810 = r.scheme_gbs246810;
+    scheme_gbs24681012 = r.scheme_gbs24681012;
     newton_full = r.newton_full;
     newton_tol = r.newton_tol;
     newton_max_iters = r.newton_max_iters;
@@ -270,6 +285,8 @@ void AppModel::from_record(const SystemRecord& r) {
     param_values = r.param_values;
     custom_schemes = r.custom_schemes;
     wrapper_schemes = r.wrapper_schemes;
+    sort_wrapper_schemes(wrapper_schemes);   // старые библиотеки — в порядке добавления
+    disabled_wrappers = r.disabled_wrappers;
     loaded_name = r.name;          // запоминаем имя на диске
     // обновим списки символов (без падения, если система ещё неполна)
     refresh_symbols();
@@ -278,12 +295,14 @@ void AppModel::from_record(const SystemRecord& r) {
     generated_code.clear();
     // A map has no scheme_* flag set — its single body is always generated.
     if (is_map
-        || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78
+        || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_dopri78_legacy
         || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
         || scheme_ccd4ss10
         || scheme_cd10 || scheme_ccd10 || scheme_ccd4_10 || scheme_ccd4s3_10 || scheme_ccd4s4_10
         || scheme_ieuler || scheme_imidpoint
-        || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler)
+        || scheme_semp || scheme_simp || scheme_dmethod || scheme_cieuler
+        || scheme_gbs || scheme_gbs24 || scheme_gbs246 || scheme_gbs2468 || scheme_gbs246810 || scheme_gbs24681012
+        || !custom_schemes.empty() || !wrapper_schemes.empty())   // их код тоже в превью
         generate();
 }
 
@@ -302,12 +321,13 @@ void AppModel::clear() {
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     is_map = false;
-    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78
+    scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
         = scheme_ccd4ss10
         = scheme_cd10 = scheme_ccd10 = scheme_ccd4_10 = scheme_ccd4s3_10 = scheme_ccd4s4_10
         = scheme_ieuler = scheme_imidpoint
-        = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler = false;
+        = scheme_semp = scheme_simp = scheme_dmethod = scheme_cieuler
+        = scheme_gbs = scheme_gbs24 = scheme_gbs246 = scheme_gbs2468 = scheme_gbs246810 = scheme_gbs24681012 = false;
     symmetry_s = "0.5";
     newton_full = false;
     newton_tol = "1e-10";
@@ -317,6 +337,7 @@ void AppModel::clear() {
     param_values.clear();
     custom_schemes.clear();
     wrapper_schemes.clear();
+    disabled_wrappers.clear();
     known_vars.clear();
     known_params.clear();
     generated_code.clear();
@@ -1073,20 +1094,22 @@ void AppModel::propagate_to_sessions() {
 
     // Экстраполяционные обёртки едут тем же маршрутом: в сессии нужны только
     // имена, тело каждый раз пересобирает compute_krs_for_scheme.
-    phase_session.wrapper_schemes       = wrapper_schemes;
-    bifurcation_session.wrapper_schemes = wrapper_schemes;
-    lle_session.wrapper_schemes         = wrapper_schemes;
-    ls_session.wrapper_schemes          = wrapper_schemes;
-    metrics_session.wrapper_schemes     = wrapper_schemes;
-    dft1d_session.wrapper_schemes       = wrapper_schemes;
-    basins_session.wrapper_schemes      = wrapper_schemes;
-    fastsync_session.wrapper_schemes    = wrapper_schemes;
-    custom_session.wrapper_schemes                = wrapper_schemes;
-    custom_session.bif_session.wrapper_schemes    = wrapper_schemes;
-    custom_session.lle_session.wrapper_schemes    = wrapper_schemes;
-    custom_session.ls_session.wrapper_schemes     = wrapper_schemes;
-    custom_session.phase_session.wrapper_schemes  = wrapper_schemes;
-    custom_session.basins_session.wrapper_schemes = wrapper_schemes;
+    // Во вкладки уходят только включённые (галочка в списке обёрток).
+    const std::vector<std::string> wrappers_on = enabled_wrapper_schemes();
+    phase_session.wrapper_schemes       = wrappers_on;
+    bifurcation_session.wrapper_schemes = wrappers_on;
+    lle_session.wrapper_schemes         = wrappers_on;
+    ls_session.wrapper_schemes          = wrappers_on;
+    metrics_session.wrapper_schemes     = wrappers_on;
+    dft1d_session.wrapper_schemes       = wrappers_on;
+    basins_session.wrapper_schemes      = wrappers_on;
+    fastsync_session.wrapper_schemes    = wrappers_on;
+    custom_session.wrapper_schemes                = wrappers_on;
+    custom_session.bif_session.wrapper_schemes    = wrappers_on;
+    custom_session.lle_session.wrapper_schemes    = wrappers_on;
+    custom_session.ls_session.wrapper_schemes     = wrappers_on;
+    custom_session.phase_session.wrapper_schemes  = wrappers_on;
+    custom_session.basins_session.wrapper_schemes = wrappers_on;
 
     // Mirror enabled built-in schemes from the current model into every session.
     const std::vector<std::string> enabled_now = enabled_builtins_from_record(to_record());
@@ -1104,6 +1127,8 @@ void AppModel::propagate_to_sessions() {
     custom_session.ls_session.enabled_builtin_schemes     = enabled_now;
     custom_session.phase_session.enabled_builtin_schemes  = enabled_now;
     custom_session.basins_session.enabled_builtin_schemes = enabled_now;
+    order_session.enabled_builtin_schemes                 = enabled_now;
+    network_session.enabled_builtin_schemes               = enabled_now;
 
     // sys обновляем для built-in схем (Euler/RK4/...): они используют
     // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
