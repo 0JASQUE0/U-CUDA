@@ -24,6 +24,12 @@ struct CustomScheme {
     // добавляет не один порядок, а два.
     int  order     = 1;
     bool symmetric = false;
+
+    // Галочка "предлагать эту схему": выключенная не показывается в комбо
+    // выбора схемы (кроме уже выбранной — сессия не должна осиротеть) и не
+    // попадает в Generate. Тело и паспорт при этом живут, и опорной для
+    // обёртки выключенная КРС быть может.
+    bool enabled   = true;
 };
 
 // Полная запись системы в библиотеке: весь ввод (для редактирования) +
@@ -56,6 +62,7 @@ struct SystemRecord {
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
     bool scheme_dopri78  = false;
+    bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy) — дроби статьи без уточнения
     bool scheme_cd       = false;
     bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
@@ -75,6 +82,14 @@ struct SystemRecord {
     bool scheme_simp     = false;   // SIMP (то же, стадия диагонально-неявная)
     bool scheme_dmethod  = false;   // D (диагонально-неявный шаг на полный h)
     bool scheme_cieuler  = false;   // Complex Implicit Euler (два неявных Эйлера, tau = h*(1±i)/2)
+    // ГБШ: опорная модифицированная средняя точка Грэгга (n = 2) и экстраполяторы
+    // по n = 2,4,...,2K, K = 2..6 (одна цепочка leapfrog на стадию, порядок 2K).
+    bool scheme_gbs         = false;   // GBS (n=2)
+    bool scheme_gbs24       = false;   // GBS 2-4
+    bool scheme_gbs246      = false;   // GBS 2-4-6
+    bool scheme_gbs2468     = false;   // GBS 2-4-6-8
+    bool scheme_gbs246810   = false;   // GBS 2-4-6-8-10
+    bool scheme_gbs24681012 = false;   // GBS 2-4-6-8-10-12
 
     // Настройки Ньютона для двух неявных схем. Живут на уровне системы, а не
     // конфига анализа: AppModel::build_system() — единственная фабрика System,
@@ -99,6 +114,11 @@ struct SystemRecord {
     // custom_schemes, где текст заморожен). Опорной может быть и встроенная
     // схема, и кастомная КРС из списка выше.
     std::vector<std::string> wrapper_schemes;
+    // Выключенные обёртки — тот же смысл, что у CustomScheme::enabled. Имена
+    // КАНОНИЧЕСКИЕ (wrapper_canonical_name, без метки): переименование галочку
+    // не сбрасывает. Хранится список выключенных, а не включённых, чтобы у
+    // старых system.json все обёртки остались включены.
+    std::vector<std::string> disabled_wrappers;
 
     // значения по умолчанию (всё опционально, пустое = не задано)
     std::string step_h;          // шаг дискретизации (строка, пустая = не задано)

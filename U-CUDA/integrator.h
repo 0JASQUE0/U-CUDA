@@ -11,7 +11,8 @@
 enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
                        ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                        CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
-                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
+                       ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
+                       GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy, Map };
 
 IntScheme int_scheme_from_string(const std::string& s);
 

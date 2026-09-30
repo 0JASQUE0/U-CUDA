@@ -7,6 +7,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Explicit Midpoint") return IntScheme::ExplicitMidpoint;
     if (s == "RK4")               return IntScheme::RK4;
     if (s == "DOPRI78")           return IntScheme::DOPRI78;
+    if (s == "DOPRI78 (legacy)")  return IntScheme::DOPRI78Legacy;
     if (s == "CD")                return IntScheme::CD;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
@@ -25,30 +26,33 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "SIMP")              return IntScheme::SIMP;
     if (s == "D")                 return IntScheme::D;
     if (s == "Complex Implicit Euler") return IntScheme::ComplexIEuler;
+    if (s == "GBS (n=2)")         return IntScheme::GBS;
+    if (s == "GBS 2-4")           return IntScheme::GBS24;
+    if (s == "GBS 2-4-6")         return IntScheme::GBS246;
+    if (s == "GBS 2-4-6-8")       return IntScheme::GBS2468;
+    if (s == "GBS 2-4-6-8-10")    return IntScheme::GBS246810;
+    if (s == "GBS 2-4-6-8-10-12") return IntScheme::GBS24681012;
     if (s == "Map")               return IntScheme::Map;
     return IntScheme::Euler;
 }
 
-// DOPRI78 коэффициенты, общие с codegen::scheme_dopri78.
-static const double DOPRI_M[13][12] = {
-    {0,0,0,0,0,0,0,0,0,0,0,0},
-    {0.05555555555556,0,0,0,0,0,0,0,0,0,0,0},
-    {0.02083333333333,0.0625,0,0,0,0,0,0,0,0,0,0},
-    {0.03125,0,0.09375,0,0,0,0,0,0,0,0,0},
-    {0.3125,0,-1.171875,1.171875,0,0,0,0,0,0,0,0},
-    {0.0375,0,0,0.1875,0.15,0,0,0,0,0,0,0},
-    {0.04791013711111,0,0,0.1122487127778,-0.02550567377778,0.01284682388889,0,0,0,0,0,0},
-    {0.01691798978729,0,0,0.387848278486,0.0359773698515,0.1969702142157,-0.1727138523405,0,0,0,0,0},
-    {0.06909575335919,0,0,-0.6342479767289,-0.1611975752246,0.1386503094588,0.9409286140358,0.2116363264819,0,0,0,0},
-    {0.183556996839,0,0,-2.468768084316,-0.2912868878163,-0.02647302023312,2.847838764193,0.2813873314699,0.1237448998633,0,0,0},
-    {-1.215424817396,0,0,16.67260866595,0.9157418284168,-6.056605804357,-16.00357359416,14.8493030863,-13.37157573529,5.13418264818,0,0},
-    {0.2588609164383,0,0,-4.774485785489,-0.435093013777,-3.049483332072,5.577920039936,6.155831589861,-5.062104586737,2.193926173181,0.1346279986593,0},
-    {0.8224275996265,0,0,-11.65867325728,-0.7576221166909,0.7139735881596,12.07577498689,-2.12765911392,1.990166207049,-0.234286471544,0.1758985777079,0}
+// DOPRI78: та же таблица, что у codegen::scheme_dopri78 (kDopri78A/B в
+// codegen.cpp); CPU-интегратор считает в double и берёт ближайший double c[0].
+namespace {
+struct DopriTable {
+    double M[13][12], B[2][13];
+    DopriTable(const MultiDoubleCoef (&A)[13][12], const MultiDoubleCoef (&Bw)[2][13]) {
+        for (int i = 0; i < 13; ++i)
+            for (int j = 0; j < 12; ++j) M[i][j] = A[i][j].c[0];
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 13; ++j) B[i][j] = Bw[i][j].c[0];
+    }
 };
-static const double DOPRI_B[2][13] = {
-    {0.04174749114153,0,0,0,0,-0.05545232861124,0.2393128072012,0.7035106694034,-0.7597596138145,0.6605630309223,0.1581874825101,-0.2381095387529,0.25},
-    {0.02955321367635,0,0,0,0,-0.8286062764878,0.3112409000511,2.4673451906,-2.546941651842,1.443548583677,0.07941559588113,0.04444444444444,0}
-};
+const DopriTable& dopri_table(bool legacy) {
+    static const DopriTable t(kDopri78A, kDopri78B), tl(kDopri78LegacyA, kDopri78LegacyB);
+    return legacy ? tl : t;
+}
+} // namespace
 
 namespace {
 
@@ -102,7 +106,8 @@ void step_rk4(const SystemEvaluator& ev, double* X, const double* a, double h,
 // для CPU-портрета нам нужен только y, 7-й порядок (z) не считаем.
 // Буферы: kbuf — 13*n, X1 — n, X2 — n.
 void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double h,
-                  int n, double* kbuf, double* X1, double* X2) {
+                  int n, double* kbuf, double* X1, double* X2, bool legacy = false) {
+    const DopriTable& T = dopri_table(legacy);
     auto k = [&](int stage, int comp) -> double& { return kbuf[stage * n + comp]; };
     for (int i = 0; i < n; ++i) X1[i] = X[i];
     for (int stage = 0; stage < 13; ++stage) {
@@ -114,7 +119,7 @@ void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double 
             for (int l = 0; l < n; ++l) X2[l] = 0;
             for (int j = 0; j < stage + 1; ++j)
                 for (int l = 0; l < n; ++l)
-                    X2[l] += DOPRI_M[stage + 1][j] * k(j, l);
+                    X2[l] += T.M[stage + 1][j] * k(j, l);
             for (int l = 0; l < n; ++l)
                 X1[l] = X[l] + h * X2[l];
         }
@@ -123,7 +128,7 @@ void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double 
     for (int l = 0; l < n; ++l) X2[l] = 0;
     for (int stage = 0; stage < 13; ++stage)
         for (int l = 0; l < n; ++l)
-            X2[l] += DOPRI_B[0][stage] * k(stage, l);
+            X2[l] += T.B[0][stage] * k(stage, l);
     for (int l = 0; l < n; ++l) X[l] += h * X2[l];
 }
 
@@ -596,6 +601,29 @@ void step_d(const SystemEvaluator& ev, double* X, const double* a, double h,
         solve_diag_implicit(ev, X, a, h, i, k1);
 }
 
+// ГБШ (см. scheme_gbs в codegen.cpp): стадия k — одна цепочка leapfrog из
+// 2(k+1) подшагов со сглаживанием Грэгга, из одного X0; w — веса стадий.
+// Буферы: X0, AC, Z0, Z1, ZT, k1 — по n.
+void step_gbs(const SystemEvaluator& ev, double* X, const double* a, double h,
+              int n, const std::vector<double>& w,
+              double* X0, double* AC, double* Z0, double* Z1, double* ZT, double* k1) {
+    for (int i = 0; i < n; ++i) { X0[i] = X[i]; AC[i] = 0.0; }
+    for (int k = 0; k < (int)w.size(); ++k) {
+        const int    ns = 2 * (k + 1);
+        const double hs = h / ns;
+        ev.eval(X0, a, k1);
+        for (int i = 0; i < n; ++i) { Z0[i] = X0[i]; Z1[i] = X0[i] + hs * k1[i]; }
+        for (int m = 1; m < ns; ++m) {
+            ev.eval(Z1, a, k1);
+            for (int i = 0; i < n; ++i) ZT[i] = Z0[i] + 2.0 * hs * k1[i];
+            for (int i = 0; i < n; ++i) { Z0[i] = Z1[i]; Z1[i] = ZT[i]; }
+        }
+        ev.eval(Z1, a, k1);
+        for (int i = 0; i < n; ++i) AC[i] += w[(size_t)k] * 0.5 * (Z0[i] + Z1[i] + hs * k1[i]);
+    }
+    for (int i = 0; i < n; ++i) X[i] = AC[i];
+}
+
 } // namespace
 
 bool computePhasePortraitCPU(
@@ -638,8 +666,30 @@ bool computePhasePortraitCPU(
     }
     if (implicit)    { Xn.resize(n);  Fv.resize(n);  Am.resize((size_t)n * n); }
     if (implicit_cx) { Znc.resize(n); Fvc.resize(n); Amc.resize((size_t)n * n); }
+    // ГБШ: число стадий и веса считаются один раз, а не на каждом шаге.
+    int gbs_K = 0;
+    switch (scheme) {
+    case IntScheme::GBS:         gbs_K = 1; break;
+    case IntScheme::GBS24:       gbs_K = 2; break;
+    case IntScheme::GBS246:      gbs_K = 3; break;
+    case IntScheme::GBS2468:     gbs_K = 4; break;
+    case IntScheme::GBS246810:   gbs_K = 5; break;
+    case IntScheme::GBS24681012: gbs_K = 6; break;
+    default: break;
+    }
+    std::vector<double> gbs_w, gbs_X0, gbs_AC, gbs_Z0, gbs_Z1, gbs_ZT;
+    if (gbs_K) {
+        gbs_w = gbs_K == 1 ? std::vector<double>{ 1.0 }
+                           : extrapolation_weights(gbs_substeps(gbs_K), 2, true);
+        gbs_X0.resize(n); gbs_AC.resize(n); gbs_Z0.resize(n); gbs_Z1.resize(n); gbs_ZT.resize(n);
+    }
 
     auto do_step = [&]() {
+        if (gbs_K) {
+            step_gbs(ev, X.data(), a, h, n, gbs_w, gbs_X0.data(), gbs_AC.data(),
+                     gbs_Z0.data(), gbs_Z1.data(), gbs_ZT.data(), k1.data());
+            return;
+        }
         switch (scheme) {
         case IntScheme::Map:              step_map(ev, X.data(), a, n, k1.data()); break;
         case IntScheme::Euler:            step_euler(ev, X.data(), a, h, n, k1.data()); break;
@@ -647,6 +697,7 @@ bool computePhasePortraitCPU(
         case IntScheme::ExplicitMidpoint: step_midpoint(ev, X.data(), a, h, n, k1.data(), tmp.data()); break;
         case IntScheme::RK4:              step_rk4(ev, X.data(), a, h, n, k1.data(), k2.data(), k3.data(), k4.data(), tmp.data()); break;
         case IntScheme::DOPRI78:          step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data()); break;
+        case IntScheme::DOPRI78Legacy:    step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data(), true); break;
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
@@ -667,6 +718,7 @@ bool computePhasePortraitCPU(
         case IntScheme::ComplexIEuler:    step_complex_ieuler(ev, a, h, n, X.data(), Zc.data(),
                                                               Znc.data(), Fvc.data(), Amc.data(),
                                                               piv.data(), Kc.data()); break;
+        default: break;   // ГБШ — выше
         }
     };
 

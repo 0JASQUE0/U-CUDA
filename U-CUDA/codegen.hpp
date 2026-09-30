@@ -101,12 +101,50 @@ struct System {
 // (её Re уже не убирает), и порядок падает до первого — ровно как у CD.
 // Шаг целиком считается в ucmplx, наружу пишется Re; мнимая часть живёт
 // внутри одного шага и в следующий не переносится.
+// GBS, GBS24 ... GBS24681012 — семейство Грэгга-Булирша-Штёра. Стадия k
+// (k = 1..K) — ОДНА цепочка модифицированной средней точки Грэгга из n = 2k
+// подшагов h/n: явный Эйлер на старте, leapfrog z_{m+1} = z_{m-1} + 2(h/n)f(z_m),
+// сглаживание (z_{n-1} + z_n + (h/n)f(z_n))/2. Стадии стартуют из одного X и
+// складываются с весами Ричардсона по 1/n^2. GBS — сама опорная схема (K = 1,
+// n = 2, порядок 2), GBS24 ... — экстраполяция по n = 2,4,...,2K, порядок 2K.
+// Отличие от Extr(GBS|1,2,...): там стадия — повтор ОДНОШАГОВОЙ базы, цепочка
+// leapfrog рвётся после каждой пары подшагов, и порядок 2-4-6 падает до 5
+// (замерено на Рёсслере). Здесь цепочка на стадию одна, разложение по h^2
+// честное, порядок 2K (замерено 4.1 и 6.1). См. scheme_gbs в codegen.cpp.
 // Map is not an integration scheme but the right-hand side of a discrete map
 // x_{n+1} = f(x_n) itself. The only emitter that never uses h.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
                     ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
-                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler, Map };
+                    ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
+                    GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy, Map };
+
+// Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
+int gbs_stage_count(Scheme sch);
+// Подшаги стадий ГБШ: {2, 4, ..., 2K}.
+std::vector<int> gbs_substeps(int K);
+
+// Таблица Бутчера DOPRI78 — RK8(7)13M (Prince & Dormand, 1981). Один источник
+// для кодогена (scheme_dopri78) и CPU-интегратора (step_dopri78).
+// Дроби из статьи — сами приближения: условия порядка они выполняют лишь до
+// ~1e-18, и в dd вкладки Order ошибка упиралась в полку ~1e-17. Поэтому
+// коэффициенты уточнены Левенбергом-Марквардтом на всех 200 условиях порядка
+// <= 8 (старт — дроби статьи, структура нулей та же, поправки ~1e-18, то есть
+// в пределах опубликованной точности) до невязки 1.8e-39 — дальше решение
+// лежит на вырожденном многообразии и Ньютон стоит, но для dd (eps 5e-32) это
+// с запасом: полка ~1e-38 вместо ~1e-17. Хранятся суммой до
+// четырёх неперекрывающихся double: c[0] — ближайший double, c[1..3] — остатки.
+// double берёт c[0], dd — c[0..1], qd — все четыре.
+// kDopri78A[i][j] = a_{i+1, j+1}; kDopri78B[0] — веса 8-го порядка, [1] — 7-го.
+struct MultiDoubleCoef { double c[4]; };
+extern const MultiDoubleCoef kDopri78A[13][12];
+extern const MultiDoubleCoef kDopri78B[2][13];
+// "DOPRI78 (legacy)" — дроби статьи Prince & Dormand (1981) как есть, без
+// уточнения (тоже суммой 4 double, чтобы dd нёс всю точность дроби). Условия
+// порядка они выполняют до ~1e-18: в double метод от уточнённого не отличить,
+// в dd ошибка упирается в полку ~1e-17. Оставлена для сравнения.
+extern const MultiDoubleCoef kDopri78LegacyA[13][12];
+extern const MultiDoubleCoef kDopri78LegacyB[2][13];
 
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
@@ -261,10 +299,11 @@ bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetri
                                  std::vector<std::string>* out);
 
 // Оборачивает ГОТОВОЕ тело шага (base_body — то, что вернул codegen_scheme
-// либо тело кастомной КРС) в K стадий. Тело вставляется дословно и ровно один
-// раз — внутрь локальной лямбды, параметр которой назван h и затеняет
+// либо тело кастомной КРС) в K стадий. Тело вставляется дословно в каждую
+// стадию, блоком со своим "const numb h = <подшаг>", который затеняет
 // макрошаг. Поэтому обёртке не нужно понимать содержимое базы: любое "0.5 * h"
-// внутри само становится подшагом.
+// внутри само становится подшагом. Тело с return/goto остаётся в локальной
+// лямбде (см. wrapper_can_inline в codegen.cpp).
 std::string wrap_extrapolation(const std::string& base_body, int N,
                                const std::vector<int>& n, int p, bool symmetric,
                                const std::string& base_name);
@@ -358,8 +397,9 @@ bool composition_gamma_values(const CompositionSpec& spec,
                               std::vector<double>* out, std::string* err = nullptr);
 
 // Wraps a READY step body in K sequential stages. The body is inserted verbatim
-// and exactly once, inside a lambda whose parameter is named h -- same trick as
-// wrap_extrapolation, and the same reason it works on an opaque custom KRS.
+// into every stage, in a block with its own "const numb h" that shadows the
+// macro step -- same trick as wrap_extrapolation, and the same reason it works
+// on an opaque custom KRS (a body with return/goto stays in a lambda).
 // sys is needed to resolve coefficient names into a[k]; p/symmetric only feed
 // the header comment. Throws std::runtime_error on an unresolvable coefficient.
 std::string wrap_composition(const std::string& base_body, const System& sys,
@@ -407,6 +447,17 @@ std::string wrapper_relabel(const std::string& name, const std::string& label);
 // NEVER use the result as a key: the full name is the scheme's identity, and
 // two different methods can round to the same short form.
 std::string wrapper_display_name(const std::string& name, int digits = 5);
+
+// Порядок списка обёрток: по типу (Extr, ExtrZ, Comp), затем по опорнику —
+// встроенные в порядке паспортной таблицы (builtin_scheme_traits), кастомные
+// КРС после них по алфавиту, — затем по числу стадий и по самим подшагам /
+// коэффициентам. Метку ключ не читает: переименование строку не двигает.
+// Неразбираемое имя уходит в конец. Сортировка устойчивая.
+void sort_wrapper_schemes(std::vector<std::string>& names);
+
+// Заголовок группы, в которую sort_wrapper_schemes ставит имя:
+// "Extr over RK4", "ExtrZ over Complex CD4", "Comp over CD"; "" — не обёртка.
+std::string wrapper_group_title(const std::string& name);
 
 // Нормализует числовое значение/выражение параметра для подстановки в C-код:
 //   "8/3"   -> "8.0/3.0"   (вещественное деление, без потери точности)
