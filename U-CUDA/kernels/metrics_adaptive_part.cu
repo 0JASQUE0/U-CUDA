@@ -37,6 +37,7 @@ struct UcudaAdPushMetrics {
 	}
 };
 
+#ifndef UCUDA_AD_NO_DENSE
 // Транзиент и запись метрик одной точки (ucudaAdUniformPoint); UNBOUND smFinalize
 // сам сводит к NaN.
 __device__ __forceinline__ int ucudaAdMetricsPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
@@ -47,6 +48,7 @@ __device__ __forceinline__ int ucudaAdMetricsPoint(UcudaAdaptState& S, const Ucu
 	UcudaAdPushMetrics push{ peaks, acc, ist, writableVar };
 	return ucudaAdUniformPoint(S, K, a, P, transientTime, dt, iters, maxValue, push, cancelFlag, prog);
 }
+#endif
 
 // Метрики на узлах шага. Узлы неравномерны, поэтому среднее и дисперсия — средние по ВРЕМЕНИ
 // на [первый узел, последний]: интегралы y и y^2 эрмитовой квадратурой — трапеция с поправкой
@@ -128,9 +130,9 @@ struct UcudaAdPushMetricsNU {
 	MetricsAccumNU& acc;
 	IntervalStats&  ist;
 	int             writableVar;
-	__device__ void operator()(const numb t, const numb* X, const numb* F)
+	__device__ __forceinline__ void operator()(const numb t, const numb* X, const numb* F)
 	{
-		const numb y = ucudaAdObs(X, writableVar), d = ucudaAdObs(F, writableVar);
+		const numb y = UCUDA_AD_OBS(X, writableVar), d = UCUDA_AD_OBS(F, writableVar);
 		acc.push(t, y, d, X, F);
 		const int  emitted0 = peaks.emitted;
 		const numb anchor0  = peaks.anchorTime;
@@ -204,14 +206,23 @@ __device__ __forceinline__ int ucudaAdMetricsRun(UcudaAdaptState& S, const Ucuda
 	IntervalStats ist;
 	ist.init();
 	int flag;
+#ifdef UCUDA_AD_NO_DENSE
+	// Модуль без плотного выхода собирается только для узлов шага (см. ucudaAdPeaksPoint).
+	if (false) {
+#else
 	if (!raw) {
+#endif
 		PeakStream peaks;
 		peaks.init(nullptr, T, 0, dt, iters, peakCapacity, false);
 		MetricsAccum acc;
 		acc.init(box);
+#ifdef UCUDA_AD_NO_DENSE
+		flag = REGIME_UNBOUND;
+#else
 		flag = skip ? REGIME_UNBOUND
 		     : ucudaAdMetricsPoint(S, K, a, P, transientTime, dt, iters, writableVar, maxValue,
 		                           peaks, acc, ist, cancelFlag, prog);
+#endif
 		flag = smFinalize(flag, acc, peaks, ist, T, dt, res);
 	} else {
 		PeakStreamNU peaks;
@@ -256,7 +267,7 @@ __global__ void calculateDiscreteModelMetricsAdCUDA(
 	const int		metricMask,
 	int*			flags,
 	const int		logAxisMask,
-	const UcudaAdaptParams* __restrict__ Pbase,
+	UCUDA_AD_P_ARG,
 	const int* __restrict__		axisKind,
 	const numb		tolRatio,
 	const numb		transientTime,
@@ -285,7 +296,7 @@ __global__ void calculateDiscreteModelMetricsAdCUDA(
 	numb res[SIGM_COUNT];
 	for (int m = 0; m < SIGM_COUNT; ++m) res[m] = (numb)nan("");
 
-	UcudaAdaptParams P = *Pbase;
+	UCUDA_AD_P_LOCAL
 	ucudaSetupSweepPointAd(nPts, amountOfCalculatedPoints, idx, dimension, ranges, indicesOfMutVars,
 		initialConditions, values, amountOfValues, logAxisMask, axisKind, tolRatio,
 		localX, localValues, P);

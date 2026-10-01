@@ -74,6 +74,29 @@ __device__ __forceinline__ numb ucudaAdObs(const numb* v, const int writableVar)
 	return v[writableVar];
 }
 
+#ifdef UCUDA_AD_NODES_KERNEL
+// То же значение весами: r = sum w_j v_j, w_j = 1 / 0 (одна переменная) или 1, pi, euler
+// (комбинация) — та же цепочка FMA, что выше, а fma(0, v, r) = r. Индексы — константы.
+// v[writableVar] (индекс известен лишь при запуске; выбор перебором компилятор сворачивает
+// обратно в него) держал бы в локальной памяти массив, на который смотрит v, — X и f(X)
+// состояния шага, а с ними и всё состояние: каждый принятый шаг дописывал его туда
+// (lg_throttle на реальных частотах).
+__device__ __forceinline__ numb ucudaAdObsW(const numb* v, const int writableVar)
+{
+	numb r = 0;
+	for (int j = 0; j < AMOUNTOFX; ++j) {
+		const numb w = writableVar < 0
+			? (j == 0 ? (numb)1 : (j == 1 ? (numb)pi : (j == 2 ? (numb)euler : (numb)0)))
+			: (writableVar == j ? (numb)1 : (numb)0);
+		r += w * v[j];
+	}
+	return r;
+}
+#define UCUDA_AD_OBS ucudaAdObsW
+#else
+#define UCUDA_AD_OBS ucudaAdObs
+#endif
+
 // Разлёт: как у циклов постоянного шага — nan/inf или sum|x| > maxValue (0 — без порога).
 __device__ __forceinline__ bool ucudaAdOut(const numb* x, const numb maxValue)
 {
@@ -93,14 +116,20 @@ __device__ __forceinline__ void ucudaAdApplyStepAxis(const int kind, const numb 
 	else if (kind >= UCUDA_AXIS_CTRL && kind < UCUDA_AXIS_CTRL + UCUDA_CTL_NPAR) P.c[kind - UCUDA_AXIS_CTRL] = v;
 }
 
+// Настройки шага, общие для всех нитей (ядро узлов, UCUDA_AD_NODES_KERNEL), оси свипа не
+// правят: такой свип движок туда не отправляет (ad_nodes_module).
+__device__ __forceinline__ void ucudaAdApplyStepAxis(const int, const numb, const numb, const UcudaAdaptParams&) {}
+
 // Точка свипа: система — как ucudaSetupSweepPoint, оси настроек шага правят
-// локальную копию параметров шага P.
+// локальную копию параметров шага P (PT = UcudaAdaptParams); у ядра узлов P — общая
+// константа (PT = const UcudaAdaptParams), и оси бывают только системные.
+template <class PT>
 __device__ __forceinline__ void ucudaSetupSweepPointAd(
 	const int nPts, const size_t amountOfCalculatedPoints, const int idx, const int dimension,
 	const numb* ranges, const int* indicesOfMutVars,
 	const numb* initialConditions, const numb* values, const int amountOfValues,
 	const int logAxisMask, const int* axisKind, const numb tolRatio,
-	numb* localX, numb* localValues, UcudaAdaptParams& P)
+	numb* localX, numb* localValues, PT& P)
 {
 	for (int i = 0; i < AMOUNTOFX; ++i) localX[i] = initialConditions[i];
 	for (int i = 0; i < amountOfValues; ++i) localValues[i] = values[i];
@@ -119,25 +148,18 @@ __device__ __forceinline__ void ucudaSetupSweepPointAd(
 	}
 }
 
-// Прогресс по модельному времени: точка отчитывает progressUnits / stride тиков,
-// по одному каждые stride * progressDt единиц времени.
+// Прогресс: точка отчитывает свои progressUnits / stride тиков целиком, в конце (top_up).
+// Тики по модельному времени внутри точки (update) убраны: каждый — атомик в память хоста
+// через PCIe, и вокруг него нити варпа ждали друг друга (BSYNC). Rossler DOP853: LLE 2D
+// 128x128 0.48 -> 0.9 s, БД и метрики 2D на сетке вывода +20%, LS 2D +5-15%.
 struct UcudaAdProgress {
 	int* counter;
-	numb next, step;
-	int  ticks;
 	__device__ void init(int* c, const int stride, const numb progressDt) {
-		counter = (stride > 0) ? c : nullptr;
-		step = (numb)stride * progressDt;
-		next = step;
-		ticks = 0;
-		if (!(step > 0)) counter = nullptr;
+		counter = (stride > 0 && progressDt > 0) ? c : nullptr;
 	}
-	__device__ void update(const numb t) {
-		if (counter == nullptr) return;
-		while (t >= next) { atomicAdd(counter, 1); ++ticks; next += step; }
-	}
+	__device__ void update(const numb) {}
 	__device__ void top_up(const int expected) {
-		if (counter != nullptr && expected > ticks) atomicAdd(counter, expected - ticks);
+		if (counter != nullptr && expected > 0) atomicAdd(counter, expected);
 	}
 };
 
@@ -301,7 +323,11 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 {
 	const numb tEnd = tTr + (numb)(iters + 1) * dtS;
 	numb y[AMOUNTOFX], y1[AMOUNTOFX];
+	// Порог разлёта и флаг отмены (память хоста, чтение через PCIe) — раз в CHECK_INTERVAL
+	// принятых шагов, не отсчётов: отсчётов в несколько раз больше, и счёт по ним стоил
+	// БД / метрикам 2D на сетке ~10% времени.
 	int cnt = 0;
+	(void)prog;   // прогресс — целой точкой, в вызывающем ядре
 	// k == 0 — транзиент, k == i + 1 — отсчёт i (последний, i == iters + 1, — сам tEnd).
 	for (size_t k = 0; k <= iters + 2; ++k) {
 		const bool   tr  = (k == 0);
@@ -310,24 +336,22 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 		const numb   lim = tr ? tTr : tEnd;
 		while (S.t < tt && !S.diverged) {
 			ucuda_ad_step(S, K, a, P, lim);
-			if (tr) {
-				if (S.diverged || ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-				prog.update(S.t);
-				if ((++cnt & 63) == 0 && cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (++cnt == CHECK_INTERVAL) {
+				cnt = 0;
+				if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
+				if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 			}
 		}
+		if (S.diverged) return REGIME_UNBOUND;
 		if (tr) continue;
 		if (i < iters) {
 			ucuda_ad_eval(S, K, a, P, tt, y);
-			if (S.diverged || ucudaAdOut(y, maxValue)) return REGIME_UNBOUND;
 			push(y);
-			prog.update(S.t);
-			if ((i & 63) == 0 && cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 		} else if (i == iters) {
 			ucuda_ad_eval(S, K, a, P, tt, y1);
 		} else {
 			ucuda_ad_eval(S, K, a, P, tt, y);
-			if (S.diverged) return REGIME_UNBOUND;
+			if (S.diverged || ucudaAdOut(y, maxValue)) return REGIME_UNBOUND;   // хвост короче CHECK_INTERVAL
 			numb d = 0;
 			for (int j = 0; j < AMOUNTOFX; ++j) d += fabs(y[j] - y1[j]);
 			return (d < eps_fixed_point) ? REGIME_FIXED_POINT : REGIME_OSCILLATION;
@@ -355,15 +379,22 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 		}
 		if (rec && !(S.t < tEnd)) break;
 		ucuda_ad_step(S, K, a, P, rec ? tEnd : tTr);
-		if (S.diverged || ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
+		if (S.diverged) return REGIME_UNBOUND;   // NaN/inf: шаг не принимается с бесконечной ошибкой
 		prog.update(S.t);
 		if (rec) {
 			++cnt;
 			if ((dec <= 1) || (cnt % dec) == 0 || !(S.t < tEnd))
 				push(S.t, S.X, S.F0);
 		}
-		if ((++nst & 63) == 0 && cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+		// Порог разлёта и флаг отмены (память хоста, чтение через PCIe) — раз в CHECK_INTERVAL
+		// принятых шагов, как у циклов постоянного шага.
+		if (++nst == CHECK_INTERVAL) {
+			nst = 0;
+			if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+		}
 	}
+	if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;   // хвост короче CHECK_INTERVAL
 	numb sf = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j) sf += fabs(S.F0[j]);
 	return (sf < eps_fixed_point) ? REGIME_FIXED_POINT : REGIME_OSCILLATION;
@@ -373,8 +404,8 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 struct UcudaAdPushNodePeaks {
 	PeakStreamNU& peaks;
 	int           writableVar;
-	__device__ void operator()(const numb t, const numb* X, const numb* F) {
-		peaks.pushNode(t, ucudaAdObs(X, writableVar), ucudaAdObs(F, writableVar));
+	__device__ __forceinline__ void operator()(const numb t, const numb* X, const numb* F) {
+		peaks.pushNode(t, UCUDA_AD_OBS(X, writableVar), UCUDA_AD_OBS(F, writableVar));
 	}
 };
 
@@ -409,6 +440,20 @@ __device__ __forceinline__ int ucudaAdPeaksPoint(UcudaAdaptState& S, const Ucuda
 	return ucudaAdUniformPoint(S, K, a, P, transientTime, dtS, iters, maxValue, push, cancelFlag, prog);
 }
 
+#else
+// Модуль без плотного выхода — только узлы шага (движок собирает его для raw_nodes): в
+// состоянии нити нет D, Xp, Fp, а стадии W живут лишь внутри попытки. Сетку такой модуль
+// не считает — движок с ней его не запускает.
+__device__ __forceinline__ int ucudaAdPeaksPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
+	const UcudaAdaptParams& P, const numb transientTime, const numb tRec, const numb dtS,
+	const size_t iters, const int raw, const int preScaller, const int writableVar, const numb maxValue,
+	PeakStream& pu, PeakStreamNU& pn, const volatile int* cancelFlag, UcudaAdProgress& prog)
+{
+	(void)dtS; (void)iters; (void)raw; (void)pu;
+	return ucudaAdNodesPoint(S, K, a, P, transientTime, transientTime + tRec, preScaller, writableVar,
+		maxValue, pn, cancelFlag, prog);
+}
+
 #endif // UCUDA_AD_NO_DENSE
 
 __device__ __forceinline__ void ucudaAdWriteStats(numb* adStats, const int idx, const UcudaAdaptState& S)
@@ -420,6 +465,17 @@ __device__ __forceinline__ void ucudaAdWriteStats(numb* adStats, const int idx, 
 	st[2] = (numb)S.st.nforced;
 	st[3] = S.st.nacc > 0 ? S.st.hsum / (numb)S.st.nacc : (numb)0;
 }
+
+// Настройки шага в ядре свипа. У ядра узлов (UCUDA_AD_NODES_KERNEL) — аргумент по значению
+// (__grid_constant__): лежит в константном банке аргументов, нить его не копирует. У общего
+// ядра — копия на нить: ось свипа может править rtol / atol / параметр регулятора.
+#ifdef UCUDA_AD_NODES_KERNEL
+#define UCUDA_AD_P_ARG   const __grid_constant__ UcudaAdaptParams Pbase
+#define UCUDA_AD_P_LOCAL const UcudaAdaptParams& P = Pbase;
+#else
+#define UCUDA_AD_P_ARG   const UcudaAdaptParams* __restrict__ Pbase
+#define UCUDA_AD_P_LOCAL UcudaAdaptParams P = *Pbase;
+#endif
 
 #ifndef UCUDA_AD_NO_SWEEP_KERNELS
 
@@ -446,7 +502,7 @@ __global__ void calculateDiscreteModelPeaksAdCUDA(
 	const int		logAxisMask,
 	const size_t	peakStride,
 	const int		peakCapacity,
-	const UcudaAdaptParams* __restrict__ Pbase,
+	UCUDA_AD_P_ARG,
 	const int* __restrict__		axisKind,
 	const numb		tolRatio,
 	const numb		transientTime,
@@ -472,7 +528,7 @@ __global__ void calculateDiscreteModelPeaksAdCUDA(
 	if (idx >= nPtsLimiter)
 		return;
 
-	UcudaAdaptParams P = *Pbase;
+	UCUDA_AD_P_LOCAL
 	ucudaSetupSweepPointAd(nPts, amountOfCalculatedPoints, idx, dimension, ranges, indicesOfMutVars,
 		initialConditions, values, amountOfValues, logAxisMask, axisKind, tolRatio,
 		localX, localValues, P);
@@ -541,7 +597,7 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	const int		feature2,
 	const numb		mult1,
 	const numb		mult2,
-	const UcudaAdaptParams* __restrict__ Pbase,
+	UCUDA_AD_P_ARG,
 	const int* __restrict__		axisKind,
 	const numb		tolRatio,
 	const numb		transientTime,
@@ -567,7 +623,7 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	if (idx >= nPtsLimiter)
 		return;
 
-	UcudaAdaptParams P = *Pbase;
+	UCUDA_AD_P_LOCAL
 	ucudaSetupSweepPointAd(nPts, amountOfCalculatedPoints, idx, dimension, ranges, indicesOfMutVars,
 		initialConditions, values, amountOfValues, 0, axisKind, tolRatio, localX, localValues, P);
 

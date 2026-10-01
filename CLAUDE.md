@@ -284,6 +284,31 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   at ordinary settings too (rtol 1e-8, eps 1e-6): steps ~10x longer, exponents within the
   finite-T scatter. The norm uses weights 1/sc_i^2: one division per clone, plus one per
   component where the floor is active (LS 2D GPU 5-8% faster; results bit-identical on the stands).
+- **Step-node kernel** (`raw_nodes` with a system/IC sweep: `ad_nodes_module`, prefix
+  `kAdNodesModulePrefix` = `UCUDA_AD_NO_DENSE` + `UCUDA_AD_NODES_KERNEL` + `UCUDA_AD_STATIC_N`):
+  own module for BD 1D/2D, basins and Metrics. The step settings come by value as a kernel argument
+  (`__grid_constant__`, `UCUDA_AD_P_ARG`, launch arg `ad_param_arg`) — no per-thread copy; a sweep
+  over a step setting (rtol/atol/controller parameter) goes to the general module. Hairer only, no
+  dense output, no attempt log, no h/err history, no tp/hp. The observable is picked by weights
+  (`ucudaAdObsW`): `v[writableVar]` with a runtime index (and a select loop, which the compiler folds
+  back into it) kept the whole state in local memory. Result: 124 registers, 0 B local memory
+  (was 214 / 1584 B), bit-identical results. The per-step progress atomic into mapped host memory
+  (PCIe) and its BSYNC were the main stall. Rossler 256x256 DOP853: BD 2D kernel 1.65 -> 0.73 s,
+  Metrics 1.64 -> 0.98 s; at real clocks the kernel is now FP64-bound (85%).
+- **Progress and cancel in all adaptive GPU kernels:** progress is reported per point
+  (`UcudaAdProgress::top_up`, `update` is a no-op); the threshold check (`ucudaAdOut` /
+  `ucuda_lyap_out`) and the cancel flag run every `CHECK_INTERVAL` accepted steps (counted in steps,
+  not output samples) plus once after the last step. `S.diverged` (non-finite error at h_min) is
+  still tested every step: it is set by the step itself and ends the loop. Cost of the old scheme
+  (measured with the kernels given `nullptr` signals): adaptive LLE 2D 128x128 0.49 -> 0.93 s,
+  BD / Metrics 2D on the output grid 7.2 -> 8.7 s, LS 2D +5-15%; fixed-step kernels and the
+  step-node kernel: no measurable cost.
+- **ncu locks clocks to base by default**: a kernel limited by memory/latency (or by atomics to host
+  memory) looks FP64-bound there. Use `--clock-control none` and check with nsys kernel times.
+- The step body (`adaptive_emb_body`) is unrolled and skips zero Butcher coefficients (DOP853: ~30%
+  of stage-combination FMAs). Bit-identical for finite stages; a trial step whose stage overflows to
+  inf used to give NaN (0*inf) and now a finite error — adaptive LLE 2D on Rossler differed in 51 of
+  16384 points (chaotic ones).
 - Adaptive sweep kernels are **FP64-bound** (ncu, Rossler 256x256 DOP853 on RTX 2060: FP64 pipe
   84% busy, 214 registers, 8 warps/SM). Register caps (168/128), block width 64/128 and
   `UCUDA_AD_STATIC_N` do not help or hurt. The uniform output grid is ~4x slower than step nodes
@@ -291,7 +316,7 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   (81% of warp instructions). Tried and reverted (results bit-identical, all slower at 256x256):
   step-then-samples loop (7.6 -> 7.9 s), the same with `__all_sync` before every attempt
   (-> 13.1 s: the warp waits for the lane with the longest sample loop and the kernel becomes
-  local-memory latency bound), dense coefficients in registers (255 registers, no gain).
+  local-memory latency bound), dense coefficients in registers (255 registers, no gain). Two-phase grid (all lanes step in lockstep — `__activemask` / `__any_sync` rounds of W samples — buffering dense coefficients, then samples in a separate pass; bit-identical): under ncu 20% faster (warp instructions /2.3, 14 vs 6 lanes per instruction), but 5-30% slower in real time — it turns local-memory latency bound, and boost clocks speed up only the FP64-bound one-phase kernel. ncu locks base clocks: judge loop changes by nsys/wall time. Unexplained: the first launch in a process runs the two-phase kernel ~35% faster than later ones (not `CU_CTX_LMEM_RESIZE_TO_MAX`, not the L1 carveout, not the chunking).
 - Order → Performance, "adaptive loses to fixed": check three things before suspecting a bug.
   (1) Chaos: E(T) grows ~e^(λT). Rössler (λ ≈ 0.07) at T = 400 gives E(T) ~ 1..10 (attractor size) for
   every h and tol, so the curves are noise; use T ≈ 20. (2) The problem: on Rössler at equal E(T) the

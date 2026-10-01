@@ -1619,6 +1619,7 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
                 if (ImGui::Selectable(bi[i].name, a.ctrl == bi[i].name)) pick(bi[i].name);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi[i].tip);
             }
+#ifndef UCUDA_AD_HAIRER_ONLY
             const std::vector<std::pair<std::string, std::string>> users = user_ctrl_list();
             if (!users.empty()) ImGui::SeparatorText("library");
             for (size_t i = 0; i < users.size(); ++i) {
@@ -1630,6 +1631,7 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
             }
             ImGui::Separator();
             if (ImGui::Selectable("edit library...")) g_ctrl_library_open_request = true;
+#endif
             ImGui::EndCombo();
         }
         AdaptiveCtrlResolved cur;
@@ -17377,13 +17379,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
             ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
 
+#ifndef UCUDA_AD_HAIRER_ONLY
             ImGui::Separator();
             ImGui::Text("Step controllers");
             ImGui::TextDisabled("Your own adaptive step controllers: C bodies and named Soderlind");
             ImGui::TextDisabled("filters, shared by all systems and tabs (library\\step_controllers.json).");
             if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
+#endif
         }
         ImGui::End();
     }
+#ifndef UCUDA_AD_HAIRER_ONLY
     draw_ctrl_library_window(model);
+#endif
 }

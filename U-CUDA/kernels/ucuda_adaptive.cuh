@@ -79,6 +79,13 @@
 #define UCUDA_CTRL_FILTER 4
 #define UCUDA_CTRL_CUSTOM 5
 
+// Пока работаем только с регулятором Хайрера: остальные законы (SciPy, I, PI, Filter,
+// пользовательский C body) в шаг не компилируются, а UI и сессии их не предлагают
+// (adaptive_settings.h, gui.cpp, session_io.cpp). Вернуть все — #define UCUDA_AD_ALL_CTRL.
+#ifndef UCUDA_AD_ALL_CTRL
+#define UCUDA_AD_HAIRER_ONLY 1
+#endif
+
 // Параметры адаптивного шага — один экземпляр на запуск. Только numb и int
 // фиксированного размера: хост заполняет ту же структуру и передаёт её в ядро.
 struct UcudaAdaptParams {
@@ -497,6 +504,10 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
 
 UCUDA_HD inline void ucuda_step_ctrl(int ctrl, const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     o.accept = 0; o.err = 0; o.h = in.h; o.pad = 0;
+#ifdef UCUDA_AD_HAIRER_ONLY
+    (void)ctrl;
+    ucuda_ctrl_hairer(in, m, o);
+#else
     switch (ctrl) {
     case UCUDA_CTRL_SCIPY:  ucuda_ctrl_scipy(in, m, o);  break;
     case UCUDA_CTRL_I:      ucuda_ctrl_i(in, m, o);      break;
@@ -507,6 +518,7 @@ UCUDA_HD inline void ucuda_step_ctrl(int ctrl, const UcudaCtlIn& in, UcudaCtlMem
 #endif
     default:                ucuda_ctrl_hairer(in, m, o); break;
     }
+#endif
 }
 
 // ---- Драйвер ---------------------------------------------------------------------
@@ -755,7 +767,9 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
         }
 
         k.emb(S.X, S.F0, a, h, Y, E, F1, W);
+#ifndef UCUDA_AD_NODES_KERNEL   // ядро узлов (свипы) выводит только nacc, nrej, nforced, hsum
         S.st.nrhs += P.emb_rhs;
+#endif
         const numb err_extra = ext.attempt(k, a, S.X, Y, E, h);
 
         UcudaCtlIn in;
@@ -772,15 +786,19 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
         // попытки с NaN/inf (пользовательский закон, который про NaN не подумал).
         const int acc  = o.accept && finite;
         const int take = acc || forced || (P.maxrej < 0 && finite);
+#ifndef UCUDA_AD_NODES_KERNEL   // лог попыток — только у Analysis
         if (S.log != nullptr && S.log_n < S.log_cap) {
             numb* r = S.log + 4 * S.log_n++;
             r[0] = S.t; r[1] = h; r[2] = o.err;
             r[3] = acc ? (numb)1 : (take ? (numb)2 : (numb)0);
         }
+#endif
         if (take) {
             ext.commit();
             if (!acc) S.st.nforced++;
+#ifndef UCUDA_AD_NODES_KERNEL   // tp, hp — плотному выходу, которого у ядра узлов нет
             S.tp = S.t; S.hp = h;
+#endif
             for (int i = 0; i < n; ++i) {
 #ifndef UCUDA_AD_NO_DENSE
                 S.Xp[i] = S.X[i]; S.Fp[i] = S.F0[i];
@@ -788,17 +806,25 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
                 S.X[i] = Y[i];    S.F0[i] = F1[i];
             }
             S.t = last ? tEnd : tn;
+#if !(defined(UCUDA_AD_NODES_KERNEL) && defined(UCUDA_AD_HAIRER_ONLY))
+            // История h и err — PI и фильтрам; Хайрер берёт только m.user[0] и счётчик.
             for (int j = UCUDA_CTL_HIST - 1; j > 0; --j) { S.mem.h[j] = S.mem.h[j - 1]; S.mem.err[j] = S.mem.err[j - 1]; }
-            S.mem.h[0] = h; S.mem.err[0] = o.err; S.mem.nacc++;
+            S.mem.h[0] = h; S.mem.err[0] = o.err;
+#endif
+            S.mem.nacc++;
+#ifndef UCUDA_AD_NODES_KERNEL
             if (S.st.nacc == 0 || h < S.st.hmin) S.st.hmin = h;
             if (S.st.nacc == 0 || h > S.st.hmax) S.st.hmax = h;
+#endif
             S.st.hsum += h; S.st.nacc++;
             S.h = (o.h > 0) ? o.h : h;   // регулятор вернул мусор — оставить шаг
             if (!last) S.hfree = S.h;
 #ifndef UCUDA_AD_NO_DENSE
             S.dense_ready = 0;
 #endif
+#ifndef UCUDA_AD_NODES_KERNEL
             S.last_forced = forced;
+#endif
             S.nrej_run = 0;
             return 1;
         }
@@ -1101,13 +1127,21 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             if (S.diverged) return 0;
             continue;
         }
-        if (ucuda_lyap_out(S.X, maxValue)) return 0;
-        if (k > 0)
-            for (int c = 0; c < NC; ++c)
-                if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
         prog.update(S.t);
-        if ((++cnt & 63) == 0 && cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        // Порог разлёта (опорная и клоны) и флаг отмены — раз в CHECK_INTERVAL принятых шагов,
+        // как у постоянного шага; NaN/inf не принимается вовсе (ошибка попытки бесконечна).
+        if (++cnt == CHECK_INTERVAL) {
+            cnt = 0;
+            if (ucuda_lyap_out(S.X, maxValue)) return 0;
+            if (k > 0)
+                for (int c = 0; c < NC; ++c)
+                    if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
+            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        }
     }
+    if (ucuda_lyap_out(S.X, maxValue)) return 0;   // хвост короче CHECK_INTERVAL
+    for (int c = 0; c < NC; ++c)
+        if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
     const numb tIntegrated = S.t - tAcc0;   // последний блок кончается ровно в tEnd при любом renorm
     for (int c = 0; c < NC; ++c) res[c] = acc[c] / tIntegrated;
     return 1;

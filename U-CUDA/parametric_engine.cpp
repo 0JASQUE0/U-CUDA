@@ -2741,11 +2741,18 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
         for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
-        const std::string key = hash_key(bodies, amountOfX) + ":ad:pov" + std::to_string(par_or_var);
+        // Узлы шага — свой модуль без плотного выхода (UCUDA_AD_NO_DENSE): состояние нити
+        // легче на D, Xp, Fp, а стадии живут только внутри попытки. Своё имя исходника — от
+        // него зависит ключ PTX библиотеки при раздельной сборке.
+        const bool nodes = ad_nodes_module(ad);
+        const std::string key = hash_key(bodies, amountOfX) + ":ad:pov" + std::to_string(par_or_var)
+                              + (nodes ? ":nodes" : "");
         return compile_into(pool_ad, key, cached_ad, activate, [&](CachedAdModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_bif2d + "\n" + src_adaptive_part), "adaptive_sweep.cu",
+            const std::string tmpl = (nodes ? std::string(kAdNodesModulePrefix) : std::string())
+                                   + src_template_bif2d + "\n" + src_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -3282,6 +3289,24 @@ struct ParametricEngine::Impl {
         return {};
     }
 
+    // Модуль узлов шага (raw_nodes) у БД, бассейнов и метрик: без плотного выхода и с
+    // размерностью-константой — циклы драйвера разворачиваются, и состояние нити может
+    // жить в регистрах, а не в локальной памяти (UCUDA_AD_N в ucuda_adaptive.cuh).
+    static constexpr const char* kAdNodesModulePrefix =
+        "#define UCUDA_AD_NO_DENSE 1\n#define UCUDA_AD_NODES_KERNEL 1\n#define UCUDA_AD_STATIC_N 1\n";
+
+    // Модуль узлов — для узлов шага при свипе по параметрам системы / НУ. Его ядрам настройки
+    // шага приходят по значению (константный банк аргументов) — передавать ad_param_arg.
+    // Свип по настройке шага (rtol, atol, параметр регулятора) идёт общим модулем.
+    static bool ad_nodes_module(const AdaptiveRequest& ad) {
+        return ad.raw_nodes && ad.axis_kind[0] == kAdAxisSystem && ad.axis_kind[1] == kAdAxisSystem;
+    }
+    // Аргумент «настройки шага» для cuLaunchKernel: модуль узлов — сама структура, общий —
+    // указатель на её копию на устройстве (d_ptr — адрес переменной с этим указателем).
+    static void* ad_param_arg(const AdaptiveRequest& ad, UcudaAdaptParams** d_ptr) {
+        return ad_nodes_module(ad) ? (void*)const_cast<UcudaAdaptParams*>(&ad.params) : (void*)d_ptr;
+    }
+
     // Прогресс адаптивных ядер — по модельному времени: точка отчитывает столько
     // «единиц», сколько здесь, как бы ни менялся шаг.
     static constexpr size_t kAdProgressUnits = 4096;
@@ -3722,7 +3747,7 @@ struct ParametricEngine::Impl {
                     &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
                     &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
                     &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
-                    &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
                     &progressUnits_arg, &d_adStats_arg
@@ -7674,7 +7699,7 @@ struct ParametricEngine::Impl {
                     &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
                     &d_outPeaks, &d_intervals, &d_amountOfPeaks,
                     &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
-                    &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
                     &progressUnits_arg, &d_adStats_arg
@@ -7842,15 +7867,19 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
         for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
-        const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var);
+        // Узлы шага — модуль без плотного выхода, как у БД (см. compile_ad_if_needed).
+        const bool nodes = ad_nodes_module(ad);
+        const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var)
+                              + (nodes ? ":nodes" : "");
         return compile_into(pool_metrics_ad, key, cached_metrics_ad, activate, [&](CachedMetricsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             // Ядра свипов БД и бассейнов из adaptive_part.cu метрикам не нужны — только время ptxas.
-            const std::string tmpl = "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
+            const std::string tmpl = std::string(nodes ? kAdNodesModulePrefix : "")
+                                   + "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
                                    + src_template_metrics + "\n"
                                    + src_adaptive_part + "\n" + src_metrics_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "signal_metrics_ad.cu",
+            if (!build_module(snapshot_sources(tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -8233,7 +8262,7 @@ struct ParametricEngine::Impl {
                     &d_values, &amountOfVal_arg, &writableVar_arg, &maxValue_arg,
                     &d_intervals, &peakStride_arg, &peakCap_arg,
                     &d_out, &metricStride_arg, &mask_arg, &d_flags, &logMask_arg,
-                    &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tMax_arg, &dtOut_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transient_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_arg, &iterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progStride_arg, &progressDt_arg,
                     &progressUnits_arg, &d_adStats_arg
@@ -9010,7 +9039,7 @@ struct ParametricEngine::Impl {
                     &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
                     &d_avg_peak_chunk, &d_avg_interv_chunk, &d_helpful_chunk,
                     &feature1_int, &feature2_int, &mult1_v, &mult2_v,
-                    &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
                     &progressUnits_arg, &d_adStats_arg

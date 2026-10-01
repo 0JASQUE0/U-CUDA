@@ -89,8 +89,23 @@ inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count) {
           "k = q+1, th = safety^k (target error); limiter = 1 smooths with 1 + atan(rho - 1).\n"
           "Defaults: H211b (b = 4)." },
     };
+#ifdef UCUDA_AD_HAIRER_ONLY
+    if (count) *count = 1;   // только Хайрер (первый в списке), см. UCUDA_AD_HAIRER_ONLY
+#else
     if (count) *count = (int)(sizeof(k) / sizeof(k[0]));
+#endif
     return k;
+}
+
+// Регулятор, которым на деле считается name: пока собран только Хайрер
+// (UCUDA_AD_HAIRER_ONLY), любое имя — "Hairer".
+inline std::string adaptive_ctrl_effective(const std::string& name) {
+#ifdef UCUDA_AD_HAIRER_ONLY
+    (void)name;
+    return "Hairer";
+#else
+    return name;
+#endif
 }
 
 inline const AdaptiveCtrlInfo* adaptive_find_builtin(const std::string& name) {
@@ -293,8 +308,9 @@ struct AdaptiveCtrlResolved {
     std::string tip;
 };
 
-inline bool adaptive_resolve_ctrl(const std::string& name, int q, AdaptiveCtrlResolved& r, std::string& err) {
+inline bool adaptive_resolve_ctrl(const std::string& name_in, int q, AdaptiveCtrlResolved& r, std::string& err) {
     r = AdaptiveCtrlResolved();
+    const std::string name = adaptive_ctrl_effective(name_in);
     if (const AdaptiveCtrlInfo* ci = adaptive_find_builtin(name)) {
         r.id = ci->id;
         for (int i = 0; i < ci->npar; ++i) r.par.push_back(ci->par[i]);
@@ -417,7 +433,8 @@ inline bool adaptive_build_params(const AdaptiveSettings& s, const AdaptiveCode&
     AdaptiveCtrlResolved cr;
     if (!adaptive_resolve_ctrl(s.ctrl, code.q, cr, err)) return false;
     std::vector<double> c = cr.def;
-    if (!s.ctrl_params.empty()) {
+    // Параметры другого регулятора (имя заменено adaptive_ctrl_effective) к Хайреру не подходят.
+    if (!s.ctrl_params.empty() && adaptive_ctrl_effective(s.ctrl) == s.ctrl) {
         if (s.ctrl_params.size() != cr.par.size()) { err = "controller parameters: wrong count"; return false; }
         for (size_t i = 0; i < cr.par.size(); ++i)
             if (!parse_num_checked(s.ctrl_params[i], c[i])) {

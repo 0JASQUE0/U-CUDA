@@ -283,6 +283,12 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
         p.expect('}');
         break;
     }
+    // Регулятор, которого в этой сборке нет (UCUDA_AD_HAIRER_ONLY), — на Хайрера с его
+    // параметрами по умолчанию: чужие параметры к нему не подходят.
+    if (adaptive_ctrl_effective(a.ctrl) != a.ctrl) {
+        a.ctrl = adaptive_ctrl_effective(a.ctrl);
+        a.ctrl_params.clear();
+    }
 }
 } // namespace
 
