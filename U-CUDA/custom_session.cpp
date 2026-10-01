@@ -27,6 +27,7 @@ void copy_integrator_and_state(const CustomTabSharedConfig& s, Cfg& c) {
     c.t_max_text       = s.t_max_text;
     c.transient_text   = s.transient_text;
     c.max_value_text   = s.max_value_text;
+    c.adaptive         = s.adaptive;
     // Not every config has pre_scaller_text (LLE/LS don't); apply where it
     // exists via a separate overload set below.
     c.initial_conditions = s.initial_conditions;
@@ -292,6 +293,7 @@ void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession&
     ph.sim_time   = s.t_max_text;
     ph.skip_time  = s.transient_text;
     ph.param_values = s.param_values;
+    ph.adaptive     = s.adaptive;
     pin_swept_h(s, ph.step_h);
     if (ph.ic_sets.empty()) {
         InitialConditionSet ic;

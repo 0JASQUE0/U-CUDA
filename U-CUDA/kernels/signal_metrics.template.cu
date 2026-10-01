@@ -75,6 +75,41 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 #define SIGM_VOLUME            13
 #define SIGM_COUNT             14
 
+// Экстремумы с параболической поправкой: вершина параболы через три соседних
+// отсчёта — та же формула, что у пиков в PeakStream, — для максимумов и для
+// минимумов. Нужна метрикам min/max, только если определён SIGM_MINMAX_INTERP:
+// при адаптивном шаге всегда, при постоянном — по галке Metrics ("min/max by
+// interpolated extrema in Fixed"). Без макроса MetricsAccum её не содержит, и
+// ядро постоянного шага компилируется ровно как раньше.
+struct ExtremaInterp
+{
+	numb y0, y1;
+	size_t n;
+	numb mx, mn;
+	bool haveMax, haveMin;
+
+	__device__ __host__ void init() { y0 = y1 = mx = mn = (numb)0; n = 0; haveMax = haveMin = false; }
+
+	__device__ __host__ void push(numb y2)
+	{
+		if (n >= 2) {
+			const bool isMax = y1 >= y0 && y1 >= y2 && (y1 > y0 || y1 > y2);
+			const bool isMin = y1 <= y0 && y1 <= y2 && (y1 < y0 || y1 < y2);
+			if (isMax || isMin) {
+				const numb denom = y0 - (numb)2.0 * y1 + y2;
+				numb v = y1;
+				if (fabs(denom) > 1e-12) {
+					const numb delta = (numb)0.5 * (y0 - y2) / denom;
+					v = y1 - (numb)0.25 * (y0 - y2) * delta;
+				}
+				if (isMax && (!haveMax || v > mx)) { mx = v; haveMax = true; }
+				if (isMin && (!haveMin || v < mn)) { mn = v; haveMin = true; }
+			}
+		}
+		y0 = y1; y1 = y2; ++n;
+	}
+};
+
 // Потоковые суммы для экстремумов, среднего и параметров Хьорта.
 //
 // Производные — конечные разности записанного ряда: d1 = Δy, d2 = Δ²y. Шаг
@@ -98,9 +133,15 @@ struct MetricsAccum
 	numb   sdd, sdd2;
 	bool   box;
 	numb   bMin[AMOUNTOFX], bMax[AMOUNTOFX];
+#ifdef SIGM_MINMAX_INTERP
+	ExtremaInterp ex;
+#endif
 
 	__device__ __host__ void init(bool trackBox)
 	{
+#ifdef SIGM_MINMAX_INTERP
+		ex.init();
+#endif
 		n = 0;
 		shift = s1 = s2 = (numb)0;
 		mn = mx = (numb)0;
@@ -125,6 +166,9 @@ struct MetricsAccum
 
 	__device__ __host__ void push(numb y)
 	{
+#ifdef SIGM_MINMAX_INTERP
+		ex.push(y);
+#endif
 		if (n == 0) { shift = y; mn = y; mx = y; }
 		const numb c = y - shift;
 		s1 += c; s2 += c * c;
@@ -286,7 +330,11 @@ __device__ int smFinalize(int flag, const MetricsAccum& acc, const PeakStream& p
 
 	res[SIGM_MAX]   = acc.mx;
 	res[SIGM_MIN]   = acc.mn;
-	res[SIGM_RANGE] = acc.mx - acc.mn;
+#ifdef SIGM_MINMAX_INTERP
+	if (acc.ex.haveMax && acc.ex.mx > res[SIGM_MAX]) res[SIGM_MAX] = acc.ex.mx;
+	if (acc.ex.haveMin && acc.ex.mn < res[SIGM_MIN]) res[SIGM_MIN] = acc.ex.mn;
+#endif
+	res[SIGM_RANGE] = res[SIGM_MAX] - res[SIGM_MIN];
 	res[SIGM_MEAN]  = acc.shift + acc.s1 / (numb)acc.n;
 	if (acc.box) {
 		numb vol = (numb)1;

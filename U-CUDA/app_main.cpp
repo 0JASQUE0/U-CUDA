@@ -17,6 +17,7 @@
 #include "plot_axis.h"
 #include "gui.h"
 #include "system_library.h"
+#include "session_io.h"       // load_ctrl_library
 #include "ocr_client_win.h"   // OcrClient + b64encode
 #include "image_source.h"     // copy_framebuffer_rect_to_clipboard
 
@@ -289,6 +290,13 @@ int main() {
     LibraryPaths lib_paths = resolve_library_paths(dir);
     seed_library_if_missing(lib_paths.library, lib_paths.tmpl);
     const std::string& library_dir = lib_paths.library;
+    // Библиотека регуляторов шага — до чтения сессий: сессия с регулятором, которого
+    // здесь нет, добавляет его в библиотеку (read_adaptive).
+    {
+        std::string ctrl_err;
+        if (!load_ctrl_library(library_dir + "\\step_controllers.json", &ctrl_err))
+            fprintf(stderr, "step controllers: %s\n", ctrl_err.c_str());
+    }
 
     std::string python_exe = resolve_python_exe(dir);
 

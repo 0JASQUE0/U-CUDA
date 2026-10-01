@@ -88,6 +88,7 @@ struct LLE1DSnapshot {
     std::vector<double> initial_conditions;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -104,6 +105,7 @@ struct LS1DSnapshot {
     std::vector<double> initial_conditions;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -144,6 +146,7 @@ struct LLE2DSnapshot {
     int    par_or_var = 1;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -161,6 +164,7 @@ struct LS2DSnapshot {
     int    par_or_var = 1;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -207,6 +211,8 @@ struct PhaseSnapshot {
     double t_max    = 0.0;
     double t_skip   = 0.0;
     int    decimator = 1;
+    // Адаптивный шаг: одна строка настроек для _config.csv; пусто — шаг постоянный.
+    std::string adaptive;
 };
 
 struct FastSyncSnapshot {
@@ -382,6 +388,8 @@ struct OrderSnapshot {
     int repeats = 0, warmup = 0, replicas = 0;
     std::string ref_scheme;          // пусто — эталон не считался
     int         ref_substeps = 0;
+    // Адаптивный шаг вкладки (узлы — tol): строка настроек для _config.csv, пусто — Fixed.
+    std::string adaptive_desc;
 
     // Только Stability. Начальные условия и время счёта для неё смысла не
     // имеют (шаг делается один, от базисных векторов), зато имеют смысл

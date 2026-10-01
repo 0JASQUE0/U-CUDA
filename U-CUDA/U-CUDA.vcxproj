@@ -59,8 +59,9 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
            русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
-           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики. -->
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
+           /bigobj: gui.cpp в Debug превышает 65279 секций объектного файла (C1128). -->
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(CUDA_PATH)\include;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -93,8 +94,9 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
            русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
-           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики. -->
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
+           /bigobj: gui.cpp в Debug превышает 65279 секций объектного файла (C1128). -->
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(CUDA_PATH)\include;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>

@@ -1,6 +1,20 @@
 ﻿#include "integrator.h"
 #include <cmath>
 #include <algorithm>   // std::swap in the implicit-scheme LU
+#include <memory>
+// Драйвер адаптивного шага целиком: на CPU размерность известна только во
+// время выполнения, массивы состояния — под потолок UCUDA_AD_MAXN.
+// Раскладка (структуры регулятора) уже пришла через integrator.h -> adaptive_settings.h;
+// пользовательский регулятор — DLL из тела (CtrlCpuFn, krs_cpu.h), её функцию ставит
+// computePhasePortraitCPU_adaptive на время расчёта (указатель — свой у потока).
+#define UCUDA_AD_NMAX UCUDA_AD_MAXN
+static thread_local UcudaCtrlCustomFn g_ctrl_custom = nullptr;
+#define UCUDA_HAS_CUSTOM_CTRL 1
+static inline void ucuda_ctrl_custom(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
+    if (g_ctrl_custom) g_ctrl_custom(&in, &m, &o);
+    else ucuda_ctrl_hairer(in, m, o);   // сюда не попасть: P.ctrl = CUSTOM только с телом
+}
+#include "kernels/ucuda_adaptive.cuh"
 
 IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return IntScheme::EulerCromer;
@@ -8,6 +22,8 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "RK4")               return IntScheme::RK4;
     if (s == "DOPRI78")           return IntScheme::DOPRI78;
     if (s == "DOPRI78 (legacy)")  return IntScheme::DOPRI78Legacy;
+    if (s == "RK45")              return IntScheme::RK45;
+    if (s == "DOP853")            return IntScheme::DOP853;
     if (s == "CD")                return IntScheme::CD;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
@@ -51,6 +67,23 @@ struct DopriTable {
 const DopriTable& dopri_table(bool legacy) {
     static const DopriTable t(kDopri78A, kDopri78B), tl(kDopri78LegacyA, kDopri78LegacyB);
     return legacy ? tl : t;
+}
+
+// RK45 / DOP853: та же таблица, что у codegen::scheme_erk; ближайший double c[0].
+// M[i][j] = a_{i,j} (стадии 0..S-1), B — веса старшего решения.
+struct ErkTable {
+    int S;
+    double M[12][11], B[12];
+    ErkTable(const MultiDoubleCoef* A, int ld, const MultiDoubleCoef* b, int s) : S(s), M{}, B{} {
+        for (int i = 0; i < S; ++i)
+            for (int j = 0; j + 1 < S; ++j) M[i][j] = A[i * ld + j].c[0];
+        for (int j = 0; j < S; ++j) B[j] = b[j].c[0];
+    }
+};
+const ErkTable& erk_table(IntScheme sch) {
+    static const ErkTable rk45(&kRK45A[0][0], 6, &kRK45B[0][0], 6);
+    static const ErkTable dop853(&kDop853A[0][0], 11, kDop853B, 12);
+    return sch == IntScheme::RK45 ? rk45 : dop853;
 }
 } // namespace
 
@@ -129,6 +162,32 @@ void step_dopri78(const SystemEvaluator& ev, double* X, const double* a, double 
     for (int stage = 0; stage < 13; ++stage)
         for (int l = 0; l < n; ++l)
             X2[l] += T.B[0][stage] * k(stage, l);
+    for (int l = 0; l < n; ++l) X[l] += h * X2[l];
+}
+
+// Явный РК по таблице (RK45, DOP853) — тот же цикл стадий, что у DOPRI78.
+// Буферы: kbuf — S*n, X1 — n, X2 — n.
+void step_erk(const SystemEvaluator& ev, double* X, const double* a, double h,
+              int n, const ErkTable& T, double* kbuf, double* X1, double* X2) {
+    auto k = [&](int stage, int comp) -> double& { return kbuf[stage * n + comp]; };
+    for (int i = 0; i < n; ++i) X1[i] = X[i];
+    for (int stage = 0; stage < T.S; ++stage) {
+        double deriv[32];   // amountOfX cap (см. kMaxAmountOfX в engine = 32)
+        ev.eval(X1, a, deriv);
+        for (int i = 0; i < n; ++i) k(stage, i) = deriv[i];
+        if (stage != T.S - 1) {
+            for (int l = 0; l < n; ++l) X2[l] = 0;
+            for (int j = 0; j < stage + 1; ++j)
+                for (int l = 0; l < n; ++l)
+                    X2[l] += T.M[stage + 1][j] * k(j, l);
+            for (int l = 0; l < n; ++l)
+                X1[l] = X[l] + h * X2[l];
+        }
+    }
+    for (int l = 0; l < n; ++l) X2[l] = 0;
+    for (int stage = 0; stage < T.S; ++stage)
+        for (int l = 0; l < n; ++l)
+            X2[l] += T.B[stage] * k(stage, l);
     for (int l = 0; l < n; ++l) X[l] += h * X2[l];
 }
 
@@ -641,7 +700,7 @@ bool computePhasePortraitCPU(
 
     // переиспользуемые буферы (без аллокаций в цикле)
     std::vector<double> k1(n), k2(n), k3(n), k4(n), tmp(n);
-    std::vector<double> kbuf(13 * n), X1(n), X2(n);  // для DOPRI78
+    std::vector<double> kbuf(13 * n), X1(n), X2(n);  // для DOPRI78, RK45, DOP853
     // Комплексные буферы нужны только Complex CD — для остальных схем это два
     // пустых вектора, без аллокаций.
     std::vector<ucmplx> Zc, Kc;
@@ -698,6 +757,8 @@ bool computePhasePortraitCPU(
         case IntScheme::RK4:              step_rk4(ev, X.data(), a, h, n, k1.data(), k2.data(), k3.data(), k4.data(), tmp.data()); break;
         case IntScheme::DOPRI78:          step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::DOPRI78Legacy:    step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data(), true); break;
+        case IntScheme::RK45:
+        case IntScheme::DOP853:           step_erk(ev, X.data(), a, h, n, erk_table(scheme), kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
@@ -750,4 +811,202 @@ bool computePhasePortraitCPU_custom(
     auto do_step = [&]() { step(Xp, A.data(), hn); };
 
     return run_trajectory(do_step, Xp, n, total, skip, out);
+}
+
+// ---- Адаптивный шаг на CPU -------------------------------------------------------
+//
+// Драйвер — тот же kernels/ucuda_adaptive.cuh, что и в ядре phase_kernel_ad;
+// функции схемы — провайдер CpuAdaptiveKrs ниже: формулы и порядок сумм те же,
+// что печатает codegen_adaptive, только правая часть идёт через SystemEvaluator.
+namespace {
+
+struct CpuAdaptiveKrs {
+    enum Kind { RK45, DOP853, DP78 };
+    const SystemEvaluator* ev = nullptr;
+    int  n = 0;
+    Kind kind = RK45;
+    int  S = 0, lc = 0, nlo = 0;
+    double M[13][12] = {}, B[13] = {}, L[2][14] = {};
+    double P45[7][4] = {}, AE[3][15] = {}, DD[4][16] = {};
+
+    CpuAdaptiveKrs(const SystemEvaluator& e, int dim, IntScheme sch) : ev(&e), n(dim) {
+        if (sch == IntScheme::RK45) {
+            kind = RK45; S = 6; lc = 7; nlo = 1;
+            for (int i = 0; i < S; ++i) for (int j = 0; j + 1 < S; ++j) M[i][j] = kRK45A[i][j].c[0];
+            for (int j = 0; j < S; ++j) B[j] = kRK45B[0][j].c[0];
+            MultiDoubleCoef w[7];
+            adaptive_err_weights(&kRK45B[0][0], S, &kRK45B[1][0], lc, w);
+            for (int j = 0; j < lc; ++j) L[0][j] = w[j].c[0];
+            for (int i = 0; i < 7; ++i) for (int j = 0; j < 4; ++j) P45[i][j] = kRK45P[i][j].c[0];
+        } else if (sch == IntScheme::DOP853) {
+            kind = DOP853; S = 12; lc = 13; nlo = 2;
+            for (int i = 0; i < S; ++i) for (int j = 0; j + 1 < S; ++j) M[i][j] = kDop853A[i][j].c[0];
+            for (int j = 0; j < S; ++j) B[j] = kDop853B[j].c[0];
+            for (int j = 0; j < lc; ++j) { L[0][j] = kDop853E5[j].c[0]; L[1][j] = kDop853E3[j].c[0]; }
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 15; ++j) AE[i][j] = kDop853AExt[i][j].c[0];
+            for (int i = 0; i < 4; ++i) for (int j = 0; j < 16; ++j) DD[i][j] = kDop853D[i][j].c[0];
+        } else {
+            const bool legacy = (sch == IntScheme::DOPRI78Legacy);
+            const MultiDoubleCoef (*A)[12] = legacy ? kDopri78LegacyA : kDopri78A;
+            const MultiDoubleCoef (*Bw)[13] = legacy ? kDopri78LegacyB : kDopri78B;
+            kind = DP78; S = 13; lc = 13; nlo = 1;
+            for (int i = 0; i < S; ++i) for (int j = 0; j + 1 < S; ++j) M[i][j] = A[i][j].c[0];
+            MultiDoubleCoef w[13];
+            adaptive_err_weights(&Bw[0][0], S, &Bw[1][0], lc, w);
+            for (int j = 0; j < S; ++j) { B[j] = Bw[0][j].c[0]; L[0][j] = w[j].c[0]; }
+        }
+    }
+
+    void rhs(const double* X, const double* a, double* F) const { ev->eval(X, a, F); }
+
+    void emb(const double* X, const double* F0, const double* a, const double h,
+             double* Y, double* E, double* F1, double* W) const {
+        double X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
+        for (int l = 0; l < n; ++l) W[l] = F0[l];
+        for (int i = 1; i < S; ++i) {
+            for (int l = 0; l < n; ++l) X2[l] = 0;
+            for (int j = 0; j < i; ++j)
+                for (int l = 0; l < n; ++l) X2[l] += M[i][j] * W[j * n + l];
+            for (int l = 0; l < n; ++l) X1[l] = X[l] + h * X2[l];
+            ev->eval(X1, a, W + i * n);
+        }
+        for (int l = 0; l < n; ++l) X2[l] = 0;
+        for (int i = 0; i < S; ++i)
+            for (int l = 0; l < n; ++l) X2[l] += B[i] * W[i * n + l];
+        for (int l = 0; l < n; ++l) Y[l] = X[l] + h * X2[l];
+        ev->eval(Y, a, F1);
+        for (int l = 0; l < n; ++l) W[S * n + l] = F1[l];
+        for (int m = 0; m < nlo; ++m) {
+            for (int l = 0; l < n; ++l) X2[l] = 0;
+            for (int i = 0; i < lc; ++i)
+                for (int l = 0; l < n; ++l) X2[l] += L[m][i] * W[i * n + l];
+            for (int l = 0; l < n; ++l)
+                E[m * n + l] = h * X2[l];   // L = b - b^, см. adaptive_err_weights
+        }
+    }
+
+    void dprep(const double* X, const double* Y, const double* F0, const double* F1,
+               const double* a, const double h, double* W, double* D) const {
+        if (kind == RK45) {
+            for (int l = 0; l < n; ++l) D[l] = X[l];
+            for (int j = 0; j < 4; ++j)
+                for (int l = 0; l < n; ++l) {
+                    double acc = 0;
+                    for (int i = 0; i < 7; ++i) acc += W[i * n + l] * P45[i][j];
+                    D[(1 + j) * n + l] = h * acc;
+                }
+        } else if (kind == DOP853) {
+            double X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
+            for (int i = 0; i < 3; ++i) {
+                for (int l = 0; l < n; ++l) X2[l] = 0;
+                for (int j = 0; j < 13 + i; ++j)
+                    for (int l = 0; l < n; ++l) X2[l] += AE[i][j] * W[j * n + l];
+                for (int l = 0; l < n; ++l) X1[l] = X[l] + h * X2[l];
+                ev->eval(X1, a, W + (13 + i) * n);
+            }
+            for (int l = 0; l < n; ++l) {
+                const double dy = Y[l] - X[l];
+                D[l] = X[l];
+                D[n + l] = dy;
+                D[2 * n + l] = h * F0[l] - dy;
+                D[3 * n + l] = 2 * dy - h * (F1[l] + F0[l]);
+            }
+            for (int r = 0; r < 4; ++r)
+                for (int l = 0; l < n; ++l) {
+                    double acc = 0;
+                    for (int i = 0; i < 16; ++i) acc += DD[r][i] * W[i * n + l];
+                    D[(4 + r) * n + l] = h * acc;
+                }
+        } else {
+            for (int l = 0; l < n; ++l) {
+                D[l] = X[l]; D[n + l] = Y[l];
+                D[2 * n + l] = h * F0[l]; D[3 * n + l] = h * F1[l];
+            }
+        }
+    }
+
+    void deval(const double* D, const double th, double* Yo) const {
+        if (kind == RK45) {
+            for (int l = 0; l < n; ++l)
+                Yo[l] = D[l] + th * (D[n + l] + th * (D[2 * n + l] + th * (D[3 * n + l] + th * D[4 * n + l])));
+        } else if (kind == DOP853) {
+            const double u = 1 - th;
+            for (int l = 0; l < n; ++l) {
+                double y = D[7 * n + l] * th;
+                y = (y + D[6 * n + l]) * u;
+                y = (y + D[5 * n + l]) * th;
+                y = (y + D[4 * n + l]) * u;
+                y = (y + D[3 * n + l]) * th;
+                y = (y + D[2 * n + l]) * u;
+                y = (y + D[n + l]) * th;
+                Yo[l] = y + D[l];
+            }
+        } else {
+            for (int l = 0; l < n; ++l) {
+                const double d = D[n + l] - D[l], f0 = D[2 * n + l], f1 = D[3 * n + l];
+                Yo[l] = D[l] + th * (f0 + th * ((3 * d - 2 * f0 - f1) + th * (f0 + f1 - 2 * d)));
+            }
+        }
+    }
+};
+
+} // namespace
+
+bool int_scheme_supports_adaptive(IntScheme s) {
+    return s == IntScheme::RK45 || s == IntScheme::DOP853
+        || s == IntScheme::DOPRI78 || s == IntScheme::DOPRI78Legacy;
+}
+
+bool computePhasePortraitCPU_adaptive(
+    const SystemEvaluator& ev, IntScheme scheme,
+    const double* ic, int dim, const double* a, const UcudaAdaptParams& P,
+    bool raw, double t_skip, double t_rec, double dt, int total, int max_pts, int log_cap,
+    std::vector<std::vector<double>>& traj, std::vector<double>& times,
+    std::vector<double>& log, AdaptiveStats& stats, double& final_h, UcudaCtrlCustomFn ctrl_fn)
+{
+    traj.clear(); times.clear(); log.clear(); stats = AdaptiveStats(); final_h = 0;
+    if (!int_scheme_supports_adaptive(scheme) || dim < 1 || dim > UCUDA_AD_MAXN) return false;
+    if (P.ctrl == UCUDA_CTRL_CUSTOM && !ctrl_fn) return false;
+    struct CtrlScope {
+        UcudaCtrlCustomFn prev;
+        explicit CtrlScope(UcudaCtrlCustomFn f) : prev(g_ctrl_custom) { g_ctrl_custom = f; }
+        ~CtrlScope() { g_ctrl_custom = prev; }
+    } ctrl_scope(ctrl_fn);
+    const CpuAdaptiveKrs K(ev, dim, scheme);
+    // Состояние велико (стадии, плотный выход) — в куче, не на стеке.
+    std::unique_ptr<UcudaAdaptState> Sp(new UcudaAdaptState());
+    UcudaAdaptState& S = *Sp;
+    std::vector<double> logbuf((size_t)(log_cap > 0 ? log_cap : 0) * 4);
+    ucuda_ad_init(S, K, dim, ic, 0.0, a, P, log_cap > 0 ? logbuf.data() : nullptr, log_cap);
+    const double tEnd = t_skip + t_rec;
+    while (S.t < t_skip && !S.diverged) ucuda_ad_step(S, K, a, P, t_skip);
+    if (!raw) {
+        std::vector<double> y((size_t)dim);
+        traj.reserve((size_t)(total > 0 ? total : 0));
+        for (int c = 0; c < total && !S.diverged; ++c) {
+            double tt = t_skip + (double)c * dt;
+            if (tt > tEnd) tt = tEnd;
+            ucuda_ad_advance_to(S, K, a, P, tt, tEnd, y.data());
+            if (S.diverged) break;
+            traj.push_back(y);
+        }
+    } else if (max_pts > 0 && !S.diverged) {
+        traj.emplace_back(S.X, S.X + dim);
+        times.push_back(S.t);
+        while (S.t < tEnd && (int)traj.size() < max_pts && !S.diverged) {
+            ucuda_ad_step(S, K, a, P, tEnd);
+            if (S.diverged) break;
+            traj.emplace_back(S.X, S.X + dim);
+            times.push_back(S.t);
+        }
+    }
+    log.assign(logbuf.begin(), logbuf.begin() + (size_t)S.log_n * 4);
+    stats.nacc = (double)S.st.nacc; stats.nrej = (double)S.st.nrej;
+    stats.nforced = (double)S.st.nforced; stats.nrhs = (double)S.st.nrhs;
+    stats.hmin = S.st.hmin; stats.hmax = S.st.hmax;
+    stats.hmean = S.st.nacc > 0 ? S.st.hsum / (double)S.st.nacc : 0.0;
+    stats.diverged = S.diverged != 0;
+    stats.truncated = raw && !S.diverged && S.t < tEnd;
+    final_h = S.h;
+    return !S.diverged;
 }

@@ -109,6 +109,93 @@ static FeaturePoints find_peaks_host(const std::vector<double>& data, double dt)
     return out;
 }
 
+// Host-порт PeakStreamNU из kernels/adaptive_part.cu: пики на узлах адаптивного шага.
+// Копия по той же причине, что и find_peaks_host выше, и повторяет оригинал один в один:
+// пик — смена знака производной сигнала с + на - между соседними узлами; принимается,
+// если вершина поднялась над минимумом сигнала после предыдущего пика не меньше чем на
+// eps_peak_delta и выше peak_threshold. Вершина — по interp: 0 — больший из двух узлов,
+// 1 — парабола по трём последним узлам с неравными шагами, 2 — кубический Эрмит на шаге
+// со сменой знака по значениям и точным производным. Время пика абсолютное, интервалы и
+// их фильтр eps_interPeak_delta — как у find_peaks_host.
+//
+// x, d, t — значение сигнала, его производная и время узлов; прореживание (каждый dec-й
+// узел и последний) уже сделано вызывающим — тем же правилом, что в ucudaAdRecordNodes.
+static FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vector<double>& d,
+                                           const std::vector<double>& t, int interp) {
+    FeaturePoints out;
+    const PeakConfig pc = get_peak_config();
+    if (!pc.do_calculate_peaks) return out;
+    const size_t n = std::min(x.size(), std::min(d.size(), t.size()));
+    if (n < 2) return out;
+    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+
+    bool   have_anchor = false;
+    double anchor = 0.0;
+    double run_min = x[0];
+    for (size_t i = 1; i < n && out.peaks.size() < cap; ++i) {
+        const double t1 = t[i - 1], x1 = x[i - 1], d1 = d[i - 1];
+        const double tc = t[i], xc = x[i], dc = d[i];
+        if (d1 > 0 && dc <= 0) {
+            double pv = x1, pt = t1;
+            if (xc > x1) { pv = xc; pt = tc; }
+            if (interp == 1 && i >= 2) {
+                const double h1 = t1 - t[i - 2], h2 = tc - t1;
+                if (h1 > 0 && h2 > 0) {
+                    const double e1 = (x1 - x[i - 2]) / h1, e2 = (xc - x1) / h2;
+                    const double c = (e2 - e1) / (h1 + h2);
+                    const double b = (e1 * h2 + e2 * h1) / (h1 + h2);
+                    if (c < 0) {
+                        double tau = -b / (2 * c);
+                        if (tau < -h1) tau = -h1;
+                        if (tau > h2)  tau = h2;
+                        pv = x1 + tau * (b + c * tau);
+                        pt = t1 + tau;
+                    }
+                }
+            }
+            else if (interp == 2) {
+                const double h = tc - t1;
+                if (h > 0) {
+                    const double D  = xc - x1;
+                    const double c1 = h * d1;
+                    const double c2 = 3 * D - h * (2 * d1 + dc);
+                    const double c3 = h * (d1 + dc) - 2 * D;
+                    const double A = 3 * c3, B = 2 * c2, C = c1;
+                    double th = -1;
+                    if (std::fabs(A) <= 1e-14 * (std::fabs(B) + std::fabs(C))) {
+                        if (B != 0) th = -C / B;
+                    } else {
+                        const double disc = B * B - 4 * A * C;
+                        if (disc >= 0) {
+                            const double sq = std::sqrt(disc);
+                            const double q  = -0.5 * (B + (B >= 0 ? sq : -sq));
+                            const double r1 = q / A;
+                            const double r2 = (q != 0) ? C / q : r1;
+                            if (r1 >= 0 && r1 <= 1 && B + 2 * A * r1 < 0)      th = r1;
+                            else if (r2 >= 0 && r2 <= 1 && B + 2 * A * r2 < 0) th = r2;
+                        }
+                    }
+                    if (th >= 0 && th <= 1) {
+                        pv = x1 + th * (c1 + th * (c2 + th * c3));
+                        pt = t1 + th * h;
+                    }
+                }
+            }
+            if (pv - run_min >= pc.eps_peak_delta && pv > pc.peak_threshold) {
+                if (!have_anchor) { anchor = pt; have_anchor = true; }
+                else if (pt - anchor >= pc.eps_interPeak_delta) {
+                    out.peaks.push_back(pv);
+                    out.intervals.push_back(pt - anchor);
+                    anchor = pt;
+                }
+                run_min = xc;
+            }
+        }
+        if (xc < run_min) run_min = xc;
+    }
+    return out;
+}
+
 // Парсит значение (число или дробь a/b) в double; пусто -> fallback.
 static inline double parse_val(const std::string& s, double fallback) {
     return parse_num(s, fallback);   // тело — в num_parse.h, одно на проект
@@ -186,8 +273,10 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_ccd4s4_10) out.emplace_back("CCD4 (o4s4)_{1-0}");
     if (r.scheme_ccd4ss01) out.emplace_back("CCD4 (s-split)_{0-1}");
     if (r.scheme_ccd4ss10) out.emplace_back("CCD4 (s-split)_{1-0}");
+    if (r.scheme_rk45)     out.emplace_back("RK45");
     if (r.scheme_dopri78)  out.emplace_back("DOPRI78");
     if (r.scheme_dopri78_legacy) out.emplace_back("DOPRI78 (legacy)");
+    if (r.scheme_dop853)   out.emplace_back("DOP853");
     if (r.scheme_gbs) out.emplace_back("GBS (n=2)");
     if (r.scheme_gbs24) out.emplace_back("GBS 2-4");
     if (r.scheme_gbs246) out.emplace_back("GBS 2-4-6");
@@ -244,6 +333,7 @@ struct PhaseRunInputs {
     std::string step_h, sim_time, skip_time;
     std::string scheme, decimation;
     std::string symmetry_s = "0.5"; // a[0] для CD
+    AdaptiveSettings adaptive;
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
@@ -436,6 +526,109 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
     note(msg);
 }
 
+// Лог попыток шага на траекторию: хватает на наглядный h(t), а память
+// ограничена (4 числа на запись, 6.4 МБ на НУ).
+static constexpr int kAdaptLogCap = 200000;
+
+// Ветка адаптивного шага для compute_phase_portrait: GPU (ядро phase_kernel_ad) или
+// CPU (computePhasePortraitCPU_adaptive) — один и тот же драйвер. raw[k] — траектория
+// НУ k, times[k] — моменты её точек на узлах шага (на равномерной сетке пусто).
+// false — ошибка настройки или компиляции, текст уже в result.error; расхождение
+// траектории ошибкой не считается и уходит в calc_ok / calc_err, как у постоянного шага.
+static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
+                               const std::vector<double>& ic_flat, const std::vector<double>& a,
+                               double h, double tsim, double tskip, int total,
+                               std::vector<std::vector<std::vector<double>>>& raw,
+                               std::vector<std::vector<double>>& times,
+                               AnalysisResult& result, bool& calc_ok, std::string& calc_err) {
+    const Scheme sch = scheme_from_name(in.scheme);
+    if (in.krs_is_custom || !scheme_supports_adaptive(sch)) {
+        result.error = "Adaptive step needs a scheme with an embedded error estimate: "
+                       "RK45, DOPRI78 or DOP853.";
+        return false;
+    }
+    AdaptiveCode code;
+    try { code = codegen_adaptive(in.sys, sch); }
+    catch (const std::exception& e) { result.error = std::string("adaptive codegen: ") + e.what(); return false; }
+
+    const double t_skip = in.skip_transient ? tskip : 0.0;
+    UcudaAdaptParams P;
+    std::string perr, ctrl_body;
+    if (!adaptive_build_params(in.adaptive, code, dim, t_skip + tsim, P, perr, &ctrl_body)) {
+        result.error = perr;
+        return false;
+    }
+    const bool rawm = in.adaptive.raw_nodes;
+    int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
+    if (max_pts < 2) max_pts = 2;
+    if (max_pts > 50000000) max_pts = 50000000;
+
+    result.adaptive  = true;
+    result.raw_nodes = rawm;
+    result.step_log.assign((size_t)N, {});
+    result.step_stats.assign((size_t)N, AdaptiveStats());
+    raw.assign((size_t)N, {});
+    times.assign((size_t)N, {});
+
+    if (in.use_gpu) {
+        PhaseAdaptiveRequest rq;
+        rq.rhs = code.rhs; rq.emb = code.emb; rq.dprep = code.dprep; rq.deval = code.deval;
+        rq.ctrl_body = ctrl_body;
+        rq.amountOfX = dim; rq.ic_flat = ic_flat; rq.N = N; rq.values = a; rq.params = P;
+        rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total;
+        rq.max_pts = max_pts; rq.log_cap = kAdaptLogCap;
+        PhaseAdaptiveResult out;
+        std::string err;
+        if (!computePhasePortraitsAdaptiveNVRTC(rq, out, &err)) {
+            result.error = "GPU: " + err;
+            return false;
+        }
+        raw = std::move(out.traj);
+        if (rawm) times = std::move(out.times);
+        result.step_log   = std::move(out.log);
+        result.step_stats = out.stats;
+    }
+    else {
+        std::unique_ptr<SystemEvaluator> ev;
+        try { ev.reset(new SystemEvaluator(in.sys)); }
+        catch (const std::exception& e) { result.error = std::string("parse error: ") + e.what(); return false; }
+        const IntScheme isch = int_scheme_from_string(in.scheme);
+        // Пользовательский регулятор на CPU — тело, собранное cl.exe (кэш на диске).
+        CtrlCpuFn ctrl;
+        if (!ctrl_body.empty()) {
+            std::vector<KrsCpuDiag> diags;
+            if (!ctrl.compile(ctrl_body, diags)) {
+                result.error = "step controller '" + in.adaptive.ctrl + "' (CPU build):";
+                for (const KrsCpuDiag& d : diags)
+                    result.error += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string())
+                                  + d.message;
+                return false;
+            }
+        }
+        for (int k = 0; k < N; ++k) {
+            double fh = 0;
+            computePhasePortraitCPU_adaptive(*ev, isch, &ic_flat[(size_t)k * dim], dim, a.data(), P,
+                                             rawm, t_skip, tsim, h, total, max_pts, kAdaptLogCap,
+                                             raw[(size_t)k], times[(size_t)k],
+                                             result.step_log[(size_t)k], result.step_stats[(size_t)k], fh,
+                                             ctrl.fn());
+        }
+    }
+    for (int k = 0; k < N; ++k) {
+        const AdaptiveStats& st = result.step_stats[(size_t)k];
+        if (st.diverged) {
+            calc_ok = false;
+            calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' diverged (nan/inf)";
+        }
+        else if (st.truncated) {
+            calc_ok = false;
+            calc_err = "trajectory '" + in.ic_sets[(size_t)k].label
+                     + "' reached max points before the end of the interval";
+        }
+    }
+    return true;
+}
+
 static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     AnalysisResult result;
     auto _t0 = std::chrono::high_resolution_clock::now();
@@ -487,7 +680,15 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     bool calc_ok = true;
     std::string calc_err;
 
-    if (in.use_gpu) {
+    // Адаптивный шаг — своя ветка расчёта; признаки, RQA и прореживание ниже общие.
+    // У отображения шага нет, и переключатель для него игнорируется.
+    std::vector<std::vector<double>> ad_times;
+    if (in.adaptive.enabled && !in.sys.is_map) {
+        if (!run_adaptive_phase(in, dim, N, ic_flat, a, h, tsim, tskip, total, raw, ad_times,
+                                result, calc_ok, calc_err))
+            return result;
+    }
+    else if (in.use_gpu) {
         if (in.krs_code.empty()) {
             result.error = "no KRS generated (check system)";
             return result;
@@ -547,6 +748,13 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
 
     result.features.resize(N);
+    // Признакам на узлах шага нужна точная производная в узле — та же f(x), что ядро
+    // берёт из S.F0. Траектория могла прийти и с GPU, поэтому вычислитель свой.
+    std::unique_ptr<SystemEvaluator> node_ev;
+    if (result.raw_nodes) {
+        try { node_ev.reset(new SystemEvaluator(in.sys)); }
+        catch (const std::exception&) { node_ev.reset(); }
+    }
     // Preallocated so a divergent trajectory (empty traj[]) still leaves a
     // zero-length slot at the same index as ic_sets[k].
     result.final_states.assign(N, std::vector<double>{});
@@ -569,7 +777,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         // строит при writable_var == -1 (x0 + pi*x1 + euler*x2, с деградацией при dim < 3).
         // Константы берём из configCUDA.h, чтобы диаграмма и бифуркация шли по одному ряду.
         result.features[k].resize((size_t)dim + 1);
-        {
+        // На узлах адаптивного шага ряд неравномерный, и поиск пиков по трём соседним
+        // отсчётам к нему неприменим — там работает find_peaks_host_nodes (ниже).
+        if (!result.raw_nodes) {
             const size_t stride = (dec > 1) ? (size_t)dec : (size_t)1;
             std::vector<double> series;
             series.reserve(traj.size() / stride + 1);
@@ -592,6 +802,35 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             }
             result.features[k][(size_t)dim] = find_peaks_host(series, h * (double)stride);
         }
+        else if (node_ev && k < (int)ad_times.size()) {
+            // Узлы — как в ucudaAdRecordNodes: каждый dec-й (считая начальный) и последний.
+            const std::vector<double>& tk = ad_times[(size_t)k];
+            const size_t m = std::min(traj.size(), tk.size());
+            std::vector<size_t> sel;
+            sel.reserve(m / (size_t)dec + 2);
+            for (size_t i = 0; i < m; ++i)
+                if (dec <= 1 || i % (size_t)dec == 0 || i + 1 == m) sel.push_back(i);
+            const size_t ns = sel.size();
+            std::vector<double> F(ns * (size_t)dim), ts(ns), xs(ns), ds(ns);
+            for (size_t j = 0; j < ns; ++j) {
+                ts[j] = tk[sel[j]];
+                node_ev->eval(traj[sel[j]].data(), a.data(), &F[j * (size_t)dim]);
+            }
+            const int interp = in.adaptive.peak_interp;
+            for (int v = 0; v <= dim; ++v) {
+                for (size_t j = 0; j < ns; ++j) {
+                    const double* X = traj[sel[j]].data();
+                    const double* f = &F[j * (size_t)dim];
+                    if (v < dim) { xs[j] = X[v]; ds[j] = f[v]; continue; }
+                    // Комбинация — та же, что ucudaAdObs; линейна, производная — от f.
+                    double c = X[0], dcomb = f[0];
+                    if (dim >= 2) { c += ::pi * X[1];    dcomb += ::pi * f[1]; }
+                    if (dim >= 3) { c += ::euler * X[2]; dcomb += ::euler * f[2]; }
+                    xs[j] = c; ds[j] = dcomb;
+                }
+                result.features[k][(size_t)v] = find_peaks_host_nodes(xs, ds, ts, interp);
+            }
+        }
 
         // RQA по этой траектории — ДО прореживания и до move(traj) ниже. Считаем по полному
         // ряду с шагом h: decimator задуман как настройка отрисовки, и наследовать его здесь
@@ -602,6 +841,8 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             RqaOutcome o;
             o.job = job;
             if (traj.empty()) o.res.error = "RQA: trajectory diverged";
+            else if (result.raw_nodes)
+                o.res.error = "RQA needs a uniform time grid: switch the adaptive output to the uniform grid";
             else rqa::compute(traj, h, job.cfg, o.res);
             result.rqa_out.push_back(std::move(o));
         }
@@ -613,6 +854,16 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             for (size_t t = 0; t < traj.size(); t += dec) dtraj.push_back(traj[t]);
         }
         result.trajectories.push_back(std::move(dtraj));
+        if (result.raw_nodes) {
+            const std::vector<double>& tk = ad_times[(size_t)k];
+            std::vector<double> dtimes;
+            if (dec <= 1) dtimes = tk;
+            else {
+                dtimes.reserve(tk.size() / dec + 1);
+                for (size_t t = 0; t < tk.size(); t += dec) dtimes.push_back(tk[t]);
+            }
+            result.times.push_back(std::move(dtimes));
+        }
         result.labels.push_back(ic.label);
         result.visible.push_back(ic.visible);
 
@@ -644,6 +895,16 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     result.snapshot.t_max     = tsim;
     result.snapshot.t_skip    = tskip;
     result.snapshot.decimator = dec;
+    if (result.adaptive) {
+        const AdaptiveSettings& ad = in.adaptive;
+        std::string d = "adaptive, controller " + ad.ctrl + ", rtol " + ad.rtol + ", atol " + ad.atol;
+        if (!ad.h0.empty())   d += ", h0 " + ad.h0;
+        if (!ad.hmin.empty()) d += ", h_min " + ad.hmin;
+        if (!ad.hmax.empty()) d += ", h_max " + ad.hmax;
+        if (!ad.max_rej.empty()) d += ", max rejects " + ad.max_rej;
+        d += ad.raw_nodes ? ", output at step nodes" : ", output on the uniform grid (h = output step)";
+        result.snapshot.adaptive = d;
+    }
     // Snapshot IC from the user's panel text — not ic_flat, which continuation overwrites
     // with the previous chunk's final X[] so the legend would flicker every frame.
     result.snapshot.ic_flat.assign(N, std::vector<double>(dim, 0.0));
@@ -684,6 +945,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.scheme       = s.scheme;
     in.symmetry_s   = s.symmetry_s;
     in.decimation   = s.decimation;
+    in.adaptive     = s.adaptive;
     in.use_gpu      = s.use_gpu;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
@@ -838,6 +1100,8 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "RK4")               return Scheme::RK4;
     if (s == "DOPRI78")           return Scheme::DOPRI78;
     if (s == "DOPRI78 (legacy)")  return Scheme::DOPRI78Legacy;
+    if (s == "RK45")              return Scheme::RK45;
+    if (s == "DOP853")            return Scheme::DOP853;
     if (s == "CD")                return Scheme::CD;
     if (s == "Complex CD")        return Scheme::ComplexCD;
     if (s == "Complex CD4")       return Scheme::ComplexCD4;
@@ -1072,6 +1336,37 @@ static int parse_i(const std::string& s, int def) {
     return parse_num_int(s, def);   // историческое имя, см. num_parse.h
 }
 
+// Адаптивный шаг вкладки -> AdaptiveRequest движка. Ошибка настройки (схема без
+// оценки ошибки, неразборный rtol...) не бросается, а уходит в setup_error: движок
+// вернёт её вместо расчёта, как любую другую ошибку запуска. span — длина всего
+// интервала интегрирования (транзиент + запись), нужна выбору h0. ax0 / ax1 —
+// коды адаптивных осей (AdaptiveAxisKind), 0 — обычная цель свипа.
+static void fill_adaptive_request(const System& sys, const std::string& scheme,
+                                  const AdaptiveSettings& st, int n, double span,
+                                  int ax0, int ax1, AdaptiveRequest& out) {
+    out = AdaptiveRequest();
+    if (!st.enabled || sys.is_map) return;
+    out.enabled      = true;
+    out.raw_nodes    = st.raw_nodes;
+    out.peak_interp  = st.peak_interp;
+    out.axis_kind[0] = ax0;
+    out.axis_kind[1] = ax1;
+    if (!adaptive_scheme_name_ok(scheme)) {
+        out.setup_error = "Adaptive step needs a scheme with an embedded error estimate: "
+                          "RK45, DOPRI78 or DOP853.";
+        return;
+    }
+    AdaptiveCode code;
+    try { code = codegen_adaptive(sys, scheme_from_name(scheme)); }
+    catch (const std::exception& e) { out.setup_error = std::string("adaptive codegen: ") + e.what(); return; }
+    std::string err;
+    if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
+    out.rhs = code.rhs; out.emb = code.emb; out.dprep = code.dprep; out.deval = code.deval;
+    // Ось tol держит отношение atol/rtol текущих настроек.
+    out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
+    out.lyap_renorm = st.lyap_renorm;
+}
+
 // Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
 // главном потоке перед стартом async-расчёта, чтобы worker работал со
 // стабильной копией и пользователь мог в это время менять поля без race.
@@ -1119,6 +1414,8 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.max_value      = parse_d(bd.max_value_text, 1.0e6);
     req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
     return req;
 }
 
@@ -1188,6 +1485,8 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.mult_peak          = parse_d(bd.mult_peak_text,     (double)::mult_peak);
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
     return req;
 }
 
@@ -1437,7 +1736,10 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.max_value      = parse_d(c.max_value_text, 1.0e6);
     req.NT             = parse_d(c.nt_text,  1.0);
     req.eps            = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
     return req;
 }
 
@@ -1498,7 +1800,10 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.max_value          = parse_d(c.max_value_text, 1.0e6);
     req.NT                 = parse_d(c.nt_text,  1.0);
     req.eps                = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
     return req;
 }
 
@@ -1984,6 +2289,8 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.feature2 = f2;
     req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, 0, 0, req.adaptive);
     return req;
 }
 
@@ -2482,6 +2789,7 @@ static void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
     ph.scheme       = c.scheme;
     ph.symmetry_s   = c.symmetry_s;
     ph.step_h       = c.h_text;
+    ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
     ph.param_values = c.param_values;
     // Своё время — единственное, чем портрет отличается от карты.
     ph.sim_time   = c.pp_t_max_text;
@@ -2890,7 +3198,10 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.max_value      = parse_d(c.max_value_text, 1.0e6);
     req.NT             = parse_d(c.nt_text,  1.0);
     req.eps            = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
     return req;
 }
 
@@ -2949,7 +3260,10 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.max_value          = parse_d(c.max_value_text, 1.0e6);
     req.NT                 = parse_d(c.nt_text,  1.0);
     req.eps                = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
     return req;
 }
 
@@ -3222,6 +3536,10 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     req.max_value      = parse_d(c.max_value_text, 1.0e6);
     req.metric_mask    = c.metric_mask & kSignalMetricAllMask;
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    req.minmax_interp  = c.adaptive.minmax_interp_fixed;
+    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+    req.adaptive.raw_nodes = false;   // метрики — только на равномерной сетке
     return req;
 }
 

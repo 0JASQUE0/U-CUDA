@@ -21,6 +21,7 @@
 #include <vector>
 #include "configCUDA.h"   // typedef numb, REGIME_*, BF_* feature codes, mult_avg_* defaults
 #include "data_export.h"  // snapshot structs embedded into *Result for right-click export
+#include "adaptive_settings.h" // UcudaAdaptParams: адаптивный шаг в свипах
 
 // PeakConfig — knobs configCUDA.h, настраиваемые из GUI (вкладка Settings).
 // В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот оборачивает свои дефолты
@@ -135,6 +136,33 @@ inline bool regime_is_oscillation(int flag) { return flag >  0; }
 inline bool regime_is_fixed_point(int flag) { return flag <  0; }
 inline bool regime_is_unbound    (int flag) { return flag == 0; }
 
+// Адаптивный шаг в свипах (ядра kernels/adaptive_part.cu). enabled == false — прежний
+// путь без изменений. Тела — AdaptiveCode схемы, params — adaptive_build_params. h
+// запроса — шаг вывода равномерной сетки; на узлах шага (raw_nodes) не участвует.
+// Ось свипа может менять не систему, а настройку шага: axis_kind[i] — код оси
+// (по порядку осей X, Y запроса), диапазон — тот же param_lo/hi(_2).
+enum AdaptiveAxisKind {
+    kAdAxisSystem = 0,    // параметр / НУ, как у постоянного шага
+    kAdAxisRtol   = 2,
+    kAdAxisAtol   = 3,    // один atol на все переменные
+    kAdAxisTol    = 4,    // rtol = v, atol = v * tol_ratio
+    kAdAxisCtrl   = 10,   // + k: k-й параметр регулятора
+};
+struct AdaptiveRequest {
+    bool   enabled = false;
+    bool   raw_nodes = false;
+    int    peak_interp = 2;              // узлы шага: 0 — узел, 1 — парабола, 2 — Эрмит по f
+    std::string rhs, emb, dprep, deval;  // тела AdaptiveCode
+    std::string ctrl_body;               // C body пользовательского регулятора, иначе пусто
+    UcudaAdaptParams params{};
+    int    axis_kind[2] = { kAdAxisSystem, kAdAxisSystem };
+    double tol_ratio = 1e-2;
+    int    lyap_renorm = 0;              // LLE/LS: 0 — ровно в k*NT, 1 — в первом узле после
+    // Ошибка сборки на стороне UI (не та схема, неразборный rtol...): движок вернёт
+    // её вместо расчёта.
+    std::string setup_error;
+};
+
 struct Bifurcation1DRequest {
     // КРС
     std::string krs_body;                    // тело calculateDiscreteModel из codegen
@@ -196,6 +224,9 @@ struct Bifurcation1DRequest {
     // period-1 windows. Ignored by the continuation path.
     bool emit_all_samples = false;
 
+    // Адаптивный шаг (см. AdaptiveRequest). Continuation и CPU с ним пока не работают.
+    AdaptiveRequest adaptive;
+
     // Если не пусто — engine запишет CSV с результатами по тому же формату,
     // что и NonLinAnal::bifurcation1D (для publication-quality пост-процессинга).
     // Пустая строка = ничего не пишем (только в памяти).
@@ -239,6 +270,10 @@ struct Bifurcation1DResult {
     // N > 0 = число найденных пиков (режим — oscillation). Нормализация к
     // -1/0/1 — regime_code(); экспорт читает N как есть (data_export.cpp).
     std::vector<int> flags;
+
+    // Адаптивный шаг: на точку по 4 числа — принятые, отвергнутые, вынужденные
+    // шаги и средний h. Пусто при постоянном шаге.
+    std::vector<double> ad_stats;
 
     // Snapshot of the request fields needed to reproduce the _config.csv
     // header on right-click export from the GUI. Filled by engine in
@@ -392,9 +427,14 @@ struct LLE1DRequest {
     // в единицах времени (NT), и размер возмущения (eps).
     double NT  = 1.0;
     double eps = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
 
     // Защита от расхождения.
     double max_value = 1.0e6;
+
+    // Адаптивный шаг (см. AdaptiveRequest): шаг выбирает регулятор по базовой траектории,
+    // клоны делают тот же шаг. Только классический GPU-свип; h не используется.
+    AdaptiveRequest adaptive;
 
     // Опциональный CSV.
     std::string csv_output_path;
@@ -430,6 +470,8 @@ struct LLE1DResult {
     // детектируется (см. комментарий к regime_code выше), поэтому -1 здесь
     // не появляется.
     std::vector<int>    flags;
+    // Адаптивный шаг: [i*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
     data_export::LLE1DSnapshot snapshot;
@@ -464,7 +506,9 @@ struct LS1DRequest {
     double t_max = 100.0;
     double NT  = 1.0;
     double eps = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value = 1.0e6;
+    AdaptiveRequest adaptive;   // см. LLE1DRequest::adaptive
     std::string csv_output_path;
 
     // See Bifurcation1DRequest::cancel.
@@ -493,6 +537,7 @@ struct LS1DResult {
     // flags[i] — REGIME_* (общий на все экспоненты): 1 = oscillation,
     // 0 = unbound. FP отдельно не детектируется, см. regime_code.
     std::vector<int> flags;
+    std::vector<double> ad_stats;   // адаптивный шаг: [i*4], см. LLE1DResult
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
     data_export::LS1DSnapshot snapshot;
@@ -548,7 +593,11 @@ struct LLE2DRequest {
     double t_max          = 100.0;
     double NT             = 1.0;
     double eps            = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value      = 1.0e6;
+
+    // Адаптивный шаг (см. LLE1DRequest::adaptive); axis_kind — по осям X, Y запроса.
+    AdaptiveRequest adaptive;
 
     std::string csv_output_path;
 
@@ -576,6 +625,7 @@ struct LLE2DResult {
     // -999 — разошлось, NaN/inf — численная проблема). Render отфильтрует.
     std::vector<double> values;
     std::vector<int>    flags;     // REGIME_*: 1=oscillation, 0=unbound (FP не детектируется)
+    std::vector<double> ad_stats;  // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Авто-нормализация для colormap'а: min/max по валидным значениям
     // (без 999/-999/nan/inf). Если валидных нет — обе 0.
@@ -649,6 +699,9 @@ struct Bifurcation2DRequest {
     double mult_peak     = (double)::mult_peak;
     double mult_interval = (double)::mult_interval;
 
+    // Адаптивный шаг (см. AdaptiveRequest); axis_kind — по осям X, Y запроса.
+    AdaptiveRequest adaptive;
+
     std::string csv_output_path;
 
     // See Bifurcation1DRequest::cancel.
@@ -677,6 +730,8 @@ struct Bifurcation2DResult {
     // flags[] — СЫРОЙ выход dbscanCUDA: -1 = fixed point, 0 = unbound,
     // N > 0 = период. Нормализация — regime_code().
     std::vector<int>    flags;
+    // Адаптивный шаг: [cell*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
 
     // Авто-нормализация для colormap (без -1/nan).
     double min_val = 0.0;
@@ -721,7 +776,10 @@ struct LS2DRequest {
     double t_max          = 100.0;
     double NT             = 1.0;
     double eps            = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value      = 1.0e6;
+
+    AdaptiveRequest adaptive;   // см. LLE2DRequest::adaptive
 
     std::string csv_output_path;
 
@@ -751,6 +809,7 @@ struct LS2DResult {
     std::vector<double> values;
     // flags[iy*n + ix] — общий per-cell REGIME_* (1=oscillation, 0=unbound).
     std::vector<int>    flags;
+    std::vector<double> ad_stats;   // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Авто-нормализация per-plane (по валидным значениям, без 999/-999/nan).
     // Размер == n_exponents; если валидных нет — обе 0.
@@ -795,6 +854,9 @@ struct BasinsRequest {
     numb mult1    = mult_avg_peak;
     numb mult2    = mult_avg_interval;
 
+    // Адаптивный шаг (оси бассейна всегда НУ, axis_kind не читается).
+    AdaptiveRequest adaptive;
+
     std::string csv_output_path;
 
     // See Bifurcation1DRequest::cancel.
@@ -822,6 +884,7 @@ struct BasinsResult {
     std::vector<double> avg_peaks;       // 999 = no peaks / unbound, NaN→999
     std::vector<double> avg_intervals;
     std::vector<int>    helpful_array;   // -1=FP, 0=Unbound, 1=Osc
+    std::vector<double> ad_stats;        // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Сводки для отрисовки.
     int    n_clusters = 0;               // max(basin_idx); min подсчитывается отдельно
@@ -1137,6 +1200,25 @@ struct PerfRequest {
     // точности меряется стоимость программной арифметики, а не double.
     int cpu_prec = 0;
 
+    // ---- «Точность — затраты» (этап 7 адаптивного шага) ----
+    // Ошибка в конечной точке E(T) = max_i |y_i(T) - y*_i(T)| против эталона высокой
+    // точности: DOP853 постоянным шагом на CPU в dd (1) или qd (2), число шагов удваивается,
+    // пока два последних решения не сойдутся; 0 — без эталона. Считает order_session
+    // (run_performance_any), движку поля не нужны.
+    int         end_ref_prec = 0;
+    std::string end_ref_body;             // КРС DOP853 для эталона
+    double      rhs_per_step = 0;         // вычислений f на шаг схемы, 0 — неизвестно
+
+    // Адаптивный шаг: узлы — tol, лог-сетка tol_lo..tol_hi из tol_n точек; rtol = tol,
+    // atol_i = tol * (atol_i / rtol) исходных настроек. Только GPU (время — ядро
+    // endpoint_kernel_ad), ошибки E1/E2/Eref здесь нет — только E(T).
+    bool        adaptive = false;
+    std::string ad_rhs, ad_emb, ad_ctrl_body;
+    UcudaAdaptParams ad_params{};
+    double      tol_lo = 1e-3, tol_hi = 1e-13;
+    int         tol_n = 11;
+    std::string setup_error;              // ошибка сборки запроса на стороне UI
+
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
 };
@@ -1168,6 +1250,16 @@ struct PerfResult {
     double t_lo   = 0.0, t_hi   = 0.0;
 
     int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;
+
+    // ---- «Точность — затраты» ----
+    bool adaptive = false;                // узлы — tol (axis_vals), а не h
+    std::vector<std::vector<double>> y_end;   // y(T) узла, [n_pts][amountOfX]; пусто — нет
+    std::vector<double> e_end;            // E(T) против эталона; пусто — эталона не было
+    std::vector<double> n_rhs;            // вычислений f за запуск (NaN — неизвестно)
+    std::vector<double> n_rej;            // отвергнутых попыток (адаптивный), иначе 0
+    double    ref_err = 0.0;              // оценка ошибки эталона (разность N и 2N шагов)
+    long long ref_steps = 0;              // шагов эталона
+    int       ref_prec = 0;               // PerfRequest::end_ref_prec
 };
 
 // ---------------------------------------------------------------------------
@@ -1443,6 +1535,13 @@ struct SignalMetricsRequest {
     // единственную метрику, которой мало потоковых сумм.
     int metric_mask = kSignalMetricAllMask;
 
+    // Адаптивный шаг (см. AdaptiveRequest): только равномерная сетка, raw_nodes не
+    // читается; Хьорт при нём не считается (NaN). Continuation и CPU — только Fixed.
+    AdaptiveRequest adaptive;
+    // min/max по интерполированным экстремумам и при постоянном шаге (при
+    // адаптивном — всегда).
+    bool minmax_interp = false;
+
     // Если не пусто — <path>_config.csv + <path>_<metric>.csv на каждую метрику.
     std::string csv_output_path;
 
@@ -1475,6 +1574,8 @@ struct SignalMetricsResult {
     std::vector<double> values[SIGM_COUNT];
     // REGIME_*: 1 = oscillation, -1 = fixed point, 0 = unbound.
     std::vector<int> flags;
+    // Адаптивный шаг: [cell*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
     // Автошкала по конечным значениям каждой метрики (обе 0, если таких нет).
     double min_val[SIGM_COUNT] = {};
     double max_val[SIGM_COUNT] = {};

@@ -143,6 +143,13 @@ D:\U-CUDA\
   поток на узел, состояние в shared. Два плейсхолдера вместо одного:
   `{{KRS_BODY}}` (шаг узла) и `{{COUPLING_BODY}}` (case-ветки switch по
   номеру закона связи, их печатает `codegen_coupling`).
+- `kernels/order.template.cu` — вкладка Order: оценка порядка, замер
+  Performance (`perfIntegrateKernel`), область устойчивости.
+- Адаптивный шаг (см. раздел «Adaptive step» ниже): `kernels/ucuda_adaptive.cuh`
+  (регуляторы и драйвер), `kernels/adaptive_part.cu` (свипы БД/бассейнов),
+  `kernels/metrics_adaptive_part.cu`, `kernels/lyapunov_adaptive_part.cu` —
+  не самостоятельные шаблоны, а хвосты, которые движок приклеивает к
+  `bifurcation2d.template.cu` / `signal_metrics.template.cu`.
 
 ### App Model / State
 - **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Dft1D / Basins / FastSync / Custom / Order / Network / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
@@ -154,7 +161,16 @@ D:\U-CUDA\
   считается РАСЩЕПЛЕНИЕМ (шаг узла, затем `X += h*coupling`), как в
   `calculateDiscreteModelforFastSynchro`, — поэтому на вкладке работают все
   схемы, но сама связь интегрируется первым порядком
-- **session_io.cpp / .h** — Save/load sessions to JSON
+- **session_io.cpp / .h** — Save/load sessions to JSON; also the step controller
+  library file (`load_ctrl_library` / `save_ctrl_library`)
+- **order_session.cpp / .h** — вкладка Order: порядок, Performance (в т.ч.
+  «точность — затраты» для адаптивного шага), устойчивость; CPU-ветки в
+  double / dd / qd через `krs_cpu`
+- **adaptive_settings.h** — header-only: `AdaptiveSettings` (блок Integration
+  каждой вкладки), встроенные регуляторы, библиотека пользовательских
+  регуляторов, `adaptive_build_params` (настройки → `UcudaAdaptParams`)
+- **krs_cpu.cpp / .h** — cl.exe-сборка тела КРС в DLL для CPU-путей
+  (`KrsCpuStep`, double/dd/qd) и тела пользовательского регулятора (`CtrlCpuFn`)
 - **system_library.cpp / .h** — Working with `library/*/system.json`
 - **system_record.h** — Struct for one ODE system (name, latex, param_order, initial conditions, values, selected numerical schemes)
 
@@ -196,6 +212,53 @@ Symbolic differentiation does exist, but it serves **only the implicit schemes**
 - `floor`/`ceil`/`fmod` are rejected at codegen time (`jac_check_differentiable`).
 
 ---
+
+## Adaptive step (RK45 / DOPRI78 / DOP853)
+Fixed step stays the default and must stay **bit-for-bit** unchanged: the adaptive path is
+a separate module/branch everywhere, never an `if` inside the fixed-step kernels.
+
+- **Codegen:** `codegen_adaptive(sys, scheme)` → `AdaptiveCode` with four bodies — `rhs`
+  (f), `emb` (one attempt: higher-order `Y`, error estimates `E = h*sum((b - b^)k)`, FSAL
+  `F1`), `dprep`/`deval` (dense output) — plus `q`, `nlo`, f-counts. Only schemes with an
+  embedded estimate (`scheme_supports_adaptive`). The same bodies feed the CPU driver
+  (`integrator.cpp`, `CpuAdaptiveKrs`).
+- **Driver:** `kernels/ucuda_adaptive.cuh`, one text for GPU (NVRTC) and CPU (exe, cl.exe
+  DLL). Two parts: the *layout* (`UcudaAdaptParams`, controller in/out/memory, error norms,
+  built-in controllers — Hairer / SciPy / I / PI / Filter) and the *driver*
+  (`ucuda_ad_init`, `ucuda_ad_step[_x]`, dense output). A module includes it twice:
+  `#define UCUDA_ADAPT_LAYOUT_ONLY` + include, then the user controller
+  (`{{CTRL_CUSTOM}}` → `adaptive_ctrl_source`), then the full include.
+- **Macros:** `UCUDA_AD_STATIC_N` (state in registers; only the Analysis kernel — in
+  sweeps it kills occupancy), `UCUDA_AD_NO_DENSE` (LLE/LS, Performance), `UCUDA_AD_EXACT_CTL`
+  (controller math in double — for step-by-step comparison with Hairer's dop853.c / scipy;
+  by default norms and `pow` run in float with a double fallback).
+- **Modules:** sweep kernels are `bifurcation2d.template.cu` + `adaptive_part.cu` (+ the
+  metrics / LLE-LS tail); placeholders `{{KRS_RHS_BODY}} {{KRS_EMB_BODY}} {{KRS_DPREP_BODY}}
+  {{KRS_DEVAL_BODY}} {{CTRL_CUSTOM}}`. Every body (incl. the controller body) must be in the
+  module cache key. Analysis uses `NvrtcEngine::compile_adaptive` (phase kernel / endpoint
+  kernel for Order → Performance).
+- **LLE/LS:** clones step through `ucuda_ad_step_x` with `UcudaLyapClones` — same attempt,
+  same embedded method, and the controller also sees the clones' error (`err_extra`).
+  Without that the step grows to the stability limit near a stable equilibrium and the
+  exponents come out ~0.
+- **Controller library:** global, `library\step_controllers.json`; entries are a C body of
+  `ucuda_ctrl_custom(in, m, o)` or a named Soderlind filter. Sessions embed the definition
+  (`ctrl_def`) and import it where it is missing. `nvrtc_check_ctrl_body` = the editor's
+  Check. PI/Filter: `safety` sets the target error `safety^(q+1)`, it does not multiply rho.
+- **Regression:** after touching anything shared, compare the fixed-step dumps against the
+  baseline — any mismatch outside the intended change is a bug.
+
+### Pitfalls found the hard way
+- `loopCalculateDiscreteModel_int` (and CPU `cpu_loop_model`) take **one more step after
+  the loop** (fixed-point check). A block of k steps is k-1 iterations; a transient of N
+  steps is N-1 (and no call for N = 0). Step counts from time go through
+  `ucuda_steps_per_block` (round to nearest), not `(size_t)(T/h)`.
+- NVRTC `curand` stubs differ per template: LLE/LS templates mix the subsequence (point
+  index) into the seed, the bifurcation/basins ones **ignore it**. Anything random per point
+  built on a bifurcation template needs its own generator (see `ucudaLyapRng`).
+- Finite-T LLE/LS depend on the random initial frame as ~ln(1/c)/t_max — point-to-point
+  noise, not a bug. `vector transient` (renormalised but unsummed blocks) removes it.
+- New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.
 
 ## ImGui/ImPlot Guidelines
 - **Immediate mode:** Do NOT store UI state in local variables between frames

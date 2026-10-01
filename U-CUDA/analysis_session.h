@@ -3,6 +3,7 @@
 #include "codegen.hpp"
 #include "parametric_engine.h"
 #include "circuit_solver.h"
+#include "adaptive_settings.h"
 
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
@@ -75,7 +76,13 @@ enum class ProjType {
     // n x n, ровно то, что он и умеет (colormap, colorbar, rect-zoom, tooltip, экспорт).
     RecurrencePlot,
     // Continuation diagram: scatter of peak values vs absolute simulated time.
-    ContinuationDiagram
+    ContinuationDiagram,
+    // Адаптивный шаг: h(t) принятых шагов линией, отвергнутые и вынужденные попытки —
+    // маркерами (лог попыток AnalysisResult::step_log).
+    StepSize,
+    // Адаптивный шаг: число отвергнутых попыток на каждом принятом шаге (маркеры) и его
+    // скользящее среднее — как часто регулятор пересчитывает шаг. Тот же лог попыток.
+    Rejections
 };
 
 struct Projection {
@@ -223,6 +230,15 @@ struct AnalysisResult {
     // Final integrator state per IC (pre-decimation), so continuation mode can
     // seed the next chunk from the true X[] rather than a decimated sample.
     std::vector<std::vector<double>> final_states;
+    // Адаптивный шаг (при постоянном всё пусто). times[k] — моменты точек trajectories[k]
+    // на узлах шага, уже прореженные decimator'ом; на равномерной сетке пусто: там, как и
+    // при постоянном шаге, t = i * h * decimator.
+    bool adaptive = false;
+    bool raw_nodes = false;
+    std::vector<std::vector<double>> times;
+    // Лог попыток шага [ic][4*k]: t, h, err, код (1 — принят, 0 — отвергнут, 2 — вынужденный).
+    std::vector<std::vector<double>> step_log;
+    std::vector<AdaptiveStats> step_stats;
     bool ok = false;
     std::string error;
     int generation = 0;
@@ -283,6 +299,9 @@ struct PhaseAnalysisSession {
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
     std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
     std::string decimation = "1";      // выводить каждую N-ю точку
+    // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
+    // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
+    AdaptiveSettings adaptive;
     bool auto_recompute = false;       // пересчитывать сразу при изменении
     bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
 
@@ -478,6 +497,12 @@ struct BifurcationDiagramConfig {
     std::string transient_text     = "100";
     std::string pre_scaller_text   = "1";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     // CSV — путь хранится отдельно от флага, чтобы можно было выключить запись,
     // не удаляя сам путь (для повторного включения).
@@ -690,10 +715,17 @@ struct LLECurveConfig {
     std::string t_max_text         = "100";
     std::string transient_text     = "100";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     // LLE-специфика.
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";       // NT (в единицах времени)
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
 
     // Continuation: точка стартует с состояния предыдущей. В отличие от БД
     // переносится не только траектория, но и вектор возмущения («щуп») —
@@ -1027,6 +1059,7 @@ struct BasinsConfig {
     std::string transient_text   = "50";
     std::string pre_scaller_text = "1";
     std::string max_value_text   = "1e6";
+    AdaptiveSettings adaptive;              // адаптивный шаг (оси сетки — всегда НУ)
     std::string eps_dbscan_text  = "0.5";
 
     bool        csv_save_enabled = false;
@@ -1404,9 +1437,16 @@ struct LSCurveConfig {
     std::string t_max_text         = "100";
     std::string transient_text     = "100";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
 
     // Continuation + выбор устройства — семантика как в LLECurveConfig
     // (переносятся траектория и ВСЕ N щупов; continuation только на CPU).
@@ -1553,6 +1593,12 @@ struct SignalMetricsConfig {
     std::string transient_text     = "100";
     std::string pre_scaller_text   = "1";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     // Биты SignalMetric (parametric_engine.h): какие метрики считать и
     // показывать. По умолчанию все.

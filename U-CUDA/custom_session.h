@@ -40,6 +40,9 @@ struct CustomTabSharedConfig {
     std::string transient_text   = "100";
     std::string pre_scaller_text = "1";
     std::string max_value_text   = "1e6";
+    // Адаптивный шаг — общий для всех уровней (2D, 1D, Phase): apply_shared_to_*
+    // раздают его вместе со схемой и шагом.
+    AdaptiveSettings adaptive;
 
     // ---- Initial conditions + RHS parameters (both maps mirror
     // BifurcationDiagramConfig::initial_conditions / param_values) ----

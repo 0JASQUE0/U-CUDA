@@ -220,6 +220,7 @@ void write_lle1d_config(std::ofstream& out, const LLE1DSnapshot& s)
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
     write_fmad_line(out, s.gpu_fmad);
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
 }
 
 void write_lle1d_row(std::ofstream& out, double param, double lyapunov)
@@ -261,6 +262,7 @@ void write_ls1d_config(std::ofstream& out, const LS1DSnapshot& s)
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
     write_fmad_line(out, s.gpu_fmad);
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
 }
 
 void write_ls1d_row(std::ofstream& out, double param,
@@ -394,6 +396,7 @@ void write_lle2d_config(std::ofstream& out, const LLE2DSnapshot& s)
     write_values_and_ic(out, s.values, s.initial_conditions);
     out << "CT = " << s.tMax << "\nNT = " << s.NT << "\nTT = " << s.transientTime << "\n";
     out << "h = " << s.h << "\neps = " << s.eps << "\n";
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
     out << "indices = " << s.indexOfMutVar << ", " << s.indexOfMutVar2 << "\n";
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
@@ -431,6 +434,7 @@ void write_ls2d_config(std::ofstream& out, const LS2DSnapshot& s)
     write_values_and_ic(out, s.values, s.initial_conditions);
     out << "CT = " << s.tMax << "\nNT = " << s.NT << "\nTT = " << s.transientTime << "\n";
     out << "h = " << s.h << "\neps = " << s.eps << "\n";
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
     out << "indices = " << s.indexOfMutVar << ", " << s.indexOfMutVar2 << "\n";
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
@@ -719,13 +723,16 @@ static void write_phase_config(std::ofstream& out, const PhaseSnapshot& s)
     out << "TT = "       << s.t_skip    << "\n";
     out << "h = "        << s.h         << "\n";
     out << "decimator = " << s.decimator << "\n";
+    if (!s.adaptive.empty()) out << "step control = " << s.adaptive << "\n";
     write_fmad_line(out, s.gpu_fmad);
 }
 
+// times — моменты точек на узлах адаптивного шага; nullptr — равномерная сетка i*dt.
 static void write_phase_trajectory(std::ofstream& out,
                                    const std::vector<std::string>& vars,
                                    const std::vector<std::vector<double>>& traj,
-                                   double dt, bool is_map)
+                                   double dt, bool is_map,
+                                   const std::vector<double>* times = nullptr)
 {
     if (!out.is_open()) return;
     out << std::setprecision(set_precision);
@@ -734,7 +741,7 @@ static void write_phase_trajectory(std::ofstream& out,
     for (const auto& v : vars) out << ", " << v;
     out << '\n';
     for (std::size_t i = 0; i < traj.size(); ++i) {
-        const double t = static_cast<double>(i) * dt;
+        const double t = (times && i < times->size()) ? (*times)[i] : static_cast<double>(i) * dt;
         out << t;
         for (double x : traj[i]) out << ", " << x;
         out << '\n';
@@ -767,10 +774,13 @@ static std::string phase_ic_tag(const PhaseSnapshot& s, std::size_t k)
 // сравниваются честно: если какая-то траектория короче, её ячейки в хвостовых
 // строках остаются ПУСТЫМИ, а не нулевыми — ноль здесь был бы неотличим от
 // настоящей координаты.
+// times — узлы адаптивного шага: у каждого НУ свои моменты, поэтому колонка t
+// идёт в начале КАЖДОГО блока ("t [метка]"), а общей нет. nullptr — прежний вид.
 static void write_phase_trajectories_wide(std::ofstream& out,
                                           const PhaseSnapshot& snapshot,
                                           const std::vector<std::vector<std::vector<double>>>& trajs,
-                                          double dt)
+                                          double dt,
+                                          const std::vector<std::vector<double>>* times = nullptr)
 {
     if (!out.is_open()) return;
     out << std::setprecision(set_precision);
@@ -778,9 +788,10 @@ static void write_phase_trajectories_wide(std::ofstream& out,
     const std::size_t n_ic  = trajs.size();
     const std::size_t n_var = snapshot.vars.size();
 
-    out << (snapshot.is_map ? "n" : "t");
+    if (!times) out << (snapshot.is_map ? "n" : "t");
     for (std::size_t k = 0; k < n_ic; ++k) {
         const std::string tag = phase_ic_tag(snapshot, k);
+        if (times) out << (k ? ", " : "") << "t [" << tag << "]";
         for (std::size_t v = 0; v < n_var; ++v)
             out << ", " << snapshot.vars[v] << " [" << tag << "]";
     }
@@ -791,9 +802,13 @@ static void write_phase_trajectories_wide(std::ofstream& out,
         if (t.size() > n_rows) n_rows = t.size();
 
     for (std::size_t i = 0; i < n_rows; ++i) {
-        out << static_cast<double>(i) * dt;
+        if (!times) out << static_cast<double>(i) * dt;
         for (std::size_t k = 0; k < n_ic; ++k) {
             const auto& traj = trajs[k];
+            if (times) {
+                if (k) out << ", ";
+                if (k < times->size() && i < (*times)[k].size()) out << (*times)[k][i];
+            }
             for (std::size_t v = 0; v < n_var; ++v) {
                 out << ", ";
                 if (i < traj.size() && v < traj[i].size()) out << traj[i][v];
@@ -933,12 +948,14 @@ bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
     if (n_ic == 1) {
         // Одно НУ — шапка без суффикса ("t, x, y, z"), ровно как раньше:
         // разделять на блоки нечего, а этот формат читают внешние скрипты.
-        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt, snapshot.is_map);
+        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt, snapshot.is_map,
+                               res.raw_nodes && !res.times.empty() ? &res.times[0] : nullptr);
         return true;
     }
 
     // Несколько НУ — в этот же файл, блоком столбцов на каждое.
-    write_phase_trajectories_wide(out, snapshot, res.trajectories, dt);
+    write_phase_trajectories_wide(out, snapshot, res.trajectories, dt,
+                                  res.raw_nodes ? &res.times : nullptr);
     return true;
 }
 
@@ -1150,12 +1167,19 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
     std::ofstream cfg(path + "_config.csv");
     if (!cfg.is_open()) return false;
     write_order_config(cfg, snap, /*perf*/ true);
+    if (res.adaptive)
+        cfg << "step control = adaptive, x = tol (rtol = tol, atol = tol * atol/rtol); "
+            << snap.adaptive_desc << "\n"
+            << "h_eff = mean accepted step; n_steps = accepted steps\n";
+    if (!res.e_end.empty())
+        cfg << "E_T = max|y(T) - y*(T)|, y*(T): DOP853 fixed step in " << (res.ref_prec == 2 ? "qd" : "dd")
+            << " on the CPU, " << res.ref_steps << " steps, own error ~" << res.ref_err << "\n";
     cfg.close();
 
     std::ofstream out(path);
     if (!out.is_open()) return false;
     out << std::setprecision(set_precision);
-    out << "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status\n";
+    out << "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status,E_T,f_evals,rejected\n";
 
     // Ячейку без замера оставляем ПУСТОЙ: ноль здесь читался бы как
     // «посчитано мгновенно», а это ровно противоположный смысл.
@@ -1175,7 +1199,11 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
         cell(res.t_min, k);
         cell(res.t_avg, k);
         cell(res.t_max, k);
-        out << "," << (k < res.status.size() ? res.status[k] : 0) << "\n";
+        out << "," << (k < res.status.size() ? res.status[k] : 0);
+        cell(res.e_end, k);
+        cell(res.n_rhs, k);
+        cell(res.n_rej, k);
+        out << "\n";
     }
     return true;
 }

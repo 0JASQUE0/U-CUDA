@@ -449,3 +449,24 @@ UCUDA_HD inline numb ucuda_node_value_cont(int k, int nPts, numb lo, numb hi,
     }
     return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
 }
+
+// Шагов постоянного h на отрезок перенормировки span = NT у LLE/LS: LLEKernelCUDA / LSKernelCUDA
+// (и их IC-версии), kernels/lle1d_cont / ls1d_cont, CPU-порты run_lle1d_cpu / run_ls1d_cpu и счёт
+// прогресса на хосте — все берут число шагов отсюда, в свипе по h и без него одинаково.
+// Округление к ближайшему: усечение (size_t)(NT/h) теряло бы шаг, когда NT/h в double чуть
+// меньше целого, ceil в свипе по h добавлял его, когда чуть больше. Если NT не кратно h, блок
+// длится k*h, а не NT, поэтому сумма логарифмов делится на проинтегрированное время nBlocks*k*h,
+// а не на tMax. 0 — отрезок короче полушага или вырожденные h/NT: точка невычислима, а не молча
+// считается с блоком другой длины.
+//
+// ВАЖНО: loopCalculateDiscreteModel_int и её CPU-порт cpu_loop_model после цикла делают ещё
+// preScaller шагов (проверка на неподвижную точку), т.е. вызов с n итерациями — это n + 1 шаг.
+// Поэтому блок из k шагов вызывается с k - 1 итерациями. Без этого каждый блок шёл k + 1 шаг,
+// а учитывался как k: все показатели завышались в (k+1)/k раз (Лоренц, h = 0.005: сумма LS -14.35
+// при NT = 0.1 и -17.08 при NT = 0.02 вместо -13.667).
+UCUDA_HD inline long long ucuda_steps_per_block(numb span, numb h) {
+    if (!(h > 0) || !(span > 0)) return 0;
+    const double r = (double)span / (double)h;
+    if (!(r >= 0.5) || !(r < 9.0e18)) return 0;
+    return (long long)floor(r + 0.5);
+}

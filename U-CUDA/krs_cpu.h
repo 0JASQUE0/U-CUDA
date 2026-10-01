@@ -99,3 +99,24 @@ private:
     StepFnDD fn_dd_  = nullptr;
     StepFnQD fn_qd_  = nullptr;
 };
+
+// Пользовательский регулятор шага (C body из библиотеки регуляторов, adaptive_settings.h)
+// для CPU-драйвера адаптивного шага: тело оборачивается в функцию над раскладкой
+// kernels/ucuda_adaptive.cuh — ту же, что ucuda_ctrl_custom на GPU, — и собирается cl.exe
+// в DLL (кэш на диске, как у КРС). Номера строк в diags — в координатах тела.
+struct UcudaCtlIn;
+struct UcudaCtlMem;
+struct UcudaCtlOut;
+class CtrlCpuFn {
+public:
+    using Fn = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
+    CtrlCpuFn() = default;
+    ~CtrlCpuFn();
+    CtrlCpuFn(const CtrlCpuFn&) = delete;
+    CtrlCpuFn& operator=(const CtrlCpuFn&) = delete;
+    bool compile(const std::string& body, std::vector<KrsCpuDiag>& diags);
+    Fn   fn() const { return fn_; }
+private:
+    void* module_ = nullptr;   // HMODULE
+    Fn    fn_     = nullptr;
+};

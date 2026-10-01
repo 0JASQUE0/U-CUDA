@@ -1,4 +1,5 @@
 ﻿#include "session_io.h"
+#include <fstream>
 #include <sstream>
 #include <cctype>
 #include <stdexcept>
@@ -143,6 +144,146 @@ bool read_rqa_field(const std::string& k, JP& p, Projection& pr) {
     else return false;
     return true;
 }
+
+// ---- Библиотека регуляторов шага ----
+void write_str_array(std::ostringstream& o, const std::vector<std::string>& v) {
+    o << "[";
+    for (size_t i = 0; i < v.size(); ++i) { if (i) o << ","; jstr(o, v[i]); }
+    o << "]";
+}
+
+void read_str_array(JP& p, std::vector<std::string>& v) {
+    v.clear();
+    p.expect('[');
+    if (p.opt(']')) return;
+    while (true) {
+        v.push_back(p.str_or_num());
+        if (p.opt(',')) continue;
+        p.expect(']');
+        break;
+    }
+}
+
+void write_user_ctrl(std::ostringstream& o, const AdaptiveUserCtrl& u) {
+    o << "{\"name\":"; jstr(o, u.name);
+    o << ",\"kind\":\"" << (u.kind == kUserCtrlFilter ? "filter" : "body") << "\"";
+    o << ",\"hairer_rules\":" << (u.hairer_rules ? "true" : "false");
+    o << ",\"par_names\":";  write_str_array(o, u.par_names);
+    o << ",\"par_values\":"; write_str_array(o, u.par_values);
+    o << ",\"tip\":";  jstr(o, u.tip);
+    o << ",\"body\":"; jstr(o, u.body);
+    o << "}";
+}
+
+void read_user_ctrl(JP& p, AdaptiveUserCtrl& u) {
+    u = AdaptiveUserCtrl();
+    p.expect('{');
+    if (p.opt('}')) return;
+    while (true) {
+        const std::string k = p.str();
+        p.expect(':');
+        if      (k == "name")         u.name = p.str();
+        else if (k == "kind")         u.kind = p.str() == "filter" ? kUserCtrlFilter : kUserCtrlBody;
+        else if (k == "hairer_rules") u.hairer_rules = p.boolean() ? 1 : 0;
+        else if (k == "par_names")    read_str_array(p, u.par_names);
+        else if (k == "par_values")   read_str_array(p, u.par_values);
+        else if (k == "tip")          u.tip = p.str();
+        else if (k == "body")         u.body = p.str();
+        else p.skip_value();
+        if (p.opt(',')) continue;
+        p.expect('}');
+        break;
+    }
+}
+
+// ---- Адаптивный шаг ----
+// Вложенный объект "adaptive" пишется, только если настройки отличаются от
+// умолчания: сессии без адаптивного шага не меняются ни на байт, а старые
+// читаются как Fixed (ключа нет — остаются дефолты AdaptiveSettings).
+void write_adaptive(std::ostringstream& o, const AdaptiveSettings& a,
+                    const char* prefix, const char* suffix) {
+    if (a == AdaptiveSettings()) return;
+    o << prefix << "\"adaptive\":{";
+    o << "\"enabled\":" << (a.enabled ? "true" : "false");
+    o << ",\"raw_nodes\":" << (a.raw_nodes ? "true" : "false");
+    o << ",\"rtol\":"; jstr(o, a.rtol);
+    o << ",\"atol\":"; jstr(o, a.atol);
+    o << ",\"h0\":";   jstr(o, a.h0);
+    o << ",\"hmin\":"; jstr(o, a.hmin);
+    o << ",\"hmax\":"; jstr(o, a.hmax);
+    o << ",\"max_rej\":"; jstr(o, a.max_rej);
+    o << ",\"ctrl\":"; jstr(o, a.ctrl);
+    o << ",\"ctrl_params\":[";
+    for (size_t i = 0; i < a.ctrl_params.size(); ++i) { if (i) o << ","; jstr(o, a.ctrl_params[i]); }
+    o << "]";
+    o << ",\"peak_interp\":" << a.peak_interp;
+    o << ",\"max_points\":"; jstr(o, a.max_points);
+    o << ",\"lyap_renorm\":" << a.lyap_renorm;
+    o << ",\"minmax_interp_fixed\":" << (a.minmax_interp_fixed ? "true" : "false");
+    // Регулятор из библиотеки едет с сессией целиком: на машине, где его нет, он
+    // добавится в библиотеку при чтении (read_adaptive).
+    AdaptiveUserCtrl u;
+    if (!adaptive_find_builtin(a.ctrl) && adaptive_find_user_ctrl(a.ctrl, &u)) {
+        o << ",\"ctrl_def\":";
+        write_user_ctrl(o, u);
+    }
+    o << "}" << suffix;
+}
+
+void read_adaptive(JP& p, AdaptiveSettings& a) {
+    a = AdaptiveSettings();
+    p.expect('{');
+    if (p.opt('}')) return;
+    while (true) {
+        const std::string k = p.str();
+        p.expect(':');
+        if      (k == "enabled")     a.enabled   = p.boolean();
+        else if (k == "raw_nodes")   a.raw_nodes = p.boolean();
+        else if (k == "rtol")        a.rtol = p.str();
+        else if (k == "atol")        a.atol = p.str();
+        else if (k == "h0")          a.h0   = p.str();
+        else if (k == "hmin")        a.hmin = p.str();
+        else if (k == "hmax")        a.hmax = p.str();
+        else if (k == "max_rej")     a.max_rej = p.str();
+        else if (k == "ctrl")        a.ctrl = p.str();
+        else if (k == "ctrl_params") {
+            a.ctrl_params.clear();
+            p.expect('[');
+            if (!p.opt(']')) {
+                while (true) {
+                    a.ctrl_params.push_back(p.str());
+                    if (p.opt(',')) continue;
+                    p.expect(']');
+                    break;
+                }
+            }
+        }
+        else if (k == "peak_interp") { try { a.peak_interp = std::stoi(p.str_or_num()); } catch (...) {} }
+        else if (k == "max_points")  a.max_points = p.str();
+        else if (k == "lyap_renorm") { try { a.lyap_renorm = std::stoi(p.str_or_num()); } catch (...) {} }
+        else if (k == "minmax_interp_fixed") a.minmax_interp_fixed = p.boolean();
+        else if (k == "ctrl_def") {
+            // Нет такого регулятора в библиотеке — добавить; есть — библиотека главнее.
+            AdaptiveUserCtrl u;
+            read_user_ctrl(p, u);
+            if (!u.name.empty() && !adaptive_find_builtin(u.name) && !adaptive_find_user_ctrl(u.name, nullptr)) {
+                AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+                bool add = false;
+                {
+                    std::lock_guard<std::mutex> lk(L.mu);
+                    bool have = false;
+                    for (const AdaptiveUserCtrl& x : L.items) have |= x.name == u.name;
+                    if (!have) { L.items.push_back(u); add = true; }
+                }
+                if (add) save_ctrl_library();
+            }
+        }
+        else p.skip_value();
+        if (p.opt(',')) continue;
+        p.expect('}');
+        break;
+    }
+}
 } // namespace
 
 std::string session_to_json(const PhaseAnalysisSession& s) {
@@ -154,6 +295,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"scheme\":"; jstr(o, s.scheme); o << ",\n";
     o << "  \"symmetry_s\":"; jstr(o, s.symmetry_s); o << ",\n";
     o << "  \"decimation\":"; jstr(o, s.decimation); o << ",\n";
+    write_adaptive(o, s.adaptive, "  ", ",\n");
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
     o << "  \"legend_show_ic\":" << (s.legend_show_ic ? "true" : "false") << ",\n";
     o << "  \"use_gpu\":" << (s.use_gpu ? "true" : "false") << ",\n";
@@ -207,6 +349,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "scheme")     s.scheme = p.str();
             else if (key == "symmetry_s") s.symmetry_s = p.str();
             else if (key == "decimation") s.decimation = p.str();
+            else if (key == "adaptive")   read_adaptive(p, s.adaptive);
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();
             else if (key == "legend_show_ic") s.legend_show_ic = p.boolean();
             else if (key == "use_gpu")        s.use_gpu = p.boolean();
@@ -316,6 +459,9 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"transient_text\":";  jstr(o, bd.transient_text);
     o << ",\"pre_scaller_text\":";jstr(o, bd.pre_scaller_text);
     o << ",\"max_value_text\":";  jstr(o, bd.max_value_text);
+    write_adaptive(o, bd.adaptive, ",", "");
+    if (bd.ad_axis)   o << ",\"ad_axis\":"   << bd.ad_axis;
+    if (bd.ad_axis_2) o << ",\"ad_axis_2\":" << bd.ad_axis_2;
     o << ",\"param_values\":";    jmap(o, bd.param_values);
     o << ",\"initial_conditions\":"; jmap(o, bd.initial_conditions);
     o << ",\"csv_save_enabled\":" << (bd.csv_save_enabled ? "true" : "false");
@@ -373,6 +519,9 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "transient_text")     bd.transient_text    = p.str();
     else if (key == "pre_scaller_text")   bd.pre_scaller_text  = p.str();
     else if (key == "max_value_text")     bd.max_value_text    = p.str();
+    else if (key == "adaptive")           read_adaptive(p, bd.adaptive);
+    else if (key == "ad_axis")            { try { bd.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "ad_axis_2")          { try { bd.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
     else if (key == "param_values")       bd.param_values      = p.map_ss();
     else if (key == "initial_conditions") bd.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   bd.csv_save_enabled  = p.boolean();
@@ -523,8 +672,12 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"t_max_text\":";      jstr(o, c.t_max_text);
     o << ",\"transient_text\":";  jstr(o, c.transient_text);
     o << ",\"max_value_text\":";  jstr(o, c.max_value_text);
+    write_adaptive(o, c.adaptive, ",", "");
+    if (c.ad_axis)   o << ",\"ad_axis\":"   << c.ad_axis;
+    if (c.ad_axis_2) o << ",\"ad_axis_2\":" << c.ad_axis_2;
     o << ",\"eps_text\":";        jstr(o, c.eps_text);
     o << ",\"nt_text\":";         jstr(o, c.nt_text);
+    if (c.vtr_text != "0") { o << ",\"vtr_text\":"; jstr(o, c.vtr_text); }
     o << ",\"param_values\":";    jmap(o, c.param_values);
     o << ",\"initial_conditions\":"; jmap(o, c.initial_conditions);
     o << ",\"csv_save_enabled\":" << (c.csv_save_enabled ? "true" : "false");
@@ -564,8 +717,12 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "t_max_text")         c.t_max_text        = p.str();
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
     else if (key == "eps_text")           c.eps_text          = p.str();
     else if (key == "nt_text")            c.nt_text           = p.str();
+    else if (key == "vtr_text")           c.vtr_text          = p.str();
     else if (key == "param_values")       c.param_values      = p.map_ss();
     else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
@@ -678,8 +835,12 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"t_max_text\":";      jstr(o, c.t_max_text);
     o << ",\"transient_text\":";  jstr(o, c.transient_text);
     o << ",\"max_value_text\":";  jstr(o, c.max_value_text);
+    write_adaptive(o, c.adaptive, ",", "");
+    if (c.ad_axis)   o << ",\"ad_axis\":"   << c.ad_axis;
+    if (c.ad_axis_2) o << ",\"ad_axis_2\":" << c.ad_axis_2;
     o << ",\"eps_text\":";        jstr(o, c.eps_text);
     o << ",\"nt_text\":";         jstr(o, c.nt_text);
+    if (c.vtr_text != "0") { o << ",\"vtr_text\":"; jstr(o, c.vtr_text); }
     o << ",\"param_values\":";    jmap(o, c.param_values);
     o << ",\"initial_conditions\":"; jmap(o, c.initial_conditions);
     o << ",\"csv_save_enabled\":" << (c.csv_save_enabled ? "true" : "false");
@@ -718,8 +879,12 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "t_max_text")         c.t_max_text        = p.str();
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
     else if (key == "eps_text")           c.eps_text          = p.str();
     else if (key == "nt_text")            c.nt_text           = p.str();
+    else if (key == "vtr_text")           c.vtr_text          = p.str();
     else if (key == "param_values")       c.param_values      = p.map_ss();
     else if (key == "initial_conditions") c.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
@@ -1034,6 +1199,7 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"transient_text\":";   jstr(o, c.transient_text);   o << ",";
     o << "\"pre_scaller_text\":"; jstr(o, c.pre_scaller_text); o << ",";
     o << "\"max_value_text\":";   jstr(o, c.max_value_text);   o << ",";
+    write_adaptive(o, c.adaptive, "", ",");
     o << "\"eps_dbscan_text\":";  jstr(o, c.eps_dbscan_text);  o << ",";
     o << "\"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",";
     o << "\"csv_output_path\":";  jstr(o, c.csv_output_path);  o << ",";
@@ -1087,6 +1253,7 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
     else if (key == "eps_dbscan_text")    c.eps_dbscan_text   = p.str();
     else if (key == "csv_save_enabled")   c.csv_save_enabled  = p.boolean();
     else if (key == "csv_output_path")    c.csv_output_path   = p.str();
@@ -1694,6 +1861,9 @@ void write_metrics_config(std::ostringstream& o, const SignalMetricsConfig& c) {
     o << ",\"transient_text\":";  jstr(o, c.transient_text);
     o << ",\"pre_scaller_text\":"; jstr(o, c.pre_scaller_text);
     o << ",\"max_value_text\":";  jstr(o, c.max_value_text);
+    write_adaptive(o, c.adaptive, ",", "");
+    if (c.ad_axis)   o << ",\"ad_axis\":"   << c.ad_axis;
+    if (c.ad_axis_2) o << ",\"ad_axis_2\":" << c.ad_axis_2;
     // Пишем ВЫКЛЮЧЕННЫЕ метрики: метрика, добавленная в будущей версии, в
     // старом файле не упомянута и потому загрузится включённой, как в новом конфиге.
     o << ",\"metric_mask_off\":"  << (kSignalMetricAllMask & ~c.metric_mask);
@@ -1732,6 +1902,9 @@ bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string&
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
+    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
     else if (key == "continuation")       c.continuation      = p.boolean();
     else if (key == "continuation_reverse") c.continuation_reverse = p.boolean();
     else if (key == "use_gpu")            c.use_gpu           = p.boolean();
@@ -1938,6 +2111,11 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"perf_warmup_text\":";   jstr(o, c.perf_warmup_text);   o << ",";
     o << "\"perf_replicas_text\":"; jstr(o, c.perf_replicas_text); o << ",";
     o << "\"perf_ref_scheme\":";   jstr(o, c.perf_ref_scheme);   o << ",";
+    o << "\"perf_end_ref\":" << c.perf_end_ref << ",";
+    o << "\"perf_tol_lo_text\":"; jstr(o, c.perf_tol_lo_text); o << ",";
+    o << "\"perf_tol_hi_text\":"; jstr(o, c.perf_tol_hi_text); o << ",";
+    o << "\"perf_tol_n_text\":";  jstr(o, c.perf_tol_n_text);  o << ",";
+    write_adaptive(o, c.adaptive, "", ",");
     o << "\"perf_ref_substeps_text\":"; jstr(o, c.perf_ref_substeps_text); o << ",";
     o << "\"stab_k_text\":";      jstr(o, c.stab_k_text);      o << ",";
     o << "\"stab_r_text\":";      jstr(o, c.stab_r_text);      o << ",";
@@ -2002,6 +2180,11 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "perf_warmup_text")   c.perf_warmup_text   = p.str();
     else if (key == "perf_replicas_text") c.perf_replicas_text = p.str();
     else if (key == "perf_ref_scheme")       c.perf_ref_scheme       = p.str();
+    else if (key == "perf_end_ref")          { try { c.perf_end_ref = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "perf_tol_lo_text")      c.perf_tol_lo_text      = p.str();
+    else if (key == "perf_tol_hi_text")      c.perf_tol_hi_text      = p.str();
+    else if (key == "perf_tol_n_text")       c.perf_tol_n_text       = p.str();
+    else if (key == "adaptive")              read_adaptive(p, c.adaptive);
     else if (key == "perf_ref_substeps_text") c.perf_ref_substeps_text = p.str();
     else if (key == "initial_conditions") c.initial_conditions = p.map_ss();
     else if (key == "param_values")       c.param_values       = p.map_ss();
@@ -2092,6 +2275,7 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"colormap_idx\":" << w.colormap_idx;
         o << ",\"error_source\":" << w.error_source;
         o << ",\"time_unit\":"    << w.time_unit;
+        o << ",\"perf_cost\":"    << w.perf_cost;
         o << ",\"show_min\":" << (w.show_min ? "true" : "false");
         o << ",\"show_avg\":" << (w.show_avg ? "true" : "false");
         o << ",\"show_max\":" << (w.show_max ? "true" : "false");
@@ -2154,6 +2338,7 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "colormap_idx")    w.colormap_idx    = std::stoi(p.str_or_num());
                                 else if (k == "error_source")    w.error_source    = std::stoi(p.str_or_num());
                                 else if (k == "time_unit")       w.time_unit       = std::stoi(p.str_or_num());
+                                else if (k == "perf_cost")       w.perf_cost       = std::stoi(p.str_or_num());
                                 else if (k == "show_min")        w.show_min        = p.boolean();
                                 else if (k == "show_avg")        w.show_avg        = p.boolean();
                                 else if (k == "show_max")        w.show_max        = p.boolean();
@@ -2296,6 +2481,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     S("transient_text",      c.transient_text);
     S("pre_scaller_text",    c.pre_scaller_text);
     S("max_value_text",      c.max_value_text);
+    write_adaptive(o, c.adaptive, "", ",");
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";       jmap(o, c.param_values);       o << ",";
     I("axis_x_par_index",    c.axis_x_par_index);
@@ -2418,6 +2604,7 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "h_text")                  c.h_text = q.str();
                         else if (k == "t_max_text")              c.t_max_text = q.str();
                         else if (k == "transient_text")          c.transient_text = q.str();
+                        else if (k == "adaptive")                read_adaptive(q, c.adaptive);
                         else if (k == "pre_scaller_text")        c.pre_scaller_text = q.str();
                         else if (k == "max_value_text")          c.max_value_text = q.str();
                         else if (k == "initial_conditions")      c.initial_conditions = q.map_ss();
@@ -2542,4 +2729,84 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
     catch (...) {
         return false;
     }
+}
+
+// ---- Библиотека регуляторов шага (step_controllers.json) ----
+bool load_ctrl_library(const std::string& path, std::string* err) {
+    AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+    {
+        std::lock_guard<std::mutex> lk(L.mu);
+        L.path = path;
+    }
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return true;   // файла ещё нет — пустая библиотека
+    std::stringstream ss; ss << f.rdbuf();
+    std::string text = ss.str();
+    if (text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB
+        && (unsigned char)text[2] == 0xBF) text.erase(0, 3);
+    std::vector<AdaptiveUserCtrl> items;
+    try {
+        JP p(text);
+        p.expect('{');
+        if (!p.opt('}')) {
+            while (true) {
+                const std::string k = p.str();
+                p.expect(':');
+                if (k == "controllers") {
+                    p.expect('[');
+                    if (!p.opt(']')) {
+                        while (true) {
+                            AdaptiveUserCtrl u;
+                            read_user_ctrl(p, u);
+                            if (!u.name.empty()) items.push_back(u);
+                            if (p.opt(',')) continue;
+                            p.expect(']');
+                            break;
+                        }
+                    }
+                }
+                else p.skip_value();
+                if (p.opt(',')) continue;
+                p.expect('}');
+                break;
+            }
+        }
+    }
+    catch (const std::exception& e) {
+        if (err) *err = path + ": " + e.what();
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(L.mu);
+    L.items = std::move(items);
+    return true;
+}
+
+bool save_ctrl_library(std::string* err) {
+    AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+    std::vector<AdaptiveUserCtrl> items;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(L.mu);
+        items = L.items;
+        path = L.path;
+    }
+    if (path.empty()) { if (err) *err = "the controller library has no file"; return false; }
+    std::ostringstream o;
+    o << "{\"version\":1,\"controllers\":[";
+    for (size_t i = 0; i < items.size(); ++i) {
+        o << (i ? ",\n" : "\n");
+        write_user_ctrl(o, items[i]);
+    }
+    o << "\n]}\n";
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) { if (err) *err = "cannot write " + tmp; return false; }
+        const std::string text = o.str();
+        f.write(text.data(), (std::streamsize)text.size());
+        if (!f) { if (err) *err = "cannot write " + tmp; return false; }
+    }
+    std::remove(path.c_str());
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) { if (err) *err = "cannot replace " + path; return false; }
+    return true;
 }

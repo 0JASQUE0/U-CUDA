@@ -403,7 +403,160 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
     }
 }
 
+// Собирает source в DLL каталога кэша key (если её там ещё нет) и возвращает путь к
+// ней. Вызывать под g_compile_mtx. Общая часть КРС и регулятора шага.
+bool build_cached_dll(const std::string& source, unsigned long long key, std::string& dll,
+                      std::vector<KrsCpuDiag>& diags) {
+    const std::string dir = cache_dir(key);
+    const std::string src = dir + "krs.cpp";
+    const std::string log = dir + "build.log";
+    dll = dir + "krs.dll";
+
+    // Кэш: тот же исходник -> DLL уже собрана.
+    if (GetFileAttributesA(dll.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+    FILE* f = nullptr;
+    if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
+        diags.push_back({ 0, "failed to write " + src });
+        return false;
+    }
+    fwrite(source.data(), 1, source.size(), f);
+    fclose(f);
+
+    std::string why;
+    const std::string vcvars = vcvars_path(why);
+
+    // /TP — компилировать как C++ (см. комментарий к make_source);
+    // /LD — DLL; /O2 — оптимизация (ради неё всё и затевается);
+    // /Fe /Fo /Fd — артефакты в каталог кэша, чтобы не сорить рядом с exe.
+    //
+    // Пути к /Fo и /Fd задаём ПОФАЙЛОВО, а не каталогом: каталог
+    // оканчивается на '\', и в "...\dir\" обратный слэш экранирует
+    // закрывающую кавычку — аргументы слипаются, cl падает с C1083.
+    // /I — каталог с configCUDA.h (его копию post-build кладёт в kernels\
+    // рядом с .exe; оттуда же его читает NVRTC-путь, так что CPU и GPU
+    // видят один и тот же файл).
+    const std::string inc_dir = exe_dir() + "\\kernels";
+
+    const std::string cmd =
+        // /fp:precise — умолчание MSVC, но задано явно: double-double
+        // держится на безошибочных преобразованиях вида (s - a), и при
+        // /fp:fast компилятор вправе свернуть их в ноль. Тогда точность
+        // молча упала бы до обычного double, а сборка прошла бы успешно.
+        "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /fp:precise /LD"
+        " /I\"" + inc_dir + "\""
+        " /Fe:\"" + dll + "\""
+        " /Fo:\"" + dir + "krs.obj\""
+        " /Fd:\"" + dir + "krs.pdb\""
+        " \"" + src + "\"\"";
+
+    std::string build_out;
+    const int rc = run_logged(cmd, log, build_out);
+    if (rc != 0 || GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        parse_cl_log(oem_to_utf8(build_out), diags);
+        if (diags.empty())
+            diags.push_back({ 0, "cl.exe exited with code " + std::to_string(rc) });
+        DeleteFileA(dll.c_str());   // не оставляем полуфабрикат в кэше
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+// Часть 4. Пользовательский регулятор шага
+//
+// Тело — внутрь функции с той же сигнатурой, что ucuda_ctrl_custom на GPU, над
+// раскладкой kernels/ucuda_adaptive.cuh (структуры, нормы, помощники). Заголовок
+// читается из kernels\ рядом с .exe — тем же файлом, что у NVRTC; его текст входит
+// в ключ кэша, иначе после правки заголовка подхватилась бы DLL со старой раскладкой.
+namespace {
+
+constexpr int kCtrlPreludeVersion = 1;
+
+std::string make_ctrl_source(const std::string& body) {
+    std::ostringstream o;
+    o << "#include <cmath>\n"
+         "#include <cstdlib>\n"
+         "using std::abs;\n"
+         "#include \"configCUDA.h\"\n"
+         "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
+         "#define UCUDA_ADAPT_LAYOUT_ONLY\n"
+         "#include \"ucuda_adaptive.cuh\"\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_ctrl_custom_c(const UcudaCtlIn* in_p, UcudaCtlMem* m_p, UcudaCtlOut* o_p) {\n"
+         "    const UcudaCtlIn& in = *in_p; UcudaCtlMem& m = *m_p; UcudaCtlOut& o = *o_p;\n"
+         "    (void)in; (void)m; (void)o;\n"
+         "#line 1 \"controller\"\n"
+      << body << "\n}\n";
+    return o.str();
+}
+
+unsigned long long ctrl_hash_key(const std::string& body, const std::string& header) {
+    unsigned long long h = 1469598103934665603ULL;      // FNV-1a
+    auto mix = [&](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    const char tag[] = "step-controller";
+    mix(tag, sizeof tag);
+    mix(body.data(), body.size());
+    mix(header.data(), header.size());
+    const int ver = kCtrlPreludeVersion;
+    mix(&ver, sizeof ver);
+    const int numb_bytes = (int)sizeof(numb);
+    mix(&numb_bytes, sizeof numb_bytes);
+    return h;
+}
+
+} // namespace
+
+CtrlCpuFn::~CtrlCpuFn() {
+    if (module_) FreeLibrary((HMODULE)module_);
+}
+
+bool CtrlCpuFn::compile(const std::string& body, std::vector<KrsCpuDiag>& diags) {
+    if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
+    fn_ = nullptr;
+
+    std::string why;
+    if (vcvars_path(why).empty()) {
+        diags.push_back({ 0, "CPU compiler unavailable: " + why });
+        return false;
+    }
+    std::string header;
+    {
+        const std::string path = exe_dir() + "\\kernels\\ucuda_adaptive.cuh";
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+            diags.push_back({ 0, "cannot read " + path });
+            return false;
+        }
+        char buf[4096];
+        size_t k;
+        while ((k = fread(buf, 1, sizeof buf, f)) > 0) header.append(buf, k);
+        fclose(f);
+    }
+
+    std::lock_guard<std::mutex> lock(g_compile_mtx);
+    std::string dll;
+    if (!build_cached_dll(make_ctrl_source(body), ctrl_hash_key(body, header), dll, diags))
+        return false;
+    HMODULE m = LoadLibraryA(dll.c_str());
+    if (!m) {
+        diags.push_back({ 0, "failed to load " + dll });
+        return false;
+    }
+    auto p = GetProcAddress(m, "ucuda_ctrl_custom_c");
+    if (!p) {
+        FreeLibrary(m);
+        diags.push_back({ 0, "the built DLL has no ucuda_ctrl_custom_c" });
+        return false;
+    }
+    module_ = m;
+    fn_ = (Fn)p;
+    return true;
+}
 
 KrsCpuStep::~KrsCpuStep() { release(); }
 
@@ -452,57 +605,11 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 
     std::lock_guard<std::mutex> lock(g_compile_mtx);
 
-    const unsigned long long key = hash_key(body, amountOfX, amountOfValues, prec);
-    const std::string dir = cache_dir(key);
-    const std::string src = dir + "krs.cpp";
-    const std::string dll = dir + "krs.dll";
-    const std::string log = dir + "build.log";
-
     // Кэш: та же схема + та же размерность -> DLL уже собрана.
-    if (GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const std::string source = make_source(body, amountOfX, prec);
-        FILE* f = nullptr;
-        if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
-            diags.push_back({ 0, "failed to write " + src });
-            return false;
-        }
-        fwrite(source.data(), 1, source.size(), f);
-        fclose(f);
-
-        // /TP — компилировать как C++ (см. комментарий к make_source);
-        // /LD — DLL; /O2 — оптимизация (ради неё всё и затевается);
-        // /Fe /Fo /Fd — артефакты в каталог кэша, чтобы не сорить рядом с exe.
-        //
-        // Пути к /Fo и /Fd задаём ПОФАЙЛОВО, а не каталогом: каталог
-        // оканчивается на '\', и в "...\dir\" обратный слэш экранирует
-        // закрывающую кавычку — аргументы слипаются, cl падает с C1083.
-        // /I — каталог с configCUDA.h (его копию post-build кладёт в kernels\
-        // рядом с .exe; оттуда же его читает NVRTC-путь, так что CPU и GPU
-        // видят один и тот же файл).
-        const std::string inc_dir = exe_dir() + "\\kernels";
-
-        const std::string cmd =
-            // /fp:precise — умолчание MSVC, но задано явно: double-double
-            // держится на безошибочных преобразованиях вида (s - a), и при
-            // /fp:fast компилятор вправе свернуть их в ноль. Тогда точность
-            // молча упала бы до обычного double, а сборка прошла бы успешно.
-            "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /fp:precise /LD"
-            " /I\"" + inc_dir + "\""
-            " /Fe:\"" + dll + "\""
-            " /Fo:\"" + dir + "krs.obj\""
-            " /Fd:\"" + dir + "krs.pdb\""
-            " \"" + src + "\"\"";
-
-        std::string build_out;
-        const int rc = run_logged(cmd, log, build_out);
-        if (rc != 0 || GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            parse_cl_log(oem_to_utf8(build_out), diags);
-            if (diags.empty())
-                diags.push_back({ 0, "cl.exe exited with code " + std::to_string(rc) });
-            DeleteFileA(dll.c_str());   // не оставляем полуфабрикат в кэше
-            return false;
-        }
-    }
+    const unsigned long long key = hash_key(body, amountOfX, amountOfValues, prec);
+    std::string dll;
+    if (!build_cached_dll(make_source(body, amountOfX, prec), key, dll, diags))
+        return false;
 
     HMODULE m = LoadLibraryA(dll.c_str());
     if (!m) {

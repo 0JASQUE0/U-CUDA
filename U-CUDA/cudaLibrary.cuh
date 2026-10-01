@@ -473,7 +473,10 @@ __global__ void LLEKernelCUDA(
 	// ВНИМАНИЕ: через cuLaunchKernel дефолты не подставляются.
 	const volatile int* cancelFlag = nullptr,
 	int* progressCounter = nullptr,
-	const int progressStride = 0);
+	const int progressStride = 0,
+	// Транзиент касательных векторов: столько времени (кратно NT, к ближайшему) клоны
+	// перенормируются, но растяжение не суммируется. 0 — прежнее поведение.
+	const numb vectorTransient = 0);
 
 // Ядро LLE, свип по начальным условиям.
 __global__ void LLEKernelICCUDA(
@@ -529,7 +532,10 @@ __global__ void LSKernelCUDA(
 	// ВНИМАНИЕ: через cuLaunchKernel дефолты не подставляются.
 	const volatile int* cancelFlag = nullptr,
 	int* progressCounter = nullptr,
-	const int progressStride = 0);
+	const int progressStride = 0,
+	// Транзиент касательных векторов: столько времени (кратно NT, к ближайшему) клоны
+	// перенормируются, но растяжение не суммируется. 0 — прежнее поведение.
+	const numb vectorTransient = 0);
 
 __global__ void LSKernelICCUDA(
 	const int nPts,

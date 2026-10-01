@@ -1,6 +1,7 @@
 ﻿#include "order_session.h"
 #include "num_parse.h"
 #include "krs_cpu.h"      // CPU-ветка считает шаг тем же телом КРС, что уходит в NVRTC
+#include "phase_portrait_nvrtc.h"   // computeAdaptiveEndpointNVRTC — замер адаптивного шага
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -104,6 +105,19 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     return req;
 }
 
+// Вычислений f на шаг встроенных явных схем постоянного шага — для оси «вызовы f»
+// Fixed-кривой; 0 — неизвестно. Неявные, CD, комплексные и составные схемы не
+// считаются: f там вычисляется по компонентам или внутри Ньютона, и одно число на шаг
+// сравнивало бы несравнимое.
+double perf_rhs_per_step(const std::string& scheme) {
+    static const struct { const char* name; int k; } kTab[] = {
+        { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 },
+        { "DOP853", 12 }, { "DOPRI78", 13 }, { "DOPRI78 (legacy)", 13 },
+    };
+    for (const auto& t : kTab) if (scheme == t.name) return (double)t.k;
+    return 0.0;
+}
+
 PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig& c) {
     // Всё общее с Order берётся из того же построителя: расхождение настроек
     // между двумя расчётами одной вкладки было бы худшим из возможных багов —
@@ -132,6 +146,35 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
     req.replicas           = std::max(1, parse_i(c.perf_replicas_text, 1));
+
+    // «Точность — затраты»: эталон в T, f на шаг, адаптивный шаг.
+    req.end_ref_prec = (c.perf_end_ref >= 0 && c.perf_end_ref <= 2) ? c.perf_end_ref : 1;
+    req.rhs_per_step = perf_rhs_per_step(c.scheme);
+    if (c.adaptive.enabled && !s.sys.is_map) {
+        req.adaptive = true;
+        if (req.end_ref_prec == 0) req.end_ref_prec = 1;   // других ошибок у адаптивного замера нет
+        if (!adaptive_scheme_name_ok(c.scheme)) {
+            req.setup_error = "Adaptive step needs a scheme with an embedded error estimate: RK45, DOPRI78 or DOP853.";
+        } else {
+            try {
+                const AdaptiveCode code = codegen_adaptive(s.sys, scheme_from_name(c.scheme));
+                std::string err;
+                if (!adaptive_build_params(c.adaptive, code, req.amountOfX, req.t_max, req.ad_params, err,
+                                           &req.ad_ctrl_body))
+                    req.setup_error = err;
+                req.ad_rhs = code.rhs;
+                req.ad_emb = code.emb;
+            } catch (const std::exception& e) {
+                req.setup_error = std::string("adaptive codegen: ") + e.what();
+            }
+        }
+        req.tol_lo = parse_d(c.perf_tol_lo_text, 1e-3);
+        req.tol_hi = parse_d(c.perf_tol_hi_text, 1e-13);
+        req.tol_n  = std::max(1, parse_i(c.perf_tol_n_text, 11));
+        if (!(req.tol_lo > 0.0) || !(req.tol_hi > 0.0)) req.setup_error = "tol range: both bounds must be > 0";
+    }
+    if (req.end_ref_prec > 0)
+        req.end_ref_body = compute_krs_for_scheme(s.custom_schemes, s.sys, "DOP853");
     return req;
 }
 
@@ -695,6 +738,7 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
     res.t_max.assign((size_t)npts, std::numeric_limits<double>::quiet_NaN());
     res.t_avg.assign((size_t)npts, std::numeric_limits<double>::quiet_NaN());
     res.n_steps.assign((size_t)npts, 0);
+    res.y_end.assign((size_t)npts, std::vector<double>());
 
     std::string err;
     KrsCpuStep step;
@@ -761,6 +805,9 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
             res.t_min[(size_t)i] = tmin;
             res.t_max[(size_t)i] = tmx;
             res.t_avg[(size_t)i] = tsum / (double)got;
+            auto& ye = res.y_end[(size_t)i];
+            ye.resize((size_t)n);
+            for (int k = 0; k < n; ++k) ye[(size_t)k] = as_d(X[(size_t)k]);
             if (first_t) { res.t_lo = tmin; res.t_hi = tmx; first_t = false; }
             else { if (tmin < res.t_lo) res.t_lo = tmin; if (tmx > res.t_hi) res.t_hi = tmx; }
         }
@@ -778,6 +825,184 @@ static PerfResult run_performance_cpu(const PerfRequest& req) {
         case kOrderPrecDD: return run_performance_cpu_t<ucuda::dd>(req);
         default:           return run_performance_cpu_t<numb>(req);
     }
+}
+
+// ---------------------------------------------------------------------------
+// «Точность — затраты» (этап 7 адаптивного шага).
+//
+// Эталон y*(T): DOP853 постоянным шагом на CPU в dd или qd. Шагов N удваивается, пока
+// два последних решения не сойдутся до ~eps арифметики по отношению к max|y|; оценка
+// ошибки эталона — их разность / 255 (восьмой порядок: половинный шаг — в 256 раз
+// точнее). Разность, которая перестала падать, — это полка округления: дальше не
+// сойтись, эталон берётся как есть, а его оценка идёт в результат. NaN на крупном шаге
+// (неустойчивость явной схемы) — повод удвоить N, а не ошибка.
+template <class S>
+static bool perf_end_reference_t(const PerfRequest& req, std::vector<double>& y, double& est,
+                                 long long& steps, bool& cancelled, std::string& err) {
+    using Tr = CpuScalarTraits<S>;
+    using std::fabs;
+    const int n = req.amountOfX, nv = (int)req.values.size();
+    KrsCpuStep step;
+    if (!compile_cpu_step<S>(req.end_ref_body, n, nv, "reference DOP853", step, err)) return false;
+    const typename Tr::Fn f = Tr::fn(step);
+    std::vector<S> a((size_t)nv);
+    for (int k = 0; k < nv; ++k) a[(size_t)k] = S(req.values[(size_t)k]);
+    const S T = S(req.t_max);
+    auto run = [&](long long N, std::vector<S>& X) -> bool {
+        X.assign((size_t)n, S(0));
+        for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+        const S h = T / S((double)N);
+        for (long long i = 0; i < N; ++i) {
+            Tr::call(f, X.data(), a.data(), h);
+            if ((i & 1023) == 0 && req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+                cancelled = true;
+                return false;
+            }
+        }
+        return true;
+    };
+    // Порог сходимости — на 10 порядков ниже любых ошибок double на графике; qd не гонится
+    // за своими 62 знаками (при восьмом порядке это миллионы дорогих шагов), его запас уходит
+    // на устойчивость к накоплению округлений на хаотических траекториях.
+    const double target = (req.end_ref_prec == 2) ? 1e-28 : 1e-26;
+    long long Nc = std::max(64LL, (long long)std::ceil(req.t_max / 0.02));
+    std::vector<S> y0, y1;
+    if (!run(Nc, y0)) return false;
+    double dprev = std::numeric_limits<double>::infinity();
+    for (int it = 0;; ++it) {
+        const long long N2 = 2 * Nc;
+        if (!run(N2, y1)) return false;
+        double d = 0.0, sc = 1.0;
+        bool finite = true;
+        for (int k = 0; k < n; ++k) {
+            const double dk = as_d(fabs(y1[(size_t)k] - y0[(size_t)k]));
+            const double yk = std::fabs(as_d(y1[(size_t)k]));
+            if (!std::isfinite(dk) || !std::isfinite(yk)) finite = false;
+            if (dk > d) d = dk;
+            if (yk > sc) sc = yk;
+        }
+        steps = N2;
+        if (!finite) {
+            if (N2 >= (1LL << 24)) { err = "the reference solution diverged (nan/inf)"; return false; }
+            dprev = std::numeric_limits<double>::infinity();
+        } else if (d <= target * sc) { est = d / 255.0; break; }
+        else if (it >= 2 && d > 0.25 * dprev) { est = d; break; }
+        else if (N2 >= (1LL << 24)) { est = d; break; }
+        else dprev = d;
+        y0.swap(y1);
+        Nc = N2;
+    }
+    y.resize((size_t)n);
+    for (int k = 0; k < n; ++k) y[(size_t)k] = as_d(y1[(size_t)k]);
+    return true;
+}
+
+// Адаптивный замер: на каждом узле tol ядро endpoint_kernel_ad (replicas нитей,
+// repeats засекаемых запусков) — y(T), счётчики шагов и f нити 0, время запуска.
+static PerfResult run_performance_adaptive(const PerfRequest& req) {
+    PerfResult res;
+    res.axis = req.axis;
+    res.adaptive = true;
+    auto fail = [&](const std::string& msg) -> PerfResult { res.error = msg; return res; };
+    if (req.repeats < 1 || req.replicas < 1 || req.warmup < 0) return fail("bad measurement settings");
+    const int n = std::max(1, req.tol_n);
+    const double qnan = std::numeric_limits<double>::quiet_NaN();
+    res.n_pts = n;
+    res.axis_vals.assign((size_t)n, req.tol_lo);
+    if (n > 1) {
+        const double k = std::log(req.tol_hi / req.tol_lo) / (double)(n - 1);
+        for (int i = 0; i < n; ++i) res.axis_vals[(size_t)i] = req.tol_lo * std::exp(k * (double)i);
+    }
+    for (auto* v : { &res.e1, &res.e2, &res.e_ref, &res.p, &res.h_eff, &res.t_min, &res.t_max,
+                     &res.t_avg, &res.n_rhs, &res.n_rej })
+        v->assign((size_t)n, qnan);
+    res.n_steps.assign((size_t)n, 0);
+    res.status.assign((size_t)n, ORDER_ST_OK);
+    res.y_end.assign((size_t)n, std::vector<double>());
+    res.repeats = req.repeats; res.warmup = req.warmup; res.replicas = req.replicas;
+
+    const UcudaAdaptParams& B = req.ad_params;
+    bool first_t = true;
+    for (int i = 0; i < n; ++i) {
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; return res; }
+        const double tol = res.axis_vals[(size_t)i];
+        AdaptiveEndpointRequest rq;
+        rq.rhs = req.ad_rhs; rq.emb = req.ad_emb; rq.ctrl_body = req.ad_ctrl_body;
+        rq.amountOfX = req.amountOfX; rq.ic = req.initial_conditions; rq.values = req.values;
+        rq.params = B;
+        rq.params.rtol = tol;
+        for (int k = 0; k < req.amountOfX; ++k)
+            rq.params.atol[k] = B.rtol > 0 ? B.atol[k] / B.rtol * tol : tol;
+        rq.T = req.t_max; rq.replicas = req.replicas; rq.repeats = req.repeats; rq.warmup = req.warmup;
+        AdaptiveEndpointResult out;
+        std::string err;
+        if (!computeAdaptiveEndpointNVRTC(rq, out, &err)) return fail("GPU: " + err);
+        res.t_min[(size_t)i] = out.t_min; res.t_avg[(size_t)i] = out.t_avg; res.t_max[(size_t)i] = out.t_max;
+        res.n_steps[(size_t)i] = (long long)out.stats.nacc;
+        res.n_rhs[(size_t)i]   = out.stats.nrhs;
+        res.n_rej[(size_t)i]   = out.stats.nrej;
+        res.h_eff[(size_t)i]   = out.stats.hmean;
+        if (out.stats.diverged) { res.status[(size_t)i] = ORDER_ST_DIVERGED; ++res.n_diverged; }
+        else { res.y_end[(size_t)i] = out.y_end; ++res.n_ok; }
+        if (first_t) { res.t_lo = out.t_min; res.t_hi = out.t_max; first_t = false; }
+        else { res.t_lo = std::min(res.t_lo, out.t_min); res.t_hi = std::max(res.t_hi, out.t_max); }
+        if (req.progress)
+            req.progress->store(0.8f * (float)(i + 1) / (float)n, std::memory_order_relaxed);
+    }
+    res.ok = true;
+    return res;
+}
+
+// Performance целиком: замер (Fixed — движок или CPU, адаптивный — GPU), затем
+// вызовы f для Fixed и E(T) против эталона.
+static PerfResult run_performance_any(ParametricEngine& engine, bool on_gpu, const PerfRequest& req) {
+    if (!req.setup_error.empty()) { PerfResult r; r.error = req.setup_error; return r; }
+    if (req.adaptive && !on_gpu) {
+        PerfResult r;
+        r.error = "The adaptive-step benchmark runs on the GPU: switch the device to GPU "
+                  "(the CPU is still used for the dd/qd reference).";
+        return r;
+    }
+    PerfResult res = req.adaptive ? run_performance_adaptive(req)
+                   : (on_gpu ? engine.run_performance(req) : run_performance_cpu(req));
+    if (!res.ok || res.cancelled) return res;
+    const int n = res.n_pts;
+    const double qnan = std::numeric_limits<double>::quiet_NaN();
+    if (!req.adaptive) {
+        res.n_rhs.assign((size_t)n, qnan);
+        res.n_rej.assign((size_t)n, 0.0);
+        for (int i = 0; i < n && i < (int)res.n_steps.size(); ++i)
+            if (req.rhs_per_step > 0 && res.n_steps[(size_t)i] > 0)
+                res.n_rhs[(size_t)i] = req.rhs_per_step * (double)res.n_steps[(size_t)i];
+    }
+    if (req.end_ref_prec > 0 && !req.end_ref_body.empty()) {
+        std::vector<double> ys;
+        double est = 0.0;
+        long long steps = 0;
+        bool cancelled = false;
+        std::string err;
+        const bool ok = (req.end_ref_prec == 2)
+            ? perf_end_reference_t<ucuda::qd>(req, ys, est, steps, cancelled, err)
+            : perf_end_reference_t<ucuda::dd>(req, ys, est, steps, cancelled, err);
+        if (cancelled) { res.cancelled = true; res.ok = false; return res; }
+        if (!ok) { res.ok = false; res.error = "reference y(T): " + err; return res; }
+        res.ref_err = est; res.ref_steps = steps; res.ref_prec = req.end_ref_prec;
+        res.e_end.assign((size_t)n, qnan);
+        for (int i = 0; i < n && i < (int)res.y_end.size(); ++i) {
+            const std::vector<double>& y = res.y_end[(size_t)i];
+            if ((int)y.size() != req.amountOfX) continue;
+            // Постоянный шаг без подгонки кончается в N*h, а не в T: сравнивать не с чем.
+            if (!req.adaptive) {
+                const double tend = (double)res.n_steps[(size_t)i] * res.h_eff[(size_t)i];
+                if (!(std::fabs(tend - req.t_max) <= 1e-9 * std::max(1.0, std::fabs(req.t_max)))) continue;
+            }
+            double e = 0.0;
+            for (int k = 0; k < req.amountOfX; ++k) e = std::max(e, std::fabs(y[(size_t)k] - ys[(size_t)k]));
+            res.e_end[(size_t)i] = e;
+        }
+    }
+    if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+    return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -950,7 +1175,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
         compute_start_time = std::chrono::steady_clock::now();
         const bool on_gpu = c.use_gpu;
         perf_future = std::async(std::launch::async, [&engine, on_gpu, preq = std::move(preq)]() {
-            return on_gpu ? engine.run_performance(preq) : run_performance_cpu(preq);
+            return run_performance_any(engine, on_gpu, preq);
         });
         return true;
     }
