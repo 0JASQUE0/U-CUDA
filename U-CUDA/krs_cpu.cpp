@@ -522,7 +522,7 @@ unsigned long long ctrl_hash_key(const std::string& body, const std::string& hea
 // par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
 namespace {
 
-constexpr int kAdModuleVersion = 3;
+constexpr int kAdModuleVersion = 4;
 
 // Подстановка плейсхолдера {{name}} во всех вхождениях.
 void replace_all(std::string& s, const std::string& from, const std::string& to) {
@@ -673,14 +673,15 @@ void ucuda_cpu_ad_lyap_range(int ls, int i0, int i1, int nPts, double lo, double
       << R"CPU(
 // Метрики 1D: классика — calculateDiscreteModelMetricsAdCUDA по точкам [i0, i1) (строки выходов
 // с i0, outMetrics[m * (i1 - i0) + row]), continuation — signalMetricsContinuationAdKernel строка в
-// строку (outMetrics[m * nPts + j], intervals — одна строка). Возвращает 0 при отмене.
+// строку (outMetrics[m * nPts + j], intervals — одна строка). Точка — ucudaAdMetricsRun (сетка или
+// узлы шага, raw). Возвращает 0 при отмене.
 extern "C" __declspec(dllexport)
 int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
     int logScale, int parOrVar, int mutIdx, const double* baseValues, int amountOfValues, const double* baseX,
     const UcudaAdaptParams* Pbase, int axisKind, double tolRatio, int writableVar, double maxValue,
     double* intervals, unsigned long long peakStride, int peakCapacity, double* outMetrics, int metricMask,
-    int* flags, double transientTime, double dtOut, int preScaller, unsigned long long iters,
-    double* adStats, const volatile int* cancelFlag, int* progress) {
+    int* flags, double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters,
+    int raw, int peakInterp, double* adStats, const volatile int* cancelFlag, int* progress) {
     const UcudaKrsFns K{};
     UcudaAdProgress prog;
     prog.init(nullptr, 0, (numb)0);
@@ -703,18 +704,10 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
             UcudaAdaptState S;
             ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
             const numb dt = (numb)dtOut * (numb)preScaller;
-            PeakStream peaks;
-            peaks.init(nullptr, intervals, (size_t)row * peakStride, dt, (size_t)iters, peakCapacity, false);
-            MetricsAccum acc;
-            acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
-            IntervalStats ist;
-            ist.init();
-            int flag = ucudaAdMetricsPoint(S, K, localValues, P, (numb)transientTime, dt, (size_t)iters,
-                writableVar, (numb)maxValue, peaks, acc, ist, cancelFlag, prog);
-            flag = smFinalize(flag, acc, peaks, ist,
-                intervals != nullptr ? intervals + (size_t)row * peakStride : nullptr, dt, res);
-            res[SIGM_HJORTH_MOBILITY]   = (numb)nan("");
-            res[SIGM_HJORTH_COMPLEXITY] = (numb)nan("");
+            const int flag = ucudaAdMetricsRun(S, K, localValues, P, (numb)transientTime, (numb)tRec, dt,
+                (size_t)iters, raw, preScaller, peakInterp, writableVar, (numb)maxValue,
+                intervals != nullptr ? intervals + (size_t)row * peakStride : nullptr, peakCapacity, metricMask,
+                false, cancelFlag, prog, res);
             if (flags != nullptr) flags[row] = flag;
             for (int m = 0; m < SIGM_COUNT; ++m)
                 if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)rows + row] = res[m];
@@ -739,18 +732,9 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
         if (j == 0) ucuda_ad_init(S, K, AMOUNTOFX, x, (numb)0, a, P);
         else        ucuda_ad_restart(S, K, (numb)0, a, P);
         const numb dt = (numb)dtOut * (numb)preScaller;
-        PeakStream peaks;
-        peaks.init(nullptr, intervals, 0, dt, (size_t)iters, peakCapacity, false);
-        MetricsAccum acc;
-        acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
-        IntervalStats ist;
-        ist.init();
-        int flag = ucudaAdOut(S.X, (numb)maxValue) ? REGIME_UNBOUND
-                 : ucudaAdMetricsPoint(S, K, a, P, (numb)transientTime, dt, (size_t)iters, writableVar,
-                                       (numb)maxValue, peaks, acc, ist, cancelFlag, prog);
-        flag = smFinalize(flag, acc, peaks, ist, intervals, dt, res);
-        res[SIGM_HJORTH_MOBILITY]   = (numb)nan("");
-        res[SIGM_HJORTH_COMPLEXITY] = (numb)nan("");
+        const int flag = ucudaAdMetricsRun(S, K, a, P, (numb)transientTime, (numb)tRec, dt, (size_t)iters, raw,
+            preScaller, peakInterp, writableVar, (numb)maxValue, intervals, peakCapacity, metricMask,
+            ucudaAdOut(S.X, (numb)maxValue), cancelFlag, prog, res);
         if (flags != nullptr) flags[j] = flag;
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)nPts + j] = res[m];

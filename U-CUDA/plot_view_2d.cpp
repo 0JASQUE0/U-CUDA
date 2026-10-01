@@ -1,5 +1,6 @@
 ﻿#include "plot_view_2d.h"
 #include "grid_snap.h"
+#include "num_parse.h"   // parse_num_checked — поля min/max осей
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -112,6 +113,32 @@ static int rgb_channel_input_callback(ImGuiInputTextCallbackData* data) {
     return rc;
 }
 
+// Поля min / max оси в меню по ПКМ. Любое значение, в том числе за пределами данных: введённое
+// ставит user_range, и clamp_view / автоподгонка ось больше не трогают. Принимается число или
+// выражение, как в полях параметров (дроби, скобки, pi), при котором min < max; на лог-оси — > 0.
+// Неподходящее молча не применяется: в поле остаётся прежнее значение.
+static void axis_range_inputs(AxisInfo& ax, const char* tag, bool positive_only) {
+    char lo_buf[48], hi_buf[48];
+    std::snprintf(lo_buf, sizeof(lo_buf), "%.10g", ax.view_min);
+    std::snprintf(hi_buf, sizeof(hi_buf), "%.10g", ax.view_max);
+    auto accept = [&](const char* text, bool is_min) {
+        double v = 0.0;
+        if (!parse_num_checked(text, v) || !std::isfinite(v)) return;
+        if (positive_only && !(v > 0.0)) return;
+        const double lo = is_min ? v : ax.view_min, hi = is_min ? ax.view_max : v;
+        if (!(lo < hi)) return;
+        ax.view_min = lo; ax.view_max = hi;
+        ax.user_range = true;
+    };
+    char id[32];
+    ImGui::SetNextItemWidth(120);
+    std::snprintf(id, sizeof(id), "min##%s", tag);
+    if (ImGui::InputText(id, lo_buf, sizeof(lo_buf), ImGuiInputTextFlags_EnterReturnsTrue)) accept(lo_buf, true);
+    ImGui::SetNextItemWidth(120);
+    std::snprintf(id, sizeof(id), "max##%s", tag);
+    if (ImGui::InputText(id, hi_buf, sizeof(hi_buf), ImGuiInputTextFlags_EnterReturnsTrue)) accept(hi_buf, false);
+}
+
 void Plot2DView::do_autofit() {
     double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
@@ -135,7 +162,8 @@ void Plot2DView::do_autofit() {
         // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
         // locked axes, but fit_request used to stomp them on every data change
         // (esp. visible in phase continuation, where each tick refit the view).
-        if (!x_axis.lock) {
+        // Ручной диапазон (user_range) переживает автоподгонку так же, как заблокированная ось.
+        if (!x_axis.lock && !x_axis.user_range) {
             if (x_fit_use_explicit) {
                 x_axis.view_min = x_fit_min;
                 x_axis.view_max = x_fit_max;
@@ -144,12 +172,12 @@ void Plot2DView::do_autofit() {
                 x_axis.view_max = wxmax;
             }
         }
-        if (!y_axis.lock) {
+        if (!y_axis.lock && !y_axis.user_range) {
             y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
         }
         view_valid = true;
     }
-    else if (x_fit_use_explicit && !x_axis.lock) {
+    else if (x_fit_use_explicit && !x_axis.lock && !x_axis.user_range) {
         // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
@@ -158,6 +186,7 @@ void Plot2DView::do_autofit() {
 }
 
 void Plot2DView::fit_x() {
+    x_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     if (x_fit_use_explicit) {
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
@@ -183,6 +212,7 @@ void Plot2DView::fit_x() {
 }
 
 void Plot2DView::fit_y() {
+    y_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
@@ -351,7 +381,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
     auto clamp_view = [&]() {
-        if (has_bounds_x && !x_axis.lock) {
+        if (has_bounds_x && !x_axis.lock && !x_axis.user_range) {
             double rx = x_axis.view_max - x_axis.view_min;
             if (rx >= clamp_hi_x - clamp_lo_x) {
                 x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_hi_x;
@@ -364,7 +394,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 }
             }
         }
-        if (has_bounds_y && !y_axis.lock) {
+        if (has_bounds_y && !y_axis.lock && !y_axis.user_range) {
             double ry = y_axis.view_max - y_axis.view_min;
             if (ry >= clamp_hi_y - clamp_lo_y) {
                 y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_hi_y;
@@ -1086,7 +1116,10 @@ void Plot2DView::render(PlotRenderer& renderer,
     // закрывает открытое меню цвета — popup'ы одного уровня взаимоисключающи.
     if (legend_rclick.row_other) ImGui::OpenPopup(pop_id);
     if (ImGui::BeginPopup(pop_id)) {
-        if (ImGui::MenuItem("Auto fit (both)")) view_valid = false;
+        if (ImGui::MenuItem("Auto fit (both)")) {
+            x_axis.user_range = y_axis.user_range = false;   // явный Auto fit — и по ручным осям
+            view_valid = false;
+        }
         if (ImGui::MenuItem("Auto fit X"))      fit_x();
         if (ImGui::MenuItem("Auto fit Y"))      fit_y();
         ImGui::Separator();
@@ -1112,17 +1145,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit X")) fit_x();
         ImGui::Separator();
-        char xmin_buf[32], xmax_buf[32];
-        std::snprintf(xmin_buf, sizeof(xmin_buf), "%.6g", x_axis.view_min);
-        std::snprintf(xmax_buf, sizeof(xmax_buf), "%.6g", x_axis.view_max);
         ImGui::Text("X range:");
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("min##x", xmin_buf, sizeof(xmin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            x_axis.view_min = std::atof(xmin_buf);
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("max##x", xmax_buf, sizeof(xmax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            x_axis.view_max = std::atof(xmax_buf);
+        axis_range_inputs(x_axis, "x", x_axis.log_scale);
         ImGui::Separator();
+        ImGui::MenuItem("Custom X range", nullptr, &x_axis.user_range);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
+                              "and survives new data. Auto fit X turns it off.");
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
         ImGui::EndPopup();
@@ -1131,17 +1160,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit Y")) fit_y();
         ImGui::Separator();
-        char ymin_buf[32], ymax_buf[32];
-        std::snprintf(ymin_buf, sizeof(ymin_buf), "%.6g", y_axis.view_min);
-        std::snprintf(ymax_buf, sizeof(ymax_buf), "%.6g", y_axis.view_max);
         ImGui::Text("Y range:");
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("min##y", ymin_buf, sizeof(ymin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            y_axis.view_min = std::atof(ymin_buf);
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("max##y", ymax_buf, sizeof(ymax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            y_axis.view_max = std::atof(ymax_buf);
+        axis_range_inputs(y_axis, "y", false);
         ImGui::Separator();
+        ImGui::MenuItem("Custom Y range", nullptr, &y_axis.user_range);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
+                              "and survives new data. Auto fit Y turns it off.");
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
         ImGui::EndPopup();

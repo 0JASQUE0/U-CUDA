@@ -3563,7 +3563,6 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     req.minmax_interp  = c.adaptive.minmax_interp_fixed;
     fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
-    req.adaptive.raw_nodes = false;   // метрики — только на равномерной сетке
     return req;
 }
 

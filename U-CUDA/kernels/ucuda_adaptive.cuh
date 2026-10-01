@@ -33,6 +33,9 @@
 #ifndef UCUDA_ADAPTIVE_LAYOUT_DONE
 #define UCUDA_ADAPTIVE_LAYOUT_DONE
 
+#if !defined(__CUDACC_RTC__)
+#include <cstring>   // memcpy: математика регулятора на CPU (ucuda_ctl_log2 и др.)
+#endif
 #if defined(__CUDACC__) || defined(__CUDACC_RTC__)
 #define UCUDA_HD __host__ __device__
 #else
@@ -177,9 +180,68 @@ struct UcudaAdaptStats {
 // регулятора. UCUDA_AD_EXACT_CTL возвращает double — для побитовой сверки
 // последовательности шагов с dop853.c / scipy.
 
+// ---- Математика регулятора на CPU -------------------------------------------------
+// Попытка шага зовёт frexp, log2f, exp2f, nextafter (h_min) и с десяток fmin / fmax. На GPU
+// это инструкции, а на CPU — вызовы CRT: в exe (/MD) exp2f ~36 нс, log2f 23, frexp 16,
+// nextafter 10, fmin / fmax по ~4. На хосте их заменяют встроенные версии ниже (<= 0.5 ulp
+// float, особые значения — через CRT; h_min — тот же результат); код GPU не меняется.
+// Попытка RK45 на Рёсслере (сама схема ~50 нс): exe 230 -> 130 нс, DLL cl.exe (статическая CRT,
+// Order -> Performance) 137 -> 120 нс. Остаток — задержка цепочки норма -> log2 -> exp2 -> h,
+// которую ждёт следующая попытка: на дешёвой правой части попытка всё равно в ~2.5 раза
+// дороже шага той же схемы с постоянным h.
+UCUDA_HD inline numb ucuda_fmax(numb a, numb b) {   // как fmax: NaN отбрасывается
+#ifdef __CUDA_ARCH__
+    return fmax(a, b);
+#else
+    return (a > b || b != b) ? a : b;
+#endif
+}
+UCUDA_HD inline numb ucuda_fmin(numb a, numb b) {
+#ifdef __CUDA_ARCH__
+    return fmin(a, b);
+#else
+    return (a < b || b != b) ? a : b;
+#endif
+}
+UCUDA_HD inline float ucuda_fmaxf(float a, float b) {
+#ifdef __CUDA_ARCH__
+    return fmaxf(a, b);
+#else
+    return (a > b || b != b) ? a : b;
+#endif
+}
+UCUDA_HD inline float ucuda_fminf(float a, float b) {
+#ifdef __CUDA_ARCH__
+    return fminf(a, b);
+#else
+    return (a < b || b != b) ? a : b;
+#endif
+}
+
+// 2^y во float. CPU: |y| < 126 — 2^k 2^f, k — ближайшее целое, |f| <= 1/2, 2^f — ряд Тейлора
+// e^(f ln 2) до 8-й степени (погрешность < 3e-10); остальное (переполнение, денормалы, inf, NaN) — CRT.
+// Многочлен — по схеме Эстрина: регулятор стоит на пути от ошибки попытки к следующему шагу,
+// и важна задержка цепочки, а не число операций (Горнер — 9 зависимых умножений и сложений).
+UCUDA_HD inline float ucuda_ctl_exp2(float y) {
+#ifdef __CUDA_ARCH__
+    return exp2f(y);
+#else
+    if (!(y > -126.0f && y < 126.0f)) return exp2f(y);
+    const int k = (int)(y >= 0 ? y + 0.5f : y - 0.5f);
+    const double f = (double)y - k, f2 = f * f, f4 = f2 * f2;   // c_j = ln2^j / j!
+    const double q0 = (1 + 0.69314718055994531 * f) + (0.24022650695910071 + 0.055504108664821579 * f) * f2;
+    const double q1 = (9.6181291076284772e-3 + 1.3333558146428443e-3 * f)
+                    + (1.5403530393381609e-4 + 1.5252733804059840e-5 * f) * f2;
+    const double p = q0 + (q1 + 1.3215486790144307e-6 * f4) * f4;
+    const unsigned long long b = (unsigned long long)(k + 1023) << 52;
+    double sc; memcpy(&sc, &b, sizeof sc);
+    return (float)(p * sc);
+#endif
+}
+
 // sc_i = atol_i + rtol*max(|y0_i|, |y1_i|) — как у Хайрера и scipy.
 UCUDA_HD inline numb ucuda_ctl_scale(const UcudaCtlIn& in, int i) {
-    return in.atol[i] + in.rtol * fmax(fabs(in.y0[i]), fabs(in.y1[i]));
+    return in.atol[i] + in.rtol * ucuda_fmax(fabs(in.y0[i]), fabs(in.y1[i]));
 }
 
 // Сумма квадратов масштабированной m-й оценки ошибки.
@@ -247,20 +309,39 @@ UCUDA_HD inline numb ucuda_ctl_err(const UcudaCtlIn& in) {
 // log2 x = e + log2f(m), поэтому вход не переполняет float во всём диапазоне double;
 // результат вне float (0 или inf) законы и так зажимают в [facmin, facmax].
 UCUDA_HD inline float ucuda_ctl_log2(numb x) {
+#ifdef __CUDA_ARCH__
     int e;
     const numb m = frexp(x, &e);
     return (float)e + log2f((float)m);
+#else
+    // CPU: нормальное x > 0 — показатель и мантисса из битов, log2 мантиссы в [sqrt(1/2), sqrt(2))
+    // рядом 2 atanh(s) / ln 2, s = (m - 1)/(m + 1), |s| <= 0.172 (погрешность < 3e-11), по Эстрину.
+    // 0, < 0, денормалы, inf, NaN — через CRT.
+    const double d = (double)x;
+    unsigned long long b; memcpy(&b, &d, sizeof b);
+    const int be = (int)((b >> 52) & 0x7ff);
+    if ((b >> 63) != 0 || be == 0 || be == 0x7ff) return (float)log2(d);
+    b = (b & 0x000fffffffffffffULL) | 0x3ff0000000000000ULL;
+    double m; memcpy(&m, &b, sizeof m);
+    int e = be - 1023;
+    if (m > 1.4142135623730951) { m *= 0.5; ++e; }
+    const double s = (m - 1) / (m + 1), s2 = s * s, s4 = s2 * s2, s8 = s4 * s4;
+    const double p = s * ((2.8853900817779268 + 0.96179669392597560 * s2)
+                        + (0.57707801635558541 + 0.41219858311113243 * s2) * s4
+                        + (0.32059889797532522 + 0.26230818925253882 * s2) * s8);
+    return (float)((double)e + p);
+#endif
 }
 
 UCUDA_HD inline numb ucuda_ctl_pow(numb x, numb y) {
 #ifdef UCUDA_AD_EXACT_CTL
     return pow(x, y);
 #else
-    return (numb)exp2f((float)y * ucuda_ctl_log2(x));
+    return (numb)ucuda_ctl_exp2((float)y * ucuda_ctl_log2(x));
 #endif
 }
 
-UCUDA_HD inline numb ucuda_clamp(numb x, numb lo, numb hi) { return fmin(hi, fmax(lo, x)); }
+UCUDA_HD inline numb ucuda_clamp(numb x, numb lo, numb hi) { return ucuda_fmin(hi, ucuda_fmax(lo, x)); }
 
 UCUDA_HD inline void ucuda_ctrl_hairer(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     const numb safe = in.c[0], facc1 = in.cc->facc1, facc2 = in.cc->facc2;
@@ -280,21 +361,21 @@ UCUDA_HD inline void ucuda_ctrl_hairer(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
     const float l11 = (float)expo1 * ucuda_ctl_log2(err);
     const float lfac = beta == 0 ? l11 : l11 - (float)beta * ucuda_ctl_log2(facold);
     const float isafe = (float)in.cc->isafe;
-    const float fac = fmaxf((float)facc2, fminf((float)facc1, exp2f(lfac) * isafe));
+    const float fac = ucuda_fmaxf((float)facc2, ucuda_fminf((float)facc1, ucuda_ctl_exp2(lfac) * isafe));
     numb hnew = in.h * (numb)(1.0f / fac);
 #endif
     o.err = err;
     if (err <= 1) {
         o.accept = 1;
-        m.user[0] = fmax(err, (numb)1e-4);
+        m.user[0] = ucuda_fmax(err, (numb)1e-4);
         if (in.hmax > 0 && hnew > in.hmax) hnew = in.hmax;
-        if (in.nrej > 0) hnew = fmin(hnew, in.h);
+        if (in.nrej > 0) hnew = ucuda_fmin(hnew, in.h);
     } else {
         o.accept = 0;
 #ifdef UCUDA_AD_EXACT_CTL
         hnew = in.h / fmin(facc1, fac11 / safe);
 #else
-        hnew = in.h * (numb)(1.0f / fminf((float)facc1, exp2f(l11) * isafe));
+        hnew = in.h * (numb)(1.0f / ucuda_fminf((float)facc1, ucuda_ctl_exp2(l11) * isafe));
 #endif
     }
     o.h = hnew;
@@ -307,12 +388,12 @@ UCUDA_HD inline void ucuda_ctrl_scipy(const UcudaCtlIn& in, UcudaCtlMem& m, Ucud
     const numb err = ucuda_ctl_err(in);
     o.err = err;
     if (err < 1) {
-        numb factor = (err == 0) ? maxf : fmin(maxf, safety * ucuda_ctl_pow(err, expo));
-        if (in.nrej > 0) factor = fmin((numb)1, factor);
+        numb factor = (err == 0) ? maxf : ucuda_fmin(maxf, safety * ucuda_ctl_pow(err, expo));
+        if (in.nrej > 0) factor = ucuda_fmin((numb)1, factor);
         o.h = in.h * factor;
         o.accept = 1;
     } else {
-        o.h = in.h * fmax(minf, safety * ucuda_ctl_pow(err, expo));
+        o.h = in.h * ucuda_fmax(minf, safety * ucuda_ctl_pow(err, expo));
         o.accept = 0;
     }
 }
@@ -345,7 +426,7 @@ UCUDA_HD inline void ucuda_ctrl_pi(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCt
 #else
     // (th/err)^kI (err_prev/err)^kP = 2^(lth - kI L - kP L + kP L_prev): одна exp2, без деления.
     const float le = ucuda_ctl_log2(err), l0 = ucuda_ctl_log2(m.err[0]);
-    numb fac = (numb)exp2f((float)in.cc->lth_pi - (float)kI * le + (float)kP * (l0 - le));
+    numb fac = (numb)ucuda_ctl_exp2((float)in.cc->lth_pi - (float)kI * le + (float)kP * (l0 - le));
 #endif
     fac = ucuda_clamp(fac, facmin, in.nrej > 0 ? (numb)1 : facmax);
     o.err = err; o.accept = 1; o.h = in.h * fac;
@@ -371,7 +452,7 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
     const float lh0 = ucuda_ctl_log2(m.h[0]);
     const float lr1 = ucuda_ctl_log2(in.h) - lh0;                            // log2 (h_n / h_{n-1})
     const float lr2 = lh0 - ucuda_ctl_log2(m.h[1]);                          // log2 (h_{n-1} / h_{n-2})
-    numb rho = (numb)exp2f((float)in.cc->lth_f
+    numb rho = (numb)ucuda_ctl_exp2((float)in.cc->lth_f
                            - (float)b1 * ucuda_ctl_log2(err) - (float)b2 * ucuda_ctl_log2(m.err[0])
                            - (float)b3 * ucuda_ctl_log2(e2) - (float)a2 * lr1 - (float)a3 * lr2);
 #endif
@@ -488,7 +569,19 @@ struct UcudaAdaptState {
 // вынужденных шагов на весь интервал, а на нормальных траекториях граница не достигается.
 // span <= 0 (не задан) — только 10 ulp.
 UCUDA_HD inline numb ucuda_ad_hmin_auto(numb t, numb span) {
+#ifdef __CUDA_ARCH__
     const numb u = 10 * fabs(nextafter(t, (numb)1e308) - t);
+#else
+    // CPU: nextafter в CRT — вызов на каждой попытке; у 0 < t < 1e308 следующее число вверх —
+    // соседний битовый код (результат тот же). Остальное — через CRT.
+    numb u;
+    if (t > 0 && t < (numb)1e308) {
+        const double d = (double)t;
+        unsigned long long b; memcpy(&b, &d, sizeof b); ++b;
+        double up; memcpy(&up, &b, sizeof up);
+        u = 10 * (numb)(up - d);
+    } else u = 10 * fabs(nextafter(t, (numb)1e308) - t);
+#endif
     const numb s = span > 0 ? (numb)1e-12 * span : (numb)0;
     return u > s ? u : s;
 }
@@ -914,24 +1007,22 @@ struct UcudaLyapClones {
         numb worst = 0;
         for (int c = 0; c < NC; ++c) {
             k.emb(y + c * n, F + c * n, a, h, Yc + c * n, Ec, Fc + c * n, W);
-            numb d0 = 0, d1 = 0, s5 = 0, s3 = 0;
+            numb d0 = 0, d1 = 0;
             for (int i = 0; i < n; ++i) {
                 const numb p0 = y[c * n + i] - X[i], p1 = Yc[c * n + i] - Y[i];
                 d0 += p0 * p0; d1 += p1 * p1;
-                const numb e5 = Ec[i] - E[i];
-                s5 += e5 * e5;
-                if (nlo >= 2) { const numb e3 = Ec[n + i] - E[n + i]; s3 += e3 * e3; }
             }
             // sc^2 = (rtol * RMS(delta))^2, delta — большее из начала и конца попытки.
-            const numb sc2 = rtol * rtol * (d0 > d1 ? d0 : d1) / (numb)n;
+            constexpr numb inv_n = (numb)1 / (numb)n;
+            const numb sc2 = rtol * rtol * (d0 > d1 ? d0 : d1) * inv_n;
             if (!(sc2 > 0)) continue;
             // Пол масштаба покомпонентно: sc_i = max(rtol * RMS(delta), K * eps * max|x_i, y_i|) —
             // шум округления разности клона и x (и их оценок E) в этой компоненте. Без пола при
             // rtol * |delta| ниже разрешения double (rtol 1e-9, eps 1e-8 у Лоренца) ошибка упиралась
-            // в шум, и регулятор дробил шаг: ~170x шагов при тех же показателях. Пол не сработал ни
-            // в одной компоненте — нормы прежним выражением, побитово как без него.
-            bool floored = false;
-            numb f5 = 0, f3 = 0;
+            // в шум, и регулятор дробил шаг: ~170x шагов при тех же показателях.
+            // Веса 1/sc_i^2: одно деление на клон, ещё по одному — на компоненту, где сработал пол.
+            const numb isc2 = 1 / sc2;
+            numb s5 = 0, s3 = 0;
             for (int i = 0; i < n; ++i) {
                 numb ax = fabs(X[i]);
                 const numb a1 = fabs(Y[i]), a2 = fabs(y[c * n + i]), a3 = fabs(Yc[c * n + i]);
@@ -939,17 +1030,16 @@ struct UcudaLyapClones {
                 if (a2 > ax) ax = a2;
                 if (a3 > ax) ax = a3;
                 const numb fl = (numb)UCUDA_LYAP_NOISE_K * (numb)UCUDA_NUMB_EPS * ax;
-                const numb sci2 = sc2 > fl * fl ? sc2 : fl * fl;
-                if (sci2 != sc2) floored = true;
+                const numb fl2 = fl * fl;
+                numb w = isc2;
+                if (fl2 > sc2) w = 1 / fl2;
                 const numb e5 = Ec[i] - E[i];
-                f5 += e5 * e5 / sci2;
-                if (nlo >= 2) { const numb e3 = Ec[n + i] - E[n + i]; f3 += e3 * e3 / sci2; }
+                s5 += e5 * e5 * w;
+                if (nlo >= 2) { const numb e3 = Ec[n + i] - E[n + i]; s3 += e3 * e3 * w; }
             }
-            if (floored) { s5 = f5; s3 = f3; }
-            else         { s5 /= sc2; s3 /= sc2; }
             numb err;
             if (nlo >= 2) err = (s5 == 0 && s3 == 0) ? (numb)0 : s5 / sqrt((s5 + (numb)0.01 * s3) * (numb)n);
-            else          err = sqrt(s5 / (numb)n);
+            else          err = sqrt(s5 * inv_n);
             if (err != err) return err;
             if (err > worst) worst = err;
         }

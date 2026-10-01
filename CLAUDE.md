@@ -264,6 +264,15 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   built on a bifurcation template needs its own generator (see `ucudaLyapRng`).
 - Finite-T LLE/LS depend on the random initial frame as ~ln(1/c)/t_max — point-to-point
   noise, not a bug. `vector transient` (renormalised but unsummed blocks) removes it.
+- Output mode of adaptive sweeps (`AdaptiveRequest::raw_nodes`, "uniform grid / step nodes" in
+  the Integration block): BD 1D/2D, basins and Metrics. Step nodes have no dense output per sample
+  and no warp divergence on the grid, so they are 4-5x faster (Metrics 2D 128x128: 3.4 → 0.8 s).
+  Metrics on nodes (`MetricsAccumNU`, `ucudaAdMetricsRun` in `metrics_adaptive_part.cu`): mean and
+  variance are TIME averages (Hermite quadrature with the exact derivative f, 4th order). A plain
+  mean over nodes is biased towards small steps. Extrema and peaks are interpolated between nodes
+  (`ucudaAdNodeVertex`, mode = peak interpolation), and the decimator keeps every N-th node. Nodes
+  are as accurate as the grid or better (Rössler, periodic: mean 2.5e-5 vs 2.7e-4 against a fine
+  fixed step). CPU and GPU agree only to ~1e-5 in peak times, because nodes land differently.
 - Warp divergence, not memory, is what slows adaptive sweeps: neighbouring lanes need steps,
   rejections and samples at different moments. One attempt per loop iteration
   (`ucuda_ad_try_x`) made LS 2D 1.5x faster, but the same restructure made the bifurcation kernels
@@ -273,7 +282,8 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   (~200x more steps, same exponents). The scale now has a per-component floor
   `max(rtol*RMS(delta), K*eps_machine*max|x_i, y_i|)`, K = `UCUDA_LYAP_NOISE_K` = 100. It is active
   at ordinary settings too (rtol 1e-8, eps 1e-6): steps ~10x longer, exponents within the
-  finite-T scatter. Without the floor the norms are computed bit-for-bit as before.
+  finite-T scatter. The norm uses weights 1/sc_i^2: one division per clone, plus one per
+  component where the floor is active (LS 2D GPU 5-8% faster; results bit-identical on the stands).
 - Adaptive sweep kernels are **FP64-bound** (ncu, Rossler 256x256 DOP853 on RTX 2060: FP64 pipe
   84% busy, 214 registers, 8 warps/SM). Register caps (168/128), block width 64/128 and
   `UCUDA_AD_STATIC_N` do not help or hurt. The uniform output grid is ~4x slower than step nodes
@@ -282,6 +292,17 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   step-then-samples loop (7.6 -> 7.9 s), the same with `__all_sync` before every attempt
   (-> 13.1 s: the warp waits for the lane with the longest sample loop and the kernel becomes
   local-memory latency bound), dense coefficients in registers (255 registers, no gain).
+- Order → Performance, "adaptive loses to fixed": check three things before suspecting a bug.
+  (1) Chaos: E(T) grows ~e^(λT). Rössler (λ ≈ 0.07) at T = 400 gives E(T) ~ 1..10 (attractor size) for
+  every h and tol, so the curves are noise; use T ≈ 20. (2) The problem: on Rössler at equal E(T) the
+  adaptive step needs about as many f evaluations as the fixed one (RK45 ~10% more, DOP853 10-30%
+  fewer). The spike is where local error control spends steps, but errors there decay. Van der Pol
+  μ = 10 is the counter-check: adaptive needs 3-5x fewer f evaluations and is faster in time.
+  (3) Cost per attempt on a cheap RHS (CPU, 3D): the RK45 scheme ~50 ns, the controller ~50 ns,
+  bookkeeping ~20 ns, against ~41 ns for a fixed RK45 step, i.e. ~20 vs ~7 ns per f. The controller
+  cost is the latency of the chain norm → log2 → exp2 → h, which the next attempt waits for. The CPU
+  versions of log2/exp2/fmin/fmax/nextafter in `ucuda_adaptive.cuh` are inline (Estrin, ≤ 0.5 ulp
+  float) because the CRT calls cost ~100 ns more per attempt in the /MD exe.
 - Default `h_min` is `max(10 ulp(t), 1e-12*span)`: 10 ulp alone let a controller pinned at an
   unreachable tolerance take ~1e15 steps.
 - New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.

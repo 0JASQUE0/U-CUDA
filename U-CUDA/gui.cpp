@@ -1673,7 +1673,7 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
             ImGui::SetNextItemWidth(kComboW);
             changed |= ImGui::Combo("peak interpolation", &a.peak_interp, items, IM_ARRAYSIZE(items));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How a peak is placed between step nodes:\n"
+                ImGui::SetTooltip("How a peak (in Metrics also a min / max) is placed between step nodes:\n"
                                   "node - the largest node itself;\n"
                                   "parabola - vertex of the parabola through three nodes\n"
                                   "  (the fixed-step formula generalised to unequal steps);\n"
@@ -1691,8 +1691,10 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
     if (opts & kAdUiMinMax) {
         changed |= ImGui::Checkbox("min/max by interpolated extrema in Fixed", &a.minmax_interp_fixed);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("With the adaptive step min/max always use the vertex of the parabola\n"
-                              "through three samples (as peaks do); this applies it to the fixed step too.");
+            ImGui::SetTooltip("With the adaptive step min/max always use interpolated extrema: on the\n"
+                              "uniform grid the vertex of the parabola through three samples (as peaks\n"
+                              "do), on step nodes the peak interpolation. This applies the parabola to\n"
+                              "the fixed step too.");
     }
     if (bc && a.enabled) {
         if (ImGui::SmallButton("apply to all tabs")) broadcast_adaptive(*bc, a);
@@ -8224,9 +8226,9 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        // Метрики — только равномерная сетка; Хьорт при адаптивном шаге не считается.
+        // Метрики — сетка или узлы шага; Хьорт при адаптивном шаге не считается.
         f.adaptive      = &c.adaptive;
-        f.adaptive_opts = kAdUiMinMax;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp | kAdUiMinMax;
         draw_integration_block("Integration##met_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 

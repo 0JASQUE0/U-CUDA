@@ -8054,7 +8054,10 @@ struct ParametricEngine::Impl {
 
         // Буфер — под худший случай шага (минимальный h на h-оси), см. run_bif2d.
         const double worstCaseH = (ax.hSweepAxis == 0) ? ranges[0] : (ax.hSweepAxis == 1) ? ranges[2] : req.h;
-        const int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / preScaller);
+        int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / preScaller);
+        // Узлы шага: отсчётов сетки нет, строка интервалов — под потолок пиков (как у БД).
+        const bool adRaw = ad && req.adaptive.raw_nodes;
+        if (adRaw) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         const size_t amountOfPointsForSkip = steps_from_time_size_t(req.transient_time, req.h);
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
@@ -8222,6 +8225,8 @@ struct ParametricEngine::Impl {
                 numb   progressDt_arg    = (numb)((req.transient_time + req.t_max) / (double)kAdProgressUnits);
                 size_t progressUnits_arg = kAdProgressUnits;
                 numb*  d_adStats_arg     = adArgs.stats;
+                int    raw_arg           = adRaw ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
                 void* args_ad[] = {
                     &nPts_arg, &limiter_arg, &calculated_arg, &dimension_arg,
                     &d_ranges, &d_indices, &d_ic, &amountOfIC_arg,
@@ -8229,7 +8234,7 @@ struct ParametricEngine::Impl {
                     &d_intervals, &peakStride_arg, &peakCap_arg,
                     &d_out, &metricStride_arg, &mask_arg, &d_flags, &logMask_arg,
                     &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tMax_arg, &dtOut_arg,
-                    &preScaller_arg, &iterations_arg,
+                    &preScaller_arg, &iterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progStride_arg, &progressDt_arg,
                     &progressUnits_arg, &d_adStats_arg
                 };
@@ -8447,11 +8452,13 @@ struct ParametricEngine::Impl {
 
         const int    nPts  = req.n_pts;
         const int    mask  = req.metric_mask & kSignalMetricAllMask;
-        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
-        if (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)())
+        const bool   raw   = ad.raw_nodes;   // узлы шага: h не участвует, интервалы — под потолок пиков
+        const size_t iters = raw ? 0 : (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (!raw && (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)()))
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
         const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
-        const size_t peakStride    = iters < (size_t)max_amount_of_peaks + 1 ? iters : (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride    = (raw || iters >= (size_t)max_amount_of_peaks + 1)
+                                   ? (size_t)max_amount_of_peaks + 1 : iters;
         const int    peakCapacity  = (int)peakStride;
         const std::vector<double> values = req.base_values, x0 = req.initial_conditions;
         const double lo = cont ? req.param_lo : ax.lo_x, hi = cont ? req.param_hi : ax.hi_x;
@@ -8487,8 +8494,8 @@ struct ParametricEngine::Impl {
                                  req.log_scale ? 1 : 0, ax.par_or_var, mutIdx, values.data(), (int)values.size(),
                                  x0.data(), &ad.params, ad.axis_kind[0], ad.tol_ratio, req.writable_var,
                                  req.max_value, iv, (unsigned long long)peakStride, peakCapacity, om, mask, fl,
-                                 req.transient_time, req.h, req.pre_scaller, (unsigned long long)iters, st,
-                                 &cancelFlag, prog);
+                                 req.transient_time, req.t_max, req.h, req.pre_scaller, (unsigned long long)iters,
+                                 raw ? 1 : 0, ad.peak_interp, st, &cancelFlag, prog);
         };
         bool aborted = false;
         if (cont) {
@@ -8557,9 +8564,10 @@ struct ParametricEngine::Impl {
             return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
         if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
             return fail("param_index out of range");
-        if (req.h <= 0.0) return fail("h must be > 0");
-        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
-        if (iters == 0) return fail("amountOfPointsInBlock <= 0");
+        const bool raw = ad.raw_nodes;   // узлы шага: h не участвует, интервалы — под потолок пиков
+        if (!raw && req.h <= 0.0) return fail("h must be > 0");
+        const size_t iters = raw ? 0 : (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (!raw && iters == 0) return fail("amountOfPointsInBlock <= 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -8569,8 +8577,8 @@ struct ParametricEngine::Impl {
         const int    nPts  = req.n_pts;
         const int    mask  = req.metric_mask & kSignalMetricAllMask;
         const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
-        const size_t peakStride    = iters < (size_t)max_amount_of_peaks + 1
-                                   ? iters : (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride    = (raw || iters >= (size_t)max_amount_of_peaks + 1)
+                                   ? (size_t)max_amount_of_peaks + 1 : iters;
 
         numb* d_baseValues = nullptr;
         numb* d_baseX      = nullptr;
@@ -8629,9 +8637,12 @@ struct ParametricEngine::Impl {
         int*   d_axis_arg      = adArgs.axis;
         numb   tolRatio_arg    = (numb)ad.tol_ratio;
         numb   transient_arg   = (numb)req.transient_time;
+        numb   tRec_arg        = (numb)req.t_max;
         numb   dtOut_arg       = (numb)req.h;
         int    preScaller_arg  = req.pre_scaller;
         size_t iters_arg       = iters;
+        int    raw_arg         = raw ? 1 : 0;
+        int    interp_arg      = ad.peak_interp;
         int*   d_cancel_arg    = sig.cancelArg();
         int*   d_progress_arg  = sig.progressArg();
         numb*  d_adStats_arg   = adArgs.stats;
@@ -8639,8 +8650,8 @@ struct ParametricEngine::Impl {
             &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &mutParamIdx_arg,
             &d_baseValues, &amountOfVal_arg, &d_baseX, &writableVar_arg, &maxValue_arg,
             &d_intervals, &peakCap_arg, &d_out, &mask_arg, &d_flags,
-            &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &dtOut_arg,
-            &preScaller_arg, &iters_arg, &d_cancel_arg, &d_progress_arg, &d_adStats_arg
+            &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tRec_arg, &dtOut_arg,
+            &preScaller_arg, &iters_arg, &raw_arg, &interp_arg, &d_cancel_arg, &d_progress_arg, &d_adStats_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;

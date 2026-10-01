@@ -160,14 +160,16 @@ public:
                                  int* progress);
     // Метрики 1D (calculateDiscreteModelMetricsAdCUDA / signalMetricsContinuationAdKernel). Классика —
     // точки [i0, i1), outMetrics[m * (i1 - i0) + row], intervals — строка на точку по peakStride;
-    // continuation — вся цепочка, outMetrics[m * nPts + j], intervals — одна строка. 0 — отмена.
+    // continuation — вся цепочка, outMetrics[m * nPts + j], intervals — одна строка. raw — узлы шага
+    // (до transientTime + tRec, прореживание preScaller), иначе сетка dtOut. 0 — отмена.
     using MetricsFn = int (*)(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
                               int logScale, int parOrVar, int mutIdx, const double* baseValues,
                               int amountOfValues, const double* baseX, const UcudaAdaptParams* P, int axisKind,
                               double tolRatio, int writableVar, double maxValue, double* intervals,
                               unsigned long long peakStride, int peakCapacity, double* outMetrics,
-                              int metricMask, int* flags, double transientTime, double dtOut, int preScaller,
-                              unsigned long long iters, double* stats, const volatile int* cancel,
+                              int metricMask, int* flags, double transientTime, double tRec, double dtOut,
+                              int preScaller, unsigned long long iters, int raw, int peakInterp,
+                              double* stats, const volatile int* cancel,
                               int* progress);
     AdaptiveCpuModule() = default;
     ~AdaptiveCpuModule();

@@ -1536,8 +1536,9 @@ struct SignalMetricsRequest {
     // единственную метрику, которой мало потоковых сумм.
     int metric_mask = kSignalMetricAllMask;
 
-    // Адаптивный шаг (см. AdaptiveRequest): только равномерная сетка, raw_nodes не
-    // читается; Хьорт при нём не считается (NaN). Continuation и CPU — только Fixed.
+    // Адаптивный шаг (см. AdaptiveRequest): равномерная сетка или узлы шага (raw_nodes;
+    // средние по времени, экстремумы и пики — интерполяцией между узлами, см.
+    // metrics_adaptive_part.cu); Хьорт при нём не считается (NaN).
     AdaptiveRequest adaptive;
     // min/max по интерполированным экстремумам и при постоянном шаге (при
     // адаптивном — всегда).

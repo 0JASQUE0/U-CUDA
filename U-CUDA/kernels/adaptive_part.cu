@@ -152,6 +152,63 @@ struct UcudaAdProgress {
 //       производным в узлах, вершина — корень его производной.
 // Время пика абсолютное; интервалы, их фильтр eps_interPeak_delta, потолки и
 // суммы — как у PeakStream.
+
+// Вершина (максимум) на отрезке [t1, t] между узлами, где d1 > 0 >= d, способом interp
+// (см. выше); (t0, x0) — узел перед ним, нужен параболе при n >= 2 (n — узлов до t).
+// Общая для пиков (PeakStreamNU) и экстремумов метрик на узлах (MetricsAccumNU); минимум —
+// та же функция от -x, -d.
+__device__ __host__ __forceinline__ void ucudaAdNodeVertex(const int interp, const int n,
+	const numb t0, const numb x0, const numb t1, const numb x1, const numb d1,
+	const numb t, const numb x, const numb d, numb& pv, numb& pt)
+{
+	pv = x1; pt = t1;
+	if (x > x1) { pv = x; pt = t; }
+	if (interp == 1 && n >= 2) {
+		const numb h1 = t1 - t0, h2 = t - t1;
+		if (h1 > 0 && h2 > 0) {
+			const numb e1 = (x1 - x0) / h1, e2 = (x - x1) / h2;
+			const numb c = (e2 - e1) / (h1 + h2);
+			const numb b = (e1 * h2 + e2 * h1) / (h1 + h2);
+			if (c < 0) {
+				numb tau = -b / (2 * c);
+				if (tau < -h1) tau = -h1;
+				if (tau > h2)  tau = h2;
+				pv = x1 + tau * (b + c * tau);
+				pt = t1 + tau;
+			}
+		}
+	}
+	else if (interp == 2) {
+		const numb h = t - t1;
+		if (h > 0) {
+			const numb D  = x - x1;
+			const numb c1 = h * d1;
+			const numb c2 = 3 * D - h * (2 * d1 + d);
+			const numb c3 = h * (d1 + d) - 2 * D;
+			// p'(th) = c1 + 2 c2 th + 3 c3 th^2; ищем корень на [0, 1] с p'' < 0.
+			const numb A = 3 * c3, B = 2 * c2, C = c1;
+			numb th = -1;
+			if (fabs(A) <= (numb)1e-14 * (fabs(B) + fabs(C))) {
+				if (B != 0) th = -C / B;
+			} else {
+				const numb disc = B * B - 4 * A * C;
+				if (disc >= 0) {
+					const numb sq = sqrt(disc);
+					const numb q  = -(numb)0.5 * (B + (B >= 0 ? sq : -sq));
+					const numb r1 = q / A;
+					const numb r2 = (q != 0) ? C / q : r1;
+					if (r1 >= 0 && r1 <= 1 && B + 2 * A * r1 < 0)      th = r1;
+					else if (r2 >= 0 && r2 <= 1 && B + 2 * A * r2 < 0) th = r2;
+				}
+			}
+			if (th >= 0 && th <= 1) {
+				pv = x1 + th * (c1 + th * (c2 + th * c3));
+				pt = t1 + th * h;
+			}
+		}
+	}
+}
+
 struct PeakStreamNU
 {
 	numb*  outPeaks;
@@ -199,52 +256,7 @@ struct PeakStreamNU
 	// Вершина на отрезке [t1, t], где d1 > 0 >= d.
 	__device__ void vertex(numb t, numb x, numb d, numb& pv, numb& pt) const
 	{
-		pv = x1; pt = t1;
-		if (x > x1) { pv = x; pt = t; }
-		if (interp == 1 && n >= 2) {
-			const numb h1 = t1 - t0, h2 = t - t1;
-			if (h1 > 0 && h2 > 0) {
-				const numb e1 = (x1 - x0) / h1, e2 = (x - x1) / h2;
-				const numb c = (e2 - e1) / (h1 + h2);
-				const numb b = (e1 * h2 + e2 * h1) / (h1 + h2);
-				if (c < 0) {
-					numb tau = -b / (2 * c);
-					if (tau < -h1) tau = -h1;
-					if (tau > h2)  tau = h2;
-					pv = x1 + tau * (b + c * tau);
-					pt = t1 + tau;
-				}
-			}
-		}
-		else if (interp == 2) {
-			const numb h = t - t1;
-			if (h > 0) {
-				const numb D  = x - x1;
-				const numb c1 = h * d1;
-				const numb c2 = 3 * D - h * (2 * d1 + d);
-				const numb c3 = h * (d1 + d) - 2 * D;
-				// p'(th) = c1 + 2 c2 th + 3 c3 th^2; ищем корень на [0, 1] с p'' < 0.
-				const numb A = 3 * c3, B = 2 * c2, C = c1;
-				numb th = -1;
-				if (fabs(A) <= (numb)1e-14 * (fabs(B) + fabs(C))) {
-					if (B != 0) th = -C / B;
-				} else {
-					const numb disc = B * B - 4 * A * C;
-					if (disc >= 0) {
-						const numb sq = sqrt(disc);
-						const numb q  = -(numb)0.5 * (B + (B >= 0 ? sq : -sq));
-						const numb r1 = q / A;
-						const numb r2 = (q != 0) ? C / q : r1;
-						if (r1 >= 0 && r1 <= 1 && B + 2 * A * r1 < 0)      th = r1;
-						else if (r2 >= 0 && r2 <= 1 && B + 2 * A * r2 < 0) th = r2;
-					}
-				}
-				if (th >= 0 && th <= 1) {
-					pv = x1 + th * (c1 + th * (c2 + th * c3));
-					pt = t1 + th * h;
-				}
-			}
-		}
+		ucudaAdNodeVertex(interp, n, t0, x0, t1, x1, d1, t, x, d, pv, pt);
 	}
 
 	__device__ void pushNode(numb t, numb x, numb d)
@@ -327,19 +339,19 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 #endif // UCUDA_AD_NO_DENSE
 
 // Транзиент и запись по узлам шага с одним вызовом шага: до tTr — транзиент, затем
-// начальный узел, каждый dec-й принятый и последний — в PeakStreamNU, до tEnd.
+// начальный узел, каждый dec-й принятый и последний — в push(t, X, F) (F = f(X)), до tEnd.
 // Разлёт — по S.X; неподвижная точка — sum|f(x)| < eps_fixed_point в конце.
-__device__ __forceinline__ int ucudaAdNodesPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
-	const UcudaAdaptParams& P, const numb tTr, const numb tEnd, const int dec,
-	const int writableVar, const numb maxValue, PeakStreamNU& peaks,
-	const volatile int* cancelFlag, UcudaAdProgress& prog)
+template <class Push>
+__device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
+	const UcudaAdaptParams& P, const numb tTr, const numb tEnd, const int dec, const numb maxValue,
+	Push& push, const volatile int* cancelFlag, UcudaAdProgress& prog)
 {
 	bool rec = false;
 	int  cnt = 0, nst = 0;
 	for (;;) {
 		if (!rec && !(S.t < tTr)) {
 			rec = true;
-			peaks.pushNode(S.t, ucudaAdObs(S.X, writableVar), ucudaAdObs(S.F0, writableVar));
+			push(S.t, S.X, S.F0);
 		}
 		if (rec && !(S.t < tEnd)) break;
 		ucuda_ad_step(S, K, a, P, rec ? tEnd : tTr);
@@ -348,13 +360,31 @@ __device__ __forceinline__ int ucudaAdNodesPoint(UcudaAdaptState& S, const Ucuda
 		if (rec) {
 			++cnt;
 			if ((dec <= 1) || (cnt % dec) == 0 || !(S.t < tEnd))
-				peaks.pushNode(S.t, ucudaAdObs(S.X, writableVar), ucudaAdObs(S.F0, writableVar));
+				push(S.t, S.X, S.F0);
 		}
 		if ((++nst & 63) == 0 && cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
 	}
 	numb sf = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j) sf += fabs(S.F0[j]);
 	return (sf < eps_fixed_point) ? REGIME_FIXED_POINT : REGIME_OSCILLATION;
+}
+
+// Узел -> пики (БД, бассейны).
+struct UcudaAdPushNodePeaks {
+	PeakStreamNU& peaks;
+	int           writableVar;
+	__device__ void operator()(const numb t, const numb* X, const numb* F) {
+		peaks.pushNode(t, ucudaAdObs(X, writableVar), ucudaAdObs(F, writableVar));
+	}
+};
+
+__device__ __forceinline__ int ucudaAdNodesPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
+	const UcudaAdaptParams& P, const numb tTr, const numb tEnd, const int dec,
+	const int writableVar, const numb maxValue, PeakStreamNU& peaks,
+	const volatile int* cancelFlag, UcudaAdProgress& prog)
+{
+	UcudaAdPushNodePeaks push{ peaks, writableVar };
+	return ucudaAdNodesPointT(S, K, a, P, tTr, tEnd, dec, maxValue, push, cancelFlag, prog);
 }
 
 #ifndef UCUDA_AD_NO_DENSE
