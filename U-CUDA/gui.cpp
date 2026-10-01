@@ -1309,7 +1309,6 @@ static void broadcast_adaptive(AppModel& m, const AdaptiveSettings& a) {
 // Окно редактора adaptive_ctrl_library(). Записи правятся на месте под замком библиотеки
 // (расчётные потоки берут копию записи по имени); файл пишется, когда правка закончена —
 // ни одно поле окна не активно.
-static bool g_ctrl_library_open_request = false;   // "edit library..." в комбо регулятора
 
 static std::vector<std::pair<std::string, std::string>> user_ctrl_list() {
     AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
@@ -1340,7 +1339,6 @@ static const char* const kCtrlBodyHelp =
     "(or after max rejects), and retries with at most 0.9 h.";
 
 static void draw_ctrl_library_window(AppModel& m) {
-    if (g_ctrl_library_open_request) { m.show_ctrl_library = true; g_ctrl_library_open_request = false; }
     if (!m.show_ctrl_library) return;
     ImGui::SetNextWindowSize(ImVec2(940.0f, 640.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Step controller library", &m.show_ctrl_library)) { ImGui::End(); return; }
@@ -1630,7 +1628,8 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
                 ImGui::PopID();
             }
             ImGui::Separator();
-            if (ImGui::Selectable("edit library...")) g_ctrl_library_open_request = true;
+            // Окно библиотеки — флаг в AppModel; без модели (bc == nullptr) пункта нет.
+            if (bc != nullptr && ImGui::Selectable("edit library...")) bc->show_ctrl_library = true;
 #endif
             ImGui::EndCombo();
         }

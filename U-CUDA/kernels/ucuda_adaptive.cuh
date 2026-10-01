@@ -739,10 +739,11 @@ struct UcudaAdNoExtra {
 // дальше интегрировать бессмысленно, а вынужденные шаги по 10 ulp(t) не закончились
 // бы никогда. Вызывающий обязан проверять diverged в своих циклах.
 //
-// Цикл свипа на GPU делает одну попытку за итерацию, а не целый шаг (ucuda_ad_step_x):
+// LLE/LS (ucuda_lyap_point) делают одну попытку за итерацию, а не целый шаг (ucuda_ad_step_x):
 // отказы у нитей варпа случаются в разное время, и с повторами внутри шага варп на
-// каждом шаге ждал бы самую невезучую нить (при 15% отказов хоть одна из 32 есть почти
-// всегда — шаг стоил бы двух попыток). Последовательность попыток каждой нити та же.
+// каждом шаге ждал бы самую невезучую нить; LS 2D так в 1.5 раза быстрее. Свипы БД, бассейнов
+// и метрик зовут целый шаг: у них та же перестройка оказалась в 1.3-1.6 раза медленнее.
+// Последовательность попыток каждой нити та же.
 template <class K, class Ext>
 UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a,
                                    const UcudaAdaptParams& P, numb tEnd, Ext& ext) {
@@ -1077,20 +1078,18 @@ struct UcudaLyapClones {
     }
 };
 
-struct UcudaLyapNoProgress { UCUDA_HD void update(numb) {} };
-
 // Одна точка. Свежая (carried = false): транзиент tTr по одной x, затем клоны (направления —
 // подпоследовательность seq), nWarm неучётных блоков, nBlocks учётных. Перенесённая с
 // предыдущей точки цепочки continuation (carried = true, клоны в cl уже прикреплены, S после
 // ucuda_ad_restart): транзиента по одной x нет — он идёт блоками с клонами без учёта
 // (max(tTr/NT, nWarm) блоков, как settleBlocks у постоянного шага), чтобы щуп не терял
 // ориентацию. res[NC] — показатели. Возвращает 1, 0 — разлёт или отмена.
-template <int NC, class K, class Prog>
+template <int NC, class K>
 UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb* a, const UcudaAdaptParams& P,
                                      UcudaLyapClones<NC>& cl, const bool carried, const numb tTr, const numb NT,
                                      const int nBlocks, const int nWarm, const numb eps, const int renorm,
                                      const numb maxValue, const int seq, numb* res,
-                                     const volatile int* cancelFlag, Prog& prog) {
+                                     const volatile int* cancelFlag) {
     constexpr int n = AMOUNTOFX;
     cl.rtol = P.rtol > 0 ? P.rtol : P.atol[0];   // чисто абсолютный допуск — как относительный для delta
     cl.nlo  = P.nlo;
@@ -1127,7 +1126,6 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             if (S.diverged) return 0;
             continue;
         }
-        prog.update(S.t);
         // Порог разлёта (опорная и клоны) и флаг отмены — раз в CHECK_INTERVAL принятых шагов,
         // как у постоянного шага; NaN/inf не принимается вовсе (ошибка попытки бесконечна).
         if (++cnt == CHECK_INTERVAL) {
@@ -1178,7 +1176,6 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
     UcudaAdaptState S;
     UcudaLyapClones<NC> cl;
     cl.active = false;
-    UcudaLyapNoProgress prog;
     bool attached = false;
     int  seq = 0;
     const numb qnan = sqrt((numb)-1);
@@ -1204,7 +1201,7 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
         numb res[NC];
         const int ok = ucuda_lyap_out(S.X, maxValue) ? 0
                      : ucuda_lyap_point<NC>(S, Kf, a, P, cl, attached, tTr, NT, nBlocks, nWarm, eps, renorm,
-                                            maxValue, seq, res, cancelFlag, prog);
+                                            maxValue, seq, res, cancelFlag);
         for (int m = 0; m < NC; ++m) result[(size_t)j * NC + m] = ok ? res[m] : qnan;
         if (adStats != nullptr) {
             numb* st = adStats + (size_t)j * 4;
@@ -1237,7 +1234,6 @@ UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const i
     UcudaAdaptState S;
     UcudaLyapClones<NC> cl;
     cl.active = false;
-    UcudaLyapNoProgress prog;
     const numb qnan = sqrt((numb)-1);
     for (int j = j0; j < j1; ++j) {
         if (cancelFlag != nullptr && *cancelFlag != 0) return;
@@ -1255,7 +1251,7 @@ UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const i
         numb res[NC];
         const int ok = ucuda_lyap_out(S.X, maxValue) ? 0
                      : ucuda_lyap_point<NC>(S, Kf, a, P, cl, false, tTr, NT, nBlocks, nWarm, eps, renorm,
-                                            maxValue, j, res, cancelFlag, prog);
+                                            maxValue, j, res, cancelFlag);
         const size_t r = (size_t)(j - j0);
         for (int m = 0; m < NC; ++m) result[r * NC + m] = ok ? res[m] : qnan;
         if (adStats != nullptr) {

@@ -296,7 +296,7 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   (PCIe) and its BSYNC were the main stall. Rossler 256x256 DOP853: BD 2D kernel 1.65 -> 0.73 s,
   Metrics 1.64 -> 0.98 s; at real clocks the kernel is now FP64-bound (85%).
 - **Progress and cancel in all adaptive GPU kernels:** progress is reported per point
-  (`UcudaAdProgress::top_up`, `update` is a no-op); the threshold check (`ucudaAdOut` /
+  (`ucudaProgressTopUp` at the end of the point; no ticks inside it); the threshold check (`ucudaAdOut` /
   `ucuda_lyap_out`) and the cancel flag run every `CHECK_INTERVAL` accepted steps (counted in steps,
   not output samples) plus once after the last step. `S.diverged` (non-finite error at h_min) is
   still tested every step: it is set by the step itself and ends the loop. Cost of the old scheme

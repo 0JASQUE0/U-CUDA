@@ -35,6 +35,8 @@ struct AdaptiveSettings {
     std::string max_points = "1000000";     // Analysis, сырые узлы: потолок узлов на траекторию
     int         lyap_renorm = 0;            // LLE/LS: 0 — ровно в k*NT, 1 — в первом узле после NT
     bool        minmax_interp_fixed = false;// Metrics: min/max по интерполированным экстремумам и в Fixed
+    bool        ctrl_replaced = false;      // чтение сессии заменило регулятор (adaptive_ctrl_effective):
+                                            //   не пишется и не сравнивается, см. session_io
 };
 
 inline bool operator==(const AdaptiveSettings& a, const AdaptiveSettings& b) {

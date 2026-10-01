@@ -3561,8 +3561,10 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     req.metric_mask    = c.metric_mask & kSignalMetricAllMask;
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     req.minmax_interp  = c.adaptive.minmax_interp_fixed;
+    // 1D: вторая ось не участвует, и её код от режима 2D не должен уводить расчёт из модуля
+    // узлов (ad_nodes_module смотрит обе оси).
     fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive);
     return req;
 }
 

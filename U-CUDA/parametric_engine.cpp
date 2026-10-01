@@ -3349,7 +3349,6 @@ struct ParametricEngine::Impl {
         numb   tMax_a = (numb)tMax, NT_a = (numb)NT, eps_a = (numb)eps;
         int    nBlocks = (int)(tMax / NT), renorm = ad.lyap_renorm;
         int    nWarm = lyap_warm_blocks(vectorTransient, NT);
-        numb   progressDt = (numb)((transientTime + tMax + nWarm * NT) / (double)kAdProgressUnits);
         size_t units = kAdProgressUnits;
         UcudaAdaptParams* dP = a.params;
         int*   dAx = a.axis;
@@ -3358,7 +3357,7 @@ struct ParametricEngine::Impl {
         int*   d_prog   = sig.progressArg();
         void* args[] = { &nPts, &cur, &calculated, &dimension, &d_ranges, &d_idx, &d_ic, &nIC, &d_vals, &nVals,
                          &maxValue_a, &d_res, &logAxisMask, &dP, &dAx, &tolRatio, &tTr, &tMax_a, &NT_a,
-                         &nBlocks, &nWarm, &eps_a, &renorm, &d_cancel, &d_prog, &progressStride, &progressDt, &units, &dSt };
+                         &nBlocks, &nWarm, &eps_a, &renorm, &d_cancel, &d_prog, &progressStride, &units, &dSt };
         return cuLaunchKernel(ls ? cached_lyap_ad.kernel_ls : cached_lyap_ad.kernel_lle,
                               gridSize, 1, 1, blockSize, 1, 1, (unsigned int)(sharedPerThread * blockSize),
                               nullptr, args, nullptr);
@@ -3738,7 +3737,6 @@ struct ParametricEngine::Impl {
                 numb   dtOut_arg         = h;
                 int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
                 int    interp_arg        = req.adaptive.peak_interp;
-                numb   progressDt_arg    = (numb)((transientTime + tMax) / (double)kAdProgressUnits);
                 size_t progressUnits_arg = kAdProgressUnits;
                 numb*  d_adStats_arg     = adArgs.stats;
                 void* args_ad[] = {
@@ -3749,7 +3747,7 @@ struct ParametricEngine::Impl {
                     &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
                     ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
-                    &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
                     &progressUnits_arg, &d_adStats_arg
                 };
                 BIF_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
@@ -7690,7 +7688,6 @@ struct ParametricEngine::Impl {
                 numb   dtOut_arg         = h;
                 int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
                 int    interp_arg        = req.adaptive.peak_interp;
-                numb   progressDt_arg    = (numb)((transientTime + tMax) / (double)kAdProgressUnits);
                 size_t progressUnits_arg = kAdProgressUnits;
                 numb*  d_adStats_arg     = adArgs.stats;
                 void* args_ad[] = {
@@ -7701,7 +7698,7 @@ struct ParametricEngine::Impl {
                     &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
                     ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
-                    &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
                     &progressUnits_arg, &d_adStats_arg
                 };
                 BIF2D_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
@@ -8251,7 +8248,6 @@ struct ParametricEngine::Impl {
                 int*   d_axis_arg        = adArgs.axis;
                 numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
                 numb   dtOut_arg         = (numb)req.h;
-                numb   progressDt_arg    = (numb)((req.transient_time + req.t_max) / (double)kAdProgressUnits);
                 size_t progressUnits_arg = kAdProgressUnits;
                 numb*  d_adStats_arg     = adArgs.stats;
                 int    raw_arg           = adRaw ? 1 : 0;
@@ -8264,7 +8260,7 @@ struct ParametricEngine::Impl {
                     &d_out, &metricStride_arg, &mask_arg, &d_flags, &logMask_arg,
                     ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transient_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_arg, &iterations_arg, &raw_arg, &interp_arg,
-                    &d_cancel_arg, &d_progress_arg, &progStride_arg, &progressDt_arg,
+                    &d_cancel_arg, &d_progress_arg, &progStride_arg,
                     &progressUnits_arg, &d_adStats_arg
                 };
                 SIGM_CHECK_CU(cuLaunchKernel(cached_metrics_ad.kernel,
@@ -9030,7 +9026,6 @@ struct ParametricEngine::Impl {
                 numb   dtOut_arg         = h;
                 int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
                 int    interp_arg        = req.adaptive.peak_interp;
-                numb   progressDt_arg    = (numb)((transientTime + tMax) / (double)kAdProgressUnits);
                 size_t progressUnits_arg = kAdProgressUnits;
                 numb*  d_adStats_arg     = adArgs.stats + iter * originalNPtsLimiter * 4;
                 void* args_ad[] = {
@@ -9041,7 +9036,7 @@ struct ParametricEngine::Impl {
                     &feature1_int, &feature2_int, &mult1_v, &mult2_v,
                     ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
-                    &d_cancel_arg, &d_progress_arg, &progressStride_arg, &progressDt_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
                     &progressUnits_arg, &d_adStats_arg
                 };
                 BAS_CHECK_CU(cuLaunchKernel(cached_ad.kernel_avg,

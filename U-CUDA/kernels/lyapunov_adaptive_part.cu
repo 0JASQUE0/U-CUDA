@@ -32,7 +32,7 @@ __device__ __forceinline__ void ucudaLyapAdKernel(
 	const UcudaAdaptParams* Pbase, const int* axisKind, const numb tolRatio,
 	const numb transientTime, const numb tMax, const numb NT, const int nBlocks, const int nWarm, const numb eps,
 	const int renorm, const volatile int* cancelFlag, int* progressCounter, const int progressStride,
-	const numb progressDt, const size_t progressUnits, numb* adStats)
+	const size_t progressUnits, numb* adStats)
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -51,18 +51,16 @@ __device__ __forceinline__ void ucudaLyapAdKernel(
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
 	ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
-	UcudaAdProgress prog;
-	prog.init(progressCounter, progressStride, progressDt);
 
 	(void)tMax;
 	UcudaLyapClones<NC> cl;
 	cl.active = false;
 	numb res[NC];
 	const int ok = ucuda_lyap_point<NC>(S, K, localValues, P, cl, false, transientTime, NT, nBlocks, nWarm, eps,
-		renorm, maxValue, idx, res, cancelFlag, prog);
+		renorm, maxValue, idx, res, cancelFlag);
 	for (int m = 0; m < NC; ++m) resultArray[(size_t)idx * NC + m] = ok ? res[m] : (numb)999;
 	ucudaAdWriteStats(adStats, idx, S);
-	prog.top_up((int)(progressUnits / (size_t)(progressStride > 0 ? progressStride : 1)));
+	ucudaProgressTopUp(progressCounter, progressStride, progressUnits, 0);
 }
 
 #define UCUDA_LYAP_AD_PARAMS \
@@ -73,12 +71,12 @@ __device__ __forceinline__ void ucudaLyapAdKernel(
 	const int logAxisMask, const UcudaAdaptParams* __restrict__ Pbase, const int* __restrict__ axisKind, \
 	const numb tolRatio, const numb transientTime, const numb tMax, const numb NT, const int nBlocks, const int nWarm, \
 	const numb eps, const int renorm, const volatile int* cancelFlag, int* progressCounter, \
-	const int progressStride, const numb progressDt, const size_t progressUnits, numb* adStats
+	const int progressStride, const size_t progressUnits, numb* adStats
 #define UCUDA_LYAP_AD_ARGS \
 	nPts, nPtsLimiter, amountOfCalculatedPoints, dimension, ranges, indicesOfMutVars, initialConditions, \
 	amountOfInitialConditions, values, amountOfValues, maxValue, resultArray, logAxisMask, Pbase, axisKind, \
 	tolRatio, transientTime, tMax, NT, nBlocks, nWarm, eps, renorm, cancelFlag, progressCounter, progressStride, \
-	progressDt, progressUnits, adStats
+	progressUnits, adStats
 
 // LLE: один клон, одно число на точку (как LLEKernelCUDA).
 __global__ void lyapunovLLEAdCUDA(UCUDA_LYAP_AD_PARAMS)

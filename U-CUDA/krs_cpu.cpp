@@ -683,8 +683,6 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
     int* flags, double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters,
     int raw, int peakInterp, double* adStats, const volatile int* cancelFlag, int* progress) {
     const UcudaKrsFns K{};
-    UcudaAdProgress prog;
-    prog.init(nullptr, 0, (numb)0);
     numb res[SIGM_COUNT];
     if (!continuation) {
         ucuda_cpu_par_or_var = parOrVar;
@@ -707,7 +705,7 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
             const int flag = ucudaAdMetricsRun(S, K, localValues, P, (numb)transientTime, (numb)tRec, dt,
                 (size_t)iters, raw, preScaller, peakInterp, writableVar, (numb)maxValue,
                 intervals != nullptr ? intervals + (size_t)row * peakStride : nullptr, peakCapacity, metricMask,
-                false, cancelFlag, prog, res);
+                false, cancelFlag, res);
             if (flags != nullptr) flags[row] = flag;
             for (int m = 0; m < SIGM_COUNT; ++m)
                 if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)rows + row] = res[m];
@@ -734,7 +732,7 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
         const numb dt = (numb)dtOut * (numb)preScaller;
         const int flag = ucudaAdMetricsRun(S, K, a, P, (numb)transientTime, (numb)tRec, dt, (size_t)iters, raw,
             preScaller, peakInterp, writableVar, (numb)maxValue, intervals, peakCapacity, metricMask,
-            ucudaAdOut(S.X, (numb)maxValue), cancelFlag, prog, res);
+            ucudaAdOut(S.X, (numb)maxValue), cancelFlag, res);
         if (flags != nullptr) flags[j] = flag;
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)nPts + j] = res[m];
@@ -754,8 +752,6 @@ int ucuda_cpu_ad_bif(int continuation, int i0, int i1, int nPts, double lo, doub
     double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters, int raw,
     int interp, double* adStats, const volatile int* cancelFlag, int* progress) {
     const UcudaKrsFns K{};
-    UcudaAdProgress prog;
-    prog.init(nullptr, 0, (numb)0);
     const numb dtS = (numb)dtOut * (numb)preScaller;
     if (!continuation) {
         ucuda_cpu_par_or_var = sweepVar ? 0 : 1;
@@ -777,7 +773,7 @@ int ucuda_cpu_ad_bif(int continuation, int i0, int i1, int nPts, double lo, doub
             if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, dtS, (size_t)iters, peakCapacity);
             else      pn.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, peakCapacity, interp);
             const int flag  = ucudaAdPeaksPoint(S, K, localValues, P, (numb)transientTime, (numb)tRec, dtS,
-                (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn, cancelFlag, prog);
+                (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn, cancelFlag);
             const int count = raw ? pn.count() : pu.count();
             flags[row] = (flag == REGIME_OSCILLATION) ? count : flag;
             ucudaAdWriteStats(adStats, row, S);
@@ -806,7 +802,7 @@ int ucuda_cpu_ad_bif(int continuation, int i0, int i1, int nPts, double lo, doub
         const int flag  = ucudaAdOut(S.X, (numb)maxValue) ? REGIME_UNBOUND
                         : ucudaAdPeaksPoint(S, K, a, P, (numb)transientTime, (numb)tRec, dtS,
                                             (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn,
-                                            cancelFlag, prog);
+                                            cancelFlag);
         const int count = raw ? pn.count() : pu.count();
         flags[j] = (flag == REGIME_OSCILLATION) ? count : flag;
         ucudaAdWriteStats(adStats, j, S);

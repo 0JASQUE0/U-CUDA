@@ -43,10 +43,10 @@ struct UcudaAdPushMetrics {
 __device__ __forceinline__ int ucudaAdMetricsPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb transientTime, const numb dt, const size_t iters,
 	const int writableVar, const numb maxValue, PeakStream& peaks, MetricsAccum& acc,
-	IntervalStats& ist, const volatile int* cancelFlag, UcudaAdProgress& prog)
+	IntervalStats& ist, const volatile int* cancelFlag)
 {
 	UcudaAdPushMetrics push{ peaks, acc, ist, writableVar };
-	return ucudaAdUniformPoint(S, K, a, P, transientTime, dt, iters, maxValue, push, cancelFlag, prog);
+	return ucudaAdUniformPoint(S, K, a, P, transientTime, dt, iters, maxValue, push, cancelFlag);
 }
 #endif
 
@@ -200,7 +200,7 @@ __device__ __forceinline__ int ucudaAdMetricsRun(UcudaAdaptState& S, const Ucuda
 	const UcudaAdaptParams& P, const numb transientTime, const numb tRec, const numb dt, const size_t iters,
 	const int raw, const int dec, const int peakInterp, const int writableVar, const numb maxValue,
 	numb* T, const int peakCapacity, const int metricMask, const bool skip,
-	const volatile int* cancelFlag, UcudaAdProgress& prog, numb* res)
+	const volatile int* cancelFlag, numb* res)
 {
 	const bool box = ((metricMask >> SIGM_VOLUME) & 1) != 0;
 	IntervalStats ist;
@@ -221,7 +221,7 @@ __device__ __forceinline__ int ucudaAdMetricsRun(UcudaAdaptState& S, const Ucuda
 #else
 		flag = skip ? REGIME_UNBOUND
 		     : ucudaAdMetricsPoint(S, K, a, P, transientTime, dt, iters, writableVar, maxValue,
-		                           peaks, acc, ist, cancelFlag, prog);
+		                           peaks, acc, ist, cancelFlag);
 #endif
 		flag = smFinalize(flag, acc, peaks, ist, T, dt, res);
 	} else {
@@ -232,7 +232,7 @@ __device__ __forceinline__ int ucudaAdMetricsRun(UcudaAdaptState& S, const Ucuda
 		UcudaAdPushMetricsNU push{ peaks, acc, ist, writableVar };
 		flag = skip ? REGIME_UNBOUND
 		     : ucudaAdNodesPointT(S, K, a, P, transientTime, transientTime + tRec, dec, maxValue,
-		                          push, cancelFlag, prog);
+		                          push, cancelFlag);
 		flag = smFinalizeNU(flag, acc, peaks, ist, T, res);
 	}
 	res[SIGM_HJORTH_MOBILITY]   = (numb)nan("");
@@ -280,7 +280,6 @@ __global__ void calculateDiscreteModelMetricsAdCUDA(
 	const volatile int* cancelFlag,
 	int*			progressCounter,
 	const int		progressStride,
-	const numb		progressDt,
 	const size_t	progressUnits,
 	numb*			adStats)
 {
@@ -304,21 +303,19 @@ __global__ void calculateDiscreteModelMetricsAdCUDA(
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
 	ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
-	UcudaAdProgress prog;
-	prog.init(progressCounter, progressStride, progressDt);
 
 	const numb dt = dtOut * (numb)preScaller;
 	// UNBOUND итог сам сводит к NaN во всех метриках.
 	const int flag = ucudaAdMetricsRun(S, K, localValues, P, transientTime, tRec, dt, iters, raw, preScaller,
 		peakInterp, writableVar, maxValue, intervals != nullptr ? intervals + (size_t)idx * peakStride : nullptr,
-		peakCapacity, metricMask, false, cancelFlag, prog, res);
+		peakCapacity, metricMask, false, cancelFlag, res);
 
 	if (flags != nullptr) flags[idx] = flag;
 	for (int m = 0; m < SIGM_COUNT; ++m)
 		if ((metricMask >> m) & 1)
 			outMetrics[(size_t)m * metricStride + idx] = res[m];
 	ucudaAdWriteStats(adStats, idx, S);
-	prog.top_up((int)(progressUnits / (size_t)(progressStride > 0 ? progressStride : 1)));
+	ucudaProgressTopUp(progressCounter, progressStride, progressUnits, 0);
 }
 
 // Continuation метрик: цепочка точек, как у signalMetricsContinuationKernel, но
@@ -368,8 +365,6 @@ __global__ void signalMetricsContinuationAdKernel(
 	const int kind = axisKind[0];
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
-	UcudaAdProgress prog;
-	prog.init(nullptr, 0, (numb)0);
 
 	numb res[SIGM_COUNT];
 	for (int j = 0; j < nPts; ++j) {
@@ -385,7 +380,7 @@ __global__ void signalMetricsContinuationAdKernel(
 		const numb dt = dtOut * (numb)preScaller;
 		const int flag = ucudaAdMetricsRun(S, K, a, P, transientTime, tRec, dt, iters, raw, preScaller, peakInterp,
 			writableVar, maxValue, intervals, peakCapacity, metricMask, ucudaAdOut(S.X, maxValue), cancelFlag,
-			prog, res);
+			res);
 
 		if (flags != nullptr) flags[j] = flag;
 		for (int m = 0; m < SIGM_COUNT; ++m)

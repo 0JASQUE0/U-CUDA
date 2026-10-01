@@ -76,7 +76,8 @@ __device__ __forceinline__ numb ucudaAdObs(const numb* v, const int writableVar)
 
 #ifdef UCUDA_AD_NODES_KERNEL
 // То же значение весами: r = sum w_j v_j, w_j = 1 / 0 (одна переменная) или 1, pi, euler
-// (комбинация) — та же цепочка FMA, что выше, а fma(0, v, r) = r. Индексы — константы.
+// (комбинация) — та же цепочка FMA, что выше. Слагаемое с нулевым весом пропускается, а не
+// умножается: 0 * inf = NaN испортил бы сигнал из-за ненаблюдаемой компоненты. Индексы — константы.
 // v[writableVar] (индекс известен лишь при запуске; выбор перебором компилятор сворачивает
 // обратно в него) держал бы в локальной памяти массив, на который смотрит v, — X и f(X)
 // состояния шага, а с ними и всё состояние: каждый принятый шаг дописывал его туда
@@ -88,7 +89,7 @@ __device__ __forceinline__ numb ucudaAdObsW(const numb* v, const int writableVar
 		const numb w = writableVar < 0
 			? (j == 0 ? (numb)1 : (j == 1 ? (numb)pi : (j == 2 ? (numb)euler : (numb)0)))
 			: (writableVar == j ? (numb)1 : (numb)0);
-		r += w * v[j];
+		r = (w != (numb)0) ? r + w * v[j] : r;
 	}
 	return r;
 }
@@ -148,20 +149,10 @@ __device__ __forceinline__ void ucudaSetupSweepPointAd(
 	}
 }
 
-// Прогресс: точка отчитывает свои progressUnits / stride тиков целиком, в конце (top_up).
-// Тики по модельному времени внутри точки (update) убраны: каждый — атомик в память хоста
-// через PCIe, и вокруг него нити варпа ждали друг друга (BSYNC). Rossler DOP853: LLE 2D
-// 128x128 0.48 -> 0.9 s, БД и метрики 2D на сетке вывода +20%, LS 2D +5-15%.
-struct UcudaAdProgress {
-	int* counter;
-	__device__ void init(int* c, const int stride, const numb progressDt) {
-		counter = (stride > 0 && progressDt > 0) ? c : nullptr;
-	}
-	__device__ void update(const numb) {}
-	__device__ void top_up(const int expected) {
-		if (counter != nullptr && expected > 0) atomicAdd(counter, expected);
-	}
-};
+// Прогресс адаптивных ядер: точка отчитывает свои progressUnits / stride тиков целиком, в
+// конце (ucudaProgressTopUp из cudaLibrary.cu). Тиков по модельному времени внутри точки нет:
+// каждый был атомиком в память хоста через PCIe, и вокруг него нити варпа ждали друг друга
+// (BSYNC). Rossler DOP853: LLE 2D 128x128 0.48 -> 0.9 s, БД и метрики 2D на сетке вывода +20%.
 
 // Поиск пиков на узлах адаптивного шага. Пик — смена знака производной сигнала
 // с + на - между соседними узлами; принимается, если вершина поднимается над
@@ -310,16 +301,17 @@ struct PeakStreamNU
 };
 
 // Транзиент и запись на равномерной сетке с одним вызовом шага. Цели по очереди:
-// сначала tTr с пределом tTr (транзиент: последний шаг обрезается, разлёт — по S.X),
-// затем отсчёты T0 + i*dtS (i < iters) с пределом tEnd = T0 + (iters + 1)*dtS —
-// шагать, пока S.t < цели, и взять отсчёт плотным выходом, как ucuda_ad_advance_to;
-// разлёт — по отсчётам. Неподвижная точка — разность отсчётов в T0 + iters*dtS и в
-// tEnd, как у loopCalculateDiscreteModelPeaks_int. push(y) — приёмник отсчёта.
+// сначала tTr с пределом tTr (транзиент: последний шаг обрезается), затем отсчёты
+// T0 + i*dtS (i < iters) с пределом tEnd = T0 + (iters + 1)*dtS — шагать, пока S.t < цели,
+// и взять отсчёт плотным выходом, как ucuda_ad_advance_to. Разлёт — по S.X раз в
+// CHECK_INTERVAL принятых шагов и по последнему отсчёту. Неподвижная точка — разность
+// отсчётов в T0 + iters*dtS и в tEnd, как у loopCalculateDiscreteModelPeaks_int. push(y) —
+// приёмник отсчёта.
 #ifndef UCUDA_AD_NO_DENSE   // сетка вывода — плотным выходом; модулю LLE/LS не нужна
 template <class Push>
 __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb tTr, const numb dtS, const size_t iters, const numb maxValue,
-	Push& push, const volatile int* cancelFlag, UcudaAdProgress& prog)
+	Push& push, const volatile int* cancelFlag)
 {
 	const numb tEnd = tTr + (numb)(iters + 1) * dtS;
 	numb y[AMOUNTOFX], y1[AMOUNTOFX];
@@ -327,7 +319,6 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 	// принятых шагов, не отсчётов: отсчётов в несколько раз больше, и счёт по ним стоил
 	// БД / метрикам 2D на сетке ~10% времени.
 	int cnt = 0;
-	(void)prog;   // прогресс — целой точкой, в вызывающем ядре
 	// k == 0 — транзиент, k == i + 1 — отсчёт i (последний, i == iters + 1, — сам tEnd).
 	for (size_t k = 0; k <= iters + 2; ++k) {
 		const bool   tr  = (k == 0);
@@ -364,11 +355,12 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 
 // Транзиент и запись по узлам шага с одним вызовом шага: до tTr — транзиент, затем
 // начальный узел, каждый dec-й принятый и последний — в push(t, X, F) (F = f(X)), до tEnd.
-// Разлёт — по S.X; неподвижная точка — sum|f(x)| < eps_fixed_point в конце.
+// Разлёт — по S.X раз в CHECK_INTERVAL принятых шагов и в конце; неподвижная точка —
+// sum|f(x)| < eps_fixed_point в конце.
 template <class Push>
 __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb tTr, const numb tEnd, const int dec, const numb maxValue,
-	Push& push, const volatile int* cancelFlag, UcudaAdProgress& prog)
+	Push& push, const volatile int* cancelFlag)
 {
 	bool rec = false;
 	int  cnt = 0, nst = 0;
@@ -380,7 +372,6 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 		if (rec && !(S.t < tEnd)) break;
 		ucuda_ad_step(S, K, a, P, rec ? tEnd : tTr);
 		if (S.diverged) return REGIME_UNBOUND;   // NaN/inf: шаг не принимается с бесконечной ошибкой
-		prog.update(S.t);
 		if (rec) {
 			++cnt;
 			if ((dec <= 1) || (cnt % dec) == 0 || !(S.t < tEnd))
@@ -412,10 +403,10 @@ struct UcudaAdPushNodePeaks {
 __device__ __forceinline__ int ucudaAdNodesPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb tTr, const numb tEnd, const int dec,
 	const int writableVar, const numb maxValue, PeakStreamNU& peaks,
-	const volatile int* cancelFlag, UcudaAdProgress& prog)
+	const volatile int* cancelFlag)
 {
 	UcudaAdPushNodePeaks push{ peaks, writableVar };
-	return ucudaAdNodesPointT(S, K, a, P, tTr, tEnd, dec, maxValue, push, cancelFlag, prog);
+	return ucudaAdNodesPointT(S, K, a, P, tTr, tEnd, dec, maxValue, push, cancelFlag);
 }
 
 #ifndef UCUDA_AD_NO_DENSE
@@ -431,13 +422,13 @@ struct UcudaAdPushPeaks {
 __device__ __forceinline__ int ucudaAdPeaksPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb transientTime, const numb tRec, const numb dtS,
 	const size_t iters, const int raw, const int preScaller, const int writableVar, const numb maxValue,
-	PeakStream& pu, PeakStreamNU& pn, const volatile int* cancelFlag, UcudaAdProgress& prog)
+	PeakStream& pu, PeakStreamNU& pn, const volatile int* cancelFlag)
 {
 	if (raw)
 		return ucudaAdNodesPoint(S, K, a, P, transientTime, transientTime + tRec, preScaller, writableVar,
-			maxValue, pn, cancelFlag, prog);
+			maxValue, pn, cancelFlag);
 	UcudaAdPushPeaks push{ pu, writableVar };
-	return ucudaAdUniformPoint(S, K, a, P, transientTime, dtS, iters, maxValue, push, cancelFlag, prog);
+	return ucudaAdUniformPoint(S, K, a, P, transientTime, dtS, iters, maxValue, push, cancelFlag);
 }
 
 #else
@@ -447,11 +438,11 @@ __device__ __forceinline__ int ucudaAdPeaksPoint(UcudaAdaptState& S, const Ucuda
 __device__ __forceinline__ int ucudaAdPeaksPoint(UcudaAdaptState& S, const UcudaKrsFns& K, const numb* a,
 	const UcudaAdaptParams& P, const numb transientTime, const numb tRec, const numb dtS,
 	const size_t iters, const int raw, const int preScaller, const int writableVar, const numb maxValue,
-	PeakStream& pu, PeakStreamNU& pn, const volatile int* cancelFlag, UcudaAdProgress& prog)
+	PeakStream& pu, PeakStreamNU& pn, const volatile int* cancelFlag)
 {
 	(void)dtS; (void)iters; (void)raw; (void)pu;
 	return ucudaAdNodesPoint(S, K, a, P, transientTime, transientTime + tRec, preScaller, writableVar,
-		maxValue, pn, cancelFlag, prog);
+		maxValue, pn, cancelFlag);
 }
 
 #endif // UCUDA_AD_NO_DENSE
@@ -515,7 +506,6 @@ __global__ void calculateDiscreteModelPeaksAdCUDA(
 	const volatile int* cancelFlag,
 	int*			progressCounter,
 	const int		progressStride,
-	const numb		progressDt,
 	const size_t	progressUnits,
 	numb*			adStats)
 {
@@ -536,21 +526,19 @@ __global__ void calculateDiscreteModelPeaksAdCUDA(
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
 	ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
-	UcudaAdProgress prog;
-	prog.init(progressCounter, progressStride, progressDt);
 
 	PeakStream   pu;
 	PeakStreamNU pn;
 	if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)idx * peakStride, dtOut * (numb)preScaller, iters, peakCapacity);
 	else      pn.init(outPeaks, timeOfPeaks, (size_t)idx * peakStride, peakCapacity, peakInterp);
 	const int flag  = ucudaAdPeaksPoint(S, K, localValues, P, transientTime, tRec, dtOut * (numb)preScaller,
-		iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag, prog);
+		iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag);
 	const int count = raw ? pn.count() : pu.count();
 	// Как у слитого ядра: OSCILLATION заменяется числом пиков, FP и UNBOUND остаются кодами.
 	if (maxValueCheckerArray != nullptr)
 		maxValueCheckerArray[idx] = (flag == REGIME_OSCILLATION) ? count : flag;
 	ucudaAdWriteStats(adStats, idx, S);
-	prog.top_up((int)(progressUnits / (size_t)(progressStride > 0 ? progressStride : 1)));
+	ucudaProgressTopUp(progressCounter, progressStride, progressUnits, 0);
 }
 
 // Признаки бассейна по суммам пиков — та же арифметика, что в
@@ -610,7 +598,6 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	const volatile int* cancelFlag,
 	int*			progressCounter,
 	const int		progressStride,
-	const numb		progressDt,
 	const size_t	progressUnits,
 	numb*			adStats)
 {
@@ -630,15 +617,13 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
 	ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
-	UcudaAdProgress prog;
-	prog.init(progressCounter, progressStride, progressDt);
 
 	PeakStream   pu;
 	PeakStreamNU pn;
 	if (!raw) pu.init(nullptr, nullptr, 0, dtOut * (numb)preScaller, iters, 0);
 	else      pn.init(nullptr, nullptr, 0, 0, peakInterp);
 	const int flag = ucudaAdPeaksPoint(S, K, localValues, P, transientTime, tRec, dtOut * (numb)preScaller,
-		iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag, prog);
+		iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag);
 	const int  count = raw ? pn.count() : pu.count();
 	const numb sumP  = raw ? pn.sumP  : pu.sumP;
 	const numb sumP2 = raw ? pn.sumP2 : pu.sumP2;
@@ -651,7 +636,7 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	outAvgPeaks[idx] = f1;
 	AvgTimeOfPeaks[idx] = f2;
 	ucudaAdWriteStats(adStats, idx, S);
-	prog.top_up((int)(progressUnits / (size_t)(progressStride > 0 ? progressStride : 1)));
+	ucudaProgressTopUp(progressCounter, progressStride, progressUnits, 0);
 }
 
 #endif // UCUDA_AD_NO_SWEEP_KERNELS
@@ -706,8 +691,6 @@ __global__ void calculateDiscreteModelPeaksAdContCUDA(
 	const int kind = axisKind[0];
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
-	UcudaAdProgress prog;
-	prog.init(nullptr, 0, (numb)0);   // прогресс — по точкам, не по времени
 
 	for (int j = 0; j < nPts; ++j) {
 		if (cancelFlag != nullptr && *cancelFlag != 0) return;
@@ -727,7 +710,7 @@ __global__ void calculateDiscreteModelPeaksAdContCUDA(
 		// шага, — и сразу даёт UNBOUND, без спуска шага до h_min.
 		const int flag  = ucudaAdOut(S.X, maxValue) ? REGIME_UNBOUND
 		                : ucudaAdPeaksPoint(S, K, a, P, transientTime, tRec, dtOut * (numb)preScaller,
-		                                    iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag, prog);
+		                                    iters, raw, preScaller, writableVar, maxValue, pu, pn, cancelFlag);
 		const int count = raw ? pn.count() : pu.count();
 		if (maxValueCheckerArray != nullptr)
 			maxValueCheckerArray[j] = (flag == REGIME_OSCILLATION) ? count : flag;

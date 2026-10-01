@@ -288,7 +288,18 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
     if (adaptive_ctrl_effective(a.ctrl) != a.ctrl) {
         a.ctrl = adaptive_ctrl_effective(a.ctrl);
         a.ctrl_params.clear();
+        a.ctrl_replaced = true;
     }
+}
+
+// Регулятор заменён (read_adaptive): ось свипа по параметру прежнего регулятора
+// (kAdAxisCtrl + k) указывала бы теперь на другой параметр Хайрера или на c[k], которого
+// он не читает, и свип молча считал бы не то. Такая ось возвращается к обычной цели свипа.
+// Зовётся и после регулятора, и после осей: порядок ключей в файле любой.
+void drop_foreign_ctrl_axes(const AdaptiveSettings& a, int& ax, int& ax2) {
+    if (!a.ctrl_replaced) return;
+    if (ax  >= kAdAxisCtrl) ax  = kAdAxisSystem;
+    if (ax2 >= kAdAxisCtrl) ax2 = kAdAxisSystem;
 }
 } // namespace
 
@@ -525,9 +536,12 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "transient_text")     bd.transient_text    = p.str();
     else if (key == "pre_scaller_text")   bd.pre_scaller_text  = p.str();
     else if (key == "max_value_text")     bd.max_value_text    = p.str();
-    else if (key == "adaptive")           read_adaptive(p, bd.adaptive);
-    else if (key == "ad_axis")            { try { bd.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
-    else if (key == "ad_axis_2")          { try { bd.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "adaptive")           { read_adaptive(p, bd.adaptive);
+                                            drop_foreign_ctrl_axes(bd.adaptive, bd.ad_axis, bd.ad_axis_2); }
+    else if (key == "ad_axis")            { try { bd.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(bd.adaptive, bd.ad_axis, bd.ad_axis_2); }
+    else if (key == "ad_axis_2")          { try { bd.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(bd.adaptive, bd.ad_axis, bd.ad_axis_2); }
     else if (key == "param_values")       bd.param_values      = p.map_ss();
     else if (key == "initial_conditions") bd.initial_conditions= p.map_ss();
     else if (key == "csv_save_enabled")   bd.csv_save_enabled  = p.boolean();
@@ -723,9 +737,12 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "t_max_text")         c.t_max_text        = p.str();
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
-    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
-    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
-    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "adaptive")           { read_adaptive(p, c.adaptive);
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
     else if (key == "eps_text")           c.eps_text          = p.str();
     else if (key == "nt_text")            c.nt_text           = p.str();
     else if (key == "vtr_text")           c.vtr_text          = p.str();
@@ -885,9 +902,12 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "t_max_text")         c.t_max_text        = p.str();
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
-    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
-    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
-    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "adaptive")           { read_adaptive(p, c.adaptive);
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
     else if (key == "eps_text")           c.eps_text          = p.str();
     else if (key == "nt_text")            c.nt_text           = p.str();
     else if (key == "vtr_text")           c.vtr_text          = p.str();
@@ -1908,9 +1928,12 @@ bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string&
     else if (key == "transient_text")     c.transient_text    = p.str();
     else if (key == "pre_scaller_text")   c.pre_scaller_text  = p.str();
     else if (key == "max_value_text")     c.max_value_text    = p.str();
-    else if (key == "adaptive")           read_adaptive(p, c.adaptive);
-    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {} }
-    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {} }
+    else if (key == "adaptive")           { read_adaptive(p, c.adaptive);
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis")            { try { c.ad_axis   = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
+    else if (key == "ad_axis_2")          { try { c.ad_axis_2 = std::stoi(p.str_or_num()); } catch (...) {}
+                                            drop_foreign_ctrl_axes(c.adaptive, c.ad_axis, c.ad_axis_2); }
     else if (key == "continuation")       c.continuation      = p.boolean();
     else if (key == "continuation_reverse") c.continuation_reverse = p.boolean();
     else if (key == "use_gpu")            c.use_gpu           = p.boolean();
