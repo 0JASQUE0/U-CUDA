@@ -245,6 +245,12 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   `ucuda_ctrl_custom(in, m, o)` or a named Soderlind filter. Sessions embed the definition
   (`ctrl_def`) and import it where it is missing. `nvrtc_check_ctrl_body` = the editor's
   Check. PI/Filter: `safety` sets the target error `safety^(q+1)`, it does not multiply rho.
+- **CPU:** `AdaptiveCpuModule` (`krs_cpu`) builds `kernels/adaptive_part.cu` itself into a cl.exe
+  DLL — placeholders substituted, `PeakStream` cut out of `kernels/cudaLibrary.cu`, the engine's
+  `peak_config_defines()` as prelude, `par_or_var` a thread-local. Entries: endpoint (Order →
+  Performance), `ucuda_lyap_chain` (LLE/LS), `ucuda_cpu_ad_bif` (1D bifurcation: classic over
+  threads, continuation as one chain — line-for-line copies of the GPU kernels). Adaptive
+  continuation belongs on the CPU: the GPU version is one thread, ~25-50x slower.
 - **Regression:** after touching anything shared, compare the fixed-step dumps against the
   baseline — any mismatch outside the intended change is a bug.
 
@@ -258,6 +264,13 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   built on a bifurcation template needs its own generator (see `ucudaLyapRng`).
 - Finite-T LLE/LS depend on the random initial frame as ~ln(1/c)/t_max — point-to-point
   noise, not a bug. `vector transient` (renormalised but unsummed blocks) removes it.
+- Warp divergence, not memory, is what slows adaptive sweeps: neighbouring lanes need steps,
+  rejections and samples at different moments. One attempt per loop iteration
+  (`ucuda_ad_try_x`) made LS 2D 1.5x faster, but the same restructure made the bifurcation kernels
+  1.3-1.6x *slower* — measure every loop-shape change (results stay bit-identical either way).
+- The clone error control asks for `rtol*|delta|`; when that is below double resolution of the
+  perturbation (`rtol*eps << 1e-16*|x|`, e.g. rtol 1e-9, eps 1e-8) the step collapses to chase
+  roundoff: 100x more steps, same exponents.
 - New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.
 
 ## ImGui/ImPlot Guidelines

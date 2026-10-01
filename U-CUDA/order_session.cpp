@@ -897,9 +897,11 @@ static bool perf_end_reference_t(const PerfRequest& req, std::vector<double>& y,
     return true;
 }
 
-// Адаптивный замер: на каждом узле tol ядро endpoint_kernel_ad (replicas нитей,
-// repeats засекаемых запусков) — y(T), счётчики шагов и f нити 0, время запуска.
-static PerfResult run_performance_adaptive(const PerfRequest& req) {
+// Адаптивный замер: на каждом узле tol — y(T), счётчики шагов и f, время запуска.
+// GPU: ядро endpoint_kernel_ad (replicas нитей, repeats засекаемых запусков, cudaEvents).
+// CPU: тот же драйвер нативным кодом (AdaptiveCpuModule, cl.exe), одна траектория
+// последовательно, steady_clock вокруг вызова — как у постоянного шага на CPU.
+static PerfResult run_performance_adaptive(const PerfRequest& req, bool on_gpu) {
     PerfResult res;
     res.axis = req.axis;
     res.adaptive = true;
@@ -922,6 +924,21 @@ static PerfResult run_performance_adaptive(const PerfRequest& req) {
     res.repeats = req.repeats; res.warmup = req.warmup; res.replicas = req.replicas;
 
     const UcudaAdaptParams& B = req.ad_params;
+    AdaptiveCpuModule cpu;
+    if (!on_gpu) {
+        if (req.cpu_prec != kOrderPrecDouble)
+            return fail("The adaptive step on the CPU runs in double: switch the CPU precision to double "
+                        "(the dd/qd reference is chosen separately).");
+        std::vector<KrsCpuDiag> diags;
+        if (!cpu.compile(req.ad_rhs, req.ad_emb, std::string(), std::string(), req.ad_ctrl_body,
+                         req.amountOfX, std::string(), diags)) {
+            std::string e = "CPU adaptive module:";
+            for (const KrsCpuDiag& d : diags)
+                e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+            return fail(e);
+        }
+        res.replicas = 1;   // последовательный прогон: реплик на CPU нет
+    }
     bool first_t = true;
     for (int i = 0; i < n; ++i) {
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; return res; }
@@ -936,7 +953,29 @@ static PerfResult run_performance_adaptive(const PerfRequest& req) {
         rq.T = req.t_max; rq.replicas = req.replicas; rq.repeats = req.repeats; rq.warmup = req.warmup;
         AdaptiveEndpointResult out;
         std::string err;
-        if (!computeAdaptiveEndpointNVRTC(rq, out, &err)) return fail("GPU: " + err);
+        if (on_gpu) {
+            if (!computeAdaptiveEndpointNVRTC(rq, out, &err)) return fail("GPU: " + err);
+        } else {
+            std::vector<double> y((size_t)req.amountOfX);
+            double st[8] = { 0 };
+            auto one = [&]() { cpu.endpoint()(rq.ic.data(), rq.values.data(), &rq.params, rq.T, y.data(), st); };
+            for (int w = 0; w < req.warmup; ++w) one();
+            double tsum = 0;
+            for (int r = 0; r < req.repeats; ++r) {
+                const auto t0 = std::chrono::steady_clock::now();
+                one();
+                const double us = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(
+                                      std::chrono::steady_clock::now() - t0).count();
+                if (r == 0) { out.t_min = out.t_max = us; }
+                else { out.t_min = std::min(out.t_min, us); out.t_max = std::max(out.t_max, us); }
+                tsum += us;
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; return res; }
+            }
+            out.t_avg = tsum / (double)req.repeats;
+            out.y_end = y;
+            out.stats.nacc = st[0]; out.stats.nrej = st[1]; out.stats.nforced = st[2]; out.stats.nrhs = st[3];
+            out.stats.hmin = st[4]; out.stats.hmax = st[5]; out.stats.hmean = st[6]; out.stats.diverged = st[7] != 0;
+        }
         res.t_min[(size_t)i] = out.t_min; res.t_avg[(size_t)i] = out.t_avg; res.t_max[(size_t)i] = out.t_max;
         res.n_steps[(size_t)i] = (long long)out.stats.nacc;
         res.n_rhs[(size_t)i]   = out.stats.nrhs;
@@ -957,13 +996,7 @@ static PerfResult run_performance_adaptive(const PerfRequest& req) {
 // вызовы f для Fixed и E(T) против эталона.
 static PerfResult run_performance_any(ParametricEngine& engine, bool on_gpu, const PerfRequest& req) {
     if (!req.setup_error.empty()) { PerfResult r; r.error = req.setup_error; return r; }
-    if (req.adaptive && !on_gpu) {
-        PerfResult r;
-        r.error = "The adaptive-step benchmark runs on the GPU: switch the device to GPU "
-                  "(the CPU is still used for the dd/qd reference).";
-        return r;
-    }
-    PerfResult res = req.adaptive ? run_performance_adaptive(req)
+    PerfResult res = req.adaptive ? run_performance_adaptive(req, on_gpu)
                    : (on_gpu ? engine.run_performance(req) : run_performance_cpu(req));
     if (!res.ok || res.cancelled) return res;
     const int n = res.n_pts;

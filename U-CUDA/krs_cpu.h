@@ -120,3 +120,52 @@ private:
     void* module_ = nullptr;   // HMODULE
     Fn    fn_     = nullptr;
 };
+
+// Адаптивный шаг на CPU нативным кодом: адаптивные тела схемы (AdaptiveCode), регулятор
+// (C body из библиотеки или пусто), kernels/adaptive_part.cu с драйвером ucuda_adaptive.cuh
+// (вместе с разделом UCUDA_AD_LYAPUNOV) и PeakStream из cudaLibrary.cu собираются cl.exe в
+// одну DLL (кэш на диске, как у КРС). Текст алгоритма — тот же, что у GPU-ядер, поэтому CPU
+// и GPU сравнимы. Только double.
+struct UcudaAdaptParams;
+class AdaptiveCpuModule {
+public:
+    // y(T) от ic: y[n], stats[8] = nacc, nrej, nforced, nrhs, hmin, hmax, hmean, diverged.
+    using EndpointFn = int (*)(const double* ic, const double* a, const UcudaAdaptParams* P, double T,
+                               double* y, double* stats);
+    // Свип LLE (ls = 0) / LS (ls = 1) цепочкой точек — ucuda_lyap_chain (continuation = 1)
+    // или классически (0). result[nPts * NC] (NaN — разлёт), stats[nPts * 4].
+    using LyapFn = void (*)(int ls, int continuation, int nPts, double lo, double hi, int reverse,
+                            int logScale, int mutParamIdx, const double* baseValues, int amountOfValues,
+                            const double* baseX, const UcudaAdaptParams* P, int axisKind, double tolRatio,
+                            double tTr, double NT, int nBlocks, int nWarm, double eps, int renorm,
+                            double maxValue, double* result, double* stats, const volatile int* cancel,
+                            int* progress);
+    // БД 1D (то же, что calculateDiscreteModelPeaksAdCUDA / ...AdContCUDA). Классика
+    // (continuation = 0) — точки [i0, i1) сетки nPts, строки выходов — с i0 (строка
+    // idx - i0); continuation — цепочка всех nPts точек (i0, i1 не читаются). flags — число
+    // пиков или код режима, stats[4] на точку. Возвращает 0 при отмене.
+    using BifFn = int (*)(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+                          int logScale, int sweepVar, int mutIdx, const double* baseValues, int amountOfValues,
+                          const double* baseX, const UcudaAdaptParams* P, int axisKind, double tolRatio,
+                          int writableVar, double maxValue, double* outPeaks, double* timeOfPeaks, int* flags,
+                          unsigned long long peakStride, int peakCapacity, double transientTime, double tRec,
+                          double dtOut, int preScaller, unsigned long long iters, int raw, int interp,
+                          double* stats, const volatile int* cancel, int* progress);
+    AdaptiveCpuModule() = default;
+    ~AdaptiveCpuModule();
+    AdaptiveCpuModule(const AdaptiveCpuModule&) = delete;
+    AdaptiveCpuModule& operator=(const AdaptiveCpuModule&) = delete;
+    // dprep / deval пустые — модуль без плотного выхода (UCUDA_AD_NO_DENSE) и без входа БД.
+    // prelude — #define'ы перед configCUDA.h (настройки пиков: peak_config_defines движка).
+    bool compile(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                 const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                 const std::string& prelude, std::vector<KrsCpuDiag>& diags);
+    EndpointFn endpoint() const { return endpoint_; }
+    LyapFn     lyap()     const { return lyap_; }
+    BifFn      bif()      const { return bif_; }
+private:
+    void*      module_   = nullptr;   // HMODULE
+    EndpointFn endpoint_ = nullptr;
+    LyapFn     lyap_     = nullptr;
+    BifFn      bif_      = nullptr;
+};

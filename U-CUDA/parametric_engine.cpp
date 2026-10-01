@@ -1903,6 +1903,9 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_ls  = nullptr;   // lyapunovLSAdCUDA
     };
     CachedLyapAdModule cached_lyap_ad;
+    // Continuation LLE/LS с адаптивным шагом: тот же текст с UCUDA_LYAP_AD_CONT_ONLY —
+    // однопоточные ядра цепочки lyapunovLLEAdContCUDA / lyapunovLSAdContCUDA.
+    CachedLyapAdModule cached_lyap_ad_cont;
 
     // Fast Synchro — два модуля (mode 0 = on attractor, mode 1 = on grid).
     // Каждый кэширует свой PTX, ключ = hash(krs_body)+amountOfX+":fs_attr"/":fs_grid"
@@ -1978,6 +1981,7 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedAdModule>          pool_ad        { kModuleCacheCapacity };
     ModuleLru<CachedSimpleContModule>  pool_ad_cont   { kModuleCacheCapacity };
     ModuleLru<CachedLyapAdModule>      pool_lyap_ad   { kModuleCacheCapacity };
+    ModuleLru<CachedLyapAdModule>      pool_lyap_ad_cont { kModuleCacheCapacity };
     ModuleLru<CachedMetricsModule>     pool_metrics_ad{ kModuleCacheCapacity };
     ModuleLru<CachedFastSyncModule>    pool_fs_attr   { kModuleCacheCapacity };
     ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
@@ -2075,6 +2079,7 @@ struct ParametricEngine::Impl {
             drain_pool(pool_ad);
             drain_pool(pool_ad_cont);
             drain_pool(pool_lyap_ad);
+            drain_pool(pool_lyap_ad_cont);
             drain_pool(pool_metrics_ad);
             drain_pool(pool_fs_attr);
             drain_pool(pool_fs_grid);
@@ -2672,6 +2677,7 @@ struct ParametricEngine::Impl {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
+                                     "#define UCUDA_AD_LYAPUNOV 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
             if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
@@ -2692,6 +2698,401 @@ struct ParametricEngine::Impl {
             }
             return true;
         }, err);
+    }
+
+    // Модуль continuation LLE/LS с адаптивным шагом (см. cached_lyap_ad_cont).
+    bool compile_lyap_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                                        std::string& err) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
+        return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, true, [&](CachedLyapAdModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
+                                     "#define UCUDA_AD_LYAPUNOV 1\n#define UCUDA_LYAP_AD_CONT_ONLY 1\n"
+                                   + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive_cont.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      "1" },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DEVAL_BODY}}",  "" },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },
+                              mod, mg, err))
+                return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_lle, err) || !module_fn(mod, mg[1], fresh.kernel_ls, err)) {
+                cuModuleUnload(mod); return false;
+            }
+            return true;
+        }, err);
+    }
+
+    // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
+    // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
+    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
+    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
+    template <class Req>
+    bool run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
+                         std::string& err, bool& cancelled) {
+        cancelled = false;
+        const AdaptiveRequest& ad = req.adaptive;
+        const int n = req.amountOfX, nPts = req.n_pts, NC = ls ? n : 1;
+        if (req.sweep_over_var) { err = "the adaptive step on this path supports a param sweep only"; return false; }
+        if (n <= 0 || n > kMaxAmountOfX) { err = "amountOfX out of range"; return false; }
+        if ((int)req.initial_conditions.size() != n) { err = "initial_conditions.size() != amountOfX"; return false; }
+        if ((int)req.base_values.size() > 64) { err = "too many base_values"; return false; }
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size())) {
+            err = "param_index out of range"; return false;
+        }
+        const int    nBlocks = (int)(req.t_max / req.NT);
+        const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
+        if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
+        out.assign((size_t)nPts * NC, std::numeric_limits<double>::quiet_NaN());
+        stats.assign((size_t)nPts * 4, 0.0);
+        const int continuation = req.continuation ? 1 : 0;
+
+        if (req.use_cpu) {
+            AdaptiveCpuModule mod;
+            std::vector<KrsCpuDiag> diags;
+            // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, peak_config_defines(), diags)) {
+                err = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                return false;
+            }
+            // Счёт — в этом потоке; второй переносит отмену во флаг DLL и счётчик точек в прогресс.
+            volatile int cancelFlag = 0;
+            int progressCount = 0;
+            std::atomic<bool> done{ false };
+            std::thread watcher([&]() {
+                while (!done.load(std::memory_order_relaxed)) {
+                    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                    if (req.progress)
+                        req.progress->store((float)progressCount / (float)(nPts > 0 ? nPts : 1), std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            mod.lyap()(ls ? 1 : 0, continuation, nPts, req.param_lo, req.param_hi, req.continuation_reverse ? 1 : 0,
+                       req.log_scale ? 1 : 0, ad_axis ? 0 : req.param_index, req.base_values.data(),
+                       (int)req.base_values.size(), req.initial_conditions.data(), &ad.params, ad.axis_kind[0],
+                       ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm, req.eps, ad.lyap_renorm,
+                       req.max_value, out.data(), stats.data(), &cancelFlag, &progressCount);
+            done.store(true, std::memory_order_relaxed);
+            watcher.join();
+            if (cancelFlag) { cancelled = true; err = "Cancelled by user"; return false; }
+            return true;
+        }
+
+        // GPU: однопоточное ядро цепочки.
+        if (!ensure_init(err)) return false;
+        cuCtxSetCurrent(context);
+        if (!compile_lyap_ad_cont_if_needed(ad, req.krs_body, n, err)) return false;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_result     = nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_result)     cudaFree(d_result);
+            sig.release();
+        };
+        auto cuda_ok = [&](cudaError_t e, const char* where) {
+            if (e == cudaSuccess) return true;
+            err = std::string("CUDA ") + where + ": " + cudaGetErrorString(e);
+            cleanup();
+            return false;
+        };
+        if (!cuda_ok(cudaMalloc((void**)&d_baseValues, (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "malloc baseValues")
+            || !cuda_ok(cudaMalloc((void**)&d_baseX, (size_t)n * sizeof(numb)), "malloc baseX")
+            || !cuda_ok(cudaMalloc((void**)&d_result, (size_t)nPts * NC * sizeof(numb)), "malloc result"))
+            return false;
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, err)) { cleanup(); return false; }
+        }
+        if (!sig.alloc(err)) { cleanup(); return false; }
+        const std::vector<numb> vals = to_numb(req.base_values), x0 = to_numb(req.initial_conditions);
+        if (!vals.empty() && !cuda_ok(cudaMemcpy(d_baseValues, vals.data(), vals.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues"))
+            return false;
+        if (!cuda_ok(cudaMemcpy(d_baseX, x0.data(), (size_t)n * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX"))
+            return false;
+        int    nPts_a = nPts, reverse_a = req.continuation_reverse ? 1 : 0, logScale_a = req.log_scale ? 1 : 0;
+        int    mut_a = ad_axis ? 0 : req.param_index, nv_a = (int)req.base_values.size(), axis_a = ad.axis_kind[0];
+        numb   lo_a = (numb)req.param_lo, hi_a = (numb)req.param_hi, tol_a = (numb)ad.tol_ratio;
+        numb   tTr_a = (numb)req.transient_time, NT_a = (numb)req.NT, eps_a = (numb)req.eps, max_a = (numb)req.max_value;
+        int    nBlocks_a = nBlocks, nWarm_a = nWarm, renorm_a = ad.lyap_renorm;
+        UcudaAdaptParams* dP = adArgs.params;
+        numb*  dSt = adArgs.stats;
+        int*   d_cancel = sig.cancelArg();
+        int*   d_prog   = sig.progressArg();
+        void* args[] = { &nPts_a, &lo_a, &hi_a, &reverse_a, &logScale_a, &mut_a, &d_baseValues, &nv_a, &d_baseX,
+                         &dP, &axis_a, &tol_a, &tTr_a, &NT_a, &nBlocks_a, &nWarm_a, &eps_a, &renorm_a, &max_a,
+                         &d_result, &dSt, &d_cancel, &d_prog };
+        CUresult r = cuLaunchKernel(ls ? cached_lyap_ad_cont.kernel_ls : cached_lyap_ad_cont.kernel_lle,
+                                    1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(lyapunov adaptive continuation): " + cu_err(r); cleanup(); return false; }
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, err)) {
+            cancelled = req.cancel && req.cancel->load(std::memory_order_relaxed);
+            cleanup();
+            return false;
+        }
+        if (!cuda_ok(cudaDeviceSynchronize(), "sync after lyapunov adaptive continuation")) return false;
+        std::vector<numb> h_res((size_t)nPts * NC), h_st((size_t)nPts * 4);
+        if (!cuda_ok(cudaMemcpy(h_res.data(), d_result, h_res.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result")
+            || !cuda_ok(cudaMemcpy(h_st.data(), adArgs.stats, h_st.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy stats"))
+            return false;
+        cleanup();
+        out.assign(h_res.begin(), h_res.end());
+        stats.assign(h_st.begin(), h_st.end());
+        return true;
+    }
+
+    // БД 1D с адаптивным шагом на CPU: AdaptiveCpuModule (cl.exe) собирает адаптивные тела,
+    // kernels/adaptive_part.cu и PeakStream в DLL, её вход ucuda_cpu_ad_bif — построчная копия
+    // calculateDiscreteModelPeaksAdCUDA (классика) и ...AdContCUDA (continuation). Раскладка
+    // пиков, флагов и статистики — как у GPU-путей, результат собирается так же. Классика
+    // раздаётся потокам по кускам точек (точки независимы, порядок результата не зависит
+    // от раздачи); continuation — одна цепочка в этом потоке. Валидация общая с GPU-путями:
+    // классика приходит из run_bif1d после проверок, continuation — из диспетчера.
+    Bifurcation1DResult run_bif1d_cpu_ad(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        const bool cont = req.continuation;
+        if (!ad.setup_error.empty())                                 return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.sweep_over_var) {
+            if (cont) return fail("continuation requires a param sweep, not an IC sweep");
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index out of range");
+        } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+            return fail("param_index out of range");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+
+        AdaptiveCpuModule mod;
+        {
+            std::vector<KrsCpuDiag> diags;
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
+                             peak_config_defines(), diags) || !mod.bif()) {
+                std::string e = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                if (diags.empty()) e += " no dense output for this scheme";
+                return fail(e);
+            }
+        }
+
+        // Строка пиков и число отсчётов — как у run_bif1d / run_bif1d_continuation_ad.
+        const int    nPts  = req.n_pts;
+        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)())
+            return fail("computed amount of points <= 0 (t_max/h/pre_scaller too small)");
+        const size_t cap        = (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride = ad.raw_nodes ? cap : (iters < cap ? iters : cap);
+        const int    peakCapacity = (int)peakStride;
+        const int    mutIdx = req.sweep_over_var ? req.var_sweep_index : (ad_axis ? 0 : req.param_index);
+        const std::vector<double> values = req.base_values, x0 = req.initial_conditions;
+
+        res.n_pts        = nPts;
+        res.record_steps = (int)peakStride;
+        res.flags.assign((size_t)nPts, 0);
+        res.bifurcation_points.assign((size_t)nPts, {});
+        res.peak_times.assign((size_t)nPts, {});
+        res.ad_stats.assign((size_t)nPts * 4, 0.0);
+        if (cont) {
+            res.param_lo = req.param_lo;
+            res.param_hi = req.param_hi;
+            res.continuation_reverse = req.continuation_reverse;
+        }
+
+        // Строки [i0, i1) из плоских буферов DLL — в результат (как у GPU-путей).
+        auto collect = [&](int i0, int i1, const std::vector<double>& pk, const std::vector<double>& tm,
+                           const std::vector<int>& fl, const std::vector<double>& st) {
+            for (int j = i0; j < i1; ++j) {
+                const size_t r = (size_t)(j - i0);
+                int n = fl[r];
+                res.flags[(size_t)j] = n;
+                if (n > (int)peakStride) n = (int)peakStride;
+                if (n > 0) {
+                    res.bifurcation_points[(size_t)j].assign(pk.begin() + r * peakStride, pk.begin() + r * peakStride + n);
+                    res.peak_times[(size_t)j].assign(tm.begin() + r * peakStride, tm.begin() + r * peakStride + n);
+                }
+                for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)j * 4 + q] = st[r * 4 + q];
+            }
+        };
+
+        volatile int cancelFlag = 0;
+        std::atomic<int> donePts{ 0 };
+        std::atomic<bool> finished{ false };
+        // Отмену переносит во флаг DLL, готовые точки — в прогресс.
+        std::thread watcher([&]() {
+            while (!finished.load(std::memory_order_relaxed)) {
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                if (req.progress)
+                    req.progress->store((float)donePts.load(std::memory_order_relaxed) / (float)nPts,
+                                        std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+        auto call = [&](int i0, int i1, std::vector<double>& pk, std::vector<double>& tm, std::vector<int>& fl,
+                        std::vector<double>& st, int* prog) {
+            return mod.bif()(cont ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi,
+                             req.continuation_reverse ? 1 : 0, req.log_scale ? 1 : 0, req.sweep_over_var ? 1 : 0,
+                             mutIdx, values.data(), (int)values.size(), x0.data(), &ad.params, ad.axis_kind[0],
+                             ad.tol_ratio, req.writable_var, req.max_value, pk.data(), tm.data(), fl.data(),
+                             (unsigned long long)peakStride, peakCapacity, req.transient_time, req.t_max, req.h,
+                             req.pre_scaller, (unsigned long long)iters, ad.raw_nodes ? 1 : 0, ad.peak_interp,
+                             st.data(), &cancelFlag, prog);
+        };
+        if (cont) {
+            // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
+            std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
+            std::vector<int> fl((size_t)nPts);
+            int prog = 0;
+            std::thread pump([&]() {
+                while (!finished.load(std::memory_order_relaxed)) {
+                    donePts.store(*(volatile int*)&prog, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            const int ok = call(0, nPts, pk, tm, fl, st, &prog);
+            finished.store(true, std::memory_order_relaxed);
+            pump.join();
+            watcher.join();
+            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            collect(0, nPts, pk, tm, fl, st);
+        } else {
+            // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
+            // стоимость точки с адаптивным шагом сильно разная.
+            constexpr int kChunk = 4;
+            unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) hw = 1;
+            const int nChunks  = (nPts + kChunk - 1) / kChunk;
+            const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)nChunks);
+            std::atomic<int> nextChunk{ 0 };
+            std::atomic<bool> aborted{ false };
+            auto worker = [&]() {
+                std::vector<double> pk((size_t)kChunk * peakStride), tm((size_t)kChunk * peakStride), st((size_t)kChunk * 4);
+                std::vector<int> fl((size_t)kChunk);
+                for (;;) {
+                    const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                    if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
+                    const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
+                    int prog = 0;
+                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
+                }
+            };
+            std::vector<std::thread> pool;
+            for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
+            finished.store(true, std::memory_order_relaxed);
+            watcher.join();
+            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+
+            // Снимок и CSV — как у классического GPU-пути.
+            res.snapshot.values.assign(values.begin(), values.end());
+            res.snapshot.initial_conditions.assign(x0.begin(), x0.end());
+            res.snapshot.tMax          = req.t_max;
+            res.snapshot.transientTime = req.transient_time;
+            res.snapshot.h             = req.h;
+            res.snapshot.gpu_fmad      = get_nvrtc_fmad();
+            res.snapshot.preScaller    = req.pre_scaller;
+            res.snapshot.writableVar   = req.writable_var;
+            res.snapshot.indexOfMutVar = mutIdx;
+            res.snapshot.range_lo      = (numb)req.param_lo;
+            res.snapshot.range_hi      = (numb)req.param_hi;
+            if (!req.csv_output_path.empty()) {
+                {
+                    std::ofstream cfg(req.csv_output_path + "_config.csv");
+                    data_export::write_bif1d_config(cfg, res.snapshot);
+                }
+                std::ofstream out(req.csv_output_path);
+                if (out.is_open()) {
+                    out << std::setprecision(15);
+                    for (int j = 0; j < nPts; ++j) {
+                        const double pv = req.log_scale ? getValueByIdx_log_local((size_t)j, nPts, req.param_lo, req.param_hi)
+                                                        : getValueByIdx_local((size_t)j, nPts, req.param_lo, req.param_hi);
+                        data_export::write_bif1d_rows(out, pv, res.flags[(size_t)j],
+                                                      res.bifurcation_points[(size_t)j].data(),
+                                                      res.peak_times[(size_t)j].data());
+                    }
+                }
+            }
+        }
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+    LLE1DResult run_lle1d_ad_seq(const LLE1DRequest& req) {
+        LLE1DResult res;
+        std::vector<double> out, st;
+        bool cancelled = false;
+        if (!run_lyap_ad_seq(false, req, out, st, res.error, cancelled)) { res.cancelled = cancelled; return res; }
+        res.n_pts = req.n_pts;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.continuation_reverse = req.continuation && req.continuation_reverse;
+        res.lyapunov = out;
+        res.flags.assign((size_t)req.n_pts, 0);
+        for (int j = 0; j < req.n_pts; ++j)
+            res.flags[(size_t)j] = std::isfinite(out[(size_t)j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        res.ad_stats = st;
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+    LS1DResult run_ls1d_ad_seq(const LS1DRequest& req) {
+        LS1DResult res;
+        std::vector<double> out, st;
+        bool cancelled = false;
+        if (!run_lyap_ad_seq(true, req, out, st, res.error, cancelled)) { res.cancelled = cancelled; return res; }
+        const int N = req.amountOfX;
+        res.n_pts = req.n_pts;
+        res.n_exponents = N;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.continuation_reverse = req.continuation && req.continuation_reverse;
+        res.spectrum.assign((size_t)req.n_pts, std::vector<double>((size_t)N, 0.0));
+        res.flags.assign((size_t)req.n_pts, 0);
+        for (int j = 0; j < req.n_pts; ++j) {
+            bool fin = true;
+            for (int k = 0; k < N; ++k) {
+                res.spectrum[(size_t)j][(size_t)k] = out[(size_t)j * N + k];
+                fin = fin && std::isfinite(out[(size_t)j * N + k]);
+            }
+            res.flags[(size_t)j] = fin ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        }
+        res.ad_stats = st;
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
     }
 
     // Ось настройки шага: rtol / atol / tol — только положительные значения (параметр
@@ -2791,8 +3192,9 @@ struct ParametricEngine::Impl {
                 r.error = "log scale requires param lo/hi > 0";
                 return r;
             }
-            // Адаптивный шаг в свипах считается только на GPU — и с continuation тоже.
-            if (req.adaptive.enabled) return run_bif1d_continuation_ad(req);
+            // Адаптивный шаг: CPU — нативная цепочка (run_bif1d_cpu_ad), GPU — ядро в одну нить.
+            if (req.adaptive.enabled)
+                return req.use_cpu ? run_bif1d_cpu_ad(req) : run_bif1d_continuation_ad(req);
             // h-свип теперь поддержан обеими ветками: шаг пересчитывается в
             // каждой точке, буфер блока выделен под худший случай.
             // CPU-ветка — до ensure_init: она не трогает CUDA вообще, так что
@@ -2842,8 +3244,8 @@ struct ParametricEngine::Impl {
         // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU
         // (то же место в конвейере, что у run_lle_1d / run_ls_1d). Стоит после
         // общей валидации и до ensure_init: CUDA этой ветке не нужна вовсе.
-        // Адаптивный шаг в свипах считается только на GPU.
-        if (req.use_cpu && !ad) return run_bif1d_cpu(req);
+        // Адаптивный шаг — своя CPU-ветка на тексте GPU-ядра (run_bif1d_cpu_ad).
+        if (req.use_cpu) return ad ? run_bif1d_cpu_ad(req) : run_bif1d_cpu(req);
 
         // dt-sweep: t_max/transient_time фиксированы, число шагов на GPU
         // пересчитывается из h per-thread (см. hSweepAxis в
@@ -3291,16 +3693,16 @@ struct ParametricEngine::Impl {
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return fail("log scale requires param lo/hi > 0");
 
-        // Адаптивный шаг: пока только классический свип на GPU.
+        // Адаптивный шаг: классический свип — ядро на точку; continuation и CPU — цепочкой.
         const bool ad = req.adaptive.enabled;
         if (ad) {
             if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
             if (req.sweep_over_h)
                 return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
-            if (req.continuation || req.use_cpu)
-                return fail("adaptive step: continuation and the CPU branch are not supported here yet");
             const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
             if (!e1.empty()) return fail(e1);
+            // Continuation (GPU, одна нить) и CPU — цепочкой точек ucuda_lyap_chain.
+            if (req.continuation || req.use_cpu) return run_lle1d_ad_seq(req);
         }
 
         // Continuation: точки выстроены в цепочку, поэтому IC-свип несовместим
@@ -4155,16 +4557,16 @@ struct ParametricEngine::Impl {
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return fail("log scale requires param lo/hi > 0");
 
-        // Адаптивный шаг: пока только классический свип на GPU.
+        // Адаптивный шаг: классический свип — ядро на точку; continuation и CPU — цепочкой.
         const bool ad = req.adaptive.enabled;
         if (ad) {
             if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
             if (req.sweep_over_h)
                 return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
-            if (req.continuation || req.use_cpu)
-                return fail("adaptive step: continuation and the CPU branch are not supported here yet");
             const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
             if (!e1.empty()) return fail(e1);
+            // Continuation (GPU, одна нить) и CPU — цепочкой точек ucuda_lyap_chain.
+            if (req.continuation || req.use_cpu) return run_ls1d_ad_seq(req);
         }
 
         // CPU-ветки — до ensure_init, CUDA им не нужна. Ограничения те же, что

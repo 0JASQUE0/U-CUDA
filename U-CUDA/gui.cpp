@@ -11284,9 +11284,10 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     ImGui::SetTooltip(
                         "The nodes of the adaptive benchmark: a log grid of tol; on every node\n"
                         "rtol = tol and atol = tol * (atol / rtol) of the settings above. The\n"
-                        "Sweep axis below is not used. Every node integrates [0, t_max] on the\n"
-                        "GPU (the step only, no output) and is timed like the fixed step;\n"
-                        "steps, rejections and f evaluations come from the controller.");
+                        "Sweep axis below is not used. Every node integrates [0, t_max] (the\n"
+                        "step only, no output) and is timed like the fixed step: on the GPU by\n"
+                        "a kernel, on the CPU by the same driver compiled with cl.exe (double).\n"
+                        "Steps, rejections and f evaluations come from the controller.");
             }
             ImGui::Separator();
         }

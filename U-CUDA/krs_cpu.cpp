@@ -1,4 +1,5 @@
 ﻿#include "krs_cpu.h"
+#include "adaptive_settings.h"   // adaptive_ctrl_source
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -510,6 +511,266 @@ unsigned long long ctrl_hash_key(const std::string& body, const std::string& hea
 }
 
 } // namespace
+
+// Часть 5. Адаптивный шаг нативным кодом (AdaptiveCpuModule)
+//
+// Исходник DLL повторяет устройство GPU-модуля свипов: перед kernels/adaptive_part.cu
+// (тела схемы, раскладка драйвера, регулятор, драйвер, поиск пиков) стоит то, что на GPU
+// даёт шаблон с cudaLibrary.cu, — PeakStream (его текст вырезается из cudaLibrary.cu) и
+// значение узла сетки; __device__ / __host__ / __forceinline__ сняты макросами, ядра
+// свипов выключены (UCUDA_AD_NO_SWEEP_KERNELS), размерность — AMOUNTOFX этой DLL.
+// par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
+namespace {
+
+constexpr int kAdModuleVersion = 2;
+
+// Подстановка плейсхолдера {{name}} во всех вхождениях.
+void replace_all(std::string& s, const std::string& from, const std::string& to) {
+    for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + to.size()))
+        s.replace(p, from.size(), to);
+}
+
+std::string strip_bom(std::string s) {
+    if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+        s.erase(0, 3);
+    return s;
+}
+
+// struct PeakStream { ... }; из текста cudaLibrary.cu: от строки "struct PeakStream" до
+// первой строки "};". Пусто — не нашлось.
+std::string extract_peak_stream(const std::string& lib) {
+    size_t b = lib.find("\nstruct PeakStream");
+    while (b != std::string::npos) {
+        const char c = b + 18 < lib.size() ? lib[b + 18] : '\0';
+        if (c == '\r' || c == '\n') break;
+        b = lib.find("\nstruct PeakStream", b + 1);
+    }
+    if (b == std::string::npos) return {};
+    const size_t e = lib.find("\n};", b);
+    if (e == std::string::npos) return {};
+    return lib.substr(b + 1, e + 3 - (b + 1)) + "\n";
+}
+
+std::string make_ad_module_source(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                                  const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                                  const std::string& prelude, const std::string& peak_stream,
+                                  std::string adaptive_part) {
+    const bool dense = !dprep.empty() && !deval.empty();
+    replace_all(adaptive_part, "{{KRS_RHS_BODY}}", rhs);
+    replace_all(adaptive_part, "{{KRS_EMB_BODY}}", emb);
+    replace_all(adaptive_part, "{{KRS_DPREP_BODY}}", dense ? dprep : std::string());
+    replace_all(adaptive_part, "{{KRS_DEVAL_BODY}}", dense ? deval : std::string());
+    replace_all(adaptive_part, "{{CTRL_CUSTOM}}", adaptive_ctrl_source(ctrl_body));
+    std::ostringstream o;
+    o << "#include <cmath>\n"
+         "#include <cstdlib>\n"
+         "#include <cstdint>\n"
+         "using std::abs;\n"
+         "#define AMOUNTOFX " << amountOfX << "\n"
+         "static thread_local int ucuda_cpu_par_or_var = 1;\n"
+         "#define par_or_var ucuda_cpu_par_or_var\n"
+      << prelude << "\n"
+         "#include \"configCUDA.h\"\n"
+         "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
+         "#define __device__\n"
+         "#define __host__\n"
+         "#define __forceinline__ inline\n"
+         "static inline int atomicAdd(int* p, int v) { const int o = *p; *p += v; return o; }\n"
+         // getValueByIdx / getValueByIdx_log из cudaLibrary.cu (та же формула узла).
+         "static inline numb getValueByIdx(const size_t idx, const int nPts, const numb lo, const numb hi,\n"
+         "                                 const int valueNumber) {\n"
+         "    if (nPts <= 0) return lo;\n"
+         "    if (nPts == 1) return hi;\n"
+         "    const int64_t divisor = (valueNumber == 0) ? 1 : nPts;\n"
+         "    return ucuda_node_value((int)(((int64_t)idx / divisor) % nPts), nPts, lo, hi);\n"
+         "}\n"
+         "static inline numb getValueByIdx_log(const int idx, const int nPts, const numb lo, const numb hi,\n"
+         "                                     const int valueNumber) {\n"
+         "    const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);\n"
+         "    return ucuda_node_value_log(n, nPts, lo, hi);\n"
+         "}\n"
+      << peak_stream
+      << "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
+         "#define UCUDA_AD_LYAPUNOV 1\n";
+    if (!dense) o << "#define UCUDA_AD_NO_DENSE 1\n";
+    o << adaptive_part << "\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "int ucuda_cpu_ad_endpoint(const double* ic, const double* a, const UcudaAdaptParams* P, double T,\n"
+         "                          double* y, double* st) {\n"
+         "    const UcudaKrsFns K{};\n"
+         "    UcudaAdaptState S;\n"
+         "    ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, a, *P);\n"
+         "    while (S.t < T && !S.diverged) ucuda_ad_step(S, K, a, *P, T);\n"
+         "    for (int k = 0; k < AMOUNTOFX; ++k) y[k] = S.X[k];\n"
+         "    st[0] = (double)S.st.nacc; st[1] = (double)S.st.nrej; st[2] = (double)S.st.nforced;\n"
+         "    st[3] = (double)S.st.nrhs; st[4] = S.st.hmin; st[5] = S.st.hmax;\n"
+         "    st[6] = S.st.nacc > 0 ? S.st.hsum / (double)S.st.nacc : 0.0;\n"
+         "    st[7] = (double)S.diverged;\n"
+         "    return S.diverged ? 0 : 1;\n"
+         "}\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_cpu_ad_lyap(int ls, int continuation, int nPts, double lo, double hi, int reverse,\n"
+         "    int logScale, int mutParamIdx, const double* baseValues, int amountOfValues, const double* baseX,\n"
+         "    const UcudaAdaptParams* P, int axisKind, double tolRatio, double tTr, double NT, int nBlocks,\n"
+         "    int nWarm, double eps, int renorm, double maxValue, double* result, double* stats,\n"
+         "    const volatile int* cancel, int* progress) {\n"
+         "    const UcudaKrsFns K{};\n"
+         "    if (ls) ucuda_lyap_chain<AMOUNTOFX>(K, continuation, nPts, lo, hi, reverse, logScale, mutParamIdx,\n"
+         "        baseValues, amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm,\n"
+         "        maxValue, result, stats, cancel, progress);\n"
+         "    else    ucuda_lyap_chain<1>(K, continuation, nPts, lo, hi, reverse, logScale, mutParamIdx,\n"
+         "        baseValues, amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm,\n"
+         "        maxValue, result, stats, cancel, progress);\n"
+         "}\n";
+    if (dense) o << R"CPU(
+// БД 1D: классика — calculateDiscreteModelPeaksAdCUDA по точкам [i0, i1), continuation —
+// calculateDiscreteModelPeaksAdContCUDA строка в строку.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_bif(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+    int logScale, int sweepVar, int mutIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* Pbase, int axisKind, double tolRatio, int writableVar, double maxValue,
+    double* outPeaks, double* timeOfPeaks, int* flags, unsigned long long peakStride, int peakCapacity,
+    double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters, int raw,
+    int interp, double* adStats, const volatile int* cancelFlag, int* progress) {
+    const UcudaKrsFns K{};
+    UcudaAdProgress prog;
+    prog.init(nullptr, 0, (numb)0);
+    const numb dtS = (numb)dtOut * (numb)preScaller;
+    if (!continuation) {
+        ucuda_cpu_par_or_var = sweepVar ? 0 : 1;
+        const numb ranges[2] = { (numb)lo, (numb)hi };
+        const int  mut[1]    = { mutIdx };
+        const int  kinds[2]  = { axisKind, UCUDA_AXIS_SYSTEM };
+        numb localX[AMOUNTOFX];
+        numb localValues[64];   // kMaxAmountOfValues в движке
+        for (int idx = i0; idx < i1; ++idx) {
+            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+            const int row = idx - i0;
+            UcudaAdaptParams P = *Pbase;
+            ucudaSetupSweepPointAd(nPts, 0, idx, 1, ranges, mut, baseX, baseValues, amountOfValues,
+                logScale ? 1 : 0, kinds, (numb)tolRatio, localX, localValues, P);
+            UcudaAdaptState S;
+            ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
+            PeakStream   pu;
+            PeakStreamNU pn;
+            if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, dtS, (size_t)iters, peakCapacity);
+            else      pn.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, peakCapacity, interp);
+            const int flag  = ucudaAdPeaksPoint(S, K, localValues, P, (numb)transientTime, (numb)tRec, dtS,
+                (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn, cancelFlag, prog);
+            const int count = raw ? pn.count() : pu.count();
+            flags[row] = (flag == REGIME_OSCILLATION) ? count : flag;
+            ucudaAdWriteStats(adStats, row, S);
+            if (progress != nullptr) ++*progress;
+        }
+        return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+    }
+    numb x[AMOUNTOFX];
+    numb a[64];
+    for (int i = 0; i < AMOUNTOFX; ++i) x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues && i < 64; ++i) a[i] = baseValues[i];
+    UcudaAdaptParams P = *Pbase;
+    UcudaAdaptState S;
+    for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        if (progress != nullptr) ++*progress;
+        const numb v = ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, logScale != 0, reverse != 0);
+        if (axisKind == UCUDA_AXIS_SYSTEM) a[mutIdx] = v;
+        else ucudaAdApplyStepAxis(axisKind, v, (numb)tolRatio, P);
+        if (j == 0) ucuda_ad_init(S, K, AMOUNTOFX, x, (numb)0, a, P);
+        else        ucuda_ad_restart(S, K, (numb)0, a, P);
+        PeakStream   pu;
+        PeakStreamNU pn;
+        if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)j * peakStride, dtS, (size_t)iters, peakCapacity);
+        else      pn.init(outPeaks, timeOfPeaks, (size_t)j * peakStride, peakCapacity, interp);
+        const int flag  = ucudaAdOut(S.X, (numb)maxValue) ? REGIME_UNBOUND
+                        : ucudaAdPeaksPoint(S, K, a, P, (numb)transientTime, (numb)tRec, dtS,
+                                            (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn,
+                                            cancelFlag, prog);
+        const int count = raw ? pn.count() : pu.count();
+        flags[j] = (flag == REGIME_OSCILLATION) ? count : flag;
+        ucudaAdWriteStats(adStats, j, S);
+    }
+    return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+}
+)CPU";
+    return o.str();
+}
+
+bool read_kernel_header(const char* name, std::string& out, std::vector<KrsCpuDiag>& diags) {
+    const std::string path = exe_dir() + "\\kernels\\" + name;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+        diags.push_back({ 0, "cannot read " + path });
+        return false;
+    }
+    char buf[4096];
+    size_t k;
+    while ((k = fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, k);
+    fclose(f);
+    return true;
+}
+
+} // namespace
+
+AdaptiveCpuModule::~AdaptiveCpuModule() {
+    if (module_) FreeLibrary((HMODULE)module_);
+}
+
+bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                                const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                                const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
+    if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
+    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr;
+    std::string why;
+    if (vcvars_path(why).empty()) {
+        diags.push_back({ 0, "CPU compiler unavailable: " + why });
+        return false;
+    }
+    std::string header, config, part, lib;
+    if (!read_kernel_header("ucuda_adaptive.cuh", header, diags)) return false;
+    if (!read_kernel_header("configCUDA.h", config, diags)) return false;
+    if (!read_kernel_header("adaptive_part.cu", part, diags)) return false;
+    if (!read_kernel_header("cudaLibrary.cu", lib, diags)) return false;
+    const std::string peaks = extract_peak_stream(lib);
+    if (peaks.empty()) {
+        diags.push_back({ 0, "struct PeakStream not found in kernels\\cudaLibrary.cu" });
+        return false;
+    }
+    // Тексты adaptive_part.cu и PeakStream входят в исходник, а с ним — в ключ кэша.
+    const std::string source = make_ad_module_source(rhs, emb, dprep, deval, ctrl_body, amountOfX, prelude,
+                                                     peaks, strip_bom(part));
+    unsigned long long h = 1469598103934665603ULL;      // FNV-1a
+    auto mix = [&](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    const char tag[] = "adaptive-module";
+    mix(tag, sizeof tag);
+    mix(source.data(), source.size());
+    mix(header.data(), header.size());
+    mix(config.data(), config.size());
+    const int ver = kAdModuleVersion;
+    mix(&ver, sizeof ver);
+
+    std::lock_guard<std::mutex> lock(g_compile_mtx);
+    std::string dll;
+    if (!build_cached_dll(source, h, dll, diags)) return false;
+    HMODULE m = LoadLibraryA(dll.c_str());
+    if (!m) { diags.push_back({ 0, "failed to load " + dll }); return false; }
+    auto pe = GetProcAddress(m, "ucuda_cpu_ad_endpoint");
+    auto pl = GetProcAddress(m, "ucuda_cpu_ad_lyap");
+    if (!pe || !pl) {
+        FreeLibrary(m);
+        diags.push_back({ 0, "the built DLL lacks the adaptive-step entry points" });
+        return false;
+    }
+    module_ = m;
+    endpoint_ = (EndpointFn)pe;
+    lyap_ = (LyapFn)pl;
+    bif_ = (BifFn)GetProcAddress(m, "ucuda_cpu_ad_bif");   // только у модуля с плотным выходом
+    return true;
+}
 
 CtrlCpuFn::~CtrlCpuFn() {
     if (module_) FreeLibrary((HMODULE)module_);
