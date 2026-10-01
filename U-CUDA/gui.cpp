@@ -1278,6 +1278,9 @@ enum AdaptiveUiOpt {
 static std::vector<AdaptiveSettings*> collect_adaptive_slots(AppModel& m) {
     std::vector<AdaptiveSettings*> v;
     v.push_back(&m.phase_session.adaptive);
+    // Custom: источник — общий конфиг вкладки (apply_shared_to_* раздаёт его уровням при
+    // запуске); его Phase — вместе с ним, как это делает draw_shared_config.
+    v.push_back(&m.custom_session.shared.adaptive);
     v.push_back(&m.custom_session.phase_session.adaptive);
     for (auto& d : m.bifurcation_session.diagrams) v.push_back(&d.adaptive);
     for (auto& c : m.lle_session.curves)           v.push_back(&c.adaptive);
@@ -1594,7 +1597,8 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
         changed |= InputNumStr("h_min", a.hmin, kFieldW, {}, true);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Smallest step. A step that would go below it is taken at h_min\n"
-                              "anyway and counted as forced. Empty: 10 ulp(t).");
+                              "anyway and counted as forced. Empty: the larger of 10 ulp(t) and\n"
+                              "1e-12 x the length of the whole interval (transient + record).");
         changed |= InputNumStr("h_max", a.hmax, kFieldW, {}, true);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Largest step. Empty: no limit.");
         changed |= InputNumStr("max rejects", a.max_rej, kFieldW, {}, true);
@@ -4953,9 +4957,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
         // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
         // раздаются всем уровням; здесь они только показываются.
-        if (on_reset_defaults)
-            changed |= draw_adaptive_block("phase_ad", s.adaptive, s.scheme,
-                                           kAdUiRaw | kAdUiInterp | kAdUiMaxPts, s.sys.is_map, bc);
+        if (on_reset_defaults &&
+            draw_adaptive_block("phase_ad", s.adaptive, s.scheme, kAdUiRaw | kAdUiInterp | kAdUiMaxPts,
+                                s.sys.is_map, bc)) {
+            changed = true;
+            s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
+        }
         else
             ImGui::TextDisabled(s.adaptive.enabled ? "Adaptive step (set in Custom -> Integration)."
                                                    : "Fixed step (set in Custom -> Integration).");
@@ -11239,41 +11246,8 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "very first launch drags the code load into the context along with\n"
                 "it and is therefore always slower than the rest.");
         ImGui::Separator();
-        // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
-        draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
-                          /*broadcast*/ false);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "The method that stands for the exact answer in Eref =\n"
-                "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
-                "own error sits below the machine precision of the solution.");
-        InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Reference steps per one step of the scheme under test. 0 turns\n"
-                "the reference off entirely - the branch is then not even compiled\n"
-                "into the kernel. Keep it above 1 when the reference method is the\n"
-                "same as the tested one: at an equal step that would be the very\n"
-                "same arithmetic and the difference identically zero.");
-        ImGui::Separator();
-        // «Точность — затраты»: ошибка в конечной точке против эталона высокой точности —
-        // общая мера для Fixed- и адаптивных вкладок одного окна.
-        {
-            const char* refs[] = { "off", "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
-            ImGui::SetNextItemWidth(kComboW);
-            ImGui::Combo("reference y*(T)", &c.perf_end_ref, refs, IM_ARRAYSIZE(refs));
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "E(T) = max|y(T) - y*(T)| at the end of the interval (t_max), against\n"
-                    "DOP853 with a fixed step in double-double (~32 digits) or quad-double\n"
-                    "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
-                    "successive answers agree, so y* is exact to far below any error on\n"
-                    "the plot. E(T) is the one error that fixed-step and adaptive tabs\n"
-                    "share: pick \"E(T)\" on the X axis of the plot window to compare them.\n"
-                    "Fixed step: needs \"fit h to t_max\" (otherwise the run ends at N*h).");
-        }
-        ImGui::Separator();
+        // Режим шага — первым: от него зависит, какой эталон у вкладки (ровно один).
+        const bool perf_ad_on = !s.sys.is_map && c.adaptive.enabled;
         if (!s.sys.is_map) {
             draw_adaptive_block("order_perf_ad", c.adaptive, c.scheme, 0, s.sys.is_map);
             if (c.adaptive.enabled) {
@@ -11291,6 +11265,41 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             }
             ImGui::Separator();
         }
+        if (!perf_ad_on) {
+            // Эталон постоянного шага: чем считаем «точный ответ» для Eref по оси X.
+            draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
+                              &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
+                              /*broadcast*/ false);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "The method that stands for the exact answer in Eref =\n"
+                    "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
+                    "own error sits below the machine precision of the solution.\n"
+                    "With \"endpoint only\" and \"fit h to t_max\" Eref is the error at t_max:\n"
+                    "it is then also this tab's E(T), comparable with adaptive tabs.");
+            InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Reference steps per one step of the scheme under test. 0 turns\n"
+                    "the reference off entirely - the branch is then not even compiled\n"
+                    "into the kernel. Keep it above 1 when the reference method is the\n"
+                    "same as the tested one: at an equal step that would be the very\n"
+                    "same arithmetic and the difference identically zero.");
+        } else {
+            // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
+            const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
+            int sel = (c.perf_end_ref == 2) ? 1 : 0;
+            ImGui::SetNextItemWidth(kComboW);
+            if (ImGui::Combo("reference y*(T)", &sel, refs, IM_ARRAYSIZE(refs))) c.perf_end_ref = sel + 1;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "E(T) = max|y(T) - y*(T)| at the end of the interval (t_max), against\n"
+                    "DOP853 with a fixed step in double-double (~32 digits) or quad-double\n"
+                    "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
+                    "successive answers agree, so y* is exact to far below any error on\n"
+                    "the plot. The adaptive step has no h grid, so E(T) is its only error.");
+        }
+        ImGui::Separator();
         // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU
         // прогон последовательный, и поле нечего означать, поэтому гасим его,
         // а не молча игнорируем значение.
@@ -12042,6 +12051,12 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     const bool is_perf  = (win.kind == OrderPlotWindow::Kind::Perf);
     const bool is_error = (win.kind == OrderPlotWindow::Kind::Error);
     const bool is_p     = (win.kind == OrderPlotWindow::Kind::P);
+    // Есть ли в окне адаптивная вкладка: без неё окно Performance — ровно прежнее
+    // (тулбар, оси, подсказки точек), без осей «точность — затраты».
+    bool any_ad = false;
+    for (int mi : win.members)
+        if (mi >= 0 && mi < (int)s.configs.size())
+            any_ad |= s.configs[(size_t)mi].adaptive.enabled || s.configs[(size_t)mi].perf_result.adaptive;
 
     // ---- Тулбар ----
     ImGui::Checkbox("log X", &win.x_log);
@@ -12068,12 +12083,28 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                 "Richardson estimate that E1 and E2 are. The reference method is\n"
                 "chosen in the tab's settings (DOPRI78 by default).");
         ImGui::SameLine();
+        ImGui::TextDisabled("| t:"); ImGui::SameLine();
+        ImGui::RadioButton("us##ptu", &win.time_unit, 0); ImGui::SameLine();
+        ImGui::RadioButton("ms##ptu", &win.time_unit, 1); ImGui::SameLine();
+        ImGui::TextDisabled("|"); ImGui::SameLine();
+        ImGui::Checkbox("min", &win.show_min); ImGui::SameLine();
+        ImGui::Checkbox("avg", &win.show_avg); ImGui::SameLine();
+        ImGui::Checkbox("max", &win.show_max);
+
+        // Вторая строка — «точность — затраты»: ошибка в T против эталона и другие оси
+        // затрат. Только когда в окне есть адаптивная вкладка: окно из одних Fixed-вкладок
+        // выглядит и строится ровно как до адаптивного шага (E1/E2/Eref против времени).
+        if (!any_ad) {
+            if (win.error_source == 3) win.error_source = 0;
+            win.perf_cost = 0;
+        } else {
+        ImGui::TextDisabled("X:"); ImGui::SameLine();
         ImGui::RadioButton("E(T)##perrsrc", &win.error_source, 3);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "max|y(T) - y*(T)| at t_max against DOP853 in dd/qd (\"reference y*(T)\" in\n"
-                "the tab's Performance settings). The only error the adaptive tabs have,\n"
-                "and the one that puts fixed-step and adaptive curves on one diagram.");
+                "Error at t_max. Adaptive tabs: max|y(T) - y*(T)| against DOP853 in dd/qd\n"
+                "(their only error). Fixed tabs: Eref with \"endpoint only\" and \"fit h to\n"
+                "t_max\". Puts fixed-step and adaptive curves on one diagram.");
         ImGui::SameLine();
         ImGui::TextDisabled("| Y:"); ImGui::SameLine();
         ImGui::RadioButton("time##pcost", &win.perf_cost, 0); ImGui::SameLine();
@@ -12082,20 +12113,11 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             ImGui::SetTooltip("Evaluations of the right-hand side per run: the controller's count for\n"
                               "the adaptive step (rejected attempts included), stages x steps for the\n"
                               "explicit fixed-step schemes. Unknown for implicit, CD and composite\n"
-                              "schemes - their curves are left out.");
+                              "schemes - their curves are left out. min / avg / max apply to time only.");
         ImGui::SameLine();
         ImGui::RadioButton("steps##pcost", &win.perf_cost, 2);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Accepted steps per run (the rejected ones are in the node tooltip).");
-        if (win.perf_cost == 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("| t:"); ImGui::SameLine();
-            ImGui::RadioButton("us##ptu", &win.time_unit, 0); ImGui::SameLine();
-            ImGui::RadioButton("ms##ptu", &win.time_unit, 1); ImGui::SameLine();
-            ImGui::TextDisabled("|"); ImGui::SameLine();
-            ImGui::Checkbox("min", &win.show_min); ImGui::SameLine();
-            ImGui::Checkbox("avg", &win.show_avg); ImGui::SameLine();
-            ImGui::Checkbox("max", &win.show_max);
         }
     }
 
@@ -12207,8 +12229,10 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             // узлов, а посчитанная величина, и монотонность её не гарантирована.
             const double qn = std::numeric_limits<double>::quiet_NaN();
             auto at = [qn](const std::vector<double>& v, int i) { return (size_t)i < v.size() ? v[(size_t)i] : qn; };
-            auto add_cost_series = [&](const std::function<double(int)>& cost, const std::string& suffix,
-                                       float shade_k, int marker_slot) {
+            // tsrc — время, которое попадает в подсказку: у кривых времени своё (min / avg /
+            // max), как было до осей f и шагов; у них — среднее.
+            auto add_cost_series = [&](const std::function<double(int)>& cost, const std::vector<double>& tsrc,
+                                       const std::string& suffix, float shade_k, int marker_slot) {
                 // Теги — h (или tol у адаптивного), ошибка, время, шаги, f, отказы. Они
                 // обязаны ехать вместе с точкой через сортировку по X: после неё позиция
                 // в массиве уже ничего не говорит о том, какому узлу точка принадлежала.
@@ -12230,7 +12254,7 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     // координатах лежат log10. В подсказке хочется исходные числа.
                     Pt pt{ win.x_log ? std::log10(e) : e, ylog ? std::log10(cv) : cv,
                            { r.adaptive ? at(r.axis_vals, i) : at(r.h_eff, i), e,
-                             at(r.t_avg, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
+                             at(tsrc, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
                     pts.push_back(pt);
                 }
                 if (pts.empty()) return;
@@ -12238,10 +12262,10 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                           [](const Pt& a, const Pt& b) { return a.x < b.x; });
                 std::vector<double> xy, tg;
                 xy.reserve(pts.size() * 2);
-                tg.reserve(pts.size() * 6);
+                tg.reserve(pts.size() * (any_ad ? 6 : 4));
                 for (const auto& pr : pts) {
                     xy.push_back(pr.x); xy.push_back(pr.y);
-                    for (double v : pr.tg) tg.push_back(v);
+                    for (int q = 0; q < (any_ad ? 6 : 4); ++q) tg.push_back(pr.tg[q]);   // Fixed: h, E, t, steps
                     note_x(pr.x);
                 }
                 bufs.push_back(std::move(xy));
@@ -12253,16 +12277,16 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             };
             const std::string kind_tag = r.adaptive ? std::string("(adaptive)") : std::string();
             if (win.perf_cost == 1) {
-                add_cost_series([&](int i) { return at(r.n_rhs, i); }, kind_tag, 1.0f, 1);
+                add_cost_series([&](int i) { return at(r.n_rhs, i); }, r.t_avg, kind_tag, 1.0f, 1);
             } else if (win.perf_cost == 2) {
                 add_cost_series([&](int i) {
                     return (size_t)i < r.n_steps.size() && r.n_steps[(size_t)i] > 0 ? (double)r.n_steps[(size_t)i] : qn;
-                }, kind_tag, 1.0f, 1);
+                }, r.t_avg, kind_tag, 1.0f, 1);
             } else {
                 const std::string sp = kind_tag.empty() ? std::string() : kind_tag + " ";
-                if (win.show_min) add_cost_series([&](int i) { return at(r.t_min, i) * time_scale; }, sp + "min", 0.55f, 0);
-                if (win.show_avg) add_cost_series([&](int i) { return at(r.t_avg, i) * time_scale; }, sp + "avg", 1.0f,  1);
-                if (win.show_max) add_cost_series([&](int i) { return at(r.t_max, i) * time_scale; }, sp + "max", 1.5f,  2);
+                if (win.show_min) add_cost_series([&](int i) { return at(r.t_min, i) * time_scale; }, r.t_min, sp + "min", 0.55f, 0);
+                if (win.show_avg) add_cost_series([&](int i) { return at(r.t_avg, i) * time_scale; }, r.t_avg, sp + "avg", 1.0f,  1);
+                if (win.show_max) add_cost_series([&](int i) { return at(r.t_max, i) * time_scale; }, r.t_max, sp + "max", 1.5f,  2);
             }
             continue;
         }
@@ -12354,12 +12378,16 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                                   : "| no reference in this result: set reference substeps > 0 and run again");
             } else if (win.error_source == 3) {
                 ImGui::SameLine();
-                if (!r.e_end.empty())
+                if (!r.e_end.empty() && r.adaptive)
                     ImGui::TextDisabled("| y*(T): DOP853 in %s, %lld steps, its own error ~%.1e",
                                         r.ref_prec == 2 ? "qd" : "dd", r.ref_steps, r.ref_err);
+                else if (!r.e_end.empty())
+                    ImGui::TextDisabled("| E(T) = Eref at t_max: %s x%s",
+                                        c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
                 else
                     ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                                       "| no y*(T) in this result: set \"reference y*(T)\" and run again");
+                                       r.adaptive ? "| no y*(T) in this result: run again"
+                                                  : "| no E(T): needs \"endpoint only\", \"fit h to t_max\" and reference substeps > 0");
             } else if (r.adaptive) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| an adaptive tab has only E(T)");
@@ -12453,7 +12481,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         const char* ename = (win.error_source == 3) ? "E(T)" : (win.error_source == 2) ? "Eref"
                           : (win.error_source == 1) ? "E2" : "E1";
         const char* unit  = (win.time_unit == 1) ? "ms" : "us";
-        view.point_tag_names = { "h / tol", ename, std::string("t avg, ") + unit, "steps", "f evals", "rejected" };
+        if (any_ad) view.point_tag_names = { "h / tol", ename, std::string("t, ") + unit, "steps", "f evals", "rejected" };
+        else        view.point_tag_names = { "h", ename, std::string("t, ") + unit, "steps" };
     }
 
     std::vector<PlotSeriesInput> series;

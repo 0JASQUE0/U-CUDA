@@ -82,7 +82,7 @@ struct UcudaAdaptParams {
     numb rtol;
     numb atol[UCUDA_AD_MAXN];   // по переменным (скаляр хост размножает)
     numb h0;                    // <= 0 — автоматически (select_initial_step)
-    numb hmin;                  // <= 0 — 10 ulp(t), как в scipy
+    numb hmin;                  // <= 0 — max(10 ulp(t), 1e-12 * span), см. ucuda_ad_hmin_auto
     numb hmax;                  // <= 0 — без ограничения
     numb span;                  // длина всего интервала (нужна выбору h0)
     numb c[UCUDA_CTL_NPAR];     // параметры регулятора
@@ -335,7 +335,9 @@ UCUDA_HD inline void ucuda_ctrl_i(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtl
 
 UCUDA_HD inline void ucuda_ctrl_pi(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     const numb err = ucuda_ctl_err(in);
-    if (err > 1 || m.nacc < 1 || err == 0 || !(m.err[0] > 0)) { ucuda_ctrl_elem(in, err, o); return; }
+    // !(err <= 1): NaN тоже к элементарному закону — он его отвергает; формула PI с NaN
+    // зажималась в facmin и принимала шаг.
+    if (!(err <= 1) || m.nacc < 1 || err == 0 || !(m.err[0] > 0)) { ucuda_ctrl_elem(in, err, o); return; }
     const numb facmin = in.c[1], facmax = in.c[2];
     const numb kI = in.cc->b1, kP = in.cc->b2;
 #ifdef UCUDA_AD_EXACT_CTL
@@ -351,15 +353,16 @@ UCUDA_HD inline void ucuda_ctrl_pi(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCt
 
 UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     const numb err = ucuda_ctl_err(in);
-    if (err > 1 || m.nacc < 2 || err == 0 || !(m.err[0] > 0) || !(m.err[1] > 0)) {
+    if (!(err <= 1) || m.nacc < 2 || err == 0 || !(m.err[0] > 0) || !(m.err[1] > 0)) {   // NaN — см. PI
         ucuda_ctrl_elem(in, err, o); return;
     }
     const numb facmin = in.c[1], facmax = in.c[2];
     const numb b1 = in.cc->b1, b2 = in.cc->b2, b3 = in.cc->b3, a2 = in.c[6], a3 = in.c[7];
-    const numb e2 = m.nacc >= 3 ? m.err[1] : m.err[0];
+    // При nacc >= 2 в памяти уже два принятых шага: err[1] = e_{n-2}, h[1] = h_{n-2}.
+    const numb e2 = m.err[1];
 #ifdef UCUDA_AD_EXACT_CTL
     const numb rho1 = in.h / m.h[0];                         // h_n / h_{n-1}
-    const numb rho2 = m.nacc >= 3 ? m.h[0] / m.h[1] : (numb)1;
+    const numb rho2 = m.h[0] / m.h[1];                       // h_{n-1} / h_{n-2}
     numb rho = exp2(in.cc->lth_f) * pow(err, -b1) * pow(m.err[0], -b2) * pow(e2, -b3)
              * pow(rho1, -a2) * pow(rho2, -a3);
 #else
@@ -367,7 +370,7 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
     // log2 h, без деления.
     const float lh0 = ucuda_ctl_log2(m.h[0]);
     const float lr1 = ucuda_ctl_log2(in.h) - lh0;                            // log2 (h_n / h_{n-1})
-    const float lr2 = m.nacc >= 3 ? lh0 - ucuda_ctl_log2(m.h[1]) : 0.0f;    // log2 (h_{n-1} / h_{n-2})
+    const float lr2 = lh0 - ucuda_ctl_log2(m.h[1]);                          // log2 (h_{n-1} / h_{n-2})
     numb rho = (numb)exp2f((float)in.cc->lth_f
                            - (float)b1 * ucuda_ctl_log2(err) - (float)b2 * ucuda_ctl_log2(m.err[0])
                            - (float)b3 * ucuda_ctl_log2(e2) - (float)a2 * lr1 - (float)a3 * lr2);
@@ -478,9 +481,16 @@ struct UcudaAdaptState {
     int  log_n;                                    //        2 — вынужденный
 };
 
-// 10 ulp(t) — нижняя граница шага по умолчанию (scipy: min_step).
-UCUDA_HD inline numb ucuda_ad_hmin_auto(numb t) {
-    return 10 * fabs(nextafter(t, (numb)1e308) - t);
+// Нижняя граница шага по умолчанию: большее из 10 ulp(t) (scipy: min_step) и 1e-12 * span.
+// Одних 10 ulp мало: регулятор, который упёрся в недостижимый допуск (пол округления ошибки
+// клонов LLE/LS, слишком строгий rtol), держит шаг на границе, и при t ~ 50 это 7e-14 —
+// ~1e15 шагов до конца интервала, расчёт не кончается. С 1e-12 * span — не больше 1e12
+// вынужденных шагов на весь интервал, а на нормальных траекториях граница не достигается.
+// span <= 0 (не задан) — только 10 ulp.
+UCUDA_HD inline numb ucuda_ad_hmin_auto(numb t, numb span) {
+    const numb u = 10 * fabs(nextafter(t, (numb)1e308) - t);
+    const numb s = span > 0 ? (numb)1e-12 * span : (numb)0;
+    return u > s ? u : s;
 }
 
 // Начальный шаг: select_initial_step scipy (Hairer-Nørsett-Wanner I, II.4).
@@ -639,7 +649,7 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
     numb* W = S.W;
 #endif
     const int  nrej = S.nrej_run;
-    const numb hmin = P.hmin > 0 ? P.hmin : ucuda_ad_hmin_auto(S.t);   // t в повторах не меняется
+    const numb hmin = P.hmin > 0 ? P.hmin : ucuda_ad_hmin_auto(S.t, P.span);   // t в повторах не меняется
     {
         numb h = S.h;
         if (P.hmax > 0 && h > P.hmax) h = P.hmax;
@@ -662,18 +672,21 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
         UcudaCtlOut o;
         ucuda_step_ctrl(P.ctrl, in, S.mem, o);
 
-        if (forced && !(o.err <= (numb)1e300)) { S.diverged = 1; return 0; }   // !(<=) ловит и NaN
+        const int finite = o.err <= (numb)1e300;   // !(<=) ловит и NaN
+        if (forced && !finite) { S.diverged = 1; return 0; }
         // Без повторов принимается любая попытка с конечной ошибкой; NaN/inf — как обычный
-        // отказ: шаг уменьшается, а на h_min разлёт ловится выше.
-        const int take = o.accept || forced || (P.maxrej < 0 && o.err <= (numb)1e300);
+        // отказ: шаг уменьшается, а на h_min разлёт ловится выше. Так же — приём регулятором
+        // попытки с NaN/inf (пользовательский закон, который про NaN не подумал).
+        const int acc  = o.accept && finite;
+        const int take = acc || forced || (P.maxrej < 0 && finite);
         if (S.log != nullptr && S.log_n < S.log_cap) {
             numb* r = S.log + 4 * S.log_n++;
             r[0] = S.t; r[1] = h; r[2] = o.err;
-            r[3] = o.accept ? (numb)1 : (take ? (numb)2 : (numb)0);
+            r[3] = acc ? (numb)1 : (take ? (numb)2 : (numb)0);
         }
         if (take) {
             ext.commit();
-            if (!o.accept) S.st.nforced++;
+            if (!acc) S.st.nforced++;
             S.tp = S.t; S.hp = h;
             for (int i = 0; i < n; ++i) {
 #ifndef UCUDA_AD_NO_DENSE
@@ -876,6 +889,12 @@ UCUDA_HD inline void ucuda_lyap_renorm(const numb* x, const numb eps, numb* y, n
     }
 }
 
+// Пол масштаба ошибки клонов: K машинных эпсилон от величины переменной (см. attempt ниже).
+#ifndef UCUDA_LYAP_NOISE_K
+#define UCUDA_LYAP_NOISE_K 100
+#endif
+#define UCUDA_NUMB_EPS (sizeof(numb) == 4 ? 1.1920928955078125e-7 : 2.220446049250313e-16)
+
 // Клоны как добавка к шагу (см. UcudaAdNoExtra): на попытке — вложенный шаг каждого клона
 // и норма ошибки возмущения, на принятии — клоны становятся новыми.
 template <int NC>
@@ -906,7 +925,28 @@ struct UcudaLyapClones {
             // sc^2 = (rtol * RMS(delta))^2, delta — большее из начала и конца попытки.
             const numb sc2 = rtol * rtol * (d0 > d1 ? d0 : d1) / (numb)n;
             if (!(sc2 > 0)) continue;
-            s5 /= sc2; s3 /= sc2;
+            // Пол масштаба покомпонентно: sc_i = max(rtol * RMS(delta), K * eps * max|x_i, y_i|) —
+            // шум округления разности клона и x (и их оценок E) в этой компоненте. Без пола при
+            // rtol * |delta| ниже разрешения double (rtol 1e-9, eps 1e-8 у Лоренца) ошибка упиралась
+            // в шум, и регулятор дробил шаг: ~170x шагов при тех же показателях. Пол не сработал ни
+            // в одной компоненте — нормы прежним выражением, побитово как без него.
+            bool floored = false;
+            numb f5 = 0, f3 = 0;
+            for (int i = 0; i < n; ++i) {
+                numb ax = fabs(X[i]);
+                const numb a1 = fabs(Y[i]), a2 = fabs(y[c * n + i]), a3 = fabs(Yc[c * n + i]);
+                if (a1 > ax) ax = a1;
+                if (a2 > ax) ax = a2;
+                if (a3 > ax) ax = a3;
+                const numb fl = (numb)UCUDA_LYAP_NOISE_K * (numb)UCUDA_NUMB_EPS * ax;
+                const numb sci2 = sc2 > fl * fl ? sc2 : fl * fl;
+                if (sci2 != sc2) floored = true;
+                const numb e5 = Ec[i] - E[i];
+                f5 += e5 * e5 / sci2;
+                if (nlo >= 2) { const numb e3 = Ec[n + i] - E[n + i]; f3 += e3 * e3 / sci2; }
+            }
+            if (floored) { s5 = f5; s3 = f3; }
+            else         { s5 /= sc2; s3 /= sc2; }
             numb err;
             if (nlo >= 2) err = (s5 == 0 && s3 == 0) ? (numb)0 : s5 / sqrt((s5 + (numb)0.01 * s3) * (numb)n);
             else          err = sqrt(s5 / (numb)n);
@@ -1049,6 +1089,56 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
         }
         if (ok) attached = continuation != 0;
         else    { attached = false; seq = j + 1; }
+    }
+}
+
+// Классический свип (каждая точка заново от baseX, направления — подпоследовательность j)
+// по куску точек [j0, j1) сетки из nPts: ровно то, что ucuda_lyap_chain делает при
+// continuation = 0, но кусками — CPU раздаёт их потокам. Выходы — с j0: result[(j-j0)*NC ..],
+// adStats[(j-j0)*4 ..]. Тик прогресса — точка.
+template <int NC, class K>
+UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const int j1, const int nPts,
+                                              const numb lo, const numb hi, const int logScale,
+                                              const int mutParamIdx, const numb* baseValues,
+                                              const int amountOfValues, const numb* baseX,
+                                              const UcudaAdaptParams& Pbase, const int axisKind,
+                                              const numb tolRatio, const numb tTr, const numb NT,
+                                              const int nBlocks, const int nWarm, const numb eps,
+                                              const int renorm, const numb maxValue, numb* result,
+                                              numb* adStats, const volatile int* cancelFlag,
+                                              int* progressCounter) {
+    numb a[64];   // kMaxAmountOfValues в движке
+    for (int i = 0; i < amountOfValues && i < 64; ++i) a[i] = baseValues[i];
+    UcudaAdaptParams P = Pbase;
+    UcudaAdaptState S;
+    UcudaLyapClones<NC> cl;
+    cl.active = false;
+    UcudaLyapNoProgress prog;
+    const numb qnan = sqrt((numb)-1);
+    for (int j = j0; j < j1; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        if (progressCounter != nullptr) {
+#ifdef __CUDA_ARCH__
+            atomicAdd(progressCounter, 1);
+#else
+            ++*progressCounter;
+#endif
+        }
+        const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, false);
+        if (axisKind == 0) a[mutParamIdx] = v;
+        else ucuda_lyap_apply_axis(axisKind, v, tolRatio, P);
+        ucuda_ad_init(S, Kf, AMOUNTOFX, baseX, (numb)0, a, P);
+        numb res[NC];
+        const int ok = ucuda_lyap_out(S.X, maxValue) ? 0
+                     : ucuda_lyap_point<NC>(S, Kf, a, P, cl, false, tTr, NT, nBlocks, nWarm, eps, renorm,
+                                            maxValue, j, res, cancelFlag, prog);
+        const size_t r = (size_t)(j - j0);
+        for (int m = 0; m < NC; ++m) result[r * NC + m] = ok ? res[m] : qnan;
+        if (adStats != nullptr) {
+            numb* st = adStats + r * 4;
+            st[0] = (numb)S.st.nacc; st[1] = (numb)S.st.nrej; st[2] = (numb)S.st.nforced;
+            st[3] = S.st.nacc > 0 ? S.st.hsum / (numb)S.st.nacc : (numb)0;
+        }
     }
 }
 

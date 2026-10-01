@@ -147,12 +147,14 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
     req.replicas           = std::max(1, parse_i(c.perf_replicas_text, 1));
 
-    // «Точность — затраты»: эталон в T, f на шаг, адаптивный шаг.
-    req.end_ref_prec = (c.perf_end_ref >= 0 && c.perf_end_ref <= 2) ? c.perf_end_ref : 1;
+    // «Точность — затраты»: f на шаг, адаптивный шаг. Эталон y*(T) в dd/qd — только у
+    // адаптивного (у него нет сетки h, E(T) — единственная ошибка); E(T) постоянного шага —
+    // это Eref в конце интервала (run_performance_any), отдельного эталона у Fixed нет.
+    req.end_ref_prec = 0;
     req.rhs_per_step = perf_rhs_per_step(c.scheme);
     if (c.adaptive.enabled && !s.sys.is_map) {
         req.adaptive = true;
-        if (req.end_ref_prec == 0) req.end_ref_prec = 1;   // других ошибок у адаптивного замера нет
+        req.end_ref_prec = (c.perf_end_ref == 2) ? 2 : 1;
         if (!adaptive_scheme_name_ok(c.scheme)) {
             req.setup_error = "Adaptive step needs a scheme with an embedded error estimate: RK45, DOPRI78 or DOP853.";
         } else {
@@ -218,7 +220,7 @@ void apply_stability_result(OrderConfig& c, StabilityResult&& r) {
 void apply_perf_result(OrderConfig& c, PerfResult&& r) {
     c.perf_result = std::move(r);
     c.perf_last_run_ok = c.perf_result.ok;
-    if (!c.perf_result.ok) c.last_error = c.perf_result.error;
+    if (!c.perf_result.error.empty()) c.last_error = c.perf_result.error;   // и предупреждение при ok
     c.perf_data_generation++;
     c.perf_fit_request = true;
 }
@@ -738,7 +740,6 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
     res.t_max.assign((size_t)npts, std::numeric_limits<double>::quiet_NaN());
     res.t_avg.assign((size_t)npts, std::numeric_limits<double>::quiet_NaN());
     res.n_steps.assign((size_t)npts, 0);
-    res.y_end.assign((size_t)npts, std::vector<double>());
 
     std::string err;
     KrsCpuStep step;
@@ -805,9 +806,6 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
             res.t_min[(size_t)i] = tmin;
             res.t_max[(size_t)i] = tmx;
             res.t_avg[(size_t)i] = tsum / (double)got;
-            auto& ye = res.y_end[(size_t)i];
-            ye.resize((size_t)n);
-            for (int k = 0; k < n; ++k) ye[(size_t)k] = as_d(X[(size_t)k]);
             if (first_t) { res.t_lo = tmin; res.t_hi = tmx; first_t = false; }
             else { if (tmin < res.t_lo) res.t_lo = tmin; if (tmx > res.t_hi) res.t_hi = tmx; }
         }
@@ -1008,7 +1006,24 @@ static PerfResult run_performance_any(ParametricEngine& engine, bool on_gpu, con
             if (req.rhs_per_step > 0 && res.n_steps[(size_t)i] > 0)
                 res.n_rhs[(size_t)i] = req.rhs_per_step * (double)res.n_steps[(size_t)i];
     }
-    if (req.end_ref_prec > 0 && !req.end_ref_body.empty()) {
+    // E(T) постоянного шага — Eref, если он и есть ошибка в t_max: "endpoint only" (иначе Eref —
+    // максимум по траектории) и узел кончился ровно в T (без "fit h to t_max" — в N*h).
+    // Эталон тот же, что у Eref (reference method / substeps); своего у Fixed нет.
+    if (!req.adaptive) {
+        res.e_end.clear();
+        if (req.endpoint_only && !res.e_ref.empty()) {
+            res.e_end.assign((size_t)n, qnan);
+            for (int i = 0; i < n && i < (int)res.e_ref.size(); ++i) {
+                if (i >= (int)res.n_steps.size() || i >= (int)res.h_eff.size()) continue;
+                const double tend = (double)res.n_steps[(size_t)i] * res.h_eff[(size_t)i];
+                if (std::fabs(tend - req.t_max) <= 1e-9 * std::max(1.0, std::fabs(req.t_max)))
+                    res.e_end[(size_t)i] = res.e_ref[(size_t)i];
+            }
+        }
+    }
+    // Адаптивный: y*(T) — DOP853 в dd/qd на CPU, одна точка на весь замер.
+    if (req.adaptive && req.end_ref_prec > 0 && !req.end_ref_body.empty()) {
+        if (req.progress) req.progress->store(0.95f, std::memory_order_relaxed);   // дальше — эталон на CPU
         std::vector<double> ys;
         double est = 0.0;
         long long steps = 0;
@@ -1018,19 +1033,21 @@ static PerfResult run_performance_any(ParametricEngine& engine, bool on_gpu, con
             ? perf_end_reference_t<ucuda::qd>(req, ys, est, steps, cancelled, err)
             : perf_end_reference_t<ucuda::dd>(req, ys, est, steps, cancelled, err);
         if (cancelled) { res.cancelled = true; res.ok = false; return res; }
-        if (!ok) { res.ok = false; res.error = "reference y(T): " + err; return res; }
+        // Замер времени ценнее эталона: неудачный эталон оставляет результат целым, без E(T),
+        // а причина уходит в сообщение вкладки (apply_perf_result).
+        if (!ok) { res.error = "reference y(T): " + err; if (req.progress) req.progress->store(1.0f); return res; }
         res.ref_err = est; res.ref_steps = steps; res.ref_prec = req.end_ref_prec;
         res.e_end.assign((size_t)n, qnan);
         for (int i = 0; i < n && i < (int)res.y_end.size(); ++i) {
             const std::vector<double>& y = res.y_end[(size_t)i];
             if ((int)y.size() != req.amountOfX) continue;
-            // Постоянный шаг без подгонки кончается в N*h, а не в T: сравнивать не с чем.
-            if (!req.adaptive) {
-                const double tend = (double)res.n_steps[(size_t)i] * res.h_eff[(size_t)i];
-                if (!(std::fabs(tend - req.t_max) <= 1e-9 * std::max(1.0, std::fabs(req.t_max)))) continue;
-            }
+            // std::max(e, NaN) молча вернул бы e: разлетевшийся узел получил бы E(T) = 0.
             double e = 0.0;
-            for (int k = 0; k < req.amountOfX; ++k) e = std::max(e, std::fabs(y[(size_t)k] - ys[(size_t)k]));
+            for (int k = 0; k < req.amountOfX; ++k) {
+                const double d = std::fabs(y[(size_t)k] - ys[(size_t)k]);
+                if (!std::isfinite(d)) { e = qnan; break; }
+                e = std::max(e, d);
+            }
             res.e_end[(size_t)i] = e;
         }
     }

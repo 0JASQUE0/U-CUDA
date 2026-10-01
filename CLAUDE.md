@@ -268,9 +268,22 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   rejections and samples at different moments. One attempt per loop iteration
   (`ucuda_ad_try_x`) made LS 2D 1.5x faster, but the same restructure made the bifurcation kernels
   1.3-1.6x *slower* — measure every loop-shape change (results stay bit-identical either way).
-- The clone error control asks for `rtol*|delta|`; when that is below double resolution of the
-  perturbation (`rtol*eps << 1e-16*|x|`, e.g. rtol 1e-9, eps 1e-8) the step collapses to chase
-  roundoff: 100x more steps, same exponents.
+- The clone error control asks for `rtol*|delta|`; below double resolution of the perturbation
+  (`rtol*eps << 1e-16*|x|`, e.g. rtol 1e-9, eps 1e-8) the step used to collapse chasing roundoff
+  (~200x more steps, same exponents). The scale now has a per-component floor
+  `max(rtol*RMS(delta), K*eps_machine*max|x_i, y_i|)`, K = `UCUDA_LYAP_NOISE_K` = 100. It is active
+  at ordinary settings too (rtol 1e-8, eps 1e-6): steps ~10x longer, exponents within the
+  finite-T scatter. Without the floor the norms are computed bit-for-bit as before.
+- Adaptive sweep kernels are **FP64-bound** (ncu, Rossler 256x256 DOP853 on RTX 2060: FP64 pipe
+  84% busy, 214 registers, 8 warps/SM). Register caps (168/128), block width 64/128 and
+  `UCUDA_AD_STATIC_N` do not help or hurt. The uniform output grid is ~4x slower than step nodes
+  because of warp divergence: the step (~410 FP64 instructions) and dprep run for 2-4 of 32 lanes
+  (81% of warp instructions). Tried and reverted (results bit-identical, all slower at 256x256):
+  step-then-samples loop (7.6 -> 7.9 s), the same with `__all_sync` before every attempt
+  (-> 13.1 s: the warp waits for the lane with the longest sample loop and the kernel becomes
+  local-memory latency bound), dense coefficients in registers (255 registers, no gain).
+- Default `h_min` is `max(10 ulp(t), 1e-12*span)`: 10 ulp alone let a controller pinned at an
+  unreachable tolerance take ~1e15 steps.
 - New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.
 
 ## ImGui/ImPlot Guidelines
@@ -327,6 +340,15 @@ x64/{Debug|Release}/U-CUDA.exe
 ### Debugging
 - **CUDA:** `compute-sanitizer` / Nsight Compute
 - **NVRTC issues:** Check that headers were copied to `kernels/` (Post-Build Event)
+- **Nsight Compute (`ncu`, in PATH):** GPU counters are enabled on this machine. Under the Russian
+  Windows locale `ncu` crashes with "bad conversion" when it PRINTS values (console or
+  `--import --csv`); profiling itself works. Write a report (`ncu -o rep ...`) and read it with the
+  Python module `ncu_report` (`<Nsight Compute>\extras\python`). Kernel regex: `--kernel-name regex:Ad`,
+  plus `--launch-count 1 --kill on`.
+- **Profiling knobs (env, off by default, kernel code unchanged when unset):**
+  `UCUDA_NVRTC_LINEINFO=1` — line info in the modules (SourceCounters per source line);
+  `UCUDA_NVRTC_MAXRREG=<n>` — register cap (NVRTC, cuModuleLoadDataEx and cuLink).
+  `CUDA_CACHE_DISABLE=1` to measure a cold module build (the driver JIT cache hides it).
 
 ---
 

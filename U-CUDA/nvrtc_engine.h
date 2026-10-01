@@ -99,6 +99,10 @@ public:
     // Не трогает состояние compile()/run_phase_portraits. false + error() при сбое.
     bool run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out);
 
+    // Только сборка адаптивного ядра Analysis в кэш (фоновый прогрев): rq.rhs/emb/dprep/deval,
+    // ctrl_body и amountOfX — те же, что потом уйдут в run_phase_portraits_adaptive.
+    bool prewarm_adaptive(const PhaseAdaptiveRequest& rq);
+
     // Замер адаптивного шага до T (см. AdaptiveEndpointRequest). Модуль — свой, в том же кэше.
     bool run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out);
 

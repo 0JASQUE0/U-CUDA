@@ -32,6 +32,8 @@ bool computePhasePortraitsNVRTC(
 // Ошибки не репортит: если прогрев не успел или упал, тот же krs_body
 // перекомпилируется (и покажет тот же NVRTC-лог) на настоящем Run.
 void prewarmPhasePortraitsNVRTC(const std::string& krs_body, int amountOfX);
+// То же для адаптивного шага: сборка ядра phase_kernel_ad по телам rq (без счёта).
+void prewarmPhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq);
 
 // Адаптивный шаг: тот же движок и кэш, ядро phase_kernel_ad (см. NvrtcEngine).
 bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out,

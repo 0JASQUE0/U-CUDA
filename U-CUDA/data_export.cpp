@@ -18,6 +18,46 @@ static void write_fmad_line(std::ofstream& out, bool gpu_fmad)
     out << "NVRTC --fmad = " << (gpu_fmad ? "on" : "off") << "\n";
 }
 
+// Хвост конфига свипа 1D: устройство и раскладка точек по оси. Строки появляются, только когда
+// что-то отличается от классического линейного свипа на GPU, — его конфиг не меняется.
+template <class Snap>
+static void write_sweep_tail(std::ofstream& out, const Snap& s)
+{
+    if (s.log_scale) out << "log scale = 1\n";
+    if (s.continuation) out << "continuation = " << (s.continuation_reverse ? "backward" : "forward") << "\n";
+    if (!s.step_control.empty()) out << "step control = " << s.step_control << "\n";
+}
+
+template <class Snap>
+static void write_device_line(std::ofstream& out, const Snap& s)
+{
+    if (s.on_cpu) out << "device = CPU\n";
+    else          write_fmad_line(out, s.gpu_fmad);
+}
+
+// Хвост конфига кривой LLE/LS 1D: устройство, транзиент касательных векторов, раскладка свипа.
+template <class Snap>
+static void write_curve1d_tail(std::ofstream& out, const Snap& s)
+{
+    write_device_line(out, s);
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
+    write_sweep_tail(out, s);
+}
+
+// x точки i — той же функцией, что у графика (sweep_value_at в gui.cpp): цепочка
+// continuation идёт в своём порядке (backward — от hi), лог-шкала — по степеням.
+// Линейный классический свип — прежняя param_value_at, побитово как раньше.
+template <class Snap>
+static double curve1d_x(const Snap& s, int i, int n)
+{
+    const bool log_ok = s.log_scale && s.range_lo > 0.0 && s.range_hi > 0.0;
+    if (s.continuation || s.continuation_reverse)
+        return (double)ucuda_node_value_cont(i, n, (numb)s.range_lo, (numb)s.range_hi, log_ok,
+                                             s.continuation_reverse);
+    if (log_ok) return (double)ucuda_node_value_log(i, n, (numb)s.range_lo, (numb)s.range_hi);
+    return param_value_at(static_cast<std::size_t>(i), n, s.range_lo, s.range_hi);
+}
+
 // Bif1D
 
 void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
@@ -48,7 +88,8 @@ void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
     out << "indexVar for peakfinder = " << s.writableVar << "\n";
     out << "indexPar for estimation = " << s.indexOfMutVar << "\n";
     out << "start value = " << s.range_lo << ", stop value = " << s.range_hi << "\n";
-    write_fmad_line(out, s.gpu_fmad);
+    write_device_line(out, s);
+    write_sweep_tail(out, s);
 }
 
 void write_bif1d_rows(std::ofstream& out,
@@ -80,10 +121,7 @@ bool export_bif1d(const Bifurcation1DResult& res, const std::string& path)
 
     const int n_pts = res.n_pts;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         const int npeaks = (i < (int)res.flags.size()) ? res.flags[i] : 0;
         if (npeaks > 0) {
             const auto& pk = res.bifurcation_points[i];
@@ -219,8 +257,7 @@ void write_lle1d_config(std::ofstream& out, const LLE1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
-    write_fmad_line(out, s.gpu_fmad);
-    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
+    write_curve1d_tail(out, s);
 }
 
 void write_lle1d_row(std::ofstream& out, double param, double lyapunov)
@@ -242,10 +279,7 @@ bool export_lle1d(const LLE1DResult& res, const std::string& path)
 
     const int n_pts = res.n_pts;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         const double v = (i < (int)res.lyapunov.size()) ? res.lyapunov[i] : 0.0;
         write_lle1d_row(out, param, v);
     }
@@ -261,8 +295,7 @@ void write_ls1d_config(std::ofstream& out, const LS1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
-    write_fmad_line(out, s.gpu_fmad);
-    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
+    write_curve1d_tail(out, s);
 }
 
 void write_ls1d_row(std::ofstream& out, double param,
@@ -288,10 +321,7 @@ bool export_ls1d(const LS1DResult& res, const std::string& path)
     const int n_pts = res.n_pts;
     const int n_exp = res.n_exponents;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         if (i < (int)res.spectrum.size() && !res.spectrum[i].empty())
             write_ls1d_row(out, param, res.spectrum[i].data(), n_exp);
         else {

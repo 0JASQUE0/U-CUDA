@@ -59,6 +59,13 @@ struct Bif1DSnapshot {
     int    indexOfMutVar = 0;                // 1-based for param, 0-based for IC
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Раскладка точек по оси — как у LLE1DSnapshot: export_bif1d считает x той же функцией,
+    // что график (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // 1D DFT — same sweep/integration fields as Bif1DSnapshot, plus the frequency
@@ -95,6 +102,13 @@ struct LLE1DSnapshot {
     int    indexOfMutVar = 0;
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Как стоят точки по оси: export_* считает x той же функцией, что график
+    // (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // LS1D shares the same header layout as LLE1D (engine writes "1D LS" instead
@@ -112,6 +126,13 @@ struct LS1DSnapshot {
     int    indexOfMutVar = 0;
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Как стоят точки по оси: export_* считает x той же функцией, что график
+    // (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // 2D: covers Bif2D (uses eps_dbscan + writableVar + preScaller fields) and

@@ -161,6 +161,7 @@ struct AdaptiveRequest {
     // Ошибка сборки на стороне UI (не та схема, неразборный rtol...): движок вернёт
     // её вместо расчёта.
     std::string setup_error;
+    std::string desc;                    // для _config.csv: регулятор и допуски (fill_adaptive_request)
 };
 
 struct Bifurcation1DRequest {

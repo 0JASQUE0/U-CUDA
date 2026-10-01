@@ -465,6 +465,14 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
     return true;
 }
 
+bool NvrtcEngine::prewarm_adaptive(const PhaseAdaptiveRequest& rq) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    void* fn = nullptr;
+    return compile_adaptive(rq, &fn, 0);
+}
+
 bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     out = AdaptiveEndpointResult();

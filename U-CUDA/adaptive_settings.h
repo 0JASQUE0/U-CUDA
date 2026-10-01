@@ -25,7 +25,7 @@ struct AdaptiveSettings {
     std::string rtol      = "1e-8";
     std::string atol      = "1e-10";        // одно число или по переменной через запятую
     std::string h0;                         // пусто — автоматически
-    std::string hmin;                       // пусто — 10 ulp(t)
+    std::string hmin;                       // пусто — max(10 ulp(t), 1e-12 * длина интервала)
     std::string hmax;                       // пусто — без ограничения
     std::string max_rej;                    // отказов подряд до шага с h_min; пусто — без предела,
                                             //   0 — без повторов (каждая попытка принимается)

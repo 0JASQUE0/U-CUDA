@@ -522,7 +522,7 @@ unsigned long long ctrl_hash_key(const std::string& body, const std::string& hea
 // par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
 namespace {
 
-constexpr int kAdModuleVersion = 2;
+constexpr int kAdModuleVersion = 3;
 
 // Подстановка плейсхолдера {{name}} во всех вхождениях.
 void replace_all(std::string& s, const std::string& from, const std::string& to) {
@@ -551,10 +551,38 @@ std::string extract_peak_stream(const std::string& lib) {
     return lib.substr(b + 1, e + 3 - (b + 1)) + "\n";
 }
 
+// Текст от строки start до конца функции, начинающейся со строки fn_start (первая
+// закрывающая скобка в начале строки после неё). Пусто — не нашлось.
+std::string extract_through_function(const std::string& src, const std::string& start,
+                                     const std::string& fn_start) {
+    const size_t b = src.find(start);
+    if (b == std::string::npos) return {};
+    const size_t f = src.find(fn_start, b);
+    if (f == std::string::npos) return {};
+    const size_t e = src.find("\n}", f);
+    if (e == std::string::npos) return {};
+    return src.substr(b, e + 2 - b) + "\n";
+}
+
+// Из signal_metrics.template.cu — то, чем GPU-ядра метрик сводят точку: номера метрик
+// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats и smFinalize; из
+// cudaLibrary.cu — ucuda_heapsort (медиана). Сами циклы и ядра шаблона не нужны.
+// Пусто — что-то не нашлось.
+std::string extract_metrics_pieces(const std::string& tmpl, const std::string& lib) {
+    const std::string heap = extract_through_function(lib, "__device__ __host__ __forceinline__ void ucuda_sift_down",
+                                                      "__device__ __host__ void ucuda_heapsort(");
+    const size_t b = tmpl.find("#define SIGM_MAX");
+    const size_t e = tmpl.find("// loopCalculateDiscreteModelPeaks_int + MetricsAccum", b == std::string::npos ? 0 : b);
+    const std::string fin = extract_through_function(tmpl, "__device__ int smFinalize(", "__device__ int smFinalize(");
+    if (heap.empty() || b == std::string::npos || e == std::string::npos || fin.empty()) return {};
+    return heap + "#define SIGM_MINMAX_INTERP 1\n" + tmpl.substr(b, e - b) + fin;
+}
+
 std::string make_ad_module_source(const std::string& rhs, const std::string& emb, const std::string& dprep,
                                   const std::string& deval, const std::string& ctrl_body, int amountOfX,
                                   const std::string& prelude, const std::string& peak_stream,
-                                  std::string adaptive_part) {
+                                  std::string adaptive_part, const std::string& metrics_pieces,
+                                  const std::string& metrics_part) {
     const bool dense = !dprep.empty() && !deval.empty();
     replace_all(adaptive_part, "{{KRS_RHS_BODY}}", rhs);
     replace_all(adaptive_part, "{{KRS_EMB_BODY}}", emb);
@@ -591,6 +619,7 @@ std::string make_ad_module_source(const std::string& rhs, const std::string& emb
          "    return ucuda_node_value_log(n, nPts, lo, hi);\n"
          "}\n"
       << peak_stream
+      << (dense ? metrics_pieces : std::string())
       << "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
          "#define UCUDA_AD_LYAPUNOV 1\n";
     if (!dense) o << "#define UCUDA_AD_NO_DENSE 1\n";
@@ -623,6 +652,113 @@ std::string make_ad_module_source(const std::string& rhs, const std::string& emb
          "        baseValues, amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm,\n"
          "        maxValue, result, stats, cancel, progress);\n"
          "}\n";
+    o << R"CPU(
+// LLE / LS: классика кусками [i0, i1) — CPU раздаёт куски потокам (ucuda_lyap_classic_range).
+extern "C" __declspec(dllexport)
+void ucuda_cpu_ad_lyap_range(int ls, int i0, int i1, int nPts, double lo, double hi, int logScale,
+    int mutParamIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* P, int axisKind, double tolRatio, double tTr, double NT, int nBlocks,
+    int nWarm, double eps, int renorm, double maxValue, double* result, double* stats,
+    const volatile int* cancel, int* progress) {
+    const UcudaKrsFns K{};
+    if (ls) ucuda_lyap_classic_range<AMOUNTOFX>(K, i0, i1, nPts, lo, hi, logScale, mutParamIdx, baseValues,
+        amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm, maxValue, result,
+        stats, cancel, progress);
+    else    ucuda_lyap_classic_range<1>(K, i0, i1, nPts, lo, hi, logScale, mutParamIdx, baseValues,
+        amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm, maxValue, result,
+        stats, cancel, progress);
+}
+)CPU";
+    if (dense && !metrics_part.empty()) o << "#define UCUDA_AD_NO_METRICS_KERNELS 1\n" << metrics_part << "\n"
+      << R"CPU(
+// Метрики 1D: классика — calculateDiscreteModelMetricsAdCUDA по точкам [i0, i1) (строки выходов
+// с i0, outMetrics[m * (i1 - i0) + row]), continuation — signalMetricsContinuationAdKernel строка в
+// строку (outMetrics[m * nPts + j], intervals — одна строка). Возвращает 0 при отмене.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+    int logScale, int parOrVar, int mutIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* Pbase, int axisKind, double tolRatio, int writableVar, double maxValue,
+    double* intervals, unsigned long long peakStride, int peakCapacity, double* outMetrics, int metricMask,
+    int* flags, double transientTime, double dtOut, int preScaller, unsigned long long iters,
+    double* adStats, const volatile int* cancelFlag, int* progress) {
+    const UcudaKrsFns K{};
+    UcudaAdProgress prog;
+    prog.init(nullptr, 0, (numb)0);
+    numb res[SIGM_COUNT];
+    if (!continuation) {
+        ucuda_cpu_par_or_var = parOrVar;
+        const numb ranges[2] = { (numb)lo, (numb)hi };
+        const int  mut[1]    = { mutIdx };
+        const int  kinds[2]  = { axisKind, UCUDA_AXIS_SYSTEM };
+        const int  rows      = i1 - i0;
+        numb localX[AMOUNTOFX];
+        numb localValues[64];   // kMaxAmountOfValues в движке
+        for (int idx = i0; idx < i1; ++idx) {
+            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+            const int row = idx - i0;
+            for (int m = 0; m < SIGM_COUNT; ++m) res[m] = (numb)nan("");
+            UcudaAdaptParams P = *Pbase;
+            ucudaSetupSweepPointAd(nPts, 0, idx, 1, ranges, mut, baseX, baseValues, amountOfValues,
+                logScale ? 1 : 0, kinds, (numb)tolRatio, localX, localValues, P);
+            UcudaAdaptState S;
+            ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
+            const numb dt = (numb)dtOut * (numb)preScaller;
+            PeakStream peaks;
+            peaks.init(nullptr, intervals, (size_t)row * peakStride, dt, (size_t)iters, peakCapacity, false);
+            MetricsAccum acc;
+            acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
+            IntervalStats ist;
+            ist.init();
+            int flag = ucudaAdMetricsPoint(S, K, localValues, P, (numb)transientTime, dt, (size_t)iters,
+                writableVar, (numb)maxValue, peaks, acc, ist, cancelFlag, prog);
+            flag = smFinalize(flag, acc, peaks, ist,
+                intervals != nullptr ? intervals + (size_t)row * peakStride : nullptr, dt, res);
+            res[SIGM_HJORTH_MOBILITY]   = (numb)nan("");
+            res[SIGM_HJORTH_COMPLEXITY] = (numb)nan("");
+            if (flags != nullptr) flags[row] = flag;
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)rows + row] = res[m];
+            ucudaAdWriteStats(adStats, row, S);
+            if (progress != nullptr) ++*progress;
+        }
+        return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+    }
+    numb x[AMOUNTOFX];
+    numb a[64];
+    for (int i = 0; i < AMOUNTOFX; ++i) x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues && i < 64; ++i) a[i] = baseValues[i];
+    UcudaAdaptParams P = *Pbase;
+    const int kind = axisKind;
+    UcudaAdaptState S;
+    for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        if (progress != nullptr) ++*progress;
+        const numb v = ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, logScale != 0, reverse != 0);
+        if (kind == UCUDA_AXIS_SYSTEM) a[mutIdx] = v;
+        else ucudaAdApplyStepAxis(kind, v, (numb)tolRatio, P);
+        if (j == 0) ucuda_ad_init(S, K, AMOUNTOFX, x, (numb)0, a, P);
+        else        ucuda_ad_restart(S, K, (numb)0, a, P);
+        const numb dt = (numb)dtOut * (numb)preScaller;
+        PeakStream peaks;
+        peaks.init(nullptr, intervals, 0, dt, (size_t)iters, peakCapacity, false);
+        MetricsAccum acc;
+        acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
+        IntervalStats ist;
+        ist.init();
+        int flag = ucudaAdOut(S.X, (numb)maxValue) ? REGIME_UNBOUND
+                 : ucudaAdMetricsPoint(S, K, a, P, (numb)transientTime, dt, (size_t)iters, writableVar,
+                                       (numb)maxValue, peaks, acc, ist, cancelFlag, prog);
+        flag = smFinalize(flag, acc, peaks, ist, intervals, dt, res);
+        res[SIGM_HJORTH_MOBILITY]   = (numb)nan("");
+        res[SIGM_HJORTH_COMPLEXITY] = (numb)nan("");
+        if (flags != nullptr) flags[j] = flag;
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)nPts + j] = res[m];
+        ucudaAdWriteStats(adStats, j, S);
+    }
+    return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+}
+)CPU";
     if (dense) o << R"CPU(
 // БД 1D: классика — calculateDiscreteModelPeaksAdCUDA по точкам [i0, i1), continuation —
 // calculateDiscreteModelPeaksAdContCUDA строка в строку.
@@ -721,7 +857,7 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
                                 const std::string& deval, const std::string& ctrl_body, int amountOfX,
                                 const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
-    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr;
+    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr;
     std::string why;
     if (vcvars_path(why).empty()) {
         diags.push_back({ 0, "CPU compiler unavailable: " + why });
@@ -737,9 +873,22 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
         diags.push_back({ 0, "struct PeakStream not found in kernels\\cudaLibrary.cu" });
         return false;
     }
-    // Тексты adaptive_part.cu и PeakStream входят в исходник, а с ним — в ключ кэша.
+    // Метрики — только модулю с плотным выходом (у них равномерная сетка).
+    std::string metrics_pieces, metrics_part;
+    if (!dprep.empty() && !deval.empty()) {
+        std::string tmpl;
+        if (!read_kernel_header("signal_metrics.template.cu", tmpl, diags)) return false;
+        if (!read_kernel_header("metrics_adaptive_part.cu", metrics_part, diags)) return false;
+        metrics_part = strip_bom(metrics_part);
+        metrics_pieces = extract_metrics_pieces(strip_bom(tmpl), lib);
+        if (metrics_pieces.empty()) {
+            diags.push_back({ 0, "MetricsAccum / smFinalize / ucuda_heapsort not found in kernels\\" });
+            return false;
+        }
+    }
+    // Тексты adaptive_part.cu, PeakStream и метрик входят в исходник, а с ним — в ключ кэша.
     const std::string source = make_ad_module_source(rhs, emb, dprep, deval, ctrl_body, amountOfX, prelude,
-                                                     peaks, strip_bom(part));
+                                                     peaks, strip_bom(part), metrics_pieces, metrics_part);
     unsigned long long h = 1469598103934665603ULL;      // FNV-1a
     auto mix = [&](const void* p, size_t n) {
         const unsigned char* b = (const unsigned char*)p;
@@ -769,6 +918,8 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
     endpoint_ = (EndpointFn)pe;
     lyap_ = (LyapFn)pl;
     bif_ = (BifFn)GetProcAddress(m, "ucuda_cpu_ad_bif");   // только у модуля с плотным выходом
+    lyap_range_ = (LyapRangeFn)GetProcAddress(m, "ucuda_cpu_ad_lyap_range");
+    metrics_ = (MetricsFn)GetProcAddress(m, "ucuda_cpu_ad_metrics");   // тоже только с плотным выходом
     return true;
 }
 

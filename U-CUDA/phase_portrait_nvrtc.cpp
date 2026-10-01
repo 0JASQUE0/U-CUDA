@@ -35,6 +35,12 @@ void prewarmPhasePortraitsNVRTC(const std::string& krs_body, int amountOfX) {
     g_engine.compile(krs_body, amountOfX);
 }
 
+void prewarmPhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq) {
+    if (rq.rhs.empty() || rq.amountOfX <= 0) return;
+    if (!g_engine.init()) return;
+    g_engine.prewarm_adaptive(rq);
+}
+
 bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out,
                                         std::string* err)
 {

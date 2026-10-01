@@ -44,6 +44,10 @@ __device__ __forceinline__ int ucudaAdMetricsPoint(UcudaAdaptState& S, const Ucu
 	return ucudaAdUniformPoint(S, K, a, P, transientTime, dt, iters, maxValue, push, cancelFlag, prog);
 }
 
+// Ядра — не для CPU-DLL (krs_cpu.cpp, AdaptiveCpuModule): она берёт отсюда только
+// точку (ucudaAdMetricsPoint), а свои входы — построчные копии ядер ниже — пишет сама.
+#ifndef UCUDA_AD_NO_METRICS_KERNELS
+
 // То же, что calculateDiscreteModelMetricsCUDA (раскладка выхода SoA одна и та же),
 // шагом управляет регулятор. adStats — см. calculateDiscreteModelPeaksAdCUDA.
 __global__ void calculateDiscreteModelMetricsAdCUDA(
@@ -207,3 +211,5 @@ __global__ void signalMetricsContinuationAdKernel(
 		ucudaAdWriteStats(adStats, j, S);
 	}
 }
+
+#endif // UCUDA_AD_NO_METRICS_KERNELS

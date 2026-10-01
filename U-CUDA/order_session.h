@@ -149,11 +149,14 @@ struct OrderConfig {
 
     // «Точность — затраты». Ошибка в конечной точке E(T) = max|y(T) - y*(T)| против
     // эталона DOP853 постоянным шагом на CPU: 0 — нет, 1 — в dd, 2 — в qd. Это та ось,
-    // на которой Fixed- и адаптивные вкладки лежат на одном графике.
-    int         perf_end_ref = 1;
+    // на которой Fixed- и адаптивные вкладки лежат на одном графике. Только у адаптивной
+    // вкладки (2 — qd, иначе dd): у Fixed E(T) — это Eref при "endpoint only" и подгонке h
+    // к t_max, своего эталона y*(T) у неё нет (build_perf_request, run_performance_any).
+    int         perf_end_ref = 0;
     // Адаптивный шаг вкладки: включённый (и схема с оценкой ошибки) переводит
     // Performance на узлы tol вместо h — лог-сетка perf_tol_lo..hi, rtol = tol,
-    // atol = tol * (atol / rtol) настроек. Считает только GPU.
+    // atol = tol * (atol / rtol) настроек. GPU — ядро endpoint_kernel_ad, CPU — тот же
+    // драйвер в cl.exe-DLL (AdaptiveCpuModule), одна траектория последовательно.
     AdaptiveSettings adaptive;
     std::string perf_tol_lo_text = "1e-3";
     std::string perf_tol_hi_text = "1e-13";

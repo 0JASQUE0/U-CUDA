@@ -1136,20 +1136,40 @@ void PhaseAnalysisSession::regenerate_krs() {
     // через compute_krs_for_scheme. Разъехавшись, они показывали бы одно, а
     // считали другое — поэтому теперь резолвер ровно один.
     krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme);
+    prewarm_gpu();
+}
 
+void PhaseAnalysisSession::prewarm_gpu() {
     // Фоновый прогрев NVRTC-кэша под новую систему/метод, не дожидаясь Run. Новый прогрев не
     // запускаем, пока предыдущий не закончился: присвоение prewarm_future иначе заблокировало бы
     // ЭТОТ (UI) поток на деструкторе предыдущей async-future. Best-effort — если не успеваем
     // прогреть, настоящий Run просто скомпилирует синхронно.
     bool prewarm_busy = prewarm_future.valid() &&
         prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
-    if (use_gpu && !krs_code.empty() && !prewarm_busy) {
-        std::string krs = krs_code;
-        int dim = (int)vars.size();
-        prewarm_future = std::async(std::launch::async, [krs, dim] {
-            prewarmPhasePortraitsNVRTC(krs, dim);
-        });
+    if (!use_gpu || prewarm_busy) return;
+    const int dim = (int)vars.size();
+    if (adaptive.enabled && !sys.is_map) {
+        // Тела и регулятор — как в run_adaptive_phase: ключ кэша ядра — ровно они и размерность.
+        // Холодная сборка адаптивного ядра Analysis — 5-6 с; без прогрева их ждал первый Run.
+        const Scheme sch = scheme_from_name(scheme);
+        if (!scheme_supports_adaptive(sch)) return;
+        PhaseAdaptiveRequest rq;
+        try {
+            const AdaptiveCode code = codegen_adaptive(sys, sch);
+            UcudaAdaptParams P;
+            std::string err;
+            if (!adaptive_build_params(adaptive, code, dim, 1.0, P, err, &rq.ctrl_body)) return;
+            rq.rhs = code.rhs; rq.emb = code.emb; rq.dprep = code.dprep; rq.deval = code.deval;
+        } catch (const std::exception&) { return; }
+        rq.amountOfX = dim;
+        prewarm_future = std::async(std::launch::async, [rq] { prewarmPhasePortraitsAdaptiveNVRTC(rq); });
+        return;
     }
+    if (krs_code.empty()) return;
+    std::string krs = krs_code;
+    prewarm_future = std::async(std::launch::async, [krs, dim] {
+        prewarmPhasePortraitsNVRTC(krs, dim);
+    });
 }
 
 // BifurcationAnalysisSession
@@ -1365,6 +1385,10 @@ static void fill_adaptive_request(const System& sys, const std::string& scheme,
     // Ось tol держит отношение atol/rtol текущих настроек.
     out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
     out.lyap_renorm = st.lyap_renorm;
+    out.desc = "adaptive " + scheme + ", controller " + st.ctrl + ", rtol " + st.rtol + ", atol " + st.atol
+             + (st.hmin.empty() ? std::string() : ", h_min " + st.hmin)
+             + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax)
+             + (st.max_rej.empty() ? std::string() : ", max rejects " + st.max_rej);
 }
 
 // Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
