@@ -126,6 +126,10 @@ struct Projection {
     // projection is created.
     bool  draw_points     = false;
     float point_size      = 2.0f;
+    // Альфа точек при Custom line style (своя, у линии — alpha выше).
+    float point_alpha     = 1.0f;
+    // Step size: ось Y в log10 (Plot2DView лог-оси Y не умеет — в буфер идёт log10 h).
+    bool  y_log           = false;
 
     std::unique_ptr<Plot2DView> view2d;
     std::unique_ptr<Plot3DView> view3d;
@@ -1371,6 +1375,10 @@ struct FastSyncConfig {
     // дальние (малый z) рисуются первыми, ближние сверху (взгляд «сверху», z↑); при true — взгляд
     // «снизу» (z↓).
     bool        invert_depth     = false;
+    // Attractor-mode: траектория в 3D (Plot3DView), третья ось — axis_z_var. Цвет, Line width
+    // и Alpha — те же, что у 2D. Глубина там честная (depth test), invert_depth не нужен.
+    bool        plot_3d          = false;
+    int         axis_z_var       = 2;
 
     // Состояние
     FastSyncResult result;

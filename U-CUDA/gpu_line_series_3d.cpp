@@ -2,7 +2,7 @@
 #include <limits>
 #include <algorithm>
 
-int GpuLineSeriesSet3D::upload(const float* points, int n_points) {
+int GpuLineSeriesSet3D::upload(const float* points, int n_points, const float* values) {
     GpuLineSeries3D s;
     s.point_count = n_points;
     float xmin = std::numeric_limits<float>::infinity();
@@ -25,6 +25,11 @@ int GpuLineSeriesSet3D::upload(const float* points, int n_points) {
         glBindBuffer(GL_ARRAY_BUFFER, s.vbo);
         glBufferData(GL_ARRAY_BUFFER, n_points * 3 * sizeof(float),
             points, GL_STATIC_DRAW);
+        if (values) {
+            glGenBuffers(1, &s.vbo_val);
+            glBindBuffer(GL_ARRAY_BUFFER, s.vbo_val);
+            glBufferData(GL_ARRAY_BUFFER, n_points * sizeof(float), values, GL_STATIC_DRAW);
+        }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
     else {
@@ -45,8 +50,10 @@ const GpuLineSeries3D& GpuLineSeriesSet3D::get(int index) const {
 }
 
 void GpuLineSeriesSet3D::clear() {
-    for (auto& s : series_)
-        if (s.vbo) glDeleteBuffers(1, &s.vbo);
+    for (auto& s : series_) {
+        if (s.vbo)     glDeleteBuffers(1, &s.vbo);
+        if (s.vbo_val) glDeleteBuffers(1, &s.vbo_val);
+    }
     series_.clear();
     bbox_data_.clear();
 }

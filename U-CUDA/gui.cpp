@@ -15,6 +15,7 @@
 #include "krs_cpu.h"
 #include "nvrtc_engine.h"   // nvrtc_check_ctrl_body — Check в библиотеке регуляторов
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
+#include "digit_input.h" // DigitInput::ComputeStep — ↑/↓ по значению в списке (atol)
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -498,6 +499,46 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
             "  invalid number, using default");
     }
+    return changed;
+}
+
+// ↑/↓ в поле-списке чисел через ',' или ';' (atol): шагает цифру того значения, в котором
+// стоит каретка, как digit_step_input_callback у одиночного числа. Пробелы вокруг значения
+// не трогаются. Запятая здесь разделитель, поэтому в точку не превращается.
+static int list_digit_step_callback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag != ImGuiInputTextFlags_CallbackHistory) return 0;
+    int dir = 0;
+    if (data->EventKey == ImGuiKey_UpArrow)   dir = +1;
+    if (data->EventKey == ImGuiKey_DownArrow) dir = -1;
+    if (dir == 0) return 0;
+    const std::string text(data->Buf, data->Buf + data->BufTextLen);
+    const int cur = std::clamp(data->CursorPos, 0, (int)text.size());
+    int b = cur, e = cur;
+    while (b > 0 && text[b - 1] != ',' && text[b - 1] != ';') --b;
+    while (e < (int)text.size() && text[e] != ',' && text[e] != ';') ++e;
+    while (b < e && text[b] == ' ') ++b;
+    while (e > b && text[e - 1] == ' ') --e;
+    if (b >= e) return 0;
+    std::string new_tok;
+    int new_cur = 0;
+    if (!DigitInput::ComputeStep(text.substr(b, e - b), std::clamp(cur - b, 0, e - b), dir,
+                                 new_tok, new_cur))
+        return 0;
+    data->DeleteChars(b, e - b);
+    data->InsertChars(b, new_tok.c_str());
+    const int pos = std::clamp(b + new_cur, 0, data->BufTextLen);
+    data->CursorPos = data->SelectionStart = data->SelectionEnd = pos;
+    return 0;
+}
+
+// Поле-список чисел (atol: одно на все переменные или по одному через ',' / ';') со
+// стрелками ↑/↓ по значению под кареткой.
+static bool InputNumListStr(const char* label, std::string& str, float width = 0.0f) {
+    std::vector<char>& buf = input_scratch(str, 1024);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    const bool changed = ImGui::InputText(label, buf.data(), buf.size(),
+        ImGuiInputTextFlags_CallbackHistory, list_digit_step_callback);
+    if (changed) str = buf.data();
     return changed;
 }
 
@@ -1648,7 +1689,7 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
             a.raw_nodes = (out == 1);
         }
         changed |= InputNumStr("rtol", a.rtol, kFieldW);
-        changed |= InputTextStr("atol", a.atol, kFieldW);
+        changed |= InputNumListStr("atol", a.atol, kFieldW);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("One value for all variables, or one per variable separated by ';'.");
         changed |= InputNumStr("h0", a.h0, kFieldW, {}, true);
@@ -2706,6 +2747,44 @@ static bool draw_style_toolbar(const char* label, const char* id_suffix,
         ImGui::EndPopup();
     }
     return changed;
+}
+
+// Стиль линейного 2D-графика проекции Analysis (Phase 2D, Time domain, Step size, Rejections):
+// Custom line style — толщина и α (толстая линия), Points — точки вместо линии; обе галки —
+// точки поверх линии (Plot2DView::points_with_lines). Настраивает pr.view2d; α к цвету линейных
+// серий применяет вызывающий (по pr.custom_line_style). Серии-маркеры (points_override = 1)
+// стиль не трогает.
+static void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
+    const std::string s = sfx;
+    draw_style_toolbar("Custom line style", sfx, pr.custom_line_style,
+        [&pr, &s]() {
+            bool ch = false;
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Line width##" + s).c_str(), &pr.line_width, 0.1f, 5.0f, "%.2f");
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Alpha##" + s).c_str(), &pr.alpha, 0.0f, 1.0f, "%.2f");
+            return ch;
+        });
+    ImGui::SameLine();
+    ImGui::Checkbox(("Points##" + s).c_str(), &pr.draw_points);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.", points_tip);
+    if (pr.draw_points) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        ImGui::SliderFloat(("size##" + s + "pt").c_str(), &pr.point_size, 0.5f, 8.0f, "%.1f");
+        if (pr.custom_line_style) {   // своя альфа точек — при Custom line style (у линии своя)
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110);
+            ImGui::SliderFloat(("alpha##" + s + "pt").c_str(), &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+        }
+    }
+    pr.view2d->imdraw_lines      = pr.custom_line_style;
+    pr.view2d->line_thickness_px = pr.line_width;
+    pr.view2d->points_mode       = pr.draw_points;
+    pr.view2d->points_with_lines = pr.draw_points && pr.custom_line_style;
+    pr.view2d->point_size_px     = pr.point_size;
+    pr.view2d->point_alpha       = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
 }
 
 static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
@@ -5791,33 +5870,11 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
                     // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
-                    draw_style_toolbar("Custom line style", "phase2d", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    ImGui::SameLine();
-                    ImGui::Checkbox("Points##phase2d", &pr.draw_points);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
-                                          "Default for discrete maps: consecutive iterates are\n"
-                                          "not joined by a continuous path, so the connecting\n"
-                                          "segments are an artefact.");
-                    if (pr.draw_points) {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(110);
-                        ImGui::SliderFloat("size##phase2dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
-                    }
-                    // imdraw_lines is the ImDrawList path for LINES; it does not
-                    // apply in point mode, where there are no segments to thicken.
-                    pr.view2d->imdraw_lines      = pr.custom_line_style && !pr.draw_points;
-                    pr.view2d->line_thickness_px = pr.line_width;
-                    pr.view2d->points_mode       = pr.draw_points;
-                    pr.view2d->point_size_px     = pr.point_size;
+                    draw_proj_line_style(pr, "phase2d",
+                        "Draw iterates as markers instead of a polyline.\n"
+                        "Default for discrete maps: consecutive iterates are\n"
+                        "not joined by a continuous path, so the connecting\n"
+                        "segments are an artefact.");
 
                     // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
                     // локальный — render() ниже забирает точки синхронно. static тут был
@@ -6034,17 +6091,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
                     // путь (1px, α=1). Аналогично Phase2D.
-                    draw_style_toolbar("Custom line style", "timedomain", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    pr.view2d->imdraw_lines      = pr.custom_line_style;
-                    pr.view2d->line_thickness_px = pr.line_width;
+                    draw_proj_line_style(pr, "timedomain",
+                        "Draw the samples as markers instead of a polyline\n"
+                        "(on step nodes: where the adaptive step actually landed).");
 
                     double h = parse_ratio_or(s.step_h, 0.01);  if (h <= 0) h = 0.01;
                     int dec = parse_int_or(s.decimation, 1);    if (dec < 1) dec = 1;
@@ -6443,10 +6492,17 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(110);
                         ImGui::SliderFloat("size##phase3dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
+                        if (pr.custom_line_style) {   // своя альфа точек (см. draw_proj_line_style)
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(110);
+                            ImGui::SliderFloat("alpha##phase3dpt", &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+                        }
                     }
+                    pr.view3d->point_alpha = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
                     pr.view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     pr.view3d->custom_line_style = pr.custom_line_style;
                     pr.view3d->points_mode       = pr.draw_points;
+                    pr.view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     pr.view3d->point_size_px     = pr.point_size;
 
                     pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
@@ -6587,11 +6643,20 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                 }
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+                    // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
+                    const bool prev_ylog = pr.y_log;
+                    ImGui::Checkbox("log Y##stepsize", &pr.y_log);
+                    if (pr.y_log != prev_ylog) pr.fit_pending = true;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
+                                          "(stiff parts, rejections near h_min) become readable.");
+                    ImGui::SameLine();
+                    draw_proj_line_style(pr, "stepsize",
+                        "Draw the accepted steps as markers instead of a line.");
                     pr.view2d->x_axis.name = "t";
-                    pr.view2d->y_axis.name = "h";
+                    pr.view2d->y_axis.name = pr.y_log ? "log10 h" : "h";
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
-                    pr.view2d->imdraw_lines = false;
 
                     std::vector<std::vector<double>> bufs;
                     bufs.reserve(res.step_log.size() * 3);   // указатели серий не должны переехать
@@ -6601,7 +6666,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         const std::vector<double>& lg = res.step_log[k];
                         std::vector<double> acc, rej, frc;
                         for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
-                            const double t = lg[r], hh = lg[r + 1], code = lg[r + 3];
+                            const double t = lg[r], code = lg[r + 3];
+                            double hh = lg[r + 1];
+                            if (pr.y_log) {
+                                if (!(hh > 0)) continue;   // log10 не определён
+                                hh = std::log10(hh);
+                            }
                             if (code == 0) { rej.push_back(t); rej.push_back(hh); continue; }
                             acc.push_back(t); acc.push_back(hh);
                             if (code == 2) { frc.push_back(t); frc.push_back(hh); }
@@ -6627,13 +6697,14 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                 si.point_marker    = part.marker;
                                 si.point_size_px   = 4.0f;
                             }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
                             si.label = std::string(part.name) + " [" + who + "]";
                             series_in.push_back(si);
                             init_vis.push_back(true);
                             glob_vis.push_back(ic_vis);
                         }
                     }
-                    int data_gen = s.data_generation * 1000 + 7;
+                    int data_gen = s.data_generation * 1000 + (pr.y_log ? 507 : 7);   // log Y — другие данные
                     ImVec2 avail  = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     pr.view2d->popup_extras = phase_popup_extras;
@@ -6652,11 +6723,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                 }
                 else {
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+                    draw_proj_line_style(pr, "rejections",
+                        "Draw the moving mean as markers instead of a line.");
                     pr.view2d->x_axis.name = "t";
                     pr.view2d->y_axis.name = "rejected per step";
                     pr.view2d->show_zero_x = false;
                     pr.view2d->show_zero_y = false;
-                    pr.view2d->imdraw_lines = false;
 
                     constexpr int kWin = 100;
                     std::vector<std::vector<double>> bufs;
@@ -6701,6 +6773,7 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                                 si.point_marker    = part.marker;
                                 si.point_size_px   = 4.0f;
                             }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
                             si.label = std::string(part.name) + " [" + who + "]";
                             series_in.push_back(si);
                             init_vis.push_back(true);
@@ -10222,6 +10295,20 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
+        // 3D-портрет — только когда есть третья переменная.
+        const bool can_3d = s.vars.size() >= 3;
+        if (!can_3d) c.plot_3d = false;
+        ImGui::BeginDisabled(!can_3d);
+        ImGui::Checkbox("3D plot##fs_plot3d", &c.plot_3d);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(can_3d ? "Phase portrait in 3D, coloured by the sync error."
+                                     : "Needs at least three state variables.");
+        if (c.plot_3d) {
+            if (c.axis_z_var < 0 || c.axis_z_var >= (int)s.vars.size()) c.axis_z_var = 2;
+            ImGui::SetNextItemWidth(kComboW);
+            ImGui::Combo("Display Z var", &c.axis_z_var, items.data(), (int)items.size());
+        }
         ImGui::Separator();
     }
 
@@ -10513,6 +10600,13 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
+    // Результат посчитан в другом режиме (переключили On Attractor <-> On Grid после Run):
+    // рисовать нечего — траектории у сетки нет, карты у траектории нет. Раньше сетка
+    // рисовалась пустой картой по старой траектории, а траектория (2D/3D) — «No trajectory data».
+    if (c.result.mode != c.mode) {
+        ImGui::TextDisabled("No data for this mode yet. Press Run.");
+        return;
+    }
 
     bool fit = c.fit_request;
     if (fit) c.fit_request = false;
@@ -10562,6 +10656,78 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         const float cb_total = colorbar_total_width(cb_ticks);
 
         ImVec2 plot_avail(std::max(64.0f, avail.x - cb_total), avail.y);
+        // Колорбар справа от плота — в «Copy image» он должен попасть вместе с ним.
+        const float shot_extra = std::max(0.0f, avail.x - plot_avail.x);
+
+        const bool fs_busy = s.in_flight &&
+                             s.active_config_index == s.running_config_index;
+
+        if (c.plot_3d && nX >= 3) {
+            // 3D: та же окраска по ошибке синхронизации, но в GL (draw_line_3d_cmap): цвет
+            // интерполируется вдоль сегмента, глубина — depth test, а не сортировка сегментов.
+            static std::map<unsigned, std::unique_ptr<Plot3DView>> traj3d_map;
+            int vz = (c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
+            auto& slot3 = traj3d_map[base_oid];
+            if (!slot3) {
+                slot3 = std::make_unique<Plot3DView>();
+                slot3->show_legend = false;
+            }
+            Plot3DView& v3 = *slot3;
+            v3.x_name = var_name(vx);
+            v3.y_name = var_name(vy);
+            v3.z_name = var_name(vz);
+            v3.line_thickness_px = c.line_width;
+            v3.screenshot_extra_right = shot_extra;
+
+            // Смена осей — новый bbox: перезаливка (токен) и автоподгонка.
+            static std::map<unsigned, int> last_axes3;
+            const int axes_key = (vx * 64 + vy) * 64 + vz;
+            auto it3 = last_axes3.find(base_oid);
+            if (it3 == last_axes3.end() || it3->second != axes_key) {
+                v3.view_valid = false;
+                last_axes3[base_oid] = axes_key;
+            }
+
+            const int n_in = c.result.n_pts_traj;
+            static std::vector<float> xyz_buf;
+            static std::vector<float> val_buf;
+            xyz_buf.resize((size_t)n_in * 3);
+            val_buf.resize((size_t)n_in);
+            for (int i = 0; i < n_in; ++i) {
+                const double* row = &c.result.traj_full[(size_t)i * nX];
+                xyz_buf[3*i + 0] = (float)row[vx];
+                xyz_buf[3*i + 1] = (float)row[vy];
+                xyz_buf[3*i + 2] = (float)row[vz];
+                val_buf[i] = (float)c.result.sync_error[i];
+            }
+
+            std::vector<PlotSeriesInput3D> s3(1);
+            s3[0].points       = xyz_buf.data();
+            s3[0].n_points     = n_in;
+            s3[0].color        = ImVec4(1, 1, 1, c.alpha);
+            s3[0].label        = "trajectory";
+            s3[0].values       = val_buf.data();
+            s3[0].colormap     = (int)cmap;
+            s3[0].cmin         = (float)cmin;
+            s3[0].cmax         = (float)cmax;
+            s3[0].cmap_reverse = invert_cmap;   // значения сырые, шкала переворачивается в шейдере
+            std::vector<bool> vis(1, true);
+            v3.popup_extras = [&c, &cb, fs_busy]() {
+                draw_export_menu_item(fs_busy, cb, [&c](const std::string& p) {
+                    data_export::export_fastsync(c.result, p);
+                });
+            };
+            v3.render(*renderer, origin, plot_avail, (int)base_oid,
+                      c.data_generation * 1000000 + axes_key, s3, vis, vis, fit);
+            v3.popup_extras = nullptr;
+
+            draw_colorbar(ImGui::GetWindowDrawList(),
+                          ImVec2(v3.last_img_pos.x + v3.last_img_size.x + kColorbarGap,
+                                 v3.last_img_pos.y),
+                          v3.last_img_size.y, (float)cmin, (float)cmax, cmap,
+                          /*reverse*/ invert_cmap, /*n_discrete*/ 0, cb_ticks);
+            return;
+        }
 
         auto& slot = traj_map[base_oid];
         if (!slot) {
@@ -10581,6 +10747,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         v.x_axis.name = var_name(vx);
         v.y_axis.name = var_name(vy);
         v.line_thickness_px = c.line_width;
+        v.screenshot_extra_right = shot_extra;
 
         // Если поменялись axes — форсим (a) fit, чтобы view нашёл новый bbox;
         // (b) re-upload GPU-кэша точек, иначе series_cache_.bbox() даст старый
@@ -10655,8 +10822,6 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // через popup_extras callback. vz/var_name захватываются по значению.
         const int   vz_capture       = vz;
         const std::string vz_name    = (vz >= 0) ? var_name(vz) : std::string{};
-        const bool fs_busy = s.in_flight &&
-                             s.active_config_index == s.running_config_index;
         v.popup_extras = [vz_capture, vz_name, &c, &cb, fs_busy]() {
             if (vz_capture >= 0) {
                 std::string lbl = "Invert depth axis (" + vz_name + ")";

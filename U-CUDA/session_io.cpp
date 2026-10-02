@@ -387,6 +387,8 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
         o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
+        if (p.y_log) o << ",\"ylog\":true";
+        if (p.point_alpha != 1.0f) o << ",\"pa\":" << p.point_alpha;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
@@ -465,6 +467,8 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
                         else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
                             else if (k == "pts")   pr.draw_points = p.boolean();
                             else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
+                            else if (k == "ylog")  pr.y_log = p.boolean();
+                            else if (k == "pa")    pr.point_alpha = (float)std::stod(p.str_or_num());
                             else if (k == "show_var") {
                                 pr.show_var.clear();
                                 p.expect('[');
@@ -1211,6 +1215,8 @@ static void write_basins_phase_projections(std::ostringstream& o,
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
         o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
+        if (p.y_log) o << ",\"ylog\":true";
+        if (p.point_alpha != 1.0f) o << ",\"pa\":" << p.point_alpha;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v) o << ","; o << (p.show_var[v] ? "true" : "false"); }
@@ -1236,6 +1242,10 @@ static void read_basins_phase_projections(JP& p, std::vector<Projection>& out) {
             else if (k == "cls")   pr.custom_line_style = p.boolean();
             else if (k == "lw")    pr.line_width = (float)std::stod(p.str_or_num());
             else if (k == "al")    pr.alpha      = (float)std::stod(p.str_or_num());
+            else if (k == "pts")   pr.draw_points = p.boolean();   // писались всегда, не читались
+            else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
+            else if (k == "ylog")  pr.y_log = p.boolean();
+            else if (k == "pa")    pr.point_alpha = (float)std::stod(p.str_or_num());
             else if (k == "show_var") {
                 pr.show_var.clear();
                 p.expect('[');
@@ -1408,6 +1418,8 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"alpha\":"             << c.alpha                 << ",";
     o << "\"swap_axes\":"         << (c.swap_axes ? "true" : "false") << ",";
     o << "\"invert_depth\":"      << (c.invert_depth ? "true" : "false") << ",";
+    o << "\"plot_3d\":"           << (c.plot_3d ? "true" : "false") << ",";
+    o << "\"axis_z_var\":"        << c.axis_z_var            << ",";
     o << "\"csv_save_enabled\":"  << (c.csv_save_enabled ? "true" : "false") << ",";
     o << "\"csv_output_path\":";  jstr(o, c.csv_output_path);  o << ",";
     o << "\"ic_master\":";        jmap(o, c.ic_master);        o << ",";
@@ -1458,6 +1470,8 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     else if (key == "alpha")               c.alpha               = (float)std::stod(p.str_or_num());
     else if (key == "swap_axes")           c.swap_axes           = p.boolean();
     else if (key == "invert_depth")        c.invert_depth        = p.boolean();
+    else if (key == "plot_3d")             c.plot_3d             = p.boolean();
+    else if (key == "axis_z_var")          c.axis_z_var          = std::stoi(p.str_or_num());
     else if (key == "csv_save_enabled")    c.csv_save_enabled    = p.boolean();
     else if (key == "csv_output_path")     c.csv_output_path     = p.str();
     else if (key == "decimator_view")      p.skip_value();   // legacy, не используется

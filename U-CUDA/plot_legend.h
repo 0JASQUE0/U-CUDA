@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "imgui.h"
+#include <map>
 #include <string>
 #include <vector>
 // Одна строка легенды: подпись и цвет образца.
@@ -49,3 +50,11 @@ void draw_legend(ImDrawList* dl,
     int owner_id,
     LegendPass pass = LegendPass::Both,
     LegendRightClick* out_clicks = nullptr);
+
+// Меню цвета серии (ПКМ по квадрату легенды), общее для 2D и 3D. Редактор — ColorEdit3, как у
+// цвета области предпочтительности (поля RGB/HSV/Hex, пикер по клику на образец), без альфы:
+// прозрачностью рулят слайдеры Alpha у графика. Вызывать каждый кадр; открывает его вызывающий
+// (ImGui::OpenPopup(pop_id), target — подпись серии). current — нынешний цвет серии. Правка пишет
+// overrides[target] (ключ — подпись, а не индекс: серии сдвигаются).
+void legend_color_popup(const char* pop_id, const std::string& target,
+                        std::map<std::string, ImVec4>& overrides, const ImVec4& current);

@@ -2555,6 +2555,12 @@ struct ParametricEngine::Impl {
             }
             lib_key += get_nvrtc_fmad() ? "|fm1" : "|fm0";
             lib_key += "|pk" + std::to_string(peak_config_epoch());
+            // Шаблон и запрошенные ядра — тоже часть ключа. Имя исходника их не определяет:
+            // FastSync собирает "fastsync.cu" и из fs_attr, и из fs_grid с одинаковыми подстановками,
+            // и On Grid получал библиотеку On Attractor — чужие ядра (картинка-мусор, illegal
+            // address) или lowered короче name_exprs (чтение за концом в cuModuleGetFunction).
+            lib_key += "|t" + std::to_string(std::hash<std::string>{}(snap.tmpl));
+            for (const char* e : name_exprs) { lib_key += '|'; lib_key += e; }
 
             std::string krs_err;
             std::string krs_ptx;
@@ -2572,6 +2578,7 @@ struct ParametricEngine::Impl {
             CachedLibPtx lib;
             std::string lib_err;
             if (lib_ptx_for(snap, src_name, lib_key, subs, name_exprs, lib, lib_err)
+                && lib.lowered.size() == name_exprs.size()
                 && link_and_load(lib.ptx, krs_ptx, out_module, lib_err)) {
                 lowered = lib.lowered;
                 return true;

@@ -56,7 +56,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
         for (const auto& s : series_in)
-            series_cache_.upload(s.points, s.n_points);
+            series_cache_.upload(s.points, s.n_points, s.values);
         series_generation = data_generation;
 
         if (count_changed) {
@@ -74,8 +74,16 @@ void Plot3DView::render(PlotRenderer& renderer,
         return loc && glob;
         };
 
-    // 2. Автофит
-    if (!view_valid || fit_request) do_autofit();
+    // 2. Автофит. Запрос вызывающего (новые данные, смена осей) — только при auto_fit; первый
+    // кадр и «Auto fit» из меню / двойной клик (view_valid = false) — всегда.
+    if (!view_valid || (fit_request && auto_fit)) do_autofit();
+
+    // Цвет серии: пользовательский (меню легенды) поверх цвета вызывающего, альфа — его.
+    auto series_color = [&](const PlotSeriesInput3D& s) -> ImVec4 {
+        auto it = series_color_override.find(s.label);
+        if (it == series_color_override.end()) return s.color;
+        return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
+        };
 
     // 3. Отступы и размеры (3D не нужен margin под подписи осей, они лежат внутри -
     //    но небольшой зазор от краёв оставляем, чтобы рамка ImGui не сливалась с полем)
@@ -85,6 +93,8 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     ImGui::Dummy(avail_size);
     ImVec2 img_pos = ImVec2(block_origin.x + margin, block_origin.y + margin);
+    last_img_pos  = img_pos;
+    last_img_size = ImVec2((float)plot_w, (float)plot_h);
 
     // 4. Рендер в FBO, с depth
     camera.aspect = (float)plot_w / (float)plot_h;
@@ -99,19 +109,9 @@ void Plot3DView::render(PlotRenderer& renderer,
     }
     float mvp[16];
     camera.build_mvp(mvp);
-    for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
-        if (!eff_visible(k)) continue;
-        const GpuLineSeries3D& g = series_cache_.get(k);
-        if (!g.valid()) continue;
-        ImVec4 c = (k < (int)series_in.size()) ? series_in[k].color : ImVec4(1, 1, 1, 1);
-        float color[4] = { c.x, c.y, c.z, c.w };
-        if (points_mode)
-            renderer.draw_points_3d(g.vbo, g.point_count, mvp, color, point_size_px);
-        else
-            renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
-                                  line_thickness_px, custom_line_style);
-    }
-    // Рисуем оси (X=красная, Y=зелёная, Z=синяя)
+    // Оси (X=красная, Y=зелёная, Z=синяя) — ДО данных: они непрозрачны и пишут глубину, поэтому
+    // траектория за осью ею закрывается, а перед ней — рисуется поверх. Полупрозрачные данные
+    // глубину не пишут (draw_line_3d), и оси, нарисованные после них, ложились бы поверх всего.
     if (show_axes) {
         rebuild_axis_cache();
         if (axis_cache_.size() == 3) {
@@ -125,6 +125,27 @@ void Plot3DView::render(PlotRenderer& renderer,
             if (ay.valid()) renderer.draw_line_3d(ay.vbo, ay.point_count, mvp, col_y, 2.0f);
             if (az.valid()) renderer.draw_line_3d(az.vbo, az.point_count, mvp, col_z, 2.0f);
         }
+    }
+    for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
+        if (!eff_visible(k)) continue;
+        const GpuLineSeries3D& g = series_cache_.get(k);
+        if (!g.valid()) continue;
+        ImVec4 c = (k < (int)series_in.size()) ? series_color(series_in[k]) : ImVec4(1, 1, 1, 1);
+        float color[4] = { c.x, c.y, c.z, c.w };
+        if (g.vbo_val && k < (int)series_in.size()) {
+            const PlotSeriesInput3D& s = series_in[k];
+            renderer.draw_line_3d_cmap(g.vbo, g.vbo_val, g.point_count, mvp, s.colormap,
+                                       s.cmin, s.cmax, s.cmap_reverse, c.w, line_thickness_px);
+        }
+        else if (points_mode) {
+            if (points_with_lines)   // линия первой, точки поверх
+                renderer.draw_line_3d(g.vbo, g.point_count, mvp, color, line_thickness_px, custom_line_style);
+            float pcolor[4] = { c.x, c.y, c.z, point_alpha >= 0.0f ? point_alpha : c.w };
+            renderer.draw_points_3d(g.vbo, g.point_count, mvp, pcolor, point_size_px);
+        }
+        else
+            renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
+                                  line_thickness_px, custom_line_style);
     }
     renderer.end_frame();
 
@@ -164,16 +185,18 @@ void Plot3DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 6. Легенда
+    // 6. Легенда. ПКМ по квадрату — меню цвета, по строке мимо — меню плота (как в 2D).
+    LegendRightClick legend_rclick;
     if (show_legend) {
         std::vector<LegendEntry> entries;
         entries.reserve(series_in.size());
         for (const auto& s : series_in) {
-            LegendEntry e{ s.label, s.color };
+            LegendEntry e{ s.label, series_color(s) };
             e.color.w = 1.0f;   // см. Plot2DView: ярлык не гаснет вместе с кривой
             entries.push_back(e);
         }
-        draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id);
+        draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id,
+                    LegendPass::Both, &legend_rclick);
     }
 
     // 7. Зона взаимодействия (одна кнопка на всё поле)
@@ -238,18 +261,25 @@ void Plot3DView::render(PlotRenderer& renderer,
         }
     }
 
-    // 11. Контекстное меню
+    // 11. Контекстное меню (и ПКМ по строке легенды мимо квадрата — легенда забирает hover себе).
     char pop_id[48];
     std::snprintf(pop_id, sizeof(pop_id), "##plot3d_menu_%d", owner_id);
+    if (legend_rclick.row_other) ImGui::OpenPopup(pop_id);
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit")) view_valid = false;
+        ImGui::MenuItem("Auto fit on new data", nullptr, &auto_fit);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("On: every recompute fits the view to the data.\n"
+                              "Off: the view stays where you left it; Auto fit above and\n"
+                              "a double click still fit it.");
         ImGui::Separator();
         ImGui::MenuItem("Show legend", nullptr, &show_legend);
         ImGui::MenuItem("Show axes", nullptr, &show_axes);
         ImGui::Separator();
         if (ImGui::MenuItem("Copy image to clipboard")) {
             request_plot_screenshot(block_origin,
-                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+                ImVec2(block_origin.x + avail_size.x + screenshot_extra_right,
+                       block_origin.y + avail_size.y));
         }
         // Caller-injected пункты (например, "Export data..."). Зеркалит тот же
         // хук у Plot2DView/HeatmapView — до его появления Phase 3D был
@@ -260,4 +290,16 @@ void Plot3DView::render(PlotRenderer& renderer,
         }
         ImGui::EndPopup();
     }
+
+    // 12. Цвет серии — ПКМ по квадрату легенды (общее с 2D меню, legend_color_popup).
+    char col_pop[48];
+    std::snprintf(col_pop, sizeof(col_pop), "##plot3d_color_%d", owner_id);
+    if (legend_rclick.swatch_index >= 0 && legend_rclick.swatch_index < (int)series_in.size()) {
+        legend_color_target_ = series_in[legend_rclick.swatch_index].label;
+        ImGui::OpenPopup(col_pop);
+    }
+    ImVec4 cur(1, 1, 1, 1);
+    for (const auto& s : series_in)
+        if (s.label == legend_color_target_) { cur = series_color(s); break; }
+    legend_color_popup(col_pop, legend_color_target_, series_color_override, cur);
 }

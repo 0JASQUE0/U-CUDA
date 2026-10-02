@@ -106,7 +106,7 @@ public:
     // виду (Phase, TimeDomain, Phase 3D, пики), и про остальные забывали:
     // Alpha у точек бифуркационной диаграммы гасила ярлыки в легенде.
 
-    // Пользовательские цвета серий: ПКМ по строке легенды -> RGB 0..255.
+    // Пользовательские цвета серий: ПКМ по квадрату легенды -> legend_color_popup.
     // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в
     // time domain прячут переменную или в окно параметрики добавляют диаграмму,
     // и цвет обязан остаться на СВОЕЙ кривой. Пустая карта = стандартный
@@ -137,6 +137,14 @@ public:
     // true: рисуем через GL_POINTS (для 1D-диаграмм).
     // false (по умолчанию): GL_LINE_STRIP, как для всех остальных графиков.
     bool points_mode = false;
+    // Вместе с points_mode: под точками рисуется и линия серии (Points + Custom line style).
+    // Линия — в FBO до точек: при imdraw_lines толстая (draw_line_thick_2d, line_thickness_px),
+    // иначе обычная GL-линия. Серии с points_override == 1 остаются точками без линии.
+    bool points_with_lines = false;
+    // Своя прозрачность точек (Points при Custom line style): >= 0 — альфа точек вместо альфы серии
+    // (линия остаётся со своей), и точки идут шейдерным путём со смешиванием. < 0 — альфа серии.
+    // Серии с points_override (маркеры, заданные вызывающим) её не берут.
+    float point_alpha = -1.0f;
     float point_size_px = 2.0f;
     // Форма маркера в points_mode (PointMarker). -1 (дефолт) — прежний
     // сплошной квадратный GL-пойнт без alpha-блендинга.
@@ -188,6 +196,9 @@ public:
     // BeginPopup/EndPopup. Используется, например, FastSync для "Invert depth
     // axis" пункта без необходимости open'ить отдельный popup.
     std::function<void()> popup_extras;
+    // «Copy image to clipboard» захватывает ещё столько пикселей справа от блока: там
+    // вызывающий рисует свой колорбар (FastSync), иначе картинка уходила без шкалы.
+    float screenshot_extra_right = 0.0f;
 
     // Crosshair-commit callback: fires on release of a crosshair gesture
     // (MMB or Shift+LMB) inside the plot, unless it was a double-click.
@@ -271,13 +282,9 @@ private:
     // меняется зумом и панорамированием, а VBO переливается только по data_generation.
     double series_origin_x_ = 0.0;
     double series_origin_y_ = 0.0;
-    // Состояние меню цвета серии. ImGui immediate mode — жить между кадрами
-    // обязано здесь, а не в локальных переменных render(). Каналы держим
-    // ТЕКСТОМ, а не float'ами: поля построены на InputText с
-    // digit_step_input_callback (↑/↓ шагают разряд под курсором), как поля
-    // параметров во вкладках анализа.
+    // Подпись серии, чей цвет правит меню легенды (legend_color_popup). ImGui immediate mode —
+    // жить между кадрами обязано здесь, а не в локальных переменных render().
     std::string legend_color_target_;
-    std::string legend_color_text_[3];
     // Эффективная видимость серий на текущий кадр (visible[k] && global_visible[k]).
     // Обновляется в начале render(); do_autofit/fit_x/fit_y используют её,
     // чтобы НЕ включать скрытые серии в авто-диапазон.

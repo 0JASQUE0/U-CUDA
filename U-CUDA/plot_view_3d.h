@@ -6,6 +6,7 @@
 #include "plot_camera_3d.h"
 #include <vector>
 #include <string>
+#include <map>
 #include <functional>
 
 struct PlotSeriesInput3D {
@@ -13,6 +14,13 @@ struct PlotSeriesInput3D {
     int          n_points = 0;
     ImVec4       color = ImVec4(1, 1, 1, 1);
     std::string  label;
+    // Окраска по колормапе (как PlotSeriesInput::values в 2D): values — n_points float,
+    // цвет вершины = colormap((v - cmin)/(cmax - cmin)), reverse переворачивает шкалу,
+    // color.w — альфа. Такая серия всегда рисуется толстой линией (line_thickness_px).
+    const float* values   = nullptr;
+    int          colormap = 0;
+    float        cmin = 0.0f, cmax = 1.0f;
+    bool         cmap_reverse = false;
 };
 
 class Plot3DView {
@@ -43,7 +51,20 @@ public:
     // Draw with GL_POINTS instead of a polyline - see Plot2DView::points_mode.
     // Discrete maps need it: there is nothing to join consecutive iterates with.
     bool  points_mode   = false;
+    // Вместе с points_mode: под точками ещё и линия (Points + Custom line style), как
+    // Plot2DView::points_with_lines.
+    bool  points_with_lines = false;
     float point_size_px = 2.0f;
+    // Своя прозрачность точек (Points при Custom line style), < 0 — альфа серии. См. Plot2DView.
+    float point_alpha = -1.0f;
+
+    // Автоподгонка камеры при новых данных (пункт меню «Auto fit on new data»). Выключена —
+    // перерасчёт и смена данных вид не трогают; «Auto fit» из меню и двойной клик работают всегда.
+    bool auto_fit = true;
+
+    // Пользовательские цвета серий (ПКМ по квадрату легенды -> legend_color_popup), ключ — подпись;
+    // альфа — от вызывающего. См. Plot2DView::series_color_override.
+    std::map<std::string, ImVec4> series_color_override;
 
     // Локальная видимость серий (переключается кликом по легенде).
     std::vector<bool> visible;
@@ -55,9 +76,15 @@ public:
     // HeatmapView::popup_extras — нужен, чтобы "Export data..." был доступен
     // и на 3D-проекциях, а не только на 2D/TimeDomain.
     std::function<void()> popup_extras;
+    // Ширина справа от блока, которую тоже берёт «Copy image» (колорбар вызывающего). См. Plot2DView.
+    float screenshot_extra_right = 0.0f;
 
     // Камера — публичное поле: до неё дотягивается меню («reset view» и т.п.).
     PlotCamera3D camera;
+
+    // Прямоугольник картинки, которым отработал последний render (для колорбара вызывающего).
+    ImVec2 last_img_pos  = ImVec2(0, 0);
+    ImVec2 last_img_size = ImVec2(0, 0);
 
     void render(PlotRenderer& renderer,
         ImVec2 avail_pos, ImVec2 avail_size,
@@ -72,6 +99,7 @@ private:
     GpuLineSeriesSet3D series_cache_;
     GpuLineSeriesSet3D axis_cache_; // 3 линии: X, Y, Z (по 2 точки каждая)
     float axis_bbox_[6] = { 0,0,0,0,0,0 }; // bbox, по которому собран axis_cache_
+    std::string legend_color_target_;      // подпись серии в меню цвета (живёт между кадрами)
 
     void do_autofit();
     void rebuild_axis_cache(); // строит/пересобирает 3 линии-оси по текущему bbox
