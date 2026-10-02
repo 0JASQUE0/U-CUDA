@@ -11,6 +11,7 @@
 #include <cmath>
 #include <memory>
 #include <chrono>
+#include <thread>   // наблюдатель отмены CPU-ветки адаптивного шага
 #include <random>   // выбор представительной ячейки бассейна (mt19937)
 
 // Слот в a[] для цели свипа по параметру. param_index конфига — 0-based индекс
@@ -334,6 +335,7 @@ struct PhaseRunInputs {
     std::string scheme, decimation;
     std::string symmetry_s = "0.5"; // a[0] для CD
     AdaptiveSettings adaptive;
+    std::shared_ptr<std::atomic<bool>> cancel;   // отмена (адаптивный шаг), nullptr — нет
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
@@ -576,10 +578,12 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         rq.amountOfX = dim; rq.ic_flat = ic_flat; rq.N = N; rq.values = a; rq.params = P;
         rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total;
         rq.max_pts = max_pts; rq.log_cap = kAdaptLogCap;
+        rq.cancel = in.cancel;
         PhaseAdaptiveResult out;
         std::string err;
         if (!computePhasePortraitsAdaptiveNVRTC(rq, out, &err)) {
-            result.error = "GPU: " + err;
+            if (err == kNvrtcCancelled) { result.cancelled = true; result.error = err; }
+            else result.error = "GPU: " + err;
             return false;
         }
         raw = std::move(out.traj);
@@ -600,15 +604,39 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 result.error += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
             return false;
         }
+        // Буфер DLL — под весь потолок сразу (cap точек): max points до 5e7 — это гигабайты,
+        // и нехватку памяти нужно отдать текстом, а не исключением из потока расчёта.
         const int cap = rawm ? max_pts : total;
-        std::vector<double> data((size_t)std::max(cap, 1) * dim), tm(rawm ? (size_t)max_pts : 0);
-        std::vector<double> lg((size_t)kAdaptLogCap * 4);
+        std::vector<double> data, tm, lg;
+        try {
+            data.resize((size_t)std::max(cap, 1) * dim);
+            tm.resize(rawm ? (size_t)max_pts : 0);
+            lg.resize((size_t)kAdaptLogCap * 4);
+        } catch (const std::bad_alloc&) {
+            result.error = "adaptive " + in.scheme + " (CPU): not enough memory for "
+                         + std::to_string(cap) + " output points; lower max points or the record time";
+            return false;
+        }
+        // Отмена: DLL смотрит volatile-флаг, его ставит этот наблюдатель по токену сессии.
+        volatile int cflag = 0;
+        std::atomic<bool> done{ false };
+        std::thread watcher([&]() {
+            while (!done.load(std::memory_order_relaxed)) {
+                if (in.cancel && in.cancel->load(std::memory_order_relaxed)) cflag = 1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+        struct JoinOnExit {
+            std::atomic<bool>& d; std::thread& t;
+            ~JoinOnExit() { d.store(true, std::memory_order_relaxed); t.join(); }
+        } join_on_exit{ done, watcher };
         for (int k = 0; k < N; ++k) {
+            if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
             int nlog = 0;
             double st[9] = {}, fh = 0;
             const int c = mod.phase()(&ic_flat[(size_t)k * dim], a.data(), &P, t_skip, tsim, h, total, rawm ? 1 : 0,
                                       max_pts, kAdaptLogCap, data.data(), rawm ? tm.data() : nullptr, lg.data(),
-                                      &nlog, st, &fh);
+                                      &nlog, st, &fh, &cflag);
             std::vector<std::vector<double>>& tr = raw[(size_t)k];
             tr.assign((size_t)c, std::vector<double>((size_t)dim));
             for (int i = 0; i < c; ++i)
@@ -644,8 +672,14 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                                              rawm, t_skip, tsim, h, total, max_pts, kAdaptLogCap,
                                              raw[(size_t)k], times[(size_t)k],
                                              result.step_log[(size_t)k], result.step_stats[(size_t)k], fh,
-                                             ctrl.fn(), ctrl.prep());
+                                             ctrl.fn(), ctrl.prep(), in.cancel.get());
+            if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
         }
+    }
+    if (in.cancel && in.cancel->load(std::memory_order_relaxed)) {
+        result.cancelled = true;
+        result.error = kNvrtcCancelled;
+        return false;
     }
     for (int k = 0; k < N; ++k) {
         const AdaptiveStats& st = result.step_stats[(size_t)k];
@@ -1041,6 +1075,8 @@ void PhaseAnalysisSession::recompute() {
 bool PhaseAnalysisSession::recompute_async() {
     if (in_flight) return false;
     PhaseRunInputs in = snapshot_phase(*this);
+    cancel_token = std::make_shared<std::atomic<bool>>(false);
+    in.cancel    = cancel_token;
     in_flight = true;
     compute_start_time = std::chrono::steady_clock::now();
     recompute_future = std::async(std::launch::async, [in = std::move(in)]() {
@@ -1099,14 +1135,27 @@ void PhaseAnalysisSession::rebuild_peaks_from_result() {
     ++continuation_peaks_gen;
 }
 
+void PhaseAnalysisSession::request_cancel() {
+    if (cancel_token) cancel_token->store(true, std::memory_order_relaxed);
+}
+
 bool PhaseAnalysisSession::poll() {
     if (!in_flight) return false;
-    if (!recompute_future.valid()) { in_flight = false; return false; }
+    if (!recompute_future.valid()) { in_flight = false; cancel_token.reset(); return false; }
     if (recompute_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-    result = recompute_future.get();
+    AnalysisResult r = recompute_future.get();
+    in_flight = false;
+    cancel_token.reset();
+    if (r.cancelled) {
+        // Прежние графики остаются; цикл continuation (если шёл) останавливается.
+        result.error = r.error;
+        continuation_active = false;
+        continuation_paused = false;
+        return true;
+    }
+    result = std::move(r);
     fit_request = true;
     data_generation++;
-    in_flight = false;
     // Carry the final X[] forward for the next continuation chunk. Only
     // adopt on success so a divergent frame doesn't corrupt the seed.
     if (continuation_active && result.ok &&

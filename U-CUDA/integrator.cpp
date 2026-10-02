@@ -969,7 +969,7 @@ bool computePhasePortraitCPU_adaptive(
     bool raw, double t_skip, double t_rec, double dt, int total, int max_pts, int log_cap,
     std::vector<std::vector<double>>& traj, std::vector<double>& times,
     std::vector<double>& log, AdaptiveStats& stats, double& final_h, UcudaCtrlCustomFn ctrl_fn,
-    UcudaCtrlPrepFn prep_fn)
+    UcudaCtrlPrepFn prep_fn, const std::atomic<bool>* cancel)
 {
     traj.clear(); times.clear(); log.clear(); stats = AdaptiveStats(); final_h = 0;
     if (!int_scheme_supports_adaptive(scheme) || dim < 1 || dim > UCUDA_AD_MAXN) return false;
@@ -989,25 +989,39 @@ bool computePhasePortraitCPU_adaptive(
     std::vector<double> logbuf((size_t)(log_cap > 0 ? log_cap : 0) * 4);
     ucuda_ad_init(S, K, dim, ic, 0.0, a, P, log_cap > 0 ? logbuf.data() : nullptr, log_cap);
     const double tEnd = t_skip + t_rec;
-    while (S.t < t_skip && !S.diverged) ucuda_ad_step(S, K, a, P, t_skip);
+    // Отмена — как у phase_kernel_ad: раз в 1024 принятых шага; сетка — ucuda_ad_advance_to,
+    // развёрнутый ради проверки между шагами (те же вызовы, тот же результат).
+    auto cancelled = [&]() {
+        return (S.st.nacc & 1023ULL) == 0 && cancel != nullptr && cancel->load(std::memory_order_relaxed);
+    };
+    bool cut = false;
+    while (S.t < t_skip && !S.diverged && !cut) {
+        ucuda_ad_step(S, K, a, P, t_skip);
+        cut = cancelled();
+    }
     if (!raw) {
         std::vector<double> y((size_t)dim);
         traj.reserve((size_t)(total > 0 ? total : 0));
-        for (int c = 0; c < total && !S.diverged; ++c) {
+        for (int c = 0; c < total && !S.diverged && !cut; ++c) {
             double tt = t_skip + (double)c * dt;
             if (tt > tEnd) tt = tEnd;
-            ucuda_ad_advance_to(S, K, a, P, tt, tEnd, y.data());
-            if (S.diverged) break;
+            while (S.t < tt && !S.diverged && !cut) {
+                ucuda_ad_step(S, K, a, P, tEnd);
+                cut = cancelled();
+            }
+            if (S.diverged || cut) break;
+            ucuda_ad_eval(S, K, a, P, tt, y.data());
             traj.push_back(y);
         }
-    } else if (max_pts > 0 && !S.diverged) {
+    } else if (max_pts > 0 && !S.diverged && !cut) {
         traj.emplace_back(S.X, S.X + dim);
         times.push_back(S.t);
-        while (S.t < tEnd && (int)traj.size() < max_pts && !S.diverged) {
+        while (S.t < tEnd && (int)traj.size() < max_pts && !S.diverged && !cut) {
             ucuda_ad_step(S, K, a, P, tEnd);
             if (S.diverged) break;
             traj.emplace_back(S.X, S.X + dim);
             times.push_back(S.t);
+            cut = cancelled();
         }
     }
     log.assign(logbuf.begin(), logbuf.begin() + (size_t)S.log_n * 4);

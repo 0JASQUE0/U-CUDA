@@ -458,10 +458,11 @@ __device__ __forceinline__ void ucudaAdWriteStats(numb* adStats, const int idx, 
 }
 
 // Настройки шага в ядре свипа. У ядра узлов (UCUDA_AD_NODES_KERNEL) — аргумент по значению
-// (__grid_constant__): лежит в константном банке аргументов, нить его не копирует. У общего
-// ядра — копия на нить: ось свипа может править rtol / atol / параметр регулятора.
+// (__grid_constant__ с compute_70, см. UCUDA_GRID_CONST): лежит в константном банке
+// аргументов, нить его не копирует. У общего ядра — копия на нить: ось свипа может править
+// rtol / atol / параметр регулятора.
 #ifdef UCUDA_AD_NODES_KERNEL
-#define UCUDA_AD_P_ARG   const __grid_constant__ UcudaAdaptParams Pbase
+#define UCUDA_AD_P_ARG   const UCUDA_GRID_CONST UcudaAdaptParams Pbase
 #define UCUDA_AD_P_LOCAL const UcudaAdaptParams& P = Pbase;
 #else
 #define UCUDA_AD_P_ARG   const UcudaAdaptParams* __restrict__ Pbase

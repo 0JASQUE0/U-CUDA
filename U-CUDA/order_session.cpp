@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <thread>   // наблюдатель отмены адаптивного замера на CPU
 
 namespace {
 
@@ -944,19 +945,40 @@ static PerfResult run_performance_adaptive(const PerfRequest& req, bool on_gpu) 
         for (int k = 0; k < req.amountOfX; ++k)
             rq.params.atol[k] = B.rtol > 0 ? B.atol[k] / B.rtol * tol : tol;
         rq.T = req.t_max; rq.replicas = req.replicas; rq.repeats = req.repeats; rq.warmup = req.warmup;
+        rq.cancel = req.cancel;
         AdaptiveEndpointResult out;
         std::string err;
         if (on_gpu) {
-            if (!computeAdaptiveEndpointNVRTC(rq, out, &err)) return fail("GPU: " + err);
+            if (!computeAdaptiveEndpointNVRTC(rq, out, &err)) {
+                if (err == kNvrtcCancelled) { res.cancelled = true; return res; }
+                return fail("GPU: " + err);
+            }
         } else {
             std::vector<double> y((size_t)req.amountOfX);
             double st[8] = { 0 };
-            auto one = [&]() { cpu.endpoint()(rq.ic.data(), rq.values.data(), &rq.params, rq.T, y.data(), st); };
-            for (int w = 0; w < req.warmup; ++w) one();
+            // Отмена внутри одного прогона: DLL смотрит volatile-флаг, его ставит наблюдатель.
+            volatile int cflag = 0;
+            std::atomic<bool> done{ false };
+            std::thread watcher([&]() {
+                while (!done.load(std::memory_order_relaxed)) {
+                    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cflag = 1;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            });
+            struct JoinOnExit {
+                std::atomic<bool>& d; std::thread& t;
+                ~JoinOnExit() { d.store(true, std::memory_order_relaxed); t.join(); }
+            } join_on_exit{ done, watcher };
+            auto one = [&]() {
+                cpu.endpoint()(rq.ic.data(), rq.values.data(), &rq.params, rq.T, y.data(), st, &cflag);
+                return cflag == 0;
+            };
+            for (int w = 0; w < req.warmup; ++w)
+                if (!one()) { res.cancelled = true; return res; }
             double tsum = 0;
             for (int r = 0; r < req.repeats; ++r) {
                 const auto t0 = std::chrono::steady_clock::now();
-                one();
+                if (!one()) { res.cancelled = true; return res; }
                 const double us = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(
                                       std::chrono::steady_clock::now() - t0).count();
                 if (r == 0) { out.t_min = out.t_max = us; }

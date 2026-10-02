@@ -134,8 +134,9 @@ struct UcudaAdaptParams;
 class AdaptiveCpuModule {
 public:
     // y(T) от ic: y[n], stats[8] = nacc, nrej, nforced, nrhs, hmin, hmax, hmean, diverged.
+    // cancel (nullptr — нет): смотрится раз в 1024 принятых шага, прерывает счёт.
     using EndpointFn = int (*)(const double* ic, const double* a, const UcudaAdaptParams* P, double T,
-                               double* y, double* stats);
+                               double* y, double* stats, const volatile int* cancel);
     // Свип LLE (ls = 0) / LS (ls = 1) цепочкой точек — ucuda_lyap_chain (continuation = 1)
     // или классически (0). result[nPts * NC] (NaN — разлёт), stats[nPts * 4].
     using LyapFn = void (*)(int ls, int continuation, int nPts, double lo, double hi, int reverse,
@@ -180,7 +181,8 @@ public:
     // log_cap попыток по 4 числа, stats[9] как у ядра (+ truncated). Возвращает число точек.
     using PhaseFn = int (*)(const double* ic, const double* values, const UcudaAdaptParams* P, double t_skip,
                             double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data,
-                            double* times, double* logs, int* log_count, double* stats, double* final_h);
+                            double* times, double* logs, int* log_count, double* stats, double* final_h,
+                            const volatile int* cancel);   // cancel — как у EndpointFn
     AdaptiveCpuModule() = default;
     ~AdaptiveCpuModule();
     AdaptiveCpuModule(const AdaptiveCpuModule&) = delete;

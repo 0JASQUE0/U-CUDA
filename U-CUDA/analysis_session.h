@@ -247,6 +247,7 @@ struct AnalysisResult {
     std::vector<std::vector<double>> step_log;
     std::vector<AdaptiveStats> step_stats;
     bool ok = false;
+    bool cancelled = false;            // расчёт отменён (PhaseAnalysisSession::request_cancel)
     std::string error;
     int generation = 0;
     // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
@@ -406,6 +407,12 @@ struct PhaseAnalysisSession {
     std::future<AnalysisResult> recompute_future;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
+    // Отмена идущего расчёта: токен создаёт recompute_async, request_cancel взводит. Слушает
+    // его ветка адаптивного шага (её траектория может идти сколько угодно шагов); постоянный
+    // шаг с известным числом шагов доходит до конца. Отменённый результат не заменяет
+    // прежний: poll() оставляет графики и пишет причину в result.error.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    void request_cancel();
 
     // Фоновый прогрев NVRTC-кэша сразу при смене system/scheme (см.
     // regenerate_krs) — к моменту реального Run модуль уже готов. Хранится

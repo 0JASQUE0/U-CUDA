@@ -523,6 +523,8 @@ public:
     std::string ctrl_lib_check_body;            // тело, для которого сделан Check,
     std::string ctrl_lib_check_log;             //   и его результат
     bool        ctrl_lib_check_ok   = false;
+    // Check идёт в фоне (NVRTC — около секунды, UI не ждёт): результат — ok и лог компилятора.
+    std::future<std::pair<bool, std::string>> ctrl_lib_check_future;
     float       ctrl_lib_body_h     = 300.0f;
 
     // метаданные для библиотеки

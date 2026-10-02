@@ -1355,6 +1355,13 @@ static const char* const kCtrlBodyHelp =
     "(or after max rejects), and retries with at most 0.9 h.";
 
 static void draw_ctrl_library_window(AppModel& m) {
+    // Результат фонового Check — и при закрытом окне, чтобы future не висел.
+    if (m.ctrl_lib_check_future.valid()
+        && m.ctrl_lib_check_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const std::pair<bool, std::string> r = m.ctrl_lib_check_future.get();
+        m.ctrl_lib_check_ok  = r.first;
+        m.ctrl_lib_check_log = r.second;
+    }
     if (!m.show_ctrl_library) return;
     ImGui::SetNextWindowSize(ImVec2(940.0f, 640.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Step controller library", &m.show_ctrl_library)) { ImGui::End(); return; }
@@ -1548,14 +1555,18 @@ static void draw_ctrl_library_window(AppModel& m) {
                 ImGui::TextDisabled("(?)");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCtrlBodyHelp);
                 ImGui::SameLine();
+                const bool checking = m.ctrl_lib_check_future.valid();
+                ImGui::BeginDisabled(checking);
                 if (ImGui::SmallButton("Check")) { do_check = true; check_body = packed; }
-                if (ImGui::IsItemHovered())
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("Compile the prepare section and the body with NVRTC (no run). The CPU\n"
                                       "build with cl.exe happens on the first CPU run of Analysis.");
                 if (checked) {
                     ImGui::SameLine();
-                    if (m.ctrl_lib_check_ok) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "compiles");
-                    else                     ImGui::TextColored(warn, "does not compile:");
+                    if (checking)                 ImGui::TextDisabled("checking...");
+                    else if (m.ctrl_lib_check_ok) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "compiles");
+                    else                          ImGui::TextColored(warn, "does not compile:");
                 }
                 edited |= InputTextMultilineStr("##body", u.body, ImVec2(-1.0f, m.ctrl_lib_body_h));
                 draw_resize_handle("##body_resize", m.ctrl_lib_body_h);
@@ -1574,9 +1585,16 @@ static void draw_ctrl_library_window(AppModel& m) {
         }
         ImGui::EndChild();
     }
-    if (do_check) {
+    if (do_check && !m.ctrl_lib_check_future.valid()) {
+        // NVRTC в фоне: окно не замирает на время сборки. Результат забирается в начале кадра.
         m.ctrl_lib_check_body = check_body;
-        m.ctrl_lib_check_ok = nvrtc_check_ctrl_body(check_body, m.ctrl_lib_check_log);
+        m.ctrl_lib_check_ok   = false;
+        m.ctrl_lib_check_log.clear();
+        m.ctrl_lib_check_future = std::async(std::launch::async, [check_body]() {
+            std::string log;
+            const bool ok = nvrtc_check_ctrl_body(check_body, log);
+            return std::make_pair(ok, log);
+        });
     }
     if (edited) m.ctrl_lib_dirty = true;
     if (m.ctrl_lib_dirty && !ImGui::IsAnyItemActive()) {
@@ -1639,7 +1657,9 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Smallest step. A step that would go below it is taken at h_min\n"
                               "anyway and counted as forced. Empty: the larger of 10 ulp(t) and\n"
-                              "1e-12 x the length of the whole interval (transient + record).");
+                              "1e-12 x the length of the whole interval (transient + record).\n"
+                              "A set value is raised to 10 ulp(t) where it is smaller: below that\n"
+                              "t + h_min == t and the step would not advance time.");
         changed |= InputNumStr("h_max", a.hmax, kFieldW, {}, true);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Largest step. Empty: no limit.");
         changed |= InputNumStr("max rejects", a.max_rej, kFieldW, {}, true);
@@ -5053,11 +5073,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
         // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
         // раздаются всем уровням; здесь они только показываются.
-        if (on_reset_defaults &&
-            draw_adaptive_block("phase_ad", s.adaptive, s.scheme, kAdUiRaw | kAdUiInterp | kAdUiMaxPts,
-                                s.sys.is_map, bc)) {
-            changed = true;
-            s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
+        if (on_reset_defaults) {
+            if (draw_adaptive_block("phase_ad", s.adaptive, s.scheme, kAdUiRaw | kAdUiInterp | kAdUiMaxPts,
+                                    s.sys.is_map, bc)) {
+                changed = true;
+                s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
+            }
         }
         else
             ImGui::TextDisabled(s.adaptive.enabled ? "Adaptive step (set in Custom -> Integration)."
@@ -5522,13 +5543,26 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (ImGui::Button("Stop (continuation)", ImVec2(-1, 0))) {
             s.continuation_active = false;
             s.continuation_paused = false;
+            s.request_cancel();   // адаптивный кадр может идти долго — прервать и его
         }
         ImGui::PopStyleColor(3);
     }
     else if (s.in_flight) {
+        // Отмену слушает ветка адаптивного шага; у постоянного шага число шагов известно,
+        // и расчёт доходит до конца.
+        const bool can_cancel = s.adaptive.enabled && !s.sys.is_map && s.cancel_token != nullptr;
+        const bool cancel_sent = can_cancel && s.cancel_token->load(std::memory_order_relaxed);
+        const float bw = can_cancel ? (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f
+                                    : -1.0f;
         ImGui::BeginDisabled();
-        ImGui::Button("Recomputing...", ImVec2(-1, 0));
+        ImGui::Button(cancel_sent ? "Cancelling..." : "Recomputing...", ImVec2(bw, 0));
         ImGui::EndDisabled();
+        if (can_cancel) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(cancel_sent);
+            if (ImGui::Button("Cancel##phase_cancel", ImVec2(-1, 0))) s.request_cancel();
+            ImGui::EndDisabled();
+        }
     }
     else {
         do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));
@@ -6833,6 +6867,11 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
             "Off: only local maxima (a Poincare section), the convention for flows.\n"
             "For a map the peak filter drops the lower branch of every period-2\n"
             "orbit and leaves the period-1 windows empty.");
+    // Адаптивный шаг пишет только пики (ядра адаптивного шага сырых отсчётов не выдают).
+    if (bd.plot_all_iterates && bd.adaptive.enabled && !model.is_map) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(not with the adaptive step: peaks only)");
+    }
     // Inter-peak times are not filled in the all-iterates path (pushRaw writes
     // zeros), so a stale toggle would plot a flat line at 0.
     if (bd.plot_all_iterates) bd.plot_inter_peaks = false;

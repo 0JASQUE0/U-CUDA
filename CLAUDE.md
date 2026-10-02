@@ -260,7 +260,10 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   exponents come out ~0.
 - **Controller library:** global, `library\step_controllers.json`; entries are a C body of
   `ucuda_ctrl_custom(in, m, o)` or a named Soderlind filter. Sessions embed the definition
-  (`ctrl_def`) and import it where it is missing. `nvrtc_check_ctrl_body` = the editor's
+  (`ctrl_def`) and import it where it is missing; if the library has the name with a different
+  definition, the session gets its own entry (one with the same definition, or "<name> (session)"),
+  so a session runs the controller it was saved with (`import_session_ctrl`). The file is replaced
+  in one step (`filesystem::rename`) under a writer lock. `nvrtc_check_ctrl_body` = the editor's
   Check. PI/Filter: `safety` sets the target error `safety^(q+1)`, it does not multiply rho.
   A C body may have a **prepare section** `ucuda_ctrl_custom_prep(c, q, k)`: run once per trajectory
   (`ucuda_ad_prepare_ctl` in init/restart), `k[0..UCUDA_CTL_NK-1]` lands in `UcudaCtlConst::k` and the
@@ -356,7 +359,19 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   versions of log2/exp2/fmin/fmax/nextafter in `ucuda_adaptive.cuh` are inline (Estrin, ≤ 0.5 ulp
   float) because the CRT calls cost ~100 ns more per attempt in the /MD exe.
 - Default `h_min` is `max(10 ulp(t), 1e-12*span)`: 10 ulp alone let a controller pinned at an
-  unreachable tolerance take ~1e15 steps.
+  unreachable tolerance take ~1e15 steps. A user `h_min` is raised to 10 ulp(t): below that
+  `t + h_min == t` and a forced step never advanced time.
+- **Cancel in Analysis / Order → Performance (adaptive):** `phase_kernel_ad`, `endpoint_kernel_ad`,
+  the DLL entries `ucuda_cpu_ad_phase` / `ucuda_cpu_ad_endpoint` and `computePhasePortraitCPU_adaptive`
+  check a cancel flag every 1024 accepted steps (GPU: an int in mapped host memory, `NvrtcEngine`
+  polls the stream and sets it; DLL: a volatile int set by a watcher thread). A cancelled run returns
+  `kNvrtcCancelled`; `PhaseAnalysisSession::poll` keeps the previous plots. The grid loop there is
+  `ucuda_ad_advance_to` unrolled (same calls, same results). TDR is not addressed: a single launch
+  longer than the Windows watchdog is still reset by the driver.
+- `__grid_constant__` only from compute_70 (`UCUDA_GRID_CONST`); on older GPUs the parameter is a plain
+  by-value one (same results, maybe a local copy).
+- Prewarm must never activate a module (`compile_*_if_needed(..., activate = false)`): a running task
+  reads its kernel from the active slot after its own compile.
 - New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.
 
 ## ImGui/ImPlot Guidelines

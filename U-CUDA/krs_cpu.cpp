@@ -532,7 +532,7 @@ unsigned long long ctrl_hash_key(const std::string& body, const std::string& hea
 // par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
 namespace {
 
-constexpr int kAdModuleVersion = 5;   // 5: вход ucuda_cpu_ad_phase
+constexpr int kAdModuleVersion = 6;   // 5: вход ucuda_cpu_ad_phase; 6: отмена в phase / endpoint
 
 // Подстановка плейсхолдера {{name}} во всех вхождениях.
 void replace_all(std::string& s, const std::string& from, const std::string& to) {
@@ -636,11 +636,14 @@ std::string make_ad_module_source(const std::string& rhs, const std::string& emb
     o << adaptive_part << "\n"
          "extern \"C\" __declspec(dllexport)\n"
          "int ucuda_cpu_ad_endpoint(const double* ic, const double* a, const UcudaAdaptParams* P, double T,\n"
-         "                          double* y, double* st) {\n"
+         "                          double* y, double* st, const volatile int* cancel) {\n"
          "    const UcudaKrsFns K{};\n"
          "    UcudaAdaptState S;\n"
          "    ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, a, *P);\n"
-         "    while (S.t < T && !S.diverged) ucuda_ad_step(S, K, a, *P, T);\n"
+         "    while (S.t < T && !S.diverged) {\n"   // отмена — как у endpoint_kernel_ad
+         "        ucuda_ad_step(S, K, a, *P, T);\n"
+         "        if ((S.st.nacc & 1023ULL) == 0 && cancel != nullptr && *cancel != 0) break;\n"
+         "    }\n"
          "    for (int k = 0; k < AMOUNTOFX; ++k) y[k] = S.X[k];\n"
          "    st[0] = (double)S.st.nacc; st[1] = (double)S.st.nrej; st[2] = (double)S.st.nforced;\n"
          "    st[3] = (double)S.st.nrhs; st[4] = S.st.hmin; st[5] = S.st.hmax;\n"
@@ -759,35 +762,46 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
 extern "C" __declspec(dllexport)
 int ucuda_cpu_ad_phase(const double* ic, const double* values, const UcudaAdaptParams* Pp, double t_skip,
     double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data, double* times,
-    double* logs, int* log_count, double* stats, double* final_h) {
+    double* logs, int* log_count, double* stats, double* final_h, const volatile int* cancel) {
     const UcudaKrsFns K{};
     const UcudaAdaptParams& P = *Pp;
     UcudaAdaptState S;
     ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, values, P, log_cap > 0 ? logs : nullptr, log_cap);
     const numb tEnd = t_skip + t_rec;
-    while (S.t < t_skip && !S.diverged) ucuda_ad_step(S, K, values, P, t_skip);
+#define UCUDA_PH_CANCELLED() ((S.st.nacc & 1023ULL) == 0 && cancel != nullptr && *cancel != 0)
+    bool cut = false;
+    while (S.t < t_skip && !S.diverged && !cut) {
+        ucuda_ad_step(S, K, values, P, t_skip);
+        cut = UCUDA_PH_CANCELLED();
+    }
     int c = 0;
     if (!raw) {
         numb y[AMOUNTOFX];
-        for (; c < total && !S.diverged; ++c) {
+        for (; c < total && !S.diverged && !cut; ++c) {
             numb tt = t_skip + (numb)c * dt;
             if (tt > tEnd) tt = tEnd;
-            ucuda_ad_advance_to(S, K, values, P, tt, tEnd, y);
-            if (S.diverged) break;
+            while (S.t < tt && !S.diverged && !cut) {
+                ucuda_ad_step(S, K, values, P, tEnd);
+                cut = UCUDA_PH_CANCELLED();
+            }
+            if (S.diverged || cut) break;
+            ucuda_ad_eval(S, K, values, P, tt, y);
             for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = y[k];
         }
     } else {
-        if (!S.diverged && max_pts > 0) {
+        if (!S.diverged && !cut && max_pts > 0) {
             for (int k = 0; k < AMOUNTOFX; ++k) data[k] = S.X[k];
             times[0] = S.t; c = 1;
         }
-        while (S.t < tEnd && c < max_pts && !S.diverged) {
+        while (S.t < tEnd && c < max_pts && !S.diverged && !cut) {
             ucuda_ad_step(S, K, values, P, tEnd);
             if (S.diverged) break;
             for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = S.X[k];
             times[c] = S.t; ++c;
+            cut = UCUDA_PH_CANCELLED();
         }
     }
+#undef UCUDA_PH_CANCELLED
     *log_count = S.log_n;
     stats[0] = (double)S.st.nacc; stats[1] = (double)S.st.nrej; stats[2] = (double)S.st.nforced;
     stats[3] = (double)S.st.nrhs; stats[4] = S.st.hmin; stats[5] = S.st.hmax;

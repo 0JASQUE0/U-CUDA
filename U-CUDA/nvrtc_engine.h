@@ -1,4 +1,6 @@
 ﻿#pragma once
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -23,7 +25,14 @@ struct PhaseAdaptiveRequest {
     int    total = 0;                     // равномерная сетка: число точек
     int    max_pts = 0;                   // узлы шага: потолок числа узлов
     int    log_cap = 0;                   // лог попыток на траекторию (0 — не вести)
+    // Отмена: ядро смотрит флаг раз в 1024 принятых шага (флаг в mapped-памяти, его ставит
+    // поток ожидания, пока ядро идёт). nullptr — без отмены. Отменённый расчёт возвращает
+    // false с error() == kNvrtcCancelled.
+    std::shared_ptr<std::atomic<bool>> cancel;
 };
+
+// Текст error() отменённого расчёта (PhaseAdaptiveRequest::cancel, AdaptiveEndpointRequest::cancel).
+inline const char* const kNvrtcCancelled = "Cancelled by user";
 
 // Замер адаптивного шага (Order -> Performance): replicas одинаковых нитей интегрируют
 // [0, T] от ic и останавливаются ровно в T; время ОДНОГО запуска ядра по cudaEvents,
@@ -38,6 +47,7 @@ struct AdaptiveEndpointRequest {
     UcudaAdaptParams params{};
     double T = 0;
     int    replicas = 1, repeats = 1, warmup = 0;
+    std::shared_ptr<std::atomic<bool>> cancel;   // см. PhaseAdaptiveRequest::cancel
 };
 
 struct AdaptiveEndpointResult {
@@ -135,7 +145,16 @@ private:
 
     std::vector<CacheEntry> cache_;  // MRU в конце
 
+    // Флаг отмены адаптивных ядер: int в mapped-памяти хоста (ядро читает его через PCIe).
+    int*               cancel_host_ = nullptr;
+    unsigned long long cancel_dev_  = 0;   // CUdeviceptr
+
     void unload_all();
+    // Флаг отмены (выделяется при первом вызове), сброшенный в 0 перед запуском.
+    bool cancel_flag_reset();
+    // Ждёт конца ядер на потоке по умолчанию; пока ждёт, переносит запрос отмены в флаг ядра.
+    // false — ошибка CUDA (текст в error_); cancelled — отмена была запрошена.
+    bool wait_default_stream(const std::shared_ptr<std::atomic<bool>>& cancel, bool& cancelled);
     // Компилирует или берёт из кэша адаптивное ядро; *fn — CUfunction.
     // variant 0 — phase_kernel_ad (Analysis), 1 — endpoint_kernel_ad (замер до T).
     bool compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, int variant = 0);

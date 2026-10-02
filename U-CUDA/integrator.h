@@ -2,6 +2,7 @@
 #include "codegen.hpp"
 #include "configCUDA.h"   // typedef numb — состояние считается в точности GPU
 #include "adaptive_settings.h"
+#include <atomic>
 #include <vector>
 #include <string>
 
@@ -73,4 +74,5 @@ bool computePhasePortraitCPU_adaptive(
     bool raw, double t_skip, double t_rec, double dt, int total, int max_pts, int log_cap,
     std::vector<std::vector<double>>& traj, std::vector<double>& times,
     std::vector<double>& log, AdaptiveStats& stats, double& final_h,
-    UcudaCtrlCustomFn ctrl_fn = nullptr, UcudaCtrlPrepFn prep_fn = nullptr);
+    UcudaCtrlCustomFn ctrl_fn = nullptr, UcudaCtrlPrepFn prep_fn = nullptr,
+    const std::atomic<bool>* cancel = nullptr);   // отмена: смотрится раз в 1024 принятых шага

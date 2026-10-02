@@ -42,7 +42,17 @@
 #define UCUDA_HD
 #endif
 
-#define UCUDA_AD_MAXN      32   // потолок размерности (kMaxAmountOfX движка)
+// Параметр ядра по значению без копии на нить (лежит в константном банке аргументов) —
+// __grid_constant__, он есть только начиная с compute_70. На более старых архитектурах
+// (Pascal и ниже) NVRTC его отвергает, поэтому там параметр — обычный по значению:
+// ядро то же и считает то же, только может копировать структуру в локальную память.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+#define UCUDA_GRID_CONST __grid_constant__
+#else
+#define UCUDA_GRID_CONST
+#endif
+
+#define UCUDA_AD_MAXN     32   // потолок размерности (kMaxAmountOfX движка)
 #define UCUDA_AD_MAXSTAGES 16   // kAdaptMaxStages в codegen.hpp
 #define UCUDA_AD_MAXDENSE  8    // kAdaptMaxDense
 #define UCUDA_AD_MAXLOW    2    // kAdaptMaxLow
@@ -97,7 +107,8 @@ struct UcudaAdaptParams {
     numb rtol;
     numb atol[UCUDA_AD_MAXN];   // по переменным (скаляр хост размножает)
     numb h0;                    // <= 0 — автоматически (select_initial_step)
-    numb hmin;                  // <= 0 — max(10 ulp(t), 1e-12 * span), см. ucuda_ad_hmin_auto
+    numb hmin;                  // <= 0 — max(10 ulp(t), 1e-12 * span), см. ucuda_ad_hmin_auto;
+                                //   заданный — не ниже 10 ulp(t) (ucuda_ad_try_x)
     numb hmax;                  // <= 0 — без ограничения
     numb span;                  // длина всего интервала (нужна выбору h0)
     numb c[UCUDA_CTL_NPAR];     // параметры регулятора
@@ -779,7 +790,10 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
     numb* W = S.W;
 #endif
     const int  nrej = S.nrej_run;
-    const numb hmin = P.hmin > 0 ? P.hmin : ucuda_ad_hmin_auto(S.t, P.span);   // t в повторах не меняется
+    // t в повторах не меняется. Заданный h_min не ниже 10 ulp(t): иначе вынужденный шаг
+    // t + h_min == t не продвигал бы время, и при ошибке > 1 на таком шаге цикл не кончился бы.
+    const numb hmin = P.hmin > 0 ? ucuda_fmax(P.hmin, ucuda_ad_hmin_auto(S.t, (numb)0))
+                                 : ucuda_ad_hmin_auto(S.t, P.span);
     {
         numb h = S.h;
         if (P.hmax > 0 && h > P.hmax) h = P.hmax;
@@ -1134,13 +1148,18 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             const bool clipped = (k == 0) || (renorm == 0);   // шаг к границе обрезался
             if (k == 0) { if (!carried) ucuda_lyap_init_clones<NC>(S.X, eps, seq, cl.y, z); }
             else        ucuda_lyap_renorm<NC>(S.X, eps, cl.y, z, k > nW ? acc : accWarm);
-            if (k == nW) tAcc0 = S.t;
             for (int c = 0; c < NC; ++c) Kf.rhs(cl.y + c * n, a, cl.F + c * n);   // клоны сдвинуты (или новые a) — f заново
             cl.active = true;
             if (clipped) S.h = S.hfree;
+            const int kDone = k;   // блок, который сейчас закрыт
             ++k;
             if (renorm != 0)   // шаг длиннее NT мог пройти несколько границ
                 while (k <= nAll && !(S.t < t0 + (numb)k * NT)) ++k;
+            // Учётные блоки — с номером > nW: их время идёт с перенормировки, после которой
+            // следующий блок уже учётный. При renorm = 1 шаг длиннее NT перескакивает номера,
+            // и блок nW мог не закрыться вовсе (k == nW так и не наступило) — поэтому переход
+            // ловится по паре номеров, а не по k == nW. Без перескока — ровно прежнее условие.
+            if (kDone <= nW && k > nW) tAcc0 = S.t;
             if (k > nAll) break;
             tb = t0 + (numb)k * NT;   // теперь S.t < tb — попытка в той же итерации
         }

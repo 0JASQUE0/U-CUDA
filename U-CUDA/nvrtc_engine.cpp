@@ -2,9 +2,11 @@
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include <cuda.h>
 #include <nvrtc.h>
+#include <chrono>
 #include <cstdio>
 #include <sstream>
 #include <fstream>
+#include <thread>
 
 // exe_dir(): единственное внешнее определение живёт в app_main.cpp (Release) /
 // main_NonLinAnal.cu (Debug) — копия в parametric_engine.cpp лежит в
@@ -31,7 +33,38 @@ static bool cu_ok(CUresult r, std::string& err, const char* where) {
 NvrtcEngine::NvrtcEngine() {}
 NvrtcEngine::~NvrtcEngine() {
     unload_all();
+    if (cancel_host_) { cuMemFreeHost(cancel_host_); cancel_host_ = nullptr; cancel_dev_ = 0; }
     if (context_) { cuCtxDestroy((CUcontext)context_); context_ = nullptr; }
+}
+
+bool NvrtcEngine::cancel_flag_reset() {
+    if (!cancel_host_) {
+        void* p = nullptr;
+        CUOK(cuMemHostAlloc(&p, sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP | CU_MEMHOSTALLOC_PORTABLE), "cancelFlagAlloc");
+        CUdeviceptr d = 0;
+        if (!cu_ok(cuMemHostGetDevicePointer(&d, p, 0), error_, "cancelFlagDevPtr")) { cuMemFreeHost(p); return false; }
+        cancel_host_ = (int*)p;
+        cancel_dev_  = (unsigned long long)d;
+    }
+    *(volatile int*)cancel_host_ = 0;
+    return true;
+}
+
+bool NvrtcEngine::wait_default_stream(const std::shared_ptr<std::atomic<bool>>& cancel, bool& cancelled) {
+    // Первые миллисекунды — опрос с yield (короткие ядра Analysis не ждут кванта планировщика),
+    // дальше — сон по 1 мс.
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        const CUresult r = cuStreamQuery(nullptr);
+        if (r == CUDA_SUCCESS) return true;
+        if (r != CUDA_ERROR_NOT_READY) return cu_ok(r, error_, "wait(ad)");
+        if (!cancelled && cancel && cancel->load(std::memory_order_relaxed)) {
+            *(volatile int*)cancel_host_ = 1;
+            cancelled = true;
+        }
+        if (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(5)) std::this_thread::yield();
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void NvrtcEngine::unload_all() {
@@ -315,9 +348,11 @@ bool nvrtc_check_ctrl_body(const std::string& body, std::string& log) {
 
 // Ядро замера (variant 1): нить интегрирует [0, T] и пишет y(T); статистика — нить 0.
 // Все нити пишут свой y, иначе компилятор вправе выбросить их работу целиком.
+// Отмена — флаг cancel (mapped-память хоста) раз в 1024 принятых шага, как у ядра Analysis.
 static const char* const kEndpointKernelAd =
     "extern \"C\" __global__ void endpoint_kernel_ad(const numb* ic, const numb* values,\n"
-    "    __grid_constant__ const UcudaAdaptParams P, numb T, int N, numb* yout, numb* stats) {\n"
+    "    UCUDA_GRID_CONST const UcudaAdaptParams P, numb T, int N, numb* yout, numb* stats,\n"
+    "    const volatile int* cancel) {\n"
     "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
     "    if (tid >= N) return;\n"
     "    const UcudaKrsFns K{};\n"
@@ -325,7 +360,10 @@ static const char* const kEndpointKernelAd =
     "    numb X0[AMOUNTOFX];\n"
     "    for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = ic[i];\n"
     "    ucuda_ad_init(S, K, AMOUNTOFX, X0, (numb)0, values, P, nullptr, 0);\n"
-    "    while (S.t < T && !S.diverged) ucuda_ad_step(S, K, values, P, T);\n"
+    "    while (S.t < T && !S.diverged) {\n"
+    "        ucuda_ad_step(S, K, values, P, T);\n"
+    "        if ((S.st.nacc & 1023ULL) == 0 && *cancel != 0) break;\n"
+    "    }\n"
     "    for (int k = 0; k < AMOUNTOFX; ++k) yout[(size_t)tid * AMOUNTOFX + k] = S.X[k];\n"
     "    if (tid == 0) {\n"
     "        stats[0] = (numb)S.st.nacc; stats[1] = (numb)S.st.nrej; stats[2] = (numb)S.st.nforced;\n"
@@ -386,16 +424,21 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
         << "#include \"ucuda_adaptive.cuh\"\n";
     if (variant == 1) src << kEndpointKernelAd;
     else src
-        // Поток на траекторию. Параметры шага P — по значению, __grid_constant__: поля
-        // читаются из банка параметров ядра (константный кэш), без копии в локальную
-        // память и без повторных загрузок из глобальной на каждой попытке шага.
+        // Поток на траекторию. Параметры шага P — по значению, __grid_constant__ (с compute_70,
+        // UCUDA_GRID_CONST): поля читаются из банка параметров ядра (константный кэш), без копии
+        // в локальную память и без повторных загрузок из глобальной на каждой попытке шага.
+        // Отмена — флаг cancel (mapped-память хоста) раз в 1024 принятых шага: шагов у
+        // траектории сколько угодно (жёсткий допуск), и без флага ядро не прервать.
+        // Сетка — шаги до отсчёта и плотный выход (ucuda_ad_advance_to, развёрнутый ради
+        // проверки отмены между шагами; те же вызовы, тот же результат).
         // Раскладка выхода:
         //   data[(tid*cap + i)*AMOUNTOFX + k], cap = total (сетка) или max_pts (узлы),
         //   times[tid*max_pts + i] — только для узлов, stats[tid*9 + ...].
-        << "extern \"C\" __global__ void phase_kernel_ad(const numb* ic, const numb* values,\n"
-           "    __grid_constant__ const UcudaAdaptParams P, numb t_skip, numb t_rec, numb dt, int total, int raw,\n"
+        << "#define UCUDA_PH_CANCELLED() ((S.st.nacc & 1023ULL) == 0 && *cancel != 0)\n"
+           "extern \"C\" __global__ void phase_kernel_ad(const numb* ic, const numb* values,\n"
+           "    UCUDA_GRID_CONST const UcudaAdaptParams P, numb t_skip, numb t_rec, numb dt, int total, int raw,\n"
            "    int max_pts, int log_cap, int N, numb* data, numb* times, int* counts,\n"
-           "    numb* logs, int* log_counts, numb* stats, numb* final_h) {\n"
+           "    numb* logs, int* log_counts, numb* stats, numb* final_h, const volatile int* cancel) {\n"
            "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
            "    if (tid >= N) return;\n"
            "    const UcudaKrsFns K{};\n"
@@ -405,30 +448,39 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
            "    numb* lg = log_cap > 0 ? logs + (size_t)tid * log_cap * 4 : nullptr;\n"
            "    ucuda_ad_init(S, K, AMOUNTOFX, X0, (numb)0, values, P, lg, log_cap);\n"
            "    const numb tEnd = t_skip + t_rec;\n"
-           "    while (S.t < t_skip && !S.diverged) ucuda_ad_step(S, K, values, P, t_skip);\n"
+           "    bool cut = false;\n"
+           "    while (S.t < t_skip && !S.diverged && !cut) {\n"
+           "        ucuda_ad_step(S, K, values, P, t_skip);\n"
+           "        cut = UCUDA_PH_CANCELLED();\n"
+           "    }\n"
            "    int c = 0;\n"
            "    if (!raw) {\n"
            "        numb* out = data + (size_t)tid * total * AMOUNTOFX;\n"
            "        numb y[AMOUNTOFX];\n"
-           "        for (; c < total && !S.diverged; ++c) {\n"
+           "        for (; c < total && !S.diverged && !cut; ++c) {\n"
            "            numb tt = t_skip + (numb)c * dt;\n"
            "            if (tt > tEnd) tt = tEnd;\n"
-           "            ucuda_ad_advance_to(S, K, values, P, tt, tEnd, y);\n"
-           "            if (S.diverged) break;\n"
+           "            while (S.t < tt && !S.diverged && !cut) {\n"
+           "                ucuda_ad_step(S, K, values, P, tEnd);\n"
+           "                cut = UCUDA_PH_CANCELLED();\n"
+           "            }\n"
+           "            if (S.diverged || cut) break;\n"
+           "            ucuda_ad_eval(S, K, values, P, tt, y);\n"
            "            for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)c * AMOUNTOFX + k] = y[k];\n"
            "        }\n"
            "    } else {\n"
            "        numb* out = data + (size_t)tid * max_pts * AMOUNTOFX;\n"
            "        numb* tm = times + (size_t)tid * max_pts;\n"
-           "        if (!S.diverged && max_pts > 0) {\n"
+           "        if (!S.diverged && !cut && max_pts > 0) {\n"
            "            for (int k = 0; k < AMOUNTOFX; ++k) out[k] = S.X[k];\n"
            "            tm[0] = S.t; c = 1;\n"
            "        }\n"
-           "        while (S.t < tEnd && c < max_pts && !S.diverged) {\n"
+           "        while (S.t < tEnd && c < max_pts && !S.diverged && !cut) {\n"
            "            ucuda_ad_step(S, K, values, P, tEnd);\n"
            "            if (S.diverged) break;\n"
            "            for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)c * AMOUNTOFX + k] = S.X[k];\n"
            "            tm[c] = S.t; ++c;\n"
+           "            cut = UCUDA_PH_CANCELLED();\n"
            "        }\n"
            "    }\n"
            "    counts[tid] = c;\n"
@@ -523,27 +575,33 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
     double T = rq.T;
     int n = N;
     UcudaAdaptParams par = rq.params;
-    void* args[] = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st };
+    ok = ok && cancel_flag_reset();
+    CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
+    void* args[] = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel };
     const int threads = 32, blocks = (N + threads - 1) / threads;
     auto launch = [&]() {
         return cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr),
                      error_, "launch(end)");
     };
-    for (int w = 0; ok && w < rq.warmup; ++w)
-        ok = launch() && cu_ok(cuCtxSynchronize(), error_, "sync(end)");
+    // Ожидание — опросом потока: пока ядро идёт, запрос отмены уходит в его флаг. Время
+    // запуска по-прежнему меряют события вокруг ядра, опрос в него не входит.
+    bool cancelled = false;
+    for (int w = 0; ok && !cancelled && w < rq.warmup; ++w)
+        ok = launch() && wait_default_stream(rq.cancel, cancelled);
     double tsum = 0;
-    for (int r = 0; ok && r < rq.repeats; ++r) {
+    for (int r = 0; ok && !cancelled && r < rq.repeats; ++r) {
         float ms = 0;
         ok = cu_ok(cuEventRecord(ev_a, nullptr), error_, "record(end)") && launch()
           && cu_ok(cuEventRecord(ev_b, nullptr), error_, "record(end)")
-          && cu_ok(cuEventSynchronize(ev_b), error_, "sync(end)")
+          && wait_default_stream(rq.cancel, cancelled)
           && cu_ok(cuEventElapsedTime(&ms, ev_a, ev_b), error_, "elapsed(end)");
-        if (!ok) break;
+        if (!ok || cancelled) break;
         const double us = (double)ms * 1000.0;
         if (r == 0) { out.t_min = out.t_max = us; }
         else { if (us < out.t_min) out.t_min = us; if (us > out.t_max) out.t_max = us; }
         tsum += us;
     }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
     std::vector<double> y((size_t)nx), st(8);
     if (ok)
         ok = cu_ok(cuMemcpyDtoH(y.data(), d_y, (size_t)nx * sizeof(double)), error_, "cpyY(end)")
@@ -601,16 +659,20 @@ bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, P
     }
     bool ok = cu_ok(cuMemcpyHtoD(d_ic, rq.ic_flat.data(), (size_t)N * nx * sizeof(double)), error_, "cpyIc(ad)")
            && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, rq.values.data(), (size_t)nv * sizeof(double)), error_, "cpyVal(ad)"));
+    bool cancelled = false;
+    if (ok) ok = cancel_flag_reset();
     if (ok) {
         double t_skip = rq.t_skip, t_rec = rq.t_rec, dt = rq.dt;
         int total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, log_cap = rq.log_cap, n = N;
         UcudaAdaptParams par = rq.params;
+        CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
         void* args[] = { &d_ic, &d_val, &par, &t_skip, &t_rec, &dt, &total, &raw, &max_pts, &log_cap, &n,
-                         &d_data, &d_times, &d_cnt, &d_log, &d_logc, &d_st, &d_fh };
+                         &d_data, &d_times, &d_cnt, &d_log, &d_logc, &d_st, &d_fh, &d_cancel };
         const int threads = 32, blocks = (N + threads - 1) / threads;
         ok = cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), error_, "launch(ad)")
-          && cu_ok(cuCtxSynchronize(), error_, "sync(ad)");
+          && wait_default_stream(rq.cancel, cancelled);
     }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
     std::vector<double> data(data_count), times(rq.raw ? (size_t)N * cap : 0), logs(log_count), st((size_t)N * 9), fh(N);
     std::vector<int> cnt(N), logc(N);
     if (ok) {

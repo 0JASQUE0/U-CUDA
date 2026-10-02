@@ -1,5 +1,7 @@
 ﻿#include "session_io.h"
+#include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <cctype>
 #include <stdexcept>
@@ -198,6 +200,51 @@ void read_user_ctrl(JP& p, AdaptiveUserCtrl& u) {
     }
 }
 
+// Тот же ли регулятор считается (имя и описание не в счёт).
+bool same_ctrl_definition(const AdaptiveUserCtrl& a, const AdaptiveUserCtrl& b) {
+    return a.kind == b.kind && a.body == b.body && a.prep == b.prep && a.par_names == b.par_names
+        && a.par_values == b.par_values && a.hairer_rules == b.hairer_rules;
+}
+
+// Регулятор из сессии (ctrl_def) -> библиотека; возвращает имя, под которым он там есть.
+// Нет такого имени — добавляется как есть. Есть с тем же определением — оно и есть. Есть, но
+// считает иначе (правили после сохранения сессии, или сессия с другой машины), — сессия
+// получает своё: запись с тем же определением под любым именем или новая "<имя> (session)".
+// Раньше библиотека молча побеждала, и сессия считалась не тем регулятором, что сохранён.
+std::string import_session_ctrl(const AdaptiveUserCtrl& u) {
+    AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+    std::string use = u.name;
+    bool add = false;
+    {
+        std::lock_guard<std::mutex> lk(L.mu);
+        const AdaptiveUserCtrl* same_name = nullptr;
+        for (const AdaptiveUserCtrl& x : L.items) if (x.name == u.name) { same_name = &x; break; }
+        if (same_name == nullptr) {
+            L.items.push_back(u);
+            add = true;
+        } else if (!same_ctrl_definition(*same_name, u)) {
+            const AdaptiveUserCtrl* same_def = nullptr;
+            for (const AdaptiveUserCtrl& x : L.items) if (same_ctrl_definition(x, u)) { same_def = &x; break; }
+            if (same_def != nullptr) {
+                use = same_def->name;
+            } else {
+                auto taken = [&](const std::string& s) {
+                    for (const AdaptiveUserCtrl& x : L.items) if (x.name == s) return true;
+                    return false;
+                };
+                use = u.name + " (session)";
+                for (int k = 2; taken(use); ++k) use = u.name + " (session " + std::to_string(k) + ")";
+                AdaptiveUserCtrl c = u;
+                c.name = use;
+                L.items.push_back(c);
+                add = true;
+            }
+        }
+    }
+    if (add) save_ctrl_library();
+    return use;
+}
+
 // ---- Адаптивный шаг ----
 // Вложенный объект "adaptive" пишется, только если настройки отличаются от
 // умолчания: сессии без адаптивного шага не меняются ни на байт, а старые
@@ -236,6 +283,7 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
     a = AdaptiveSettings();
     p.expect('{');
     if (p.opt('}')) return;
+    std::string def_name, def_use;   // ctrl_def: имя в сессии -> имя в библиотеке
     while (true) {
         const std::string k = p.str();
         p.expect(':');
@@ -265,19 +313,13 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
         else if (k == "lyap_renorm") { try { a.lyap_renorm = std::stoi(p.str_or_num()); } catch (...) {} }
         else if (k == "minmax_interp_fixed") a.minmax_interp_fixed = p.boolean();
         else if (k == "ctrl_def") {
-            // Нет такого регулятора в библиотеке — добавить; есть — библиотека главнее.
+            // Регулятор едет с сессией: в библиотеку, если его там нет, а если под тем же именем
+            // лежит другое определение — под своим именем (import_session_ctrl).
             AdaptiveUserCtrl u;
             read_user_ctrl(p, u);
-            if (!u.name.empty() && !adaptive_find_builtin(u.name) && !adaptive_find_user_ctrl(u.name, nullptr)) {
-                AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
-                bool add = false;
-                {
-                    std::lock_guard<std::mutex> lk(L.mu);
-                    bool have = false;
-                    for (const AdaptiveUserCtrl& x : L.items) have |= x.name == u.name;
-                    if (!have) { L.items.push_back(u); add = true; }
-                }
-                if (add) save_ctrl_library();
+            if (!u.name.empty() && !adaptive_find_builtin(u.name)) {
+                def_name = u.name;
+                def_use  = import_session_ctrl(u);
             }
         }
         else p.skip_value();
@@ -285,6 +327,8 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
         p.expect('}');
         break;
     }
+    // Порядок ключей в файле любой, поэтому переименование — после разбора.
+    if (!def_name.empty() && a.ctrl == def_name && def_use != def_name) a.ctrl = def_use;
     // Регулятор, которого в этой сборке нет (UCUDA_AD_HAIRER_ONLY), — на Хайрера с его
     // параметрами по умолчанию: чужие параметры к нему не подходят.
     if (adaptive_ctrl_effective(a.ctrl) != a.ctrl) {
@@ -2816,6 +2860,11 @@ bool save_ctrl_library(std::string* err) {
     AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
     std::vector<AdaptiveUserCtrl> items;
     std::string path;
+    // Писателей двое: окно библиотеки (UI) и чтение сессии с ctrl_def (read_adaptive), и
+    // поток чтения бывает не UI. Замок файла — на всю запись, и снимок записей берётся под
+    // ним: иначе писатель с более старым снимком мог бы записать его последним.
+    static std::mutex file_mu;
+    std::lock_guard<std::mutex> file_lk(file_mu);
     {
         std::lock_guard<std::mutex> lk(L.mu);
         items = L.items;
@@ -2837,7 +2886,11 @@ bool save_ctrl_library(std::string* err) {
         f.write(text.data(), (std::streamsize)text.size());
         if (!f) { if (err) *err = "cannot write " + tmp; return false; }
     }
-    std::remove(path.c_str());
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) { if (err) *err = "cannot replace " + path; return false; }
+    // Замена одним шагом: filesystem::rename на Windows — MoveFileEx с REPLACE_EXISTING.
+    // Прежние remove + rename при сбое между ними оставляли библиотеку без файла.
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+    // Без ec.message(): в русской Windows это текст в CP1251, а ImGui рисует UTF-8.
+    if (ec) { if (err) *err = "cannot replace " + path + " (error " + std::to_string(ec.value()) + ")"; return false; }
     return true;
 }

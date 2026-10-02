@@ -2844,13 +2844,15 @@ struct ParametricEngine::Impl {
     }
 
     // Модуль continuation LLE/LS с адаптивным шагом (см. cached_lyap_ad_cont).
+    // activate = false — прогрев: модуль только в пул. Активный слот прогрев трогать не вправе:
+    // идущий расчёт берёт ядро из него уже после своей компиляции.
     bool compile_lyap_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
-                                        std::string& err) {
+                                        std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
         for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
-        return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, true, [&](CachedLyapAdModule& fresh) {
+        return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
@@ -3377,6 +3379,12 @@ struct ParametricEngine::Impl {
     //     в NVRTC-bundle
     //   - результат пишется в Bifurcation1DResult (память + CSV), не в файл
     Bifurcation1DResult run_bif1d(const Bifurcation1DRequest& req) {
+        // Ось rtol / atol / tol — только положительные значения. Проверка — до всех веток
+        // (continuation и CPU уходят из диспетчера раньше общей валидации ниже).
+        if (req.adaptive.enabled && req.adaptive.setup_error.empty()) {
+            const std::string e = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e.empty()) { Bifurcation1DResult r; r.error = e; return r; }
+        }
         // Continuation требует sequential x-carry — это совсем другой путь
         // (single-thread kernel). Отказываем при IC-sweep (не имеет смысла:
         // continuation подразумевает param как непрерывный параметр).
@@ -9601,7 +9609,7 @@ struct ParametricEngine::Impl {
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
         // Continuation с адаптивным шагом считает модуль цепочки, а не классический (run_lyap_ad_seq).
-        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err); return; }
+        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false); return; }
         if (req.adaptive.enabled) compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
         else compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
@@ -9626,7 +9634,7 @@ struct ParametricEngine::Impl {
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
         // Continuation с адаптивным шагом считает модуль цепочки, а не классический (run_lyap_ad_seq).
-        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err); return; }
+        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false); return; }
         if (req.adaptive.enabled) compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
         else compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
