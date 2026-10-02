@@ -234,7 +234,10 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   Analysis on CPU: the exe driver is Butcher-table only, so extrapolators go through the cl.exe DLL —
   entry `ucuda_cpu_ad_phase` (`AdaptiveCpuModule::phase`), a line-for-line copy of `phase_kernel_ad`;
   RK pairs keep the exe driver. CPU == GPU in accepted/rejected counts, grid samples to ~1e-8 on Rossler
-  at t = 150 (node times differ ~1e-6: the float controller). Not yet: ExtrZ, Comp.
+  at t = 150 (node times differ ~1e-6: the float controller). ExtrZ (`codegen_adaptive_extrapolation_complex`):
+  the same over the complex core (stages and both sums `ucmplx`, Y and E are their Re, symmetric weights),
+  built-in complex CD bases only; ExtrZ(Complex CD4|1,2,3) (q = 6) needs 136 steps at tol 1e-10 on Rossler.
+  Not yet: Comp.
   `compile_adaptive` feeds configCUDA.h when `emb` holds `ucmplx` (Extr over a complex CD base).
 - **Driver:** `kernels/ucuda_adaptive.cuh`, one text for GPU (NVRTC) and CPU (exe, cl.exe
   DLL). Two parts: the *layout* (`UcudaAdaptParams`, controller in/out/memory, error norms,

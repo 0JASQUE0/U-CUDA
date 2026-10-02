@@ -1321,9 +1321,20 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
     if (const int K = gbs_stage_count(sch); K >= 2) return codegen_adaptive_gbs(sys, K);
     ExtrapolationSpec spec;
     if (parse_extrapolation_name(scheme, &spec)) {
-        if (spec.re_at_output) throw std::runtime_error("adaptive step: ExtrZ is not supported yet");
         if (spec.n.size() < 2)
             throw std::runtime_error("adaptive step needs an extrapolation with at least two stages");
+        if (spec.re_at_output) {
+            // ExtrZ — как в krs_for_scheme_impl: нужно комплексное ядро встроенной CD-схемы; кастомная
+            // КРС с тем же именем перекрыла бы встроенную, а её ядро не выделить.
+            for (const auto& cs : custom_schemes)
+                if (cs.name == spec.base)
+                    throw std::runtime_error("ExtrZ needs a built-in complex base, '" + spec.base + "' is a custom KRS");
+            int p = 1; bool sym = false;
+            if (!scheme_has_complex_core(spec.base) || !builtin_scheme_traits(spec.base, &p, &sym))
+                throw std::runtime_error("ExtrZ base '" + spec.base + "' has no complex core");
+            return codegen_adaptive_extrapolation_complex(
+                sys, codegen_scheme_complex_core(sys, scheme_from_string(spec.base)), spec.n, p, spec.base);
+        }
         std::string body; int p = 1; bool sym = false;
         if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym))
             throw std::runtime_error("extrapolation base '" + spec.base + "' is unknown or has no step body");

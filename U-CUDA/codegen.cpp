@@ -3894,6 +3894,55 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     return c;
 }
 
+// ExtrZ: стадии и обе суммы — ucmplx, ядро базы шагает по Z[] без Re между подшагами, Re
+// берётся на выходе (как wrap_extrapolation_complex). Веса — симметричные: разложение Re стадии
+// идёт по чётным степеням, поэтому Re младшей комбинации — решение порядка
+// extrapolation_order(K-1, p, true), и E = Re sum (alpha - beta) Z — его оценка.
+AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
+                                                    const std::vector<int>& n, int p,
+                                                    const std::string& base_name) {
+    if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+    const int N = (int)s.vars.size(), K = (int)n.size();
+    if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
+    if (K < 2) throw std::runtime_error("adaptive step needs an extrapolation with at least two stages "
+                                        "(the lower-order solution comes from the first K-1)");
+    if (core_body.empty()) throw std::runtime_error("ExtrZ base '" + base_name + "' has no complex core");
+    const bool symmetric = extrapolation_symmetric(true, false);
+    const ExtrAdWeights w = extr_ad_weights(n, p, symmetric);
+    const int P = extrapolation_order(K, p, symmetric), Q = extrapolation_order(K - 1, p, symmetric);
+
+    std::ostringstream o;
+    o << "    // --- adaptive " << make_extrapolation_name(base_name, n, {}, true) << ": Y = Re over " << K
+      << " stages (order " << P << "), estimate over the first " << K - 1 << " (order " << Q << ") ---\n";
+    // Z — имя, над которым работает ядро базы.
+    o << "    ucmplx Z[" << N << "], Z0_ea[" << N << "], AC_ea[" << N << "], EC_ea[" << N << "];\n";
+    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) {\n"
+      << "        Z0_ea[i_ea] = ucmplx(X[i_ea], 0.0); AC_ea[i_ea] = ucmplx(0.0, 0.0); EC_ea[i_ea] = ucmplx(0.0, 0.0);\n"
+      << "    }\n";
+    o << "    (void)F0; (void)W;\n";
+    // Ядро — встроенная CD-схема, return/goto в нём нет: подставляется всегда.
+    o << "    const numb h_ea = h;\n";
+    for (int k = 0; k < K; ++k) {
+        o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s") << " of h/" << n[k]
+          << ", no Re in between\n";
+        o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) Z[i_ea] = Z0_ea[i_ea];\n";
+        o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
+        o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+        emit_indented(o, core_body, "    ");
+        o << "    }\n";
+        // Сумма — тем же выражением, что у постоянного ExtrZ (AC = AC + alpha * Z).
+        o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { AC_ea[i_ea] = AC_ea[i_ea] + " << w.alpha[(size_t)k]
+          << " * Z[i_ea]; EC_ea[i_ea] = EC_ea[i_ea] + " << w.diff[(size_t)k] << " * Z[i_ea]; }\n";
+    }
+    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { Y[i_ea] = AC_ea[i_ea].re; E[i_ea] = EC_ea[i_ea].re; }\n";
+    const auto fy = rhs_over(s, "Y");
+    for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
+
+    AdaptiveCode c = extr_ad_code(s, P, Q, 1);   // f внутри комплексного ядра не считаем
+    c.emb = o.str();
+    return c;
+}
+
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     const int N = (int)s.vars.size();
@@ -3965,7 +4014,7 @@ bool adaptive_scheme_name_supported(const std::string& name) {
     if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
     if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
     ExtrapolationSpec spec;
-    return parse_extrapolation_name(name, &spec) && !spec.re_at_output && spec.n.size() >= 2;
+    return parse_extrapolation_name(name, &spec) && spec.n.size() >= 2;   // Extr и ExtrZ
 }
 
 int adaptive_scheme_q_guess(const std::string& name) {

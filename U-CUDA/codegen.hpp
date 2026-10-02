@@ -240,13 +240,18 @@ AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
                                             const std::string& base_name, int base_rhs);
+// ExtrZ(база|n1..nK): то же над комплексным ядром базы (codegen_scheme_complex_core), стадии и
+// суммы — ucmplx, Y и E — их Re; веса симметричные (extrapolation_symmetric(true, ...)).
+AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
+                                                    const std::vector<int>& n, int p,
+                                                    const std::string& base_name);
 // GBS 2-4 ... 2-4-6-8-10-12 (K = gbs_stage_count). f(X) первой стадии берётся из F0.
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K);
 // Вычислений f на шаг встроенной явной схемы постоянного шага; 0 — неизвестно (неявные, CD,
 // комплексные: f там по компонентам или внутри Ньютона).
 int builtin_scheme_rhs_per_step(const std::string& name);
 // Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
-// с K >= 2 (ExtrZ — пока нет). База Extr проверяется только при сборке кода.
+// и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
 bool adaptive_scheme_name_supported(const std::string& name);
 // Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
 // у Extr с кастомной базой неизвестен — 7.
