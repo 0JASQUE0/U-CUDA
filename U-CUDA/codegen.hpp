@@ -230,6 +230,28 @@ bool scheme_supports_adaptive(Scheme sch);
 // Бросает std::runtime_error для схемы без встроенной оценки.
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
 
+// Адаптивный шаг экстраполяторов: вложенная пара из одних и тех же стадий. Y — по всем K
+// стадиям (веса и порядок постоянного шага), младшее решение — по первым K-1 (свои веса,
+// q = extrapolation_order(K-1)), E = sum (alpha_k - beta_k) T_k. F1 = f(Y) — FSAL и эрмитов
+// плотный выход 3-го порядка. Нужно K >= 2. Принятый шаг с тем же h — побитово шаг
+// постоянного Extr / GBS (см. codegen.cpp).
+//   base_body — тело шага базы (как для wrap_extrapolation), base_rhs — вычислений f на
+//   шаг базы, 0 — неизвестно (тогда счётчик f видит только F1).
+AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
+                                            const std::vector<int>& n, int p, bool symmetric,
+                                            const std::string& base_name, int base_rhs);
+// GBS 2-4 ... 2-4-6-8-10-12 (K = gbs_stage_count). f(X) первой стадии берётся из F0.
+AdaptiveCode codegen_adaptive_gbs(const System& s, int K);
+// Вычислений f на шаг встроенной явной схемы постоянного шага; 0 — неизвестно (неявные, CD,
+// комплексные: f там по компонентам или внутри Ньютона).
+int builtin_scheme_rhs_per_step(const std::string& name);
+// Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
+// с K >= 2 (ExtrZ — пока нет). База Extr проверяется только при сборке кода.
+bool adaptive_scheme_name_supported(const std::string& name);
+// Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
+// у Extr с кастомной базой неизвестен — 7.
+int adaptive_scheme_q_guess(const std::string& name);
+
 // Emits a human-readable C-code mirror of what the CPU integrator
 // (integrator.cpp::step_*) actually computes. Now identical to codegen_scheme
 // for every scheme: the CPU path evaluates the same AST, and for the

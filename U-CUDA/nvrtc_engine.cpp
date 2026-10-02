@@ -258,8 +258,8 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
 
 // Текст kernels/ucuda_adaptive.cuh для NVRTC: заголовок подаётся ТЕКСТОМ, поэтому
 // BOM и не-ASCII снимаются так же, как у configCUDA.h выше.
-static bool read_adaptive_header(std::string& out, std::string& err) {
-    const std::string path = exe_dir() + "\\kernels\\ucuda_adaptive.cuh";
+static bool read_kernel_text(const char* name, std::string& out, std::string& err) {
+    const std::string path = exe_dir() + "\\kernels\\" + name;
     std::ifstream f(path, std::ios::binary);
     if (!f) { err = "missing " + path + " (check that kernels\\ was copied next to the .exe)"; return false; }
     std::ostringstream ss; ss << f.rdbuf();
@@ -270,6 +270,9 @@ static bool read_adaptive_header(std::string& out, std::string& err) {
     for (char& c : out) if ((unsigned char)c >= 0x80) c = ' ';
     return true;
 }
+static bool read_adaptive_header(std::string& out, std::string& err) {
+    return read_kernel_text("ucuda_adaptive.cuh", out, err);
+}
 
 // Проверка тела пользовательского регулятора (редактор библиотеки): только компиляция
 // NVRTC, без контекста CUDA и без запуска. Функция — та же, что попадает в модули
@@ -278,15 +281,20 @@ bool nvrtc_check_ctrl_body(const std::string& body, std::string& log) {
     log.clear();
     std::string hdr, err;
     if (!read_adaptive_header(hdr, err)) { log = err; return false; }
-    // #line 1 "controller" — в самом конце, поэтому номера ошибок — строки тела.
+    // #line 1 "prepare" / "controller" — в самом конце, поэтому номера ошибок — строки раздела
+    // подготовки и тела (body — оба, adaptive_ctrl_pack).
     std::ostringstream src;
     src << "typedef double numb;\n"
         << "#define AMOUNTOFX 3\n"
         << "#define UCUDA_ADAPT_LAYOUT_ONLY\n#include \"ucuda_adaptive.cuh\"\n#undef UCUDA_ADAPT_LAYOUT_ONLY\n"
         << "extern \"C\" __global__ void ucuda_ctrl_check(const UcudaCtlIn* in, UcudaCtlMem* m, UcudaCtlOut* o);\n"
+        << "extern \"C\" __global__ void ucuda_ctrl_check_prep(const numb* c, int q, numb* k);\n"
         << adaptive_ctrl_source(body, true)
         << "extern \"C\" __global__ void ucuda_ctrl_check(const UcudaCtlIn* in, UcudaCtlMem* m, UcudaCtlOut* o) {\n"
            "    ucuda_ctrl_custom(*in, *m, *o);\n"
+           "}\n"
+           "extern \"C\" __global__ void ucuda_ctrl_check_prep(const numb* c, int q, numb* k) {\n"
+           "    ucuda_ctrl_custom_prep(c, q, k);\n"
            "}\n";
     const std::string code = src.str();
     nvrtcProgram prog = nullptr;
@@ -347,12 +355,18 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
 
     std::string hdr;
     if (!read_adaptive_header(hdr, error_)) return false;
+    // Адаптивный экстраполятор над базой с комплексными коэффициентами держит в emb ucmplx —
+    // тип из configCUDA.h; признак и подача текстом — как у ядра постоянного шага (compile).
+    const bool needs_complex = rq.emb.find("ucmplx") != std::string::npos;
+    std::string cfg;
+    if (needs_complex && !read_kernel_text("configCUDA.h", cfg, error_)) return false;
 
     // Функции схемы — __host__ __device__, как calculateDiscreteModel в шаблонах:
     // их зовут __host__ __device__ методы провайдера UcudaKrsFns.
     std::ostringstream src;
     src << "typedef double numb;\n"
         << "#define AMOUNTOFX " << rq.amountOfX << "\n"
+        << (needs_complex ? "#include \"configCUDA.h\"\n" : "")
         << "#define UCUDA_AD_KRS_FUNCS\n"
         << "#define UCUDA_AD_STATIC_N\n"   // поток на траекторию, потоков мало: состояние — в регистры
         << (variant == 1 ? "#define UCUDA_AD_NO_DENSE 1\n" : "")
@@ -430,9 +444,10 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
     const std::string code = src.str();
 
     nvrtcProgram prog;
-    const char* hdr_src[]  = { hdr.c_str() };
-    const char* hdr_name[] = { "ucuda_adaptive.cuh" };
-    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model_ad.cu", 1, hdr_src, hdr_name), "createProgram(ad)");
+    const char* hdr_src[]  = { hdr.c_str(), cfg.c_str() };
+    const char* hdr_name[] = { "ucuda_adaptive.cuh", "configCUDA.h" };
+    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model_ad.cu", needs_complex ? 2 : 1, hdr_src, hdr_name),
+         "createProgram(ad)");
     char arch[32];
     snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
     const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false", "--std=c++17" };

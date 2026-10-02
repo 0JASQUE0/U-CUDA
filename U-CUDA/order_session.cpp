@@ -110,12 +110,7 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
 // считаются: f там вычисляется по компонентам или внутри Ньютона, и одно число на шаг
 // сравнивало бы несравнимое.
 double perf_rhs_per_step(const std::string& scheme) {
-    static const struct { const char* name; int k; } kTab[] = {
-        { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 },
-        { "DOP853", 12 }, { "DOPRI78", 13 }, { "DOPRI78 (legacy)", 13 },
-    };
-    for (const auto& t : kTab) if (scheme == t.name) return (double)t.k;
-    return 0.0;
+    return (double)builtin_scheme_rhs_per_step(scheme);   // таблица — в codegen (её же берёт адаптивный Extr)
 }
 
 PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig& c) {
@@ -156,10 +151,10 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
         req.adaptive = true;
         req.end_ref_prec = (c.perf_end_ref == 2) ? 2 : 1;
         if (!adaptive_scheme_name_ok(c.scheme)) {
-            req.setup_error = "Adaptive step needs a scheme with an embedded error estimate: RK45, DOPRI78 or DOP853.";
+            req.setup_error = adaptive_scheme_hint();
         } else {
             try {
-                const AdaptiveCode code = codegen_adaptive(s.sys, scheme_from_name(c.scheme));
+                const AdaptiveCode code = adaptive_code_for_scheme(s.custom_schemes, s.sys, c.scheme);
                 std::string err;
                 if (!adaptive_build_params(c.adaptive, code, req.amountOfX, req.t_max, req.ad_params, err,
                                            &req.ad_ctrl_body))

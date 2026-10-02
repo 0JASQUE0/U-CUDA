@@ -172,6 +172,7 @@ void write_user_ctrl(std::ostringstream& o, const AdaptiveUserCtrl& u) {
     o << ",\"par_values\":"; write_str_array(o, u.par_values);
     o << ",\"tip\":";  jstr(o, u.tip);
     o << ",\"body\":"; jstr(o, u.body);
+    if (!u.prep.empty()) { o << ",\"prep\":"; jstr(o, u.prep); }   // раздел подготовки C body
     o << "}";
 }
 
@@ -189,6 +190,7 @@ void read_user_ctrl(JP& p, AdaptiveUserCtrl& u) {
         else if (k == "par_values")   read_str_array(p, u.par_values);
         else if (k == "tip")          u.tip = p.str();
         else if (k == "body")         u.body = p.str();
+        else if (k == "prep")         u.prep = p.str();
         else p.skip_value();
         if (p.opt(',')) continue;
         p.expect('}');

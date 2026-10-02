@@ -222,6 +222,20 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   `F1`), `dprep`/`deval` (dense output) — plus `q`, `nlo`, f-counts. Only schemes with an
   embedded estimate (`scheme_supports_adaptive`). The same bodies feed the CPU driver
   (`integrator.cpp`, `CpuAdaptiveKrs`).
+- **Extrapolators:** `GBS 2-4 ...` (`codegen_adaptive_gbs`) and `Extr(base|n1..nK)`, K >= 2
+  (`codegen_adaptive_extrapolation`, base = built-in or custom KRS) are embedded pairs built from the
+  same stages: Y over all K stages (weights of the fixed step), the lower solution over the first K-1,
+  `E = sum (alpha_k - beta_k) T_k`, q = `extrapolation_order(K-1)`; F1 = f(Y), cubic Hermite dense
+  output. The base body is printed into `emb` with a local `numb* const X` shadowing the const input.
+  Y is printed exactly like `wrap_extrapolation` / `scheme_gbs`, so a step pinned to h (h0 = h_max = h,
+  `UCUDA_AD_NO_RETRY`, clip 0) is bit-identical to the fixed Extr / GBS on CPU (GBS takes f(X) from F0).
+  Entry by name: `adaptive_code_for_scheme(custom_schemes, sys, scheme)` (analysis_session) — all
+  callers go through it; `adaptive_scheme_name_ok` / `adaptive_scheme_hint` for UI and setup errors.
+  Analysis on CPU: the exe driver is Butcher-table only, so extrapolators go through the cl.exe DLL —
+  entry `ucuda_cpu_ad_phase` (`AdaptiveCpuModule::phase`), a line-for-line copy of `phase_kernel_ad`;
+  RK pairs keep the exe driver. CPU == GPU in accepted/rejected counts, grid samples to ~1e-8 on Rossler
+  at t = 150 (node times differ ~1e-6: the float controller). Not yet: ExtrZ, Comp.
+  `compile_adaptive` feeds configCUDA.h when `emb` holds `ucmplx` (Extr over a complex CD base).
 - **Driver:** `kernels/ucuda_adaptive.cuh`, one text for GPU (NVRTC) and CPU (exe, cl.exe
   DLL). Two parts: the *layout* (`UcudaAdaptParams`, controller in/out/memory, error norms,
   built-in controllers — Hairer / SciPy / I / PI / Filter) and the *driver*
@@ -245,6 +259,16 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   `ucuda_ctrl_custom(in, m, o)` or a named Soderlind filter. Sessions embed the definition
   (`ctrl_def`) and import it where it is missing. `nvrtc_check_ctrl_body` = the editor's
   Check. PI/Filter: `safety` sets the target error `safety^(q+1)`, it does not multiply rho.
+  A C body may have a **prepare section** `ucuda_ctrl_custom_prep(c, q, k)`: run once per trajectory
+  (`ucuda_ad_prepare_ctl` in init/restart), `k[0..UCUDA_CTL_NK-1]` lands in `UcudaCtlConst::k` and the
+  body reads it as `in.k[]` — the same role as `UcudaCtlConst` for the built-ins (no double divisions
+  per attempt). Prepare + body travel as ONE string (`adaptive_ctrl_pack`: prep, `\x1e`, body) through
+  every `ctrl_body` field, cache key and DLL hash; `adaptive_ctrl_source` / `make_ctrl_source` unpack
+  it. With `UCUDA_AD_HAIRER_ONLY` (default) the built-ins are Hairer only, but C bodies work:
+  `ucuda_step_ctrl` compiles exactly one law per module (the custom one when the module has its body,
+  else Hairer), no switch; Soderlind filters (they need the built-in Filter) are hidden. The preset
+  "Hairer (C)" is the built-in float arithmetic one-to-one: all sweep modes and both CPU paths are
+  bit-identical to the built-in Hairer, same registers and speed (Rossler DOP853 stands).
 - **CPU:** `AdaptiveCpuModule` (`krs_cpu`) builds `kernels/adaptive_part.cu` itself into a cl.exe
   DLL — placeholders substituted, `PeakStream` cut out of `kernels/cudaLibrary.cu`, the engine's
   `peak_config_defines()` as prelude, `par_or_var` a thread-local. Entries: endpoint (Order →
@@ -288,8 +312,8 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   `kAdNodesModulePrefix` = `UCUDA_AD_NO_DENSE` + `UCUDA_AD_NODES_KERNEL` + `UCUDA_AD_STATIC_N`):
   own module for BD 1D/2D, basins and Metrics. The step settings come by value as a kernel argument
   (`__grid_constant__`, `UCUDA_AD_P_ARG`, launch arg `ad_param_arg`) — no per-thread copy; a sweep
-  over a step setting (rtol/atol/controller parameter) goes to the general module. Hairer only, no
-  dense output, no attempt log, no h/err history, no tp/hp. The observable is picked by weights
+  over a step setting (rtol/atol/controller parameter) goes to the general module. Hairer or a C body
+  from the library, no dense output, no attempt log, no h/err history (kept for a C body), no tp/hp. The observable is picked by weights
   (`ucudaAdObsW`): `v[writableVar]` with a runtime index (and a select loop, which the compiler folds
   back into it) kept the whole state in local memory. Result: 124 registers, 0 B local memory
   (was 214 / 1584 B), bit-identical results. The per-step progress atomic into mapped host memory

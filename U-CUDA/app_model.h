@@ -788,6 +788,14 @@ public:
     // session save (avoids writing to disk every single frame).
     bool parametric_plot_windows_dirty = false;
 
+    // Выбранная вкладка каждого узла дока, по режимам (AppMode): имена окон, которые были
+    // выбраны в своих узлах, пока режим был на экране. Окна чужого режима не выводятся, ImGui
+    // вынимает их из узлов, а при возвращении выбирает в узле окно, появившееся последним
+    // (оно же получает фокус). track_dock_selection в gui.cpp восстанавливает выбор. Не пишется.
+    std::map<int, std::vector<std::string>> dock_selected_by_mode;
+    int  dock_prev_mode      = -1;   // режим прошлого кадра
+    int  dock_restore_frames = 0;    // сколько кадров ещё восстанавливать выбор после входа
+
     // Add a new plot window of (kind, mode_2d) with the given initial member
     // indices (into the matching session's diagrams/curves list). Assigns a
     // fresh id and a default "Plot N" label.

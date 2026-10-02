@@ -1314,7 +1314,12 @@ static std::vector<std::pair<std::string, std::string>> user_ctrl_list() {
     AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
     std::lock_guard<std::mutex> lk(L.mu);
     std::vector<std::pair<std::string, std::string>> v;
-    for (const AdaptiveUserCtrl& u : L.items) v.emplace_back(u.name, u.tip);
+    for (const AdaptiveUserCtrl& u : L.items) {
+#ifdef UCUDA_AD_HAIRER_ONLY
+        if (u.kind == kUserCtrlFilter) continue;   // встроенный Filter не собран
+#endif
+        v.emplace_back(u.name, u.tip);
+    }
     return v;
 }
 
@@ -1333,8 +1338,19 @@ static const char* const kCtrlBodyHelp =
     "o.accept      1 - take the step, 0 - retry it with o.h\n"
     "o.h           next step, or the step of the retry\n"
     "\n"
+    "in.k[0..7]    constants computed by the prepare section (0 if not set)\n"
+    "\n"
+    "Prepare section (optional), once per trajectory:\n"
+    "void ucuda_ctrl_custom_prep(const numb* c, int q, numb* k) { <prepare> }\n"
+    "c[] - the parameters, q - estimator order, k[0..7] - constants for the body.\n"
+    "Put divisions and powers that depend only on c[] and q here: double division\n"
+    "costs as much as several RHS evaluations on GeForce cards.\n"
+    "\n"
     "Helpers: ucuda_ctl_err(in) - RMS norm of the estimate, sc_i = atol_i + rtol max(|y0_i|, |y1_i|);\n"
-    "ucuda_ctl_pow(x, y) - fast x^y (float);  ucuda_clamp(x, lo, hi).  numb is double.\n"
+    "ucuda_ctl_pow(x, y) - fast x^y (float);  ucuda_ctl_log2(x), ucuda_ctl_exp2(f) - float;\n"
+    "ucuda_clamp(x, lo, hi);  ucuda_fmin/fmax (double), ucuda_fminf/fmaxf (float).  numb is double.\n"
+    "Index arrays (m.user, in.k, ...) with constants: a computed index puts the state of\n"
+    "the GPU thread into local memory.\n"
     "The driver then clamps h to h_max, takes the step at h_min when it would go below\n"
     "(or after max rejects), and retries with at most 0.9 h.";
 
@@ -1380,12 +1396,14 @@ static void draw_ctrl_library_window(AppModel& m) {
                          "                         (numb)0.2, o.accept ? (numb)5 : (numb)1);\n";
                 add(u);
             }
+#ifndef UCUDA_AD_HAIRER_ONLY   // фильтры — параметры встроенного Filter, а он не собран
             if (ImGui::Selectable("empty filter")) {
                 AdaptiveUserCtrl u;
                 u.name = "my filter"; u.kind = kUserCtrlFilter;
                 for (double v : adaptive_ctrl_defaults(UCUDA_CTRL_FILTER, 7)) u.par_values.push_back(fmt_num_shortest(v));
                 add(u);
             }
+#endif
             int np = 0;
             const AdaptiveCtrlPreset* pr = adaptive_ctrl_presets(&np);
             ImGui::SeparatorText("C body presets");
@@ -1394,12 +1412,14 @@ static void draw_ctrl_library_window(AppModel& m) {
                 if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pr[i].tip);
             }
+#ifndef UCUDA_AD_HAIRER_ONLY
             ImGui::SeparatorText("Soderlind filters");
             for (int i = 0; i < np; ++i) {
                 if (pr[i].kind != kUserCtrlFilter) continue;
                 if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pr[i].tip);
             }
+#endif
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -1438,9 +1458,18 @@ static void draw_ctrl_library_window(AppModel& m) {
             else if (taken(u.name, m.ctrl_lib_sel))
                 ImGui::TextColored(warn, "The name is taken (a built-in controller or another entry).");
             int kind = u.kind;
+#ifdef UCUDA_AD_HAIRER_ONLY
+            // Фильтр — параметры встроенного Filter, который в этой сборке не собран: такую
+            // запись (из старой библиотеки) можно только перевести в C body или удалить.
+            if (u.kind == kUserCtrlFilter) {
+                ImGui::TextColored(warn, "Soderlind filters are not built in this version: the tabs do not offer it.");
+                if (ImGui::SmallButton("make it a C body")) kind = kUserCtrlBody;
+            }
+#else
             ImGui::RadioButton("C body", &kind, kUserCtrlBody);
             ImGui::SameLine();
             ImGui::RadioButton("Soderlind filter", &kind, kUserCtrlFilter);
+#endif
             if (kind != u.kind) {
                 u.kind = kind;
                 if (kind == kUserCtrlFilter) {
@@ -1454,6 +1483,7 @@ static void draw_ctrl_library_window(AppModel& m) {
             edited |= InputTextStr("description", u.tip, 520.0f);
 
             if (u.kind == kUserCtrlFilter) {
+#ifndef UCUDA_AD_HAIRER_ONLY   // иначе встроенного Filter нет (adaptive_find_builtin -> nullptr)
                 const AdaptiveCtrlInfo* fi = adaptive_find_builtin("Filter");
                 ImGui::TextDisabled("%s", fi->tip);
                 if ((int)u.par_values.size() != fi->npar) {
@@ -1468,6 +1498,7 @@ static void draw_ctrl_library_window(AppModel& m) {
                     edited |= InputTextStr(fi->par[i], u.par_values[(size_t)i], kFieldW);
                     ImGui::PopID();
                 }
+#endif
             } else {
                 bool hr = u.hairer_rules != 0;
                 if (ImGui::Checkbox("Hairer's initial step and end-point rule", &hr)) { u.hairer_rules = hr; edited = true; }
@@ -1504,23 +1535,31 @@ static void draw_ctrl_library_window(AppModel& m) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(up to %d; each is also a sweep axis)", UCUDA_CTL_NPAR);
 
+                ImGui::Text("Prepare:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("once per trajectory: k[0..7] from c[] and q, read by the body as in.k[]");
+                edited |= InputTextMultilineStr("##prep", u.prep,
+                                                ImVec2(-1.0f, ImGui::GetTextLineHeightWithSpacing() * 6.5f));
+                // Проверка и её результат — по паре (подготовка, тело), как их собирает модуль.
+                const std::string packed = adaptive_ctrl_pack(u.prep, u.body);
+                const bool checked = !m.ctrl_lib_check_body.empty() && m.ctrl_lib_check_body == packed;
                 ImGui::Text("Body:");
                 ImGui::SameLine();
                 ImGui::TextDisabled("(?)");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCtrlBodyHelp);
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Check")) { do_check = true; check_body = u.body; }
+                if (ImGui::SmallButton("Check")) { do_check = true; check_body = packed; }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Compile the body with NVRTC (no run). The CPU build with cl.exe\n"
-                                      "happens on the first CPU run of Analysis.");
-                if (!m.ctrl_lib_check_body.empty() && m.ctrl_lib_check_body == u.body) {
+                    ImGui::SetTooltip("Compile the prepare section and the body with NVRTC (no run). The CPU\n"
+                                      "build with cl.exe happens on the first CPU run of Analysis.");
+                if (checked) {
                     ImGui::SameLine();
                     if (m.ctrl_lib_check_ok) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "compiles");
                     else                     ImGui::TextColored(warn, "does not compile:");
                 }
                 edited |= InputTextMultilineStr("##body", u.body, ImVec2(-1.0f, m.ctrl_lib_body_h));
                 draw_resize_handle("##body_resize", m.ctrl_lib_body_h);
-                if (!m.ctrl_lib_check_body.empty() && m.ctrl_lib_check_body == u.body && !m.ctrl_lib_check_log.empty())
+                if (checked && !m.ctrl_lib_check_log.empty())
                     ImGui::InputTextMultiline("##check_log", const_cast<char*>(m.ctrl_lib_check_log.c_str()),
                                               m.ctrl_lib_check_log.size() + 1, ImVec2(-1.0f, 110.0f),
                                               ImGuiInputTextFlags_ReadOnly);
@@ -1565,13 +1604,17 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Step size chosen by an error controller from the embedded\n"
-                          "error estimate of the scheme. Needs RK45, DOPRI78 or DOP853.");
+                          "error estimate of the scheme. Needs RK45, DOPRI78, DOP853,\n"
+                          "GBS 2-4 ... or an extrapolation Extr(...) with at least two stages:\n"
+                          "its first K-1 stages give the lower-order solution, and the\n"
+                          "dense output between step nodes is cubic Hermite.");
     a.enabled = (mode == 1);
 
     if (a.enabled) {
         if (!ok)
             ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
-                               "The scheme has no error estimate: choose RK45, DOPRI78 or DOP853.");
+                               "The scheme has no error estimate: choose RK45, DOPRI78, DOP853, GBS 2-4 ...\n"
+                               "or Extr(...) with at least two stages.");
         if (opts & kAdUiRaw) {
             int out = a.raw_nodes ? 1 : 0;
             changed |= ImGui::RadioButton("uniform grid", &out, 0);
@@ -1617,7 +1660,6 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
                 if (ImGui::Selectable(bi[i].name, a.ctrl == bi[i].name)) pick(bi[i].name);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi[i].tip);
             }
-#ifndef UCUDA_AD_HAIRER_ONLY
             const std::vector<std::pair<std::string, std::string>> users = user_ctrl_list();
             if (!users.empty()) ImGui::SeparatorText("library");
             for (size_t i = 0; i < users.size(); ++i) {
@@ -1630,7 +1672,6 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
             ImGui::Separator();
             // Окно библиотеки — флаг в AppModel; без модели (bc == nullptr) пункта нет.
             if (bc != nullptr && ImGui::Selectable("edit library...")) bc->show_ctrl_library = true;
-#endif
             ImGui::EndCombo();
         }
         AdaptiveCtrlResolved cur;
@@ -2368,9 +2409,45 @@ struct TabBarResult {
     int to_remove = -1;
 };
 
+// Выбранные вкладки узлов дока при смене режима (Analysis, Parametric, ...). Окна чужого
+// режима не выводятся, и ImGui вынимает их из узлов дока; при возвращении окно, появившееся
+// последним, получает фокус, и его узел выбирает именно его, а не то, что было выбрано.
+// Пока режим на экране, запоминаем выбранное окно каждого узла; первые кадры после входа
+// просим узлы выбрать его снова (NextSelectedTabId: узел сам переведёт на окно и фокус).
+// Кадров несколько: в первом узел ещё пересобирает таб-бар и выбирает по-своему.
+// Зовётся после вывода всех окон кадра.
+static void track_dock_selection(AppModel& model) {
+    const int mode = (int)model.app_mode;
+    std::vector<std::string>& mem = model.dock_selected_by_mode[mode];
+    if (model.dock_prev_mode != mode) {
+        model.dock_prev_mode      = mode;
+        model.dock_restore_frames = 3;
+    }
+    if (model.dock_restore_frames > 0) {
+        --model.dock_restore_frames;
+        for (const std::string& name : mem) {
+            ImGuiWindow* w = ImGui::FindWindowByName(name.c_str());
+            if (w == nullptr || !w->Active || w->DockNode == nullptr || w->DockNode->TabBar == nullptr) continue;
+            ImGuiTabBar* tb = w->DockNode->TabBar;
+            if (tb->SelectedTabId != w->TabId && ImGui::TabBarFindTabByID(tb, w->TabId) != nullptr)
+                tb->NextSelectedTabId = w->TabId;
+        }
+        return;
+    }
+    mem.clear();
+    for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+        if (w->Active && w->DockIsActive && w->DockNode != nullptr && w->DockNode->TabBar != nullptr
+            && w->DockNode->TabBar->SelectedTabId == w->TabId)
+            mem.push_back(w->Name);
+}
+
 // Таб-бар "одна вкладка на конфиг + кнопка +" (раньше — шесть копий).
 // item_id_prefix задаёт неизменную часть ID вкладки ("bd_tab_", "lle_tab_", …), поэтому
-// идентификаторы побайтово совпадают с прежними. body == nullptr — тело вкладки пустое
+// идентификаторы побайтово совпадают с прежними. ID завязан на номер конфига, поэтому
+// бар НЕ Reorderable: перетаскивание меняло только порядок на экране, а не в данных, и
+// после закрытия вкладки из середины ImGui считал конфиг, сдвинувшийся на её номер, новой
+// вкладкой и ставил его в конец (BD1, BD4, BD3). Без Reorderable новые вкладки
+// сортируются по порядку вывода, то есть по порядку конфигов. body == nullptr — тело вкладки пустое
 // (DFT/Basins/FastSync рисуют настройки активного конфига уже после EndTabBar).
 // request_select — внешний запрос выбрать вкладку (тулбар Colored 1D у Bif).
 static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_prefix,
@@ -2380,8 +2457,17 @@ static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_
                                         const std::function<void()>& on_add,
                                         int request_select = -1) {
     TabBarResult r;
-    if (!ImGui::BeginTabBar(bar_id, ImGuiTabBarFlags_Reorderable |
-                                    ImGuiTabBarFlags_AutoSelectNewTabs |
+    // Выбор после закрытия вкладки (между кадрами — в хранилище ImGui, ключ от bar_id).
+    // Под номер закрытой вкладки встаёт следующий конфиг, ImGui видит его как новую вкладку
+    // и по AutoSelectNewTabs выбрал бы его, даже если закрывали не активную.
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID pending_key = ImGui::GetID(bar_id) ^ 0x5e1ec7u;
+    const int pending = st->GetInt(pending_key, -1);
+    if (pending >= 0) {
+        st->SetInt(pending_key, -1);
+        if (request_select < 0 && pending < n) request_select = pending;
+    }
+    if (!ImGui::BeginTabBar(bar_id, ImGuiTabBarFlags_AutoSelectNewTabs |
                                     ImGuiTabBarFlags_FittingPolicyScroll))
         return r;
     for (int i = 0; i < n; ++i) {
@@ -2414,6 +2500,13 @@ static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_
             on_add();
     }
     ImGui::EndTabBar();
+    if (r.to_remove >= 0) {
+        // Активная остаётся активной (её номер сдвигается, если она правее закрытой);
+        // закрыли саму активную — выбрать ту, что встала на её место (или последнюю).
+        const int a = r.active, i = r.to_remove;
+        const int next = (a > i) ? a - 1 : (a == i || a < 0) ? std::min(i, n - 2) : a;
+        st->SetInt(pending_key, next);
+    }
     return r;
 }
 
@@ -17378,17 +17471,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
             ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
 
-#ifndef UCUDA_AD_HAIRER_ONLY
             ImGui::Separator();
             ImGui::Text("Step controllers");
+#ifdef UCUDA_AD_HAIRER_ONLY
+            ImGui::TextDisabled("Your own adaptive step controllers (C bodies), shared by all systems");
+            ImGui::TextDisabled("and tabs (library\\step_controllers.json).");
+#else
             ImGui::TextDisabled("Your own adaptive step controllers: C bodies and named Soderlind");
             ImGui::TextDisabled("filters, shared by all systems and tabs (library\\step_controllers.json).");
-            if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
 #endif
+            if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
         }
         ImGui::End();
     }
-#ifndef UCUDA_AD_HAIRER_ONLY
+    track_dock_selection(model);
     draw_ctrl_library_window(model);
-#endif
 }

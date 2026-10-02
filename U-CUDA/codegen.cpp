@@ -3782,6 +3782,203 @@ std::string wrap_extrapolation_complex(const std::string& core_body, int N,
     return o.str();
 }
 
+// --- Адаптивный шаг экстраполяторов ----------------------------------------
+//
+// Вложенная пара из одних и тех же стадий T_1..T_K: старшее решение Y = sum alpha_k T_k
+// (веса и порядок — как у постоянного шага), младшее — по первым K-1 стадиям с весами
+// beta (порядок extrapolation_order(K-1)). Оценка ошибки E = Y - Yhat = sum (alpha_k -
+// beta_k) T_k, beta_K = 0 — по разности весов, как у RK-пар. Это обычная локальная
+// экстраполяция: регулятор ведёт по ошибке Yhat (показатель 1/(q+1)), а шаг продолжает Y.
+// Y печатается тем же выражением, что в wrap_extrapolation / scheme_gbs, поэтому
+// принятый шаг с тем же h совпадает с шагом постоянного Extr / GBS (GBS берёт f(X) из F0
+// — то же значение, на вычисление f меньше на стадию). F1 = f(Y): FSAL драйвера и
+// эрмитов плотный выход 3-го порядка (как у DOPRI78).
+namespace {
+
+// Веса alpha (по всем K стадиям) и разности alpha - beta литералами: alpha — точными
+// дробями, когда сходятся (как у постоянного шага), разности — double: это только оценка.
+struct ExtrAdWeights {
+    std::vector<std::string> alpha, diff;
+};
+
+ExtrAdWeights extr_ad_weights(const std::vector<int>& n, int p, bool symmetric) {
+    const int K = (int)n.size();
+    const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
+    const std::vector<int> nlo(n.begin(), n.end() - 1);
+    const std::vector<double> beta = extrapolation_weights(nlo, p, symmetric);
+    std::vector<ExRat> arat;
+    const bool exact = extrapolation_weights_rational(n, p, symmetric, arat);
+    ExtrAdWeights w;
+    for (int k = 0; k < K; ++k) {
+        w.alpha.push_back(exact ? ex_rat_expr(arat[(size_t)k]) : ("(numb)(" + fmtnum(alpha[k]) + ")"));
+        const double b = k < K - 1 ? beta[(size_t)k] : 0.0;
+        w.diff.push_back("(numb)(" + fmtnum(alpha[k] - b) + ")");
+    }
+    return w;
+}
+
+// Общая часть AdaptiveCode экстраполятора: правая часть, плотный выход, порядки.
+AdaptiveCode extr_ad_code(const System& s, int p, int q, int emb_rhs) {
+    AdaptiveCode c;
+    c.rhs = adaptive_rhs_body(s);
+    c.p = p; c.q = q; c.nlo = 1; c.wstages = 0; c.dsize = 4;
+    c.emb_rhs = emb_rhs; c.dprep_rhs = 0; c.dense_order = 3;
+    c.dprep = hermite_dprep_body(s); c.deval = hermite_deval_body(s);
+    return c;
+}
+
+// Хвост emb: Y, E и F1 = f(Y).
+void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, const char* ec) {
+    const int N = (int)s.vars.size();
+    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { Y[i_ea] = " << ac << "[i_ea]; E[i_ea] = "
+      << ec << "[i_ea]; }\n";
+    const auto fy = rhs_over(s, "Y");
+    for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
+}
+
+} // namespace
+
+AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
+                                            const std::vector<int>& n, int p, bool symmetric,
+                                            const std::string& base_name, int base_rhs) {
+    if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+    const int N = (int)s.vars.size(), K = (int)n.size();
+    if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
+    if (K < 2) throw std::runtime_error("adaptive step needs an extrapolation with at least two stages "
+                                        "(the lower-order solution comes from the first K-1)");
+    if (base_body.empty()) throw std::runtime_error("extrapolation base '" + base_name + "' has no step body");
+    const ExtrAdWeights w = extr_ad_weights(n, p, symmetric);
+    long long cost = 0;
+    for (int v : n) cost += v;
+    const int P = extrapolation_order(K, p, symmetric), Q = extrapolation_order(K - 1, p, symmetric);
+
+    std::ostringstream o;
+    o << "    // --- adaptive " << make_extrapolation_name(base_name, n) << ": Y over " << K
+      << " stages (order " << P << "), estimate over the first " << K - 1 << " (order " << Q << ") ---\n";
+    o << "    numb X0_ea[" << N << "], AC_ea[" << N << "], EC_ea[" << N << "];\n";
+    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { X0_ea[i_ea] = X[i_ea]; AC_ea[i_ea] = (numb)0; "
+         "EC_ea[i_ea] = (numb)0; }\n";
+    o << "    (void)F0; (void)W;\n";
+    o << "    {\n";
+    // База шагает по X на месте: локальная копия затеняет константный вход emb.
+    o << "    numb XS_ea[" << N << "];\n";
+    o << "    numb* const X = XS_ea;\n";
+    const bool inl = wrapper_can_inline(base_body);
+    if (inl) {
+        o << "    const numb h_ea = h;\n";
+    } else {
+        o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
+        o << "    auto step_ea = [&](const numb h) {\n";
+        emit_indented(o, base_body, "    ");
+        o << "    };\n";
+    }
+    for (int k = 0; k < K; ++k) {
+        o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s") << " of h/" << n[k] << "\n";
+        o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) X[i_ea] = X0_ea[i_ea];\n";
+        if (inl) {
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
+            o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+            emit_indented(o, base_body, "    ");
+            o << "    }\n";
+        } else {
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h / (numb)" << fmtnum((double)n[k]) << ");\n";
+        }
+        o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { AC_ea[i_ea] += " << w.alpha[(size_t)k]
+          << " * X[i_ea]; EC_ea[i_ea] += " << w.diff[(size_t)k] << " * X[i_ea]; }\n";
+    }
+    o << "    }\n";
+    extr_ad_finish(o, s, "AC_ea", "EC_ea");
+
+    AdaptiveCode c = extr_ad_code(s, P, Q, base_rhs > 0 ? (int)(cost * base_rhs) + 1 : 1);
+    c.emb = o.str();
+    return c;
+}
+
+AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
+    if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+    const int N = (int)s.vars.size();
+    if (N < 1) throw std::runtime_error("GBS needs a non-empty system");
+    if (K < 2) throw std::runtime_error("adaptive step needs GBS 2-4 or longer (the lower-order solution comes "
+                                        "from the first K-1 stages)");
+    const std::vector<int> n = gbs_substeps(K);
+    const ExtrAdWeights w = extr_ad_weights(n, 2, true);
+    const auto f1 = rhs_over(s, "Z1_gbs");
+    int cost = 0;
+    for (int v : n) cost += v;   // n - 1 leapfrog + сглаживание; f(X) — из F0
+
+    const std::string Ns = std::to_string(N), Ks = std::to_string(K);
+    std::ostringstream o;
+    o << "    // --- adaptive GBS";
+    for (int k = 0; k < K; ++k) o << (k ? "-" : " ") << n[k];
+    o << ": Y order " << 2 * K << ", estimate over the first " << K - 1 << " stages (order " << 2 * (K - 1) << ") ---\n";
+    o << "    numb X0_gbs[" << Ns << "], AC_gbs[" << Ns << "], EC_gbs[" << Ns << "], Z0_gbs[" << Ns
+      << "], Z1_gbs[" << Ns << "], ZT_gbs[" << Ns << "], T_gbs[" << Ns << "];\n";
+    o << "    const numb W_gbs[" << Ks << "] = { ";
+    for (int k = 0; k < K; ++k) o << (k ? ", " : "") << w.alpha[(size_t)k];
+    o << " };\n";
+    o << "    const numb V_gbs[" << Ks << "] = { ";
+    for (int k = 0; k < K; ++k) o << (k ? ", " : "") << w.diff[(size_t)k];
+    o << " };\n";
+    o << "    (void)W;\n";
+    o << "    int i_gbs, m_gbs, k_gbs;\n";
+    o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { X0_gbs[i_gbs] = X[i_gbs]; AC_gbs[i_gbs] = (numb)0; "
+         "EC_gbs[i_gbs] = (numb)0; }\n";
+    o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
+    o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
+    o << "        const numb hs_gbs = h / (numb)n_gbs;\n";
+    o << "        // старт: явный Эйлер на первый подшаг, f(X) — F0 драйвера\n";
+    o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) {\n";
+    o << "            Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";
+    o << "            Z1_gbs[i_gbs] = X0_gbs[i_gbs] + hs_gbs * F0[i_gbs];\n";
+    o << "        }\n";
+    o << "        // leapfrog: z_{m+1} = z_{m-1} + 2*hs*f(z_m), всего n подшагов\n";
+    o << "        for (m_gbs = 1; m_gbs < n_gbs; ++m_gbs) {\n";
+    for (int i = 0; i < N; ++i)
+        o << "            ZT_gbs[" << i << "] = Z0_gbs[" << i << "] + (numb)2 * hs_gbs * (" << f1[(size_t)i] << ");\n";
+    o << "            for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { Z0_gbs[i_gbs] = Z1_gbs[i_gbs]; Z1_gbs[i_gbs] = ZT_gbs[i_gbs]; }\n";
+    o << "        }\n";
+    // (numb)0.5 * (...) и W * (0.5 * x) == (W * 0.5) * x точно: множитель — степень двойки.
+    o << "        // сглаживание Грэгга: (z_{n-1} + z_n + hs*f(z_n)) / 2\n";
+    for (int i = 0; i < N; ++i)
+        o << "        T_gbs[" << i << "] = (numb)0.5 * (Z0_gbs[" << i << "] + Z1_gbs[" << i << "] + hs_gbs * ("
+          << f1[(size_t)i] << "));\n";
+    o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { AC_gbs[i_gbs] += W_gbs[k_gbs] * T_gbs[i_gbs]; "
+         "EC_gbs[i_gbs] += V_gbs[k_gbs] * T_gbs[i_gbs]; }\n";
+    o << "    }\n";
+    extr_ad_finish(o, s, "AC_gbs", "EC_gbs");
+
+    AdaptiveCode c = extr_ad_code(s, 2 * K, 2 * (K - 1), cost + 1);
+    c.emb = o.str();
+    return c;
+}
+
+int builtin_scheme_rhs_per_step(const std::string& name) {
+    static const struct { const char* name; int k; } kTab[] = {
+        { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 },
+        { "DOP853", 12 }, { "DOPRI78", 13 }, { "DOPRI78 (legacy)", 13 },
+    };
+    for (const auto& t : kTab) if (name == t.name) return t.k;
+    return 0;
+}
+
+bool adaptive_scheme_name_supported(const std::string& name) {
+    if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
+    if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
+    ExtrapolationSpec spec;
+    return parse_extrapolation_name(name, &spec) && !spec.re_at_output && spec.n.size() >= 2;
+}
+
+int adaptive_scheme_q_guess(const std::string& name) {
+    if (name == "RK45") return 4;
+    const int K = gbs_stage_count(scheme_from_name(name));
+    if (K >= 2) return 2 * (K - 1);
+    ExtrapolationSpec spec;
+    int p = 0; bool sym = false;
+    if (parse_extrapolation_name(name, &spec) && spec.n.size() >= 2 && builtin_scheme_traits(spec.base, &p, &sym))
+        return extrapolation_order((int)spec.n.size() - 1, p, extrapolation_symmetric(spec.re_at_output, sym));
+    return 7;
+}
+
 // --- Композиция -------------------------------------------------------------
 
 static const char* const kCompPrefix = "Comp(";

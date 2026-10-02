@@ -340,6 +340,7 @@ struct PhaseRunInputs {
     // krs_code для custom схемы содержит тело дословно (см. regenerate_krs).
     // Флаг нужен, чтобы CPU-ветка знала: это сырой C, а не codegen-вывод.
     bool        krs_is_custom = false;
+    std::vector<CustomScheme> custom_schemes;   // база Extr у адаптивного шага (adaptive_code_for_scheme)
     std::map<std::string, std::string>  param_values;
     std::vector<InitialConditionSet>    ic_sets;
     // Continuation mode plumbing. When ic_override is populated it takes
@@ -541,14 +542,12 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                                std::vector<std::vector<std::vector<double>>>& raw,
                                std::vector<std::vector<double>>& times,
                                AnalysisResult& result, bool& calc_ok, std::string& calc_err) {
-    const Scheme sch = scheme_from_name(in.scheme);
-    if (in.krs_is_custom || !scheme_supports_adaptive(sch)) {
-        result.error = "Adaptive step needs a scheme with an embedded error estimate: "
-                       "RK45, DOPRI78 or DOP853.";
+    if (!adaptive_scheme_name_ok(in.scheme)) {
+        result.error = adaptive_scheme_hint();
         return false;
     }
     AdaptiveCode code;
-    try { code = codegen_adaptive(in.sys, sch); }
+    try { code = adaptive_code_for_scheme(in.custom_schemes, in.sys, in.scheme); }
     catch (const std::exception& e) { result.error = std::string("adaptive codegen: ") + e.what(); return false; }
 
     const double t_skip = in.skip_transient ? tskip : 0.0;
@@ -588,6 +587,40 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_log   = std::move(out.log);
         result.step_stats = out.stats;
     }
+    else if (!scheme_supports_adaptive(scheme_from_name(in.scheme))) {
+        // Экстраполятор (Extr, GBS): CPU-драйвер exe считает по таблицам Бутчера и тело базы в
+        // стадиях не выразит. Те же тела, что у GPU, собирает cl.exe в DLL адаптивного модуля
+        // (AdaptiveCpuModule, кэш на диске), траектория — ucuda_cpu_ad_phase, копия phase_kernel_ad;
+        // регулятор (и пользовательский) вкомпилирован туда же.
+        AdaptiveCpuModule mod;
+        std::vector<KrsCpuDiag> diags;
+        if (!mod.compile(code.rhs, code.emb, code.dprep, code.deval, ctrl_body, dim, "", diags) || !mod.phase()) {
+            result.error = "adaptive " + in.scheme + " (CPU build):";
+            for (const KrsCpuDiag& d : diags)
+                result.error += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+            return false;
+        }
+        const int cap = rawm ? max_pts : total;
+        std::vector<double> data((size_t)std::max(cap, 1) * dim), tm(rawm ? (size_t)max_pts : 0);
+        std::vector<double> lg((size_t)kAdaptLogCap * 4);
+        for (int k = 0; k < N; ++k) {
+            int nlog = 0;
+            double st[9] = {}, fh = 0;
+            const int c = mod.phase()(&ic_flat[(size_t)k * dim], a.data(), &P, t_skip, tsim, h, total, rawm ? 1 : 0,
+                                      max_pts, kAdaptLogCap, data.data(), rawm ? tm.data() : nullptr, lg.data(),
+                                      &nlog, st, &fh);
+            std::vector<std::vector<double>>& tr = raw[(size_t)k];
+            tr.assign((size_t)c, std::vector<double>((size_t)dim));
+            for (int i = 0; i < c; ++i)
+                for (int j = 0; j < dim; ++j) tr[(size_t)i][(size_t)j] = data[(size_t)i * dim + j];
+            if (rawm) times[(size_t)k].assign(tm.begin(), tm.begin() + c);
+            result.step_log[(size_t)k].assign(lg.begin(), lg.begin() + (size_t)nlog * 4);
+            AdaptiveStats& as = result.step_stats[(size_t)k];
+            as.nacc = st[0]; as.nrej = st[1]; as.nforced = st[2]; as.nrhs = st[3];
+            as.hmin = st[4]; as.hmax = st[5]; as.hmean = st[6];
+            as.diverged = st[7] != 0; as.truncated = st[8] != 0;
+        }
+    }
     else {
         std::unique_ptr<SystemEvaluator> ev;
         try { ev.reset(new SystemEvaluator(in.sys)); }
@@ -611,7 +644,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                                              rawm, t_skip, tsim, h, total, max_pts, kAdaptLogCap,
                                              raw[(size_t)k], times[(size_t)k],
                                              result.step_log[(size_t)k], result.step_stats[(size_t)k], fh,
-                                             ctrl.fn());
+                                             ctrl.fn(), ctrl.prep());
         }
     }
     for (int k = 0; k < N; ++k) {
@@ -962,6 +995,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
         if (!in.krs_is_custom && parse_extrapolation_name(s.scheme, nullptr))
             in.krs_is_custom = true;
     }
+    in.custom_schemes = s.custom_schemes;
     in.param_values = s.param_values;
     in.ic_sets      = s.ic_sets;
     in.circuit_show        = s.circuit_show;
@@ -1151,11 +1185,10 @@ void PhaseAnalysisSession::prewarm_gpu() {
     if (adaptive.enabled && !sys.is_map) {
         // Тела и регулятор — как в run_adaptive_phase: ключ кэша ядра — ровно они и размерность.
         // Холодная сборка адаптивного ядра Analysis — 5-6 с; без прогрева их ждал первый Run.
-        const Scheme sch = scheme_from_name(scheme);
-        if (!scheme_supports_adaptive(sch)) return;
+        if (!adaptive_scheme_name_ok(scheme)) return;
         PhaseAdaptiveRequest rq;
         try {
-            const AdaptiveCode code = codegen_adaptive(sys, sch);
+            const AdaptiveCode code = adaptive_code_for_scheme(custom_schemes, sys, scheme);
             UcudaAdaptParams P;
             std::string err;
             if (!adaptive_build_params(adaptive, code, dim, 1.0, P, err, &rq.ctrl_body)) return;
@@ -1180,6 +1213,26 @@ void PhaseAnalysisSession::prewarm_gpu() {
 // codegen_scheme. Чистая функция — зовётся при сборке Request в момент Run
 // (не персистится). Переиспользуется bifurcation и LLE.
 //
+// Тело, порядок и симметричность базы обёртки (Extr, Comp, адаптивный Extr): у кастомной
+// КРС их объявил автор, у встроенной берём из паспорта. Неизвестная база — отказ, а не
+// тихий откат на Эйлер. Одна функция на все обёртки — иначе они разъехались бы по тому,
+// что считают допустимой базой.
+static bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const System& sys,
+                                 const std::string& base_name, std::string (*gen)(const System&, Scheme),
+                                 std::string& body, int& p, bool& sym) {
+    p = 1; sym = false;
+    for (const auto& cs : custom_schemes) {
+        if (cs.name == base_name) {
+            body = cs.body; p = cs.order; sym = cs.symmetric;
+            return !body.empty();
+        }
+    }
+    if (!builtin_scheme_traits(base_name, &p, &sym)) return false;
+    try { body = gen(sys, scheme_from_string(base_name)); }
+    catch (...) { return false; }
+    return !body.empty();
+}
+
 // gen отличает GPU-форму от CPU-эквивалента: обе проходят ОДИН И ТОТ ЖЕ разбор
 // имени, поэтому панель KRS и движок не могут понять имя по-разному.
 static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
@@ -1204,17 +1257,7 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     // что считают допустимой базой.
     auto resolve_base = [&](const std::string& base_name, std::string& body,
                             int& p, bool& sym) -> bool {
-        p = 1; sym = false;
-        for (const auto& cs : custom_schemes) {
-            if (cs.name == base_name) {
-                body = cs.body; p = cs.order; sym = cs.symmetric;
-                return !body.empty();
-            }
-        }
-        if (!builtin_scheme_traits(base_name, &p, &sym)) return false;
-        try { body = gen(sys, scheme_from_string(base_name)); }
-        catch (...) { return false; }
-        return !body.empty();
+        return resolve_wrapper_base(custom_schemes, sys, base_name, gen, body, p, sym);
     };
 
     ExtrapolationSpec spec;
@@ -1265,6 +1308,29 @@ std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schem
                                           const System& sys,
                                           const std::string& scheme) {
     return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme);
+}
+
+AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                      const System& sys, const std::string& scheme) {
+    // Кастомная КРС с этим именем перекрывает встроенную (как в krs_for_scheme_impl), а её
+    // текст непрозрачен: оценки ошибки у неё нет.
+    for (const auto& cs : custom_schemes)
+        if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
+    const Scheme sch = scheme_from_name(scheme);
+    if (scheme_supports_adaptive(sch)) return codegen_adaptive(sys, sch);
+    if (const int K = gbs_stage_count(sch); K >= 2) return codegen_adaptive_gbs(sys, K);
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme, &spec)) {
+        if (spec.re_at_output) throw std::runtime_error("adaptive step: ExtrZ is not supported yet");
+        if (spec.n.size() < 2)
+            throw std::runtime_error("adaptive step needs an extrapolation with at least two stages");
+        std::string body; int p = 1; bool sym = false;
+        if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym))
+            throw std::runtime_error("extrapolation base '" + spec.base + "' is unknown or has no step body");
+        return codegen_adaptive_extrapolation(sys, body, spec.n, p, sym, spec.base,
+                                              builtin_scheme_rhs_per_step(spec.base));
+    }
+    throw std::runtime_error(adaptive_scheme_hint());
 }
 
 // CPU-форма того же шага — только для отладочной панели, нигде не
@@ -1361,7 +1427,8 @@ static int parse_i(const std::string& s, int def) {
 // вернёт её вместо расчёта, как любую другую ошибку запуска. span — длина всего
 // интервала интегрирования (транзиент + запись), нужна выбору h0. ax0 / ax1 —
 // коды адаптивных осей (AdaptiveAxisKind), 0 — обычная цель свипа.
-static void fill_adaptive_request(const System& sys, const std::string& scheme,
+static void fill_adaptive_request(const std::vector<CustomScheme>& custom_schemes,
+                                  const System& sys, const std::string& scheme,
                                   const AdaptiveSettings& st, int n, double span,
                                   int ax0, int ax1, AdaptiveRequest& out) {
     out = AdaptiveRequest();
@@ -1372,12 +1439,11 @@ static void fill_adaptive_request(const System& sys, const std::string& scheme,
     out.axis_kind[0] = ax0;
     out.axis_kind[1] = ax1;
     if (!adaptive_scheme_name_ok(scheme)) {
-        out.setup_error = "Adaptive step needs a scheme with an embedded error estimate: "
-                          "RK45, DOPRI78 or DOP853.";
+        out.setup_error = adaptive_scheme_hint();
         return;
     }
     AdaptiveCode code;
-    try { code = codegen_adaptive(sys, scheme_from_name(scheme)); }
+    try { code = adaptive_code_for_scheme(custom_schemes, sys, scheme); }
     catch (const std::exception& e) { out.setup_error = std::string("adaptive codegen: ") + e.what(); return; }
     std::string err;
     if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
@@ -1438,7 +1504,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.max_value      = parse_d(bd.max_value_text, 1.0e6);
     req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
     return req;
 }
@@ -1509,7 +1575,7 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.mult_peak          = parse_d(bd.mult_peak_text,     (double)::mult_peak);
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
     return req;
 }
@@ -1762,7 +1828,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.eps            = parse_d(c.eps_text, 1.0e-4);
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
     return req;
 }
@@ -1826,7 +1892,7 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.eps                = parse_d(c.eps_text, 1.0e-4);
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
     return req;
 }
@@ -2313,7 +2379,7 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.feature2 = f2;
     req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, 0, 0, req.adaptive);
     return req;
 }
@@ -3224,7 +3290,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.eps            = parse_d(c.eps_text, 1.0e-4);
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
     return req;
 }
@@ -3286,7 +3352,7 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.eps                = parse_d(c.eps_text, 1.0e-4);
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
     return req;
 }
@@ -3563,7 +3629,7 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     req.minmax_interp  = c.adaptive.minmax_interp_fixed;
     // 1D: вторая ось не участвует, и её код от режима 2D не должен уводить расчёт из модуля
     // узлов (ad_nodes_module смотрит обе оси).
-    fill_adaptive_request(s.sys, c.scheme, c.adaptive, req.amountOfX,
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive);
     return req;
 }

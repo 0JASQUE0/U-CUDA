@@ -9,10 +9,16 @@
 // computePhasePortraitCPU_adaptive на время расчёта (указатель — свой у потока).
 #define UCUDA_AD_NMAX UCUDA_AD_MAXN
 static thread_local UcudaCtrlCustomFn g_ctrl_custom = nullptr;
+static thread_local UcudaCtrlPrepFn   g_ctrl_prep   = nullptr;
 #define UCUDA_HAS_CUSTOM_CTRL 1
+// С UCUDA_AD_HAIRER_ONLY драйвер зовёт ucuda_ctrl_custom при любом P.ctrl (в exe он
+// определён всегда), поэтому без DLL — встроенный Хайрер.
 static inline void ucuda_ctrl_custom(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     if (g_ctrl_custom) g_ctrl_custom(&in, &m, &o);
-    else ucuda_ctrl_hairer(in, m, o);   // сюда не попасть: P.ctrl = CUSTOM только с телом
+    else ucuda_ctrl_hairer(in, m, o);
+}
+static inline void ucuda_ctrl_custom_prep(const numb* c, int q, numb* k) {
+    if (g_ctrl_prep) g_ctrl_prep(c, q, k);
 }
 #include "kernels/ucuda_adaptive.cuh"
 
@@ -962,16 +968,20 @@ bool computePhasePortraitCPU_adaptive(
     const double* ic, int dim, const double* a, const UcudaAdaptParams& P,
     bool raw, double t_skip, double t_rec, double dt, int total, int max_pts, int log_cap,
     std::vector<std::vector<double>>& traj, std::vector<double>& times,
-    std::vector<double>& log, AdaptiveStats& stats, double& final_h, UcudaCtrlCustomFn ctrl_fn)
+    std::vector<double>& log, AdaptiveStats& stats, double& final_h, UcudaCtrlCustomFn ctrl_fn,
+    UcudaCtrlPrepFn prep_fn)
 {
     traj.clear(); times.clear(); log.clear(); stats = AdaptiveStats(); final_h = 0;
     if (!int_scheme_supports_adaptive(scheme) || dim < 1 || dim > UCUDA_AD_MAXN) return false;
     if (P.ctrl == UCUDA_CTRL_CUSTOM && !ctrl_fn) return false;
     struct CtrlScope {
         UcudaCtrlCustomFn prev;
-        explicit CtrlScope(UcudaCtrlCustomFn f) : prev(g_ctrl_custom) { g_ctrl_custom = f; }
-        ~CtrlScope() { g_ctrl_custom = prev; }
-    } ctrl_scope(ctrl_fn);
+        UcudaCtrlPrepFn   prev_prep;
+        CtrlScope(UcudaCtrlCustomFn f, UcudaCtrlPrepFn p) : prev(g_ctrl_custom), prev_prep(g_ctrl_prep) {
+            g_ctrl_custom = f; g_ctrl_prep = p;
+        }
+        ~CtrlScope() { g_ctrl_custom = prev; g_ctrl_prep = prev_prep; }
+    } ctrl_scope(ctrl_fn, prep_fn);
     const CpuAdaptiveKrs K(ev, dim, scheme);
     // Состояние велико (стадии, плотный выход) — в куче, не на стеке.
     std::unique_ptr<UcudaAdaptState> Sp(new UcudaAdaptState());

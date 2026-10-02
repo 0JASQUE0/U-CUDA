@@ -64,7 +64,8 @@ bool int_scheme_supports_adaptive(IntScheme s);
 // вычислитель правых частей. Транзиент кончается ровно в t_skip; дальше либо
 // равномерная сетка (total точек через dt, первая в t_skip), либо узлы шага (raw,
 // не больше max_pts; times — их моменты). log — попытки {t, h, err, код}.
-// ctrl_fn — пользовательский регулятор (CtrlCpuFn), обязателен при P.ctrl = CUSTOM.
+// ctrl_fn, prep_fn — пользовательский регулятор и его раздел подготовки (CtrlCpuFn);
+// ctrl_fn обязателен при P.ctrl = CUSTOM.
 // false — схема без оценки ошибки или решение разошлось (traj тогда короче).
 bool computePhasePortraitCPU_adaptive(
     const SystemEvaluator& ev, IntScheme scheme,
@@ -72,4 +73,4 @@ bool computePhasePortraitCPU_adaptive(
     bool raw, double t_skip, double t_rec, double dt, int total, int max_pts, int log_cap,
     std::vector<std::vector<double>>& traj, std::vector<double>& times,
     std::vector<double>& log, AdaptiveStats& stats, double& final_h,
-    UcudaCtrlCustomFn ctrl_fn = nullptr);
+    UcudaCtrlCustomFn ctrl_fn = nullptr, UcudaCtrlPrepFn prep_fn = nullptr);

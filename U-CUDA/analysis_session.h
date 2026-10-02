@@ -28,6 +28,13 @@ std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_s
                                        const System& sys,
                                        const std::string& scheme);
 
+// Тела адаптивного шага по имени схемы — тот же разбор имени, что у compute_krs_for_scheme:
+// RK-пары (codegen_adaptive), GBS 2-4 ... (codegen_adaptive_gbs), Extr(база|n1..nK), K >= 2
+// (codegen_adaptive_extrapolation; база — встроенная или кастомная КРС). Схема без оценки
+// ошибки (и кастомная КРС с тем же именем) — std::runtime_error с текстом для UI.
+AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                      const System& sys, const std::string& scheme);
+
 // Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
 // t/h, so with h = 1 the computing time is exactly the iteration count.
 std::string default_h_from_record(const SystemRecord& r);

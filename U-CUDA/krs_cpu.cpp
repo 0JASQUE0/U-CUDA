@@ -386,6 +386,7 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
         if (pos == std::string::npos) continue;
 
         int ln = 0;
+        std::string where;   // у регулятора два куска: "prepare" — раздел подготовки
         if (pos > 0 && line[pos - 1] == ')') {
             const size_t close = pos - 1;
             const size_t open  = line.rfind('(', close);
@@ -397,9 +398,10 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
                 for (char c : num)
                     if (!std::isdigit((unsigned char)c)) { digits = false; break; }
                 if (digits) ln = std::atoi(num.c_str());
+                if (line.compare(0, open, "prepare") == 0) where = "prepare section: ";
             }
         }
-        diags.push_back({ ln, line.substr(pos + 2) });   // отрезаем ": "
+        diags.push_back({ ln, where + line.substr(pos + 2) });   // отрезаем ": "
         if (diags.size() >= 20) break;                   // не заливаем UI простынёй
     }
 }
@@ -472,9 +474,12 @@ bool build_cached_dll(const std::string& source, unsigned long long key, std::st
 // в ключ кэша, иначе после правки заголовка подхватилась бы DLL со старой раскладкой.
 namespace {
 
-constexpr int kCtrlPreludeVersion = 1;
+constexpr int kCtrlPreludeVersion = 2;   // 2: раздел подготовки ucuda_ctrl_custom_prep_c
 
-std::string make_ctrl_source(const std::string& body) {
+// packed — раздел подготовки и тело (adaptive_ctrl_pack).
+std::string make_ctrl_source(const std::string& packed) {
+    std::string prep, body;
+    adaptive_ctrl_unpack(packed, prep, body);
     std::ostringstream o;
     o << "#include <cmath>\n"
          "#include <cstdlib>\n"
@@ -484,6 +489,11 @@ std::string make_ctrl_source(const std::string& body) {
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
          "#define UCUDA_ADAPT_LAYOUT_ONLY\n"
          "#include \"ucuda_adaptive.cuh\"\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_ctrl_custom_prep_c(const numb* c, int q, numb* k) {\n"
+         "    (void)c; (void)q; (void)k;\n"
+         "#line 1 \"prepare\"\n"
+      << prep << "\n}\n"
          "extern \"C\" __declspec(dllexport)\n"
          "void ucuda_ctrl_custom_c(const UcudaCtlIn* in_p, UcudaCtlMem* m_p, UcudaCtlOut* o_p) {\n"
          "    const UcudaCtlIn& in = *in_p; UcudaCtlMem& m = *m_p; UcudaCtlOut& o = *o_p;\n"
@@ -522,7 +532,7 @@ unsigned long long ctrl_hash_key(const std::string& body, const std::string& hea
 // par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
 namespace {
 
-constexpr int kAdModuleVersion = 4;
+constexpr int kAdModuleVersion = 5;   // 5: вход ucuda_cpu_ad_phase
 
 // Подстановка плейсхолдера {{name}} во всех вхождениях.
 void replace_all(std::string& s, const std::string& from, const std::string& to) {
@@ -742,6 +752,53 @@ int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, 
 }
 )CPU";
     if (dense) o << R"CPU(
+// Фазовая траектория Analysis — phase_kernel_ad (nvrtc_engine.cpp) строка в строку, одна НУ на вызов.
+// raw = 0 — сетка: total отсчётов с шагом dt от t_skip, data[c * AMOUNTOFX + k]; raw = 1 — узлы шага
+// (не больше max_pts): data и times[c]. logs — попытки (log_cap записей по 4 числа), stats[9] — как у
+// ядра. Возвращает число записанных точек.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_phase(const double* ic, const double* values, const UcudaAdaptParams* Pp, double t_skip,
+    double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data, double* times,
+    double* logs, int* log_count, double* stats, double* final_h) {
+    const UcudaKrsFns K{};
+    const UcudaAdaptParams& P = *Pp;
+    UcudaAdaptState S;
+    ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, values, P, log_cap > 0 ? logs : nullptr, log_cap);
+    const numb tEnd = t_skip + t_rec;
+    while (S.t < t_skip && !S.diverged) ucuda_ad_step(S, K, values, P, t_skip);
+    int c = 0;
+    if (!raw) {
+        numb y[AMOUNTOFX];
+        for (; c < total && !S.diverged; ++c) {
+            numb tt = t_skip + (numb)c * dt;
+            if (tt > tEnd) tt = tEnd;
+            ucuda_ad_advance_to(S, K, values, P, tt, tEnd, y);
+            if (S.diverged) break;
+            for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = y[k];
+        }
+    } else {
+        if (!S.diverged && max_pts > 0) {
+            for (int k = 0; k < AMOUNTOFX; ++k) data[k] = S.X[k];
+            times[0] = S.t; c = 1;
+        }
+        while (S.t < tEnd && c < max_pts && !S.diverged) {
+            ucuda_ad_step(S, K, values, P, tEnd);
+            if (S.diverged) break;
+            for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = S.X[k];
+            times[c] = S.t; ++c;
+        }
+    }
+    *log_count = S.log_n;
+    stats[0] = (double)S.st.nacc; stats[1] = (double)S.st.nrej; stats[2] = (double)S.st.nforced;
+    stats[3] = (double)S.st.nrhs; stats[4] = S.st.hmin; stats[5] = S.st.hmax;
+    stats[6] = S.st.nacc > 0 ? S.st.hsum / (double)S.st.nacc : 0.0;
+    stats[7] = (double)S.diverged;
+    stats[8] = (double)(raw && !S.diverged && S.t < tEnd);
+    *final_h = S.h;
+    return c;
+}
+)CPU";
+    if (dense) o << R"CPU(
 // БД 1D: классика — calculateDiscreteModelPeaksAdCUDA по точкам [i0, i1), continuation —
 // calculateDiscreteModelPeaksAdContCUDA строка в строку.
 extern "C" __declspec(dllexport)
@@ -837,7 +894,7 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
                                 const std::string& deval, const std::string& ctrl_body, int amountOfX,
                                 const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
-    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr;
+    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr; phase_ = nullptr;
     std::string why;
     if (vcvars_path(why).empty()) {
         diags.push_back({ 0, "CPU compiler unavailable: " + why });
@@ -900,6 +957,7 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
     bif_ = (BifFn)GetProcAddress(m, "ucuda_cpu_ad_bif");   // только у модуля с плотным выходом
     lyap_range_ = (LyapRangeFn)GetProcAddress(m, "ucuda_cpu_ad_lyap_range");
     metrics_ = (MetricsFn)GetProcAddress(m, "ucuda_cpu_ad_metrics");   // тоже только с плотным выходом
+    phase_ = (PhaseFn)GetProcAddress(m, "ucuda_cpu_ad_phase");         // и фазовая траектория Analysis
     return true;
 }
 
@@ -910,6 +968,7 @@ CtrlCpuFn::~CtrlCpuFn() {
 bool CtrlCpuFn::compile(const std::string& body, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
     fn_ = nullptr;
+    prep_ = nullptr;
 
     std::string why;
     if (vcvars_path(why).empty()) {
@@ -939,14 +998,16 @@ bool CtrlCpuFn::compile(const std::string& body, std::vector<KrsCpuDiag>& diags)
         diags.push_back({ 0, "failed to load " + dll });
         return false;
     }
-    auto p = GetProcAddress(m, "ucuda_ctrl_custom_c");
-    if (!p) {
+    auto p  = GetProcAddress(m, "ucuda_ctrl_custom_c");
+    auto pp = GetProcAddress(m, "ucuda_ctrl_custom_prep_c");
+    if (!p || !pp) {
         FreeLibrary(m);
-        diags.push_back({ 0, "the built DLL has no ucuda_ctrl_custom_c" });
+        diags.push_back({ 0, "the built DLL has no ucuda_ctrl_custom_c / ucuda_ctrl_custom_prep_c" });
         return false;
     }
     module_ = m;
     fn_ = (Fn)p;
+    prep_ = (PrepFn)pp;
     return true;
 }
 

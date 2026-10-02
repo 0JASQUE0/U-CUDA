@@ -109,16 +109,20 @@ struct UcudaCtlMem;
 struct UcudaCtlOut;
 class CtrlCpuFn {
 public:
-    using Fn = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
+    using Fn     = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
+    using PrepFn = void (*)(const double* c, int q, double* k);   // раздел подготовки (numb = double)
     CtrlCpuFn() = default;
     ~CtrlCpuFn();
     CtrlCpuFn(const CtrlCpuFn&) = delete;
     CtrlCpuFn& operator=(const CtrlCpuFn&) = delete;
-    bool compile(const std::string& body, std::vector<KrsCpuDiag>& diags);
-    Fn   fn() const { return fn_; }
+    // body — раздел подготовки и тело, как их упаковывает adaptive_ctrl_pack.
+    bool   compile(const std::string& body, std::vector<KrsCpuDiag>& diags);
+    Fn     fn() const   { return fn_; }
+    PrepFn prep() const { return prep_; }
 private:
-    void* module_ = nullptr;   // HMODULE
-    Fn    fn_     = nullptr;
+    void*  module_ = nullptr;   // HMODULE
+    Fn     fn_     = nullptr;
+    PrepFn prep_   = nullptr;
 };
 
 // Адаптивный шаг на CPU нативным кодом: адаптивные тела схемы (AdaptiveCode), регулятор
@@ -171,6 +175,12 @@ public:
                               int preScaller, unsigned long long iters, int raw, int peakInterp,
                               double* stats, const volatile int* cancel,
                               int* progress);
+    // Фазовая траектория Analysis от одной НУ (phase_kernel_ad строка в строку): raw = 0 — сетка total
+    // отсчётов через dt от t_skip, 1 — узлы шага (не больше max_pts, times). data[c * n + k], logs —
+    // log_cap попыток по 4 числа, stats[9] как у ядра (+ truncated). Возвращает число точек.
+    using PhaseFn = int (*)(const double* ic, const double* values, const UcudaAdaptParams* P, double t_skip,
+                            double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data,
+                            double* times, double* logs, int* log_count, double* stats, double* final_h);
     AdaptiveCpuModule() = default;
     ~AdaptiveCpuModule();
     AdaptiveCpuModule(const AdaptiveCpuModule&) = delete;
@@ -185,6 +195,7 @@ public:
     BifFn      bif()      const { return bif_; }
     LyapRangeFn lyap_range() const { return lyap_range_; }
     MetricsFn  metrics()  const { return metrics_; }
+    PhaseFn    phase()    const { return phase_; }    // только у модуля с плотным выходом
 private:
     void*      module_   = nullptr;   // HMODULE
     EndpointFn endpoint_ = nullptr;
@@ -192,4 +203,5 @@ private:
     BifFn      bif_      = nullptr;
     LyapRangeFn lyap_range_ = nullptr;
     MetricsFn  metrics_  = nullptr;
+    PhaseFn    phase_    = nullptr;
 };

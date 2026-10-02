@@ -49,6 +49,7 @@
 #define UCUDA_CTL_NPAR     12   // параметров регулятора
 #define UCUDA_CTL_HIST     3    // принятых шагов в истории регулятора
 #define UCUDA_CTL_USER     8    // свободная память регулятора
+#define UCUDA_CTL_NK       8    // производных констант пользовательского регулятора (in.k)
 #define UCUDA_AD_NO_RETRY  (-1) // UcudaAdaptParams::maxrej: шаг не повторяется (поле UI "max rejects" = 0)
 
 // Встроенные регуляторы (UcudaAdaptParams::ctrl), параметры — c[]:
@@ -71,7 +72,9 @@
 //            цель safety^(k / sum kbeta): PI (kI = 0.3) на DOP853 — err ~ 0.06, H321 —
 //            ~ 5e-4 и вдвое больше шагов.
 //   CUSTOM — пользовательский: C body из библиотеки (AdaptiveUserCtrl), печатается
-//            в ucuda_ctrl_custom (adaptive_ctrl_source).
+//            в ucuda_ctrl_custom (adaptive_ctrl_source). Его раздел подготовки —
+//            ucuda_ctrl_custom_prep(c, q, k) — считает производные константы k[] из c[] и q
+//            один раз на траекторию (как UcudaCtlConst у встроенных); тело читает их как in.k[].
 #define UCUDA_CTRL_HAIRER 0
 #define UCUDA_CTRL_SCIPY  1
 #define UCUDA_CTRL_I      2
@@ -79,9 +82,11 @@
 #define UCUDA_CTRL_FILTER 4
 #define UCUDA_CTRL_CUSTOM 5
 
-// Пока работаем только с регулятором Хайрера: остальные законы (SciPy, I, PI, Filter,
-// пользовательский C body) в шаг не компилируются, а UI и сессии их не предлагают
-// (adaptive_settings.h, gui.cpp, session_io.cpp). Вернуть все — #define UCUDA_AD_ALL_CTRL.
+// Пока работаем только с регулятором Хайрера и пользовательскими (C body из библиотеки):
+// остальные встроенные законы (SciPy, I, PI, Filter) в шаг не компилируются, а UI и сессии
+// их не предлагают (adaptive_settings.h, gui.cpp, session_io.cpp). В модуль попадает ровно
+// один закон: пользовательский, если модуль собран с его телом (UCUDA_HAS_CUSTOM_CTRL), иначе
+// Хайрер (ucuda_step_ctrl). Вернуть все — #define UCUDA_AD_ALL_CTRL.
 #ifndef UCUDA_AD_ALL_CTRL
 #define UCUDA_AD_HAIRER_ONLY 1
 #endif
@@ -124,7 +129,9 @@ struct UcudaCtlIn {
     int  n, nlo, q;
     int  nrej;          // сколько попыток этого шага уже отвергнуто
     const struct UcudaCtlConst* cc;   // производные константы законов (ucuda_ctl_prepare)
-    numb err_extra;     // добавочная норма ошибки (LLE/LS — ошибка возмущений), 0 — нет;
+    const numb* k;      // производные константы пользовательского регулятора (UCUDA_CTL_NK,
+                        //   ucuda_ctrl_custom_prep; не заданные — 0)
+    numb err_extra;    // добавочная норма ошибки (LLE/LS — ошибка возмущений), 0 — нет;
                         //   ucuda_ctl_err берёт большую из неё и своей
 };
 
@@ -157,6 +164,7 @@ struct UcudaCtlConst {
     numb b1, b2, b3;    // PI: kI/k, kP/k; Filter: b1/k, b2/k, b3/k (c[3..5]/k, k = q+1)
     numb lth_pi;        // PI: log2 (th^(kI/k)) = kI log2 safety, th = safety^k — целевая ошибка
     numb lth_f;         // Filter: (b1 + b2 + b3) log2 safety
+    numb k[UCUDA_CTL_NK];   // пользовательский регулятор: раздел подготовки (in.k)
 };
 
 UCUDA_HD inline void ucuda_ctl_prepare(const UcudaAdaptParams& P, UcudaCtlConst& cc) {
@@ -170,6 +178,7 @@ UCUDA_HD inline void ucuda_ctl_prepare(const UcudaAdaptParams& P, UcudaCtlConst&
     const numb ls = log2(P.c[0]);
     cc.lth_pi = P.c[3] * ls;
     cc.lth_f  = (P.c[3] + P.c[4] + P.c[5]) * ls;
+    for (int j = 0; j < UCUDA_CTL_NK; ++j) cc.k[j] = 0;   // заполняет ucuda_ad_prepare_ctl
 }
 
 // Статистика одной траектории.
@@ -502,11 +511,26 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
 // (adaptive_ctrl_source в adaptive_settings.h) — целиком. Так тело пользователя видит
 // все помощники, а встраивается в шаг, как встроенные законы.
 
+// Константы регулятора на траекторию: встроенных законов и раздел подготовки
+// пользовательского (ucuda_ctrl_custom_prep(c, q, k), печатает adaptive_ctrl_source).
+UCUDA_HD inline void ucuda_ad_prepare_ctl(const UcudaAdaptParams& P, UcudaCtlConst& cc) {
+    ucuda_ctl_prepare(P, cc);
+#ifdef UCUDA_HAS_CUSTOM_CTRL
+    ucuda_ctrl_custom_prep(P.c, P.q, cc.k);
+#endif
+}
+
 UCUDA_HD inline void ucuda_step_ctrl(int ctrl, const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     o.accept = 0; o.err = 0; o.h = in.h; o.pad = 0;
 #ifdef UCUDA_AD_HAIRER_ONLY
+    // Один закон на модуль, без switch: тело пользователя приходит в модуль, только когда
+    // выбран он (adaptive_build_params), и встраивается в шаг так же, как Хайрер.
     (void)ctrl;
+#ifdef UCUDA_HAS_CUSTOM_CTRL
+    ucuda_ctrl_custom(in, m, o);
+#else
     ucuda_ctrl_hairer(in, m, o);
+#endif
 #else
     switch (ctrl) {
     case UCUDA_CTRL_SCIPY:  ucuda_ctrl_scipy(in, m, o);  break;
@@ -685,7 +709,7 @@ UCUDA_HD inline void ucuda_ad_init(UcudaAdaptState& S, const K& k, int n, const 
     for (int i = 0; i < UCUDA_CTL_USER; ++i) S.mem.user[i] = 0;
     S.mem.nacc = 0; S.mem.pad = 0;
     S.log = log; S.log_cap = log_cap; S.log_n = 0;
-    ucuda_ctl_prepare(P, S.cc);
+    ucuda_ad_prepare_ctl(P, S.cc);
     S.h = P.h0 > 0 ? P.h0
         : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, S.X, S.F0, a, P, S.st)
                          : ucuda_ad_h0(k, n, S.X, S.F0, a, P, S.st));
@@ -713,7 +737,7 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
     S.tp = t0; S.hp = 0;
     S.last_forced = 0; S.diverged = 0; S.nrej_run = 0;
     S.log_n = 0;
-    ucuda_ctl_prepare(P, S.cc);
+    ucuda_ad_prepare_ctl(P, S.cc);
     if (hc > 0 && hc <= (numb)1e300) S.h = hc;   // !(<=) отсекает и inf, и NaN
     else S.h = P.h0 > 0 ? P.h0
              : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, S.X, S.F0, a, P, S.st)
@@ -776,7 +800,7 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
         UcudaCtlIn in;
         in.y0 = S.X; in.y1 = Y; in.yerr = E; in.atol = P.atol; in.c = P.c;
         in.rtol = P.rtol; in.h = h; in.hmin = hmin; in.hmax = P.hmax; in.t = S.t;
-        in.n = n; in.nlo = P.nlo; in.q = P.q; in.nrej = nrej; in.cc = &S.cc; in.err_extra = err_extra;
+        in.n = n; in.nlo = P.nlo; in.q = P.q; in.nrej = nrej; in.cc = &S.cc; in.k = S.cc.k; in.err_extra = err_extra;
         UcudaCtlOut o;
         ucuda_step_ctrl(P.ctrl, in, S.mem, o);
 
@@ -807,8 +831,8 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
                 S.X[i] = Y[i];    S.F0[i] = F1[i];
             }
             S.t = last ? tEnd : tn;
-#if !(defined(UCUDA_AD_NODES_KERNEL) && defined(UCUDA_AD_HAIRER_ONLY))
-            // История h и err — PI и фильтрам; Хайрер берёт только m.user[0] и счётчик.
+#if !(defined(UCUDA_AD_NODES_KERNEL) && defined(UCUDA_AD_HAIRER_ONLY) && !defined(UCUDA_HAS_CUSTOM_CTRL))
+            // История h и err — PI, фильтрам и пользовательскому; Хайрер берёт только m.user[0] и счётчик.
             for (int j = UCUDA_CTL_HIST - 1; j > 0; --j) { S.mem.h[j] = S.mem.h[j - 1]; S.mem.err[j] = S.mem.err[j - 1]; }
             S.mem.h[0] = h; S.mem.err[0] = o.err;
 #endif

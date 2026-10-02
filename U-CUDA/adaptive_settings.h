@@ -49,13 +49,19 @@ inline bool operator==(const AdaptiveSettings& a, const AdaptiveSettings& b) {
 }
 inline bool operator!=(const AdaptiveSettings& a, const AdaptiveSettings& b) { return !(a == b); }
 
-// Схемы со встроенной оценкой ошибки — по имени, как их пишут сессии и UI.
+// Схемы со встроенной оценкой ошибки — по имени, как их пишут сессии и UI: RK-пары,
+// GBS 2-4 ..., Extr(база|n1,...,nK) с K >= 2 (adaptive_scheme_name_supported).
 inline bool adaptive_scheme_name_ok(const std::string& scheme) {
-    return scheme == "RK45" || scheme == "DOP853" || scheme == "DOPRI78" || scheme == "DOPRI78 (legacy)";
+    return adaptive_scheme_name_supported(scheme);
 }
 // Порядок оценщика по имени схемы (нужен значениям по умолчанию регулятора Хайрера).
 inline int adaptive_scheme_q(const std::string& scheme) {
-    return scheme == "RK45" ? 4 : 7;
+    return adaptive_scheme_q_guess(scheme);
+}
+// Текст отказа для схемы без адаптивного шага — один на UI и движки.
+inline const char* adaptive_scheme_hint() {
+    return "Adaptive step needs a scheme with an embedded error estimate: RK45, DOPRI78, DOP853, "
+           "GBS 2-4 ... or Extr(...) with at least two stages.";
 }
 
 // ---- Встроенные регуляторы ------------------------------------------------------
@@ -67,7 +73,8 @@ struct AdaptiveCtrlInfo {
     const char* tip;                     // подсказка
 };
 
-inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count) {
+// all — весь список, включая законы, не собранные в этой сборке (UCUDA_AD_HAIRER_ONLY).
+inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count, bool all = false) {
     static const AdaptiveCtrlInfo k[] = {
         { "Hairer", UCUDA_CTRL_HAIRER, 5, { "safe", "fac1", "fac2", "beta", "kbeta" },
           "Hairer's dopri5 / dop853 controller (PI with facold^beta),\n"
@@ -92,22 +99,13 @@ inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count) {
           "Defaults: H211b (b = 4)." },
     };
 #ifdef UCUDA_AD_HAIRER_ONLY
-    if (count) *count = 1;   // только Хайрер (первый в списке), см. UCUDA_AD_HAIRER_ONLY
+    // только Хайрер (первый в списке), см. UCUDA_AD_HAIRER_ONLY
+    if (count) *count = all ? (int)(sizeof(k) / sizeof(k[0])) : 1;
 #else
+    (void)all;
     if (count) *count = (int)(sizeof(k) / sizeof(k[0]));
 #endif
     return k;
-}
-
-// Регулятор, которым на деле считается name: пока собран только Хайрер
-// (UCUDA_AD_HAIRER_ONLY), любое имя — "Hairer".
-inline std::string adaptive_ctrl_effective(const std::string& name) {
-#ifdef UCUDA_AD_HAIRER_ONLY
-    (void)name;
-    return "Hairer";
-#else
-    return name;
-#endif
 }
 
 inline const AdaptiveCtrlInfo* adaptive_find_builtin(const std::string& name) {
@@ -131,13 +129,17 @@ inline const AdaptiveCtrlInfo* adaptive_find_builtin(const std::string& name) {
 //            без кода и без компиляции.
 enum AdaptiveUserCtrlKind { kUserCtrlBody = 0, kUserCtrlFilter = 1 };
 
-// Пользовательский регулятор, собранный для CPU (CtrlCpuFn в krs_cpu.h).
+// Пользовательский регулятор, собранный для CPU (CtrlCpuFn в krs_cpu.h): шаг и раздел подготовки.
 typedef void (*UcudaCtrlCustomFn)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
+typedef void (*UcudaCtrlPrepFn)(const numb* c, int q, numb* k);
 
 struct AdaptiveUserCtrl {
     std::string name;
     int         kind = kUserCtrlBody;
     std::string body;                      // C body
+    std::string prep;                      // C body: раздел подготовки — тело
+                                           //   void ucuda_ctrl_custom_prep(const numb* c, int q, numb* k),
+                                           //   раз на траекторию; тело читает k[] как in.k[]
     std::vector<std::string> par_names;    // C body: имена c[0..], не больше UCUDA_CTL_NPAR
     std::vector<std::string> par_values;   // значения по умолчанию (filter — 9 чисел Filter)
     int         hairer_rules = 0;          // C body: h0 и последний шаг — 0 как в scipy, 1 как у Хайрера
@@ -145,7 +147,7 @@ struct AdaptiveUserCtrl {
 };
 
 inline bool operator==(const AdaptiveUserCtrl& a, const AdaptiveUserCtrl& b) {
-    return a.name == b.name && a.kind == b.kind && a.body == b.body && a.par_names == b.par_names
+    return a.name == b.name && a.kind == b.kind && a.body == b.body && a.prep == b.prep && a.par_names == b.par_names
         && a.par_values == b.par_values && a.hairer_rules == b.hairer_rules && a.tip == b.tip;
 }
 inline bool operator!=(const AdaptiveUserCtrl& a, const AdaptiveUserCtrl& b) { return !(a == b); }
@@ -171,8 +173,26 @@ inline bool adaptive_find_user_ctrl(const std::string& name, AdaptiveUserCtrl* o
     return false;
 }
 
+// Регулятор, которым на деле считается name. Пока из встроенных собран только Хайрер
+// (UCUDA_AD_HAIRER_ONLY): остаются он и C body из библиотеки, любое другое имя (SciPy, PI,
+// фильтры Сёдерлинда — встроенные и из библиотеки) — "Hairer".
+inline std::string adaptive_ctrl_effective(const std::string& name) {
+#ifdef UCUDA_AD_HAIRER_ONLY
+    if (adaptive_find_builtin(name)) return name;
+    int n = 0;
+    const AdaptiveCtrlInfo* k = adaptive_builtin_ctrls(&n, true);
+    for (int i = 0; i < n; ++i) if (name == k[i].name) return "Hairer";   // встроенный, не собранный
+    AdaptiveUserCtrl u;
+    if (adaptive_find_user_ctrl(name, &u) && u.kind == kUserCtrlFilter) return "Hairer";
+    return name;   // C body из библиотеки или неизвестное имя (его отвергнет adaptive_resolve_ctrl)
+#else
+    return name;
+#endif
+}
+
 // Шаблоны новых записей: встроенные Hairer и SciPy, выписанные C-телом (отправная точка
-// для своих), и известные фильтры Сёдерлинда (2003) с их полюсами.
+// для своих), и известные фильтры Сёдерлинда (2003) с их полюсами. С UCUDA_AD_HAIRER_ONLY
+// список — только "Hairer (C)" (первый).
 struct AdaptiveCtrlPreset {
     const char* name;
     int         kind;
@@ -181,35 +201,46 @@ struct AdaptiveCtrlPreset {
     int         hairer_rules;
     const char* tip;
     const char* body;
+    const char* prep;      // C body: раздел подготовки (nullptr — пусто)
 };
 
+// "Hairer (C)" — арифметика встроенного ucuda_ctrl_hairer (ветка float, без
+// UCUDA_AD_EXACT_CTL) один в один, константы — те же, что ucuda_ctl_prepare: на GPU и CPU
+// результат побитово равен встроенному, и шаг так же не делит в double.
 inline const AdaptiveCtrlPreset* adaptive_ctrl_presets(int* count) {
     static const AdaptiveCtrlPreset k[] = {
         { "Hairer (C)", kUserCtrlBody, "safe, fac1, fac2, beta, kbeta", "0.9, 0.333, 6, 0, 0.2", 1,
-          "Hairer's dopri5 / dop853 controller written out as a C body\n"
-          "(the built-in \"Hairer\"; defaults of dop853, for dopri5: 0.9, 0.2, 10, 0.04, 0.75).",
-          "// Hairer's dopri5 / dop853 step-size control (PI with facold^beta).\n"
+          "Hairer's dopri5 / dop853 controller written out as a C body: the same arithmetic\n"
+          "and the same results as the built-in \"Hairer\" (defaults of dop853; for dopri5:\n"
+          "0.9, 0.2, 10, 0.04, 0.75).",
+          "// Hairer's dopri5 / dop853 step-size control (facold^beta stabilisation), the same\n"
+          "// arithmetic as the built-in \"Hairer\": exponents in float through log2 / exp2,\n"
+          "// no double divisions per attempt (k[] comes from the prepare section).\n"
           "// c[0] safe, c[1] fac1, c[2] fac2, c[3] beta, c[4] kbeta; m.user[0] keeps facold.\n"
-          "const numb safe = in.c[0], fac1 = in.c[1], fac2 = in.c[2];\n"
-          "const numb beta = in.c[3], kbeta = in.c[4];\n"
+          "const numb beta = in.c[3];\n"
           "const numb err = ucuda_ctl_err(in);          // RMS norm, 1 = on the tolerance\n"
           "const numb facold = m.nacc > 0 ? m.user[0] : (numb)1e-4;\n"
-          "const numb expo1 = (numb)1 / (in.q + 1) - kbeta * beta;\n"
-          "const numb fac11 = ucuda_ctl_pow(err, expo1);\n"
-          "numb fac = fac11 / ucuda_ctl_pow(facold, beta);\n"
-          "fac = fmax(1 / fac2, fmin(1 / fac1, fac / safe));\n"
+          "const float l11 = (float)in.k[2] * ucuda_ctl_log2(err);           // log2 err^expo1\n"
+          "const float lfac = beta == 0 ? l11 : l11 - (float)beta * ucuda_ctl_log2(facold);\n"
+          "const float isafe = (float)in.k[3];\n"
+          "const float fac = ucuda_fmaxf((float)in.k[1], ucuda_fminf((float)in.k[0], ucuda_ctl_exp2(lfac) * isafe));\n"
+          "numb hnew = in.h * (numb)(1.0f / fac);\n"
           "o.err = err;\n"
           "if (err <= 1) {\n"
           "    o.accept = 1;\n"
-          "    m.user[0] = fmax(err, (numb)1e-4);\n"
-          "    numb hnew = in.h / fac;\n"
+          "    m.user[0] = ucuda_fmax(err, (numb)1e-4);\n"
           "    if (in.hmax > 0 && hnew > in.hmax) hnew = in.hmax;\n"
-          "    if (in.nrej > 0) hnew = fmin(hnew, in.h);   // no growth right after a rejection\n"
-          "    o.h = hnew;\n"
+          "    if (in.nrej > 0) hnew = ucuda_fmin(hnew, in.h);   // no growth right after a rejection\n"
           "} else {\n"
           "    o.accept = 0;\n"
-          "    o.h = in.h / fmin(1 / fac1, fac11 / safe);\n"
-          "}\n" },
+          "    hnew = in.h * (numb)(1.0f / ucuda_fminf((float)in.k[0], ucuda_ctl_exp2(l11) * isafe));\n"
+          "}\n"
+          "o.h = hnew;\n",
+          "// Once per trajectory: constants of the step body (in.k[0..7]).\n"
+          "k[0] = 1 / c[1];                          // 1 / fac1\n"
+          "k[1] = 1 / c[2];                          // 1 / fac2\n"
+          "k[2] = (numb)1 / (q + 1) - c[4] * c[3];   // expo1 = 1/(q+1) - kbeta beta\n"
+          "k[3] = 1 / c[0];                          // 1 / safe\n" },
         { "SciPy (C)", kUserCtrlBody, "safety, min_factor, max_factor", "0.9, 0.2, 10", 0,
           "scipy.integrate RK45 / DOP853 controller written out as a C body\n"
           "(the built-in \"SciPy\").",
@@ -254,7 +285,11 @@ inline const AdaptiveCtrlPreset* adaptive_ctrl_presets(int* count) {
         { "PI3333", kUserCtrlFilter, "", "0.9, 0.2, 5, 0.6666666666666666, -0.3333333333333333, 0, 0, 0, 1", 0,
           "PI.3.3: kbeta = (2/3, -1/3).", "" },
     };
+#ifdef UCUDA_AD_HAIRER_ONLY
+    if (count) *count = 1;
+#else
     if (count) *count = (int)(sizeof(k) / sizeof(k[0]));
+#endif
     return k;
 }
 
@@ -279,6 +314,7 @@ inline std::vector<std::string> adaptive_split_list(const std::string& text) {
 inline AdaptiveUserCtrl adaptive_ctrl_from_preset(const AdaptiveCtrlPreset& p) {
     AdaptiveUserCtrl u;
     u.name = p.name; u.kind = p.kind; u.body = p.body; u.hairer_rules = p.hairer_rules; u.tip = p.tip;
+    u.prep = p.prep ? p.prep : "";
     u.par_names  = adaptive_split_list(p.pars);
     u.par_values = adaptive_split_list(p.values);
     return u;
@@ -305,10 +341,26 @@ struct AdaptiveCtrlResolved {
     bool user = false;                    // из библиотеки
     std::vector<std::string> par;         // имена параметров c[]
     std::vector<double>      def;         // значения по умолчанию (для схемы с порядком q)
-    std::string body;                     // C body (id == UCUDA_CTRL_CUSTOM)
+    std::string body;                     // C body с разделом подготовки (adaptive_ctrl_pack),
+                                          //   id == UCUDA_CTRL_CUSTOM
     bool hairer_rules = false;            // h0 и последний шаг по Хайреру
     std::string tip;
 };
+
+// Пользовательский регулятор едет до сборки модуля одной строкой (ctrl_body в запросах
+// движков, ключи кэша модулей и DLL): раздел подготовки, разделитель \x1e, тело шага.
+// Без подготовки — одно тело, как раньше. Разбирают adaptive_ctrl_source и CtrlCpuFn.
+inline std::string adaptive_ctrl_pack(const std::string& prep, const std::string& body) {
+    bool blank = true;
+    for (char ch : prep) if (!std::isspace((unsigned char)ch)) { blank = false; break; }
+    return blank ? body : prep + '\x1e' + body;
+}
+inline void adaptive_ctrl_unpack(const std::string& packed, std::string& prep, std::string& body) {
+    const size_t p = packed.find('\x1e');
+    if (p == std::string::npos) { prep.clear(); body = packed; return; }
+    prep = packed.substr(0, p);
+    body = packed.substr(p + 1);
+}
 
 inline bool adaptive_resolve_ctrl(const std::string& name_in, int q, AdaptiveCtrlResolved& r, std::string& err) {
     r = AdaptiveCtrlResolved();
@@ -335,7 +387,7 @@ inline bool adaptive_resolve_ctrl(const std::string& name_in, int q, AdaptiveCtr
         r.def = adaptive_ctrl_defaults(UCUDA_CTRL_FILTER, q);
     } else {
         r.id = UCUDA_CTRL_CUSTOM;
-        r.body = u.body;
+        r.body = adaptive_ctrl_pack(u.prep, u.body);
         r.hairer_rules = u.hairer_rules != 0;
         if (u.par_names.size() > (size_t)UCUDA_CTL_NPAR) {
             err = "controller '" + name + "': at most " + std::to_string(UCUDA_CTL_NPAR) + " parameters";
@@ -353,15 +405,26 @@ inline bool adaptive_resolve_ctrl(const std::string& name_in, int q, AdaptiveCtr
 }
 
 // Текст пользовательского регулятора для модуля ядра: ставится между раскладкой
-// ucuda_adaptive.cuh (UCUDA_ADAPT_LAYOUT_ONLY) и его драйвером. Пустое тело — пустой
-// текст (встроенные регуляторы). line_directive — нумерация ошибок в координатах тела
-// (только когда за функцией ничего нет: #line действует до конца файла).
-inline std::string adaptive_ctrl_source(const std::string& body, bool line_directive = false) {
-    if (body.empty()) return std::string();
+// ucuda_adaptive.cuh (UCUDA_ADAPT_LAYOUT_ONLY) и его драйвером. packed — раздел подготовки
+// и тело (adaptive_ctrl_pack); пусто — пустой текст (встроенные регуляторы). Обе функции
+// __forceinline__: тело встраивается в попытку шага, подготовка — в ucuda_ad_init /
+// ucuda_ad_restart (ucuda_ad_prepare_ctl), как константы встроенных законов. line_directive —
+// нумерация ошибок в координатах раздела ("prepare") и тела ("controller"); только когда
+// за функциями ничего нет: #line действует до конца файла.
+inline std::string adaptive_ctrl_source(const std::string& packed, bool line_directive = false) {
+    if (packed.empty()) return std::string();
+    std::string prep, body;
+    adaptive_ctrl_unpack(packed, prep, body);
     std::string s = "#define UCUDA_HAS_CUSTOM_CTRL 1\n"
-                    "__device__ __host__ __forceinline__ void ucuda_ctrl_custom(const UcudaCtlIn& in, "
-                    "UcudaCtlMem& m, UcudaCtlOut& o) {\n"
-                    "    (void)in; (void)m; (void)o;\n";
+                    "__device__ __host__ __forceinline__ void ucuda_ctrl_custom_prep(const numb* c, int q, "
+                    "numb* k) {\n"
+                    "    (void)c; (void)q; (void)k;\n";
+    if (line_directive) s += "#line 1 \"prepare\"\n";
+    s += prep;
+    s += "\n}\n"
+         "__device__ __host__ __forceinline__ void ucuda_ctrl_custom(const UcudaCtlIn& in, "
+         "UcudaCtlMem& m, UcudaCtlOut& o) {\n"
+         "    (void)in; (void)m; (void)o;\n";
     if (line_directive) s += "#line 1 \"controller\"\n";
     s += body;
     s += "\n}\n";
@@ -445,8 +508,10 @@ inline bool adaptive_build_params(const AdaptiveSettings& s, const AdaptiveCode&
             }
     }
     if (cr.id == UCUDA_CTRL_CUSTOM) {
+        std::string prep, body;
+        adaptive_ctrl_unpack(cr.body, prep, body);
         bool blank = true;
-        for (char ch : cr.body) if (!std::isspace((unsigned char)ch)) { blank = false; break; }
+        for (char ch : body) if (!std::isspace((unsigned char)ch)) { blank = false; break; }
         if (blank) { err = "controller '" + s.ctrl + "' has an empty body"; return false; }
         if (ctrl_body) *ctrl_body = cr.body;
     }
