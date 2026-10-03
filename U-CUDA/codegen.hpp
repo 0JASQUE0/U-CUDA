@@ -38,6 +38,11 @@ struct System {
 // DOPRI78 — Dormand-Prince 8(7), 13-стадийный embedded метод (см. scheme_dopri78
 // в codegen.cpp). Сейчас используется только 8-й порядок (b[0]); 7-й порядок (z)
 // тоже считается — резерв под будущий адаптивный шаг по |y-z|.
+// RK45 — Dormand-Prince 5(4)7M, решатель ode45 / scipy RK45: 6 стадий на шаг,
+// 7-я (FSAL, f в новой точке) нужна только оценке ошибки. DOP853 — метод
+// Хайрера 8(5,3), 12 стадий, со встроенными оценщиками 5-го и 3-го порядков и
+// плотным выходом 7-го порядка. Обе схемы с постоянным шагом используют только
+// старшее решение; оценщики — задел под адаптивный шаг.
 // ComplexCD — та же композиция, что CD, но с комплексными полушагами:
 // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6, где s = a[0] — тот же
 // коэффициент симметрии, что у CD (дефолт 0.5). h1 + h2 = h при любом s; при
@@ -117,7 +122,8 @@ enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, Comp
                     ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
-                    GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy, Map };
+                    GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy,
+                    RK45, DOP853, Map };
 
 // Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
 int gbs_stage_count(Scheme sch);
@@ -137,6 +143,13 @@ std::vector<int> gbs_substeps(int K);
 // double берёт c[0], dd — c[0..1], qd — все четыре.
 // kDopri78A[i][j] = a_{i+1, j+1}; kDopri78B[0] — веса 8-го порядка, [1] — 7-го.
 struct MultiDoubleCoef { double c[4]; };
+
+// Веса оценки ошибки встроенной пары w = b - b^ (b — S весов старшего решения, b^ — lc
+// весов оценочного, lc >= S; недостающие b — нули), с точностью double-double (two_sum):
+// оценка E = h*sum(w_j k_j) считается одной суммой, без вычитания близких решений.
+// Общая для тела emb (codegen) и CPU-интегратора — веса у них совпадают побитово.
+void adaptive_err_weights(const MultiDoubleCoef* b, int S, const MultiDoubleCoef* bh, int lc,
+                          MultiDoubleCoef* w);
 extern const MultiDoubleCoef kDopri78A[13][12];
 extern const MultiDoubleCoef kDopri78B[2][13];
 // "DOPRI78 (legacy)" — дроби статьи Prince & Dormand (1981) как есть, без
@@ -146,9 +159,113 @@ extern const MultiDoubleCoef kDopri78B[2][13];
 extern const MultiDoubleCoef kDopri78LegacyA[13][12];
 extern const MultiDoubleCoef kDopri78LegacyB[2][13];
 
+// RK45 — Dormand-Prince 5(4)7M. Коэффициенты — точные дроби (взяты из
+// исходника scipy RK45 и проверены точной арифметикой: b — порядок 5, b^ —
+// порядок 4), суммой до четырёх double, как у DOPRI78.
+// kRK45A[i][j] = a_{i,j}, строка 6 = b (стадия FSAL, f(y_{n+1})).
+// kRK45B[0] — b (5-й порядок, им идёт шаг), [1] — b^ (4-й, оценщик).
+// kRK45P — плотный выход Шампайна 4-го порядка (матрица P scipy).
+extern const MultiDoubleCoef kRK45A[7][6];
+extern const MultiDoubleCoef kRK45B[2][7];
+extern const MultiDoubleCoef kRK45P[7][4];
+
+// DOP853 — метод Хайрера 8(5,3), 12 стадий. Старт — 30-значные литералы
+// (scipy, dop853_coefficients.py), дальше та же процедура, что у DOPRI78:
+// Ньютон с минимальной нормой поправки на всех 200 условиях порядка <= 8 плюс
+// суммы строк a_ij = c_i с точными узлами (в c2..c5 входит sqrt(6)); структура
+// нулей и дроби 1/27, 19/512, -9/512 сохранены. Невязка 3e-78 (была 6e-29),
+// поправки ~5e-29 — в пределах опубликованной точности.
+// kDop853A[i][j] = a_{i,j} для стадий 0..11; kDop853B — b (8-й порядок).
+// kDop853E5 / kDop853E3 — b - b^ оценщиков 5-го и 3-го порядков по 13 стадиям
+// (стадия 12 = f(y_{n+1})): веса b^(5) уточнены линейно до 4e-77, b^(3) —
+// точные дроби 31/127, 12675/17272, 3/136.
+// kDop853AExt — стадии 13..15 плотного выхода, kDop853D — его коэффициенты
+// d4..d7; они влияют только на интерполированные значения и оставлены как
+// опубликованы (~30 знаков).
+extern const MultiDoubleCoef kDop853A[12][11];
+extern const MultiDoubleCoef kDop853B[12];
+extern const MultiDoubleCoef kDop853E5[13];
+extern const MultiDoubleCoef kDop853E3[13];
+extern const MultiDoubleCoef kDop853AExt[3][15];
+extern const MultiDoubleCoef kDop853D[4][16];
+
 // Генерирует тело шага схемы в виде C/CUDA-кода (строки вида
 // "X[0] = X[0] + h * (...);"). Бросает std::runtime_error при ошибке разбора.
 std::string codegen_scheme(const System& s, Scheme sch);
+
+// ---- Адаптивный шаг ---------------------------------------------------------
+// Схемы со встроенной оценкой ошибки (RK45, DOPRI78 обоих видов, DOP853) дают,
+// кроме тела шага с постоянным h, четыре тела функций. Обёртку с сигнатурой
+// печатает потребитель (шаблон ядра, модуль КРС, CPU), поэтому здесь — только
+// тела, а сигнатуры зафиксированы так (N — число переменных):
+//   rhs  (const numb* X, const numb* a, numb* F)            F = f(X)
+//   emb  (const numb* X, const numb* F0, const numb* a, const numb h,
+//         numb* Y, numb* E, numb* F1, numb* W)
+//        Пробный шаг из X, где F0 = f(X) уже посчитана (FSAL / прошлый шаг):
+//        Y — старшее решение (побитово то же, что даёт тело постоянного шага
+//        при этом h), E — nlo оценок ошибки подряд (E[m*N + i] = Y_i - Yhat_m,i,
+//        считаются по разности весов, а не вычитанием решений),
+//        F1 = f(Y), W — стадии W[s*N + i] (нужны плотному выходу).
+//   dprep(const numb* X, const numb* Y, const numb* F0, const numb* F1,
+//         const numb* a, const numb h, numb* W, numb* D)
+//        Плотный выход принятого шага [t, t+h] в D (dsize*N чисел). DOP853
+//        досчитывает здесь три стадии, остальные вычислений f не делают.
+//   deval(const numb* D, const numb th, numb* Yo)   y(t + th*h), th в [0, 1]
+struct AdaptiveCode {
+    std::string rhs, emb, dprep, deval;
+    int p = 0;           // порядок метода
+    int q = 0;           // порядок оценщика: показатель регулятора 1/(q+1)
+    int nlo = 0;         // число оценок ошибки (DOP853: [0] — по 5-му, [1] — по 3-му порядку)
+    int wstages = 0;     // сколько стадий пишет W (с плотным выходом)
+    int dsize = 0;       // размер D в единицах N
+    int emb_rhs = 0;     // новых вычислений f на одну попытку шага
+    int dprep_rhs = 0;   // вычислений f на подготовку плотного выхода
+    int dense_order = 0; // порядок плотного выхода
+};
+// Верхние границы для буферов драйвера (kernels/ucuda_adaptive.cuh).
+constexpr int kAdaptMaxStages = 16;
+constexpr int kAdaptMaxDense  = 8;
+constexpr int kAdaptMaxLow    = 2;
+bool scheme_supports_adaptive(Scheme sch);
+// Бросает std::runtime_error для схемы без встроенной оценки.
+AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
+
+// Адаптивный шаг экстраполяторов: вложенная пара из одних и тех же стадий. Y — по всем K
+// стадиям (веса и порядок постоянного шага), младшее решение — по первым K-1 (свои веса,
+// q = extrapolation_order(K-1)), E = sum (alpha_k - beta_k) T_k. F1 = f(Y) — FSAL и эрмитов
+// плотный выход 3-го порядка. Нужно K >= 2. Принятый шаг с тем же h — побитово шаг
+// постоянного Extr / GBS (см. codegen.cpp).
+//   base_body — тело шага базы (как для wrap_extrapolation), base_rhs — вычислений f на
+//   шаг базы (scheme_rhs_per_step, может быть дробным), 0 — неизвестно (тогда счётчик f
+//   видит только F1).
+AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
+                                            const std::vector<int>& n, int p, bool symmetric,
+                                            const std::string& base_name, double base_rhs);
+// ExtrZ(база|n1..nK): то же над комплексным ядром базы (codegen_scheme_complex_core), стадии и
+// суммы — ucmplx, Y и E — их Re; веса симметричные (extrapolation_symmetric(true, ...)).
+// base_rhs — как у codegen_adaptive_extrapolation.
+AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
+                                                    const std::vector<int>& n, int p,
+                                                    const std::string& base_name, double base_rhs = 0);
+// GBS 2-4 ... 2-4-6-8-10-12 (K = gbs_stage_count). f(X) первой стадии берётся из F0.
+AdaptiveCode codegen_adaptive_gbs(const System& s, int K);
+// Вычислений f на шаг встроенной явной схемы постоянного шага; 0 — неизвестно (неявные, CD,
+// комплексные: f там по компонентам или внутри Ньютона).
+int builtin_scheme_rhs_per_step(const std::string& name);
+// Вычислений f на шаг любой схемы по имени, в единицах «полная f» (все N компонент); 0 —
+// неизвестно (неявные с Ньютоном, кастомная КРС, Comp/Extr над такой базой). Сверх таблицы
+// явных схем: Euler-Cromer, SEMP — по одной f на проход; CD-семейство — проходы x (явный
+// полушаг 1 + неявный), неявный полушаг (и стадия SIMP, и D) — 1 по компоненте, линейной по
+// своей переменной, CD_ITERS по нелинейной, делённое на N (поэтому дробное); комплексные CD
+// считаются так же (f в комплексной арифметике дороже, но вызов — один); GBS — sum n_k + 1;
+// Extr(база|n) / ExtrZ — sum n_k x база; Comp(база|g) — число g x база.
+double scheme_rhs_per_step(const System& s, const std::string& name);
+// Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
+// и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
+bool adaptive_scheme_name_supported(const std::string& name);
+// Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
+// у Extr с кастомной базой неизвестен — 7.
+int adaptive_scheme_q_guess(const std::string& name);
 
 // Emits a human-readable C-code mirror of what the CPU integrator
 // (integrator.cpp::step_*) actually computes. Now identical to codegen_scheme

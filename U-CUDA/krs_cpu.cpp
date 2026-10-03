@@ -1,4 +1,5 @@
 ﻿#include "krs_cpu.h"
+#include "adaptive_settings.h"   // adaptive_ctrl_source
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -385,6 +386,7 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
         if (pos == std::string::npos) continue;
 
         int ln = 0;
+        std::string where;   // у регулятора два куска: "prepare" — раздел подготовки
         if (pos > 0 && line[pos - 1] == ')') {
             const size_t close = pos - 1;
             const size_t open  = line.rfind('(', close);
@@ -396,14 +398,632 @@ void parse_cl_log(const std::string& log, std::vector<KrsCpuDiag>& diags) {
                 for (char c : num)
                     if (!std::isdigit((unsigned char)c)) { digits = false; break; }
                 if (digits) ln = std::atoi(num.c_str());
+                if (line.compare(0, open, "prepare") == 0) where = "prepare section: ";
             }
         }
-        diags.push_back({ ln, line.substr(pos + 2) });   // отрезаем ": "
+        diags.push_back({ ln, where + line.substr(pos + 2) });   // отрезаем ": "
         if (diags.size() >= 20) break;                   // не заливаем UI простынёй
     }
 }
 
+// Собирает source в DLL каталога кэша key (если её там ещё нет) и возвращает путь к
+// ней. Вызывать под g_compile_mtx. Общая часть КРС и регулятора шага.
+bool build_cached_dll(const std::string& source, unsigned long long key, std::string& dll,
+                      std::vector<KrsCpuDiag>& diags) {
+    const std::string dir = cache_dir(key);
+    const std::string src = dir + "krs.cpp";
+    const std::string log = dir + "build.log";
+    dll = dir + "krs.dll";
+
+    // Кэш: тот же исходник -> DLL уже собрана.
+    if (GetFileAttributesA(dll.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+    FILE* f = nullptr;
+    if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
+        diags.push_back({ 0, "failed to write " + src });
+        return false;
+    }
+    fwrite(source.data(), 1, source.size(), f);
+    fclose(f);
+
+    std::string why;
+    const std::string vcvars = vcvars_path(why);
+
+    // /TP — компилировать как C++ (см. комментарий к make_source);
+    // /LD — DLL; /O2 — оптимизация (ради неё всё и затевается);
+    // /Fe /Fo /Fd — артефакты в каталог кэша, чтобы не сорить рядом с exe.
+    //
+    // Пути к /Fo и /Fd задаём ПОФАЙЛОВО, а не каталогом: каталог
+    // оканчивается на '\', и в "...\dir\" обратный слэш экранирует
+    // закрывающую кавычку — аргументы слипаются, cl падает с C1083.
+    // /I — каталог с configCUDA.h (его копию post-build кладёт в kernels\
+    // рядом с .exe; оттуда же его читает NVRTC-путь, так что CPU и GPU
+    // видят один и тот же файл).
+    const std::string inc_dir = exe_dir() + "\\kernels";
+
+    const std::string cmd =
+        // /fp:precise — умолчание MSVC, но задано явно: double-double
+        // держится на безошибочных преобразованиях вида (s - a), и при
+        // /fp:fast компилятор вправе свернуть их в ноль. Тогда точность
+        // молча упала бы до обычного double, а сборка прошла бы успешно.
+        "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /fp:precise /LD"
+        " /I\"" + inc_dir + "\""
+        " /Fe:\"" + dll + "\""
+        " /Fo:\"" + dir + "krs.obj\""
+        " /Fd:\"" + dir + "krs.pdb\""
+        " \"" + src + "\"\"";
+
+    std::string build_out;
+    const int rc = run_logged(cmd, log, build_out);
+    if (rc != 0 || GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        parse_cl_log(oem_to_utf8(build_out), diags);
+        if (diags.empty())
+            diags.push_back({ 0, "cl.exe exited with code " + std::to_string(rc) });
+        DeleteFileA(dll.c_str());   // не оставляем полуфабрикат в кэше
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+// Часть 4. Пользовательский регулятор шага
+//
+// Тело — внутрь функции с той же сигнатурой, что ucuda_ctrl_custom на GPU, над
+// раскладкой kernels/ucuda_adaptive.cuh (структуры, нормы, помощники). Заголовок
+// читается из kernels\ рядом с .exe — тем же файлом, что у NVRTC; его текст входит
+// в ключ кэша, иначе после правки заголовка подхватилась бы DLL со старой раскладкой.
+namespace {
+
+constexpr int kCtrlPreludeVersion = 2;   // 2: раздел подготовки ucuda_ctrl_custom_prep_c
+
+// packed — раздел подготовки и тело (adaptive_ctrl_pack).
+std::string make_ctrl_source(const std::string& packed) {
+    std::string prep, body;
+    adaptive_ctrl_unpack(packed, prep, body);
+    std::ostringstream o;
+    o << "#include <cmath>\n"
+         "#include <cstdlib>\n"
+         "using std::abs;\n"
+         "#include \"configCUDA.h\"\n"
+         "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
+         "#define UCUDA_ADAPT_LAYOUT_ONLY\n"
+         "#include \"ucuda_adaptive.cuh\"\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_ctrl_custom_prep_c(const numb* c, int q, numb* k) {\n"
+         "    (void)c; (void)q; (void)k;\n"
+         "#line 1 \"prepare\"\n"
+      << prep << "\n}\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_ctrl_custom_c(const UcudaCtlIn* in_p, UcudaCtlMem* m_p, UcudaCtlOut* o_p) {\n"
+         "    const UcudaCtlIn& in = *in_p; UcudaCtlMem& m = *m_p; UcudaCtlOut& o = *o_p;\n"
+         "    (void)in; (void)m; (void)o;\n"
+         "#line 1 \"controller\"\n"
+      << body << "\n}\n";
+    return o.str();
+}
+
+unsigned long long ctrl_hash_key(const std::string& body, const std::string& header) {
+    unsigned long long h = 1469598103934665603ULL;      // FNV-1a
+    auto mix = [&](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    const char tag[] = "step-controller";
+    mix(tag, sizeof tag);
+    mix(body.data(), body.size());
+    mix(header.data(), header.size());
+    const int ver = kCtrlPreludeVersion;
+    mix(&ver, sizeof ver);
+    const int numb_bytes = (int)sizeof(numb);
+    mix(&numb_bytes, sizeof numb_bytes);
+    return h;
+}
+
+} // namespace
+
+// Часть 5. Адаптивный шаг нативным кодом (AdaptiveCpuModule)
+//
+// Исходник DLL повторяет устройство GPU-модуля свипов: перед kernels/adaptive_part.cu
+// (тела схемы, раскладка драйвера, регулятор, драйвер, поиск пиков) стоит то, что на GPU
+// даёт шаблон с cudaLibrary.cu, — PeakStream (его текст вырезается из cudaLibrary.cu) и
+// значение узла сетки; __device__ / __host__ / __forceinline__ сняты макросами, ядра
+// свипов выключены (UCUDA_AD_NO_SWEEP_KERNELS), размерность — AMOUNTOFX этой DLL.
+// par_or_var на GPU — макрос модуля, здесь — переменная потока (классика БД её ставит).
+namespace {
+
+constexpr int kAdModuleVersion = 6;   // 5: вход ucuda_cpu_ad_phase; 6: отмена в phase / endpoint
+
+// Подстановка плейсхолдера {{name}} во всех вхождениях.
+void replace_all(std::string& s, const std::string& from, const std::string& to) {
+    for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + to.size()))
+        s.replace(p, from.size(), to);
+}
+
+std::string strip_bom(std::string s) {
+    if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+        s.erase(0, 3);
+    return s;
+}
+
+// struct PeakStream { ... }; из текста cudaLibrary.cu: от строки "struct PeakStream" до
+// первой строки "};". Пусто — не нашлось.
+std::string extract_peak_stream(const std::string& lib) {
+    size_t b = lib.find("\nstruct PeakStream");
+    while (b != std::string::npos) {
+        const char c = b + 18 < lib.size() ? lib[b + 18] : '\0';
+        if (c == '\r' || c == '\n') break;
+        b = lib.find("\nstruct PeakStream", b + 1);
+    }
+    if (b == std::string::npos) return {};
+    const size_t e = lib.find("\n};", b);
+    if (e == std::string::npos) return {};
+    return lib.substr(b + 1, e + 3 - (b + 1)) + "\n";
+}
+
+// Текст от строки start до конца функции, начинающейся со строки fn_start (первая
+// закрывающая скобка в начале строки после неё). Пусто — не нашлось.
+std::string extract_through_function(const std::string& src, const std::string& start,
+                                     const std::string& fn_start) {
+    const size_t b = src.find(start);
+    if (b == std::string::npos) return {};
+    const size_t f = src.find(fn_start, b);
+    if (f == std::string::npos) return {};
+    const size_t e = src.find("\n}", f);
+    if (e == std::string::npos) return {};
+    return src.substr(b, e + 2 - b) + "\n";
+}
+
+// Из signal_metrics.template.cu — то, чем GPU-ядра метрик сводят точку: номера метрик
+// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats и smFinalize; из
+// cudaLibrary.cu — ucuda_heapsort (медиана). Сами циклы и ядра шаблона не нужны.
+// Пусто — что-то не нашлось.
+std::string extract_metrics_pieces(const std::string& tmpl, const std::string& lib) {
+    const std::string heap = extract_through_function(lib, "__device__ __host__ __forceinline__ void ucuda_sift_down",
+                                                      "__device__ __host__ void ucuda_heapsort(");
+    const size_t b = tmpl.find("#define SIGM_MAX");
+    const size_t e = tmpl.find("// loopCalculateDiscreteModelPeaks_int + MetricsAccum", b == std::string::npos ? 0 : b);
+    const std::string fin = extract_through_function(tmpl, "__device__ int smFinalize(", "__device__ int smFinalize(");
+    if (heap.empty() || b == std::string::npos || e == std::string::npos || fin.empty()) return {};
+    return heap + "#define SIGM_MINMAX_INTERP 1\n" + tmpl.substr(b, e - b) + fin;
+}
+
+std::string make_ad_module_source(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                                  const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                                  const std::string& prelude, const std::string& peak_stream,
+                                  std::string adaptive_part, const std::string& metrics_pieces,
+                                  const std::string& metrics_part) {
+    const bool dense = !dprep.empty() && !deval.empty();
+    replace_all(adaptive_part, "{{KRS_RHS_BODY}}", rhs);
+    replace_all(adaptive_part, "{{KRS_EMB_BODY}}", emb);
+    replace_all(adaptive_part, "{{KRS_DPREP_BODY}}", dense ? dprep : std::string());
+    replace_all(adaptive_part, "{{KRS_DEVAL_BODY}}", dense ? deval : std::string());
+    replace_all(adaptive_part, "{{CTRL_CUSTOM}}", adaptive_ctrl_source(ctrl_body));
+    std::ostringstream o;
+    o << "#include <cmath>\n"
+         "#include <cstdlib>\n"
+         "#include <cstdint>\n"
+         "using std::abs;\n"
+         "#define AMOUNTOFX " << amountOfX << "\n"
+         "static thread_local int ucuda_cpu_par_or_var = 1;\n"
+         "#define par_or_var ucuda_cpu_par_or_var\n"
+      << prelude << "\n"
+         "#include \"configCUDA.h\"\n"
+         "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
+         "#define __device__\n"
+         "#define __host__\n"
+         "#define __forceinline__ inline\n"
+         "static inline int atomicAdd(int* p, int v) { const int o = *p; *p += v; return o; }\n"
+         // getValueByIdx / getValueByIdx_log из cudaLibrary.cu (та же формула узла).
+         "static inline numb getValueByIdx(const size_t idx, const int nPts, const numb lo, const numb hi,\n"
+         "                                 const int valueNumber) {\n"
+         "    if (nPts <= 0) return lo;\n"
+         "    if (nPts == 1) return hi;\n"
+         "    const int64_t divisor = (valueNumber == 0) ? 1 : nPts;\n"
+         "    return ucuda_node_value((int)(((int64_t)idx / divisor) % nPts), nPts, lo, hi);\n"
+         "}\n"
+         "static inline numb getValueByIdx_log(const int idx, const int nPts, const numb lo, const numb hi,\n"
+         "                                     const int valueNumber) {\n"
+         "    const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);\n"
+         "    return ucuda_node_value_log(n, nPts, lo, hi);\n"
+         "}\n"
+      << peak_stream
+      << (dense ? metrics_pieces : std::string())
+      << "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
+         "#define UCUDA_AD_LYAPUNOV 1\n";
+    if (!dense) o << "#define UCUDA_AD_NO_DENSE 1\n";
+    o << adaptive_part << "\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "int ucuda_cpu_ad_endpoint(const double* ic, const double* a, const UcudaAdaptParams* P, double T,\n"
+         "                          double* y, double* st, const volatile int* cancel) {\n"
+         "    const UcudaKrsFns K{};\n"
+         "    UcudaAdaptState S;\n"
+         "    ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, a, *P);\n"
+         "    while (S.t < T && !S.diverged) {\n"   // отмена — как у endpoint_kernel_ad
+         "        ucuda_ad_step(S, K, a, *P, T);\n"
+         "        if ((S.st.nacc & 1023ULL) == 0 && cancel != nullptr && *cancel != 0) break;\n"
+         "    }\n"
+         "    for (int k = 0; k < AMOUNTOFX; ++k) y[k] = S.X[k];\n"
+         "    st[0] = (double)S.st.nacc; st[1] = (double)S.st.nrej; st[2] = (double)S.st.nforced;\n"
+         "    st[3] = (double)S.st.nrhs; st[4] = S.st.hmin; st[5] = S.st.hmax;\n"
+         "    st[6] = S.st.nacc > 0 ? S.st.hsum / (double)S.st.nacc : 0.0;\n"
+         "    st[7] = (double)S.diverged;\n"
+         "    return S.diverged ? 0 : 1;\n"
+         "}\n"
+         "extern \"C\" __declspec(dllexport)\n"
+         "void ucuda_cpu_ad_lyap(int ls, int continuation, int nPts, double lo, double hi, int reverse,\n"
+         "    int logScale, int mutParamIdx, const double* baseValues, int amountOfValues, const double* baseX,\n"
+         "    const UcudaAdaptParams* P, int axisKind, double tolRatio, double tTr, double NT, int nBlocks,\n"
+         "    int nWarm, double eps, int renorm, double maxValue, double* result, double* stats,\n"
+         "    const volatile int* cancel, int* progress) {\n"
+         "    const UcudaKrsFns K{};\n"
+         "    if (ls) ucuda_lyap_chain<AMOUNTOFX>(K, continuation, nPts, lo, hi, reverse, logScale, mutParamIdx,\n"
+         "        baseValues, amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm,\n"
+         "        maxValue, result, stats, cancel, progress);\n"
+         "    else    ucuda_lyap_chain<1>(K, continuation, nPts, lo, hi, reverse, logScale, mutParamIdx,\n"
+         "        baseValues, amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm,\n"
+         "        maxValue, result, stats, cancel, progress);\n"
+         "}\n";
+    o << R"CPU(
+// LLE / LS: классика кусками [i0, i1) — CPU раздаёт куски потокам (ucuda_lyap_classic_range).
+extern "C" __declspec(dllexport)
+void ucuda_cpu_ad_lyap_range(int ls, int i0, int i1, int nPts, double lo, double hi, int logScale,
+    int mutParamIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* P, int axisKind, double tolRatio, double tTr, double NT, int nBlocks,
+    int nWarm, double eps, int renorm, double maxValue, double* result, double* stats,
+    const volatile int* cancel, int* progress) {
+    const UcudaKrsFns K{};
+    if (ls) ucuda_lyap_classic_range<AMOUNTOFX>(K, i0, i1, nPts, lo, hi, logScale, mutParamIdx, baseValues,
+        amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm, maxValue, result,
+        stats, cancel, progress);
+    else    ucuda_lyap_classic_range<1>(K, i0, i1, nPts, lo, hi, logScale, mutParamIdx, baseValues,
+        amountOfValues, baseX, *P, axisKind, tolRatio, tTr, NT, nBlocks, nWarm, eps, renorm, maxValue, result,
+        stats, cancel, progress);
+}
+)CPU";
+    if (dense && !metrics_part.empty()) o << "#define UCUDA_AD_NO_METRICS_KERNELS 1\n" << metrics_part << "\n"
+      << R"CPU(
+// Метрики 1D: классика — calculateDiscreteModelMetricsAdCUDA по точкам [i0, i1) (строки выходов
+// с i0, outMetrics[m * (i1 - i0) + row]), continuation — signalMetricsContinuationAdKernel строка в
+// строку (outMetrics[m * nPts + j], intervals — одна строка). Точка — ucudaAdMetricsRun (сетка или
+// узлы шага, raw). Возвращает 0 при отмене.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_metrics(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+    int logScale, int parOrVar, int mutIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* Pbase, int axisKind, double tolRatio, int writableVar, double maxValue,
+    double* intervals, unsigned long long peakStride, int peakCapacity, double* outMetrics, int metricMask,
+    int* flags, double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters,
+    int raw, int peakInterp, double* adStats, const volatile int* cancelFlag, int* progress) {
+    const UcudaKrsFns K{};
+    numb res[SIGM_COUNT];
+    if (!continuation) {
+        ucuda_cpu_par_or_var = parOrVar;
+        const numb ranges[2] = { (numb)lo, (numb)hi };
+        const int  mut[1]    = { mutIdx };
+        const int  kinds[2]  = { axisKind, UCUDA_AXIS_SYSTEM };
+        const int  rows      = i1 - i0;
+        numb localX[AMOUNTOFX];
+        numb localValues[64];   // kMaxAmountOfValues в движке
+        for (int idx = i0; idx < i1; ++idx) {
+            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+            const int row = idx - i0;
+            for (int m = 0; m < SIGM_COUNT; ++m) res[m] = (numb)nan("");
+            UcudaAdaptParams P = *Pbase;
+            ucudaSetupSweepPointAd(nPts, 0, idx, 1, ranges, mut, baseX, baseValues, amountOfValues,
+                logScale ? 1 : 0, kinds, (numb)tolRatio, localX, localValues, P);
+            UcudaAdaptState S;
+            ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
+            const numb dt = (numb)dtOut * (numb)preScaller;
+            const int flag = ucudaAdMetricsRun(S, K, localValues, P, (numb)transientTime, (numb)tRec, dt,
+                (size_t)iters, raw, preScaller, peakInterp, writableVar, (numb)maxValue,
+                intervals != nullptr ? intervals + (size_t)row * peakStride : nullptr, peakCapacity, metricMask,
+                false, cancelFlag, res);
+            if (flags != nullptr) flags[row] = flag;
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)rows + row] = res[m];
+            ucudaAdWriteStats(adStats, row, S);
+            if (progress != nullptr) ++*progress;
+        }
+        return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+    }
+    numb x[AMOUNTOFX];
+    numb a[64];
+    for (int i = 0; i < AMOUNTOFX; ++i) x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues && i < 64; ++i) a[i] = baseValues[i];
+    UcudaAdaptParams P = *Pbase;
+    const int kind = axisKind;
+    UcudaAdaptState S;
+    for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        if (progress != nullptr) ++*progress;
+        const numb v = ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, logScale != 0, reverse != 0);
+        if (kind == UCUDA_AXIS_SYSTEM) a[mutIdx] = v;
+        else ucudaAdApplyStepAxis(kind, v, (numb)tolRatio, P);
+        if (j == 0) ucuda_ad_init(S, K, AMOUNTOFX, x, (numb)0, a, P);
+        else        ucuda_ad_restart(S, K, (numb)0, a, P);
+        const numb dt = (numb)dtOut * (numb)preScaller;
+        const int flag = ucudaAdMetricsRun(S, K, a, P, (numb)transientTime, (numb)tRec, dt, (size_t)iters, raw,
+            preScaller, peakInterp, writableVar, (numb)maxValue, intervals, peakCapacity, metricMask,
+            ucudaAdOut(S.X, (numb)maxValue), cancelFlag, res);
+        if (flags != nullptr) flags[j] = flag;
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((metricMask >> m) & 1) outMetrics[(size_t)m * (size_t)nPts + j] = res[m];
+        ucudaAdWriteStats(adStats, j, S);
+    }
+    return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+}
+)CPU";
+    if (dense) o << R"CPU(
+// Фазовая траектория Analysis — phase_kernel_ad (nvrtc_engine.cpp) строка в строку, одна НУ на вызов.
+// raw = 0 — сетка: total отсчётов с шагом dt от t_skip, data[c * AMOUNTOFX + k]; raw = 1 — узлы шага
+// (не больше max_pts): data и times[c]. logs — попытки (log_cap записей по 4 числа), stats[9] — как у
+// ядра. Возвращает число записанных точек.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_phase(const double* ic, const double* values, const UcudaAdaptParams* Pp, double t_skip,
+    double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data, double* times,
+    double* logs, int* log_count, double* stats, double* final_h, const volatile int* cancel) {
+    const UcudaKrsFns K{};
+    const UcudaAdaptParams& P = *Pp;
+    UcudaAdaptState S;
+    ucuda_ad_init(S, K, AMOUNTOFX, ic, (numb)0, values, P, log_cap > 0 ? logs : nullptr, log_cap);
+    const numb tEnd = t_skip + t_rec;
+#define UCUDA_PH_CANCELLED() ((S.st.nacc & 1023ULL) == 0 && cancel != nullptr && *cancel != 0)
+    bool cut = false;
+    while (S.t < t_skip && !S.diverged && !cut) {
+        ucuda_ad_step(S, K, values, P, t_skip);
+        cut = UCUDA_PH_CANCELLED();
+    }
+    int c = 0;
+    if (!raw) {
+        numb y[AMOUNTOFX];
+        for (; c < total && !S.diverged && !cut; ++c) {
+            numb tt = t_skip + (numb)c * dt;
+            if (tt > tEnd) tt = tEnd;
+            while (S.t < tt && !S.diverged && !cut) {
+                ucuda_ad_step(S, K, values, P, tEnd);
+                cut = UCUDA_PH_CANCELLED();
+            }
+            if (S.diverged || cut) break;
+            ucuda_ad_eval(S, K, values, P, tt, y);
+            for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = y[k];
+        }
+    } else {
+        if (!S.diverged && !cut && max_pts > 0) {
+            for (int k = 0; k < AMOUNTOFX; ++k) data[k] = S.X[k];
+            times[0] = S.t; c = 1;
+        }
+        while (S.t < tEnd && c < max_pts && !S.diverged && !cut) {
+            ucuda_ad_step(S, K, values, P, tEnd);
+            if (S.diverged) break;
+            for (int k = 0; k < AMOUNTOFX; ++k) data[(size_t)c * AMOUNTOFX + k] = S.X[k];
+            times[c] = S.t; ++c;
+            cut = UCUDA_PH_CANCELLED();
+        }
+    }
+#undef UCUDA_PH_CANCELLED
+    *log_count = S.log_n;
+    stats[0] = (double)S.st.nacc; stats[1] = (double)S.st.nrej; stats[2] = (double)S.st.nforced;
+    stats[3] = (double)S.st.nrhs; stats[4] = S.st.hmin; stats[5] = S.st.hmax;
+    stats[6] = S.st.nacc > 0 ? S.st.hsum / (double)S.st.nacc : 0.0;
+    stats[7] = (double)S.diverged;
+    stats[8] = (double)(raw && !S.diverged && S.t < tEnd);
+    *final_h = S.h;
+    return c;
+}
+)CPU";
+    if (dense) o << R"CPU(
+// БД 1D: классика — calculateDiscreteModelPeaksAdCUDA по точкам [i0, i1), continuation —
+// calculateDiscreteModelPeaksAdContCUDA строка в строку.
+extern "C" __declspec(dllexport)
+int ucuda_cpu_ad_bif(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+    int logScale, int sweepVar, int mutIdx, const double* baseValues, int amountOfValues, const double* baseX,
+    const UcudaAdaptParams* Pbase, int axisKind, double tolRatio, int writableVar, double maxValue,
+    double* outPeaks, double* timeOfPeaks, int* flags, unsigned long long peakStride, int peakCapacity,
+    double transientTime, double tRec, double dtOut, int preScaller, unsigned long long iters, int raw,
+    int interp, double* adStats, const volatile int* cancelFlag, int* progress) {
+    const UcudaKrsFns K{};
+    const numb dtS = (numb)dtOut * (numb)preScaller;
+    if (!continuation) {
+        ucuda_cpu_par_or_var = sweepVar ? 0 : 1;
+        const numb ranges[2] = { (numb)lo, (numb)hi };
+        const int  mut[1]    = { mutIdx };
+        const int  kinds[2]  = { axisKind, UCUDA_AXIS_SYSTEM };
+        numb localX[AMOUNTOFX];
+        numb localValues[64];   // kMaxAmountOfValues в движке
+        for (int idx = i0; idx < i1; ++idx) {
+            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+            const int row = idx - i0;
+            UcudaAdaptParams P = *Pbase;
+            ucudaSetupSweepPointAd(nPts, 0, idx, 1, ranges, mut, baseX, baseValues, amountOfValues,
+                logScale ? 1 : 0, kinds, (numb)tolRatio, localX, localValues, P);
+            UcudaAdaptState S;
+            ucuda_ad_init(S, K, AMOUNTOFX, localX, (numb)0, localValues, P);
+            PeakStream   pu;
+            PeakStreamNU pn;
+            if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, dtS, (size_t)iters, peakCapacity);
+            else      pn.init(outPeaks, timeOfPeaks, (size_t)row * peakStride, peakCapacity, interp);
+            const int flag  = ucudaAdPeaksPoint(S, K, localValues, P, (numb)transientTime, (numb)tRec, dtS,
+                (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn, cancelFlag);
+            const int count = raw ? pn.count() : pu.count();
+            flags[row] = (flag == REGIME_OSCILLATION) ? count : flag;
+            ucudaAdWriteStats(adStats, row, S);
+            if (progress != nullptr) ++*progress;
+        }
+        return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+    }
+    numb x[AMOUNTOFX];
+    numb a[64];
+    for (int i = 0; i < AMOUNTOFX; ++i) x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues && i < 64; ++i) a[i] = baseValues[i];
+    UcudaAdaptParams P = *Pbase;
+    UcudaAdaptState S;
+    for (int j = 0; j < nPts; ++j) {
+        if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+        if (progress != nullptr) ++*progress;
+        const numb v = ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, logScale != 0, reverse != 0);
+        if (axisKind == UCUDA_AXIS_SYSTEM) a[mutIdx] = v;
+        else ucudaAdApplyStepAxis(axisKind, v, (numb)tolRatio, P);
+        if (j == 0) ucuda_ad_init(S, K, AMOUNTOFX, x, (numb)0, a, P);
+        else        ucuda_ad_restart(S, K, (numb)0, a, P);
+        PeakStream   pu;
+        PeakStreamNU pn;
+        if (!raw) pu.init(outPeaks, timeOfPeaks, (size_t)j * peakStride, dtS, (size_t)iters, peakCapacity);
+        else      pn.init(outPeaks, timeOfPeaks, (size_t)j * peakStride, peakCapacity, interp);
+        const int flag  = ucudaAdOut(S.X, (numb)maxValue) ? REGIME_UNBOUND
+                        : ucudaAdPeaksPoint(S, K, a, P, (numb)transientTime, (numb)tRec, dtS,
+                                            (size_t)iters, raw, preScaller, writableVar, (numb)maxValue, pu, pn,
+                                            cancelFlag);
+        const int count = raw ? pn.count() : pu.count();
+        flags[j] = (flag == REGIME_OSCILLATION) ? count : flag;
+        ucudaAdWriteStats(adStats, j, S);
+    }
+    return (cancelFlag != nullptr && *cancelFlag != 0) ? 0 : 1;
+}
+)CPU";
+    return o.str();
+}
+
+bool read_kernel_header(const char* name, std::string& out, std::vector<KrsCpuDiag>& diags) {
+    const std::string path = exe_dir() + "\\kernels\\" + name;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+        diags.push_back({ 0, "cannot read " + path });
+        return false;
+    }
+    char buf[4096];
+    size_t k;
+    while ((k = fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, k);
+    fclose(f);
+    return true;
+}
+
+} // namespace
+
+AdaptiveCpuModule::~AdaptiveCpuModule() {
+    if (module_) FreeLibrary((HMODULE)module_);
+}
+
+bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                                const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                                const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
+    if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
+    endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr; phase_ = nullptr;
+    std::string why;
+    if (vcvars_path(why).empty()) {
+        diags.push_back({ 0, "CPU compiler unavailable: " + why });
+        return false;
+    }
+    std::string header, config, part, lib;
+    if (!read_kernel_header("ucuda_adaptive.cuh", header, diags)) return false;
+    if (!read_kernel_header("configCUDA.h", config, diags)) return false;
+    if (!read_kernel_header("adaptive_part.cu", part, diags)) return false;
+    if (!read_kernel_header("cudaLibrary.cu", lib, diags)) return false;
+    const std::string peaks = extract_peak_stream(lib);
+    if (peaks.empty()) {
+        diags.push_back({ 0, "struct PeakStream not found in kernels\\cudaLibrary.cu" });
+        return false;
+    }
+    // Метрики — только модулю с плотным выходом (у них равномерная сетка).
+    std::string metrics_pieces, metrics_part;
+    if (!dprep.empty() && !deval.empty()) {
+        std::string tmpl;
+        if (!read_kernel_header("signal_metrics.template.cu", tmpl, diags)) return false;
+        if (!read_kernel_header("metrics_adaptive_part.cu", metrics_part, diags)) return false;
+        metrics_part = strip_bom(metrics_part);
+        metrics_pieces = extract_metrics_pieces(strip_bom(tmpl), lib);
+        if (metrics_pieces.empty()) {
+            diags.push_back({ 0, "MetricsAccum / smFinalize / ucuda_heapsort not found in kernels\\" });
+            return false;
+        }
+    }
+    // Тексты adaptive_part.cu, PeakStream и метрик входят в исходник, а с ним — в ключ кэша.
+    const std::string source = make_ad_module_source(rhs, emb, dprep, deval, ctrl_body, amountOfX, prelude,
+                                                     peaks, strip_bom(part), metrics_pieces, metrics_part);
+    unsigned long long h = 1469598103934665603ULL;      // FNV-1a
+    auto mix = [&](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    const char tag[] = "adaptive-module";
+    mix(tag, sizeof tag);
+    mix(source.data(), source.size());
+    mix(header.data(), header.size());
+    mix(config.data(), config.size());
+    const int ver = kAdModuleVersion;
+    mix(&ver, sizeof ver);
+
+    std::lock_guard<std::mutex> lock(g_compile_mtx);
+    std::string dll;
+    if (!build_cached_dll(source, h, dll, diags)) return false;
+    HMODULE m = LoadLibraryA(dll.c_str());
+    if (!m) { diags.push_back({ 0, "failed to load " + dll }); return false; }
+    auto pe = GetProcAddress(m, "ucuda_cpu_ad_endpoint");
+    auto pl = GetProcAddress(m, "ucuda_cpu_ad_lyap");
+    if (!pe || !pl) {
+        FreeLibrary(m);
+        diags.push_back({ 0, "the built DLL lacks the adaptive-step entry points" });
+        return false;
+    }
+    module_ = m;
+    endpoint_ = (EndpointFn)pe;
+    lyap_ = (LyapFn)pl;
+    bif_ = (BifFn)GetProcAddress(m, "ucuda_cpu_ad_bif");   // только у модуля с плотным выходом
+    lyap_range_ = (LyapRangeFn)GetProcAddress(m, "ucuda_cpu_ad_lyap_range");
+    metrics_ = (MetricsFn)GetProcAddress(m, "ucuda_cpu_ad_metrics");   // тоже только с плотным выходом
+    phase_ = (PhaseFn)GetProcAddress(m, "ucuda_cpu_ad_phase");         // и фазовая траектория Analysis
+    return true;
+}
+
+CtrlCpuFn::~CtrlCpuFn() {
+    if (module_) FreeLibrary((HMODULE)module_);
+}
+
+bool CtrlCpuFn::compile(const std::string& body, std::vector<KrsCpuDiag>& diags) {
+    if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
+    fn_ = nullptr;
+    prep_ = nullptr;
+
+    std::string why;
+    if (vcvars_path(why).empty()) {
+        diags.push_back({ 0, "CPU compiler unavailable: " + why });
+        return false;
+    }
+    std::string header;
+    {
+        const std::string path = exe_dir() + "\\kernels\\ucuda_adaptive.cuh";
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+            diags.push_back({ 0, "cannot read " + path });
+            return false;
+        }
+        char buf[4096];
+        size_t k;
+        while ((k = fread(buf, 1, sizeof buf, f)) > 0) header.append(buf, k);
+        fclose(f);
+    }
+
+    std::lock_guard<std::mutex> lock(g_compile_mtx);
+    std::string dll;
+    if (!build_cached_dll(make_ctrl_source(body), ctrl_hash_key(body, header), dll, diags))
+        return false;
+    HMODULE m = LoadLibraryA(dll.c_str());
+    if (!m) {
+        diags.push_back({ 0, "failed to load " + dll });
+        return false;
+    }
+    auto p  = GetProcAddress(m, "ucuda_ctrl_custom_c");
+    auto pp = GetProcAddress(m, "ucuda_ctrl_custom_prep_c");
+    if (!p || !pp) {
+        FreeLibrary(m);
+        diags.push_back({ 0, "the built DLL has no ucuda_ctrl_custom_c / ucuda_ctrl_custom_prep_c" });
+        return false;
+    }
+    module_ = m;
+    fn_ = (Fn)p;
+    prep_ = (PrepFn)pp;
+    return true;
+}
 
 KrsCpuStep::~KrsCpuStep() { release(); }
 
@@ -452,57 +1072,11 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 
     std::lock_guard<std::mutex> lock(g_compile_mtx);
 
-    const unsigned long long key = hash_key(body, amountOfX, amountOfValues, prec);
-    const std::string dir = cache_dir(key);
-    const std::string src = dir + "krs.cpp";
-    const std::string dll = dir + "krs.dll";
-    const std::string log = dir + "build.log";
-
     // Кэш: та же схема + та же размерность -> DLL уже собрана.
-    if (GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const std::string source = make_source(body, amountOfX, prec);
-        FILE* f = nullptr;
-        if (fopen_s(&f, src.c_str(), "wb") != 0 || !f) {
-            diags.push_back({ 0, "failed to write " + src });
-            return false;
-        }
-        fwrite(source.data(), 1, source.size(), f);
-        fclose(f);
-
-        // /TP — компилировать как C++ (см. комментарий к make_source);
-        // /LD — DLL; /O2 — оптимизация (ради неё всё и затевается);
-        // /Fe /Fo /Fd — артефакты в каталог кэша, чтобы не сорить рядом с exe.
-        //
-        // Пути к /Fo и /Fd задаём ПОФАЙЛОВО, а не каталогом: каталог
-        // оканчивается на '\', и в "...\dir\" обратный слэш экранирует
-        // закрывающую кавычку — аргументы слипаются, cl падает с C1083.
-        // /I — каталог с configCUDA.h (его копию post-build кладёт в kernels\
-        // рядом с .exe; оттуда же его читает NVRTC-путь, так что CPU и GPU
-        // видят один и тот же файл).
-        const std::string inc_dir = exe_dir() + "\\kernels";
-
-        const std::string cmd =
-            // /fp:precise — умолчание MSVC, но задано явно: double-double
-            // держится на безошибочных преобразованиях вида (s - a), и при
-            // /fp:fast компилятор вправе свернуть их в ноль. Тогда точность
-            // молча упала бы до обычного double, а сборка прошла бы успешно.
-            "cmd.exe /c \"\"" + vcvars + "\" >nul && cl /nologo /TP /O2 /fp:precise /LD"
-            " /I\"" + inc_dir + "\""
-            " /Fe:\"" + dll + "\""
-            " /Fo:\"" + dir + "krs.obj\""
-            " /Fd:\"" + dir + "krs.pdb\""
-            " \"" + src + "\"\"";
-
-        std::string build_out;
-        const int rc = run_logged(cmd, log, build_out);
-        if (rc != 0 || GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            parse_cl_log(oem_to_utf8(build_out), diags);
-            if (diags.empty())
-                diags.push_back({ 0, "cl.exe exited with code " + std::to_string(rc) });
-            DeleteFileA(dll.c_str());   // не оставляем полуфабрикат в кэше
-            return false;
-        }
-    }
+    const unsigned long long key = hash_key(body, amountOfX, amountOfValues, prec);
+    std::string dll;
+    if (!build_cached_dll(make_source(body, amountOfX, prec), key, dll, diags))
+        return false;
 
     HMODULE m = LoadLibraryA(dll.c_str());
     if (!m) {

@@ -129,6 +129,10 @@ public:
     // Рисует 2D-линию (vbo с float[2] на вершину).
     void draw_line(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
+    // Толстая 2D-линия (geometry shader, как у draw_line_3d) с alpha-блендингом: внутри FBO,
+    // поэтому точки, нарисованные после, ложатся поверх. Нет программы — draw_line.
+    void draw_line_thick_2d(GLuint vbo, int point_count, const float mvp[16],
+        const float color[4], float line_width);
 
     // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS; этим же путём рисуются точки
     // 1D-бифуркационных диаграмм. marker < 0 — старый путь: сплошной квадрат, GL-состояние не
@@ -174,6 +178,12 @@ public:
     void draw_points_3d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float point_size);
 
+    // Толстая 3D-линия, окрашенная колормапой по значению в вершине (vbo_val — float на
+    // вершину; значение интерполируется вдоль сегмента). colormap_id — как у draw_heatmap,
+    // reverse: t := 1-t. NaN/Inf — верхний край шкалы. Нет geometry shader — не рисует.
+    void draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count, const float mvp[16],
+        int colormap_id, float vmin, float vmax, bool reverse, float alpha, float line_width);
+
     void end_frame();
 
     GLuint texture_id() const { return color_tex_; }
@@ -200,6 +210,13 @@ private:
     GLuint program_points_ = 0;   // VS_2D + FS_POINT (маска формы маркера)
     GLuint program_3d_ = 0;
     GLuint program_3d_thick_ = 0;
+    GLuint program_2d_thick_ = 0;   // VS_2D + GS_3D_THICK + FS
+    GLint  loc_mvp_2d_thick_ = -1, loc_color_2d_thick_ = -1,
+           loc_viewport_2d_thick_ = -1, loc_thickness_2d_thick_ = -1;
+    GLuint program_3d_cmap_ = 0;    // VS_3D_VAL + GS_3D_THICK_VAL + FS_CMAP
+    GLint  loc_mvp_3d_cmap_ = -1, loc_viewport_3d_cmap_ = -1, loc_thickness_3d_cmap_ = -1,
+           loc_lut_3d_cmap_ = -1, loc_cmap_3d_cmap_ = -1, loc_vmin_3d_cmap_ = -1,
+           loc_vmax_3d_cmap_ = -1, loc_reverse_3d_cmap_ = -1, loc_alpha_3d_cmap_ = -1;
     GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
     GLint  loc_point_size_3d_ = -1;

@@ -11,6 +11,7 @@
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 #include "module_lru.h"
+#include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
 #include <algorithm>
 #include <atomic>
@@ -97,6 +98,20 @@ int launch_block_size(size_t sharedPerThread) {
     return b;
 }
 
+// Ключи профилирования для nvrtcCompileProgram, из переменных окружения (по умолчанию не заданы,
+// код ядра без них — прежний):
+//   UCUDA_NVRTC_LINEINFO=1  — номера строк исходника в модуле: Nsight Compute (SourceCounters)
+//                             раскладывает счётчики по строкам; код ядра не меняется;
+//   UCUDA_NVRTC_MAXRREG=<n> — потолок регистров на поток, для опытов с занятостью.
+// storage держит строку ключа, на которую указывает opts, до вызова компилятора.
+static void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string& storage) {
+    char v[16];
+    DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_LINEINFO", v, sizeof v);
+    if (n > 0 && n < sizeof v && v[0] == '1') opts.push_back("--generate-line-info");
+    n = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", v, sizeof v);
+    if (n > 0 && n < sizeof v) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
+}
+
 // Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
 // живёт дольше вызова.
 const char* nvrtc_fmad_opt() {
@@ -180,6 +195,12 @@ constexpr double kEuler = 2.7182818284590452353602874713527;
 //   ..._int    — только под settleBlocks = TT / NT: это число NT-БЛОКОВ, а не шагов, оно живёт в
 //                host-side счётчиках и на порядки меньше. INT_MAX здесь недостижим на осмысленных
 //                входах, но каст всё равно идёт через проверку, а не вслепую.
+// Блоков NT в транзиенте касательных векторов (к ближайшему, как ucuda_steps_per_block в ядре).
+static inline int lyap_warm_blocks(double vt, double NT)
+{
+    return vt > 0 ? (int)ucuda_steps_per_block((numb)vt, (numb)NT) : 0;
+}
+
 static inline size_t steps_from_time_size_t(double t, double h)
 {
     if (!(h > 0.0) || !(t > 0.0)) return 0;
@@ -382,6 +403,28 @@ float cpu_curand_uniform(CpuRandState* s) {
 // Два отличия от GPU-двойника, оба в лучшую сторону: память — один блок траектории вместо
 // матрицы nPts x record_steps (GPU держит её трижды: d_data + d_outPeaks + d_timeOfPeaks); отмена
 // и прогресс работают на каждой точке свипа, а не только до запуска монолитного kernel'а.
+// Снимок БД 1D для экспорта (правый клик, export_bif1d) и CSV — для веток, которые не заполняют
+// его по ходу счёта (continuation на CPU и GPU, адаптивная цепочка). on_cpu — "device = CPU".
+static void fill_bif1d_snapshot(data_export::Bif1DSnapshot& sn, const Bifurcation1DRequest& req,
+                                bool continuation, bool on_cpu) {
+    sn.values.assign(req.base_values.begin(), req.base_values.end());
+    sn.initial_conditions.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+    sn.tMax          = req.t_max;
+    sn.transientTime = req.transient_time;
+    sn.h             = req.h;
+    sn.gpu_fmad      = get_nvrtc_fmad();
+    sn.preScaller    = req.pre_scaller;
+    sn.writableVar   = req.writable_var;
+    sn.indexOfMutVar = req.sweep_over_var ? req.var_sweep_index : req.param_index;
+    sn.range_lo      = req.param_lo;
+    sn.range_hi      = req.param_hi;
+    sn.log_scale     = req.log_scale;
+    sn.continuation  = continuation;
+    sn.continuation_reverse = continuation && req.continuation_reverse;
+    sn.on_cpu        = on_cpu;
+    sn.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
+}
+
 Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) {
     Bifurcation1DResult res;
     auto fail = [&](const std::string& msg) -> Bifurcation1DResult& {
@@ -510,6 +553,8 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ true);
+    if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -584,6 +629,8 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     res.snapshot.indexOfMutVar = req.sweep_over_var ? req.var_sweep_index : req.param_index;
     res.snapshot.range_lo      = req.param_lo;
     res.snapshot.range_hi      = req.param_hi;
+    res.snapshot.log_scale     = req.log_scale;
+    res.snapshot.on_cpu        = true;
 
     const std::string& OUT_FILE_PATH = req.csv_output_path;
     constexpr int set_precision = 15;
@@ -794,7 +841,41 @@ inline double getValueByIdx_log_local(size_t idx, int nPts, double lo, double hi
 //   ориентацию, поэтому transient_time сохраняет прежний смысл, а результаты сравнимы с классикой.
 //
 // Внутри точки алгоритм в обоих режимах одинаков: Бенеттин с одним вектором возмущения,
-// перенормировка каждые NT единиц времени, lambda = sum(log(|dX|/eps)) / tMax.
+// перенормировка каждые k = ucuda_steps_per_block(NT, h) шагов,
+// lambda = sum(log(|dX|/eps)) / (nBlocks*k*h) — делится на проинтегрированное время, не на tMax.
+// Снимок кривой LLE/LS 1D для экспорта (правый клик, export_lle1d / export_ls1d) и CSV —
+// один на все ветки: CPU, continuation на GPU, адаптивная цепочка. GPU-классика заполняет
+// свой снимок сама, по своим локальным копиям. on_cpu — строка "device = CPU" вместо fmad.
+template <class Snap, class Req>
+static void fill_curve1d_snapshot(Snap& sn, const Req& req, bool continuation, bool on_cpu) {
+    sn.values.assign(req.base_values.begin(), req.base_values.end());
+    sn.initial_conditions.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+    sn.tMax            = req.t_max;
+    sn.NT              = req.NT;
+    sn.vectorTransient = req.vector_transient;
+    sn.transientTime   = req.transient_time;
+    sn.h               = req.h;
+    sn.eps             = req.eps;
+    sn.gpu_fmad        = get_nvrtc_fmad();
+    sn.on_cpu          = on_cpu;
+    sn.indexOfMutVar   = req.sweep_over_var ? req.var_sweep_index : req.param_index;
+    sn.range_lo        = req.param_lo;
+    sn.range_hi        = req.param_hi;
+    sn.log_scale       = req.log_scale;
+    sn.continuation    = continuation;
+    sn.continuation_reverse = continuation && req.continuation_reverse;
+    sn.step_control    = req.adaptive.enabled ? req.adaptive.desc : std::string();
+}
+
+// CSV по csv_output_path для веток, которые пишут его не по ходу счёта: тот же формат, что у
+// правого клика (export_*), — конфиг и строки.
+static void write_curve1d_csv(const LLE1DResult& r, const std::string& path) {
+    if (!path.empty()) data_export::export_lle1d(r, path);
+}
+static void write_curve1d_csv(const LS1DResult& r, const std::string& path) {
+    if (!path.empty()) data_export::export_ls1d(r, path);
+}
+
 LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     LLE1DResult res;
     auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
@@ -827,11 +908,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);   // NT-блоков; от h не зависит
     const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
+    const int nWarm        = lyap_warm_blocks(req.vector_transient, req.NT);   // как в ядре
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // Число шагов в NT-блоке и в прогреве зависит от h, а при h-свипе h своё в
     // каждой точке — считаем их внутри цикла.
-    int ntSteps   = (int)(req.NT / req.h);
-    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
+    int ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)req.h);   // как в ядре
+    size_t skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)req.h);   // как в ядре
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -865,10 +947,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
 
     // Один NT-блок: продвинуть x и щуп, вернуть log(|dX|/eps) и вернуть щуп на
     // расстояние eps. Точная копия тела цикла LLEKernelCUDA.
+    // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
+    // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb& out_log) -> bool {
-        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
 
         double d = 0.0;
@@ -900,8 +984,8 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         if (req.sweep_over_h) {
             // Свипуем сам шаг: a[] не трогаем, пересчитываем число шагов.
             h_local   = p;
-            ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
+            ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)h_local);
+            skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -922,10 +1006,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         }
 
         bool alive = true;
+        int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probe_attached) {
             // Первая точка (и любая после разрыва цепочки): выходим на аттрактор
             // одной траекторией, как классический свип, затем цепляем щуп.
-            if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps, N,
+            // Ровно skipSteps шагов: cpu_loop_model делает ещё шаг после цикла (как ядро).
+            if (skipSteps > 0 && cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps - 1, N,
                                1, 0, req.max_value, nullptr) == 0) {
                 alive = false;
             } else {
@@ -933,8 +1019,11 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
                 probe_attached = true;
             }
         } else {
+            warm = settleBlocks > nWarm ? settleBlocks : nWarm;
+        }
+        {
             numb dummy;
-            for (int b = 0; b < settleBlocks && alive; ++b)
+            for (int b = 0; b < warm && alive; ++b)
                 if (!advance_block(dummy)) alive = false;
         }
 
@@ -946,7 +1035,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         }
 
         if (alive) {
-            res.lyapunov[j] = (double)(sum / (numb)req.t_max);
+            res.lyapunov[j] = (double)(sum / ((numb)nBlocks * (numb)ntSteps * (numb)h_local));
             res.flags[j]    = REGIME_OSCILLATION;
         } else {
             // LLE не различает fixed point: единственная причина «не посчиталось»
@@ -964,6 +1053,8 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
+    write_curve1d_csv(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -1100,7 +1191,7 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullpt
 // run_ls1d_cpu — спектр Ляпунова LS(param) на CPU, оба режима (см. run_lle1d_cpu).
 // Внутри точки — построчный порт LSKernelCUDA: Бенеттин с N векторами возмущения и
 // ортогонализацией Грама-Шмидта каждые NT единиц времени,
-// lambda_k = sum(log(denominators[k]/eps)) / tMax.
+// lambda_k = sum(log(denominators[k]/eps)) / (nBlocks*k*h), k = ucuda_steps_per_block(NT, h).
 // В continuation переносятся траектория x[] и ВСЕ N щупов y[] — к концу точки они уже выстроены
 // вдоль собственных направлений растяжения. Отличие от LLE только в размере состояния (там один
 // щуп, здесь N плюс ортогонализация), поэтому точка дороже примерно в N раз.
@@ -1136,10 +1227,11 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);
     const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
+    const int nWarm        = lyap_warm_blocks(req.vector_transient, req.NT);   // как в ядре
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // См. run_lle1d_cpu: при h-свипе шаг свой в каждой точке.
-    int ntSteps   = (int)(req.NT / req.h);
-    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
+    int ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)req.h);   // как в ядре
+    size_t skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)req.h);   // как в ядре
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -1183,12 +1275,14 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     // Один NT-блок: продвинуть траекторию и все щупы, ортогонализовать, вернуть
     // log(denominators[k]/eps) по каждому направлению и вернуть щупы на eps.
     // Точная копия тела цикла LSKernelCUDA.
+    // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
+    // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb* out_logs) -> bool {
-        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
         for (int j = 0; j < N; ++j)
             if (cpu_loop_model(step.fn(), y.data() + (size_t)j * N, a.data(), h_local,
-                               ntSteps, N, 1, 0, req.max_value, nullptr) == 0) return false;
+                               (size_t)(ntSteps - 1), N, 1, 0, req.max_value, nullptr) == 0) return false;
 
         for (int k = 0; k < N; ++k)
             for (int l = 0; l < N; ++l)
@@ -1217,8 +1311,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                                           req.log_scale);
         if (req.sweep_over_h) {
             h_local   = p;
-            ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
+            ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)h_local);
+            skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -1237,8 +1331,10 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         bool alive = true;
+        int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probes_attached) {
-            if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps, N,
+            // Ровно skipSteps шагов: cpu_loop_model делает ещё шаг после цикла (как ядро).
+            if (skipSteps > 0 && cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps - 1, N,
                                1, 0, req.max_value, nullptr) == 0) {
                 alive = false;
             } else {
@@ -1251,9 +1347,10 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                 probes_attached = true;
             }
         } else {
-            for (int b = 0; b < settleBlocks && alive; ++b)
-                if (!advance_block(nullptr)) alive = false;
+            warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        for (int b = 0; b < warm && alive; ++b)
+            if (!advance_block(nullptr)) alive = false;
 
         std::fill(sum.begin(), sum.end(), 0.0);
         for (int b = 0; alive && b < nBlocks; ++b) {
@@ -1262,7 +1359,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         if (alive) {
-            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / (numb)req.t_max);
+            const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * (numb)h_local;
+            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / tIntegrated);
             res.flags[j] = REGIME_OSCILLATION;
         } else {
             // Как и LLE, LS не различает fixed point — только расходимость.
@@ -1276,6 +1374,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
+    write_curve1d_csv(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -1478,6 +1578,34 @@ struct CpuMetricsAccum {
     }
 };
 
+// Host-двойник ExtremaInterp (signal_metrics.template.cu, SIGM_MINMAX_INTERP): вершина
+// параболы через три соседних отсчёта для максимумов и минимумов. Без него галка Metrics
+// "min/max by interpolated extrema in Fixed" на CPU молча ничего не делала.
+struct CpuExtremaInterp {
+    numb y0 = 0, y1 = 0;
+    size_t n = 0;
+    numb mx = 0, mn = 0;
+    bool haveMax = false, haveMin = false;
+
+    void push(numb y2) {
+        if (n >= 2) {
+            const bool isMax = y1 >= y0 && y1 >= y2 && (y1 > y0 || y1 > y2);
+            const bool isMin = y1 <= y0 && y1 <= y2 && (y1 < y0 || y1 < y2);
+            if (isMax || isMin) {
+                const numb denom = y0 - (numb)2.0 * y1 + y2;
+                numb v = y1;
+                if (std::fabs(denom) > 1e-12) {
+                    const numb delta = (numb)0.5 * (y0 - y2) / denom;
+                    v = y1 - (numb)0.25 * (y0 - y2) * delta;
+                }
+                if (isMax && (!haveMax || v > mx)) { mx = v; haveMax = true; }
+                if (isMin && (!haveMin || v < mn)) { mn = v; haveMin = true; }
+            }
+        }
+        y0 = y1; y1 = y2; ++n;
+    }
+};
+
 inline numb cpu_sm_variance(numb s1, numb s2, size_t n) {
     if (n == 0) return (numb)0;
     const numb inv = (numb)1 / (numb)n;
@@ -1594,14 +1722,21 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
         if (flag != REGIME_OSCILLATION && flag != REGIME_FIXED_POINT) { done(); continue; }
 
         CpuMetricsAccum acc;
-        for (int i = 0; i < pointsInBlock; ++i) acc.push(block[(size_t)i]);
+        CpuExtremaInterp ex;
+        for (int i = 0; i < pointsInBlock; ++i) {
+            acc.push(block[(size_t)i]);
+            if (req.minmax_interp) ex.push(block[(size_t)i]);
+        }
 
         const numb dt = h_local * (numb)req.pre_scaller;
         double r[SIGM_COUNT];
         for (int m = 0; m < SIGM_COUNT; ++m) r[m] = NaN;
-        r[SIGM_MAX]   = (double)acc.mx;
-        r[SIGM_MIN]   = (double)acc.mn;
-        r[SIGM_RANGE] = (double)(acc.mx - acc.mn);
+        numb mxv = acc.mx, mnv = acc.mn;   // как smFinalize: интерполяция только расширяет
+        if (ex.haveMax && ex.mx > mxv) mxv = ex.mx;
+        if (ex.haveMin && ex.mn < mnv) mnv = ex.mn;
+        r[SIGM_MAX]   = (double)mxv;
+        r[SIGM_MIN]   = (double)mnv;
+        r[SIGM_RANGE] = (double)(mxv - mnv);
         r[SIGM_MEAN]  = (double)(acc.shift + acc.s1 / (numb)acc.n);
         if (wantBox) {
             numb vol = (numb)1;
@@ -1744,6 +1879,10 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cu;
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
+    std::string src_ucuda_adaptive_cuh;   // драйвер адаптивного шага (kernels/ucuda_adaptive.cuh)
+    std::string src_adaptive_part;        // адаптивные ядра свипов (kernels/adaptive_part.cu)
+    std::string src_metrics_adaptive_part; // адаптивное ядро метрик (kernels/metrics_adaptive_part.cu)
+    std::string src_lyap_adaptive_part;    // адаптивные LLE/LS (kernels/lyapunov_adaptive_part.cu)
     // curand_kernel.h перехвачен inline-stub'ом в каждом template'е (kernels/*.cu), а
     // `#define CURAND_KERNEL_H_` блокирует реальный header; virtual header'а здесь больше нет —
     // иначе он повторно объявлял бы curandState_t.
@@ -1851,6 +1990,36 @@ struct ParametricEngine::Impl {
     };
     CachedBasinsModule cached_basins;
 
+    // Адаптивный шаг в свипах: bifurcation2d.template.cu + kernels/adaptive_part.cu. Один
+    // модуль на (КРС, тела адаптивного шага, par_or_var): пики БД 1D/2D, признаки бассейнов
+    // и DBSCAN обеих — всё из одного шаблона.
+    struct CachedAdModule {
+        std::string  key;
+        CUmodule     module              = nullptr;
+        CUfunction   kernel_peaks        = nullptr;  // calculateDiscreteModelPeaksAdCUDA
+        CUfunction   kernel_avg          = nullptr;  // calculateDiscreteModelAvgPeaksAdCUDA
+        CUfunction   kernel_dbscan       = nullptr;  // dbscanCUDA (БД 2D)
+        CUfunction   kernel_cdbscan      = nullptr;  // CUDA_dbscan_kernel (бассейны)
+        CUfunction   kernel_search_fixed = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
+        CUfunction   kernel_search_clear = nullptr;  // CUDA_dbscan_search_clear_points_kernel
+    };
+    CachedAdModule cached_ad;
+    // Continuation БД 1D с адаптивным шагом — свой модуль (UCUDA_AD_CONT_KERNEL): ядро с
+    // тремя копиями шага нужно редко, а в общем модуле удлиняло бы каждую первую сборку.
+    CachedSimpleContModule cached_ad_cont;   // calculateDiscreteModelPeaksAdContCUDA
+    // LLE/LS с адаптивным шагом: bifurcation2d.template.cu + общая часть adaptive_part.cu
+    // (без ядер пиков и без плотного выхода) + kernels/lyapunov_adaptive_part.cu.
+    struct CachedLyapAdModule {
+        std::string  key;
+        CUmodule     module     = nullptr;
+        CUfunction   kernel_lle = nullptr;   // lyapunovLLEAdCUDA
+        CUfunction   kernel_ls  = nullptr;   // lyapunovLSAdCUDA
+    };
+    CachedLyapAdModule cached_lyap_ad;
+    // Continuation LLE/LS с адаптивным шагом: тот же текст с UCUDA_LYAP_AD_CONT_ONLY —
+    // однопоточные ядра цепочки lyapunovLLEAdContCUDA / lyapunovLSAdContCUDA.
+    CachedLyapAdModule cached_lyap_ad_cont;
+
     // Fast Synchro — два модуля (mode 0 = on attractor, mode 1 = on grid).
     // Каждый кэширует свой PTX, ключ = hash(krs_body)+amountOfX+":fs_attr"/":fs_grid"
     // + (type_of_synch, error_estim, fs_error_trs) — все три substituted в #define
@@ -1898,6 +2067,9 @@ struct ParametricEngine::Impl {
         CUfunction  kernel_cont = nullptr;   // signalMetricsContinuationKernel
     };
     CachedMetricsModule cached_metrics;
+    // Метрики с адаптивным шагом: шаблон метрик + adaptive_part.cu + metrics_adaptive_part.cu.
+    // kernel — calculateDiscreteModelMetricsAdCUDA, kernel_cont — signalMetricsContinuationAdKernel.
+    CachedMetricsModule cached_metrics_ad;
 
     // Every cached_* above is just a view on the active entry of its pool; the pool owns the
     // modules. One slot per analysis type meant recompiling on every switch back to a scheme that
@@ -1919,6 +2091,11 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedSimpleContModule>  pool_dft_hsweep{ kModuleCacheCapacity };
     ModuleLru<CachedBif2dModule>       pool_bif2d     { kModuleCacheCapacity };
     ModuleLru<CachedBasinsModule>      pool_basins    { kModuleCacheCapacity };
+    ModuleLru<CachedAdModule>          pool_ad        { kModuleCacheCapacity };
+    ModuleLru<CachedSimpleContModule>  pool_ad_cont   { kModuleCacheCapacity };
+    ModuleLru<CachedLyapAdModule>      pool_lyap_ad   { kModuleCacheCapacity };
+    ModuleLru<CachedLyapAdModule>      pool_lyap_ad_cont { kModuleCacheCapacity };
+    ModuleLru<CachedMetricsModule>     pool_metrics_ad{ kModuleCacheCapacity };
     ModuleLru<CachedFastSyncModule>    pool_fs_attr   { kModuleCacheCapacity };
     ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
     ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
@@ -2012,6 +2189,11 @@ struct ParametricEngine::Impl {
             drain_pool(pool_dft_hsweep);
             drain_pool(pool_bif2d);
             drain_pool(pool_basins);
+            drain_pool(pool_ad);
+            drain_pool(pool_ad_cont);
+            drain_pool(pool_lyap_ad);
+            drain_pool(pool_lyap_ad_cont);
+            drain_pool(pool_metrics_ad);
             drain_pool(pool_fs_attr);
             drain_pool(pool_fs_grid);
             drain_pool(pool_order);
@@ -2082,6 +2264,10 @@ struct ParametricEngine::Impl {
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
+        src_ucuda_adaptive_cuh = read_text_file(root + "ucuda_adaptive.cuh",       e); if (!e.empty()) { err = e; return false; }
+        src_adaptive_part     = read_text_file(root + "adaptive_part.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_metrics_adaptive_part = read_text_file(root + "metrics_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
+        src_lyap_adaptive_part = read_text_file(root + "lyapunov_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
         src_configCUDA_h_raw  = read_text_file(root + "configCUDA.h",              e); if (!e.empty()) { err = e; return false; }
         src_configCUDA_h = peak_config_defines() + src_configCUDA_h_raw;
         srcs_peak_epoch  = ep;
@@ -2093,11 +2279,36 @@ struct ParametricEngine::Impl {
     // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
     // std::string while another thread assigns it is a race no matter how rare.
     struct SrcSnapshot {
-        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h;
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh;
     };
 
     SrcSnapshot snapshot_sources(const std::string& tmpl) const {
-        return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h };
+        return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h,
+                 src_ucuda_adaptive_cuh };
+    }
+
+    // Функции модуля КРС при раздельной сборке. Шаблон держит тело каждой под своим
+    // плейсхолдером; в библиотечной половине плейсхолдер заменяется вызовом внешней функции
+    // модуля КРС. Кроме шага с постоянным h, это четыре функции адаптивного шага (см.
+    // AdaptiveCode в codegen.hpp) — их плейсхолдеры есть только в адаптивных шаблонах.
+    struct KrsFn { const char* ph; const char* name; const char* params; const char* call; };
+    static constexpr KrsFn kKrsFns[] = {
+        { "{{KRS_BODY}}", "krs_step", "numb* X, const numb* a, const numb h",
+          "    krs_step(X, a, h);" },
+        { "{{KRS_RHS_BODY}}", "krs_rhs", "const numb* X, const numb* a, numb* F",
+          "    krs_rhs(X, a, F);" },
+        { "{{KRS_EMB_BODY}}", "krs_emb",
+          "const numb* X, const numb* F0, const numb* a, const numb h, numb* Y, numb* E, numb* F1, numb* W",
+          "    krs_emb(X, F0, a, h, Y, E, F1, W);" },
+        { "{{KRS_DPREP_BODY}}", "krs_dprep",
+          "const numb* X, const numb* Y, const numb* F0, const numb* F1, const numb* a, const numb h, numb* W, numb* D",
+          "    krs_dprep(X, Y, F0, F1, a, h, W, D);" },
+        { "{{KRS_DEVAL_BODY}}", "krs_deval", "const numb* D, const numb th, numb* Yo",
+          "    krs_deval(D, th, Yo);" },
+    };
+    static const KrsFn* krs_fn(const std::string& ph) {
+        for (const KrsFn& f : kKrsFns) if (ph == f.ph) return &f;
+        return nullptr;
     }
 
     // Кэш PTX библиотечной половины: ключ — всё, кроме КРС. Именно это и есть смысл затеи:
@@ -2158,6 +2369,8 @@ struct ParametricEngine::Impl {
         std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
                                           cuda_include_opt.c_str(), nvrtc_fmad_opt() };
         if (rdc) opts.push_back("--relocatable-device-code=true");
+        std::string dev_opt_storage;
+        add_profiling_nvrtc_opts(opts, dev_opt_storage);
 
         nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
         if (nr != NVRTC_SUCCESS) {
@@ -2203,18 +2416,22 @@ struct ParametricEngine::Impl {
 
         std::string src = snap.tmpl;
         for (const auto& sub : subs) {
-            if (sub.first == "{{KRS_BODY}}") continue;
+            if (krs_fn(sub.first)) continue;
             src = replace_all(src, sub.first, sub.second);
         }
-        src = replace_all(src, "{{KRS_BODY}}", "    krs_step(X, a, h);");
-        src = replace_all(src, "#include \"cudaLibrary.cuh\"",
-                          "#include \"cudaLibrary.cuh\"\n"
-                          "extern \"C\" __device__ void krs_step(numb* X, const numb* a, const numb h);");
+        std::string decls;
+        for (const KrsFn& f : kKrsFns) {
+            if (src.find(f.ph) == std::string::npos) continue;
+            src = replace_all(src, f.ph, f.call);
+            decls += std::string("\nextern \"C\" __device__ void ") + f.name + "(" + f.params + ");";
+        }
+        src = replace_all(src, "#include \"cudaLibrary.cuh\"", "#include \"cudaLibrary.cuh\"" + decls);
 
         const std::vector<const char*> hs = { snap.lib_cu.c_str(), snap.lib_cuh.c_str(),
-                                              snap.macros_cuh.c_str(), snap.config_h.c_str() };
+                                              snap.macros_cuh.c_str(), snap.config_h.c_str(),
+                                              snap.adaptive_cuh.c_str() };
         const std::vector<const char*> hn = { "cudaLibrary.cu", "cudaLibrary.cuh",
-                                              "cudaMacros.cuh", "configCUDA.h" };
+                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh" };
         CachedLibPtx fresh;
         fresh.key = lib_key;
         const bool ok = compile_ptx(src, src_name, hs, hn, name_exprs, true,
@@ -2232,7 +2449,8 @@ struct ParametricEngine::Impl {
 
     // Половина с шагом: отдельная единица трансляции на одном configCUDA.h (нужен и numb, и
     // ucmplx для комплексных схем).
-    bool krs_ptx_for(const SrcSnapshot& snap, const std::string& krs_body,
+    bool krs_ptx_for(const SrcSnapshot& snap,
+                     const std::vector<std::pair<const KrsFn*, std::string>>& fns,
                      const std::string& amount_of_x, const std::string& krs_key,
                      std::string& out_ptx, std::string& err) {
         {
@@ -2242,9 +2460,10 @@ struct ParametricEngine::Impl {
         }
 
         std::string src = "#define AMOUNTOFX " + amount_of_x + "\n"
-                          "#include \"configCUDA.h\"\n"
-                          "extern \"C\" __device__ void krs_step(numb* X, const numb* a, const numb h) {\n"
-                          + krs_body + "\n}\n";
+                          "#include \"configCUDA.h\"\n";
+        for (const auto& fb : fns)
+            src += std::string("extern \"C\" __device__ void ") + fb.first->name + "(" + fb.first->params
+                 + ") {\n" + fb.second + "\n}\n";
         const std::vector<const char*> hs = { snap.config_h.c_str() };
         const std::vector<const char*> hn = { "configCUDA.h" };
         std::vector<std::string> ignored;
@@ -2264,7 +2483,17 @@ struct ParametricEngine::Impl {
     bool link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
                        CUmodule& out_module, std::string& err) {
         CUlinkState st = nullptr;
-        CUresult r = cuLinkCreate(0, nullptr, nullptr, &st);
+        // UCUDA_NVRTC_LINEINFO=1 (см. build_module): строки исходника переживают и линковку.
+        // UCUDA_NVRTC_MAXRREG — тот же потолок регистров: распределяет их именно линковщик.
+        CUjit_option jopt[2];
+        void*        jval[2];
+        unsigned     nj = 0;
+        char li[16];
+        DWORD lin = GetEnvironmentVariableA("UCUDA_NVRTC_LINEINFO", li, sizeof li);
+        if (lin > 0 && lin < sizeof li && li[0] == '1') { jopt[nj] = CU_JIT_GENERATE_LINE_INFO; jval[nj++] = (void*)(size_t)1; }
+        lin = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", li, sizeof li);
+        if (lin > 0 && lin < sizeof li) { jopt[nj] = CU_JIT_MAX_REGISTERS; jval[nj++] = (void*)(size_t)std::atoi(li); }
+        CUresult r = cuLinkCreate(nj, nj ? jopt : nullptr, nj ? jval : nullptr, &st);
         if (r != CUDA_SUCCESS) { err = "cuLinkCreate: " + cu_err(r); return false; }
         auto fail = [&](const std::string& what, CUresult rr) {
             err = what + ": " + cu_err(rr);
@@ -2313,23 +2542,34 @@ struct ParametricEngine::Impl {
         // трансляции. Цена — вызов вместо инлайна: на RTX 2060 SUPER от -1% до +7% времени счёта,
         // результаты побитово те же (FP64 идёт 1/32 скорости, накладные прячутся в её тени).
         if (get_nvrtc_rdc()) {
-            std::string krs_body, amount_of_x = "3";
+            std::vector<std::pair<const KrsFn*, std::string>> krs_fns;
+            std::string krs_all, amount_of_x = "3";
             std::string lib_key = src_name;
             for (const auto& sub : subs) {
-                if (sub.first == "{{KRS_BODY}}") { krs_body = sub.second; continue; }
+                if (const KrsFn* f = krs_fn(sub.first)) {
+                    krs_fns.emplace_back(f, sub.second);
+                    krs_all += f->name; krs_all += '\x1f'; krs_all += sub.second; krs_all += '\x1f';
+                    continue;
+                }
                 if (sub.first == "{{AMOUNT_OF_X}}") amount_of_x = sub.second;
                 lib_key += ''; lib_key += sub.first; lib_key += '='; lib_key += sub.second;
             }
             lib_key += get_nvrtc_fmad() ? "|fm1" : "|fm0";
             lib_key += "|pk" + std::to_string(peak_config_epoch());
+            // Шаблон и запрошенные ядра — тоже часть ключа. Имя исходника их не определяет:
+            // FastSync собирает "fastsync.cu" и из fs_attr, и из fs_grid с одинаковыми подстановками,
+            // и On Grid получал библиотеку On Attractor — чужие ядра (картинка-мусор, illegal
+            // address) или lowered короче name_exprs (чтение за концом в cuModuleGetFunction).
+            lib_key += "|t" + std::to_string(std::hash<std::string>{}(snap.tmpl));
+            for (const char* e : name_exprs) { lib_key += '|'; lib_key += e; }
 
             std::string krs_err;
             std::string krs_ptx;
-            const std::string krs_key = std::to_string(std::hash<std::string>{}(krs_body))
+            const std::string krs_key = std::to_string(std::hash<std::string>{}(krs_all))
                                       + ":" + amount_of_x
                                       + (get_nvrtc_fmad() ? ":fm1" : ":fm0")
                                       + ":pk" + std::to_string(peak_config_epoch());
-            if (!krs_ptx_for(snap, krs_body, amount_of_x, krs_key, krs_ptx, krs_err)) {
+            if (!krs_ptx_for(snap, krs_fns, amount_of_x, krs_key, krs_ptx, krs_err)) {
                 // Не компилируется САМ шаг — это ошибка пользователя, и монолитный путь выдал бы
                 // ту же самую. Отдаём как есть, без второго захода на те же грабли.
                 err = krs_err;
@@ -2339,6 +2579,7 @@ struct ParametricEngine::Impl {
             CachedLibPtx lib;
             std::string lib_err;
             if (lib_ptx_for(snap, src_name, lib_key, subs, name_exprs, lib, lib_err)
+                && lib.lowered.size() == name_exprs.size()
                 && link_and_load(lib.ptx, krs_ptx, out_module, lib_err)) {
                 lowered = lib.lowered;
                 return true;
@@ -2360,14 +2601,16 @@ struct ParametricEngine::Impl {
             snap.lib_cuh.c_str(),
             snap.macros_cuh.c_str(),
             snap.config_h.c_str(),
+            snap.adaptive_cuh.c_str(),
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
             "cudaLibrary.cuh",
             "cudaMacros.cuh",
             "configCUDA.h",
+            "ucuda_adaptive.cuh",
         };
-        constexpr int n_headers = 4;
+        constexpr int n_headers = 5;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
@@ -2402,10 +2645,12 @@ struct ParametricEngine::Impl {
         }
 
         std::string std_opt = "--std=c++17";
-        const char* opts[] = { arch, std_opt.c_str(), "-default-device",
-                               cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+        std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
+                                          cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+        std::string dev_opt_storage;
+        add_profiling_nvrtc_opts(opts, dev_opt_storage);
 
-        nr = nvrtcCompileProgram(prog, (int)(sizeof(opts) / sizeof(opts[0])), opts);
+        nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
         if (nr != NVRTC_SUCCESS) {
             size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
             std::string log;
@@ -2433,7 +2678,17 @@ struct ParametricEngine::Impl {
         // Грузим во временную переменную: при неудаче у вызывающего слот кэша
         // остаётся нетронутым, и release_*_module() не получит мусорный handle.
         CUmodule mod = nullptr;
-        CUresult r = cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr);
+        // UCUDA_NVRTC_MAXRREG (add_profiling_nvrtc_opts): регистры распределяет JIT драйвера при
+        // загрузке PTX, поэтому потолок — и сюда.
+        CUjit_option mopt[1] = { CU_JIT_MAX_REGISTERS };
+        void*        mval[1] = { nullptr };
+        unsigned     nm = 0;
+        {
+            char v[16];
+            const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", v, sizeof v);
+            if (n > 0 && n < sizeof v) { mval[0] = (void*)(size_t)std::atoi(v); nm = 1; }
+        }
+        CUresult r = cuModuleLoadDataEx(&mod, ptx.c_str(), nm, nm ? mopt : nullptr, nm ? mval : nullptr);
         if (r != CUDA_SUCCESS) {
             err = std::string("cuModuleLoadDataEx(") + src_name + "): " + cu_err(r);
             return false;
@@ -2487,6 +2742,619 @@ struct ParametricEngine::Impl {
         }, err);
     }
 
+    // Адаптивный модуль свипов (см. CachedAdModule). Тела адаптивного шага входят в ключ:
+    // от них зависит модуль КРС, как от krs_body.
+    bool compile_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                              int par_or_var, std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        // Узлы шага — свой модуль без плотного выхода (UCUDA_AD_NO_DENSE): состояние нити
+        // легче на D, Xp, Fp, а стадии живут только внутри попытки. Своё имя исходника — от
+        // него зависит ключ PTX библиотеки при раздельной сборке.
+        const bool nodes = ad_nodes_module(ad);
+        const std::string key = hash_key(bodies, amountOfX) + ":ad:pov" + std::to_string(par_or_var)
+                              + (nodes ? ":nodes" : "");
+        return compile_into(pool_ad, key, cached_ad, activate, [&](CachedAdModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            const std::string tmpl = (nodes ? std::string(kAdNodesModulePrefix) : std::string())
+                                   + src_template_bif2d + "\n" + src_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  ad.dprep },
+                                { "{{KRS_DEVAL_BODY}}",  ad.deval },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "calculateDiscreteModelPeaksAdCUDA", "calculateDiscreteModelAvgPeaksAdCUDA",
+                                "dbscanCUDA", "CUDA_dbscan_kernel",
+                                "CUDA_dbscan_search_fixed_points_kernel",
+                                "CUDA_dbscan_search_clear_points_kernel" },
+                              mod, mg, err))
+                return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            CUfunction* slots[] = { &fresh.kernel_peaks, &fresh.kernel_avg, &fresh.kernel_dbscan,
+                                    &fresh.kernel_cdbscan, &fresh.kernel_search_fixed, &fresh.kernel_search_clear };
+            for (int i = 0; i < 6; ++i)
+                if (!module_fn(mod, mg[(size_t)i], *slots[i], err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
+
+    // Модуль continuation БД 1D с адаптивным шагом (см. cached_ad_cont): тот же шаблон, но
+    // из adaptive_part.cu в него попадает только ядро цепочки.
+    bool compile_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                                   std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        const std::string key = hash_key(bodies, amountOfX) + ":ad_cont";
+        return compile_into(pool_ad_cont, key, cached_ad_cont, activate, [&](CachedSimpleContModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_CONT_KERNEL 1\n"
+                                   + src_template_bif2d + "\n" + src_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), "adaptive_cont.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      "1" },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  ad.dprep },
+                                { "{{KRS_DEVAL_BODY}}",  ad.deval },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "calculateDiscreteModelPeaksAdContCUDA" },
+                              mod, mg, err))
+                return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
+
+    // Модуль LLE/LS с адаптивным шагом (см. CachedLyapAdModule). Оба ядра в одном модуле.
+    bool compile_lyap_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                                   int par_or_var, std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad:pov" + std::to_string(par_or_var);
+        return compile_into(pool_lyap_ad, key, cached_lyap_ad, activate, [&](CachedLyapAdModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
+                                     "#define UCUDA_AD_LYAPUNOV 1\n"
+                                   + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DEVAL_BODY}}",  "" },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "lyapunovLLEAdCUDA", "lyapunovLSAdCUDA" },
+                              mod, mg, err))
+                return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_lle, err) || !module_fn(mod, mg[1], fresh.kernel_ls, err)) {
+                cuModuleUnload(mod); return false;
+            }
+            return true;
+        }, err);
+    }
+
+    // Модуль continuation LLE/LS с адаптивным шагом (см. cached_lyap_ad_cont).
+    // activate = false — прогрев: модуль только в пул. Активный слот прогрев трогать не вправе:
+    // идущий расчёт берёт ядро из него уже после своей компиляции.
+    bool compile_lyap_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                                        std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
+        return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, activate, [&](CachedLyapAdModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
+                                     "#define UCUDA_AD_LYAPUNOV 1\n#define UCUDA_LYAP_AD_CONT_ONLY 1\n"
+                                   + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive_cont.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      "1" },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DEVAL_BODY}}",  "" },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },
+                              mod, mg, err))
+                return false;
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel_lle, err) || !module_fn(mod, mg[1], fresh.kernel_ls, err)) {
+                cuModuleUnload(mod); return false;
+            }
+            return true;
+        }, err);
+    }
+
+    // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
+    // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
+    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
+    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
+    template <class Req>
+    bool run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
+                         std::string& err, bool& cancelled) {
+        cancelled = false;
+        const AdaptiveRequest& ad = req.adaptive;
+        const int n = req.amountOfX, nPts = req.n_pts, NC = ls ? n : 1;
+        if (req.sweep_over_var) { err = "the adaptive step on this path supports a param sweep only"; return false; }
+        if (n <= 0 || n > kMaxAmountOfX) { err = "amountOfX out of range"; return false; }
+        if ((int)req.initial_conditions.size() != n) { err = "initial_conditions.size() != amountOfX"; return false; }
+        if ((int)req.base_values.size() > 64) { err = "too many base_values"; return false; }
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size())) {
+            err = "param_index out of range"; return false;
+        }
+        const int    nBlocks = (int)(req.t_max / req.NT);
+        const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
+        if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
+        out.assign((size_t)nPts * NC, std::numeric_limits<double>::quiet_NaN());
+        stats.assign((size_t)nPts * 4, 0.0);
+        const int continuation = req.continuation ? 1 : 0;
+
+        if (req.use_cpu) {
+            AdaptiveCpuModule mod;
+            std::vector<KrsCpuDiag> diags;
+            // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, peak_config_defines(), diags)) {
+                err = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                return false;
+            }
+            // Второй поток переносит отмену во флаг DLL и число готовых точек в прогресс.
+            volatile int cancelFlag = 0;
+            int progressCount = 0;                  // цепочка: счётчик DLL (точки)
+            std::atomic<int> donePts{ 0 };          // классика: точки готовых кусков
+            std::atomic<bool> done{ false };
+            std::thread watcher([&]() {
+                while (!done.load(std::memory_order_relaxed)) {
+                    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                    const int got = continuation ? *(volatile int*)&progressCount
+                                                 : donePts.load(std::memory_order_relaxed);
+                    if (req.progress)
+                        req.progress->store((float)got / (float)(nPts > 0 ? nPts : 1), std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            if (continuation || !mod.lyap_range()) {
+                // Цепочка continuation — одна, в этом потоке.
+                mod.lyap()(ls ? 1 : 0, continuation, nPts, req.param_lo, req.param_hi, req.continuation_reverse ? 1 : 0,
+                           req.log_scale ? 1 : 0, ad_axis ? 0 : req.param_index, req.base_values.data(),
+                           (int)req.base_values.size(), req.initial_conditions.data(), &ad.params, ad.axis_kind[0],
+                           ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm, req.eps, ad.lyap_renorm,
+                           req.max_value, out.data(), stats.data(), &cancelFlag, &progressCount);
+            } else {
+                // Классика: точки независимы — куски раздаются потокам по мере освобождения (цена
+                // точки с адаптивным шагом сильно разная). Тот же код точки, что у цепочки при
+                // continuation = 0 (ucuda_lyap_classic_range), поэтому результат от раздачи не зависит.
+                constexpr int kChunk = 2;
+                unsigned hw = std::thread::hardware_concurrency();
+                if (hw == 0) hw = 1;
+                const int nChunks  = (nPts + kChunk - 1) / kChunk;
+                const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)(nChunks > 0 ? nChunks : 1));
+                std::atomic<int> nextChunk{ 0 };
+                auto worker = [&]() {
+                    for (;;) {
+                        const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                        if (c >= nChunks || cancelFlag) return;
+                        const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
+                        int prog = 0;
+                        mod.lyap_range()(ls ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi, req.log_scale ? 1 : 0,
+                                         ad_axis ? 0 : req.param_index, req.base_values.data(),
+                                         (int)req.base_values.size(), req.initial_conditions.data(), &ad.params,
+                                         ad.axis_kind[0], ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm,
+                                         req.eps, ad.lyap_renorm, req.max_value, out.data() + (size_t)i0 * NC,
+                                         stats.data() + (size_t)i0 * 4, &cancelFlag, &prog);
+                        donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
+                    }
+                };
+                std::vector<std::thread> pool;
+                for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+                for (std::thread& t : pool) t.join();
+            }
+            done.store(true, std::memory_order_relaxed);
+            watcher.join();
+            if (cancelFlag) { cancelled = true; err = "Cancelled by user"; return false; }
+            return true;
+        }
+
+        // GPU: однопоточное ядро цепочки.
+        if (!ensure_init(err)) return false;
+        cuCtxSetCurrent(context);
+        if (!compile_lyap_ad_cont_if_needed(ad, req.krs_body, n, err)) return false;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_result     = nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_result)     cudaFree(d_result);
+            sig.release();
+        };
+        auto cuda_ok = [&](cudaError_t e, const char* where) {
+            if (e == cudaSuccess) return true;
+            err = std::string("CUDA ") + where + ": " + cudaGetErrorString(e);
+            cleanup();
+            return false;
+        };
+        if (!cuda_ok(cudaMalloc((void**)&d_baseValues, (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "malloc baseValues")
+            || !cuda_ok(cudaMalloc((void**)&d_baseX, (size_t)n * sizeof(numb)), "malloc baseX")
+            || !cuda_ok(cudaMalloc((void**)&d_result, (size_t)nPts * NC * sizeof(numb)), "malloc result"))
+            return false;
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, err)) { cleanup(); return false; }
+        }
+        if (!sig.alloc(err)) { cleanup(); return false; }
+        const std::vector<numb> vals = to_numb(req.base_values), x0 = to_numb(req.initial_conditions);
+        if (!vals.empty() && !cuda_ok(cudaMemcpy(d_baseValues, vals.data(), vals.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues"))
+            return false;
+        if (!cuda_ok(cudaMemcpy(d_baseX, x0.data(), (size_t)n * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX"))
+            return false;
+        int    nPts_a = nPts, reverse_a = req.continuation_reverse ? 1 : 0, logScale_a = req.log_scale ? 1 : 0;
+        int    mut_a = ad_axis ? 0 : req.param_index, nv_a = (int)req.base_values.size(), axis_a = ad.axis_kind[0];
+        numb   lo_a = (numb)req.param_lo, hi_a = (numb)req.param_hi, tol_a = (numb)ad.tol_ratio;
+        numb   tTr_a = (numb)req.transient_time, NT_a = (numb)req.NT, eps_a = (numb)req.eps, max_a = (numb)req.max_value;
+        int    nBlocks_a = nBlocks, nWarm_a = nWarm, renorm_a = ad.lyap_renorm;
+        UcudaAdaptParams* dP = adArgs.params;
+        numb*  dSt = adArgs.stats;
+        int*   d_cancel = sig.cancelArg();
+        int*   d_prog   = sig.progressArg();
+        void* args[] = { &nPts_a, &lo_a, &hi_a, &reverse_a, &logScale_a, &mut_a, &d_baseValues, &nv_a, &d_baseX,
+                         &dP, &axis_a, &tol_a, &tTr_a, &NT_a, &nBlocks_a, &nWarm_a, &eps_a, &renorm_a, &max_a,
+                         &d_result, &dSt, &d_cancel, &d_prog };
+        CUresult r = cuLaunchKernel(ls ? cached_lyap_ad_cont.kernel_ls : cached_lyap_ad_cont.kernel_lle,
+                                    1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(lyapunov adaptive continuation): " + cu_err(r); cleanup(); return false; }
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, err)) {
+            cancelled = req.cancel && req.cancel->load(std::memory_order_relaxed);
+            cleanup();
+            return false;
+        }
+        if (!cuda_ok(cudaDeviceSynchronize(), "sync after lyapunov adaptive continuation")) return false;
+        std::vector<numb> h_res((size_t)nPts * NC), h_st((size_t)nPts * 4);
+        if (!cuda_ok(cudaMemcpy(h_res.data(), d_result, h_res.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result")
+            || !cuda_ok(cudaMemcpy(h_st.data(), adArgs.stats, h_st.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy stats"))
+            return false;
+        cleanup();
+        out.assign(h_res.begin(), h_res.end());
+        stats.assign(h_st.begin(), h_st.end());
+        return true;
+    }
+
+    // БД 1D с адаптивным шагом на CPU: AdaptiveCpuModule (cl.exe) собирает адаптивные тела,
+    // kernels/adaptive_part.cu и PeakStream в DLL, её вход ucuda_cpu_ad_bif — построчная копия
+    // calculateDiscreteModelPeaksAdCUDA (классика) и ...AdContCUDA (continuation). Раскладка
+    // пиков, флагов и статистики — как у GPU-путей, результат собирается так же. Классика
+    // раздаётся потокам по кускам точек (точки независимы, порядок результата не зависит
+    // от раздачи); continuation — одна цепочка в этом потоке. Валидация общая с GPU-путями:
+    // классика приходит из run_bif1d после проверок, continuation — из диспетчера.
+    Bifurcation1DResult run_bif1d_cpu_ad(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        const bool cont = req.continuation;
+        if (!ad.setup_error.empty())                                 return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.sweep_over_var) {
+            if (cont) return fail("continuation requires a param sweep, not an IC sweep");
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index out of range");
+        } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+            return fail("param_index out of range");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+
+        AdaptiveCpuModule mod;
+        {
+            std::vector<KrsCpuDiag> diags;
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
+                             peak_config_defines(), diags) || !mod.bif()) {
+                std::string e = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                if (diags.empty()) e += " no dense output for this scheme";
+                return fail(e);
+            }
+        }
+
+        // Строка пиков и число отсчётов — как у run_bif1d / run_bif1d_continuation_ad.
+        const int    nPts  = req.n_pts;
+        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)())
+            return fail("computed amount of points <= 0 (t_max/h/pre_scaller too small)");
+        const size_t cap        = (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride = ad.raw_nodes ? cap : (iters < cap ? iters : cap);
+        const int    peakCapacity = (int)peakStride;
+        const int    mutIdx = req.sweep_over_var ? req.var_sweep_index : (ad_axis ? 0 : req.param_index);
+        const std::vector<double> values = req.base_values, x0 = req.initial_conditions;
+
+        res.n_pts        = nPts;
+        res.record_steps = (int)peakStride;
+        res.flags.assign((size_t)nPts, 0);
+        res.bifurcation_points.assign((size_t)nPts, {});
+        res.peak_times.assign((size_t)nPts, {});
+        res.ad_stats.assign((size_t)nPts * 4, 0.0);
+        if (cont) {
+            res.param_lo = req.param_lo;
+            res.param_hi = req.param_hi;
+            res.continuation_reverse = req.continuation_reverse;
+        }
+
+        // Строки [i0, i1) из плоских буферов DLL — в результат (как у GPU-путей).
+        auto collect = [&](int i0, int i1, const std::vector<double>& pk, const std::vector<double>& tm,
+                           const std::vector<int>& fl, const std::vector<double>& st) {
+            for (int j = i0; j < i1; ++j) {
+                const size_t r = (size_t)(j - i0);
+                int n = fl[r];
+                res.flags[(size_t)j] = n;
+                if (n > (int)peakStride) n = (int)peakStride;
+                if (n > 0) {
+                    res.bifurcation_points[(size_t)j].assign(pk.begin() + r * peakStride, pk.begin() + r * peakStride + n);
+                    res.peak_times[(size_t)j].assign(tm.begin() + r * peakStride, tm.begin() + r * peakStride + n);
+                }
+                for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)j * 4 + q] = st[r * 4 + q];
+            }
+        };
+
+        volatile int cancelFlag = 0;
+        std::atomic<int> donePts{ 0 };
+        std::atomic<bool> finished{ false };
+        // Отмену переносит во флаг DLL, готовые точки — в прогресс.
+        std::thread watcher([&]() {
+            while (!finished.load(std::memory_order_relaxed)) {
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                if (req.progress)
+                    req.progress->store((float)donePts.load(std::memory_order_relaxed) / (float)nPts,
+                                        std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+        auto call = [&](int i0, int i1, std::vector<double>& pk, std::vector<double>& tm, std::vector<int>& fl,
+                        std::vector<double>& st, int* prog) {
+            return mod.bif()(cont ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi,
+                             req.continuation_reverse ? 1 : 0, req.log_scale ? 1 : 0, req.sweep_over_var ? 1 : 0,
+                             mutIdx, values.data(), (int)values.size(), x0.data(), &ad.params, ad.axis_kind[0],
+                             ad.tol_ratio, req.writable_var, req.max_value, pk.data(), tm.data(), fl.data(),
+                             (unsigned long long)peakStride, peakCapacity, req.transient_time, req.t_max, req.h,
+                             req.pre_scaller, (unsigned long long)iters, ad.raw_nodes ? 1 : 0, ad.peak_interp,
+                             st.data(), &cancelFlag, prog);
+        };
+        if (cont) {
+            // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
+            std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
+            std::vector<int> fl((size_t)nPts);
+            int prog = 0;
+            std::thread pump([&]() {
+                while (!finished.load(std::memory_order_relaxed)) {
+                    donePts.store(*(volatile int*)&prog, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            const int ok = call(0, nPts, pk, tm, fl, st, &prog);
+            finished.store(true, std::memory_order_relaxed);
+            pump.join();
+            watcher.join();
+            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            collect(0, nPts, pk, tm, fl, st);
+        } else {
+            // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
+            // стоимость точки с адаптивным шагом сильно разная.
+            constexpr int kChunk = 4;
+            unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) hw = 1;
+            const int nChunks  = (nPts + kChunk - 1) / kChunk;
+            const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)nChunks);
+            std::atomic<int> nextChunk{ 0 };
+            std::atomic<bool> aborted{ false };
+            auto worker = [&]() {
+                std::vector<double> pk((size_t)kChunk * peakStride), tm((size_t)kChunk * peakStride), st((size_t)kChunk * 4);
+                std::vector<int> fl((size_t)kChunk);
+                for (;;) {
+                    const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                    if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
+                    const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
+                    int prog = 0;
+                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
+                }
+            };
+            std::vector<std::thread> pool;
+            for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
+            finished.store(true, std::memory_order_relaxed);
+            watcher.join();
+            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        }
+        fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+    LLE1DResult run_lle1d_ad_seq(const LLE1DRequest& req) {
+        LLE1DResult res;
+        std::vector<double> out, st;
+        bool cancelled = false;
+        if (!run_lyap_ad_seq(false, req, out, st, res.error, cancelled)) { res.cancelled = cancelled; return res; }
+        res.n_pts = req.n_pts;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.continuation_reverse = req.continuation && req.continuation_reverse;
+        res.lyapunov = out;
+        res.flags.assign((size_t)req.n_pts, 0);
+        for (int j = 0; j < req.n_pts; ++j)
+            res.flags[(size_t)j] = std::isfinite(out[(size_t)j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        res.ad_stats = st;
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
+        write_curve1d_csv(res, req.csv_output_path);
+        res.ok = true;
+        return res;
+    }
+
+    LS1DResult run_ls1d_ad_seq(const LS1DRequest& req) {
+        LS1DResult res;
+        std::vector<double> out, st;
+        bool cancelled = false;
+        if (!run_lyap_ad_seq(true, req, out, st, res.error, cancelled)) { res.cancelled = cancelled; return res; }
+        const int N = req.amountOfX;
+        res.n_pts = req.n_pts;
+        res.n_exponents = N;
+        res.param_lo = req.param_lo;
+        res.param_hi = req.param_hi;
+        res.continuation_reverse = req.continuation && req.continuation_reverse;
+        res.spectrum.assign((size_t)req.n_pts, std::vector<double>((size_t)N, 0.0));
+        res.flags.assign((size_t)req.n_pts, 0);
+        for (int j = 0; j < req.n_pts; ++j) {
+            bool fin = true;
+            for (int k = 0; k < N; ++k) {
+                res.spectrum[(size_t)j][(size_t)k] = out[(size_t)j * N + k];
+                fin = fin && std::isfinite(out[(size_t)j * N + k]);
+            }
+            res.flags[(size_t)j] = fin ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        }
+        res.ad_stats = st;
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
+        write_curve1d_csv(res, req.csv_output_path);
+        res.ok = true;
+        return res;
+    }
+
+    // Ось настройки шага: rtol / atol / tol — только положительные значения (параметр
+    // регулятора может быть любым). Пусто — всё в порядке.
+    static std::string ad_axis_range_error(int kind, double lo, double hi) {
+        if ((kind == kAdAxisRtol || kind == kAdAxisAtol || kind == kAdAxisTol) && !(lo > 0.0 && hi > 0.0))
+            return "lo/hi must be > 0 on the rtol / atol axis";
+        return {};
+    }
+
+    // Обе оси 2D — настройки шага, задевающие одно поле (rtol и tol, atol и tol, один параметр
+    // регулятора): ядро применяет оси по порядку, и Y затирала бы X. Пусто — всё в порядке.
+    static std::string ad_axes_overlap_error(int kx, int ky) {
+        auto fields = [](int k) -> unsigned {
+            if (k == kAdAxisRtol) return 1u;
+            if (k == kAdAxisAtol) return 2u;
+            if (k == kAdAxisTol)  return 3u;
+            if (k >= kAdAxisCtrl && k < kAdAxisCtrl + UCUDA_CTL_NPAR) return 4u << (k - kAdAxisCtrl);
+            return 0u;
+        };
+        if (fields(kx) & fields(ky))
+            return "both axes sweep the same step setting (rtol / atol / tol / controller parameter)";
+        return {};
+    }
+
+    // Модуль узлов шага (raw_nodes) у БД, бассейнов и метрик: без плотного выхода и с
+    // размерностью-константой — циклы драйвера разворачиваются, и состояние нити может
+    // жить в регистрах, а не в локальной памяти (UCUDA_AD_N в ucuda_adaptive.cuh).
+    static constexpr const char* kAdNodesModulePrefix =
+        "#define UCUDA_AD_NO_DENSE 1\n#define UCUDA_AD_NODES_KERNEL 1\n#define UCUDA_AD_STATIC_N 1\n";
+
+    // Модуль узлов — для узлов шага при свипе по параметрам системы / НУ. Его ядрам настройки
+    // шага приходят по значению (константный банк аргументов) — передавать ad_param_arg.
+    // Свип по настройке шага (rtol, atol, параметр регулятора) идёт общим модулем.
+    static bool ad_nodes_module(const AdaptiveRequest& ad) {
+        return ad.raw_nodes && ad.axis_kind[0] == kAdAxisSystem && ad.axis_kind[1] == kAdAxisSystem;
+    }
+    // Аргумент «настройки шага» для cuLaunchKernel: модуль узлов — сама структура, общий —
+    // указатель на её копию на устройстве (d_ptr — адрес переменной с этим указателем).
+    static void* ad_param_arg(const AdaptiveRequest& ad, UcudaAdaptParams** d_ptr) {
+        return ad_nodes_module(ad) ? (void*)const_cast<UcudaAdaptParams*>(&ad.params) : (void*)d_ptr;
+    }
+
+    // Прогресс адаптивных ядер — по модельному времени: точка отчитывает столько
+    // «единиц», сколько здесь, как бы ни менялся шаг.
+    static constexpr size_t kAdProgressUnits = 4096;
+
+    // Параметры адаптивного шага на устройстве: UcudaAdaptParams, коды осей и буфер
+    // статистики (4 числа на точку чанка).
+    struct AdDeviceArgs {
+        UcudaAdaptParams* params = nullptr;
+        int*              axis   = nullptr;
+        numb*             stats  = nullptr;
+        void release() {
+            if (params) cudaFree(params);
+            if (axis)   cudaFree(axis);
+            if (stats)  cudaFree(stats);
+            params = nullptr; axis = nullptr; stats = nullptr;
+        }
+        bool alloc(const AdaptiveRequest& ad, const int* kinds, size_t cells, std::string& err) {
+            cudaError_t e = cudaMalloc((void**)&params, sizeof(UcudaAdaptParams));
+            if (e == cudaSuccess) e = cudaMalloc((void**)&axis, 2 * sizeof(int));
+            if (e == cudaSuccess) e = cudaMalloc((void**)&stats, (cells > 0 ? cells : 1) * 4 * sizeof(numb));
+            if (e == cudaSuccess) e = cudaMemcpy(params, &ad.params, sizeof(UcudaAdaptParams), cudaMemcpyHostToDevice);
+            if (e == cudaSuccess) e = cudaMemcpy(axis, kinds, 2 * sizeof(int), cudaMemcpyHostToDevice);
+            if (e != cudaSuccess) { err = std::string("CUDA adaptive params: ") + cudaGetErrorString(e); release(); return false; }
+            return true;
+        }
+    };
+
+    // Запуск ядра LLE (ls = false) или LS (ls = true) с адаптивным шагом на один чанк cur
+    // точек. Раскладка результата — как у LLEKernelCUDA / LSKernelCUDA, статистика — a.stats.
+    CUresult launch_lyap_ad(bool ls, AdDeviceArgs& a, const AdaptiveRequest& ad, int nPts, int cur,
+                            size_t calculated, int dimension, numb* d_ranges, int* d_idx, numb* d_ic,
+                            int nIC, numb* d_vals, int nVals, double maxValue, numb* d_res, int logAxisMask,
+                            double transientTime, double tMax, double NT, double eps, double vectorTransient,
+                            RunSignals& sig, int progressStride) {
+        const size_t sharedPerThread = (size_t)ucuda_shared_stride(nIC, nVals) * sizeof(numb);
+        int blockSize = launch_block_size(sharedPerThread);
+        if (blockSize < 1) blockSize = 1;
+        const int gridSize  = (cur + blockSize - 1) / blockSize;
+        numb   maxValue_a = (numb)maxValue, tolRatio = (numb)ad.tol_ratio, tTr = (numb)transientTime;
+        numb   tMax_a = (numb)tMax, NT_a = (numb)NT, eps_a = (numb)eps;
+        int    nBlocks = (int)(tMax / NT), renorm = ad.lyap_renorm;
+        int    nWarm = lyap_warm_blocks(vectorTransient, NT);
+        size_t units = kAdProgressUnits;
+        UcudaAdaptParams* dP = a.params;
+        int*   dAx = a.axis;
+        numb*  dSt = a.stats;
+        int*   d_cancel = sig.cancelArg();
+        int*   d_prog   = sig.progressArg();
+        void* args[] = { &nPts, &cur, &calculated, &dimension, &d_ranges, &d_idx, &d_ic, &nIC, &d_vals, &nVals,
+                         &maxValue_a, &d_res, &logAxisMask, &dP, &dAx, &tolRatio, &tTr, &tMax_a, &NT_a,
+                         &nBlocks, &nWarm, &eps_a, &renorm, &d_cancel, &d_prog, &progressStride, &units, &dSt };
+        return cuLaunchKernel(ls ? cached_lyap_ad.kernel_ls : cached_lyap_ad.kernel_lle,
+                              gridSize, 1, 1, blockSize, 1, 1, (unsigned int)(sharedPerThread * blockSize),
+                              nullptr, args, nullptr);
+    }
+
     // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu. Идея: брать оригинальный код
     // почти как есть, чтобы при обновлениях NonLinAnal перенос был механическим diff → patch.
     // ОБЯЗАТЕЛЬНЫЕ изменения (помечены комментарием [ADAPT]):
@@ -2501,6 +3369,12 @@ struct ParametricEngine::Impl {
     //     в NVRTC-bundle
     //   - результат пишется в Bifurcation1DResult (память + CSV), не в файл
     Bifurcation1DResult run_bif1d(const Bifurcation1DRequest& req) {
+        // Ось rtol / atol / tol — только положительные значения. Проверка — до всех веток
+        // (continuation и CPU уходят из диспетчера раньше общей валидации ниже).
+        if (req.adaptive.enabled && req.adaptive.setup_error.empty()) {
+            const std::string e = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e.empty()) { Bifurcation1DResult r; r.error = e; return r; }
+        }
         // Continuation требует sequential x-carry — это совсем другой путь
         // (single-thread kernel). Отказываем при IC-sweep (не имеет смысла:
         // continuation подразумевает param как непрерывный параметр).
@@ -2519,6 +3393,9 @@ struct ParametricEngine::Impl {
                 r.error = "log scale requires param lo/hi > 0";
                 return r;
             }
+            // Адаптивный шаг: CPU — нативная цепочка (run_bif1d_cpu_ad), GPU — ядро в одну нить.
+            if (req.adaptive.enabled)
+                return req.use_cpu ? run_bif1d_cpu_ad(req) : run_bif1d_continuation_ad(req);
             // h-свип теперь поддержан обеими ветками: шаг пересчитывается в
             // каждой точке, буфер блока выделен под худший случай.
             // CPU-ветка — до ensure_init: она не трогает CUDA вообще, так что
@@ -2531,18 +3408,25 @@ struct ParametricEngine::Impl {
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
         // валидация
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
         if (req.krs_body.empty())                                   return fail("krs_body is empty");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         // base_values уже идёт со сдвигом +1 (a[0] зарезервирован):
         if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
+        // Адаптивный шаг: h — шаг вывода, свипать его бессмысленно; ось может свипать
+        // настройку шага (rtol, atol, tol, параметр регулятора) — тогда индекс не нужен.
+        const bool ad      = req.adaptive.enabled;
+        const bool ad_axis = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        if (ad && req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
         if (req.sweep_over_h) {
             if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
                 return fail("h lo/hi must be > 0 with sweep_over_h");
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
-        } else {
+        } else if (!ad_axis) {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
         }
@@ -2561,7 +3445,8 @@ struct ParametricEngine::Impl {
         // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU
         // (то же место в конвейере, что у run_lle_1d / run_ls_1d). Стоит после
         // общей валидации и до ensure_init: CUDA этой ветке не нужна вовсе.
-        if (req.use_cpu) return run_bif1d_cpu(req);
+        // Адаптивный шаг — своя CPU-ветка на тексте GPU-ядра (run_bif1d_cpu_ad).
+        if (req.use_cpu) return ad ? run_bif1d_cpu_ad(req) : run_bif1d_cpu(req);
 
         // dt-sweep: t_max/transient_time фиксированы, число шагов на GPU
         // пересчитывается из h per-thread (см. hSweepAxis в
@@ -2577,8 +3462,12 @@ struct ParametricEngine::Impl {
         cuCtxSetCurrent(context);
 
         // компиляция или cache hit
-        if (!compile_if_needed(req.krs_body, req.amountOfX,
-                               req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                      req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        }
+        else if (!compile_if_needed(req.krs_body, req.amountOfX,
+                                    req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         // ПОРТ NonLinAnal::bifurcation1D (hostLibrary.cu:165-655).
         // Локальные имена мапятся на аргументы функции NonLinAnal для удобства
@@ -2621,6 +3510,9 @@ struct ParametricEngine::Impl {
         // не превышает эту аллокацию (см. actualIterations).
         double worstCaseH = (hSweepAxis != -1) ? ranges[0] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
+        // На узлах шага число отсчётов заранее неизвестно, но пиков в строке всё равно
+        // не больше max_amount_of_peaks + 1 — под это и строка.
+        if (ad && req.adaptive.raw_nodes) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
@@ -2667,6 +3559,7 @@ struct ParametricEngine::Impl {
         std::vector<numb> h_outPeaks   (nPtsLimiter * peakStride);
         std::vector<numb> h_timeOfPeaks(nPtsLimiter * peakStride);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
+        std::vector<numb>   h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         // Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq)
         numb* d_ranges            = nullptr;
@@ -2677,8 +3570,10 @@ struct ParametricEngine::Impl {
         RunSignals sig;                       // прогресс и отмена в mapped-памяти
         numb* d_outPeaks          = nullptr;
         numb* d_timeOfPeaks       = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -2721,7 +3616,13 @@ struct ParametricEngine::Impl {
         BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+            res.ad_stats.assign((size_t)nPts * 4, 0.0);
+        }
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)nPts * ticksPerPoint;
@@ -2751,6 +3652,8 @@ struct ParametricEngine::Impl {
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
         res.snapshot.range_hi      = ranges[1];
+        res.snapshot.log_scale     = req.log_scale;
+        res.snapshot.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
 
         // Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан)
         if (!OUT_FILE_PATH.empty()) {
@@ -2824,6 +3727,33 @@ struct ParametricEngine::Impl {
 
             unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
 
+            if (ad) {
+                // Та же раскладка пиков, что у слитого ядра; шагом управляет регулятор.
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats;
+                void* args_ad[] = {
+                    &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfInitialConditions_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
+                    &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BIF_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            shared, nullptr, args_ad, nullptr),
+                             "cuLaunchKernel(bif1d adaptive)");
+            }
+            else
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_fused,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args_fused, nullptr),
@@ -2838,6 +3768,13 @@ struct ParametricEngine::Impl {
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
             BIF_CHECK(cudaMemcpy(h_amountOfPeaks.data(),  d_amountOfPeaks,  nPtsLimiter * sizeof(int),                                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
             BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+            if (ad) {
+                BIF_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, nPtsLimiter * 4 * sizeof(numb),
+                                     cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+                for (size_t k = 0; k < nPtsLimiter; ++k)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[(originalNPtsLimiter * iter + k) * 4 + q] = (double)h_adStats[k * 4 + q];
+            }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
             // CSV + аккумуляция результата (порт строк 574-608 NL)
@@ -2945,7 +3882,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
-        } else {
+        } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
+            // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
         }
@@ -2957,6 +3895,18 @@ struct ParametricEngine::Impl {
         if (req.eps <= 0.0)         return fail("eps must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return fail("log scale requires param lo/hi > 0");
+
+        // Адаптивный шаг: классический свип — ядро на точку; continuation и CPU — цепочкой.
+        const bool ad = req.adaptive.enabled;
+        if (ad) {
+            if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
+            if (req.sweep_over_h)
+                return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+            const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e1.empty()) return fail(e1);
+            // Continuation (GPU, одна нить) и CPU — цепочкой точек ucuda_lyap_chain.
+            if (req.continuation || req.use_cpu) return run_lle1d_ad_seq(req);
+        }
 
         // Continuation: точки выстроены в цепочку, поэтому IC-свип несовместим
         // (как в run_bif1d). h-свип и log-сетка поддержаны на обоих устройствах.
@@ -2980,8 +3930,8 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_lle_if_needed(req.krs_body, req.amountOfX,
-                                   req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        if (ad ? !compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err)
+               : !compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         // ПОРТ NonLinAnal::LLE1D (hostLibrary.cu:2261-2511)
         const double tMax                       = req.t_max;
@@ -3021,12 +3971,13 @@ struct ParametricEngine::Impl {
         // На точку реально выделяется ТОЛЬКО d_lleResult (одно numb): траектория
         // не хранится, ядро зовёт цикл интегрирования с data = nullptr. Прежняя
         // формула делила память на длину блока, которой здесь нет.
-        size_t nPtsLimiter = freeMemory / sizeof(numb);
+        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (ad ? 5 : 1));   // + статистика шага
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > (size_t)nPts)  nPtsLimiter = (size_t)nPts;
         size_t originalNPtsLimiter = nPtsLimiter;
 
         std::vector<numb> h_lleResult(nPtsLimiter);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -3035,7 +3986,9 @@ struct ParametricEngine::Impl {
         numb* d_lleResult         = nullptr;
 
         RunSignals sig;   // прогресс и отмена в mapped-памяти
+        AdDeviceArgs adArgs;   // адаптивный шаг: параметры, оси, статистика
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -3074,7 +4027,12 @@ struct ParametricEngine::Impl {
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
         // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)(amountOfPointsInBlock + lyap_warm_blocks(req.vector_transient, NT)) * (size_t)ucuda_steps_per_block((numb)NT, (numb)h);
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+        }
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)nPts * ticksPerPoint;
@@ -3093,6 +4051,7 @@ struct ParametricEngine::Impl {
             initialConditions + amountOfInitialConditions);
         res.snapshot.tMax          = tMax;
         res.snapshot.NT            = NT;
+        res.snapshot.vectorTransient = req.vector_transient;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
         res.snapshot.gpu_fmad      = get_nvrtc_fmad();
@@ -3100,6 +4059,8 @@ struct ParametricEngine::Impl {
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
         res.snapshot.range_hi      = ranges[1];
+        res.snapshot.log_scale     = req.log_scale;
+        res.snapshot.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
 
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
@@ -3113,6 +4074,7 @@ struct ParametricEngine::Impl {
         res.param_hi = ranges[1];
         res.lyapunov.assign(nPts, 0.0);
         res.flags.assign(nPts, 0);
+        if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
@@ -3158,6 +4120,7 @@ struct ParametricEngine::Impl {
             int    progressStride_arg = progressStride;
             sig.resetTicks();
 
+            numb vectorTransient_arg = (numb)req.vector_transient;
             void* args[] = {
                 &nPts_arg,
                 &nPtsLimiter_arg,
@@ -3183,13 +4146,20 @@ struct ParametricEngine::Impl {
                 &hSweepAxis_arg,
                 &transientTime_arg,
                 &logAxisMask_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg, &vectorTransient_arg
             };
 
             // Shared = (3 * amountOfIC + amountOfValues) * sizeof(numb) * blockSize
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
                                                  * sizeof(numb) * blockSize);
 
+            if (ad)
+                LLE_CHECK_CU(launch_lyap_ad(false, adArgs, req.adaptive, nPts_arg, nPtsLimiter_arg,
+                                            (size_t)amountOfCalculatedPoints, 1, d_ranges, d_indicesOfMutVars,
+                                            d_initialConditions, amountOfInitialConditions, d_values, amountOfValues,
+                                            maxValue, d_lleResult, logAxisMask, transientTime, tMax, NT, eps, req.vector_transient,
+                                            sig, progressStride), "cuLaunchKernel(lle adaptive)");
+            else
             LLE_CHECK_CU(cuLaunchKernel(cached_lle.kernel_lle,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args, nullptr),
@@ -3202,6 +4172,13 @@ struct ParametricEngine::Impl {
             LLE_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, nPtsLimiter * sizeof(numb), cudaMemcpyDeviceToHost),
                       "memcpy h_lleResult");
             LLE_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+            if (ad) {
+                LLE_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, (size_t)nPtsLimiter * 4 * sizeof(numb),
+                              cudaMemcpyDeviceToHost), "memcpy adStats");
+                for (size_t k = 0; k < (size_t)nPtsLimiter; ++k)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[(originalNPtsLimiter * iter + k) * 4 + q] = h_adStats[k * 4 + q];
+            }
 
             // Аккумулируем + опциональный CSV (порт NonLinAnal LLE1D:2478-2492)
             std::ofstream out;
@@ -3316,16 +4293,40 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_h && req.sweep_over_h_2)
             return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
-        if (req.sweep_over_h || req.sweep_over_h_2) {
+        // Адаптивный шаг: ось настройки шага разбирается как ось h (см. run_bif2d); если
+        // настройки шага на обеих осях, система не свипается.
+        const bool ad   = req.adaptive.enabled;
+        const bool ad_x = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
+        if (ad) {
+            if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
+            if (req.sweep_over_h || req.sweep_over_h_2)
+                return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+            const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e1.empty()) return fail(e1 + " (X axis)");
+            const std::string e2 = ad_axis_range_error(req.adaptive.axis_kind[1], req.param_lo_2, req.param_hi_2);
+            if (!e2.empty()) return fail(e2 + " (Y axis)");
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
+        }
+        const bool over_h  = req.sweep_over_h   || ad_x;
+        const bool over_h2 = req.sweep_over_h_2 || ad_y;
+
+        if (over_h && over_h2) {
+            par_or_var = 1;
+            idx_axis_x = 0; idx_axis_y = 0;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (over_h || over_h2) {
             // Ровно одна ось — h, другая param либо IC. Кернел-слоты X/Y совпадают с
             // пользовательскими напрямую, swap_xy тут не нужен: в смешанном param/IC случае ниже
             // swap существует только потому, что ветка par_or_var==2 захардкожена под одну
             // конкретную пару слотов, а здесь par_or_var симметричен по слотам.
-            hSweepAxis = req.sweep_over_h ? 0 : 1;
-            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+            hSweepAxis = over_h ? 0 : 1;
+            par_or_var = par_or_var_2d(over_h, over_h2,
                                        req.sweep_over_var, req.sweep_over_var_2);
 
-            if (req.sweep_over_h) {
+            if (over_h) {
                 if (par_or_var == 1) {
                     if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
@@ -3391,11 +4392,13 @@ struct ParametricEngine::Impl {
         }
 
         int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
+        if (ad) hSweepAxis = -1;   // адаптивная ось правит настройку шага, а не h
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_lle_2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        if (ad ? !compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, par_or_var, err)
+               : !compile_lle_2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
 
         const double tMax                       = req.t_max;
         const double NT                         = req.NT;
@@ -3433,12 +4436,13 @@ struct ParametricEngine::Impl {
         // На точку реально выделяется ТОЛЬКО d_lleResult (одно numb): траектория
         // не хранится, ядро зовёт цикл интегрирования с data = nullptr. Прежняя
         // формула делила память на длину блока, которой здесь нет.
-        size_t nPtsLimiter = freeMemory / sizeof(numb);
+        size_t nPtsLimiter = freeMemory / (sizeof(numb) * (ad ? 5 : 1));   // + статистика шага
         if (nPtsLimiter == 0)                  nPtsLimiter = (size_t)blockSize_setup;
         if (nPtsLimiter > total_cells)         nPtsLimiter = total_cells;
         size_t originalNPtsLimiter = nPtsLimiter;
 
         std::vector<numb> h_lleResult(nPtsLimiter);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -3447,7 +4451,9 @@ struct ParametricEngine::Impl {
         numb* d_lleResult         = nullptr;
 
         RunSignals sig;   // прогресс и отмена в mapped-памяти
+        AdDeviceArgs adArgs;   // адаптивный шаг: параметры, оси, статистика
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -3486,7 +4492,12 @@ struct ParametricEngine::Impl {
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
         // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)(amountOfPointsInBlock + lyap_warm_blocks(req.vector_transient, NT)) * (size_t)ucuda_steps_per_block((numb)NT, (numb)h);
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+        }
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerPoint;
@@ -3509,6 +4520,7 @@ struct ParametricEngine::Impl {
         res.param_hi_2 = req.param_hi_2;
         res.values.assign(total_cells, 0.0);
         res.flags.assign(total_cells, 0);
+        if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         // Snapshot of CSV-relevant fields in USER ordering — engine + GUI
         // share the writer, so both files agree on axis ordering even when
@@ -3519,6 +4531,7 @@ struct ParametricEngine::Impl {
         res.snapshot.par_or_var    = par_or_var;
         res.snapshot.tMax          = tMax;
         res.snapshot.NT            = NT;
+        res.snapshot.vectorTransient = req.vector_transient;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
         res.snapshot.gpu_fmad      = get_nvrtc_fmad();
@@ -3580,6 +4593,7 @@ struct ParametricEngine::Impl {
             int    progressStride_arg = progressStride;
             sig.resetTicks();
 
+            numb vectorTransient_arg = (numb)req.vector_transient;
             void* args[] = {
                 &nPts_arg,
                 &nPtsLimiter_arg,
@@ -3605,12 +4619,19 @@ struct ParametricEngine::Impl {
                 &hSweepAxis_arg,
                 &transientTime_arg,
                 &logAxisMask_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg, &vectorTransient_arg
             };
 
             unsigned int shared = (unsigned int)((3 * amountOfInitialConditions + amountOfValues)
                                                  * sizeof(numb) * blockSize);
 
+            if (ad)
+                LLE2_CHECK_CU(launch_lyap_ad(false, adArgs, req.adaptive, nPts_arg, nPtsLimiter_arg,
+                                             (size_t)amountOfCalculatedPoints, 2, d_ranges, d_indicesOfMutVars,
+                                             d_initialConditions, amountOfInitialConditions, d_values, amountOfValues,
+                                             maxValue, d_lleResult, logAxisMask, transientTime, tMax, NT, eps, req.vector_transient,
+                                             sig, progressStride), "cuLaunchKernel(lle2d adaptive)");
+            else
             LLE2_CHECK_CU(cuLaunchKernel(cached_lle_2d.kernel_lle,
                                          gridSize, 1, 1, blockSize, 1, 1,
                                          shared, nullptr, args, nullptr),
@@ -3623,6 +4644,15 @@ struct ParametricEngine::Impl {
             LLE2_CHECK(cudaMemcpy(h_lleResult.data(), d_lleResult, cur_limiter * sizeof(numb), cudaMemcpyDeviceToHost),
                        "memcpy h_lleResult");
             LLE2_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+            if (ad) {
+                LLE2_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, cur_limiter * 4 * sizeof(numb),
+                              cudaMemcpyDeviceToHost), "memcpy adStats");
+                for (size_t k = 0; k < cur_limiter; ++k) {
+                    const size_t ki = originalNPtsLimiter * iter + k;
+                    const size_t oi = swap_xy ? (ki % (size_t)nPts) * (size_t)nPts + ki / (size_t)nPts : ki;
+                    for (int q = 0; q < 4; ++q) res.ad_stats[oi * 4 + q] = h_adStats[k * 4 + q];
+                }
+            }
 
             for (size_t k = 0; k < cur_limiter; ++k) {
                 size_t kernel_idx = originalNPtsLimiter * iter + k;
@@ -3721,7 +4751,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
-        } else {
+        } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
+            // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
         }
@@ -3733,6 +4764,18 @@ struct ParametricEngine::Impl {
         if (req.eps <= 0.0)         return fail("eps must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return fail("log scale requires param lo/hi > 0");
+
+        // Адаптивный шаг: классический свип — ядро на точку; continuation и CPU — цепочкой.
+        const bool ad = req.adaptive.enabled;
+        if (ad) {
+            if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
+            if (req.sweep_over_h)
+                return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+            const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e1.empty()) return fail(e1);
+            // Continuation (GPU, одна нить) и CPU — цепочкой точек ucuda_lyap_chain.
+            if (req.continuation || req.use_cpu) return run_ls1d_ad_seq(req);
+        }
 
         // CPU-ветки — до ensure_init, CUDA им не нужна. Ограничения те же, что
         // и у LLE (см. run_lle_1d).
@@ -3754,8 +4797,8 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_ls_if_needed(req.krs_body, req.amountOfX,
-                                  req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        if (ad ? !compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err)
+               : !compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         const double tMax                       = req.t_max;
         const double NT                         = req.NT;
@@ -3793,7 +4836,7 @@ struct ParametricEngine::Impl {
         // На точку реально выделяется ТОЛЬКО d_lsResult (N numb): траектория
         // не хранится. Прежняя формула умножала это на длину блока и брала
         // 1/16 свободной памяти — вместе это резало чанк без причины.
-        size_t perSystemBytes = sizeof(numb) * (size_t)amountOfInitialConditions;
+        size_t perSystemBytes = sizeof(numb) * ((size_t)amountOfInitialConditions + (ad ? 4 : 0));
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)            nPtsLimiter = (size_t)blockSize_setup;
@@ -3802,6 +4845,7 @@ struct ParametricEngine::Impl {
 
         // h_lsResult хранит nPtsLimiter × N row-major.
         std::vector<numb> h_lsResult(nPtsLimiter * (size_t)amountOfInitialConditions);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -3810,7 +4854,9 @@ struct ParametricEngine::Impl {
         numb* d_lsResult          = nullptr;
 
         RunSignals sig;   // прогресс и отмена в mapped-памяти
+        AdDeviceArgs adArgs;   // адаптивный шаг: параметры, оси, статистика
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -3849,7 +4895,12 @@ struct ParametricEngine::Impl {
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
         // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)(amountOfPointsInBlock + lyap_warm_blocks(req.vector_transient, NT)) * (size_t)ucuda_steps_per_block((numb)NT, (numb)h);
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+        }
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)nPts * ticksPerPoint;
@@ -3868,6 +4919,7 @@ struct ParametricEngine::Impl {
             initialConditions + amountOfInitialConditions);
         res.snapshot.tMax          = tMax;
         res.snapshot.NT            = NT;
+        res.snapshot.vectorTransient = req.vector_transient;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
         res.snapshot.gpu_fmad      = get_nvrtc_fmad();
@@ -3875,6 +4927,8 @@ struct ParametricEngine::Impl {
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
         res.snapshot.range_hi      = ranges[1];
+        res.snapshot.log_scale     = req.log_scale;
+        res.snapshot.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
 
         if (!OUT_FILE_PATH.empty()) {
             std::ofstream cfg(OUT_FILE_PATH + "_config.csv");
@@ -3888,6 +4942,7 @@ struct ParametricEngine::Impl {
         res.param_hi    = ranges[1];
         res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, 0.0));
         res.flags.assign(nPts, 0);
+        if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             LS_CANCEL_CHECK();
@@ -3933,6 +4988,7 @@ struct ParametricEngine::Impl {
             int    progressStride_arg = progressStride;
             sig.resetTicks();
 
+            numb vectorTransient_arg = (numb)req.vector_transient;
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
                 &amountOfCalculatedPoints, &amountOfPointsForSkip_arg, &dimension_arg,
@@ -3940,7 +4996,7 @@ struct ParametricEngine::Impl {
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
                 &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg, &vectorTransient_arg
             };
 
             // Shared = (3N + 2N² + nValues) * sizeof(numb) * blockSize
@@ -3949,6 +5005,13 @@ struct ParametricEngine::Impl {
                                                  + amountOfValues)
                                                 * sizeof(numb) * blockSize);
 
+            if (ad)
+                LS_CHECK_CU(launch_lyap_ad(true, adArgs, req.adaptive, nPts_arg, nPtsLimiter_arg,
+                                           (size_t)amountOfCalculatedPoints, 1, d_ranges, d_indicesOfMutVars,
+                                           d_initialConditions, amountOfInitialConditions, d_values, amountOfValues,
+                                           maxValue, d_lsResult, logAxisMask, transientTime, tMax, NT, eps, req.vector_transient,
+                                           sig, progressStride), "cuLaunchKernel(ls adaptive)");
+            else
             LS_CHECK_CU(cuLaunchKernel(cached_ls.kernel_ls,
                                        gridSize, 1, 1, blockSize, 1, 1,
                                        shared, nullptr, args, nullptr),
@@ -3963,6 +5026,13 @@ struct ParametricEngine::Impl {
                                 cudaMemcpyDeviceToHost),
                      "memcpy h_lsResult");
             LS_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+            if (ad) {
+                LS_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, (size_t)nPtsLimiter * 4 * sizeof(numb),
+                              cudaMemcpyDeviceToHost), "memcpy adStats");
+                for (size_t k = 0; k < (size_t)nPtsLimiter; ++k)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[(originalNPtsLimiter * iter + k) * 4 + q] = h_adStats[k * 4 + q];
+            }
 
             std::ofstream out;
             if (!OUT_FILE_PATH.empty()) {
@@ -4065,13 +5135,37 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_h && req.sweep_over_h_2)
             return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
-        if (req.sweep_over_h || req.sweep_over_h_2) {
+        // Адаптивный шаг: ось настройки шага разбирается как ось h (см. run_bif2d); если
+        // настройки шага на обеих осях, система не свипается.
+        const bool ad   = req.adaptive.enabled;
+        const bool ad_x = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
+        if (ad) {
+            if (!req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
+            if (req.sweep_over_h || req.sweep_over_h_2)
+                return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+            const std::string e1 = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e1.empty()) return fail(e1 + " (X axis)");
+            const std::string e2 = ad_axis_range_error(req.adaptive.axis_kind[1], req.param_lo_2, req.param_hi_2);
+            if (!e2.empty()) return fail(e2 + " (Y axis)");
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
+        }
+        const bool over_h  = req.sweep_over_h   || ad_x;
+        const bool over_h2 = req.sweep_over_h_2 || ad_y;
+
+        if (over_h && over_h2) {
+            par_or_var = 1;
+            idx_axis_x = 0; idx_axis_y = 0;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (over_h || over_h2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
-            hSweepAxis = req.sweep_over_h ? 0 : 1;
-            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+            hSweepAxis = over_h ? 0 : 1;
+            par_or_var = par_or_var_2d(over_h, over_h2,
                                        req.sweep_over_var, req.sweep_over_var_2);
 
-            if (req.sweep_over_h) {
+            if (over_h) {
                 if (par_or_var == 1) {
                     if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
@@ -4131,11 +5225,13 @@ struct ParametricEngine::Impl {
         }
 
         int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
+        if (ad) hSweepAxis = -1;   // адаптивная ось правит настройку шага, а не h
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_ls_2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        if (ad ? !compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, par_or_var, err)
+               : !compile_ls_2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
 
         const double tMax                       = req.t_max;
         const double NT                         = req.NT;
@@ -4175,7 +5271,7 @@ struct ParametricEngine::Impl {
         // На точку реально выделяется ТОЛЬКО d_lsResult (N numb): траектория
         // не хранится. Прежняя формула умножала это на длину блока и брала
         // 1/16 свободной памяти — вместе это резало чанк без причины.
-        size_t perSystemBytes = sizeof(numb) * (size_t)N;
+        size_t perSystemBytes = sizeof(numb) * ((size_t)N + (ad ? 4 : 0));
         if (perSystemBytes == 0) perSystemBytes = sizeof(numb);
         size_t nPtsLimiter = freeMemory / perSystemBytes;
         if (nPtsLimiter == 0)             nPtsLimiter = (size_t)blockSize_setup;
@@ -4184,6 +5280,7 @@ struct ParametricEngine::Impl {
 
         // h_lsResult — nPtsLimiter × N row-major (как в run_ls_1d).
         std::vector<numb> h_lsResult(nPtsLimiter * (size_t)N);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         numb* d_ranges            = nullptr;
         int*    d_indicesOfMutVars  = nullptr;
@@ -4192,7 +5289,9 @@ struct ParametricEngine::Impl {
         numb* d_lsResult          = nullptr;
 
         RunSignals sig;   // прогресс и отмена в mapped-памяти
+        AdDeviceArgs adArgs;   // адаптивный шаг: параметры, оси, статистика
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -4231,7 +5330,12 @@ struct ParametricEngine::Impl {
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         // Шагов на точку: транзиент плюс NT-блоки по NT/h шагов.
         // Тики ставит только ведущая траектория (см. ядро), поэтому копии не считаем.
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock * steps_from_time_size_t(NT, h);
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)(amountOfPointsInBlock + lyap_warm_blocks(req.vector_transient, NT)) * (size_t)ucuda_steps_per_block((numb)NT, (numb)h);
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+        }
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerPoint;
@@ -4252,6 +5356,7 @@ struct ParametricEngine::Impl {
         res.param_hi_2  = req.param_hi_2;
         res.values.assign((size_t)N * total_cells, 0.0);
         res.flags.assign(total_cells, 0);
+        if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         res.snapshot.values.assign(values, values + amountOfValues);
         res.snapshot.initial_conditions.assign(initialConditions,
@@ -4259,6 +5364,7 @@ struct ParametricEngine::Impl {
         res.snapshot.par_or_var    = par_or_var;
         res.snapshot.tMax          = tMax;
         res.snapshot.NT            = NT;
+        res.snapshot.vectorTransient = req.vector_transient;
         res.snapshot.transientTime = transientTime;
         res.snapshot.h             = h;
         res.snapshot.gpu_fmad      = get_nvrtc_fmad();
@@ -4320,6 +5426,7 @@ struct ParametricEngine::Impl {
             int    progressStride_arg = progressStride;
             sig.resetTicks();
 
+            numb vectorTransient_arg = (numb)req.vector_transient;
             void* args[] = {
                 &nPts_arg, &nPtsLimiter_arg, &NT_arg, &tMax_arg, &sizeOfBlock_arg,
                 &amountOfCalculatedPoints, &amountOfPointsForSkip_arg, &dimension_arg,
@@ -4327,12 +5434,19 @@ struct ParametricEngine::Impl {
                 &amountOfIC_arg, &d_values, &amountOfValues_arg,
                 &amountOfIterations_arg, &preScaller_arg, &writableVar_arg, &maxValue_arg,
                 &d_lsResult, &hSweepAxis_arg, &transientTime_arg, &logAxisMask_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg, &vectorTransient_arg
             };
 
             unsigned int shared = (unsigned int)((3 * N + 2 * N * N + amountOfValues)
                                                  * sizeof(numb) * blockSize);
 
+            if (ad)
+                LS2_CHECK_CU(launch_lyap_ad(true, adArgs, req.adaptive, nPts_arg, nPtsLimiter_arg,
+                                            (size_t)amountOfCalculatedPoints, 2, d_ranges, d_indicesOfMutVars,
+                                            d_initialConditions, N, d_values, amountOfValues,
+                                            maxValue, d_lsResult, logAxisMask, transientTime, tMax, NT, eps, req.vector_transient,
+                                            sig, progressStride), "cuLaunchKernel(ls2d adaptive)");
+            else
             LS2_CHECK_CU(cuLaunchKernel(cached_ls_2d.kernel_ls,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args, nullptr),
@@ -4347,6 +5461,15 @@ struct ParametricEngine::Impl {
                                  cudaMemcpyDeviceToHost),
                       "memcpy h_lsResult");
             LS2_CHECK(cudaDeviceSynchronize(), "sync after D2H");
+            if (ad) {
+                LS2_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, cur_limiter * 4 * sizeof(numb),
+                              cudaMemcpyDeviceToHost), "memcpy adStats");
+                for (size_t k = 0; k < cur_limiter; ++k) {
+                    const size_t ki = originalNPtsLimiter * iter + k;
+                    const size_t oi = swap_xy ? (ki % (size_t)nPts) * (size_t)nPts + ki / (size_t)nPts : ki;
+                    for (int q = 0; q < 4; ++q) res.ad_stats[oi * 4 + q] = h_adStats[k * 4 + q];
+                }
+            }
 
             // Распаковка: для каждой ячейки чанка — N экспонент. Layout
             // values[k * total_cells + out_idx] — k-я плоскость contiguous.
@@ -4522,6 +5645,7 @@ struct ParametricEngine::Impl {
         numb lo_arg = req.param_lo, hi_arg = req.param_hi;
         numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
         numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
+        numb vectorTransient_arg = (numb)req.vector_transient;
 
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         int* d_cancel_arg   = sig.cancelArg();
@@ -4532,7 +5656,7 @@ struct ParametricEngine::Impl {
             &d_baseX, &amountOfX_arg,
             &h_arg, &NT_arg, &tMax_arg, &transientTime_arg,
             &eps_arg, &maxValue_arg, &d_result
-            ,&d_cancel_arg, &d_progress_arg
+            ,&d_cancel_arg, &d_progress_arg, &vectorTransient_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
@@ -4562,6 +5686,8 @@ struct ParametricEngine::Impl {
         for (int j = 0; j < nPts; ++j)
             res.flags[j] = std::isfinite(res.lyapunov[j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
         return res;
     }
@@ -4613,6 +5739,7 @@ struct ParametricEngine::Impl {
         numb lo_arg = req.param_lo, hi_arg = req.param_hi;
         numb h_arg = req.h, NT_arg = req.NT, tMax_arg = req.t_max;
         numb transientTime_arg = req.transient_time, eps_arg = req.eps, maxValue_arg = req.max_value;
+        numb vectorTransient_arg = (numb)req.vector_transient;
 
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         int* d_cancel_arg   = sig.cancelArg();
@@ -4623,7 +5750,7 @@ struct ParametricEngine::Impl {
             &d_baseX, &amountOfX_arg,
             &h_arg, &NT_arg, &tMax_arg, &transientTime_arg,
             &eps_arg, &maxValue_arg, &d_result
-            ,&d_cancel_arg, &d_progress_arg
+            ,&d_cancel_arg, &d_progress_arg, &vectorTransient_arg
         };
         if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
             res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
@@ -4661,6 +5788,8 @@ struct ParametricEngine::Impl {
             res.flags[j] = ok ? REGIME_OSCILLATION : REGIME_UNBOUND;
         }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
         return res;
     }
@@ -5273,6 +6402,173 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef C_CHECK
         #undef C_CHECK_CU
+        fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
+        res.ok = true;
+        return res;
+    }
+
+    // run_bif1d_continuation_ad — continuation с адаптивным шагом. Одна нить идёт по
+    // точкам цепочки (calculateDiscreteModelPeaksAdContCUDA) и переносит из точки в точку
+    // X, предложенный шаг и память регулятора; пики пишутся сразу в короткие строки, как
+    // у адаптивного ядра обычного свипа, поэтому отдельного прохода peakFinderCUDA нет.
+    Bifurcation1DResult run_bif1d_continuation_ad(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad.setup_error.empty())                                 return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+                                                                     return fail("param_index out of range");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_ad_cont_if_needed(ad, req.krs_body, req.amountOfX, err)) return fail(err);
+
+        // Строка пиков — как у run_bif1d: на равномерной сетке не длиннее записи, на узлах
+        // шага число отсчётов заранее неизвестно, и строка — под потолок пиков.
+        const int nPts = req.n_pts;
+        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (iters == 0) return fail("computed amount of points <= 0 (t_max/h/pre_scaller too small)");
+        const size_t cap = (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride = ad.raw_nodes ? cap : (iters < cap ? iters : cap);
+        const int    peakCapacity = (int)peakStride;
+
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        int*  d_flags      = nullptr;
+        numb* d_outPeaks   = nullptr;
+        numb* d_timeOfPeaks= nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;   // однопоточное ядро: тик на точку
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues)  cudaFree(d_baseValues);
+            if (d_baseX)       cudaFree(d_baseX);
+            if (d_flags)       cudaFree(d_flags);
+            if (d_outPeaks)    cudaFree(d_outPeaks);
+            if (d_timeOfPeaks) cudaFree(d_timeOfPeaks);
+            sig.release();
+        };
+        #define CA_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define CA_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        const size_t rowBytes = (size_t)nPts * peakStride * sizeof(numb);
+        CA_CHECK(cudaMalloc((void**)&d_baseValues,  (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "cudaMalloc d_baseValues");
+        CA_CHECK(cudaMalloc((void**)&d_baseX,       (size_t)req.amountOfX * sizeof(numb)), "cudaMalloc d_baseX");
+        CA_CHECK(cudaMalloc((void**)&d_flags,       (size_t)nPts * sizeof(int)),          "cudaMalloc d_flags");
+        CA_CHECK(cudaMalloc((void**)&d_outPeaks,    rowBytes),                             "cudaMalloc d_outPeaks");
+        CA_CHECK(cudaMalloc((void**)&d_timeOfPeaks, rowBytes),                             "cudaMalloc d_timeOfPeaks");
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, res.error)) { cleanup(); return res; }
+        }
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+
+        const std::vector<numb> values_staged_ = to_numb(req.base_values);
+        const std::vector<numb> x_staged_      = to_numb(req.initial_conditions);
+        if (!values_staged_.empty())
+            CA_CHECK(cudaMemcpy(d_baseValues, values_staged_.data(), values_staged_.size() * sizeof(numb),
+                                cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        CA_CHECK(cudaMemcpy(d_baseX, x_staged_.data(), (size_t)req.amountOfX * sizeof(numb),
+                            cudaMemcpyHostToDevice), "memcpy d_baseX");
+        CA_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        int    nPts_arg        = nPts;
+        numb   lo_arg          = (numb)req.param_lo;
+        numb   hi_arg          = (numb)req.param_hi;
+        int    reverse_arg     = req.continuation_reverse ? 1 : 0;
+        int    logScale_arg    = req.log_scale ? 1 : 0;
+        int    mutParamIdx_arg = ad_axis ? 0 : req.param_index;
+        int    amountOfValues_arg = (int)req.base_values.size();
+        int    writableVar_arg = req.writable_var;
+        numb   maxValue_arg    = (numb)req.max_value;
+        size_t peakStride_arg  = peakStride;
+        int    peakCapacity_arg= peakCapacity;
+        UcudaAdaptParams* d_adp_arg = adArgs.params;
+        int*   d_axis_arg      = adArgs.axis;
+        numb   tolRatio_arg    = (numb)ad.tol_ratio;
+        numb   transient_arg   = (numb)req.transient_time;
+        numb   tRec_arg        = (numb)req.t_max;
+        numb   dtOut_arg       = (numb)req.h;
+        int    preScaller_arg  = req.pre_scaller;
+        size_t iters_arg       = iters;
+        int    raw_arg         = ad.raw_nodes ? 1 : 0;
+        int    interp_arg      = ad.peak_interp;
+        int*   d_cancel_arg    = sig.cancelArg();
+        int*   d_progress_arg  = sig.progressArg();
+        numb*  d_adStats_arg   = adArgs.stats;
+        void* args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &mutParamIdx_arg,
+            &d_baseValues, &amountOfValues_arg, &d_baseX, &writableVar_arg, &maxValue_arg,
+            &d_outPeaks, &d_timeOfPeaks, &d_flags, &peakStride_arg, &peakCapacity_arg,
+            &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tRec_arg, &dtOut_arg,
+            &preScaller_arg, &iters_arg, &raw_arg, &interp_arg,
+            &d_cancel_arg, &d_progress_arg, &d_adStats_arg
+        };
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+        CA_CHECK_CU(cuLaunchKernel(cached_ad_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
+                    "cuLaunchKernel(bif1d adaptive continuation)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
+        CA_CHECK(cudaDeviceSynchronize(), "sync after adaptive continuation");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+
+        std::vector<numb> h_outPeaks((size_t)nPts * peakStride), h_timeOfPeaks((size_t)nPts * peakStride);
+        std::vector<int>  h_flags((size_t)nPts);
+        std::vector<numb> h_adStats((size_t)nPts * 4);
+        CA_CHECK(cudaMemcpy(h_outPeaks.data(),    d_outPeaks,    rowBytes, cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
+        CA_CHECK(cudaMemcpy(h_timeOfPeaks.data(), d_timeOfPeaks, rowBytes, cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+        CA_CHECK(cudaMemcpy(h_flags.data(),       d_flags, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy h_flags");
+        CA_CHECK(cudaMemcpy(h_adStats.data(),     adArgs.stats, (size_t)nPts * 4 * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+
+        res.n_pts        = nPts;
+        res.record_steps = (int)peakStride;
+        res.param_lo     = req.param_lo;
+        res.param_hi     = req.param_hi;
+        res.continuation_reverse = req.continuation_reverse;
+        res.flags.assign((size_t)nPts, 0);
+        res.bifurcation_points.assign((size_t)nPts, {});
+        res.peak_times.assign((size_t)nPts, {});
+        res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
+        for (int j = 0; j < nPts; ++j) {
+            int n = h_flags[(size_t)j];
+            res.flags[(size_t)j] = n;
+            if (n > (int)peakStride) n = (int)peakStride;
+            if (n > 0) {
+                const numb* pr = h_outPeaks.data()    + (size_t)j * peakStride;
+                const numb* tr = h_timeOfPeaks.data() + (size_t)j * peakStride;
+                res.bifurcation_points[(size_t)j].assign(pr, pr + n);
+                res.peak_times[(size_t)j].assign(tr, tr + n);
+            }
+        }
+        cleanup();
+        #undef CA_CHECK
+        #undef CA_CHECK_CU
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
         return res;
     }
@@ -5961,6 +7257,7 @@ struct ParametricEngine::Impl {
     Bifurcation2DResult run_bif2d(const Bifurcation2DRequest& req) {
         Bifurcation2DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
 
         // валидация
         if (req.krs_body.empty())                                    return fail("krs_body is empty");
@@ -5998,13 +7295,33 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_h && req.sweep_over_h_2)
             return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
-        if (req.sweep_over_h || req.sweep_over_h_2) {
+        // Адаптивный шаг: h — шаг вывода, его не свипают. Ось настройки шага (rtol, atol,
+        // tol, параметр регулятора) при разборе осей ведёт себя как ось h: вторую ось
+        // определяет система. Если настройки шага на обеих осях, система не свипается.
+        const bool ad   = req.adaptive.enabled;
+        const bool ad_x = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
+        if (ad && (req.sweep_over_h || req.sweep_over_h_2))
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (ad) {
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
+        }
+        const bool over_h  = req.sweep_over_h   || ad_x;
+        const bool over_h2 = req.sweep_over_h_2 || ad_y;
+
+        if (over_h && over_h2) {
+            par_or_var = 1;
+            idx_axis_x = 0; idx_axis_y = 0;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (over_h || over_h2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
-            hSweepAxis = req.sweep_over_h ? 0 : 1;
-            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+            hSweepAxis = over_h ? 0 : 1;
+            par_or_var = par_or_var_2d(over_h, over_h2,
                                        req.sweep_over_var, req.sweep_over_var_2);
 
-            if (req.sweep_over_h) {
+            if (over_h) {
                 if (par_or_var == 1) {
                     if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
@@ -6028,11 +7345,14 @@ struct ParametricEngine::Impl {
             // ось — параметр или НУ, где отрицательные значения совершенно законны (свип sigma от
             // -5 до 5 к шагу отношения не имеет). Раньше условие требовало > 0 от ОБЕИХ осей и
             // заворачивало такой прогон сообщением про h. У run_lle_2d / run_ls_2d проверки нет вовсе.
-            const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
-            const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
-            if (h_lo <= 0.0 || h_hi <= 0.0)
-                return fail(std::string("h lo/hi must be > 0 when sweeping over dt (h) (axis ")
-                            + (req.sweep_over_h ? "X" : "Y") + ")");
+            const double h_lo = over_h ? req.param_lo : req.param_lo_2;
+            const double h_hi = over_h ? req.param_hi : req.param_hi_2;
+            // Параметр регулятора может быть и отрицательным; шаг и допуски — нет.
+            const int  kind_h = over_h ? req.adaptive.axis_kind[0] : req.adaptive.axis_kind[1];
+            const bool any_sign = ad && kind_h >= kAdAxisCtrl;
+            if (!any_sign && (h_lo <= 0.0 || h_hi <= 0.0))
+                return fail(std::string("lo/hi must be > 0 on the axis of h / rtol / atol (axis ")
+                            + (over_h ? "X" : "Y") + ")");
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
@@ -6074,11 +7394,15 @@ struct ParametricEngine::Impl {
         }
 
         int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
+        if (ad) hSweepAxis = -1;   // адаптивная ось правит настройку шага, а не h
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        }
+        else if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
 
         // локальные переменные (порт hostLibrary.cu:bifurcation2D)
         const int    nPts                       = req.n_pts;
@@ -6112,6 +7436,7 @@ struct ParametricEngine::Impl {
         // диапазоне h-оси) -- см. run_bif1d.
         double worstCaseH = (hSweepAxis == 0) ? ranges[0] : (hSweepAxis == 1) ? ranges[2] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
+        if (ad && req.adaptive.raw_nodes) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
@@ -6160,13 +7485,15 @@ struct ParametricEngine::Impl {
         // Шаг кратен CHECK_INTERVAL (тики ставятся в уже существующей проверке)
         // и выбран так, чтобы ячейка отчиталась около 64 раз за всю работу:
         // этого хватает для гладкого бара и не создаёт давки на одном адресе.
-        const size_t stepsPerCell = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const size_t stepsPerCell = ad ? kAdProgressUnits
+                                       : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerCell);
         const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerCell;
 
         // host buffers
         std::vector<int> h_dbscanResult(nPtsLimiter);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         // device buffers
         numb* d_ranges            = nullptr;
@@ -6185,8 +7512,10 @@ struct ParametricEngine::Impl {
         // downclock between launches; on the same stream kernels are ordered
         // implicitly and the GPU stays under continuous load.
         CUstream stream = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -6232,6 +7561,12 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
+        if (ad) {
+            // swap_xy бывает только при двух системных осях, поэтому коды осей идут как есть.
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+            res.ad_stats.assign(total_cells * 4, 0.0);
+        }
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -6354,6 +7689,32 @@ struct ParametricEngine::Impl {
             };
             sig.resetTicks();
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            if (ad) {
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats;
+                void* args_ad[] = {
+                    &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension_arg,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_outPeaks, &d_intervals, &d_amountOfPeaks,
+                    &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BIF2D_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
+                                              gridSize, 1, 1, blockSize, 1, 1,
+                                              shared_traj, stream, args_ad, nullptr),
+                               "cuLaunchKernel(bif2d adaptive)");
+            }
+            else
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           shared_traj, stream, args_fused, nullptr),
@@ -6383,7 +7744,7 @@ struct ParametricEngine::Impl {
                 &peakStride_arg,
                 &helpfulStride_arg
             };
-            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
+            BIF2D_CHECK_CU(cuLaunchKernel(ad ? cached_ad.kernel_dbscan : cached_bif2d.kernel_dbscan,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           0, stream, args_dbscan, nullptr),
                            "cuLaunchKernel(bif2d dbscan)");
@@ -6405,6 +7766,9 @@ struct ParametricEngine::Impl {
             BIF2D_CHECK(cudaMemcpy(h_dbscanResult.data(), d_dbscanResult,
                                    cur_limiter * sizeof(int), cudaMemcpyDeviceToHost),
                         "memcpy h_dbscanResult");
+            if (ad)
+                BIF2D_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, cur_limiter * 4 * sizeof(numb),
+                                       cudaMemcpyDeviceToHost), "memcpy adaptive stats");
 
             for (size_t k = 0; k < cur_limiter; ++k) {
                 size_t kernel_idx = originalNPtsLimiter * iter + k;
@@ -6423,6 +7787,9 @@ struct ParametricEngine::Impl {
                 // попадал в автошкалу colormap'а как «период 0».
                 res.values[out_idx] = (double)period;
                 res.flags[out_idx]  = period;
+                if (ad)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[out_idx * 4 + q] = (double)h_adStats[k * 4 + q];
             }
         }
 
@@ -6470,14 +7837,20 @@ struct ParametricEngine::Impl {
 
     // compile_metrics_if_needed — шаблон signal_metrics.template.cu, одно ядро
     // calculateDiscreteModelMetricsCUDA. Cache key: ":metrics:" + par_or_var.
+    // minmax — min/max по интерполированным экстремумам (SIGM_MINMAX_INTERP, см. шаблон):
+    // другой модуль, поэтому и в ключе, и в имени исходника (ключ библиотечной половины).
     bool compile_metrics_if_needed(const std::string& krs_body, int amountOfX,
-                                   int par_or_var, std::string& err, bool activate = true) {
+                                   int par_or_var, std::string& err, bool activate = true,
+                                   bool minmax = false) {
         cuCtxSetCurrent(context);
-        std::string key = hash_key(krs_body, amountOfX) + ":metrics:" + std::to_string(par_or_var);
+        std::string key = hash_key(krs_body, amountOfX) + ":metrics:" + std::to_string(par_or_var)
+                        + (minmax ? ":mm" : "");
         return compile_into(pool_metrics, key, cached_metrics, activate, [&](CachedMetricsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_metrics), "signal_metrics.cu",
+            const std::string tmpl = minmax ? "#define SIGM_MINMAX_INTERP 1\n" + src_template_metrics
+                                            : src_template_metrics;
+            if (!build_module(snapshot_sources(tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -6485,6 +7858,44 @@ struct ParametricEngine::Impl {
                               mod, mg, err))
                 return false;
 
+            fresh.key    = key;
+            fresh.module = mod;
+            if (!module_fn(mod, mg[0], fresh.kernel,      err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_cont, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
+
+    // Метрики с адаптивным шагом (см. cached_metrics_ad).
+    bool compile_metrics_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+                                      int par_or_var, std::string& err, bool activate = true) {
+        cuCtxSetCurrent(context);
+        std::string bodies = krs_body;
+        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        // Узлы шага — модуль без плотного выхода, как у БД (см. compile_ad_if_needed).
+        const bool nodes = ad_nodes_module(ad);
+        const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var)
+                              + (nodes ? ":nodes" : "");
+        return compile_into(pool_metrics_ad, key, cached_metrics_ad, activate, [&](CachedMetricsModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> mg;
+            // Ядра свипов БД и бассейнов из adaptive_part.cu метрикам не нужны — только время ptxas.
+            const std::string tmpl = std::string(nodes ? kAdNodesModulePrefix : "")
+                                   + "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
+                                   + src_template_metrics + "\n"
+                                   + src_adaptive_part + "\n" + src_metrics_adaptive_part;
+            if (!build_module(snapshot_sources(tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
+                              { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
+                                { "{{KRS_BODY}}",        krs_body },
+                                { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
+                                { "{{KRS_RHS_BODY}}",    ad.rhs },
+                                { "{{KRS_EMB_BODY}}",    ad.emb },
+                                { "{{KRS_DPREP_BODY}}",  ad.dprep },
+                                { "{{KRS_DEVAL_BODY}}",  ad.deval },
+                                { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
+                              { "calculateDiscreteModelMetricsAdCUDA", "signalMetricsContinuationAdKernel" },
+                              mod, mg, err))
+                return false;
             fresh.key    = key;
             fresh.module = mod;
             if (!module_fn(mod, mg[0], fresh.kernel,      err)) { cuModuleUnload(mod); return false; }
@@ -6512,10 +7923,22 @@ struct ParametricEngine::Impl {
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return "log scale requires param lo/hi > 0 (X axis)";
 
+        // Адаптивный шаг: h не свипается; ось настройки шага разбирается как ось h,
+        // но h-осью для ядра не становится (hSweepAxis = -1).
+        const bool ad   = req.adaptive.enabled;
+        const bool ad_x = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
+        if (ad && (req.sweep_over_h || req.sweep_over_h_2))
+            return "the step h is not swept with the adaptive step: sweep rtol / atol instead";
+        const bool over_h  = req.sweep_over_h   || ad_x;
+        const bool over_h2 = req.sweep_over_h_2 || ad_y;
+        auto any_sign = [&](int axis) { return ad && req.adaptive.axis_kind[axis] >= kAdAxisCtrl; };
+
         if (req.dimension == 1) {
-            if (req.sweep_over_h) {
-                if (req.param_lo <= 0.0 || req.param_hi <= 0.0) return "h lo/hi must be > 0 with sweep over dt (h)";
-                a.hSweepAxis = 0;
+            if (over_h) {
+                if (!any_sign(0) && (req.param_lo <= 0.0 || req.param_hi <= 0.0))
+                    return "lo/hi must be > 0 on the axis of h / rtol / atol";
+                a.hSweepAxis = ad ? -1 : 0;
                 a.par_or_var = 1;
                 a.idx_x = 0;
             } else if (req.sweep_over_var) {
@@ -6533,17 +7956,30 @@ struct ParametricEngine::Impl {
             return {};
         }
 
+        if (ad) {
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return e3;
+        }
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
             return "log scale requires param lo/hi > 0 (Y axis)";
         if (req.sweep_over_h && req.sweep_over_h_2)
             return "only one axis can sweep over dt (h)";
 
         bool log_x = req.log_scale, log_y = req.log_scale_2;
-        a.par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+        if (over_h && over_h2) {
+            // Обе оси — настройки шага (скажем, rtol x atol): система не свипается.
+            a.par_or_var = 1;
+            a.idx_x = 0; a.idx_y = 0;
+            a.lo_x = req.param_lo;   a.hi_x = req.param_hi;
+            a.lo_y = req.param_lo_2; a.hi_y = req.param_hi_2;
+            a.logAxisMask = (log_x ? 1 : 0) | (log_y ? 2 : 0);
+            return {};
+        }
+        a.par_or_var = par_or_var_2d(over_h, over_h2,
                                      req.sweep_over_var, req.sweep_over_var_2);
-        if (req.sweep_over_h || req.sweep_over_h_2) {
-            a.hSweepAxis = req.sweep_over_h ? 0 : 1;
-            if (req.sweep_over_h) {
+        if (over_h || over_h2) {
+            a.hSweepAxis = ad ? -1 : (over_h ? 0 : 1);
+            if (over_h) {
                 if (a.par_or_var == 1) { if (!check_param(req.param_index_2))   return "param_index_2 (Y axis) out of range"; a.idx_y = req.param_index_2; }
                 else                   { if (!check_var(req.var_sweep_index_2)) return "var_sweep_index_2 (Y axis) out of range"; a.idx_y = req.var_sweep_index_2; }
                 a.idx_x = 0;
@@ -6552,11 +7988,11 @@ struct ParametricEngine::Impl {
                 else                   { if (!check_var(req.var_sweep_index))   return "var_sweep_index (X axis) out of range"; a.idx_x = req.var_sweep_index; }
                 a.idx_y = 0;
             }
-            const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
-            const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
-            if (h_lo <= 0.0 || h_hi <= 0.0)
-                return std::string("h lo/hi must be > 0 when sweeping over dt (h) (axis ")
-                       + (req.sweep_over_h ? "X" : "Y") + ")";
+            const double h_lo = over_h ? req.param_lo : req.param_lo_2;
+            const double h_hi = over_h ? req.param_hi : req.param_hi_2;
+            if (!any_sign(over_h ? 0 : 1) && (h_lo <= 0.0 || h_hi <= 0.0))
+                return std::string("lo/hi must be > 0 on the axis of h / rtol / atol (axis ")
+                       + (over_h ? "X" : "Y") + ")";
             a.lo_x = req.param_lo;   a.hi_x = req.param_hi;
             a.lo_y = req.param_lo_2; a.hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
@@ -6598,6 +8034,7 @@ struct ParametricEngine::Impl {
         SignalMetricsResult res;
         auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
 
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
         if (req.krs_body.empty())                                    return fail("krs_body is empty");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
@@ -6620,21 +8057,28 @@ struct ParametricEngine::Impl {
 
         // Continuation и CPU — только 1D; обе ветки уходят до ensure_init
         // (CPU-ветке CUDA не нужна вовсе).
+        const bool ad = req.adaptive.enabled;
         if (req.continuation) {
             if (req.dimension != 1)  return fail("continuation works in 1D only");
             if (req.sweep_over_var)  return fail("continuation requires a param or h sweep, not an IC sweep");
+            // Адаптивный: CPU — нативная цепочка (run_metrics_cpu_ad), GPU — ядро в одну нить.
+            if (ad)                  return req.use_cpu ? run_metrics_cpu_ad(req, ax) : run_metrics_continuation_ad(req);
             if (req.use_cpu)         return run_metrics_cpu(req, true);
             return run_metrics_continuation_gpu(req);
         }
         if (req.use_cpu) {
             if (req.dimension != 1)  return fail("CPU computation works in 1D only");
-            return run_metrics_cpu(req, false);
+            return ad ? run_metrics_cpu_ad(req, ax) : run_metrics_cpu(req, false);
         }
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err)) return fail(err);
+        if (ad) {
+            if (!compile_metrics_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, ax.par_or_var, err)) return fail(err);
+        }
+        else if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err, true,
+                                            req.minmax_interp)) return fail(err);
 
         const int    nPts          = req.n_pts;
         const int    dimension     = req.dimension;
@@ -6648,7 +8092,10 @@ struct ParametricEngine::Impl {
 
         // Буфер — под худший случай шага (минимальный h на h-оси), см. run_bif2d.
         const double worstCaseH = (ax.hSweepAxis == 0) ? ranges[0] : (ax.hSweepAxis == 1) ? ranges[2] : req.h;
-        const int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / preScaller);
+        int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / preScaller);
+        // Узлы шага: отсчётов сетки нет, строка интервалов — под потолок пиков (как у БД).
+        const bool adRaw = ad && req.adaptive.raw_nodes;
+        if (adRaw) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         const size_t amountOfPointsForSkip = steps_from_time_size_t(req.transient_time, req.h);
         if (amountOfPointsInBlock <= 0)
             return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
@@ -6676,7 +8123,8 @@ struct ParametricEngine::Impl {
         const size_t chunk = nPtsLimiter;
         const size_t amountOfIteration = (total_cells + chunk - 1) / chunk;
 
-        const size_t stepsPerCell   = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const size_t stepsPerCell   = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerCell);
         const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerCell;
@@ -6690,8 +8138,10 @@ struct ParametricEngine::Impl {
         int*  d_flags     = nullptr;
         RunSignals sig;
         CUstream stream = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)    cudaFree(d_ranges);
             if (d_indices)   cudaFree(d_indices);
             if (d_ic)        cudaFree(d_ic);
@@ -6734,6 +8184,12 @@ struct ParametricEngine::Impl {
         if (needIntervals)
             SIGM_CHECK(cudaMalloc((void**)&d_intervals, chunk * peakStride * sizeof(numb)),    "cudaMalloc d_intervals");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
+        if (ad) {
+            // swap_xy — только при двух системных осях, коды осей идут как есть.
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, chunk, res.error)) { cleanup(); return res; }
+            res.ad_stats.assign(total_cells * 4, 0.0);
+        }
 
         SIGM_CHECK(cudaMemcpy(d_ranges,  ranges,               4 * sizeof(numb),                      cudaMemcpyHostToDevice), "memcpy d_ranges");
         SIGM_CHECK(cudaMemcpy(d_indices, indicesOfMutVars,     2 * sizeof(int),                       cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -6799,6 +8255,32 @@ struct ParametricEngine::Impl {
             };
             sig.resetTicks();
             const unsigned int shared = (unsigned int)(sharedPerThread * blockSize);
+            if (ad) {
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = (numb)req.h;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats;
+                int    raw_arg           = adRaw ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                void* args_ad[] = {
+                    &nPts_arg, &limiter_arg, &calculated_arg, &dimension_arg,
+                    &d_ranges, &d_indices, &d_ic, &amountOfIC_arg,
+                    &d_values, &amountOfVal_arg, &writableVar_arg, &maxValue_arg,
+                    &d_intervals, &peakStride_arg, &peakCap_arg,
+                    &d_out, &metricStride_arg, &mask_arg, &d_flags, &logMask_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transient_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_arg, &iterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                SIGM_CHECK_CU(cuLaunchKernel(cached_metrics_ad.kernel,
+                                             gridSize, 1, 1, blockSize, 1, 1,
+                                             shared, stream, args_ad, nullptr),
+                              "cuLaunchKernel(signal metrics adaptive)");
+            }
+            else
             SIGM_CHECK_CU(cuLaunchKernel(cached_metrics.kernel,
                                          gridSize, 1, 1, blockSize, 1, 1,
                                          shared, stream, args, nullptr),
@@ -6822,6 +8304,13 @@ struct ParametricEngine::Impl {
 
             SIGM_CHECK(cudaMemcpy(h_flags.data(), d_flags, cur * sizeof(int), cudaMemcpyDeviceToHost), "memcpy flags");
             for (size_t k = 0; k < cur; ++k) res.flags[out_index(k)] = h_flags[k];
+            if (ad) {
+                std::vector<numb> h_st(cur * 4);
+                SIGM_CHECK(cudaMemcpy(h_st.data(), adArgs.stats, cur * 4 * sizeof(numb), cudaMemcpyDeviceToHost),
+                           "memcpy adaptive stats");
+                for (size_t k = 0; k < cur; ++k)
+                    for (int q = 0; q < 4; ++q) res.ad_stats[out_index(k) * 4 + q] = (double)h_st[k * 4 + q];
+            }
 
             for (int m = 0; m < SIGM_COUNT; ++m) {
                 if (!((mask >> m) & 1)) continue;
@@ -6851,7 +8340,7 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, 1, err)) return fail(err);
+        if (!compile_metrics_if_needed(req.krs_body, req.amountOfX, 1, err, true, req.minmax_interp)) return fail(err);
 
         const double worstCaseH = req.sweep_over_h
                                 ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
@@ -6969,6 +8458,280 @@ struct ParametricEngine::Impl {
         return res;
     }
 
+    // Continuation метрик с адаптивным шагом: signalMetricsContinuationAdKernel, одна нить
+    // на всю цепочку. Устроено как run_metrics_continuation_gpu; h — шаг вывода, не свипается.
+    // Метрики 1D с адаптивным шагом на CPU: AdaptiveCpuModule, вход ucuda_cpu_ad_metrics — построчные
+    // копии calculateDiscreteModelMetricsAdCUDA (классика, кусками по потокам) и
+    // signalMetricsContinuationAdKernel (continuation, цепочка в этом потоке). Раскладка и сборка
+    // результата — как у GPU-путей (run_signal_metrics / run_metrics_continuation_ad). Валидация и
+    // оси — вызывающего (run_signal_metrics, metrics_axes).
+    SignalMetricsResult run_metrics_cpu_ad(const SignalMetricsRequest& req, const MetricsAxes& ax) {
+        SignalMetricsResult res;
+        auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool cont = req.continuation;
+        if (req.dimension != 1) return fail("CPU computation works in 1D only");
+        if (cont && !(ad.axis_kind[0] != kAdAxisSystem) && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+            return fail("param_index out of range");
+
+        AdaptiveCpuModule mod;
+        {
+            std::vector<KrsCpuDiag> diags;
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
+                             peak_config_defines(), diags) || !mod.metrics()) {
+                std::string e = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                if (diags.empty()) e += " no dense output for this scheme";
+                return fail(e);
+            }
+        }
+
+        const int    nPts  = req.n_pts;
+        const int    mask  = req.metric_mask & kSignalMetricAllMask;
+        const bool   raw   = ad.raw_nodes;   // узлы шага: h не участвует, интервалы — под потолок пиков
+        const size_t iters = raw ? 0 : (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (!raw && (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)()))
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
+        const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
+        const size_t peakStride    = (raw || iters >= (size_t)max_amount_of_peaks + 1)
+                                   ? (size_t)max_amount_of_peaks + 1 : iters;
+        const int    peakCapacity  = (int)peakStride;
+        const std::vector<double> values = req.base_values, x0 = req.initial_conditions;
+        const double lo = cont ? req.param_lo : ax.lo_x, hi = cont ? req.param_hi : ax.hi_x;
+        const int    mutIdx = cont ? (ad.axis_kind[0] != kAdAxisSystem ? 0 : req.param_index) : ax.idx_x;
+
+        res.dimension   = 1;
+        res.n_pts       = nPts;
+        res.param_lo    = req.param_lo;
+        res.param_hi    = req.param_hi;
+        res.log_scale   = req.log_scale;
+        res.metric_mask = mask;
+        res.continuation         = cont;
+        res.continuation_reverse = cont && req.continuation_reverse;
+        res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, std::numeric_limits<double>::quiet_NaN());
+        res.ad_stats.assign((size_t)nPts * 4, 0.0);
+
+        volatile int cancelFlag = 0;
+        std::atomic<int> donePts{ 0 };
+        std::atomic<bool> finished{ false };
+        int chainProg = 0;
+        std::thread watcher([&]() {
+            while (!finished.load(std::memory_order_relaxed)) {
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                const int got = cont ? *(volatile int*)&chainProg : donePts.load(std::memory_order_relaxed);
+                if (req.progress) req.progress->store((float)got / (float)nPts, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+        auto call = [&](int i0, int i1, double* iv, double* om, int* fl, double* st, int* prog) {
+            return mod.metrics()(cont ? 1 : 0, i0, i1, nPts, lo, hi, req.continuation_reverse ? 1 : 0,
+                                 req.log_scale ? 1 : 0, ax.par_or_var, mutIdx, values.data(), (int)values.size(),
+                                 x0.data(), &ad.params, ad.axis_kind[0], ad.tol_ratio, req.writable_var,
+                                 req.max_value, iv, (unsigned long long)peakStride, peakCapacity, om, mask, fl,
+                                 req.transient_time, req.t_max, req.h, req.pre_scaller, (unsigned long long)iters,
+                                 raw ? 1 : 0, ad.peak_interp, st, &cancelFlag, prog);
+        };
+        bool aborted = false;
+        if (cont) {
+            std::vector<double> iv(needIntervals ? peakStride : 0), om((size_t)SIGM_COUNT * nPts), st((size_t)nPts * 4);
+            std::vector<int> fl((size_t)nPts);
+            aborted = !call(0, nPts, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &chainProg);
+            if (!aborted) {
+                for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
+                for (int m = 0; m < SIGM_COUNT; ++m)
+                    if ((mask >> m) & 1)
+                        for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
+                res.ad_stats = st;
+            }
+        } else {
+            // Куски точек — потокам по мере освобождения; строки кусков не пересекаются.
+            constexpr int kChunk = 4;
+            unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) hw = 1;
+            const int nChunks  = (nPts + kChunk - 1) / kChunk;
+            const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)nChunks);
+            std::atomic<int> nextChunk{ 0 };
+            std::atomic<bool> stop{ false };
+            auto worker = [&]() {
+                std::vector<double> iv(needIntervals ? (size_t)kChunk * peakStride : 0);
+                std::vector<double> om((size_t)SIGM_COUNT * kChunk), st((size_t)kChunk * 4);
+                std::vector<int> fl((size_t)kChunk);
+                for (;;) {
+                    const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                    if (c >= nChunks || stop.load(std::memory_order_relaxed)) return;
+                    const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk), rows = i1 - i0;
+                    int prog = 0;
+                    if (!call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog)) {
+                        stop.store(true); return;
+                    }
+                    for (int r = 0; r < rows; ++r) {
+                        res.flags[(size_t)(i0 + r)] = fl[(size_t)r];
+                        for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)(i0 + r) * 4 + q] = st[(size_t)r * 4 + q];
+                    }
+                    for (int m = 0; m < SIGM_COUNT; ++m)
+                        if ((mask >> m) & 1)
+                            for (int r = 0; r < rows; ++r) res.values[m][(size_t)(i0 + r)] = om[(size_t)m * rows + r];
+                    donePts.fetch_add(rows, std::memory_order_relaxed);
+                }
+            };
+            std::vector<std::thread> pool;
+            for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
+            aborted = stop.load();
+        }
+        finished.store(true, std::memory_order_relaxed);
+        watcher.join();
+        if (aborted || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        metrics_finish(res, req);
+        return res;
+    }
+
+    SignalMetricsResult run_metrics_continuation_ad(const SignalMetricsRequest& req) {
+        SignalMetricsResult res;
+        auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad.setup_error.empty()) return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+            return fail("param_index out of range");
+        const bool raw = ad.raw_nodes;   // узлы шага: h не участвует, интервалы — под потолок пиков
+        if (!raw && req.h <= 0.0) return fail("h must be > 0");
+        const size_t iters = raw ? 0 : (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (!raw && iters == 0) return fail("amountOfPointsInBlock <= 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_metrics_ad_if_needed(ad, req.krs_body, req.amountOfX, 1, err)) return fail(err);
+
+        const int    nPts  = req.n_pts;
+        const int    mask  = req.metric_mask & kSignalMetricAllMask;
+        const bool   needIntervals = ((mask >> SIGM_MEDIAN_FREQ) & 1) != 0;
+        const size_t peakStride    = (raw || iters >= (size_t)max_amount_of_peaks + 1)
+                                   ? (size_t)max_amount_of_peaks + 1 : iters;
+
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_intervals  = nullptr;
+        numb* d_out        = nullptr;
+        int*  d_flags      = nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;   // однопоточное ядро: тик на точку
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_intervals)  cudaFree(d_intervals);
+            if (d_out)        cudaFree(d_out);
+            if (d_flags)      cudaFree(d_flags);
+            sig.release();
+        };
+        #define SMA_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define SMA_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        SMA_CHECK(cudaMalloc((void**)&d_baseValues, (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "cudaMalloc d_baseValues");
+        SMA_CHECK(cudaMalloc((void**)&d_baseX,      (size_t)req.amountOfX * sizeof(numb)),             "cudaMalloc d_baseX");
+        SMA_CHECK(cudaMalloc((void**)&d_out,        (size_t)SIGM_COUNT * (size_t)nPts * sizeof(numb)), "cudaMalloc d_out");
+        SMA_CHECK(cudaMalloc((void**)&d_flags,      (size_t)nPts * sizeof(int)),                       "cudaMalloc d_flags");
+        if (needIntervals)
+            SMA_CHECK(cudaMalloc((void**)&d_intervals, peakStride * sizeof(numb)),                     "cudaMalloc d_intervals");
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, res.error)) { cleanup(); return res; }
+        }
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+
+        const std::vector<numb> baseValues_staged = to_numb(req.base_values);
+        const std::vector<numb> baseX_staged      = to_numb(req.initial_conditions);
+        if (!baseValues_staged.empty())
+            SMA_CHECK(cudaMemcpy(d_baseValues, baseValues_staged.data(), baseValues_staged.size() * sizeof(numb),
+                                 cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        SMA_CHECK(cudaMemcpy(d_baseX, baseX_staged.data(), (size_t)req.amountOfX * sizeof(numb),
+                             cudaMemcpyHostToDevice), "memcpy d_baseX");
+        SMA_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        int    nPts_arg        = nPts;
+        numb   lo_arg          = (numb)req.param_lo;
+        numb   hi_arg          = (numb)req.param_hi;
+        int    reverse_arg     = req.continuation_reverse ? 1 : 0;
+        int    logScale_arg    = req.log_scale ? 1 : 0;
+        int    mutParamIdx_arg = ad_axis ? 0 : req.param_index;
+        int    amountOfVal_arg = (int)req.base_values.size();
+        int    writableVar_arg = req.writable_var;
+        numb   maxValue_arg    = (numb)req.max_value;
+        int    peakCap_arg     = (int)peakStride;
+        int    mask_arg        = mask;
+        UcudaAdaptParams* d_adp_arg = adArgs.params;
+        int*   d_axis_arg      = adArgs.axis;
+        numb   tolRatio_arg    = (numb)ad.tol_ratio;
+        numb   transient_arg   = (numb)req.transient_time;
+        numb   tRec_arg        = (numb)req.t_max;
+        numb   dtOut_arg       = (numb)req.h;
+        int    preScaller_arg  = req.pre_scaller;
+        size_t iters_arg       = iters;
+        int    raw_arg         = raw ? 1 : 0;
+        int    interp_arg      = ad.peak_interp;
+        int*   d_cancel_arg    = sig.cancelArg();
+        int*   d_progress_arg  = sig.progressArg();
+        numb*  d_adStats_arg   = adArgs.stats;
+        void* args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &mutParamIdx_arg,
+            &d_baseValues, &amountOfVal_arg, &d_baseX, &writableVar_arg, &maxValue_arg,
+            &d_intervals, &peakCap_arg, &d_out, &mask_arg, &d_flags,
+            &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tRec_arg, &dtOut_arg,
+            &preScaller_arg, &iters_arg, &raw_arg, &interp_arg, &d_cancel_arg, &d_progress_arg, &d_adStats_arg
+        };
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+        SMA_CHECK_CU(cuLaunchKernel(cached_metrics_ad.kernel_cont, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
+                     "cuLaunchKernel(metrics adaptive continuation)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
+        SMA_CHECK(cudaDeviceSynchronize(), "sync after metrics adaptive continuation");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+
+        res.dimension   = 1;
+        res.n_pts       = nPts;
+        res.param_lo    = req.param_lo;
+        res.param_hi    = req.param_hi;
+        res.log_scale   = req.log_scale;
+        res.metric_mask = mask;
+        res.continuation         = true;
+        res.continuation_reverse = req.continuation_reverse;
+
+        std::vector<int>  h_flags((size_t)nPts);
+        std::vector<numb> h_row((size_t)nPts);
+        std::vector<numb> h_st((size_t)nPts * 4);
+        SMA_CHECK(cudaMemcpy(h_flags.data(), d_flags, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy flags");
+        res.flags.assign(h_flags.begin(), h_flags.end());
+        for (int m = 0; m < SIGM_COUNT; ++m) {
+            if (!((mask >> m) & 1)) continue;
+            SMA_CHECK(cudaMemcpy(h_row.data(), d_out + (size_t)m * (size_t)nPts, (size_t)nPts * sizeof(numb),
+                                 cudaMemcpyDeviceToHost), "memcpy metrics");
+            res.values[m].assign(h_row.begin(), h_row.end());
+        }
+        SMA_CHECK(cudaMemcpy(h_st.data(), adArgs.stats, (size_t)nPts * 4 * sizeof(numb), cudaMemcpyDeviceToHost),
+                  "memcpy adaptive stats");
+        res.ad_stats.assign(h_st.begin(), h_st.end());
+
+        cleanup();
+        #undef SMA_CHECK
+        #undef SMA_CHECK_CU
+        metrics_finish(res, req);
+        return res;
+    }
 
     // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
     // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
@@ -7008,6 +8771,7 @@ struct ParametricEngine::Impl {
     BasinsResult run_basins(const BasinsRequest& req) {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
 
         if (req.krs_body.empty())                                  return fail("krs_body is empty");
         if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of the allowed range");
@@ -7027,7 +8791,14 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        const bool ad = req.adaptive.enabled;   // адаптивный шаг: ядра из адаптивного модуля
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err)) return fail(err);
+        }
+        else if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        const CUfunction k_cdbscan      = ad ? cached_ad.kernel_cdbscan      : cached_basins.kernel_dbscan;
+        const CUfunction k_search_fixed = ad ? cached_ad.kernel_search_fixed : cached_basins.kernel_search_fixed;
+        const CUfunction k_search_clear = ad ? cached_ad.kernel_search_clear : cached_basins.kernel_search_clear;
 
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
@@ -7078,8 +8849,10 @@ struct ParametricEngine::Impl {
         int*    d_amountOfNeighbors = nullptr;
         int*    d_neighbors         = nullptr;
         int*    d_clearIdx          = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -7125,7 +8898,12 @@ struct ParametricEngine::Impl {
         BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
         BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
-        const size_t stepsPerCell   = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        if (ad) {
+            const int kinds[2] = { kAdAxisSystem, kAdAxisSystem };
+            if (!adArgs.alloc(req.adaptive, kinds, total_cells, res.error)) { cleanup(); return res; }
+        }
+        const size_t stepsPerCell   = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerCell);
         const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerCell;
@@ -7253,6 +9031,32 @@ struct ParametricEngine::Impl {
                 &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            if (ad) {
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats + iter * originalNPtsLimiter * 4;
+                void* args_ad[] = {
+                    &nPts_arg, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension_arg,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_avg_peak_chunk, &d_avg_interv_chunk, &d_helpful_chunk,
+                    &feature1_int, &feature2_int, &mult1_v, &mult2_v,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BAS_CHECK_CU(cuLaunchKernel(cached_ad.kernel_avg,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            shared_traj, nullptr, args_ad, nullptr),
+                             "cuLaunchKernel(basins adaptive)");
+            }
+            else
             BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_fused,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared_traj, nullptr, args_basins, nullptr),
@@ -7262,6 +9066,13 @@ struct ParametricEngine::Impl {
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BAS_CHECK(cudaDeviceSynchronize(), "sync after traj+features");
             BAS_CANCEL_CHECK();
+        }
+
+        if (ad) {
+            std::vector<numb> h_adStats(total_cells * 4);
+            BAS_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, total_cells * 4 * sizeof(numb),
+                                 cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+            res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
         }
 
         // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan).
@@ -7295,7 +9106,7 @@ struct ParametricEngine::Impl {
             // search_fixed_points: проверяет, остались ли -1-точки без cluster'а.
             void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
                                     &amountOfData_int, &d_clearIdx };
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_fixed,
+            BAS_CHECK_CU(cuLaunchKernel(k_search_fixed,
                                         gridSize_db, 1, 1, blockSize_db, 1, 1,
                                         0, nullptr, args_search, nullptr),
                          "cuLaunchKernel(search_fixed)");
@@ -7307,7 +9118,7 @@ struct ParametricEngine::Impl {
             int resultClusters = 0;
             if (clearIdx == -1) {
                 // FP-точек не осталось — search_clear_points (Osc).
-                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_clear,
+                BAS_CHECK_CU(cuLaunchKernel(k_search_clear,
                                             gridSize_db, 1, 1, blockSize_db, 1, 1,
                                             0, nullptr, args_search, nullptr),
                              "cuLaunchKernel(search_clear)");
@@ -7337,7 +9148,7 @@ struct ParametricEngine::Impl {
                 &amountOfData_int, &eps_arg, &resultClusters,
                 &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
             };
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+            BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
                                         gridSize_db, 1, 1, blockSize_db, 1, 1,
                                         0, nullptr, args_db, nullptr),
                          "cuLaunchKernel(dbscan expand init)");
@@ -7356,7 +9167,7 @@ struct ParametricEngine::Impl {
                     &amountOfData_int, &eps_arg, &resultClusters,
                     &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
                 };
-                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
                                             gridSize_db, 1, 1, blockSize_db, 1, 1,
                                             0, nullptr, args_db2, nullptr),
                              "cuLaunchKernel(dbscan expand neighbor)");
@@ -7745,54 +9556,103 @@ struct ParametricEngine::Impl {
     // prewarm_* — компиляция без расчёта. Ключи считаются ровно так же, как в соответствующем
     // run_*, иначе прогретый модуль не был бы найден. Ошибки не всплывают: не прогрелось — Run
     // скомпилирует сам и покажет ошибку уже там.
+    // CPU-ветки адаптивного шага (БД 1D, метрики, LLE/LS) считают одной cl.exe-DLL с теми же
+    // аргументами сборки: прогрев собирает её в дисковый кэш (build_cached_dll), Run её только
+    // загружает. GPU-модули им не нужны.
+    void prewarm_ad_cpu(const AdaptiveRequest& ad, int amountOfX) {
+        if (!ad.setup_error.empty()) return;
+        AdaptiveCpuModule mod;
+        std::vector<KrsCpuDiag> diags;
+        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, peak_config_defines(), diags);
+    }
+
     void prewarm_bif1d(const Bifurcation1DRequest& req) {
+        if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
-        if (req.continuation && !req.use_cpu) compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err, false);
+        if (req.adaptive.enabled && req.continuation)
+            compile_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false);
+        else if (req.adaptive.enabled)
+            compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        else if (req.continuation && !req.use_cpu) compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err, false);
         else compile_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
     void prewarm_metrics(const SignalMetricsRequest& req) {
-        if (req.use_cpu) return;   // CPU-шаг собирает cl.exe при Run, греть тут нечего
+        if (req.use_cpu) {   // Fixed: CPU-шаг собирает cl.exe при Run; адаптивный — общая CPU-DLL
+            if (req.adaptive.enabled) prewarm_ad_cpu(req.adaptive, req.amountOfX);
+            return;
+        }
         MetricsAxes ax;
         if (!metrics_axes(req, ax).empty()) return;
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
-        compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err, false);
+        if (req.adaptive.enabled)
+            compile_metrics_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, ax.par_or_var, err, false);
+        else
+            compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err, false, req.minmax_interp);
     }
     void prewarm_bif2d(const Bifurcation2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
+        if (req.adaptive.enabled) {
+            // par_or_var адаптивного прогона разбирает run_bif2d; греем самый частый случай.
+            compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                 par_or_var_2d(false, false, req.sweep_over_var, req.sweep_over_var_2), err, false);
+            return;
+        }
         compile_bif2d_if_needed(req.krs_body, req.amountOfX,
                                 par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                               req.sweep_over_var, req.sweep_over_var_2), err, false);
     }
     void prewarm_lle1d(const LLE1DRequest& req) {
+        if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
-        compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        // Continuation с адаптивным шагом считает модуль цепочки, а не классический (run_lyap_ad_seq).
+        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false); return; }
+        if (req.adaptive.enabled) compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        else compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
     void prewarm_lle2d(const LLE2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
+        if (req.adaptive.enabled) {
+            const bool ax = req.adaptive.axis_kind[0] != kAdAxisSystem, ay = req.adaptive.axis_kind[1] != kAdAxisSystem;
+            compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                      (ax && ay) ? 1 : par_or_var_2d(ax, ay, req.sweep_over_var, req.sweep_over_var_2),
+                                      err, false);
+            return;
+        }
         compile_lle_2d_if_needed(req.krs_body, req.amountOfX,
                                  par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                                req.sweep_over_var, req.sweep_over_var_2), err, false);
     }
     void prewarm_ls1d(const LS1DRequest& req) {
+        if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
-        compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        // Continuation с адаптивным шагом считает модуль цепочки, а не классический (run_lyap_ad_seq).
+        if (req.adaptive.enabled && req.continuation) { compile_lyap_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false); return; }
+        if (req.adaptive.enabled) compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        else compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
     void prewarm_ls2d(const LS2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
+        if (req.adaptive.enabled) {
+            const bool ax = req.adaptive.axis_kind[0] != kAdAxisSystem, ay = req.adaptive.axis_kind[1] != kAdAxisSystem;
+            compile_lyap_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                      (ax && ay) ? 1 : par_or_var_2d(ax, ay, req.sweep_over_var, req.sweep_over_var_2),
+                                      err, false);
+            return;
+        }
         compile_ls_2d_if_needed(req.krs_body, req.amountOfX,
                                 par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
                                               req.sweep_over_var, req.sweep_over_var_2), err, false);
@@ -7801,7 +9661,8 @@ struct ParametricEngine::Impl {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);
-        compile_basins_if_needed(req.krs_body, req.amountOfX, err, false);
+        if (req.adaptive.enabled) compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err, false);
+        else compile_basins_if_needed(req.krs_body, req.amountOfX, err, false);
     }
 
     // Узлы одной оси. Лог-сетка требует строго положительных границ: по шагу
@@ -8342,17 +10203,19 @@ struct ParametricEngine::Impl {
             if (e != cudaSuccess) return fail(std::string("memcpy values: ") + cudaGetErrorString(e));
         }
 
-        struct EventPair {
-            cudaEvent_t a = nullptr, b = nullptr;
-            ~EventPair() { if (a) cudaEventDestroy(a); if (b) cudaEventDestroy(b); }
-        } ev;
-        if (cudaEventCreate(&ev.a) != cudaSuccess || cudaEventCreate(&ev.b) != cudaSuccess)
-            return fail("cudaEventCreate: could not create the timing events");
+        // Время меряет само ядро (%globaltimer вокруг цикла шагов, см. perfIntegrateKernel):
+        // события вокруг запуска захватывали ещё и задержку запуска (~6-8 мкс на WDDM).
+        OrderDevBuf d_tspan;
+        if (!d_tspan.alloc(2 * sizeof(unsigned long long), "perfTimer", err)) return fail(err);
+
+        // y(T) узла — для E(T) против эталона y*(T) (run_performance_any), как у адаптивного.
+        res.y_end.assign((size_t)n, std::vector<double>());
 
         // Ширина блока — 32: измерено, что дальше упирается в регистры, а не в
         // лимит блоков на SM. При replicas == 1 это один активный warp.
         const int blockSize = 32;
         const int gridSize  = (req.replicas + blockSize - 1) / blockSize;
+        bool first_node = true;
 
         for (int i = 0; i < n; ++i) {
             if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
@@ -8384,33 +10247,46 @@ struct ParametricEngine::Impl {
             numb      h_arg   = (numb)h_node;
             long long n_arg   = N;
             numb*     out_arg = d_out.as<numb>();
-            void* args[] = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg };
+            unsigned long long* ts_none = nullptr;
+            unsigned long long* ts_arg  = d_tspan.as<unsigned long long>();
+            void* args_warm[] = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg, &ts_none };
+            void* args[]      = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg, &ts_arg };
 
-            auto launch = [&](const char* what) -> bool {
+            auto launch = [&](const char* what, void** a) -> bool {
                 CUresult r = cuLaunchKernel(cached_order.kernel_perf, gridSize, 1, 1, blockSize, 1, 1,
-                                            0, nullptr, args, nullptr);
+                                            0, nullptr, a, nullptr);
                 if (r != CUDA_SUCCESS) { err = std::string("cuLaunchKernel(") + what + "): " + cu_err(r); return false; }
                 return true;
             };
-
-            for (int w = 0; w < req.warmup; ++w) {
-                if (!launch("perf warmup")) return fail(err);
+            auto sync = [&]() -> bool {
                 cudaError_t ce = cudaDeviceSynchronize();
-                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
-            }
+                if (ce != cudaSuccess) { err = std::string("perf kernel: ") + cudaGetErrorString(ce); return false; }
+                return true;
+            };
+
+            // Прогрев по времени: GPU поднимает частоту только под сплошной нагрузкой, а
+            // короткие запуски с синхронизацией между ними её не дают — без этого одно и то же
+            // ядро мерилось то на холостой частоте, то на рабочей (до 3-5 раз разницы).
+            // Пачка запусков подряд, без синхронизаций: ~300 мс перед первым узлом, ~20 мс
+            // перед каждым следующим. Потом — warmup запусков из настроек, как раньше.
+            if (!perf_burst_warmup(first_node ? 300.0 : 20.0,
+                                   [&]() { return launch("perf warmup", args_warm); }, sync))
+                return fail(err);
+            first_node = false;
+            for (int w = 0; w < req.warmup; ++w)
+                if (!launch("perf warmup", args_warm) || !sync()) return fail(err);
 
             double tmin = 0.0, tmax = 0.0, tsum = 0.0;
             int got = 0;
             for (int rep = 0; rep < req.repeats; ++rep) {
-                cudaEventRecord(ev.a, 0);
-                if (!launch("perf")) return fail(err);
-                cudaEventRecord(ev.b, 0);
-                cudaError_t ce = cudaEventSynchronize(ev.b);
-                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
-                float ms = 0.0f;
-                ce = cudaEventElapsedTime(&ms, ev.a, ev.b);
-                if (ce != cudaSuccess) return fail(std::string("cudaEventElapsedTime: ") + cudaGetErrorString(ce));
-                const double us = (double)ms * 1000.0;
+                const unsigned long long ts_init[2] = { ~0ULL, 0ULL };
+                cudaError_t ce = cudaMemcpy(d_tspan.p, ts_init, sizeof(ts_init), cudaMemcpyHostToDevice);
+                if (ce != cudaSuccess) return fail(std::string("memcpy timer: ") + cudaGetErrorString(ce));
+                if (!launch("perf", args) || !sync()) return fail(err);
+                unsigned long long ts[2] = { 0, 0 };
+                ce = cudaMemcpy(ts, d_tspan.p, sizeof(ts), cudaMemcpyDeviceToHost);
+                if (ce != cudaSuccess) return fail(std::string("memcpy timer: ") + cudaGetErrorString(ce));
+                const double us = ts[1] >= ts[0] ? (double)(ts[1] - ts[0]) * 1.0e-3 : 0.0;
                 if (got == 0) { tmin = tmax = us; }
                 else { if (us < tmin) tmin = us; if (us > tmax) tmax = us; }
                 tsum += us;
@@ -8425,6 +10301,16 @@ struct ParametricEngine::Impl {
                 res.t_min[(size_t)i] = tmin;
                 res.t_max[(size_t)i] = tmax;
                 res.t_avg[(size_t)i] = tsum / (double)got;
+            }
+
+            // y(T) первой реплики — только если узел кончился ровно в t_max (fit h to t_max):
+            // иначе сравнивать с y*(T) нечего, E(T) узла остаётся пустым.
+            if ((double)N * h_node > 0.0
+                && std::fabs((double)N * h_node - req.t_max) <= 1e-9 * (std::max)(1.0, std::fabs(req.t_max))) {
+                std::vector<numb> y((size_t)req.amountOfX);
+                cudaError_t ce = cudaMemcpy(y.data(), d_out.p, y.size() * sizeof(numb), cudaMemcpyDeviceToHost);
+                if (ce != cudaSuccess) return fail(std::string("memcpy y(T): ") + cudaGetErrorString(ce));
+                res.y_end[(size_t)i].assign(y.begin(), y.end());
             }
 
             if (req.progress)

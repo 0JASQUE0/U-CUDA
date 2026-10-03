@@ -48,6 +48,10 @@ struct AxisInfo {
     double view_max = 1;
     bool   lock = false;
     bool   invert = false;
+    // Диапазон задан вручную (поля min/max в меню оси по ПКМ): вид не прижимается к границам
+    // данных и не сбрасывается автоподгонкой при новых данных — можно смотреть и за пределы
+    // данных. Снимается явным Auto fit (меню) или пунктом меню.
+    bool   user_range = false;
     // Sweep-сетка по этой оси log-распределена (см. BifurcationDiagramConfig::
     // log_scale и др.).
     //

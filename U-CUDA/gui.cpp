@@ -13,7 +13,9 @@
 #include "app_config.h"
 #include "data_export.h"
 #include "krs_cpu.h"
+#include "nvrtc_engine.h"   // nvrtc_check_ctrl_body — Check в библиотеке регуляторов
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
+#include "digit_input.h" // DigitInput::ComputeStep — ↑/↓ по значению в списке (atol)
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -500,6 +502,46 @@ static bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
     return changed;
 }
 
+// ↑/↓ в поле-списке чисел через ',' или ';' (atol): шагает цифру того значения, в котором
+// стоит каретка, как digit_step_input_callback у одиночного числа. Пробелы вокруг значения
+// не трогаются. Запятая здесь разделитель, поэтому в точку не превращается.
+static int list_digit_step_callback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag != ImGuiInputTextFlags_CallbackHistory) return 0;
+    int dir = 0;
+    if (data->EventKey == ImGuiKey_UpArrow)   dir = +1;
+    if (data->EventKey == ImGuiKey_DownArrow) dir = -1;
+    if (dir == 0) return 0;
+    const std::string text(data->Buf, data->Buf + data->BufTextLen);
+    const int cur = std::clamp(data->CursorPos, 0, (int)text.size());
+    int b = cur, e = cur;
+    while (b > 0 && text[b - 1] != ',' && text[b - 1] != ';') --b;
+    while (e < (int)text.size() && text[e] != ',' && text[e] != ';') ++e;
+    while (b < e && text[b] == ' ') ++b;
+    while (e > b && text[e - 1] == ' ') --e;
+    if (b >= e) return 0;
+    std::string new_tok;
+    int new_cur = 0;
+    if (!DigitInput::ComputeStep(text.substr(b, e - b), std::clamp(cur - b, 0, e - b), dir,
+                                 new_tok, new_cur))
+        return 0;
+    data->DeleteChars(b, e - b);
+    data->InsertChars(b, new_tok.c_str());
+    const int pos = std::clamp(b + new_cur, 0, data->BufTextLen);
+    data->CursorPos = data->SelectionStart = data->SelectionEnd = pos;
+    return 0;
+}
+
+// Поле-список чисел (atol: одно на все переменные или по одному через ',' / ';') со
+// стрелками ↑/↓ по значению под кареткой.
+static bool InputNumListStr(const char* label, std::string& str, float width = 0.0f) {
+    std::vector<char>& buf = input_scratch(str, 1024);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    const bool changed = ImGui::InputText(label, buf.data(), buf.size(),
+        ImGuiInputTextFlags_CallbackHistory, list_digit_step_callback);
+    if (changed) str = buf.data();
+    return changed;
+}
+
 // Общие хелперы диаграмм — единый источник истины для настроек view'ов и тулбаров.
 // Раньше каждая вкладка собирала всё заново, и одна и та же диаграмма отличалась
 // между вкладками (линии x=0/y=0 у Bif-1D, autoscale/vmin/vmax у Basins, Swap axes
@@ -901,6 +943,12 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "Error constant differs from {0-1} and depends on the problem:\n"
       "10x larger on Lorenz, 2.8x smaller on Rossler.\n"
       "a[0] is NOT read." },
+    { "RK45",                     5, &AppModel::scheme_rk45,
+      "Dormand-Prince 5(4)7M: the ode45 / scipy RK45 pair.\n"
+      "With a fixed step: 6 stages, order 5 (the 5th-order\n"
+      "solution advances the step; the 4th-order one and the\n"
+      "FSAL 7th stage are only for error control).\n"
+      "Coefficients are the exact published fractions." },
     { "DOPRI78",                  8, &AppModel::scheme_dopri78,
       "Dormand-Prince RK8(7)13M, 13 stages, order 8 (the 7th-order\n"
       "embedded solution is computed but not used).\n"
@@ -917,6 +965,14 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "They satisfy the order conditions only to ~1e-18: in double\n"
       "this is indistinguishable from DOPRI78, in dd the error\n"
       "floors at ~1e-17. Kept for comparison." },
+    { "DOP853",                   8, &AppModel::scheme_dop853,
+      "Hairer's DOP853: explicit RK of order 8 with 12 stages,\n"
+      "embedded 5th- and 3rd-order error estimators and a\n"
+      "7th-order dense output (the scipy DOP853 method).\n"
+      "With a fixed step only the 8th-order solution is used.\n"
+      "Coefficients refined from the published 30-digit values\n"
+      "by solving all 200 order conditions to 3e-78: dd/qd in\n"
+      "the Order tab get the full precision." },
     { "GBS (n=2)",               2, &AppModel::scheme_gbs,
       "Gragg's modified midpoint with n = 2 substeps of h/2, the\n"
       "base of the Gragg-Bulirsch-Stoer family:\n"
@@ -1148,7 +1204,15 @@ static void draw_sweep_target_combo(const char* label,
                                     bool allow_s = false,
                                     AppModel* bc = nullptr,
                                     BroadcastField which = BroadcastField::SweepTarget,
-                                    bool allow_h = true) {
+                                    bool allow_h = true,
+                                    int* ad_axis = nullptr,
+                                    const AdaptiveSettings* ad = nullptr) {
+    // Адаптивный шаг: h — шаг вывода, его не свипают; вместо него ось может свипать
+    // настройку шага (*ad_axis — AdaptiveAxisKind движка, 0 — обычная цель).
+    const bool ad_on = ad_axis && ad && ad->enabled;
+    if (ad_axis && !ad_on) *ad_axis = 0;
+    if (ad_on) allow_h = false;
+    const bool ad_sel = ad_on && *ad_axis != 0;
     // A map has no step, so there is nothing to sweep over.
     if (!allow_h) over_h = false;
     if (params.empty() && vars.empty() && note_when_empty) {
@@ -1163,8 +1227,19 @@ static void draw_sweep_target_combo(const char* label,
     if (par_index >= (int)params.size()) par_index = 0;
     if (var_index < 0 || var_index >= (int)vars.size())   var_index = 0;
 
+    auto ad_name = [&](int kind) -> std::string {
+        if (kind == kAdAxisRtol) return "rtol";
+        if (kind == kAdAxisAtol) return "atol";
+        if (kind == kAdAxisTol)  return "tol (atol = rtol x ratio)";
+        AdaptiveCtrlResolved cr;
+        std::string cerr;
+        const bool known = ad && adaptive_resolve_ctrl(ad->ctrl, 7, cr, cerr);
+        const int k = kind - kAdAxisCtrl;
+        return "controller: " + ((known && k >= 0 && k < (int)cr.par.size()) ? cr.par[(size_t)k] : std::string("?"));
+    };
     const std::string preview =
-          over_h                      ? std::string("dt (h)")
+          ad_sel                      ? ad_name(*ad_axis)
+        : over_h                      ? std::string("dt (h)")
         : (over_var && !vars.empty()) ? (vars[var_index] + " (IC)")
         : (par_index < 0)             ? std::string("s (a[0])")
         : (!params.empty())           ? params[par_index]
@@ -1180,23 +1255,26 @@ static void draw_sweep_target_combo(const char* label,
     if (!ImGui::BeginCombo(label, preview.c_str())) { apply_all_menu(); return; }
 
     for (int i = 0; i < (int)params.size(); ++i) {
-        const bool sel = !over_var && !over_h && par_index == i;
+        const bool sel = !ad_sel && !over_var && !over_h && par_index == i;
         if (ImGui::Selectable(params[i].c_str(), sel)) {
             par_index = i; over_var = false; over_h = false;
+            if (ad_axis) *ad_axis = 0;
         }
     }
     if (!params.empty() && !vars.empty()) ImGui::Separator();
     for (int i = 0; i < (int)vars.size(); ++i) {
-        const bool sel = over_var && !over_h && var_index == i;
+        const bool sel = !ad_sel && over_var && !over_h && var_index == i;
         if (ImGui::Selectable((vars[i] + " (IC)").c_str(), sel)) {
             var_index = i; over_var = true; over_h = false;
+            if (ad_axis) *ad_axis = 0;
         }
     }
 
     if (allow_s) {
         ImGui::Separator();
-        if (ImGui::Selectable("s (a[0])", !over_var && !over_h && par_index < 0)) {
+        if (ImGui::Selectable("s (a[0])", !ad_sel && !over_var && !over_h && par_index < 0)) {
             par_index = -1; over_var = false; over_h = false;
+            if (ad_axis) *ad_axis = 0;
         }
     }
     if (allow_h) {
@@ -1206,8 +1284,532 @@ static void draw_sweep_target_combo(const char* label,
             if (other_over_h) *other_over_h = false;   // ровно одна ось = h
         }
     }
+    if (ad_on) {
+        ImGui::Separator();
+        auto item = [&](int kind) {
+            if (ImGui::Selectable(ad_name(kind).c_str(), *ad_axis == kind)) {
+                *ad_axis = kind; over_var = false; over_h = false;
+            }
+        };
+        item(kAdAxisRtol); item(kAdAxisAtol); item(kAdAxisTol);
+        AdaptiveCtrlResolved cr;
+        std::string cerr;
+        if (adaptive_resolve_ctrl(ad->ctrl, 7, cr, cerr))
+            for (int k = 0; k < (int)cr.par.size(); ++k) item(kAdAxisCtrl + k);
+    }
     ImGui::EndCombo();
     apply_all_menu();
+}
+
+// ---- Адаптивный шаг --------------------------------------------------------------
+// Блок настроек AdaptiveSettings в секции Integration. opts — какие поля есть у
+// вкладки (сырые узлы, интерполяция пиков, потолок узлов, перенормировка LLE/LS,
+// min/max Metrics). Возвращает true, если что-то поменялось.
+enum AdaptiveUiOpt {
+    kAdUiRaw    = 1,    // выбор сетки вывода: равномерная / узлы шага
+    kAdUiInterp = 2,    // интерполяция пиков на узлах шага
+    kAdUiMaxPts = 4,    // потолок числа узлов (Analysis)
+    kAdUiRenorm = 8,    // перенормировка LLE/LS
+    kAdUiMinMax = 16,   // Metrics: min/max по интерполированным экстремумам и в Fixed
+};
+
+// Все настройки адаптивного шага в модели — в фиксированном порядке, чтобы откат
+// мог сопоставить их с сохранёнными значениями (и отказаться, если число конфигов
+// с тех пор изменилось).
+static std::vector<AdaptiveSettings*> collect_adaptive_slots(AppModel& m) {
+    std::vector<AdaptiveSettings*> v;
+    v.push_back(&m.phase_session.adaptive);
+    // Custom: источник — общий конфиг вкладки (apply_shared_to_* раздаёт его уровням при
+    // запуске); его Phase — вместе с ним, как это делает draw_shared_config.
+    v.push_back(&m.custom_session.shared.adaptive);
+    v.push_back(&m.custom_session.phase_session.adaptive);
+    for (auto& d : m.bifurcation_session.diagrams) v.push_back(&d.adaptive);
+    for (auto& c : m.lle_session.curves)           v.push_back(&c.adaptive);
+    for (auto& c : m.ls_session.curves)            v.push_back(&c.adaptive);
+    for (auto& c : m.basins_session.configs)       v.push_back(&c.adaptive);
+    for (auto& c : m.metrics_session.configs)      v.push_back(&c.adaptive);
+    return v;
+}
+
+// «apply to all tabs»: одни и те же настройки шага во все вкладки, где они есть
+// (Analysis, Custom, БД, LLE, LS, Basins, Metrics). Откат — Ctrl+Z.
+static void broadcast_adaptive(AppModel& m, const AdaptiveSettings& a) {
+    std::vector<AdaptiveSettings> old;
+    for (AdaptiveSettings* p : collect_adaptive_slots(m)) { old.push_back(*p); *p = a; }
+    AppModel* mp = &m;
+    m.push_undo("adaptive step settings to all tabs",
+        [mp, old]() {
+            std::vector<AdaptiveSettings*> v = collect_adaptive_slots(*mp);
+            if (v.size() == old.size())
+                for (size_t i = 0; i < v.size(); ++i) *v[i] = old[i];
+        },
+        [mp, a]() { for (AdaptiveSettings* p : collect_adaptive_slots(*mp)) *p = a; });
+}
+
+// ---- Библиотека регуляторов шага ------------------------------------------------
+// Окно редактора adaptive_ctrl_library(). Записи правятся на месте под замком библиотеки
+// (расчётные потоки берут копию записи по имени); файл пишется, когда правка закончена —
+// ни одно поле окна не активно.
+
+static std::vector<std::pair<std::string, std::string>> user_ctrl_list() {
+    AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+    std::lock_guard<std::mutex> lk(L.mu);
+    std::vector<std::pair<std::string, std::string>> v;
+    for (const AdaptiveUserCtrl& u : L.items) {
+#ifdef UCUDA_AD_HAIRER_ONLY
+        if (u.kind == kUserCtrlFilter) continue;   // встроенный Filter не собран
+#endif
+        v.emplace_back(u.name, u.tip);
+    }
+    return v;
+}
+
+static const char* const kCtrlBodyHelp =
+    "void ucuda_ctrl_custom(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) { <body> }\n"
+    "\n"
+    "in.h          size of this attempt;  in.t - t at the start of the step\n"
+    "in.y0[i]      solution at t;  in.y1[i] - higher-order solution at t + h\n"
+    "in.yerr[i]    error estimate y1 - yhat; in.nlo estimates of in.n values each\n"
+    "              (DOP853: in.yerr[in.n + i] is the 3rd-order one)\n"
+    "in.rtol, in.atol[i], in.c[k] - parameters of this controller, in.q - estimator order\n"
+    "in.hmin, in.hmax (+inf: no limit; the driver clamps to it anyway), in.nrej - rejected attempts\n"
+    "m.h[j], m.err[j]  accepted steps and their errors, j = 0 the latest (3 kept)\n"
+    "m.nacc        accepted steps so far;  m.user[0..7] - free memory kept between steps\n"
+    "o.err         error of the attempt (1 = on the tolerance): the norm or its square (Hairer\n"
+    "              reports err^2); the driver only checks that it is finite; goes to the log\n"
+    "o.accept      1 - take the step, 0 - retry it with o.h\n"
+    "o.h           next step, or the step of the retry\n"
+    "\n"
+    "in.k[0..7]    constants computed by the prepare section (0 if not set)\n"
+    "\n"
+    "Prepare section (optional), once per trajectory:\n"
+    "void ucuda_ctrl_custom_prep(const numb* c, int q, numb* k) { <prepare> }\n"
+    "c[] - the parameters, q - estimator order, k[0..7] - constants for the body.\n"
+    "Put divisions and powers that depend only on c[] and q here: double division\n"
+    "costs as much as several RHS evaluations on GeForce cards.\n"
+    "\n"
+    "Helpers: ucuda_ctl_err(in) - RMS norm of the estimate, sc_i = atol_i + rtol max(|y0_i|, |y1_i|);\n"
+    "ucuda_ctl_lg2err2(in, err2) - log2(err^2) in float, err^2 into err2, no sqrt (\"Hairer fast\");\n"
+    "ucuda_ctl_lg2err2_numb(in, err2) - the same in numb (\"Hairer numb\");\n"
+    "ucuda_ctl_pow(x, y) - fast x^y (float);  ucuda_ctl_log2(x), ucuda_ctl_exp2(f) - float;\n"
+    "ucuda_clamp(x, lo, hi);  ucuda_fmin/fmax (double), ucuda_fminf/fmaxf (float).  numb is double.\n"
+    "Index arrays (m.user, in.k, ...) with constants: a computed index puts the state of\n"
+    "the GPU thread into local memory.\n"
+    "The driver then clamps h to h_max, takes the step at h_min when it would go below\n"
+    "(or after max rejects), and retries with at most 0.9 h.";
+
+static void draw_ctrl_library_window(AppModel& m) {
+    // Результат фонового Check — и при закрытом окне, чтобы future не висел.
+    if (m.ctrl_lib_check_future.valid()
+        && m.ctrl_lib_check_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const std::pair<bool, std::string> r = m.ctrl_lib_check_future.get();
+        m.ctrl_lib_check_ok  = r.first;
+        m.ctrl_lib_check_log = r.second;
+    }
+    if (!m.show_ctrl_library) return;
+    ImGui::SetNextWindowSize(ImVec2(940.0f, 640.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Step controller library", &m.show_ctrl_library)) { ImGui::End(); return; }
+
+    AdaptiveCtrlLibrary& L = adaptive_ctrl_library();
+    bool edited = false;
+    std::string check_body;
+    bool do_check = false;
+    {
+        std::lock_guard<std::mutex> lk(L.mu);
+        std::vector<AdaptiveUserCtrl>& items = L.items;
+        if (m.ctrl_lib_sel >= (int)items.size()) m.ctrl_lib_sel = (int)items.size() - 1;
+
+        auto taken = [&](const std::string& s, int self) {
+            if (adaptive_find_builtin(s)) return true;
+            for (int i = 0; i < (int)items.size(); ++i) if (i != self && items[(size_t)i].name == s) return true;
+            return false;
+        };
+        auto add = [&](AdaptiveUserCtrl u) {
+            std::string base = u.name.empty() ? std::string("controller") : u.name;
+            u.name = base;
+            for (int k = 2; taken(u.name, -1); ++k) u.name = base + " " + std::to_string(k);
+            items.push_back(u);
+            m.ctrl_lib_sel = (int)items.size() - 1;
+            edited = true;
+        };
+
+        // Слева — список и кнопки.
+        ImGui::BeginChild("##ctrl_list", ImVec2(230.0f, 0.0f), ImGuiChildFlags_Borders);
+        if (ImGui::Button("New...")) ImGui::OpenPopup("##ctrl_new");
+        if (ImGui::BeginPopup("##ctrl_new")) {
+            if (ImGui::Selectable("empty C body")) {
+                AdaptiveUserCtrl u;
+                u.name = "my controller";
+                u.body = "const numb err = ucuda_ctl_err(in);\n"
+                         "o.err = err;\n"
+                         "o.accept = err <= 1;\n"
+                         "o.h = in.h * ucuda_clamp((numb)0.9 * ucuda_ctl_pow(err, (numb)-1 / (in.q + 1)),\n"
+                         "                         (numb)0.2, o.accept ? (numb)5 : (numb)1);\n";
+                add(u);
+            }
+#ifndef UCUDA_AD_HAIRER_ONLY   // фильтры — параметры встроенного Filter, а он не собран
+            if (ImGui::Selectable("empty filter")) {
+                AdaptiveUserCtrl u;
+                u.name = "my filter"; u.kind = kUserCtrlFilter;
+                for (double v : adaptive_ctrl_defaults(UCUDA_CTRL_FILTER, 7)) u.par_values.push_back(fmt_num_shortest(v));
+                add(u);
+            }
+#endif
+            int np = 0;
+            const AdaptiveCtrlPreset* pr = adaptive_ctrl_presets(&np);
+            ImGui::SeparatorText("C body presets");
+            for (int i = 0; i < np; ++i) {
+                if (pr[i].kind != kUserCtrlBody) continue;
+                if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pr[i].tip);
+            }
+#ifndef UCUDA_AD_HAIRER_ONLY
+            ImGui::SeparatorText("Soderlind filters");
+            for (int i = 0; i < np; ++i) {
+                if (pr[i].kind != kUserCtrlFilter) continue;
+                if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pr[i].tip);
+            }
+#endif
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m.ctrl_lib_sel < 0);
+        if (ImGui::Button("Copy") && m.ctrl_lib_sel >= 0) add(items[(size_t)m.ctrl_lib_sel]);
+        ImGui::SameLine();
+        if (ImGui::Button("Delete") && m.ctrl_lib_sel >= 0) {
+            items.erase(items.begin() + m.ctrl_lib_sel);
+            if (m.ctrl_lib_sel >= (int)items.size()) m.ctrl_lib_sel = (int)items.size() - 1;
+            edited = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+        for (int i = 0; i < (int)items.size(); ++i) {
+            ImGui::PushID(i);
+            const AdaptiveUserCtrl& u = items[(size_t)i];
+            const std::string label = u.name + (u.kind == kUserCtrlFilter ? "  (filter)" : "");
+            if (ImGui::Selectable(label.c_str(), m.ctrl_lib_sel == i)) m.ctrl_lib_sel = i;
+            if (!u.tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", u.tip.c_str());
+            ImGui::PopID();
+        }
+        if (items.empty()) ImGui::TextDisabled("Empty. New... adds a controller\nfrom scratch or from a preset.");
+        ImGui::EndChild();
+
+        // Справа — выбранная запись.
+        ImGui::SameLine();
+        ImGui::BeginChild("##ctrl_edit", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+        if (m.ctrl_lib_sel >= 0) {
+            AdaptiveUserCtrl& u = items[(size_t)m.ctrl_lib_sel];
+            const ImVec4 warn(1.0f, 0.55f, 0.3f, 1.0f);
+            edited |= InputTextStr("name", u.name, 260.0f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Tabs refer to a controller by its name: after a rename they\n"
+                                  "report the old name as unknown until you pick it again.");
+            if (u.name.empty()) ImGui::TextColored(warn, "The name is empty.");
+            else if (taken(u.name, m.ctrl_lib_sel))
+                ImGui::TextColored(warn, "The name is taken (a built-in controller or another entry).");
+            int kind = u.kind;
+#ifdef UCUDA_AD_HAIRER_ONLY
+            // Фильтр — параметры встроенного Filter, который в этой сборке не собран: такую
+            // запись (из старой библиотеки) можно только перевести в C body или удалить.
+            if (u.kind == kUserCtrlFilter) {
+                ImGui::TextColored(warn, "Soderlind filters are not built in this version: the tabs do not offer it.");
+                if (ImGui::SmallButton("make it a C body")) kind = kUserCtrlBody;
+            }
+#else
+            ImGui::RadioButton("C body", &kind, kUserCtrlBody);
+            ImGui::SameLine();
+            ImGui::RadioButton("Soderlind filter", &kind, kUserCtrlFilter);
+#endif
+            if (kind != u.kind) {
+                u.kind = kind;
+                if (kind == kUserCtrlFilter) {
+                    u.par_values.clear();
+                    for (double v : adaptive_ctrl_defaults(UCUDA_CTRL_FILTER, 7)) u.par_values.push_back(fmt_num_shortest(v));
+                } else if (u.par_names.size() != u.par_values.size()) {
+                    u.par_values.resize(u.par_names.size());
+                }
+                edited = true;
+            }
+            edited |= InputTextStr("description", u.tip, 520.0f);
+
+            if (u.kind == kUserCtrlFilter) {
+#ifndef UCUDA_AD_HAIRER_ONLY   // иначе встроенного Filter нет (adaptive_find_builtin -> nullptr)
+                const AdaptiveCtrlInfo* fi = adaptive_find_builtin("Filter");
+                ImGui::TextDisabled("%s", fi->tip);
+                if ((int)u.par_values.size() != fi->npar) {
+                    const std::vector<double> d = adaptive_ctrl_defaults(UCUDA_CTRL_FILTER, 7);
+                    u.par_values.resize((size_t)fi->npar);
+                    for (int i = 0; i < fi->npar; ++i)
+                        if (u.par_values[(size_t)i].empty()) u.par_values[(size_t)i] = fmt_num_shortest(d[(size_t)i]);
+                    edited = true;
+                }
+                for (int i = 0; i < fi->npar; ++i) {
+                    ImGui::PushID(i);
+                    edited |= InputTextStr(fi->par[i], u.par_values[(size_t)i], kFieldW);
+                    ImGui::PopID();
+                }
+#endif
+            } else {
+                bool hr = u.hairer_rules != 0;
+                if (ImGui::Checkbox("Hairer's initial step and end-point rule", &hr)) { u.hairer_rules = hr; edited = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("On: initial step as hinit of dopri5 / dop853 and the last step\n"
+                                      "stretched when x + 1.01 h passes the end (as the built-in Hairer).\n"
+                                      "Off: scipy's initial step, the step is cut exactly at the end.");
+                ImGui::Text("Parameters c[k] (name, default):");
+                if (u.par_values.size() != u.par_names.size()) u.par_values.resize(u.par_names.size());
+                int remove = -1;
+                for (int i = 0; i < (int)u.par_names.size(); ++i) {
+                    ImGui::PushID(i);
+                    ImGui::Text("c[%d]", i);
+                    ImGui::SameLine(60.0f);
+                    edited |= InputTextStr("##pn", u.par_names[(size_t)i], 140.0f);
+                    ImGui::SameLine();
+                    edited |= InputTextStr("##pv", u.par_values[(size_t)i], kFieldW);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("x")) remove = i;
+                    ImGui::PopID();
+                }
+                if (remove >= 0) {
+                    u.par_names.erase(u.par_names.begin() + remove);
+                    u.par_values.erase(u.par_values.begin() + remove);
+                    edited = true;
+                }
+                ImGui::BeginDisabled(u.par_names.size() >= (size_t)UCUDA_CTL_NPAR);
+                if (ImGui::SmallButton("+ parameter")) {
+                    u.par_names.push_back("p" + std::to_string(u.par_names.size()));
+                    u.par_values.push_back("0");
+                    edited = true;
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextDisabled("(up to %d; each is also a sweep axis)", UCUDA_CTL_NPAR);
+
+                ImGui::Text("Prepare:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("once per trajectory: k[0..7] from c[] and q, read by the body as in.k[]");
+                edited |= InputTextMultilineStr("##prep", u.prep,
+                                                ImVec2(-1.0f, ImGui::GetTextLineHeightWithSpacing() * 6.5f));
+                // Проверка и её результат — по паре (подготовка, тело), как их собирает модуль.
+                const std::string packed = adaptive_ctrl_pack(u.prep, u.body);
+                const bool checked = !m.ctrl_lib_check_body.empty() && m.ctrl_lib_check_body == packed;
+                ImGui::Text("Body:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCtrlBodyHelp);
+                ImGui::SameLine();
+                const bool checking = m.ctrl_lib_check_future.valid();
+                ImGui::BeginDisabled(checking);
+                if (ImGui::SmallButton("Check")) { do_check = true; check_body = packed; }
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Compile the prepare section and the body with NVRTC (no run). The CPU\n"
+                                      "build with cl.exe happens on the first CPU run of Analysis.");
+                if (checked) {
+                    ImGui::SameLine();
+                    if (checking)                 ImGui::TextDisabled("checking...");
+                    else if (m.ctrl_lib_check_ok) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "compiles");
+                    else                          ImGui::TextColored(warn, "does not compile:");
+                }
+                edited |= InputTextMultilineStr("##body", u.body, ImVec2(-1.0f, m.ctrl_lib_body_h));
+                draw_resize_handle("##body_resize", m.ctrl_lib_body_h);
+                if (checked && !m.ctrl_lib_check_log.empty())
+                    ImGui::InputTextMultiline("##check_log", const_cast<char*>(m.ctrl_lib_check_log.c_str()),
+                                              m.ctrl_lib_check_log.size() + 1, ImVec2(-1.0f, 110.0f),
+                                              ImGuiInputTextFlags_ReadOnly);
+                if (ImGui::TreeNode("API")) {
+                    ImGui::TextUnformatted(kCtrlBodyHelp);
+                    ImGui::TreePop();
+                }
+            }
+        } else {
+            ImGui::TextDisabled("Select a controller on the left, or add one with New...");
+            ImGui::TextDisabled("Controllers of this library appear in the \"controller\" list of every tab.");
+        }
+        ImGui::EndChild();
+    }
+    if (do_check && !m.ctrl_lib_check_future.valid()) {
+        // NVRTC в фоне: окно не замирает на время сборки. Результат забирается в начале кадра.
+        m.ctrl_lib_check_body = check_body;
+        m.ctrl_lib_check_ok   = false;
+        m.ctrl_lib_check_log.clear();
+        m.ctrl_lib_check_future = std::async(std::launch::async, [check_body]() {
+            std::string log;
+            const bool ok = nvrtc_check_ctrl_body(check_body, log);
+            return std::make_pair(ok, log);
+        });
+    }
+    if (edited) m.ctrl_lib_dirty = true;
+    if (m.ctrl_lib_dirty && !ImGui::IsAnyItemActive()) {
+        std::string err;
+        m.ctrl_lib_status = save_ctrl_library(&err) ? std::string() : err;
+        m.ctrl_lib_dirty = false;
+    }
+    if (!m.ctrl_lib_status.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m.ctrl_lib_status.c_str());
+    ImGui::End();
+}
+
+static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string& scheme,
+                                int opts, bool is_map, AppModel* bc = nullptr) {
+    if (is_map) return false;   // у отображения шага нет
+    ImGui::PushID(id);
+    bool changed = false;
+    const bool ok = adaptive_scheme_name_ok(scheme);
+
+    int mode = a.enabled ? 1 : 0;
+    changed |= ImGui::RadioButton("Fixed step", &mode, 0);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!ok && !a.enabled);
+    changed |= ImGui::RadioButton("Adaptive step", &mode, 1);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Step size chosen by an error controller from the embedded\n"
+                          "error estimate of the scheme. Needs RK45, DOPRI78, DOP853,\n"
+                          "GBS 2-4 ... or an extrapolation Extr(...) with at least two stages:\n"
+                          "its first K-1 stages give the lower-order solution, and the\n"
+                          "dense output between step nodes is cubic Hermite.");
+    a.enabled = (mode == 1);
+
+    if (a.enabled) {
+        if (!ok)
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                               "The scheme has no error estimate: choose RK45, DOPRI78, DOP853, GBS 2-4 ...\n"
+                               "or Extr(...) with at least two stages.");
+        if (opts & kAdUiRaw) {
+            int out = a.raw_nodes ? 1 : 0;
+            changed |= ImGui::RadioButton("uniform grid", &out, 0);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Output on a uniform time grid through the dense output of\n"
+                                  "the scheme; the field h is the output step.");
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("step nodes", &out, 1);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Output exactly at the accepted steps (including the steps\n"
+                                  "shortened at the end of the transient and of the interval);\n"
+                                  "the decimator keeps every N-th node, h is not used.");
+            a.raw_nodes = (out == 1);
+        }
+        changed |= InputNumStr("rtol", a.rtol, kFieldW);
+        changed |= InputNumListStr("atol", a.atol, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("One value for all variables, or one per variable separated by ';'.");
+        changed |= InputNumStr("h0", a.h0, kFieldW, {}, true);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Initial step. Empty: chosen automatically.");
+        changed |= InputNumStr("h_min", a.hmin, kFieldW, {}, true);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Smallest step. A step that would go below it is taken at h_min\n"
+                              "anyway and counted as forced. Empty: the larger of 10 ulp(t) and\n"
+                              "1e-12 x the length of the whole interval (transient + record).\n"
+                              "A set value is raised to 10 ulp(t) where it is smaller: below that\n"
+                              "t + h_min == t and the step would not advance time.");
+        changed |= InputNumStr("h_max", a.hmax, kFieldW, {}, true);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Largest step. Empty: no limit.");
+        changed |= InputNumStr("max rejects", a.max_rej, kFieldW, {}, true);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Rejections allowed per step. After this many in a row the next\n"
+                              "attempt is made at h_min and taken unconditionally. Empty: no limit.\n"
+                              "0: no retries - every attempt is taken, a rejection only shrinks the\n"
+                              "next step (counted as forced); the tolerance becomes a target, not a bound.");
+
+        int nb = 0;
+        const AdaptiveCtrlInfo* bi = adaptive_builtin_ctrls(&nb);
+        ImGui::SetNextItemWidth(kComboW);
+        if (ImGui::BeginCombo("controller", a.ctrl.c_str())) {
+            auto pick = [&](const std::string& name) {
+                if (a.ctrl != name) { a.ctrl = name; a.ctrl_params.clear(); changed = true; }
+            };
+            for (int i = 0; i < nb; ++i) {
+                if (ImGui::Selectable(bi[i].name, a.ctrl == bi[i].name)) pick(bi[i].name);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi[i].tip);
+            }
+            const std::vector<std::pair<std::string, std::string>> users = user_ctrl_list();
+            if (!users.empty()) ImGui::SeparatorText("library");
+            for (size_t i = 0; i < users.size(); ++i) {
+                ImGui::PushID((int)i);
+                if (ImGui::Selectable(users[i].first.c_str(), a.ctrl == users[i].first)) pick(users[i].first);
+                if (!users[i].second.empty() && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", users[i].second.c_str());
+                ImGui::PopID();
+            }
+            ImGui::Separator();
+            // Окно библиотеки — флаг в AppModel; без модели (bc == nullptr) пункта нет.
+            if (bc != nullptr && ImGui::Selectable("edit library...")) bc->show_ctrl_library = true;
+            ImGui::EndCombo();
+        }
+        AdaptiveCtrlResolved cur;
+        std::string cur_err;
+        if (!adaptive_resolve_ctrl(a.ctrl, adaptive_scheme_q(scheme), cur, cur_err)) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", cur_err.c_str());
+        } else {
+            const int npar = (int)cur.par.size();
+            const std::vector<double>& def = cur.def;
+            if ((int)a.ctrl_params.size() != npar) {
+                std::string line;
+                for (int i = 0; i < npar; ++i) {
+                    char buf[96];
+                    std::snprintf(buf, sizeof(buf), "%s%s = %g", i ? ", " : "", cur.par[(size_t)i].c_str(),
+                                  i < (int)def.size() ? def[(size_t)i] : 0.0);
+                    line += buf;
+                }
+                if (npar > 0) {
+                    ImGui::TextDisabled("%s", line.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("edit")) {
+                        a.ctrl_params.clear();
+                        for (int i = 0; i < npar; ++i) a.ctrl_params.push_back(fmt_num_shortest(def[(size_t)i]));
+                        changed = true;
+                    }
+                }
+            } else {
+                for (int i = 0; i < npar; ++i) {
+                    ImGui::PushID(i);
+                    changed |= InputNumStr(cur.par[(size_t)i].c_str(), a.ctrl_params[(size_t)i], kFieldW);
+                    ImGui::PopID();
+                }
+                if (ImGui::SmallButton("defaults")) { a.ctrl_params.clear(); changed = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(cur.user ? "Back to the defaults stored in the controller library."
+                                               : "Back to the defaults for this scheme.");
+            }
+        }
+        if ((opts & kAdUiInterp) && a.raw_nodes) {
+            const char* items[] = { "node", "parabola", "Hermite by f" };
+            ImGui::SetNextItemWidth(kComboW);
+            changed |= ImGui::Combo("peak interpolation", &a.peak_interp, items, IM_ARRAYSIZE(items));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How a peak (in Metrics also a min / max) is placed between step nodes:\n"
+                                  "node - the largest node itself;\n"
+                                  "parabola - vertex of the parabola through three nodes\n"
+                                  "  (the fixed-step formula generalised to unequal steps);\n"
+                                  "Hermite by f - cubic on the step where dx/dt changes sign,\n"
+                                  "  built from the nodes and the exact derivatives.");
+        }
+        if ((opts & kAdUiMaxPts) && a.raw_nodes)
+            changed |= InputNumStr("max points", a.max_points, kFieldW);
+        if (opts & kAdUiRenorm) {
+            const char* items[] = { "exactly at k*NT", "first node after NT" };
+            ImGui::SetNextItemWidth(kComboW);
+            changed |= ImGui::Combo("renormalization", &a.lyap_renorm, items, IM_ARRAYSIZE(items));
+        }
+    }
+    if (opts & kAdUiMinMax) {
+        changed |= ImGui::Checkbox("min/max by interpolated extrema in Fixed", &a.minmax_interp_fixed);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("With the adaptive step min/max always use interpolated extrema: on the\n"
+                              "uniform grid the vertex of the parabola through three samples (as peaks\n"
+                              "do), on step nodes the peak interpolation. This applies the parabola to\n"
+                              "the fixed step too.");
+    }
+    if (bc && a.enabled) {
+        if (ImGui::SmallButton("apply to all tabs")) broadcast_adaptive(*bc, a);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Copy these step settings to every tab that has them\n"
+                              "(Analysis, Custom, Bifurcation, LLE, LS, Basins, Metrics). Ctrl+Z undoes.");
+    }
+    ImGui::PopID();
+    return changed;
 }
 
 // Поля секции "Integration". nullptr = поле у этого анализа отсутствует
@@ -1220,6 +1822,10 @@ struct IntegrationFields {
     std::string* transient   = nullptr;
     std::string* pre_scaller = nullptr;
     std::string* max_value   = nullptr;
+    // Адаптивный шаг: nullptr — у вкладки только постоянный шаг (DFT, FastSync,
+    // Network, Stability). adaptive_opts — AdaptiveUiOpt.
+    AdaptiveSettings* adaptive = nullptr;
+    int adaptive_opts = 0;
 };
 
 // bc — модель для пункта "Apply to all calculation tabs" в ПКМ по полю;
@@ -1241,6 +1847,12 @@ static bool draw_integration_block(const char* header,
     const char* transient_label = is_map ? "transient iterations" : "transient time";
     if (f.h && !is_map) changed |= InputNumStr("h", *f.h, kFieldW,
                                     menu(BroadcastField::StepH, "h", *f.h));
+    if (f.h && !is_map && f.adaptive && f.adaptive->enabled) {
+        ImGui::SameLine();
+        // LLE/LS (перенормировка в узлах шага) h не используют вовсе.
+        ImGui::TextDisabled((f.adaptive_opts & kAdUiRenorm) ? "(not used)"
+                            : f.adaptive->raw_nodes ? "(not used on step nodes)" : "(output step)");
+    }
     if (f.symmetry_s && scheme_uses_symmetry(scheme, custom_schemes))
         changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW,
                                menu(BroadcastField::SymmetryS, "symmetry s", *f.symmetry_s));
@@ -1252,6 +1864,10 @@ static bool draw_integration_block(const char* header,
                                menu(BroadcastField::PreScaller, "decimator", *f.pre_scaller));
     if (f.max_value)   changed |= InputNumStr("max value",      *f.max_value,   kFieldW,
                                menu(BroadcastField::MaxValue, "max value", *f.max_value));
+    if (f.adaptive) {
+        ImGui::Separator();
+        changed |= draw_adaptive_block(header, *f.adaptive, scheme, f.adaptive_opts, is_map, bc);
+    }
     return changed;
 }
 
@@ -1857,9 +2473,45 @@ struct TabBarResult {
     int to_remove = -1;
 };
 
+// Выбранные вкладки узлов дока при смене режима (Analysis, Parametric, ...). Окна чужого
+// режима не выводятся, и ImGui вынимает их из узлов дока; при возвращении окно, появившееся
+// последним, получает фокус, и его узел выбирает именно его, а не то, что было выбрано.
+// Пока режим на экране, запоминаем выбранное окно каждого узла; первые кадры после входа
+// просим узлы выбрать его снова (NextSelectedTabId: узел сам переведёт на окно и фокус).
+// Кадров несколько: в первом узел ещё пересобирает таб-бар и выбирает по-своему.
+// Зовётся после вывода всех окон кадра.
+static void track_dock_selection(AppModel& model) {
+    const int mode = (int)model.app_mode;
+    std::vector<std::string>& mem = model.dock_selected_by_mode[mode];
+    if (model.dock_prev_mode != mode) {
+        model.dock_prev_mode      = mode;
+        model.dock_restore_frames = 3;
+    }
+    if (model.dock_restore_frames > 0) {
+        --model.dock_restore_frames;
+        for (const std::string& name : mem) {
+            ImGuiWindow* w = ImGui::FindWindowByName(name.c_str());
+            if (w == nullptr || !w->Active || w->DockNode == nullptr || w->DockNode->TabBar == nullptr) continue;
+            ImGuiTabBar* tb = w->DockNode->TabBar;
+            if (tb->SelectedTabId != w->TabId && ImGui::TabBarFindTabByID(tb, w->TabId) != nullptr)
+                tb->NextSelectedTabId = w->TabId;
+        }
+        return;
+    }
+    mem.clear();
+    for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+        if (w->Active && w->DockIsActive && w->DockNode != nullptr && w->DockNode->TabBar != nullptr
+            && w->DockNode->TabBar->SelectedTabId == w->TabId)
+            mem.push_back(w->Name);
+}
+
 // Таб-бар "одна вкладка на конфиг + кнопка +" (раньше — шесть копий).
 // item_id_prefix задаёт неизменную часть ID вкладки ("bd_tab_", "lle_tab_", …), поэтому
-// идентификаторы побайтово совпадают с прежними. body == nullptr — тело вкладки пустое
+// идентификаторы побайтово совпадают с прежними. ID завязан на номер конфига, поэтому
+// бар НЕ Reorderable: перетаскивание меняло только порядок на экране, а не в данных, и
+// после закрытия вкладки из середины ImGui считал конфиг, сдвинувшийся на её номер, новой
+// вкладкой и ставил его в конец (BD1, BD4, BD3). Без Reorderable новые вкладки
+// сортируются по порядку вывода, то есть по порядку конфигов. body == nullptr — тело вкладки пустое
 // (DFT/Basins/FastSync рисуют настройки активного конфига уже после EndTabBar).
 // request_select — внешний запрос выбрать вкладку (тулбар Colored 1D у Bif).
 static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_prefix,
@@ -1869,8 +2521,17 @@ static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_
                                         const std::function<void()>& on_add,
                                         int request_select = -1) {
     TabBarResult r;
-    if (!ImGui::BeginTabBar(bar_id, ImGuiTabBarFlags_Reorderable |
-                                    ImGuiTabBarFlags_AutoSelectNewTabs |
+    // Выбор после закрытия вкладки (между кадрами — в хранилище ImGui, ключ от bar_id).
+    // Под номер закрытой вкладки встаёт следующий конфиг, ImGui видит его как новую вкладку
+    // и по AutoSelectNewTabs выбрал бы его, даже если закрывали не активную.
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID pending_key = ImGui::GetID(bar_id) ^ 0x5e1ec7u;
+    const int pending = st->GetInt(pending_key, -1);
+    if (pending >= 0) {
+        st->SetInt(pending_key, -1);
+        if (request_select < 0 && pending < n) request_select = pending;
+    }
+    if (!ImGui::BeginTabBar(bar_id, ImGuiTabBarFlags_AutoSelectNewTabs |
                                     ImGuiTabBarFlags_FittingPolicyScroll))
         return r;
     for (int i = 0; i < n; ++i) {
@@ -1903,6 +2564,13 @@ static TabBarResult draw_config_tab_bar(const char* bar_id, const char* item_id_
             on_add();
     }
     ImGui::EndTabBar();
+    if (r.to_remove >= 0) {
+        // Активная остаётся активной (её номер сдвигается, если она правее закрытой);
+        // закрыли саму активную — выбрать ту, что встала на её место (или последнюю).
+        const int a = r.active, i = r.to_remove;
+        const int next = (a > i) ? a - 1 : (a == i || a < 0) ? std::min(i, n - 2) : a;
+        st->SetInt(pending_key, next);
+    }
     return r;
 }
 
@@ -2082,6 +2750,44 @@ static bool draw_style_toolbar(const char* label, const char* id_suffix,
         ImGui::EndPopup();
     }
     return changed;
+}
+
+// Стиль линейного 2D-графика проекции Analysis (Phase 2D, Time domain, Step size, Rejections):
+// Custom line style — толщина и α (толстая линия), Points — точки вместо линии; обе галки —
+// точки поверх линии (Plot2DView::points_with_lines). Настраивает pr.view2d; α к цвету линейных
+// серий применяет вызывающий (по pr.custom_line_style). Серии-маркеры (points_override = 1)
+// стиль не трогает.
+static void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
+    const std::string s = sfx;
+    draw_style_toolbar("Custom line style", sfx, pr.custom_line_style,
+        [&pr, &s]() {
+            bool ch = false;
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Line width##" + s).c_str(), &pr.line_width, 0.1f, 5.0f, "%.2f");
+            ImGui::SetNextItemWidth(150);
+            ch |= ImGui::SliderFloat(("Alpha##" + s).c_str(), &pr.alpha, 0.0f, 1.0f, "%.2f");
+            return ch;
+        });
+    ImGui::SameLine();
+    ImGui::Checkbox(("Points##" + s).c_str(), &pr.draw_points);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.", points_tip);
+    if (pr.draw_points) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        ImGui::SliderFloat(("size##" + s + "pt").c_str(), &pr.point_size, 0.5f, 8.0f, "%.1f");
+        if (pr.custom_line_style) {   // своя альфа точек — при Custom line style (у линии своя)
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110);
+            ImGui::SliderFloat(("alpha##" + s + "pt").c_str(), &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+        }
+    }
+    pr.view2d->imdraw_lines      = pr.custom_line_style;
+    pr.view2d->line_thickness_px = pr.line_width;
+    pr.view2d->points_mode       = pr.draw_points;
+    pr.view2d->points_with_lines = pr.draw_points && pr.custom_line_style;
+    pr.view2d->point_size_px     = pr.point_size;
+    pr.view2d->point_alpha       = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
 }
 
 static bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
@@ -4446,6 +5152,34 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     }
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
+    if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
+        // раздаются всем уровням; здесь они только показываются.
+        if (on_reset_defaults) {
+            if (draw_adaptive_block("phase_ad", s.adaptive, s.scheme, kAdUiRaw | kAdUiInterp | kAdUiMaxPts,
+                                    s.sys.is_map, bc)) {
+                changed = true;
+                s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
+            }
+        }
+        else
+            ImGui::TextDisabled(s.adaptive.enabled ? "Adaptive step (set in Custom -> Integration)."
+                                                   : "Fixed step (set in Custom -> Integration).");
+        if (s.adaptive.enabled && !s.adaptive.raw_nodes)
+            ImGui::TextDisabled("h above is the output step of the uniform grid.");
+        // Статистика последнего прогона: по строке на НУ.
+        if (s.result.adaptive) {
+            for (size_t k = 0; k < s.result.step_stats.size(); ++k) {
+                const AdaptiveStats& st = s.result.step_stats[k];
+                const std::string lab = k < s.result.labels.size() ? s.result.labels[k]
+                                                                  : "IC" + std::to_string(k + 1);
+                ImGui::TextDisabled("%s: %.0f accepted, %.0f rejected, %.0f forced, %.0f f-evals, "
+                                    "h in [%.3g, %.3g], mean %.3g%s", lab.c_str(), st.nacc, st.nrej,
+                                    st.nforced, st.nrhs, st.hmin, st.hmax, st.hmean,
+                                    st.diverged ? " (diverged)" : (st.truncated ? " (max points)" : ""));
+            }
+        }
+    }
     // шаг/время/децимация влияют на ось времени и сами данные: при их смене
     // просим автоскейл, чтобы time domain не "скакал" со старыми пределами.
     if (changed) s.fit_request = true;
@@ -4605,7 +5339,7 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::SetNextItemWidth(110);
         // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
         const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram",
-                                 "Recurrence plot", "Continuation diagram" };
+                                 "Recurrence plot", "Continuation diagram", "Step size", "Rejections" };
         int t = (int)pr.type;
         if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
             pr.type = (ProjType)t; s.fit_request = true;
@@ -4737,6 +5471,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
             }
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs time)");
+        }
+        else if (pr.type == ProjType::StepSize) {
+            ImGui::TextDisabled("(accepted h vs t; rejected and forced attempts as markers)");
+        }
+        else if (pr.type == ProjType::Rejections) {
+            ImGui::TextDisabled("(rejected attempts per accepted step vs t)");
         }
         else { // TimeDomain — галочки переменных
             // Слотов на один больше числа переменных: последний — комбинация
@@ -4885,13 +5625,26 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (ImGui::Button("Stop (continuation)", ImVec2(-1, 0))) {
             s.continuation_active = false;
             s.continuation_paused = false;
+            s.request_cancel();   // адаптивный кадр может идти долго — прервать и его
         }
         ImGui::PopStyleColor(3);
     }
     else if (s.in_flight) {
+        // Отмену слушает ветка адаптивного шага; у постоянного шага число шагов известно,
+        // и расчёт доходит до конца.
+        const bool can_cancel = s.adaptive.enabled && !s.sys.is_map && s.cancel_token != nullptr;
+        const bool cancel_sent = can_cancel && s.cancel_token->load(std::memory_order_relaxed);
+        const float bw = can_cancel ? (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f
+                                    : -1.0f;
         ImGui::BeginDisabled();
-        ImGui::Button("Recomputing...", ImVec2(-1, 0));
+        ImGui::Button(cancel_sent ? "Cancelling..." : "Recomputing...", ImVec2(bw, 0));
         ImGui::EndDisabled();
+        if (can_cancel) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(cancel_sent);
+            if (ImGui::Button("Cancel##phase_cancel", ImVec2(-1, 0))) s.request_cancel();
+            ImGui::EndDisabled();
+        }
     }
     else {
         do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));
@@ -4937,6 +5690,28 @@ static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int&
 
 // Подпись под "OK: ..." — печатается только если есть что показать кроме
 // колебательного режима (иначе строка была бы шумом на каждом успешном run'е).
+// Сводка адаптивного шага по свипу: st — по 4 числа на точку (принятые, отвергнутые,
+// вынужденные шаги, средний h), пусто при постоянном шаге.
+static void draw_adaptive_stats(const std::vector<double>& st) {
+    if (st.size() < 4) return;
+    double acc = 0, rej = 0, frc = 0, hsum = 0, hmin = 0, hmax = 0;
+    size_t n = 0;
+    for (size_t i = 0; i + 3 < st.size(); i += 4) {
+        acc += st[i]; rej += st[i + 1]; frc += st[i + 2];
+        const double hm = st[i + 3];
+        if (hm > 0) {
+            if (n == 0 || hm < hmin) hmin = hm;
+            if (n == 0 || hm > hmax) hmax = hm;
+            hsum += hm; ++n;
+        }
+    }
+    const double att = acc + rej;
+    ImGui::TextDisabled("Adaptive step: mean h %.3g (%.3g..%.3g over points), %.0f accepted, "
+                        "%.0f rejected (%.1f%%), %.0f forced",
+                        n ? hsum / (double)n : 0.0, hmin, hmax, acc, rej,
+                        att > 0 ? 100.0 * rej / att : 0.0, frc);
+}
+
 static void draw_regime_summary(const std::vector<int>& flags) {
     int fp = 0, unb = 0, osc = 0;
     count_regimes(flags, fp, unb, osc);
@@ -5098,33 +5873,11 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
                     // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
-                    draw_style_toolbar("Custom line style", "phase2d", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    ImGui::SameLine();
-                    ImGui::Checkbox("Points##phase2d", &pr.draw_points);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
-                                          "Default for discrete maps: consecutive iterates are\n"
-                                          "not joined by a continuous path, so the connecting\n"
-                                          "segments are an artefact.");
-                    if (pr.draw_points) {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(110);
-                        ImGui::SliderFloat("size##phase2dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
-                    }
-                    // imdraw_lines is the ImDrawList path for LINES; it does not
-                    // apply in point mode, where there are no segments to thicken.
-                    pr.view2d->imdraw_lines      = pr.custom_line_style && !pr.draw_points;
-                    pr.view2d->line_thickness_px = pr.line_width;
-                    pr.view2d->points_mode       = pr.draw_points;
-                    pr.view2d->point_size_px     = pr.point_size;
+                    draw_proj_line_style(pr, "phase2d",
+                        "Draw iterates as markers instead of a polyline.\n"
+                        "Default for discrete maps: consecutive iterates are\n"
+                        "not joined by a continuous path, so the connecting\n"
+                        "segments are an artefact.");
 
                     // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
                     // локальный — render() ниже забирает точки синхронно. static тут был
@@ -5341,17 +6094,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
                     // путь (1px, α=1). Аналогично Phase2D.
-                    draw_style_toolbar("Custom line style", "timedomain", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    pr.view2d->imdraw_lines      = pr.custom_line_style;
-                    pr.view2d->line_thickness_px = pr.line_width;
+                    draw_proj_line_style(pr, "timedomain",
+                        "Draw the samples as markers instead of a polyline\n"
+                        "(on step nodes: where the adaptive step actually landed).");
 
                     double h = parse_ratio_or(s.step_h, 0.01);  if (h <= 0) h = 0.01;
                     int dec = parse_int_or(s.decimation, 1);    if (dec < 1) dec = 1;
@@ -5406,8 +6151,12 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                             series_data.emplace_back();
                             auto& buf = series_data.back();
                             buf.reserve(n * 2);
+                            // Узлы адаптивного шага идут неравномерно: время — из
+                            // результата, а не t * dt.
+                            const std::vector<double>* tk =
+                                (res.raw_nodes && k < res.times.size()) ? &res.times[k] : nullptr;
                             for (int t = 0; t < n; ++t) {
-                                buf.push_back((double)(t * dt));
+                                buf.push_back(tk && t < (int)tk->size() ? (*tk)[(size_t)t] : (double)(t * dt));
                                 buf.push_back((double)(is_combo
                                     ? combo_var_value(traj[t], nvars)
                                     : traj[t][vi < (int)traj[t].size() ? vi : 0]));
@@ -5746,10 +6495,17 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(110);
                         ImGui::SliderFloat("size##phase3dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
+                        if (pr.custom_line_style) {   // своя альфа точек (см. draw_proj_line_style)
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(110);
+                            ImGui::SliderFloat("alpha##phase3dpt", &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+                        }
                     }
+                    pr.view3d->point_alpha = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
                     pr.view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     pr.view3d->custom_line_style = pr.custom_line_style;
                     pr.view3d->points_mode       = pr.draw_points;
+                    pr.view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     pr.view3d->point_size_px     = pr.point_size;
 
                     pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
@@ -5881,6 +6637,160 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                         series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
+            // h(t) адаптивного шага: принятые шаги линией, отвергнутые попытки —
+            // крестиками, вынужденные (на h_min) — квадратами. Данные — лог попыток.
+            else if (pr.type == ProjType::StepSize) {
+                if (!res.ok || !res.adaptive || res.step_log.empty()) {
+                    ImGui::TextDisabled("No data. The step-size plot needs the adaptive step "
+                                        "(Step size -> Adaptive step).");
+                }
+                else {
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+                    // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
+                    const bool prev_ylog = pr.y_log;
+                    ImGui::Checkbox("log Y##stepsize", &pr.y_log);
+                    if (pr.y_log != prev_ylog) pr.fit_pending = true;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
+                                          "(stiff parts, rejections near h_min) become readable.");
+                    ImGui::SameLine();
+                    draw_proj_line_style(pr, "stepsize",
+                        "Draw the accepted steps as markers instead of a line.");
+                    pr.view2d->x_axis.name = "t";
+                    pr.view2d->y_axis.name = pr.y_log ? "log10 h" : "h";
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = false;
+
+                    std::vector<std::vector<double>> bufs;
+                    bufs.reserve(res.step_log.size() * 3);   // указатели серий не должны переехать
+                    std::vector<PlotSeriesInput> series_in;
+                    std::vector<bool> init_vis, glob_vis;
+                    for (size_t k = 0; k < res.step_log.size(); ++k) {
+                        const std::vector<double>& lg = res.step_log[k];
+                        std::vector<double> acc, rej, frc;
+                        for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
+                            const double t = lg[r], code = lg[r + 3];
+                            double hh = lg[r + 1];
+                            if (pr.y_log) {
+                                if (!(hh > 0)) continue;   // log10 не определён
+                                hh = std::log10(hh);
+                            }
+                            if (code == 0) { rej.push_back(t); rej.push_back(hh); continue; }
+                            acc.push_back(t); acc.push_back(hh);
+                            if (code == 2) { frc.push_back(t); frc.push_back(hh); }
+                        }
+                        const std::string who = (k < res.labels.size()) ? res.labels[k]
+                                                                        : ("IC" + std::to_string(k + 1));
+                        const bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        struct Part { std::vector<double>* v; const char* name; int marker; ImVec4 col; };
+                        const Part parts[3] = {
+                            { &acc, "h",        -1, ic_base_color((int)k) },
+                            { &rej, "rejected", (int)PointMarker::Cross,  ImVec4(0.90f, 0.30f, 0.30f, 1.0f) },
+                            { &frc, "forced",   (int)PointMarker::Square, ImVec4(1.00f, 0.65f, 0.20f, 1.0f) },
+                        };
+                        for (const Part& part : parts) {
+                            if (part.v->empty()) continue;
+                            bufs.push_back(std::move(*part.v));
+                            PlotSeriesInput si;
+                            si.points = bufs.back().data();
+                            si.n_points = (int)(bufs.back().size() / 2);
+                            si.color = part.col;
+                            if (part.marker >= 0) {
+                                si.points_override = 1;
+                                si.point_marker    = part.marker;
+                                si.point_size_px   = 4.0f;
+                            }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
+                            si.label = std::string(part.name) + " [" + who + "]";
+                            series_in.push_back(si);
+                            init_vis.push_back(true);
+                            glob_vis.push_back(ic_vis);
+                        }
+                    }
+                    int data_gen = s.data_generation * 1000 + (pr.y_log ? 507 : 7);   // log Y — другие данные
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    pr.view2d->popup_extras = phase_popup_extras;
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, pr.fit_pending);
+                }
+            }
+            // Отказы адаптивного шага: у каждого принятого шага — сколько попыток ему
+            // отвергли (маркер, шаги без отказов не рисуются; вынужденные — квадратом), и
+            // скользящее среднее по kWin принятым шагам — доля лишних вычислений схемы.
+            // Точка стоит в начале шага. Данные — лог попыток, как у Step size.
+            else if (pr.type == ProjType::Rejections) {
+                if (!res.ok || !res.adaptive || res.step_log.empty()) {
+                    ImGui::TextDisabled("No data. The rejections plot needs the adaptive step "
+                                        "(Step size -> Adaptive step).");
+                }
+                else {
+                    if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
+                    draw_proj_line_style(pr, "rejections",
+                        "Draw the moving mean as markers instead of a line.");
+                    pr.view2d->x_axis.name = "t";
+                    pr.view2d->y_axis.name = "rejected per step";
+                    pr.view2d->show_zero_x = false;
+                    pr.view2d->show_zero_y = false;
+
+                    constexpr int kWin = 100;
+                    std::vector<std::vector<double>> bufs;
+                    bufs.reserve(res.step_log.size() * 3);   // указатели серий не должны переехать
+                    std::vector<PlotSeriesInput> series_in;
+                    std::vector<bool> init_vis, glob_vis;
+                    for (size_t k = 0; k < res.step_log.size(); ++k) {
+                        const std::vector<double>& lg = res.step_log[k];
+                        std::vector<double> rej, frc, mean;
+                        int cnt = 0, wsum = 0, wn = 0, wpos = 0;
+                        int win[kWin] = {};
+                        for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
+                            const double code = lg[r + 3];
+                            if (code == 0) { ++cnt; continue; }
+                            const double t = lg[r];
+                            if (code == 2) { frc.push_back(t); frc.push_back(cnt); }
+                            else if (cnt > 0) { rej.push_back(t); rej.push_back(cnt); }
+                            wsum += cnt - (wn == kWin ? win[wpos] : 0);
+                            win[wpos] = cnt; wpos = (wpos + 1) % kWin;
+                            if (wn < kWin) ++wn;
+                            mean.push_back(t); mean.push_back((double)wsum / wn);
+                            cnt = 0;
+                        }
+                        const std::string who = (k < res.labels.size()) ? res.labels[k]
+                                                                        : ("IC" + std::to_string(k + 1));
+                        const bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        struct Part { std::vector<double>* v; const char* name; int marker; ImVec4 col; };
+                        const Part parts[3] = {
+                            { &mean, "mean of 100 steps", -1, ic_base_color((int)k) },
+                            { &rej,  "rejected",          (int)PointMarker::Cross,  ImVec4(0.90f, 0.30f, 0.30f, 1.0f) },
+                            { &frc,  "forced",            (int)PointMarker::Square, ImVec4(1.00f, 0.65f, 0.20f, 1.0f) },
+                        };
+                        for (const Part& part : parts) {
+                            if (part.v->empty()) continue;
+                            bufs.push_back(std::move(*part.v));
+                            PlotSeriesInput si;
+                            si.points = bufs.back().data();
+                            si.n_points = (int)(bufs.back().size() / 2);
+                            si.color = part.col;
+                            if (part.marker >= 0) {
+                                si.points_override = 1;
+                                si.point_marker    = part.marker;
+                                si.point_size_px   = 4.0f;
+                            }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
+                            si.label = std::string(part.name) + " [" + who + "]";
+                            series_in.push_back(si);
+                            init_vis.push_back(true);
+                            glob_vis.push_back(ic_vis);
+                        }
+                    }
+                    int data_gen = s.data_generation * 1000 + 8;
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    pr.view2d->popup_extras = phase_popup_extras;
+                    pr.view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, pr.fit_pending);
+                }
+            }
             ImGui::PopID();
             // Окно реально отрисовалось в этом кадре — автоскейл до него дошёл.
             // Гасим здесь, а не после цикла: у невидимых окон Begin вернул
@@ -5962,7 +6872,8 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                             bd.mode_2d ? &bd.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(bd.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget, !model.is_map);
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &bd.ad_axis, &bd.adaptive);
     InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text); });
@@ -5993,7 +6904,8 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                                     bd.sweep_over_h_2, &bd.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(bd.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2, !model.is_map);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &bd.ad_axis_2, &bd.adaptive);
         InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text); });
@@ -6031,6 +6943,11 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
             "Off: only local maxima (a Poincare section), the convention for flows.\n"
             "For a map the peak filter drops the lower branch of every period-2\n"
             "orbit and leaves the period-1 windows empty.");
+    // Адаптивный шаг пишет только пики (ядра адаптивного шага сырых отсчётов не выдают).
+    if (bd.plot_all_iterates && bd.adaptive.enabled && !model.is_map) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(not with the adaptive step: peaks only)");
+    }
     // Inter-peak times are not filled in the all-iterates path (pushRaw writes
     // zeros), so a stale toggle would plot a flat line at 0.
     if (bd.plot_all_iterates) bd.plot_inter_peaks = false;
@@ -6066,6 +6983,8 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
         f.max_value   = &bd.max_value_text;
+        f.adaptive      = &bd.adaptive;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp;
         draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
@@ -6087,6 +7006,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
             draw_regime_summary(bd.result_2d.flags);
+            draw_adaptive_stats(bd.result_2d.ad_stats);
         }
         else if (!bd.last_error.empty()) {
             draw_error_box("##par_err_2d", bd.last_error);
@@ -6104,6 +7024,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                 "OK: n_pts=%d, peaks total=%d (max per param=%d)",
                 bd.result.n_pts, total_peaks, max_peaks);
             draw_regime_summary(bd.result.flags);
+            draw_adaptive_stats(bd.result.ad_stats);
         }
         else if (!bd.last_error.empty()) {
             draw_error_box("##par_err", bd.last_error);
@@ -6664,7 +7585,8 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget, !model.is_map);
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &c.ad_axis, &c.adaptive);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -6693,7 +7615,8 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2, !model.is_map);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &c.ad_axis_2, &c.adaptive);
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
@@ -6716,6 +7639,8 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRenorm;
         draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
@@ -6723,6 +7648,17 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
     if (ImGui::CollapsingHeader("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
+        InputNumStr("vector transient", c.vtr_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Tangent-vector transient: after the transient of the trajectory the\n"
+                "perturbations are attached and renormalised every NT for this long\n"
+                "(rounded to whole NT blocks) without adding their stretching to the sum.\n"
+                "While the random initial frame turns towards the Lyapunov directions it\n"
+                "collects ln(1/c) (c - its projection on them), and the exponents then\n"
+                "depend on that random frame as ~ln(1/c)/t_max: point-to-point noise.\n"
+                "It aligns as exp(-(L1 - L2) t), so take ~10/(L1 - L2), or 10-20%% of t_max.\n"
+                "Costs this much extra time for every perturbed copy. 0 - off.");
         ImGui::TextDisabled(model.is_map
             ? "eps = initial perturbation magnitude; NT = block length\n"
               "between renormalizations (in iterations)."
@@ -6747,6 +7683,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
             draw_regime_summary(c.result_2d.flags);
+            draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##lle_err", c.last_error);
@@ -6756,6 +7693,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
             draw_regime_summary(c.result.flags);
+            draw_adaptive_stats(c.result.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##lle_err", c.last_error);
@@ -6997,7 +7935,8 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget, !model.is_map);
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &c.ad_axis, &c.adaptive);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -7024,7 +7963,8 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2, !model.is_map);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &c.ad_axis_2, &c.adaptive);
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
@@ -7047,6 +7987,8 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRenorm;
         draw_integration_block("Integration##ls_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
@@ -7054,6 +7996,17 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
     if (ImGui::CollapsingHeader("LS (Wolf/Benettin + Gram-Schmidt)##ls_wbgs", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
+        InputNumStr("vector transient", c.vtr_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Tangent-vector transient: after the transient of the trajectory the\n"
+                "perturbations are attached and renormalised every NT for this long\n"
+                "(rounded to whole NT blocks) without adding their stretching to the sum.\n"
+                "While the random initial frame turns towards the Lyapunov directions it\n"
+                "collects ln(1/c) (c - its projection on them), and the exponents then\n"
+                "depend on that random frame as ~ln(1/c)/t_max: point-to-point noise.\n"
+                "It aligns as exp(-(L1 - L2) t), so take ~10/(L1 - L2), or 10-20%% of t_max.\n"
+                "Costs this much extra time for every perturbed copy. 0 - off.");
         ImGui::TextDisabled(model.is_map
             ? "eps = initial perturbation magnitude; NT = block length\n"
               "between renormalizations (in iterations)."
@@ -7077,6 +8030,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
                 "OK: %dx%d heatmap, %d exponents",
                 c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
             draw_regime_summary(c.result_2d.flags);
+            draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##ls_err_2d", c.last_error);
@@ -7086,6 +8040,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
             draw_regime_summary(c.result.flags);
+            draw_adaptive_stats(c.result.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##ls_err", c.last_error);
@@ -7403,7 +8358,8 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
                             scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget, !model.is_map);
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &c.ad_axis, &c.adaptive);
     InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
                                         c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
@@ -7428,7 +8384,8 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
                                     scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                                    &model, BroadcastField::SweepTarget2, !model.is_map);
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &c.ad_axis_2, &c.adaptive);
         InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
                 [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
                                         c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
@@ -7478,6 +8435,9 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
+        // Метрики — сетка или узлы шага; Хьорт при адаптивном шаге не считается.
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp | kAdUiMinMax;
         draw_integration_block("Integration##met_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
@@ -7497,6 +8457,7 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         else
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: n_pts=%d", r.n_pts);
         draw_regime_summary(r.flags);
+        draw_adaptive_stats(r.ad_stats);
     }
     else if (!c.last_error.empty()) {
         draw_error_box("##met_err", c.last_error);
@@ -8726,6 +9687,8 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp;
         draw_integration_block("Integration", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
@@ -8791,6 +9754,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             c.result.n_pts, c.result.n_pts,
             c.result.n_clusters, -c.result.min_cluster_idx);
         draw_regime_summary(c.result.helpful_array);
+        draw_adaptive_stats(c.result.ad_stats);
     } else if (!c.last_error.empty()) {
         draw_error_box("##basins_err", c.last_error);
     }
@@ -9334,6 +10298,20 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
+        // 3D-портрет — только когда есть третья переменная.
+        const bool can_3d = s.vars.size() >= 3;
+        if (!can_3d) c.plot_3d = false;
+        ImGui::BeginDisabled(!can_3d);
+        ImGui::Checkbox("3D plot##fs_plot3d", &c.plot_3d);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(can_3d ? "Phase portrait in 3D, coloured by the sync error."
+                                     : "Needs at least three state variables.");
+        if (c.plot_3d) {
+            if (c.axis_z_var < 0 || c.axis_z_var >= (int)s.vars.size()) c.axis_z_var = 2;
+            ImGui::SetNextItemWidth(kComboW);
+            ImGui::Combo("Display Z var", &c.axis_z_var, items.data(), (int)items.size());
+        }
         ImGui::Separator();
     }
 
@@ -9625,6 +10603,13 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
+    // Результат посчитан в другом режиме (переключили On Attractor <-> On Grid после Run):
+    // рисовать нечего — траектории у сетки нет, карты у траектории нет. Раньше сетка
+    // рисовалась пустой картой по старой траектории, а траектория (2D/3D) — «No trajectory data».
+    if (c.result.mode != c.mode) {
+        ImGui::TextDisabled("No data for this mode yet. Press Run.");
+        return;
+    }
 
     bool fit = c.fit_request;
     if (fit) c.fit_request = false;
@@ -9674,6 +10659,78 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         const float cb_total = colorbar_total_width(cb_ticks);
 
         ImVec2 plot_avail(std::max(64.0f, avail.x - cb_total), avail.y);
+        // Колорбар справа от плота — в «Copy image» он должен попасть вместе с ним.
+        const float shot_extra = std::max(0.0f, avail.x - plot_avail.x);
+
+        const bool fs_busy = s.in_flight &&
+                             s.active_config_index == s.running_config_index;
+
+        if (c.plot_3d && nX >= 3) {
+            // 3D: та же окраска по ошибке синхронизации, но в GL (draw_line_3d_cmap): цвет
+            // интерполируется вдоль сегмента, глубина — depth test, а не сортировка сегментов.
+            static std::map<unsigned, std::unique_ptr<Plot3DView>> traj3d_map;
+            int vz = (c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
+            auto& slot3 = traj3d_map[base_oid];
+            if (!slot3) {
+                slot3 = std::make_unique<Plot3DView>();
+                slot3->show_legend = false;
+            }
+            Plot3DView& v3 = *slot3;
+            v3.x_name = var_name(vx);
+            v3.y_name = var_name(vy);
+            v3.z_name = var_name(vz);
+            v3.line_thickness_px = c.line_width;
+            v3.screenshot_extra_right = shot_extra;
+
+            // Смена осей — новый bbox: перезаливка (токен) и автоподгонка.
+            static std::map<unsigned, int> last_axes3;
+            const int axes_key = (vx * 64 + vy) * 64 + vz;
+            auto it3 = last_axes3.find(base_oid);
+            if (it3 == last_axes3.end() || it3->second != axes_key) {
+                v3.view_valid = false;
+                last_axes3[base_oid] = axes_key;
+            }
+
+            const int n_in = c.result.n_pts_traj;
+            static std::vector<float> xyz_buf;
+            static std::vector<float> val_buf;
+            xyz_buf.resize((size_t)n_in * 3);
+            val_buf.resize((size_t)n_in);
+            for (int i = 0; i < n_in; ++i) {
+                const double* row = &c.result.traj_full[(size_t)i * nX];
+                xyz_buf[3*i + 0] = (float)row[vx];
+                xyz_buf[3*i + 1] = (float)row[vy];
+                xyz_buf[3*i + 2] = (float)row[vz];
+                val_buf[i] = (float)c.result.sync_error[i];
+            }
+
+            std::vector<PlotSeriesInput3D> s3(1);
+            s3[0].points       = xyz_buf.data();
+            s3[0].n_points     = n_in;
+            s3[0].color        = ImVec4(1, 1, 1, c.alpha);
+            s3[0].label        = "trajectory";
+            s3[0].values       = val_buf.data();
+            s3[0].colormap     = (int)cmap;
+            s3[0].cmin         = (float)cmin;
+            s3[0].cmax         = (float)cmax;
+            s3[0].cmap_reverse = invert_cmap;   // значения сырые, шкала переворачивается в шейдере
+            std::vector<bool> vis(1, true);
+            v3.popup_extras = [&c, &cb, fs_busy]() {
+                draw_export_menu_item(fs_busy, cb, [&c](const std::string& p) {
+                    data_export::export_fastsync(c.result, p);
+                });
+            };
+            v3.render(*renderer, origin, plot_avail, (int)base_oid,
+                      c.data_generation * 1000000 + axes_key, s3, vis, vis, fit);
+            v3.popup_extras = nullptr;
+
+            draw_colorbar(ImGui::GetWindowDrawList(),
+                          ImVec2(v3.last_img_pos.x + v3.last_img_size.x + kColorbarGap,
+                                 v3.last_img_pos.y),
+                          v3.last_img_size.y, (float)cmin, (float)cmax, cmap,
+                          /*reverse*/ invert_cmap, /*n_discrete*/ 0, cb_ticks);
+            return;
+        }
 
         auto& slot = traj_map[base_oid];
         if (!slot) {
@@ -9693,6 +10750,7 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         v.x_axis.name = var_name(vx);
         v.y_axis.name = var_name(vy);
         v.line_thickness_px = c.line_width;
+        v.screenshot_extra_right = shot_extra;
 
         // Если поменялись axes — форсим (a) fit, чтобы view нашёл новый bbox;
         // (b) re-upload GPU-кэша точек, иначе series_cache_.bbox() даст старый
@@ -9767,8 +10825,6 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // через popup_extras callback. vz/var_name захватываются по значению.
         const int   vz_capture       = vz;
         const std::string vz_name    = (vz >= 0) ? var_name(vz) : std::string{};
-        const bool fs_busy = s.in_flight &&
-                             s.active_config_index == s.running_config_index;
         v.popup_extras = [vz_capture, vz_name, &c, &cb, fs_busy]() {
             if (vz_capture >= 0) {
                 std::string lbl = "Invert depth axis (" + vz_name + ")";
@@ -10493,23 +11549,74 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "very first launch drags the code load into the context along with\n"
                 "it and is therefore always slower than the rest.");
         ImGui::Separator();
-        // Эталон: чем считаем «точный ответ» для третьей величины по оси X.
-        draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                          &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
-                          /*broadcast*/ false);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "The method that stands for the exact answer in Eref =\n"
-                "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
-                "own error sits below the machine precision of the solution.");
-        InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Reference steps per one step of the scheme under test. 0 turns\n"
-                "the reference off entirely - the branch is then not even compiled\n"
-                "into the kernel. Keep it above 1 when the reference method is the\n"
-                "same as the tested one: at an equal step that would be the very\n"
-                "same arithmetic and the difference identically zero.");
+        // Режим шага — первым: от него зависит, какой эталон у вкладки (ровно один).
+        const bool perf_ad_on = !s.sys.is_map && c.adaptive.enabled;
+        if (!s.sys.is_map) {
+            draw_adaptive_block("order_perf_ad", c.adaptive, c.scheme, 0, s.sys.is_map, &model);
+            if (c.adaptive.enabled) {
+                InputNumStr("tol from", c.perf_tol_lo_text, kFieldW);
+                InputNumStr("tol to", c.perf_tol_hi_text, kFieldW);
+                InputNumStr("tol points", c.perf_tol_n_text, kFieldW);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "The nodes of the adaptive benchmark: a log grid of tol; on every node\n"
+                        "rtol = tol and atol = tol * (atol / rtol) of the settings above. The\n"
+                        "Sweep axis below is not used. Every node integrates [0, t_max] (the\n"
+                        "step only, no output) and is timed like the fixed step: on the GPU by\n"
+                        "a kernel, on the CPU by the same driver compiled with cl.exe (double).\n"
+                        "Steps, rejections and f evaluations come from the controller.");
+            }
+            ImGui::Separator();
+        }
+        if (!perf_ad_on) {
+            // Эталон постоянного шага: чем считаем «точный ответ» для Eref по оси X.
+            draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
+                              &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
+                              /*broadcast*/ false);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "The method that stands for the exact answer in Eref =\n"
+                    "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
+                    "own error sits below the machine precision of the solution.\n"
+                    "With \"endpoint only\" and \"fit h to t_max\" Eref is the error at t_max:\n"
+                    "it is then also this tab's E(T), comparable with adaptive tabs.");
+            InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Reference steps per one step of the scheme under test. 0 turns\n"
+                    "the reference off entirely - the branch is then not even compiled\n"
+                    "into the kernel. Keep it above 1 when the reference method is the\n"
+                    "same as the tested one: at an equal step that would be the very\n"
+                    "same arithmetic and the difference identically zero.");
+            // y*(T) для E(T) — тот же эталон, что у адаптивного шага: с ним кривые постоянного
+            // и адаптивного шага ложатся на одну диаграмму (X: E(T) в окне Performance).
+            const char* refs_fx[] = { "none", "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
+            int sel_fx = (c.perf_end_ref == 1 || c.perf_end_ref == 2) ? c.perf_end_ref : 0;
+            ImGui::SetNextItemWidth(kComboW);
+            if (ImGui::Combo("reference y*(T)##fixed", &sel_fx, refs_fx, IM_ARRAYSIZE(refs_fx)))
+                c.perf_end_ref = sel_fx;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "E(T) = max|y(T) - y*(T)| at t_max against DOP853 in double-double or\n"
+                    "quad-double on the CPU - the same y*(T) the adaptive step is measured\n"
+                    "against, so fixed-step and adaptive curves can share one diagram\n"
+                    "(X: E(T) in the Performance window). Needs \"fit h to t_max\": a node\n"
+                    "that ends at N*h != t_max has no E(T). Computed after the timing and\n"
+                    "not part of it. none: E(T) is Eref at t_max (\"endpoint only\").");
+        } else {
+            // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
+            const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
+            int sel = (c.perf_end_ref == 2) ? 1 : 0;
+            ImGui::SetNextItemWidth(kComboW);
+            if (ImGui::Combo("reference y*(T)", &sel, refs, IM_ARRAYSIZE(refs))) c.perf_end_ref = sel + 1;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "E(T) = max|y(T) - y*(T)| at the end of the interval (t_max), against\n"
+                    "DOP853 with a fixed step in double-double (~32 digits) or quad-double\n"
+                    "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
+                    "successive answers agree, so y* is exact to far below any error on\n"
+                    "the plot. The adaptive step has no h grid, so E(T) is its only error.");
+        }
         ImGui::Separator();
         // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU
         // прогон последовательный, и поле нечего означать, поэтому гасим его,
@@ -10527,7 +11634,8 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 : "GPU only: the CPU branch runs one trajectory sequentially,\n"
                   "so the measurement is always the time of a single task.");
 
-        const int n_nodes = std::max(1, (int)parse_num(c.axis_x_n_text, 200.0));
+        const int n_nodes = c.adaptive.enabled ? std::max(1, (int)parse_num(c.perf_tol_n_text, 11.0))
+                                               : std::max(1, (int)parse_num(c.axis_x_n_text, 200.0));
         const int reps    = std::max(1, (int)parse_num(c.perf_repeats_text, 20.0));
         const int wu      = std::max(0, (int)parse_num(c.perf_warmup_text, 2.0));
         const long long launches = (long long)n_nodes * (long long)(reps + wu);
@@ -10558,6 +11666,11 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (c.calc_kind != kOrderCalcStab &&
         ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
+        const bool perf_ad   = perf_mode && c.adaptive.enabled && !s.sys.is_map;
+        if (perf_ad)
+            ImGui::TextDisabled("Adaptive step: the benchmark runs over the tol nodes (Performance above);\n"
+                                "the X axis below is not used.");
+        if (perf_ad) ImGui::BeginDisabled();
         if (perf_mode) ImGui::BeginDisabled();
         if (ImGui::Checkbox("2D map", &c.two_d)) order_rehome_config(model, idx);
         if (perf_mode) {
@@ -10579,6 +11692,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep h");
         else if (c.two_d && c.axis_x_target == c.axis_y_target)
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep the same thing");
+        if (perf_ad) ImGui::EndDisabled();
     }
 
     // Что из этих двух блоков расчёт задаёт сам. У области устойчивости это
@@ -10853,6 +11967,8 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
         sn.ref_scheme   = c.perf_ref_scheme;
         sn.ref_substeps = std::max(0, (int)parse_num(c.perf_ref_substeps_text, 4.0));
     }
+    // Настройки шага — тоже из прогона (у адаптивного Eref нет вовсе, только E(T)).
+    if (c.perf_result.adaptive) sn.adaptive_desc = c.perf_result.ad_desc;
     // Настройки теста устойчивости — тоже фактические, из результата; в снимке
     // остаётся лишь раскладка слотов, которой в результате нет.
     sn.stab_k = c.stab_result.k;
@@ -11251,6 +12367,12 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     const bool is_perf  = (win.kind == OrderPlotWindow::Kind::Perf);
     const bool is_error = (win.kind == OrderPlotWindow::Kind::Error);
     const bool is_p     = (win.kind == OrderPlotWindow::Kind::P);
+    // Есть ли в окне адаптивная вкладка: без неё окно Performance — ровно прежнее
+    // (тулбар, оси, подсказки точек), без осей «точность — затраты».
+    bool any_ad = false;
+    for (int mi : win.members)
+        if (mi >= 0 && mi < (int)s.configs.size())
+            any_ad |= s.configs[(size_t)mi].adaptive.enabled || s.configs[(size_t)mi].perf_result.adaptive;
 
     // ---- Тулбар ----
     ImGui::Checkbox("log X", &win.x_log);
@@ -11284,6 +12406,39 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         ImGui::Checkbox("min", &win.show_min); ImGui::SameLine();
         ImGui::Checkbox("avg", &win.show_avg); ImGui::SameLine();
         ImGui::Checkbox("max", &win.show_max);
+
+        // Вторая строка — «точность — затраты»: ошибка в T против эталона и другие оси
+        // затрат. Есть всегда: E(T) постоянного шага считается против того же y*(T), что у
+        // адаптивного (reference y*(T) в настройках вкладки), так что и окно из одних Fixed-
+        // вкладок можно строить в тех же осях, что смешанное.
+        {
+        ImGui::TextDisabled("X:"); ImGui::SameLine();
+        ImGui::RadioButton("E(T)##perrsrc", &win.error_source, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Error at t_max, max|y(T) - y*(T)|, against DOP853 in dd/qd on the CPU.\n"
+                "Adaptive tabs always have it (their only error). Fixed tabs: with\n"
+                "\"reference y*(T)\" set in the tab and \"fit h to t_max\" on - the same\n"
+                "y*(T), so fixed-step and adaptive curves share one diagram; without it,\n"
+                "Eref at t_max (\"endpoint only\" and \"fit h to t_max\").");
+        ImGui::SameLine();
+        ImGui::TextDisabled("| Y:"); ImGui::SameLine();
+        ImGui::RadioButton("time##pcost", &win.perf_cost, 0); ImGui::SameLine();
+        ImGui::RadioButton("f evals##pcost", &win.perf_cost, 1);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Evaluations of the right-hand side per run (one = all N components):\n"
+                              "the controller's count for the adaptive step (rejected attempts\n"
+                              "included), f per step x steps for the fixed one. CD family: passes x\n"
+                              "(explicit half 1 + implicit half: 1 per component linear in its own\n"
+                              "variable, 4 iterations otherwise, / N); Extr: substeps x the base;\n"
+                              "Comp: stages x the base; GBS: sum n_k + 1. Unknown for Newton-based\n"
+                              "implicit schemes and custom KRS - their curves are left out.\n"
+                              "min / avg / max apply to time only.");
+        ImGui::SameLine();
+        ImGui::RadioButton("steps##pcost", &win.perf_cost, 2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Accepted steps per run (the rejected ones are in the node tooltip).");
+        }
     }
 
     // Стиль кривых — тот же тулбар-с-попапом, что у точек бифуркационных
@@ -11390,67 +12545,69 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             any_data = true;
 
             // Точка существует, только когда есть ОБЕ координаты: ошибка узла
-            // и его время. Сортировка по X обязательна — ось X здесь не сетка
+            // и его затраты. Сортировка по X обязательна — ось X здесь не сетка
             // узлов, а посчитанная величина, и монотонность её не гарантирована.
-            auto add_time_series = [&](const std::vector<double>& t, const char* suffix,
-                                       float shade_k, int marker_slot) {
-                if (t.empty()) return;
-                // Третья компонента — шаг узла. Он обязан ехать вместе с точкой
-                // через сортировку по X: после неё позиция в массиве уже ничего
-                // не говорит о том, какому h точка принадлежала.
-                struct Pt { double x, y, h, e, t, steps; };
+            const double qn = std::numeric_limits<double>::quiet_NaN();
+            auto at = [qn](const std::vector<double>& v, int i) { return (size_t)i < v.size() ? v[(size_t)i] : qn; };
+            // tsrc — время, которое попадает в подсказку: у кривых времени своё (min / avg /
+            // max), как было до осей f и шагов; у них — среднее.
+            auto add_cost_series = [&](const std::function<double(int)>& cost, const std::vector<double>& tsrc,
+                                       const std::string& suffix, float shade_k, int marker_slot) {
+                // Теги — h (или tol у адаптивного), ошибка, время, шаги, f, отказы. Они
+                // обязаны ехать вместе с точкой через сортировку по X: после неё позиция
+                // в массиве уже ничего не говорит о том, какому узлу точка принадлежала.
+                struct Pt { double x, y, tg[6]; };
                 std::vector<Pt> pts;
                 pts.reserve((size_t)r.n_pts);
                 for (int i = 0; i < r.n_pts; ++i) {
-                    // Eref есть не в каждом результате: эталон можно было и не
+                    // Eref / E(T) есть не в каждом результате: эталон можно было и не
                     // просить, а старые прогоны про него вовсе не знают.
-                    const double e =
-                        (win.error_source == 2)
-                            ? ((size_t)i < r.e_ref.size() ? r.e_ref[(size_t)i]
-                                                          : std::numeric_limits<double>::quiet_NaN())
-                        : (win.error_source == 1) ? r.e2[(size_t)i]
-                                                  : r.e1[(size_t)i];
-                    const double tv = t[(size_t)i] * time_scale;
-                    if (!std::isfinite(e) || !std::isfinite(tv)) continue;
+                    const double e = (win.error_source == 3) ? at(r.e_end, i)
+                                   : (win.error_source == 2) ? at(r.e_ref, i)
+                                   : (win.error_source == 1) ? at(r.e2, i) : at(r.e1, i);
+                    const double cv = cost(i);
+                    if (!std::isfinite(e) || !std::isfinite(cv)) continue;
                     if (win.x_log && !(e > 0.0)) continue;
-                    if (ylog && !(tv > 0.0)) continue;
-                    // h_eff старые результаты могли не заполнить — тогда в
-                    // подсказке будет NaN, и это честнее выдуманного нуля.
-                    const double hv = ((size_t)i < r.h_eff.size())
-                                        ? r.h_eff[(size_t)i]
-                                        : std::numeric_limits<double>::quiet_NaN();
-                    const double ns = ((size_t)i < r.n_steps.size())
-                                        ? (double)r.n_steps[(size_t)i]
-                                        : std::numeric_limits<double>::quiet_NaN();
-                    // e и tv кладём в теги ОТДЕЛЬНО от координат: по X может
-                    // стоять любой из трёх источников ошибки, а в лог-режиме в
-                    // координатах лежат log10(e) и log10(t). В подсказке хочется
-                    // исходные числа, а не то, во что их превратил режим осей.
-                    pts.push_back({ win.x_log ? std::log10(e) : e,
-                                    ylog ? std::log10(tv) : tv, hv, e, tv, ns });
+                    if (ylog && !(cv > 0.0)) continue;
+                    const double ns = ((size_t)i < r.n_steps.size()) ? (double)r.n_steps[(size_t)i] : qn;
+                    // e и cv кладём в теги ОТДЕЛЬНО от координат: в лог-режиме в
+                    // координатах лежат log10. В подсказке хочется исходные числа.
+                    Pt pt{ win.x_log ? std::log10(e) : e, ylog ? std::log10(cv) : cv,
+                           { r.adaptive ? at(r.axis_vals, i) : at(r.h_eff, i), e,
+                             at(tsrc, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
+                    pts.push_back(pt);
                 }
                 if (pts.empty()) return;
                 std::sort(pts.begin(), pts.end(),
                           [](const Pt& a, const Pt& b) { return a.x < b.x; });
                 std::vector<double> xy, tg;
                 xy.reserve(pts.size() * 2);
-                tg.reserve(pts.size() * 4);
+                tg.reserve(pts.size() * (any_ad ? 6 : 4));
                 for (const auto& pr : pts) {
                     xy.push_back(pr.x); xy.push_back(pr.y);
-                    tg.push_back(pr.h); tg.push_back(pr.e);
-                    tg.push_back(pr.t); tg.push_back(pr.steps);
+                    for (int q = 0; q < (any_ad ? 6 : 4); ++q) tg.push_back(pr.tg[q]);   // Fixed: h, E, t, steps
                     note_x(pr.x);
                 }
                 bufs.push_back(std::move(xy));
                 tags.resize(bufs.size());
                 tags.back() = std::move(tg);
-                labels.push_back(c.label + " " + suffix);
+                labels.push_back(c.label + (suffix.empty() ? std::string() : " " + suffix));
                 colors.push_back(order_shade(base, shade_k));
                 markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
             };
-            if (win.show_min) add_time_series(r.t_min, "min", 0.55f, 0);   // circle
-            if (win.show_avg) add_time_series(r.t_avg, "avg", 1.0f,  1);   // triangle down
-            if (win.show_max) add_time_series(r.t_max, "max", 1.5f,  2);   // triangle up
+            const std::string kind_tag = r.adaptive ? std::string("(adaptive)") : std::string();
+            if (win.perf_cost == 1) {
+                add_cost_series([&](int i) { return at(r.n_rhs, i); }, r.t_avg, kind_tag, 1.0f, 1);
+            } else if (win.perf_cost == 2) {
+                add_cost_series([&](int i) {
+                    return (size_t)i < r.n_steps.size() && r.n_steps[(size_t)i] > 0 ? (double)r.n_steps[(size_t)i] : qn;
+                }, r.t_avg, kind_tag, 1.0f, 1);
+            } else {
+                const std::string sp = kind_tag.empty() ? std::string() : kind_tag + " ";
+                if (win.show_min) add_cost_series([&](int i) { return at(r.t_min, i) * time_scale; }, r.t_min, sp + "min", 0.55f, 0);
+                if (win.show_avg) add_cost_series([&](int i) { return at(r.t_avg, i) * time_scale; }, r.t_avg, sp + "avg", 1.0f,  1);
+                if (win.show_max) add_cost_series([&](int i) { return at(r.t_max, i) * time_scale; }, r.t_max, sp + "max", 1.5f,  2);
+            }
             continue;
         }
 
@@ -11537,7 +12694,37 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                         c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
                 else
                     ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                                       "| no reference in this result: set reference substeps > 0 and run again");
+                                       r.adaptive ? "| an adaptive tab has only E(T)"
+                                                  : "| no reference in this result: set reference substeps > 0 and run again");
+            } else if (win.error_source == 3) {
+                ImGui::SameLine();
+                const bool any_e = std::any_of(r.e_end.begin(), r.e_end.end(),
+                                               [](double v) { return std::isfinite(v); });
+                if (any_e && r.ref_prec > 0)
+                    ImGui::TextDisabled("| y*(T): DOP853 in %s, %lld steps, its own error ~%.1e",
+                                        r.ref_prec == 2 ? "qd" : "dd", r.ref_steps, r.ref_err);
+                else if (any_e)
+                    ImGui::TextDisabled("| E(T) = Eref at t_max: %s x%s",
+                                        c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
+                else
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                                       r.adaptive ? "| no y*(T) in this result: run again"
+                                                  : "| no E(T): set \"reference y*(T)\" (or \"endpoint only\") with \"fit h to t_max\" and run again");
+            } else if (r.adaptive) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| an adaptive tab has only E(T)");
+            }
+            if (r.adaptive) {
+                double rej = 0, acc = 0;
+                for (int i = 0; i < r.n_pts; ++i) {
+                    if ((size_t)i < r.n_rej.size() && std::isfinite(r.n_rej[(size_t)i])) rej += r.n_rej[(size_t)i];
+                    if ((size_t)i < r.n_steps.size()) acc += (double)r.n_steps[(size_t)i];
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("| tol %.0e..%.0e, rejected %.1f%% of attempts",
+                                    r.axis_vals.empty() ? 0.0 : r.axis_vals.front(),
+                                    r.axis_vals.empty() ? 0.0 : r.axis_vals.back(),
+                                    acc + rej > 0 ? 100.0 * rej / (acc + rej) : 0.0);
             }
         } else {
             if (!c.last_run_ok) continue;
@@ -11574,7 +12761,7 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     std::string xname = "x";
     for (int mi : win.members) {
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
-        xname = is_perf ? ((win.error_source == 2) ? "Eref"
+        xname = is_perf ? ((win.error_source == 3) ? "E(T)" : (win.error_source == 2) ? "Eref"
                             : (win.error_source == 1) ? "E2" : "E1")
                         : s.axis_target_label(s.configs[(size_t)mi].axis_x_target);
         break;
@@ -11590,7 +12777,10 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     view.x_axis.name = xname;
     if (is_perf) {
         const char* unit = (win.time_unit == 1) ? "ms" : "us";
-        view.y_axis.name = ylog ? (std::string("log10 t, ") + unit) : (std::string("t, ") + unit);
+        const std::string yn = win.perf_cost == 1 ? std::string("f evals")
+                             : win.perf_cost == 2 ? std::string("steps")
+                                                  : std::string("t, ") + unit;
+        view.y_axis.name = ylog ? "log10 " + yn : yn;
     } else {
         view.y_axis.name = is_error ? (ylog ? "log10 E" : "E") : "p";
     }
@@ -11610,10 +12800,11 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     view.point_markers = !pts && (is_perf || (win.custom_line_style && win.node_markers));
     view.point_marker_px = win.custom_line_style ? win.point_size : 3.5f;
     if (is_perf) {
-        const char* ename = (win.error_source == 2) ? "Eref"
+        const char* ename = (win.error_source == 3) ? "E(T)" : (win.error_source == 2) ? "Eref"
                           : (win.error_source == 1) ? "E2" : "E1";
         const char* unit  = (win.time_unit == 1) ? "ms" : "us";
-        view.point_tag_names = { "h", ename, std::string("t, ") + unit, "steps" };
+        if (any_ad) view.point_tag_names = { "h / tol", ename, std::string("t, ") + unit, "steps", "f evals", "rejected" };
+        else        view.point_tag_names = { "h", ename, std::string("t, ") + unit, "steps" };
     }
 
     std::vector<PlotSeriesInput> series;
@@ -11646,8 +12837,8 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // autofit — log10 E и E отличаются на четырнадцать порядков, а p от них обоих.
     sig = sig * 131 + (win.x_log ? 1 : 0) + (ylog ? 2 : 0) + (win.show_e2 ? 4 : 0)
         + (win.show_nominal ? 8 : 0) + (win.show_min ? 16 : 0) + (win.show_avg ? 32 : 0)
-        + (win.show_max ? 64 : 0) + win.error_source * 128 + win.time_unit * 256
-        + (int)bufs.size() * 512;
+        + (win.show_max ? 64 : 0) + win.error_source * 128 + win.time_unit * 512
+        + win.perf_cost * 1024 + (int)bufs.size() * 4096;
     // Стиль в сигнатуру НЕ входит намеренно: содержимое VBO от него не
     // зависит (толщина, маркер, альфа — решения момента рисования), а смена
     // сигнатуры тянет за собой autofit и сбросила бы текущий масштаб вида.
@@ -13037,6 +14228,11 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
         if (InputNumStr("decimator",      c.pre_scaller_text, kFieldW))
             phase.decimation = c.pre_scaller_text;
         InputNumStr("max value",      c.max_value_text, kFieldW); // Phase has no analogue
+        // Адаптивный шаг — общий для всех уровней; Phase получает его сразу, как и h.
+        ImGui::Separator();
+        if (draw_adaptive_block("custom_ad", c.adaptive, c.scheme,
+                                kAdUiRaw | kAdUiInterp | kAdUiMaxPts, model.is_map, &model))
+            phase.adaptive = c.adaptive;
     }
 
     // Initial conditions — one InputNumStr per line, matching draw_diagram_controls.
@@ -16500,7 +17696,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("default -- try wider only on a different GPU.");
             ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
             ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
+
+            ImGui::Separator();
+            ImGui::Text("Step controllers");
+#ifdef UCUDA_AD_HAIRER_ONLY
+            ImGui::TextDisabled("Your own adaptive step controllers (C bodies), shared by all systems");
+            ImGui::TextDisabled("and tabs (library\\step_controllers.json).");
+#else
+            ImGui::TextDisabled("Your own adaptive step controllers: C bodies and named Soderlind");
+            ImGui::TextDisabled("filters, shared by all systems and tabs (library\\step_controllers.json).");
+#endif
+            if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
         }
         ImGui::End();
     }
+    track_dock_selection(model);
+    draw_ctrl_library_window(model);
 }

@@ -206,6 +206,69 @@ void main() {
 }
 )";
 
+// Линия, окрашенная по значению в вершине (колормапа slanCM — та же таблица, что у хитмапы).
+// Значение интерполируется вдоль сегмента, поэтому цвет течёт плавно, а не ступенькой по
+// сегментам. Толщина — тот же разворот в quads, что у GS_3D_THICK.
+static const char* VS_3D_VAL = R"(
+#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in float a_val;
+uniform mat4 u_mvp;
+out float v_val;
+void main() {
+    gl_Position = u_mvp * vec4(a_pos, 1.0);
+    v_val = a_val;
+}
+)";
+
+static const char* GS_3D_THICK_VAL = R"(
+#version 330 core
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+in float v_val[];
+out float g_val;
+uniform vec2  u_viewport;
+uniform float u_thickness_px;
+void main() {
+    vec4 p0 = gl_in[0].gl_Position;
+    vec4 p1 = gl_in[1].gl_Position;
+    if (p0.w <= 0.0 || p1.w <= 0.0) return;
+    vec2 p0_ndc = p0.xy / p0.w;
+    vec2 p1_ndc = p1.xy / p1.w;
+    vec2 dir_px = (p1_ndc - p0_ndc) * (u_viewport * 0.5);
+    float len_px = length(dir_px);
+    if (len_px < 1e-6) return;
+    vec2 dir_n = dir_px / len_px;
+    vec2 nrm_px = vec2(-dir_n.y, dir_n.x);
+    vec2 off_ndc = (nrm_px * (u_thickness_px * 0.5)) / (u_viewport * 0.5);
+    g_val = v_val[0]; gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_val = v_val[0]; gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_val = v_val[1]; gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    g_val = v_val[1]; gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    EndPrimitive();
+}
+)";
+
+static const char* FS_CMAP = R"(
+#version 330 core
+in float g_val;
+uniform sampler2D u_cmap_lut;  // 256x200 RGB8, строка N-1 = карта slanCM #N
+uniform int   u_colormap;
+uniform float u_vmin;
+uniform float u_vmax;
+uniform int   u_reverse;
+uniform float u_alpha;
+out vec4 frag_color;
+void main() {
+    float range = u_vmax - u_vmin;
+    float t = (range > 1e-30) ? clamp((g_val - u_vmin) / range, 0.0, 1.0) : 0.5;
+    if (isnan(g_val) || isinf(g_val)) t = 1.0;   // разошедшаяся ошибка — верхний край шкалы
+    if (u_reverse != 0) t = 1.0 - t;
+    float row = float(u_colormap - 1001) + 0.5;
+    frag_color = vec4(texture(u_cmap_lut, vec2(t, row / 200.0)).rgb, u_alpha);
+}
+)";
+
 static const char* FS = R"(
 #version 330 core
 uniform vec4 u_color;
@@ -383,6 +446,8 @@ PlotRenderer::~PlotRenderer() {
     if (program_points_)   glDeleteProgram(program_points_);
     if (program_3d_)       glDeleteProgram(program_3d_);
     if (program_3d_thick_) glDeleteProgram(program_3d_thick_);
+    if (program_2d_thick_) glDeleteProgram(program_2d_thick_);
+    if (program_3d_cmap_)  glDeleteProgram(program_3d_cmap_);
     if (program_heatmap_)  glDeleteProgram(program_heatmap_);
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
     if (lut_tex_)         glDeleteTextures(1, &lut_tex_);
@@ -451,6 +516,38 @@ void PlotRenderer::compile_shaders() {
             loc_viewport_3d_thick_  = glGetUniformLocation(program_3d_thick_, "u_viewport");
             loc_thickness_3d_thick_ = glGetUniformLocation(program_3d_thick_, "u_thickness_px");
         }
+    }
+    // 2D-вариант толстой линии: тот же GS (z = 0, w = 1 у 2D-вершин), вход — VS_2D.
+    if (fs && vs2 && gs3t) {
+        program_2d_thick_ = link_program_3(vs2, gs3t, fs);
+        if (program_2d_thick_) {
+            loc_mvp_2d_thick_       = glGetUniformLocation(program_2d_thick_, "u_mvp");
+            loc_color_2d_thick_     = glGetUniformLocation(program_2d_thick_, "u_color");
+            loc_viewport_2d_thick_  = glGetUniformLocation(program_2d_thick_, "u_viewport");
+            loc_thickness_2d_thick_ = glGetUniformLocation(program_2d_thick_, "u_thickness_px");
+        }
+    }
+    {
+        GLuint vs_v = compile(GL_VERTEX_SHADER, VS_3D_VAL);
+        GLuint gs_v = compile(GL_GEOMETRY_SHADER, GS_3D_THICK_VAL);
+        GLuint fs_c = compile(GL_FRAGMENT_SHADER, FS_CMAP);
+        if (vs_v && gs_v && fs_c) {
+            program_3d_cmap_ = link_program_3(vs_v, gs_v, fs_c);
+            if (program_3d_cmap_) {
+                loc_mvp_3d_cmap_       = glGetUniformLocation(program_3d_cmap_, "u_mvp");
+                loc_viewport_3d_cmap_  = glGetUniformLocation(program_3d_cmap_, "u_viewport");
+                loc_thickness_3d_cmap_ = glGetUniformLocation(program_3d_cmap_, "u_thickness_px");
+                loc_lut_3d_cmap_       = glGetUniformLocation(program_3d_cmap_, "u_cmap_lut");
+                loc_cmap_3d_cmap_      = glGetUniformLocation(program_3d_cmap_, "u_colormap");
+                loc_vmin_3d_cmap_      = glGetUniformLocation(program_3d_cmap_, "u_vmin");
+                loc_vmax_3d_cmap_      = glGetUniformLocation(program_3d_cmap_, "u_vmax");
+                loc_reverse_3d_cmap_   = glGetUniformLocation(program_3d_cmap_, "u_reverse");
+                loc_alpha_3d_cmap_     = glGetUniformLocation(program_3d_cmap_, "u_alpha");
+            }
+        }
+        if (vs_v) glDeleteShader(vs_v);
+        if (gs_v) glDeleteShader(gs_v);
+        if (fs_c) glDeleteShader(fs_c);
     }
     GLuint fs_h = compile(GL_FRAGMENT_SHADER, FS_HEATMAP);
     GLuint vs_h = compile(GL_VERTEX_SHADER, VS_HEATMAP);
@@ -562,6 +659,31 @@ void PlotRenderer::draw_line(GLuint vbo, int point_count, const float mvp[16],
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
+}
+
+void PlotRenderer::draw_line_thick_2d(GLuint vbo, int point_count, const float mvp[16],
+    const float color[4], float line_width) {
+    if (!program_2d_thick_) { draw_line(vbo, point_count, mvp, color, line_width); return; }
+    if (point_count < 2 || !vbo) return;
+    const GLboolean was_blend = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    // Альфа FBO держим на 1, как у draw_points (иначе полупрозрачная линия «продырявит» текстуру).
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(program_2d_thick_);
+    glUniformMatrix4fv(loc_mvp_2d_thick_, 1, GL_FALSE, mvp);
+    glUniform4fv(loc_color_2d_thick_, 1, color);
+    if (loc_viewport_2d_thick_ >= 0)  glUniform2f(loc_viewport_2d_thick_, (float)fbo_w_, (float)fbo_h_);
+    if (loc_thickness_2d_thick_ >= 0) glUniform1f(loc_thickness_2d_thick_, line_width);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glDrawArrays(GL_LINE_STRIP, 0, point_count);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    if (!was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
@@ -693,7 +815,10 @@ void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[1
     // leans on alpha, and without it the markers would be opaque squares.
     GLboolean was_blend = glIsEnabled(GL_BLEND);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Альфа FBO — на 1, полупрозрачные точки не пишут глубину: см. draw_line_3d.
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    const bool translucent = color[3] < 1.0f;
+    if (translucent) glDepthMask(GL_FALSE);
 
     glUseProgram(program_3d_);
     glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
@@ -711,6 +836,7 @@ void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[1
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
+    if (translucent) glDepthMask(GL_TRUE);
     if (!was_blend) glDisable(GL_BLEND);
 }
 
@@ -742,9 +868,15 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
 
     // ТОЛСТЫЙ путь: geometry shader раскрывает сегменты в quads
     // Alpha blending включаем только тут, чтобы OFF-путь не менял GL state.
+    // Альфа FBO держим на 1 (как draw_points): с glBlendFunc(SRC_ALPHA, ...) на канал альфы
+    // полупрозрачная линия «продырявливала» текстуру плота, и вся траектория выходила ровным
+    // бледным тоном. Полупрозрачная линия не пишет глубину: иначе тест глубины отбрасывал
+    // витки за уже нарисованными, и наложения (градиент плотности) не копились.
     GLboolean was_blend = glIsEnabled(GL_BLEND);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    const bool translucent = color[3] < 1.0f;
+    if (translucent) glDepthMask(GL_FALSE);
 
     glUseProgram(program_3d_thick_);
     glUniformMatrix4fv(loc_mvp_3d_thick_, 1, GL_FALSE, mvp);
@@ -765,6 +897,52 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
 
     // Точный blend func не восстанавливаем — ImGui сам ставит свой перед
     // отрисовкой ImDrawList, "утечка" не важна.
+    if (translucent) glDepthMask(GL_TRUE);
+    if (!was_blend) glDisable(GL_BLEND);
+}
+
+void PlotRenderer::draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count,
+    const float mvp[16], int colormap_id, float vmin, float vmax, bool reverse,
+    float alpha, float line_width) {
+    if (point_count < 2 || !vbo || !vbo_val || !program_3d_cmap_) return;
+
+    // Смешивание и глубина — как у толстого пути draw_line_3d: альфа FBO на 1, полупрозрачная
+    // линия глубину не пишет (иначе наложения витков не копятся).
+    GLboolean was_blend = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    const bool translucent = alpha < 1.0f;
+    if (translucent) glDepthMask(GL_FALSE);
+
+    glUseProgram(program_3d_cmap_);
+    glUniformMatrix4fv(loc_mvp_3d_cmap_, 1, GL_FALSE, mvp);
+    if (loc_viewport_3d_cmap_ >= 0)  glUniform2f(loc_viewport_3d_cmap_, (float)fbo_w_, (float)fbo_h_);
+    if (loc_thickness_3d_cmap_ >= 0) glUniform1f(loc_thickness_3d_cmap_, line_width);
+    if (loc_cmap_3d_cmap_ >= 0)      glUniform1i(loc_cmap_3d_cmap_, colormap_id_or(colormap_id, 0));
+    if (loc_vmin_3d_cmap_ >= 0)      glUniform1f(loc_vmin_3d_cmap_, vmin);
+    if (loc_vmax_3d_cmap_ >= 0)      glUniform1f(loc_vmax_3d_cmap_, vmax);
+    if (loc_reverse_3d_cmap_ >= 0)   glUniform1i(loc_reverse_3d_cmap_, reverse ? 1 : 0);
+    if (loc_alpha_3d_cmap_ >= 0)     glUniform1f(loc_alpha_3d_cmap_, alpha);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lut_tex_);
+    if (loc_lut_3d_cmap_ >= 0)       glUniform1i(loc_lut_3d_cmap_, 0);
+
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_val);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, sizeof(float), (void*)0);
+    glDrawArrays(GL_LINE_STRIP, 0, point_count);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    if (translucent) glDepthMask(GL_TRUE);
     if (!was_blend) glDisable(GL_BLEND);
 }
 

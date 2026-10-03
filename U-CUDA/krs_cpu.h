@@ -99,3 +99,111 @@ private:
     StepFnDD fn_dd_  = nullptr;
     StepFnQD fn_qd_  = nullptr;
 };
+
+// Пользовательский регулятор шага (C body из библиотеки регуляторов, adaptive_settings.h)
+// для CPU-драйвера адаптивного шага: тело оборачивается в функцию над раскладкой
+// kernels/ucuda_adaptive.cuh — ту же, что ucuda_ctrl_custom на GPU, — и собирается cl.exe
+// в DLL (кэш на диске, как у КРС). Номера строк в diags — в координатах тела.
+struct UcudaCtlIn;
+struct UcudaCtlMem;
+struct UcudaCtlOut;
+class CtrlCpuFn {
+public:
+    using Fn     = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
+    using PrepFn = void (*)(const double* c, int q, double* k);   // раздел подготовки (numb = double)
+    CtrlCpuFn() = default;
+    ~CtrlCpuFn();
+    CtrlCpuFn(const CtrlCpuFn&) = delete;
+    CtrlCpuFn& operator=(const CtrlCpuFn&) = delete;
+    // body — раздел подготовки и тело, как их упаковывает adaptive_ctrl_pack.
+    bool   compile(const std::string& body, std::vector<KrsCpuDiag>& diags);
+    Fn     fn() const   { return fn_; }
+    PrepFn prep() const { return prep_; }
+private:
+    void*  module_ = nullptr;   // HMODULE
+    Fn     fn_     = nullptr;
+    PrepFn prep_   = nullptr;
+};
+
+// Адаптивный шаг на CPU нативным кодом: адаптивные тела схемы (AdaptiveCode), регулятор
+// (C body из библиотеки или пусто), kernels/adaptive_part.cu с драйвером ucuda_adaptive.cuh
+// (вместе с разделом UCUDA_AD_LYAPUNOV) и PeakStream из cudaLibrary.cu собираются cl.exe в
+// одну DLL (кэш на диске, как у КРС). Текст алгоритма — тот же, что у GPU-ядер, поэтому CPU
+// и GPU сравнимы. Только double.
+struct UcudaAdaptParams;
+class AdaptiveCpuModule {
+public:
+    // y(T) от ic: y[n], stats[8] = nacc, nrej, nforced, nrhs, hmin, hmax, hmean, diverged.
+    // cancel (nullptr — нет): смотрится раз в 1024 принятых шага, прерывает счёт.
+    using EndpointFn = int (*)(const double* ic, const double* a, const UcudaAdaptParams* P, double T,
+                               double* y, double* stats, const volatile int* cancel);
+    // Свип LLE (ls = 0) / LS (ls = 1) цепочкой точек — ucuda_lyap_chain (continuation = 1)
+    // или классически (0). result[nPts * NC] (NaN — разлёт), stats[nPts * 4].
+    using LyapFn = void (*)(int ls, int continuation, int nPts, double lo, double hi, int reverse,
+                            int logScale, int mutParamIdx, const double* baseValues, int amountOfValues,
+                            const double* baseX, const UcudaAdaptParams* P, int axisKind, double tolRatio,
+                            double tTr, double NT, int nBlocks, int nWarm, double eps, int renorm,
+                            double maxValue, double* result, double* stats, const volatile int* cancel,
+                            int* progress);
+    // БД 1D (то же, что calculateDiscreteModelPeaksAdCUDA / ...AdContCUDA). Классика
+    // (continuation = 0) — точки [i0, i1) сетки nPts, строки выходов — с i0 (строка
+    // idx - i0); continuation — цепочка всех nPts точек (i0, i1 не читаются). flags — число
+    // пиков или код режима, stats[4] на точку. Возвращает 0 при отмене.
+    using BifFn = int (*)(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+                          int logScale, int sweepVar, int mutIdx, const double* baseValues, int amountOfValues,
+                          const double* baseX, const UcudaAdaptParams* P, int axisKind, double tolRatio,
+                          int writableVar, double maxValue, double* outPeaks, double* timeOfPeaks, int* flags,
+                          unsigned long long peakStride, int peakCapacity, double transientTime, double tRec,
+                          double dtOut, int preScaller, unsigned long long iters, int raw, int interp,
+                          double* stats, const volatile int* cancel, int* progress);
+    // LLE / LS классикой по куску точек [i0, i1) сетки nPts (ucuda_lyap_classic_range): выходы — с i0.
+    using LyapRangeFn = void (*)(int ls, int i0, int i1, int nPts, double lo, double hi, int logScale,
+                                 int mutParamIdx, const double* baseValues, int amountOfValues,
+                                 const double* baseX, const UcudaAdaptParams* P, int axisKind, double tolRatio,
+                                 double tTr, double NT, int nBlocks, int nWarm, double eps, int renorm,
+                                 double maxValue, double* result, double* stats, const volatile int* cancel,
+                                 int* progress);
+    // Метрики 1D (calculateDiscreteModelMetricsAdCUDA / signalMetricsContinuationAdKernel). Классика —
+    // точки [i0, i1), outMetrics[m * (i1 - i0) + row], intervals — строка на точку по peakStride;
+    // continuation — вся цепочка, outMetrics[m * nPts + j], intervals — одна строка. raw — узлы шага
+    // (до transientTime + tRec, прореживание preScaller), иначе сетка dtOut. 0 — отмена.
+    using MetricsFn = int (*)(int continuation, int i0, int i1, int nPts, double lo, double hi, int reverse,
+                              int logScale, int parOrVar, int mutIdx, const double* baseValues,
+                              int amountOfValues, const double* baseX, const UcudaAdaptParams* P, int axisKind,
+                              double tolRatio, int writableVar, double maxValue, double* intervals,
+                              unsigned long long peakStride, int peakCapacity, double* outMetrics,
+                              int metricMask, int* flags, double transientTime, double tRec, double dtOut,
+                              int preScaller, unsigned long long iters, int raw, int peakInterp,
+                              double* stats, const volatile int* cancel,
+                              int* progress);
+    // Фазовая траектория Analysis от одной НУ (phase_kernel_ad строка в строку): raw = 0 — сетка total
+    // отсчётов через dt от t_skip, 1 — узлы шага (не больше max_pts, times). data[c * n + k], logs —
+    // log_cap попыток по 4 числа, stats[9] как у ядра (+ truncated). Возвращает число точек.
+    using PhaseFn = int (*)(const double* ic, const double* values, const UcudaAdaptParams* P, double t_skip,
+                            double t_rec, double dt, int total, int raw, int max_pts, int log_cap, double* data,
+                            double* times, double* logs, int* log_count, double* stats, double* final_h,
+                            const volatile int* cancel);   // cancel — как у EndpointFn
+    AdaptiveCpuModule() = default;
+    ~AdaptiveCpuModule();
+    AdaptiveCpuModule(const AdaptiveCpuModule&) = delete;
+    AdaptiveCpuModule& operator=(const AdaptiveCpuModule&) = delete;
+    // dprep / deval пустые — модуль без плотного выхода (UCUDA_AD_NO_DENSE) и без входа БД.
+    // prelude — #define'ы перед configCUDA.h (настройки пиков: peak_config_defines движка).
+    bool compile(const std::string& rhs, const std::string& emb, const std::string& dprep,
+                 const std::string& deval, const std::string& ctrl_body, int amountOfX,
+                 const std::string& prelude, std::vector<KrsCpuDiag>& diags);
+    EndpointFn endpoint() const { return endpoint_; }
+    LyapFn     lyap()     const { return lyap_; }
+    BifFn      bif()      const { return bif_; }
+    LyapRangeFn lyap_range() const { return lyap_range_; }
+    MetricsFn  metrics()  const { return metrics_; }
+    PhaseFn    phase()    const { return phase_; }    // только у модуля с плотным выходом
+private:
+    void*      module_   = nullptr;   // HMODULE
+    EndpointFn endpoint_ = nullptr;
+    LyapFn     lyap_     = nullptr;
+    BifFn      bif_      = nullptr;
+    LyapRangeFn lyap_range_ = nullptr;
+    MetricsFn  metrics_  = nullptr;
+    PhaseFn    phase_    = nullptr;
+};

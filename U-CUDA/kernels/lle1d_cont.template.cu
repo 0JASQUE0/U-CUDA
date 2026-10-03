@@ -87,7 +87,8 @@ extern "C" __global__ void lle1dContinuationKernel(
     numb maxValue,
     numb* result,
     const volatile int* cancelFlag,
-    int*  progressCounter)
+    int*  progressCounter,
+    numb  vectorTransient)          // tangent-vector transient: blocks renormalised, not summed
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -110,7 +111,8 @@ extern "C" __global__ void lle1dContinuationKernel(
 
     int probeAttached = 0;
     const numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
-    const int nBlocks = (int)(tMax / NT);   // h-independent
+    const int nBlocks = (int)(tMax / NT);
+    const int nWarm   = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;   // h-independent
 
     for (int j = 0; j < nPts; ++j) {
         if (cancelFlag != nullptr && *cancelFlag != 0) return;
@@ -124,9 +126,12 @@ extern "C" __global__ void lle1dContinuationKernel(
 
         if (hLocal <= 0 || nBlocks <= 0) { result[j] = nan(""); continue; }
 
-        const int ntSteps   = (int)(NT / hLocal);
-        const int skipSteps = (int)(transientTime / hLocal);
+        // Round to nearest, divide by k*h*nBlocks -- see ucuda_steps_per_block (configCUDA.h).
+        const int ntSteps   = (int)ucuda_steps_per_block(NT, hLocal);
+        const int skipSteps = (int)ucuda_steps_per_block(transientTime, hLocal);   // round, as the blocks
         if (ntSteps <= 0) { result[j] = nan(""); continue; }
+        // The loop adds one more step after its iterations (see ucuda_steps_per_block).
+        const int blockIters = ntSteps - 1;
 
         int alive = 1;
         // settleBlocks: warm-up for a point that CARRIED the probe over -- run
@@ -136,7 +141,8 @@ extern "C" __global__ void lle1dContinuationKernel(
         int settleBlocks = (int)(transientTime / NT);
         if (!probeAttached) {
             settleBlocks = 0;
-            if (loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps, amountOfX,
+            // Exactly skipSteps steps: the loop adds one more after its iterations.
+            if (skipSteps > 0 && loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps - 1, amountOfX,
                                                1, 0, maxValue, nullptr, 0, 1) == 0) {
                 alive = 0;
             } else {
@@ -145,12 +151,15 @@ extern "C" __global__ void lle1dContinuationKernel(
             }
         }
 
+        // Tangent-vector transient: a fresh probe gets nWarm unsummed blocks too, a carried
+        // one the larger of its settle blocks and nWarm.
+        if (settleBlocks < nWarm) settleBlocks = nWarm;
         numb sum = 0;
         const int totalBlocks = settleBlocks + nBlocks;
         for (int b = 0; alive && b < totalBlocks; ++b) {
-            if (loopCalculateDiscreteModel_int(x, a, hLocal, ntSteps, amountOfX,
+            if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
                                                1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
-            if (loopCalculateDiscreteModel_int(y, a, hLocal, ntSteps, amountOfX,
+            if (loopCalculateDiscreteModel_int(y, a, hLocal, blockIters, amountOfX,
                                                1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
 
             numb d = 0;
@@ -171,7 +180,7 @@ extern "C" __global__ void lle1dContinuationKernel(
         }
 
         if (alive) {
-            result[j] = sum / tMax;
+            result[j] = sum / ((numb)nBlocks * (numb)ntSteps * hLocal);
         } else {
             result[j] = nan("");
             // Break the chain: restart from the initial conditions with a fresh

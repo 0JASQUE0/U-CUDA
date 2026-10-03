@@ -174,7 +174,10 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
                    bool reverse, int n_discrete,
                    const std::vector<ColorbarTick>& ticks) {
     if (!dl || height <= 0.0f) return;
-    const float cb_x = top_left.x, cb_y = top_left.y, cb_h = height;
+    // Шкала короче отведённой высоты на 2.5% сверху и снизу: подпись крайнего тика стоит по
+    // центру штриха и иначе на полстроки вылезала за верх/низ блока (и за кадр Copy image).
+    const float inset = 0.025f * height;
+    const float cb_x = top_left.x, cb_y = top_left.y + inset, cb_h = height - 2.0f * inset;
     const ImU32 col_text = plot_col_text();
     const float font_h   = plot_text_line_height();
 

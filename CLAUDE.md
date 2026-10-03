@@ -143,6 +143,13 @@ D:\U-CUDA\
   поток на узел, состояние в shared. Два плейсхолдера вместо одного:
   `{{KRS_BODY}}` (шаг узла) и `{{COUPLING_BODY}}` (case-ветки switch по
   номеру закона связи, их печатает `codegen_coupling`).
+- `kernels/order.template.cu` — вкладка Order: оценка порядка, замер
+  Performance (`perfIntegrateKernel`), область устойчивости.
+- Адаптивный шаг (см. раздел «Adaptive step» ниже): `kernels/ucuda_adaptive.cuh`
+  (регуляторы и драйвер), `kernels/adaptive_part.cu` (свипы БД/бассейнов),
+  `kernels/metrics_adaptive_part.cu`, `kernels/lyapunov_adaptive_part.cu` —
+  не самостоятельные шаблоны, а хвосты, которые движок приклеивает к
+  `bifurcation2d.template.cu` / `signal_metrics.template.cu`.
 
 ### App Model / State
 - **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Dft1D / Basins / FastSync / Custom / Order / Network / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
@@ -154,7 +161,16 @@ D:\U-CUDA\
   считается РАСЩЕПЛЕНИЕМ (шаг узла, затем `X += h*coupling`), как в
   `calculateDiscreteModelforFastSynchro`, — поэтому на вкладке работают все
   схемы, но сама связь интегрируется первым порядком
-- **session_io.cpp / .h** — Save/load sessions to JSON
+- **session_io.cpp / .h** — Save/load sessions to JSON; also the step controller
+  library file (`load_ctrl_library` / `save_ctrl_library`)
+- **order_session.cpp / .h** — вкладка Order: порядок, Performance (в т.ч.
+  «точность — затраты» для адаптивного шага), устойчивость; CPU-ветки в
+  double / dd / qd через `krs_cpu`
+- **adaptive_settings.h** — header-only: `AdaptiveSettings` (блок Integration
+  каждой вкладки), встроенные регуляторы, библиотека пользовательских
+  регуляторов, `adaptive_build_params` (настройки → `UcudaAdaptParams`)
+- **krs_cpu.cpp / .h** — cl.exe-сборка тела КРС в DLL для CPU-путей
+  (`KrsCpuStep`, double/dd/qd) и тела пользовательского регулятора (`CtrlCpuFn`)
 - **system_library.cpp / .h** — Working with `library/*/system.json`
 - **system_record.h** — Struct for one ODE system (name, latex, param_order, initial conditions, values, selected numerical schemes)
 
@@ -196,6 +212,204 @@ Symbolic differentiation does exist, but it serves **only the implicit schemes**
 - `floor`/`ceil`/`fmod` are rejected at codegen time (`jac_check_differentiable`).
 
 ---
+
+## Adaptive step (RK45 / DOPRI78 / DOP853)
+Fixed step stays the default and must stay **bit-for-bit** unchanged: the adaptive path is
+a separate module/branch everywhere, never an `if` inside the fixed-step kernels.
+
+- **Codegen:** `codegen_adaptive(sys, scheme)` → `AdaptiveCode` with four bodies — `rhs`
+  (f), `emb` (one attempt: higher-order `Y`, error estimates `E = h*sum((b - b^)k)`, FSAL
+  `F1`), `dprep`/`deval` (dense output) — plus `q`, `nlo`, f-counts. Only schemes with an
+  embedded estimate (`scheme_supports_adaptive`). The same bodies feed the CPU driver
+  (`integrator.cpp`, `CpuAdaptiveKrs`).
+- **Extrapolators:** `GBS 2-4 ...` (`codegen_adaptive_gbs`) and `Extr(base|n1..nK)`, K >= 2
+  (`codegen_adaptive_extrapolation`, base = built-in or custom KRS) are embedded pairs built from the
+  same stages: Y over all K stages (weights of the fixed step), the lower solution over the first K-1,
+  `E = sum (alpha_k - beta_k) T_k`, q = `extrapolation_order(K-1)`; F1 = f(Y), cubic Hermite dense
+  output. The base body is printed into `emb` with a local `numb* const X` shadowing the const input.
+  Y is printed exactly like `wrap_extrapolation` / `scheme_gbs`, so a step pinned to h (h0 = h_max = h,
+  `UCUDA_AD_NO_RETRY`, clip 0) is bit-identical to the fixed Extr / GBS on CPU (GBS takes f(X) from F0).
+  Entry by name: `adaptive_code_for_scheme(custom_schemes, sys, scheme)` (analysis_session) — all
+  callers go through it; `adaptive_scheme_name_ok` / `adaptive_scheme_hint` for UI and setup errors.
+  Analysis on CPU: the exe driver is Butcher-table only, so extrapolators go through the cl.exe DLL —
+  entry `ucuda_cpu_ad_phase` (`AdaptiveCpuModule::phase`), a line-for-line copy of `phase_kernel_ad`;
+  RK pairs keep the exe driver. CPU == GPU in accepted/rejected counts, grid samples to ~1e-8 on Rossler
+  at t = 150 (node times differ ~1e-6: the float controller). ExtrZ (`codegen_adaptive_extrapolation_complex`):
+  the same over the complex core (stages and both sums `ucmplx`, Y and E are their Re, symmetric weights),
+  built-in complex CD bases only; ExtrZ(Complex CD4|1,2,3) (q = 6) needs 136 steps at tol 1e-10 on Rossler.
+  Not yet: Comp.
+  `compile_adaptive` feeds configCUDA.h when `emb` holds `ucmplx` (Extr over a complex CD base).
+- **Driver:** `kernels/ucuda_adaptive.cuh`, one text for GPU (NVRTC) and CPU (exe, cl.exe
+  DLL). Two parts: the *layout* (`UcudaAdaptParams`, controller in/out/memory, error norms,
+  built-in controllers — Hairer / SciPy / I / PI / Filter) and the *driver*
+  (`ucuda_ad_init`, `ucuda_ad_step[_x]`, dense output). A module includes it twice:
+  `#define UCUDA_ADAPT_LAYOUT_ONLY` + include, then the user controller
+  (`{{CTRL_CUSTOM}}` → `adaptive_ctrl_source`), then the full include.
+- **Macros:** `UCUDA_AD_STATIC_N` (state in registers; only the Analysis kernel — in
+  sweeps it kills occupancy), `UCUDA_AD_NO_DENSE` (LLE/LS, Performance), `UCUDA_AD_EXACT_CTL`
+  (controller math in double — for step-by-step comparison with Hairer's dop853.c / scipy;
+  by default norms and `pow` run in float with a double fallback).
+- **Modules:** sweep kernels are `bifurcation2d.template.cu` + `adaptive_part.cu` (+ the
+  metrics / LLE-LS tail); placeholders `{{KRS_RHS_BODY}} {{KRS_EMB_BODY}} {{KRS_DPREP_BODY}}
+  {{KRS_DEVAL_BODY}} {{CTRL_CUSTOM}}`. Every body (incl. the controller body) must be in the
+  module cache key. Analysis uses `NvrtcEngine::compile_adaptive` (phase kernel / endpoint
+  kernel for Order → Performance).
+- **LLE/LS:** clones step through `ucuda_ad_step_x` with `UcudaLyapClones` — same attempt,
+  same embedded method, and the controller also sees the clones' error (`err_extra`).
+  Without that the step grows to the stability limit near a stable equilibrium and the
+  exponents come out ~0.
+- **Controller library:** global, `library\step_controllers.json`; entries are a C body of
+  `ucuda_ctrl_custom(in, m, o)` or a named Soderlind filter. Sessions embed the definition
+  (`ctrl_def`) and import it where it is missing; if the library has the name with a different
+  definition, the session gets its own entry (one with the same definition, or "<name> (session)"),
+  so a session runs the controller it was saved with (`import_session_ctrl`). The file is replaced
+  in one step (`filesystem::rename`) under a writer lock. `nvrtc_check_ctrl_body` = the editor's
+  Check. PI/Filter: `safety` sets the target error `safety^(q+1)`, it does not multiply rho.
+  A C body may have a **prepare section** `ucuda_ctrl_custom_prep(c, q, k)`: run once per trajectory
+  (`ucuda_ad_prepare_ctl` in init/restart), `k[0..UCUDA_CTL_NK-1]` lands in `UcudaCtlConst::k` and the
+  body reads it as `in.k[]` — the same role as `UcudaCtlConst` for the built-ins (no double divisions
+  per attempt). Prepare + body travel as ONE string (`adaptive_ctrl_pack`: prep, `\x1e`, body) through
+  every `ctrl_body` field, cache key and DLL hash; `adaptive_ctrl_source` / `make_ctrl_source` unpack
+  it. With `UCUDA_AD_HAIRER_ONLY` (default) the built-ins are Hairer only, but C bodies work:
+  `ucuda_step_ctrl` compiles exactly one law per module (the custom one when the module has its body,
+  else Hairer), no switch; Soderlind filters (they need the built-in Filter) are hidden. The presets
+  "Hairer fast (C)" and "Hairer numb (C)" are the built-ins written out one-to-one ("numb (C)" uses the
+  very same body/prep strings): all sweep modes and both CPU paths are bit-identical to the built-in,
+  same registers and speed (Rossler DOP853 stands).
+- **Built-in Hairer, two variants:** "Hairer fast" (`UCUDA_CTRL_HAIRER`, the default) and "Hairer numb"
+  (a C body + prepare shipped as a built-in `AdaptiveCtrlInfo` with `body/prep`, id `UCUDA_CTRL_CUSTOM`;
+  works wherever library bodies work). Same law in the log domain:
+  `h_new = h * 2^clamp(-expo1/2 * log2(err²) + C, log2 fac1, log2 fac2)`, where C = `beta*log2(facold) +
+  log2(safe)` is stored in `m.user[0]` on acceptance; after a rejection the upper bound is
+  `min(log2 fac2, 0)`. All logs of the parameters are taken once in `ucuda_ad_prepare_ctl`
+  (`UcudaCtlConst::he/lsafe/lfac1/lfac2/lc0`). "fast" does the norm and logs in float
+  (`ucuda_ctl_lg2err2`, fallback to double on overflow/NaN), "numb" in numb (`ucuda_ctl_lg2err2_numb`).
+  Differences are ulp-level: on Lorenz (T = 2, tol 1e-3..1e-11, RK45/DOP853, CPU/GPU) steps, rejections
+  and f counts equal the old controller; y(T) differs by ≤ 1.3e-7 at tol 1e-3, ~1e-14 at tight tol.
+  `UCUDA_AD_EXACT_CTL` keeps the old double version (dop853.c comparison).
+  The law does not clip to h_max — the driver does (`if (h > P.hmax) h = P.hmax`); "no limit" is
+  `hmax = +inf` (`adaptive_build_params`), so the controllers need no `hmax > 0` test.
+  `o.err` of Hairer is **err²** (the driver only checks it is finite; the log of attempts shows t, h and
+  the code, not the error). Sessions: `"ctrl_v":2`; an old "Hairer" loads as "Hairer fast" (no ctrl_v)
+  or "Hairer numb" (ctrl_v 2).
+- **New built-in controllers: simplify to the bone.** The controller sits on the critical path of every
+  attempt (norm → law → h, which the next attempt waits for), so:
+  - everything that depends only on parameters, q or constants goes to prepare (`ucuda_ad_prepare_ctl` /
+    `UcudaCtlConst`, or the prep section of a C body) — logs of safety/fac bounds, exponents, products
+    of parameters, the state before the first accepted step;
+  - no divisions, square roots or `pow` per attempt where avoidable: work in the log2 domain
+    (`h * 2^clamp(...)`, clamps of logs instead of factors), with the norm squared (`err²`, compare with
+    1, `log2 err = 1/2 log2 err²`), multiply by precomputed reciprocals;
+  - store in controller memory what the next attempt needs in its final form (e.g. `beta*log2 facold +
+    log2 safe`), not raw values to be transformed again;
+  - no checks the driver already does (h_max clamp, finiteness of the error);
+  - ship a float version ("fast") and a numb version, plus C-body presets that reproduce each one
+    bit for bit (check on the Order → Performance stand: steps, rejections, f and y(T)).
+- **CPU:** `AdaptiveCpuModule` (`krs_cpu`) builds `kernels/adaptive_part.cu` itself into a cl.exe
+  DLL — placeholders substituted, `PeakStream` cut out of `kernels/cudaLibrary.cu`, the engine's
+  `peak_config_defines()` as prelude, `par_or_var` a thread-local. Entries: endpoint (Order →
+  Performance), `ucuda_lyap_chain` (LLE/LS), `ucuda_cpu_ad_bif` (1D bifurcation: classic over
+  threads, continuation as one chain — line-for-line copies of the GPU kernels). Adaptive
+  continuation belongs on the CPU: the GPU version is one thread, ~25-50x slower.
+- **Regression:** after touching anything shared, compare the fixed-step dumps against the
+  baseline — any mismatch outside the intended change is a bug.
+
+### Pitfalls found the hard way
+- `loopCalculateDiscreteModel_int` (and CPU `cpu_loop_model`) take **one more step after
+  the loop** (fixed-point check). A block of k steps is k-1 iterations; a transient of N
+  steps is N-1 (and no call for N = 0). Step counts from time go through
+  `ucuda_steps_per_block` (round to nearest), not `(size_t)(T/h)`.
+- NVRTC `curand` stubs differ per template: LLE/LS templates mix the subsequence (point
+  index) into the seed, the bifurcation/basins ones **ignore it**. Anything random per point
+  built on a bifurcation template needs its own generator (see `ucudaLyapRng`).
+- Finite-T LLE/LS depend on the random initial frame as ~ln(1/c)/t_max — point-to-point
+  noise, not a bug. `vector transient` (renormalised but unsummed blocks) removes it.
+- Output mode of adaptive sweeps (`AdaptiveRequest::raw_nodes`, "uniform grid / step nodes" in
+  the Integration block): BD 1D/2D, basins and Metrics. Step nodes have no dense output per sample
+  and no warp divergence on the grid, so they are 4-5x faster (Metrics 2D 128x128: 3.4 → 0.8 s).
+  Metrics on nodes (`MetricsAccumNU`, `ucudaAdMetricsRun` in `metrics_adaptive_part.cu`): mean and
+  variance are TIME averages (Hermite quadrature with the exact derivative f, 4th order). A plain
+  mean over nodes is biased towards small steps. Extrema and peaks are interpolated between nodes
+  (`ucudaAdNodeVertex`, mode = peak interpolation), and the decimator keeps every N-th node. Nodes
+  are as accurate as the grid or better (Rössler, periodic: mean 2.5e-5 vs 2.7e-4 against a fine
+  fixed step). CPU and GPU agree only to ~1e-5 in peak times, because nodes land differently.
+- Warp divergence, not memory, is what slows adaptive sweeps: neighbouring lanes need steps,
+  rejections and samples at different moments. One attempt per loop iteration
+  (`ucuda_ad_try_x`) made LS 2D 1.5x faster, but the same restructure made the bifurcation kernels
+  1.3-1.6x *slower* — measure every loop-shape change (results stay bit-identical either way).
+- The clone error control asks for `rtol*|delta|`; below double resolution of the perturbation
+  (`rtol*eps << 1e-16*|x|`, e.g. rtol 1e-9, eps 1e-8) the step used to collapse chasing roundoff
+  (~200x more steps, same exponents). The scale now has a per-component floor
+  `max(rtol*RMS(delta), K*eps_machine*max|x_i, y_i|)`, K = `UCUDA_LYAP_NOISE_K` = 100. It is active
+  at ordinary settings too (rtol 1e-8, eps 1e-6): steps ~10x longer, exponents within the
+  finite-T scatter. The norm uses weights 1/sc_i^2: one division per clone, plus one per
+  component where the floor is active (LS 2D GPU 5-8% faster; results bit-identical on the stands).
+- **Step-node kernel** (`raw_nodes` with a system/IC sweep: `ad_nodes_module`, prefix
+  `kAdNodesModulePrefix` = `UCUDA_AD_NO_DENSE` + `UCUDA_AD_NODES_KERNEL` + `UCUDA_AD_STATIC_N`):
+  own module for BD 1D/2D, basins and Metrics. The step settings come by value as a kernel argument
+  (`__grid_constant__`, `UCUDA_AD_P_ARG`, launch arg `ad_param_arg`) — no per-thread copy; a sweep
+  over a step setting (rtol/atol/controller parameter) goes to the general module. Hairer or a C body
+  from the library, no dense output, no attempt log, no h/err history (kept for a C body), no tp/hp. The observable is picked by weights
+  (`ucudaAdObsW`): `v[writableVar]` with a runtime index (and a select loop, which the compiler folds
+  back into it) kept the whole state in local memory. Result: 124 registers, 0 B local memory
+  (was 214 / 1584 B), bit-identical results. The per-step progress atomic into mapped host memory
+  (PCIe) and its BSYNC were the main stall. Rossler 256x256 DOP853: BD 2D kernel 1.65 -> 0.73 s,
+  Metrics 1.64 -> 0.98 s; at real clocks the kernel is now FP64-bound (85%).
+- **Progress and cancel in all adaptive GPU kernels:** progress is reported per point
+  (`ucudaProgressTopUp` at the end of the point; no ticks inside it); the threshold check (`ucudaAdOut` /
+  `ucuda_lyap_out`) and the cancel flag run every `CHECK_INTERVAL` accepted steps (counted in steps,
+  not output samples) plus once after the last step. `S.diverged` (non-finite error at h_min) is
+  still tested every step: it is set by the step itself and ends the loop. Cost of the old scheme
+  (measured with the kernels given `nullptr` signals): adaptive LLE 2D 128x128 0.49 -> 0.93 s,
+  BD / Metrics 2D on the output grid 7.2 -> 8.7 s, LS 2D +5-15%; fixed-step kernels and the
+  step-node kernel: no measurable cost.
+- **ncu locks clocks to base by default**: a kernel limited by memory/latency (or by atomics to host
+  memory) looks FP64-bound there. Use `--clock-control none` and check with nsys kernel times.
+- The step body (`adaptive_emb_body`) is unrolled and skips zero Butcher coefficients (DOP853: ~30%
+  of stage-combination FMAs). Bit-identical for finite stages; a trial step whose stage overflows to
+  inf used to give NaN (0*inf) and now a finite error — adaptive LLE 2D on Rossler differed in 51 of
+  16384 points (chaotic ones).
+- Adaptive sweep kernels are **FP64-bound** (ncu, Rossler 256x256 DOP853 on RTX 2060: FP64 pipe
+  84% busy, 214 registers, 8 warps/SM). Register caps (168/128), block width 64/128 and
+  `UCUDA_AD_STATIC_N` do not help or hurt. The uniform output grid is ~4x slower than step nodes
+  because of warp divergence: the step (~410 FP64 instructions) and dprep run for 2-4 of 32 lanes
+  (81% of warp instructions). Tried and reverted (results bit-identical, all slower at 256x256):
+  step-then-samples loop (7.6 -> 7.9 s), the same with `__all_sync` before every attempt
+  (-> 13.1 s: the warp waits for the lane with the longest sample loop and the kernel becomes
+  local-memory latency bound), dense coefficients in registers (255 registers, no gain). Two-phase grid (all lanes step in lockstep — `__activemask` / `__any_sync` rounds of W samples — buffering dense coefficients, then samples in a separate pass; bit-identical): under ncu 20% faster (warp instructions /2.3, 14 vs 6 lanes per instruction), but 5-30% slower in real time — it turns local-memory latency bound, and boost clocks speed up only the FP64-bound one-phase kernel. ncu locks base clocks: judge loop changes by nsys/wall time. Unexplained: the first launch in a process runs the two-phase kernel ~35% faster than later ones (not `CU_CTX_LMEM_RESIZE_TO_MAX`, not the L1 carveout, not the chunking).
+- Order → Performance, "adaptive loses to fixed": check three things before suspecting a bug.
+  (1) Chaos: E(T) grows ~e^(λT). Rössler (λ ≈ 0.07) at T = 400 gives E(T) ~ 1..10 (attractor size) for
+  every h and tol, so the curves are noise; use T ≈ 20. (2) The problem: on Rössler at equal E(T) the
+  adaptive step needs about as many f evaluations as the fixed one (RK45 ~10% more, DOP853 10-30%
+  fewer). The spike is where local error control spends steps, but errors there decay. Van der Pol
+  μ = 10 is the counter-check: adaptive needs 3-5x fewer f evaluations and is faster in time.
+  (3) Cost per attempt on a cheap RHS (CPU, 3D): the RK45 scheme ~50 ns, the controller ~50 ns,
+  bookkeeping ~20 ns, against ~41 ns for a fixed RK45 step, i.e. ~20 vs ~7 ns per f. The controller
+  cost is the latency of the chain norm → log2 → exp2 → h, which the next attempt waits for. The CPU
+  versions of log2/exp2/fmin/fmax/nextafter in `ucuda_adaptive.cuh` are inline (Estrin, ≤ 0.5 ulp
+  float) because the CRT calls cost ~100 ns more per attempt in the /MD exe.
+- **Order → Performance timing (GPU):** the kernels time themselves — `%globaltimer` around the step
+  loop (`perfIntegrateKernel`) / init + loop (`endpoint_kernel_ad`), atomicMin start / atomicMax end over
+  replicas; launch latency (~6-8 us on WDDM) and loads/stores are outside. Before measuring, a burst of
+  back-to-back launches (`perf_burst_warmup`, ~300 ms before the first node, ~20 ms before the rest):
+  short launches with a sync after each never raise the GPU clock, and the same kernel measured 3-5x
+  apart (Lorenz RK45 adaptive: 16 vs 3 us per step). E(T) of a fixed-step tab is against the same
+  dd/qd DOP853 y*(T) as the adaptive one when "reference y*(T)" is set (needs "fit h to t_max").
+- Default `h_min` is `max(10 ulp(t), 1e-12*span)`: 10 ulp alone let a controller pinned at an
+  unreachable tolerance take ~1e15 steps. A user `h_min` is raised to 10 ulp(t): below that
+  `t + h_min == t` and a forced step never advanced time.
+- **Cancel in Analysis / Order → Performance (adaptive):** `phase_kernel_ad`, `endpoint_kernel_ad`,
+  the DLL entries `ucuda_cpu_ad_phase` / `ucuda_cpu_ad_endpoint` and `computePhasePortraitCPU_adaptive`
+  check a cancel flag every 1024 accepted steps (GPU: an int in mapped host memory, `NvrtcEngine`
+  polls the stream and sets it; DLL: a volatile int set by a watcher thread). A cancelled run returns
+  `kNvrtcCancelled`; `PhaseAnalysisSession::poll` keeps the previous plots. The grid loop there is
+  `ucuda_ad_advance_to` unrolled (same calls, same results). TDR is not addressed: a single launch
+  longer than the Windows watchdog is still reset by the driver.
+- `__grid_constant__` only from compute_70 (`UCUDA_GRID_CONST`); on older GPUs the parameter is a plain
+  by-value one (same results, maybe a local copy).
+- Prewarm must never activate a module (`compile_*_if_needed(..., activate = false)`): a running task
+  reads its kernel from the active slot after its own compile.
+- New `.h`-only files need no `.vcxproj` change; new `.cpp` files do — ask first.
 
 ## ImGui/ImPlot Guidelines
 - **Immediate mode:** Do NOT store UI state in local variables between frames
@@ -251,6 +465,15 @@ x64/{Debug|Release}/U-CUDA.exe
 ### Debugging
 - **CUDA:** `compute-sanitizer` / Nsight Compute
 - **NVRTC issues:** Check that headers were copied to `kernels/` (Post-Build Event)
+- **Nsight Compute (`ncu`, in PATH):** GPU counters are enabled on this machine. Under the Russian
+  Windows locale `ncu` crashes with "bad conversion" when it PRINTS values (console or
+  `--import --csv`); profiling itself works. Write a report (`ncu -o rep ...`) and read it with the
+  Python module `ncu_report` (`<Nsight Compute>\extras\python`). Kernel regex: `--kernel-name regex:Ad`,
+  plus `--launch-count 1 --kill on`.
+- **Profiling knobs (env, off by default, kernel code unchanged when unset):**
+  `UCUDA_NVRTC_LINEINFO=1` — line info in the modules (SourceCounters per source line);
+  `UCUDA_NVRTC_MAXRREG=<n>` — register cap (NVRTC, cuModuleLoadDataEx and cuLink).
+  `CUDA_CACHE_DISABLE=1` to measure a cold module build (the driver JIT cache hides it).
 
 ---
 

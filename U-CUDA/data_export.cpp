@@ -18,6 +18,46 @@ static void write_fmad_line(std::ofstream& out, bool gpu_fmad)
     out << "NVRTC --fmad = " << (gpu_fmad ? "on" : "off") << "\n";
 }
 
+// Хвост конфига свипа 1D: устройство и раскладка точек по оси. Строки появляются, только когда
+// что-то отличается от классического линейного свипа на GPU, — его конфиг не меняется.
+template <class Snap>
+static void write_sweep_tail(std::ofstream& out, const Snap& s)
+{
+    if (s.log_scale) out << "log scale = 1\n";
+    if (s.continuation) out << "continuation = " << (s.continuation_reverse ? "backward" : "forward") << "\n";
+    if (!s.step_control.empty()) out << "step control = " << s.step_control << "\n";
+}
+
+template <class Snap>
+static void write_device_line(std::ofstream& out, const Snap& s)
+{
+    if (s.on_cpu) out << "device = CPU\n";
+    else          write_fmad_line(out, s.gpu_fmad);
+}
+
+// Хвост конфига кривой LLE/LS 1D: устройство, транзиент касательных векторов, раскладка свипа.
+template <class Snap>
+static void write_curve1d_tail(std::ofstream& out, const Snap& s)
+{
+    write_device_line(out, s);
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
+    write_sweep_tail(out, s);
+}
+
+// x точки i — той же функцией, что у графика (sweep_value_at в gui.cpp): цепочка
+// continuation идёт в своём порядке (backward — от hi), лог-шкала — по степеням.
+// Линейный классический свип — прежняя param_value_at, побитово как раньше.
+template <class Snap>
+static double curve1d_x(const Snap& s, int i, int n)
+{
+    const bool log_ok = s.log_scale && s.range_lo > 0.0 && s.range_hi > 0.0;
+    if (s.continuation || s.continuation_reverse)
+        return (double)ucuda_node_value_cont(i, n, (numb)s.range_lo, (numb)s.range_hi, log_ok,
+                                             s.continuation_reverse);
+    if (log_ok) return (double)ucuda_node_value_log(i, n, (numb)s.range_lo, (numb)s.range_hi);
+    return param_value_at(static_cast<std::size_t>(i), n, s.range_lo, s.range_hi);
+}
+
 // Bif1D
 
 void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
@@ -48,7 +88,8 @@ void write_bif1d_config(std::ofstream& out, const Bif1DSnapshot& s)
     out << "indexVar for peakfinder = " << s.writableVar << "\n";
     out << "indexPar for estimation = " << s.indexOfMutVar << "\n";
     out << "start value = " << s.range_lo << ", stop value = " << s.range_hi << "\n";
-    write_fmad_line(out, s.gpu_fmad);
+    write_device_line(out, s);
+    write_sweep_tail(out, s);
 }
 
 void write_bif1d_rows(std::ofstream& out,
@@ -80,10 +121,7 @@ bool export_bif1d(const Bifurcation1DResult& res, const std::string& path)
 
     const int n_pts = res.n_pts;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         const int npeaks = (i < (int)res.flags.size()) ? res.flags[i] : 0;
         if (npeaks > 0) {
             const auto& pk = res.bifurcation_points[i];
@@ -219,7 +257,7 @@ void write_lle1d_config(std::ofstream& out, const LLE1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
-    write_fmad_line(out, s.gpu_fmad);
+    write_curve1d_tail(out, s);
 }
 
 void write_lle1d_row(std::ofstream& out, double param, double lyapunov)
@@ -241,10 +279,7 @@ bool export_lle1d(const LLE1DResult& res, const std::string& path)
 
     const int n_pts = res.n_pts;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         const double v = (i < (int)res.lyapunov.size()) ? res.lyapunov[i] : 0.0;
         write_lle1d_row(out, param, v);
     }
@@ -260,7 +295,7 @@ void write_ls1d_config(std::ofstream& out, const LS1DSnapshot& s)
                                 s.values, s.initial_conditions,
                                 s.tMax, s.NT, s.transientTime, s.h, s.eps,
                                 s.indexOfMutVar, s.range_lo, s.range_hi);
-    write_fmad_line(out, s.gpu_fmad);
+    write_curve1d_tail(out, s);
 }
 
 void write_ls1d_row(std::ofstream& out, double param,
@@ -286,10 +321,7 @@ bool export_ls1d(const LS1DResult& res, const std::string& path)
     const int n_pts = res.n_pts;
     const int n_exp = res.n_exponents;
     for (int i = 0; i < n_pts; ++i) {
-        const double param = param_value_at(static_cast<std::size_t>(i),
-                                            n_pts,
-                                            res.snapshot.range_lo,
-                                            res.snapshot.range_hi);
+        const double param = curve1d_x(res.snapshot, i, n_pts);
         if (i < (int)res.spectrum.size() && !res.spectrum[i].empty())
             write_ls1d_row(out, param, res.spectrum[i].data(), n_exp);
         else {
@@ -394,6 +426,7 @@ void write_lle2d_config(std::ofstream& out, const LLE2DSnapshot& s)
     write_values_and_ic(out, s.values, s.initial_conditions);
     out << "CT = " << s.tMax << "\nNT = " << s.NT << "\nTT = " << s.transientTime << "\n";
     out << "h = " << s.h << "\neps = " << s.eps << "\n";
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
     out << "indices = " << s.indexOfMutVar << ", " << s.indexOfMutVar2 << "\n";
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
@@ -431,6 +464,7 @@ void write_ls2d_config(std::ofstream& out, const LS2DSnapshot& s)
     write_values_and_ic(out, s.values, s.initial_conditions);
     out << "CT = " << s.tMax << "\nNT = " << s.NT << "\nTT = " << s.transientTime << "\n";
     out << "h = " << s.h << "\neps = " << s.eps << "\n";
+    if (s.vectorTransient > 0) out << "vector transient = " << s.vectorTransient << "\n";
     out << "indices = " << s.indexOfMutVar << ", " << s.indexOfMutVar2 << "\n";
     out << "axis1: " << s.range1_lo << " .. " << s.range1_hi << "\n";
     out << "axis2: " << s.range2_lo << " .. " << s.range2_hi << "\n";
@@ -719,13 +753,16 @@ static void write_phase_config(std::ofstream& out, const PhaseSnapshot& s)
     out << "TT = "       << s.t_skip    << "\n";
     out << "h = "        << s.h         << "\n";
     out << "decimator = " << s.decimator << "\n";
+    if (!s.adaptive.empty()) out << "step control = " << s.adaptive << "\n";
     write_fmad_line(out, s.gpu_fmad);
 }
 
+// times — моменты точек на узлах адаптивного шага; nullptr — равномерная сетка i*dt.
 static void write_phase_trajectory(std::ofstream& out,
                                    const std::vector<std::string>& vars,
                                    const std::vector<std::vector<double>>& traj,
-                                   double dt, bool is_map)
+                                   double dt, bool is_map,
+                                   const std::vector<double>* times = nullptr)
 {
     if (!out.is_open()) return;
     out << std::setprecision(set_precision);
@@ -734,7 +771,7 @@ static void write_phase_trajectory(std::ofstream& out,
     for (const auto& v : vars) out << ", " << v;
     out << '\n';
     for (std::size_t i = 0; i < traj.size(); ++i) {
-        const double t = static_cast<double>(i) * dt;
+        const double t = (times && i < times->size()) ? (*times)[i] : static_cast<double>(i) * dt;
         out << t;
         for (double x : traj[i]) out << ", " << x;
         out << '\n';
@@ -767,10 +804,13 @@ static std::string phase_ic_tag(const PhaseSnapshot& s, std::size_t k)
 // сравниваются честно: если какая-то траектория короче, её ячейки в хвостовых
 // строках остаются ПУСТЫМИ, а не нулевыми — ноль здесь был бы неотличим от
 // настоящей координаты.
+// times — узлы адаптивного шага: у каждого НУ свои моменты, поэтому колонка t
+// идёт в начале КАЖДОГО блока ("t [метка]"), а общей нет. nullptr — прежний вид.
 static void write_phase_trajectories_wide(std::ofstream& out,
                                           const PhaseSnapshot& snapshot,
                                           const std::vector<std::vector<std::vector<double>>>& trajs,
-                                          double dt)
+                                          double dt,
+                                          const std::vector<std::vector<double>>* times = nullptr)
 {
     if (!out.is_open()) return;
     out << std::setprecision(set_precision);
@@ -778,9 +818,10 @@ static void write_phase_trajectories_wide(std::ofstream& out,
     const std::size_t n_ic  = trajs.size();
     const std::size_t n_var = snapshot.vars.size();
 
-    out << (snapshot.is_map ? "n" : "t");
+    if (!times) out << (snapshot.is_map ? "n" : "t");
     for (std::size_t k = 0; k < n_ic; ++k) {
         const std::string tag = phase_ic_tag(snapshot, k);
+        if (times) out << (k ? ", " : "") << "t [" << tag << "]";
         for (std::size_t v = 0; v < n_var; ++v)
             out << ", " << snapshot.vars[v] << " [" << tag << "]";
     }
@@ -791,9 +832,13 @@ static void write_phase_trajectories_wide(std::ofstream& out,
         if (t.size() > n_rows) n_rows = t.size();
 
     for (std::size_t i = 0; i < n_rows; ++i) {
-        out << static_cast<double>(i) * dt;
+        if (!times) out << static_cast<double>(i) * dt;
         for (std::size_t k = 0; k < n_ic; ++k) {
             const auto& traj = trajs[k];
+            if (times) {
+                if (k) out << ", ";
+                if (k < times->size() && i < (*times)[k].size()) out << (*times)[k][i];
+            }
             for (std::size_t v = 0; v < n_var; ++v) {
                 out << ", ";
                 if (i < traj.size() && v < traj[i].size()) out << traj[i][v];
@@ -933,12 +978,14 @@ bool export_phase(const AnalysisResult& res, const PhaseSnapshot& snapshot,
     if (n_ic == 1) {
         // Одно НУ — шапка без суффикса ("t, x, y, z"), ровно как раньше:
         // разделять на блоки нечего, а этот формат читают внешние скрипты.
-        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt, snapshot.is_map);
+        write_phase_trajectory(out, snapshot.vars, res.trajectories[0], dt, snapshot.is_map,
+                               res.raw_nodes && !res.times.empty() ? &res.times[0] : nullptr);
         return true;
     }
 
     // Несколько НУ — в этот же файл, блоком столбцов на каждое.
-    write_phase_trajectories_wide(out, snapshot, res.trajectories, dt);
+    write_phase_trajectories_wide(out, snapshot, res.trajectories, dt,
+                                  res.raw_nodes ? &res.times : nullptr);
     return true;
 }
 
@@ -1150,12 +1197,19 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
     std::ofstream cfg(path + "_config.csv");
     if (!cfg.is_open()) return false;
     write_order_config(cfg, snap, /*perf*/ true);
+    if (res.adaptive)
+        cfg << "step control = adaptive, x = tol (rtol = tol, atol = tol * atol/rtol); "
+            << snap.adaptive_desc << "\n"
+            << "h_eff = mean accepted step; n_steps = accepted steps\n";
+    if (!res.e_end.empty())
+        cfg << "E_T = max|y(T) - y*(T)|, y*(T): DOP853 fixed step in " << (res.ref_prec == 2 ? "qd" : "dd")
+            << " on the CPU, " << res.ref_steps << " steps, own error ~" << res.ref_err << "\n";
     cfg.close();
 
     std::ofstream out(path);
     if (!out.is_open()) return false;
     out << std::setprecision(set_precision);
-    out << "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status\n";
+    out << "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status,E_T,f_evals,rejected\n";
 
     // Ячейку без замера оставляем ПУСТОЙ: ноль здесь читался бы как
     // «посчитано мгновенно», а это ровно противоположный смысл.
@@ -1175,7 +1229,11 @@ bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::st
         cell(res.t_min, k);
         cell(res.t_avg, k);
         cell(res.t_max, k);
-        out << "," << (k < res.status.size() ? res.status[k] : 0) << "\n";
+        out << "," << (k < res.status.size() ? res.status[k] : 0);
+        cell(res.e_end, k);
+        cell(res.n_rhs, k);
+        cell(res.n_rej, k);
+        out << "\n";
     }
     return true;
 }

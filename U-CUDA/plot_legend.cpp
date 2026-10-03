@@ -118,3 +118,26 @@ void draw_legend(ImDrawList* dl,
         ++row;
     }
 }
+
+void legend_color_popup(const char* pop_id, const std::string& target,
+                        std::map<std::string, ImVec4>& overrides, const ImVec4& current) {
+    if (!ImGui::BeginPopup(pop_id)) return;
+    ImGui::TextUnformatted(target.empty() ? "(series)" : target.c_str());
+    ImGui::Separator();
+    float f[3] = { current.x, current.y, current.z };
+    ImGui::SetNextItemWidth(260.0f);
+    // Override — только после реальной правки: открыть меню и закрыть — цвет остаётся палитровым.
+    if (ImGui::ColorEdit3("colour##legend_color", f) && !target.empty())
+        overrides[target] = ImVec4(f[0], f[1], f[2], 1.0f);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Click the swatch for the picker; drag the fields or type RGB / HSV / Hex.\n"
+                          "Transparency is set by the Alpha sliders of the plot.");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reset this colour", nullptr, false, overrides.count(target) != 0)) {
+        overrides.erase(target);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::MenuItem("Reset all colours", nullptr, false, !overrides.empty()))
+        overrides.clear();
+    ImGui::EndPopup();
+}

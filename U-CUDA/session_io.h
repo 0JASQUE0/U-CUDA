@@ -93,3 +93,10 @@ bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DP
 // any sub-session flow into the bundle automatically.
 std::string session_to_json_custom(const CustomSession& s);
 bool session_from_json_custom(const std::string& json, CustomSession& s);
+
+// Библиотека регуляторов шага (adaptive_ctrl_library() в adaptive_settings.h): файл
+// step_controllers.json в каталоге library. load — при старте, запоминает путь (нет
+// файла — пустая библиотека, не ошибка); save — после правки в редакторе и при импорте
+// регулятора из сессии (write_adaptive кладёт определение в сессию целиком).
+bool load_ctrl_library(const std::string& path, std::string* err = nullptr);
+bool save_ctrl_library(std::string* err = nullptr);

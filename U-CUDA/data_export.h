@@ -59,6 +59,13 @@ struct Bif1DSnapshot {
     int    indexOfMutVar = 0;                // 1-based for param, 0-based for IC
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Раскладка точек по оси — как у LLE1DSnapshot: export_bif1d считает x той же функцией,
+    // что график (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // 1D DFT — same sweep/integration fields as Bif1DSnapshot, plus the frequency
@@ -88,12 +95,20 @@ struct LLE1DSnapshot {
     std::vector<double> initial_conditions;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
     int    indexOfMutVar = 0;
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Как стоят точки по оси: export_* считает x той же функцией, что график
+    // (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // LS1D shares the same header layout as LLE1D (engine writes "1D LS" instead
@@ -104,12 +119,20 @@ struct LS1DSnapshot {
     std::vector<double> initial_conditions;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
     int    indexOfMutVar = 0;
     double range_lo = 0.0;
     double range_hi = 0.0;
+    // Как стоят точки по оси: export_* считает x той же функцией, что график
+    // (лог-шкала, порядок цепочки continuation), а не линейно lo..hi.
+    bool   log_scale = false;
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+    bool   on_cpu = false;          // строка "device = CPU" вместо NVRTC --fmad
+    std::string step_control;       // адаптивный шаг: регулятор и допуски, пусто — Fixed
 };
 
 // 2D: covers Bif2D (uses eps_dbscan + writableVar + preScaller fields) and
@@ -144,6 +167,7 @@ struct LLE2DSnapshot {
     int    par_or_var = 1;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -161,6 +185,7 @@ struct LS2DSnapshot {
     int    par_or_var = 1;
     double tMax = 0.0;
     double NT   = 0.0;
+    double vectorTransient = 0.0;   // транзиент касательных векторов, 0 — нет
     double transientTime = 0.0;
     double h    = 0.0;
     double eps  = 0.0;
@@ -207,6 +232,8 @@ struct PhaseSnapshot {
     double t_max    = 0.0;
     double t_skip   = 0.0;
     int    decimator = 1;
+    // Адаптивный шаг: одна строка настроек для _config.csv; пусто — шаг постоянный.
+    std::string adaptive;
 };
 
 struct FastSyncSnapshot {
@@ -382,6 +409,8 @@ struct OrderSnapshot {
     int repeats = 0, warmup = 0, replicas = 0;
     std::string ref_scheme;          // пусто — эталон не считался
     int         ref_substeps = 0;
+    // Адаптивный шаг вкладки (узлы — tol): строка настроек для _config.csv, пусто — Fixed.
+    std::string adaptive_desc;
 
     // Только Stability. Начальные условия и время счёта для неё смысла не
     // имеют (шаг делается один, от базисных векторов), зато имеют смысл

@@ -34,3 +34,25 @@ void prewarmPhasePortraitsNVRTC(const std::string& krs_body, int amountOfX) {
     if (!g_engine.init()) return;
     g_engine.compile(krs_body, amountOfX);
 }
+
+void prewarmPhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq) {
+    if (rq.rhs.empty() || rq.amountOfX <= 0) return;
+    if (!g_engine.init()) return;
+    g_engine.prewarm_adaptive(rq);
+}
+
+bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out,
+                                        std::string* err)
+{
+    if (!g_engine.init()) { if (err) *err = g_engine.error(); return false; }
+    if (!g_engine.run_phase_portraits_adaptive(rq, out)) { if (err) *err = g_engine.error(); return false; }
+    return true;
+}
+
+bool computeAdaptiveEndpointNVRTC(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out,
+                                  std::string* err)
+{
+    if (!g_engine.init()) { if (err) *err = g_engine.error(); return false; }
+    if (!g_engine.run_adaptive_endpoint(rq, out)) { if (err) *err = g_engine.error(); return false; }
+    return true;
+}

@@ -147,7 +147,8 @@ struct OrderPlotWindow {
     // окна не используется, но и не забывается.
     bool stab_paper_cmap = true;
     int  colormap_idx = -1;     // Map; -1 = взять app-дефолт
-    int  error_source = 0;      // Perf: 0 = E1, 1 = E2 по оси X
+    int  error_source = 0;      // Perf: 0 = E1, 1 = E2, 2 = Eref, 3 = E(T) против эталона dd/qd по оси X
+    int  perf_cost = 0;         // Perf: по оси Y 0 = время, 1 = вычисления f, 2 = шаги
     int  time_unit = 0;         // Perf: 0 = мкс, 1 = мс
     bool show_min = true, show_avg = true, show_max = true;   // Perf
 
@@ -362,6 +363,8 @@ public:
     bool scheme_rk4 = false;
     bool scheme_dopri78 = false;
     bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy): дроби статьи без уточнения
+    bool scheme_rk45 = false;
+    bool scheme_dop853 = false;
     bool scheme_cd = false;
     // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
     // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
@@ -510,6 +513,19 @@ public:
     float funcs_editor_h = 60.0f;
     float gen_code_editor_h = 220.0f;
     std::map<std::string, float> custom_scheme_editor_h;   // keyed by scheme name
+
+    // Окно библиотеки регуляторов шага (draw_ctrl_library_window в gui.cpp). Сами записи —
+    // в adaptive_ctrl_library() (adaptive_settings.h), здесь только состояние окна.
+    bool        show_ctrl_library   = false;
+    int         ctrl_lib_sel        = -1;       // выбранная запись
+    bool        ctrl_lib_dirty      = false;    // правка ещё не записана в файл
+    std::string ctrl_lib_status;                // ошибка записи файла
+    std::string ctrl_lib_check_body;            // тело, для которого сделан Check,
+    std::string ctrl_lib_check_log;             //   и его результат
+    bool        ctrl_lib_check_ok   = false;
+    // Check идёт в фоне (NVRTC — около секунды, UI не ждёт): результат — ok и лог компилятора.
+    std::future<std::pair<bool, std::string>> ctrl_lib_check_future;
+    float       ctrl_lib_body_h     = 300.0f;
 
     // метаданные для библиотеки
     std::string name;
@@ -773,6 +789,14 @@ public:
     // once per frame in draw_gui to trigger a "_last_parametric_windows"
     // session save (avoids writing to disk every single frame).
     bool parametric_plot_windows_dirty = false;
+
+    // Выбранная вкладка каждого узла дока, по режимам (AppMode): имена окон, которые были
+    // выбраны в своих узлах, пока режим был на экране. Окна чужого режима не выводятся, ImGui
+    // вынимает их из узлов, а при возвращении выбирает в узле окно, появившееся последним
+    // (оно же получает фокус). track_dock_selection в gui.cpp восстанавливает выбор. Не пишется.
+    std::map<int, std::vector<std::string>> dock_selected_by_mode;
+    int  dock_prev_mode      = -1;   // режим прошлого кадра
+    int  dock_restore_frames = 0;    // сколько кадров ещё восстанавливать выбор после входа
 
     // Add a new plot window of (kind, mode_2d) with the given initial member
     // indices (into the matching session's diagrams/curves list). Assigns a
@@ -1079,8 +1103,10 @@ public:
                 { scheme_ccd4s4_10, "CCD4 (o4s4)_{1-0}", Scheme::ComplexCD4S4_10 },
                 { scheme_ccd4ss01, "CCD4 (s-split)_{0-1}", Scheme::ComplexCD4SS01 },
                 { scheme_ccd4ss10, "CCD4 (s-split)_{1-0}", Scheme::ComplexCD4SS10 },
+                { scheme_rk45,     "RK45",              Scheme::RK45 },
                 { scheme_dopri78,  "DOPRI78",           Scheme::DOPRI78 },
                 { scheme_dopri78_legacy, "DOPRI78 (legacy)", Scheme::DOPRI78Legacy },
+                { scheme_dop853,   "DOP853",            Scheme::DOP853 },
                 { scheme_gbs, "GBS (n=2)", Scheme::GBS },
                 { scheme_gbs24, "GBS 2-4", Scheme::GBS24 },
                 { scheme_gbs246, "GBS 2-4-6", Scheme::GBS246 },

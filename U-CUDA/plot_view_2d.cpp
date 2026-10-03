@@ -1,5 +1,6 @@
 ﻿#include "plot_view_2d.h"
 #include "grid_snap.h"
+#include "num_parse.h"   // parse_num_checked — поля min/max осей
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -79,37 +80,31 @@ void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
     left = plot_y_axis_margin(y, y_name);
 }
 
-// Клампер поля RGB-канала в [0, 255]. Правку ловим ЧЕРЕЗ КОЛБЭК, а не после возврата из InputText:
-// пока поле активно, ImGui читает свою внутреннюю копию текста и правки внешнего буфера
-// игнорирует — граница бы «включалась» только после ухода фокуса, а data->Buf это как раз
-// внутренний буфер. В CharFilter-событии Buf невалиден (там есть только EventChar), поэтому клампим
-// на Edit/History. History нужен отдельно, потому что ImGui выбирает событие цепочкой else-if: в
-// кадре со стрелкой ↑/↓ Edit уже не придёт, а шагнуть за границу стрелка может.
-static void clamp_rgb_channel_buf(ImGuiInputTextCallbackData* data) {
-    if (data->Buf == nullptr || data->BufTextLen <= 0) return;
-    std::string text(data->Buf, data->Buf + data->BufTextLen);
-    char* end = nullptr;
-    float v = std::strtof(text.c_str(), &end);
-    if (end == text.c_str()) return;      // "-", "." — ещё не число, не мешаем
-    while (*end == ' ' || *end == '\t') ++end;
-    if (*end != '\0') return;             // мусор в хвосте — тоже не наше дело
-    if (v >= 0.0f && v <= 255.0f) return;
 
-    const char* clamped = (v < 0.0f) ? "0" : "255";
-    data->DeleteChars(0, data->BufTextLen);
-    data->InsertChars(0, clamped);
-    data->CursorPos      = data->BufTextLen;
-    data->SelectionStart = data->CursorPos;
-    data->SelectionEnd   = data->CursorPos;
-}
-
-static int rgb_channel_input_callback(ImGuiInputTextCallbackData* data) {
-    // Базовое поведение — общее с полями параметров: запятая→точка и ↑/↓ по
-    // разряду под курсором.
-    const int rc = digit_step_input_callback(data);
-    if (data->EventFlag != ImGuiInputTextFlags_CallbackCharFilter)
-        clamp_rgb_channel_buf(data);
-    return rc;
+// Поля min / max оси в меню по ПКМ. Любое значение, в том числе за пределами данных: введённое
+// ставит user_range, и clamp_view / автоподгонка ось больше не трогают. Принимается число или
+// выражение, как в полях параметров (дроби, скобки, pi), при котором min < max; на лог-оси — > 0.
+// Неподходящее молча не применяется: в поле остаётся прежнее значение.
+static void axis_range_inputs(AxisInfo& ax, const char* tag, bool positive_only) {
+    char lo_buf[48], hi_buf[48];
+    std::snprintf(lo_buf, sizeof(lo_buf), "%.10g", ax.view_min);
+    std::snprintf(hi_buf, sizeof(hi_buf), "%.10g", ax.view_max);
+    auto accept = [&](const char* text, bool is_min) {
+        double v = 0.0;
+        if (!parse_num_checked(text, v) || !std::isfinite(v)) return;
+        if (positive_only && !(v > 0.0)) return;
+        const double lo = is_min ? v : ax.view_min, hi = is_min ? ax.view_max : v;
+        if (!(lo < hi)) return;
+        ax.view_min = lo; ax.view_max = hi;
+        ax.user_range = true;
+    };
+    char id[32];
+    ImGui::SetNextItemWidth(120);
+    std::snprintf(id, sizeof(id), "min##%s", tag);
+    if (ImGui::InputText(id, lo_buf, sizeof(lo_buf), ImGuiInputTextFlags_EnterReturnsTrue)) accept(lo_buf, true);
+    ImGui::SetNextItemWidth(120);
+    std::snprintf(id, sizeof(id), "max##%s", tag);
+    if (ImGui::InputText(id, hi_buf, sizeof(hi_buf), ImGuiInputTextFlags_EnterReturnsTrue)) accept(hi_buf, false);
 }
 
 void Plot2DView::do_autofit() {
@@ -135,7 +130,8 @@ void Plot2DView::do_autofit() {
         // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
         // locked axes, but fit_request used to stomp them on every data change
         // (esp. visible in phase continuation, where each tick refit the view).
-        if (!x_axis.lock) {
+        // Ручной диапазон (user_range) переживает автоподгонку так же, как заблокированная ось.
+        if (!x_axis.lock && !x_axis.user_range) {
             if (x_fit_use_explicit) {
                 x_axis.view_min = x_fit_min;
                 x_axis.view_max = x_fit_max;
@@ -144,12 +140,12 @@ void Plot2DView::do_autofit() {
                 x_axis.view_max = wxmax;
             }
         }
-        if (!y_axis.lock) {
+        if (!y_axis.lock && !y_axis.user_range) {
             y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
         }
         view_valid = true;
     }
-    else if (x_fit_use_explicit && !x_axis.lock) {
+    else if (x_fit_use_explicit && !x_axis.lock && !x_axis.user_range) {
         // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
@@ -158,6 +154,7 @@ void Plot2DView::do_autofit() {
 }
 
 void Plot2DView::fit_x() {
+    x_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     if (x_fit_use_explicit) {
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
@@ -183,6 +180,7 @@ void Plot2DView::fit_x() {
 }
 
 void Plot2DView::fit_y() {
+    y_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     double xmin, xmax, ymin, ymax;
     bool ok = render_visible_mask_.empty()
               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
@@ -351,7 +349,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
     }
     auto clamp_view = [&]() {
-        if (has_bounds_x && !x_axis.lock) {
+        if (has_bounds_x && !x_axis.lock && !x_axis.user_range) {
             double rx = x_axis.view_max - x_axis.view_min;
             if (rx >= clamp_hi_x - clamp_lo_x) {
                 x_axis.view_min = clamp_lo_x; x_axis.view_max = clamp_hi_x;
@@ -364,7 +362,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 }
             }
         }
-        if (has_bounds_y && !y_axis.lock) {
+        if (has_bounds_y && !y_axis.lock && !y_axis.user_range) {
             double ry = y_axis.view_max - y_axis.view_min;
             if (ry >= clamp_hi_y - clamp_lo_y) {
                 y_axis.view_min = clamp_lo_y; y_axis.view_max = clamp_hi_y;
@@ -462,8 +460,23 @@ void Plot2DView::render(PlotRenderer& renderer,
             marker    = si->point_marker;
             if (si->point_size_px > 0.0f) psize = si->point_size_px;
         }
-        if (as_points)
-            renderer.draw_points(g.vbo, g.point_count, mvp, color, psize, marker);
+        if (as_points) {
+            // Points + линия: линия первой, точки поверх (обе в FBO).
+            if (points_with_lines && !(si && si->points_override == 1)) {
+                if (imdraw_lines) renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                else              renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                // Точки поверх — со смешиванием (шейдерный квадрат, PointMarker 1): старый сплошной
+                // GL-пойнт пишет α цвета прямо в текстуру плота, и плотные точки закрашивали
+                // траекторию ровным бледным тоном вместо накопления полупрозрачных витков.
+                if (marker < 0) marker = 1;
+            }
+            float pcolor[4] = { color[0], color[1], color[2], color[3] };
+            if (point_alpha >= 0.0f && !(si && si->points_override >= 0)) {
+                pcolor[3] = point_alpha;
+                if (marker < 0) marker = 1;   // альфа — только со смешиванием (см. выше)
+            }
+            renderer.draw_points(g.vbo, g.point_count, mvp, pcolor, psize, marker);
+        }
         else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
             renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
     }
@@ -558,7 +571,9 @@ void Plot2DView::render(PlotRenderer& renderer,
             if (!eff_visible(k)) continue;
             const PlotSeriesInput& s = series_in[k];
             if (!s.points || s.n_points < 2) continue;
-            if (s.points_override == 1) continue;  // уже нарисована как GL-точки
+            // Точечные серии (и Points + линия) уже нарисованы в GL-проходе.
+            const bool as_pts = s.points_override >= 0 ? (s.points_override == 1) : points_mode;
+            if (as_pts) continue;
             const bool   colored = (s.values != nullptr);
             const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
             const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(series_color(s));
@@ -1086,7 +1101,10 @@ void Plot2DView::render(PlotRenderer& renderer,
     // закрывает открытое меню цвета — popup'ы одного уровня взаимоисключающи.
     if (legend_rclick.row_other) ImGui::OpenPopup(pop_id);
     if (ImGui::BeginPopup(pop_id)) {
-        if (ImGui::MenuItem("Auto fit (both)")) view_valid = false;
+        if (ImGui::MenuItem("Auto fit (both)")) {
+            x_axis.user_range = y_axis.user_range = false;   // явный Auto fit — и по ручным осям
+            view_valid = false;
+        }
         if (ImGui::MenuItem("Auto fit X"))      fit_x();
         if (ImGui::MenuItem("Auto fit Y"))      fit_y();
         ImGui::Separator();
@@ -1099,7 +1117,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         if (ImGui::MenuItem("Copy image to clipboard")) {
             request_plot_screenshot(block_origin,
-                ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y));
+                ImVec2(block_origin.x + avail_size.x + screenshot_extra_right,
+                       block_origin.y + avail_size.y));
         }
         // Caller-injected пункты (например, FastSync "Invert depth axis").
         if (popup_extras) {
@@ -1112,17 +1131,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit X")) fit_x();
         ImGui::Separator();
-        char xmin_buf[32], xmax_buf[32];
-        std::snprintf(xmin_buf, sizeof(xmin_buf), "%.6g", x_axis.view_min);
-        std::snprintf(xmax_buf, sizeof(xmax_buf), "%.6g", x_axis.view_max);
         ImGui::Text("X range:");
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("min##x", xmin_buf, sizeof(xmin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            x_axis.view_min = std::atof(xmin_buf);
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("max##x", xmax_buf, sizeof(xmax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            x_axis.view_max = std::atof(xmax_buf);
+        axis_range_inputs(x_axis, "x", x_axis.log_scale);
         ImGui::Separator();
+        ImGui::MenuItem("Custom X range", nullptr, &x_axis.user_range);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
+                              "and survives new data. Auto fit X turns it off.");
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
         ImGui::EndPopup();
@@ -1131,116 +1146,34 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit Y")) fit_y();
         ImGui::Separator();
-        char ymin_buf[32], ymax_buf[32];
-        std::snprintf(ymin_buf, sizeof(ymin_buf), "%.6g", y_axis.view_min);
-        std::snprintf(ymax_buf, sizeof(ymax_buf), "%.6g", y_axis.view_max);
         ImGui::Text("Y range:");
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("min##y", ymin_buf, sizeof(ymin_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            y_axis.view_min = std::atof(ymin_buf);
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("max##y", ymax_buf, sizeof(ymax_buf), ImGuiInputTextFlags_EnterReturnsTrue))
-            y_axis.view_max = std::atof(ymax_buf);
+        axis_range_inputs(y_axis, "y", false);
         ImGui::Separator();
+        ImGui::MenuItem("Custom Y range", nullptr, &y_axis.user_range);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
+                              "and survives new data. Auto fit Y turns it off.");
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
         ImGui::EndPopup();
     }
 
-    // 13b. Цвет серии — меню по ПКМ на строке легенды. RGB задаётся float'ами
-    // 0..255. Серии с per-segment colormap (FastSync colored trajectory)
-    // пропускаем: их линия рисуется cmap_sample'ом, uniform-цвет не при делах,
-    // и меню меняло бы только квадратик в легенде — то есть врало бы.
+    // 13b. Цвет серии — меню по ПКМ на квадрате легенды (legend_color_popup, общее с 3D).
+    // Серии с per-segment colormap (FastSync colored trajectory) пропускаем: их линия рисуется
+    // cmap_sample'ом, uniform-цвет не при делах, и меню меняло бы только квадратик в легенде.
     std::snprintf(pop_id, sizeof(pop_id), "##legend_color_%d", owner_id);
-    auto fmt_channel = [](float v) -> std::string {
-        char b[32];
-        std::snprintf(b, sizeof(b), "%.1f", v);
-        return std::string(b);
-        };
-    // Канал из текста поля: 0..255, с проверкой что строка съедена целиком
-    // ("12x" / "abc" — не число, старое значение остаётся).
-    auto parse_channel = [](const std::string& s, float& out) -> bool {
-        if (s.empty()) return false;
-        char* end = nullptr;
-        float v = std::strtof(s.c_str(), &end);
-        if (end == s.c_str()) return false;
-        while (*end == ' ' || *end == '\t') ++end;
-        if (*end != '\0') return false;
-        out = std::min(255.0f, std::max(0.0f, v));
-        return true;
-        };
-
     const int color_target = legend_rclick.swatch_index;
     if (color_target >= 0 && color_target < (int)series_in.size() &&
         series_in[color_target].values == nullptr) {
-        const PlotSeriesInput& s = series_in[color_target];
-        ImVec4 cur = series_color(s);
-        legend_color_target_  = s.label;
-        legend_color_text_[0] = fmt_channel(cur.x * 255.0f);
-        legend_color_text_[1] = fmt_channel(cur.y * 255.0f);
-        legend_color_text_[2] = fmt_channel(cur.z * 255.0f);
+        legend_color_target_ = series_in[color_target].label;
         ImGui::OpenPopup(pop_id);
     }
-    if (ImGui::BeginPopup(pop_id)) {
-        ImGui::TextUnformatted(legend_color_target_.empty() ? "(series)"
-                                                            : legend_color_target_.c_str());
-        ImGui::TextDisabled("RGB, 0..255");
-        ImGui::Separator();
-        static const char* kChannel[3] = { "R", "G", "B" };
-        bool edited = false;
-        bool renorm[3] = { false, false, false };
-        for (int c = 0; c < 3; ++c) {
-            std::string& t = legend_color_text_[c];
-            std::vector<char> buf(t.begin(), t.end());
-            buf.resize(t.size() + 64);
-            buf[t.size()] = '\0';
-            ImGui::SetNextItemWidth(90);
-            // Тот же ввод, что у полей параметров: ↑/↓ шагают разряд под
-            // курсором, запятая превращается в точку. Плюс CallbackEdit —
-            // через него канал зажимается в [0, 255] прямо в поле.
-            if (ImGui::InputText(kChannel[c], buf.data(), buf.size(),
-                                 ImGuiInputTextFlags_CallbackCharFilter |
-                                 ImGuiInputTextFlags_CallbackHistory |
-                                 ImGuiInputTextFlags_CallbackEdit,
-                                 rgb_channel_input_callback)) {
-                t = buf.data();
-                edited = true;
-            }
-            renorm[c] = ImGui::IsItemDeactivatedAfterEdit();
-        }
-
-        float ch[3] = { 0, 0, 0 };
-        bool parsed = parse_channel(legend_color_text_[0], ch[0])
-                   && parse_channel(legend_color_text_[1], ch[1])
-                   && parse_channel(legend_color_text_[2], ch[2]);
-        if (!parsed) {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
-                "invalid number, keeping previous colour");
-        } else {
-            ImVec4 preview(ch[0] / 255.0f, ch[1] / 255.0f, ch[2] / 255.0f, 1.0f);
-            ImGui::ColorButton("##legend_color_preview", preview,
-                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-                               ImVec2(120, ImGui::GetTextLineHeight()));
-            // Override создаётся ТОЛЬКО после реальной правки: просто открыть
-            // меню и закрыть — цвет остаётся палитровым.
-            if (edited && !legend_color_target_.empty())
-                series_color_override[legend_color_target_] = preview;
-            // Пока печатают, "300" не трогаем (иначе ввод дерётся с клампом),
-            // но на уходе фокуса поле переписываем тем, что реально ушло в цвет.
-            for (int c = 0; c < 3; ++c)
-                if (renorm[c]) legend_color_text_[c] = fmt_channel(ch[c]);
-        }
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset this colour")) {
-            series_color_override.erase(legend_color_target_);
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::MenuItem("Reset all colours", nullptr, false,
-                            !series_color_override.empty()))
-            series_color_override.clear();
-        ImGui::EndPopup();
+    {
+        ImVec4 cur(1, 1, 1, 1);
+        for (const PlotSeriesInput& s : series_in)
+            if (s.label == legend_color_target_) { cur = series_color(s); break; }
+        legend_color_popup(pop_id, legend_color_target_, series_color_override, cur);
     }
-
     // Clamp view to data bounds — after ALL interactions this frame (wheel/pan
     // on plot & axes, rect-zoom, and popup min/max InputText). Mirrors the
     // one-call-at-end pattern from heatmap_view.cpp. Bounds & lock respected.
