@@ -1,5 +1,6 @@
 ﻿#include "nvrtc_engine.h"
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
+#include "perf_warmup.h"       // прогрев GPU перед замером Performance
 #include <cuda.h>
 #include <nvrtc.h>
 #include <chrono>
@@ -349,21 +350,28 @@ bool nvrtc_check_ctrl_body(const std::string& body, std::string& log) {
 // Ядро замера (variant 1): нить интегрирует [0, T] и пишет y(T); статистика — нить 0.
 // Все нити пишут свой y, иначе компилятор вправе выбросить их работу целиком.
 // Отмена — флаг cancel (mapped-память хоста) раз в 1024 принятых шага, как у ядра Analysis.
+// Время — %globaltimer (нс) вокруг init + цикла шагов (init подбирает h0 вызовами f — это
+// часть расчёта, CPU-ветка меряет так же); tspan[0] — atomicMin старта, tspan[1] — atomicMax
+// конца по нитям; запуск ядра, загрузка НУ и запись результата в замер не входят.
 static const char* const kEndpointKernelAd =
     "extern \"C\" __global__ void endpoint_kernel_ad(const numb* ic, const numb* values,\n"
     "    UCUDA_GRID_CONST const UcudaAdaptParams P, numb T, int N, numb* yout, numb* stats,\n"
-    "    const volatile int* cancel) {\n"
+    "    const volatile int* cancel, unsigned long long* tspan) {\n"
     "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
     "    if (tid >= N) return;\n"
     "    const UcudaKrsFns K{};\n"
     "    UcudaAdaptState S;\n"
     "    numb X0[AMOUNTOFX];\n"
     "    for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = ic[i];\n"
+    "    unsigned long long t0, t1;\n"
+    "    asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t0) :: \"memory\");\n"
     "    ucuda_ad_init(S, K, AMOUNTOFX, X0, (numb)0, values, P, nullptr, 0);\n"
     "    while (S.t < T && !S.diverged) {\n"
     "        ucuda_ad_step(S, K, values, P, T);\n"
     "        if ((S.st.nacc & 1023ULL) == 0 && *cancel != 0) break;\n"
     "    }\n"
+    "    asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t1) : \"d\"((double)S.X[0]) : \"memory\");\n"
+    "    if (tspan != nullptr) { atomicMin(&tspan[0], t0); atomicMax(&tspan[1], t1); }\n"
     "    for (int k = 0; k < AMOUNTOFX; ++k) yout[(size_t)tid * AMOUNTOFX + k] = S.X[k];\n"
     "    if (tid == 0) {\n"
     "        stats[0] = (numb)S.st.nacc; stats[1] = (numb)S.st.nrej; stats[2] = (numb)S.st.nforced;\n"
@@ -557,46 +565,51 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
     if (!compile_adaptive(cr, &fn, 1)) return false;
 
     const int nv = (int)rq.values.size();
-    CUdeviceptr d_ic = 0, d_val = 0, d_y = 0, d_st = 0;
-    CUevent ev_a = nullptr, ev_b = nullptr;
+    CUdeviceptr d_ic = 0, d_val = 0, d_y = 0, d_st = 0, d_ts = 0;
     auto free_all = [&]() {
-        for (CUdeviceptr p : { d_ic, d_val, d_y, d_st }) if (p) cuMemFree(p);
-        if (ev_a) cuEventDestroy(ev_a);
-        if (ev_b) cuEventDestroy(ev_b);
+        for (CUdeviceptr p : { d_ic, d_val, d_y, d_st, d_ts }) if (p) cuMemFree(p);
     };
     bool ok = cu_ok(cuMemAlloc(&d_ic, (size_t)nx * sizeof(double)), error_, "allocIc(end)")
            && cu_ok(cuMemAlloc(&d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(double)), error_, "allocVal(end)")
            && cu_ok(cuMemAlloc(&d_y, (size_t)N * nx * sizeof(double)), error_, "allocY(end)")
            && cu_ok(cuMemAlloc(&d_st, 8 * sizeof(double)), error_, "allocStats(end)")
+           && cu_ok(cuMemAlloc(&d_ts, 2 * sizeof(unsigned long long)), error_, "allocTimer(end)")
            && cu_ok(cuMemcpyHtoD(d_ic, rq.ic.data(), (size_t)nx * sizeof(double)), error_, "cpyIc(end)")
-           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, rq.values.data(), (size_t)nv * sizeof(double)), error_, "cpyVal(end)"))
-           && cu_ok(cuEventCreate(&ev_a, CU_EVENT_DEFAULT), error_, "event(end)")
-           && cu_ok(cuEventCreate(&ev_b, CU_EVENT_DEFAULT), error_, "event(end)");
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, rq.values.data(), (size_t)nv * sizeof(double)), error_, "cpyVal(end)"));
     double T = rq.T;
     int n = N;
     UcudaAdaptParams par = rq.params;
     ok = ok && cancel_flag_reset();
     CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
-    void* args[] = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel };
+    CUdeviceptr ts_none = 0;
+    void* args_warm[] = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel, &ts_none };
+    void* args[]      = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel, &d_ts };
     const int threads = 32, blocks = (N + threads - 1) / threads;
-    auto launch = [&]() {
-        return cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr),
+    auto launch_with = [&](void** a) {
+        return cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, a, nullptr),
                      error_, "launch(end)");
     };
     // Ожидание — опросом потока: пока ядро идёт, запрос отмены уходит в его флаг. Время
-    // запуска по-прежнему меряют события вокруг ядра, опрос в него не входит.
+    // меряет само ядро (%globaltimer), опрос и запуск в него не входят.
     bool cancelled = false;
+    // Прогрев по времени (perf_warmup.h): частота GPU поднимается только под сплошной
+    // нагрузкой. ~300 мс перед первым узлом замера процесса, ~20 мс перед остальными.
+    static std::chrono::steady_clock::time_point last_endpoint_run{};
+    const bool cold = std::chrono::steady_clock::now() - last_endpoint_run > std::chrono::seconds(1);
+    ok = ok && perf_burst_warmup(cold ? 300.0 : 20.0, [&]() { return launch_with(args_warm); },
+                                 [&]() { return wait_default_stream(rq.cancel, cancelled); });
     for (int w = 0; ok && !cancelled && w < rq.warmup; ++w)
-        ok = launch() && wait_default_stream(rq.cancel, cancelled);
+        ok = launch_with(args_warm) && wait_default_stream(rq.cancel, cancelled);
     double tsum = 0;
     for (int r = 0; ok && !cancelled && r < rq.repeats; ++r) {
-        float ms = 0;
-        ok = cu_ok(cuEventRecord(ev_a, nullptr), error_, "record(end)") && launch()
-          && cu_ok(cuEventRecord(ev_b, nullptr), error_, "record(end)")
+        const unsigned long long ts_init[2] = { ~0ULL, 0ULL };
+        unsigned long long ts[2] = { 0, 0 };
+        ok = cu_ok(cuMemcpyHtoD(d_ts, ts_init, sizeof(ts_init)), error_, "cpyTimer(end)")
+          && launch_with(args)
           && wait_default_stream(rq.cancel, cancelled)
-          && cu_ok(cuEventElapsedTime(&ms, ev_a, ev_b), error_, "elapsed(end)");
+          && (cancelled || cu_ok(cuMemcpyDtoH(ts, d_ts, sizeof(ts)), error_, "cpyTimer(end)"));
         if (!ok || cancelled) break;
-        const double us = (double)ms * 1000.0;
+        const double us = ts[1] >= ts[0] ? (double)(ts[1] - ts[0]) * 1.0e-3 : 0.0;
         if (r == 0) { out.t_min = out.t_max = us; }
         else { if (us < out.t_min) out.t_min = us; if (us > out.t_max) out.t_max = us; }
         tsum += us;
@@ -613,6 +626,7 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
     out.stats.nacc = st[0]; out.stats.nrej = st[1]; out.stats.nforced = st[2]; out.stats.nrhs = st[3];
     out.stats.hmin = st[4]; out.stats.hmax = st[5]; out.stats.hmean = st[6];
     out.stats.diverged = st[7] != 0;
+    last_endpoint_run = std::chrono::steady_clock::now();
     return true;
 }
 

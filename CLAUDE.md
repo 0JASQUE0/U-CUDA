@@ -272,9 +272,39 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   every `ctrl_body` field, cache key and DLL hash; `adaptive_ctrl_source` / `make_ctrl_source` unpack
   it. With `UCUDA_AD_HAIRER_ONLY` (default) the built-ins are Hairer only, but C bodies work:
   `ucuda_step_ctrl` compiles exactly one law per module (the custom one when the module has its body,
-  else Hairer), no switch; Soderlind filters (they need the built-in Filter) are hidden. The preset
-  "Hairer (C)" is the built-in float arithmetic one-to-one: all sweep modes and both CPU paths are
-  bit-identical to the built-in Hairer, same registers and speed (Rossler DOP853 stands).
+  else Hairer), no switch; Soderlind filters (they need the built-in Filter) are hidden. The presets
+  "Hairer fast (C)" and "Hairer numb (C)" are the built-ins written out one-to-one ("numb (C)" uses the
+  very same body/prep strings): all sweep modes and both CPU paths are bit-identical to the built-in,
+  same registers and speed (Rossler DOP853 stands).
+- **Built-in Hairer, two variants:** "Hairer fast" (`UCUDA_CTRL_HAIRER`, the default) and "Hairer numb"
+  (a C body + prepare shipped as a built-in `AdaptiveCtrlInfo` with `body/prep`, id `UCUDA_CTRL_CUSTOM`;
+  works wherever library bodies work). Same law in the log domain:
+  `h_new = h * 2^clamp(-expo1/2 * log2(err²) + C, log2 fac1, log2 fac2)`, where C = `beta*log2(facold) +
+  log2(safe)` is stored in `m.user[0]` on acceptance; after a rejection the upper bound is
+  `min(log2 fac2, 0)`. All logs of the parameters are taken once in `ucuda_ad_prepare_ctl`
+  (`UcudaCtlConst::he/lsafe/lfac1/lfac2/lc0`). "fast" does the norm and logs in float
+  (`ucuda_ctl_lg2err2`, fallback to double on overflow/NaN), "numb" in numb (`ucuda_ctl_lg2err2_numb`).
+  Differences are ulp-level: on Lorenz (T = 2, tol 1e-3..1e-11, RK45/DOP853, CPU/GPU) steps, rejections
+  and f counts equal the old controller; y(T) differs by ≤ 1.3e-7 at tol 1e-3, ~1e-14 at tight tol.
+  `UCUDA_AD_EXACT_CTL` keeps the old double version (dop853.c comparison).
+  The law does not clip to h_max — the driver does (`if (h > P.hmax) h = P.hmax`); "no limit" is
+  `hmax = +inf` (`adaptive_build_params`), so the controllers need no `hmax > 0` test.
+  `o.err` of Hairer is **err²** (the driver only checks it is finite; the log of attempts shows t, h and
+  the code, not the error). Sessions: `"ctrl_v":2`; an old "Hairer" loads as "Hairer fast" (no ctrl_v)
+  or "Hairer numb" (ctrl_v 2).
+- **New built-in controllers: simplify to the bone.** The controller sits on the critical path of every
+  attempt (norm → law → h, which the next attempt waits for), so:
+  - everything that depends only on parameters, q or constants goes to prepare (`ucuda_ad_prepare_ctl` /
+    `UcudaCtlConst`, or the prep section of a C body) — logs of safety/fac bounds, exponents, products
+    of parameters, the state before the first accepted step;
+  - no divisions, square roots or `pow` per attempt where avoidable: work in the log2 domain
+    (`h * 2^clamp(...)`, clamps of logs instead of factors), with the norm squared (`err²`, compare with
+    1, `log2 err = 1/2 log2 err²`), multiply by precomputed reciprocals;
+  - store in controller memory what the next attempt needs in its final form (e.g. `beta*log2 facold +
+    log2 safe`), not raw values to be transformed again;
+  - no checks the driver already does (h_max clamp, finiteness of the error);
+  - ship a float version ("fast") and a numb version, plus C-body presets that reproduce each one
+    bit for bit (check on the Order → Performance stand: steps, rejections, f and y(T)).
 - **CPU:** `AdaptiveCpuModule` (`krs_cpu`) builds `kernels/adaptive_part.cu` itself into a cl.exe
   DLL — placeholders substituted, `PeakStream` cut out of `kernels/cudaLibrary.cu`, the engine's
   `peak_config_defines()` as prelude, `par_or_var` a thread-local. Entries: endpoint (Order →
@@ -358,6 +388,13 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   cost is the latency of the chain norm → log2 → exp2 → h, which the next attempt waits for. The CPU
   versions of log2/exp2/fmin/fmax/nextafter in `ucuda_adaptive.cuh` are inline (Estrin, ≤ 0.5 ulp
   float) because the CRT calls cost ~100 ns more per attempt in the /MD exe.
+- **Order → Performance timing (GPU):** the kernels time themselves — `%globaltimer` around the step
+  loop (`perfIntegrateKernel`) / init + loop (`endpoint_kernel_ad`), atomicMin start / atomicMax end over
+  replicas; launch latency (~6-8 us on WDDM) and loads/stores are outside. Before measuring, a burst of
+  back-to-back launches (`perf_burst_warmup`, ~300 ms before the first node, ~20 ms before the rest):
+  short launches with a sync after each never raise the GPU clock, and the same kernel measured 3-5x
+  apart (Lorenz RK45 adaptive: 16 vs 3 us per step). E(T) of a fixed-step tab is against the same
+  dd/qd DOP853 y*(T) as the adaptive one when "reference y*(T)" is set (needs "fit h to t_max").
 - Default `h_min` is `max(10 ulp(t), 1e-12*span)`: 10 ulp alone let a controller pinned at an
   unreachable tolerance take ~1e15 steps. A user `h_min` is raised to 10 ulp(t): below that
   `t + h_min == t` and a forced step never advanced time.

@@ -1372,10 +1372,11 @@ static const char* const kCtrlBodyHelp =
     "in.yerr[i]    error estimate y1 - yhat; in.nlo estimates of in.n values each\n"
     "              (DOP853: in.yerr[in.n + i] is the 3rd-order one)\n"
     "in.rtol, in.atol[i], in.c[k] - parameters of this controller, in.q - estimator order\n"
-    "in.hmin, in.hmax (<= 0: no limit), in.nrej - rejected attempts of this step\n"
+    "in.hmin, in.hmax (+inf: no limit; the driver clamps to it anyway), in.nrej - rejected attempts\n"
     "m.h[j], m.err[j]  accepted steps and their errors, j = 0 the latest (3 kept)\n"
     "m.nacc        accepted steps so far;  m.user[0..7] - free memory kept between steps\n"
-    "o.err         error norm of the attempt (1 = on the tolerance), goes to the log\n"
+    "o.err         error of the attempt (1 = on the tolerance): the norm or its square (Hairer\n"
+    "              reports err^2); the driver only checks that it is finite; goes to the log\n"
     "o.accept      1 - take the step, 0 - retry it with o.h\n"
     "o.h           next step, or the step of the retry\n"
     "\n"
@@ -1388,6 +1389,8 @@ static const char* const kCtrlBodyHelp =
     "costs as much as several RHS evaluations on GeForce cards.\n"
     "\n"
     "Helpers: ucuda_ctl_err(in) - RMS norm of the estimate, sc_i = atol_i + rtol max(|y0_i|, |y1_i|);\n"
+    "ucuda_ctl_lg2err2(in, err2) - log2(err^2) in float, err^2 into err2, no sqrt (\"Hairer fast\");\n"
+    "ucuda_ctl_lg2err2_numb(in, err2) - the same in numb (\"Hairer numb\");\n"
     "ucuda_ctl_pow(x, y) - fast x^y (float);  ucuda_ctl_log2(x), ucuda_ctl_exp2(f) - float;\n"
     "ucuda_clamp(x, lo, hi);  ucuda_fmin/fmax (double), ucuda_fminf/fmaxf (float).  numb is double.\n"
     "Index arrays (m.user, in.k, ...) with constants: a computed index puts the state of\n"
@@ -11549,7 +11552,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         // Режим шага — первым: от него зависит, какой эталон у вкладки (ровно один).
         const bool perf_ad_on = !s.sys.is_map && c.adaptive.enabled;
         if (!s.sys.is_map) {
-            draw_adaptive_block("order_perf_ad", c.adaptive, c.scheme, 0, s.sys.is_map);
+            draw_adaptive_block("order_perf_ad", c.adaptive, c.scheme, 0, s.sys.is_map, &model);
             if (c.adaptive.enabled) {
                 InputNumStr("tol from", c.perf_tol_lo_text, kFieldW);
                 InputNumStr("tol to", c.perf_tol_hi_text, kFieldW);
@@ -11585,6 +11588,21 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     "into the kernel. Keep it above 1 when the reference method is the\n"
                     "same as the tested one: at an equal step that would be the very\n"
                     "same arithmetic and the difference identically zero.");
+            // y*(T) для E(T) — тот же эталон, что у адаптивного шага: с ним кривые постоянного
+            // и адаптивного шага ложатся на одну диаграмму (X: E(T) в окне Performance).
+            const char* refs_fx[] = { "none", "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
+            int sel_fx = (c.perf_end_ref == 1 || c.perf_end_ref == 2) ? c.perf_end_ref : 0;
+            ImGui::SetNextItemWidth(kComboW);
+            if (ImGui::Combo("reference y*(T)##fixed", &sel_fx, refs_fx, IM_ARRAYSIZE(refs_fx)))
+                c.perf_end_ref = sel_fx;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "E(T) = max|y(T) - y*(T)| at t_max against DOP853 in double-double or\n"
+                    "quad-double on the CPU - the same y*(T) the adaptive step is measured\n"
+                    "against, so fixed-step and adaptive curves can share one diagram\n"
+                    "(X: E(T) in the Performance window). Needs \"fit h to t_max\": a node\n"
+                    "that ends at N*h != t_max has no E(T). Computed after the timing and\n"
+                    "not part of it. none: E(T) is Eref at t_max (\"endpoint only\").");
         } else {
             // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
             const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
@@ -12392,28 +12410,32 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         ImGui::Checkbox("max", &win.show_max);
 
         // Вторая строка — «точность — затраты»: ошибка в T против эталона и другие оси
-        // затрат. Только когда в окне есть адаптивная вкладка: окно из одних Fixed-вкладок
-        // выглядит и строится ровно как до адаптивного шага (E1/E2/Eref против времени).
-        if (!any_ad) {
-            if (win.error_source == 3) win.error_source = 0;
-            win.perf_cost = 0;
-        } else {
+        // затрат. Есть всегда: E(T) постоянного шага считается против того же y*(T), что у
+        // адаптивного (reference y*(T) в настройках вкладки), так что и окно из одних Fixed-
+        // вкладок можно строить в тех же осях, что смешанное.
+        {
         ImGui::TextDisabled("X:"); ImGui::SameLine();
         ImGui::RadioButton("E(T)##perrsrc", &win.error_source, 3);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Error at t_max. Adaptive tabs: max|y(T) - y*(T)| against DOP853 in dd/qd\n"
-                "(their only error). Fixed tabs: Eref with \"endpoint only\" and \"fit h to\n"
-                "t_max\". Puts fixed-step and adaptive curves on one diagram.");
+                "Error at t_max, max|y(T) - y*(T)|, against DOP853 in dd/qd on the CPU.\n"
+                "Adaptive tabs always have it (their only error). Fixed tabs: with\n"
+                "\"reference y*(T)\" set in the tab and \"fit h to t_max\" on - the same\n"
+                "y*(T), so fixed-step and adaptive curves share one diagram; without it,\n"
+                "Eref at t_max (\"endpoint only\" and \"fit h to t_max\").");
         ImGui::SameLine();
         ImGui::TextDisabled("| Y:"); ImGui::SameLine();
         ImGui::RadioButton("time##pcost", &win.perf_cost, 0); ImGui::SameLine();
         ImGui::RadioButton("f evals##pcost", &win.perf_cost, 1);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Evaluations of the right-hand side per run: the controller's count for\n"
-                              "the adaptive step (rejected attempts included), stages x steps for the\n"
-                              "explicit fixed-step schemes. Unknown for implicit, CD and composite\n"
-                              "schemes - their curves are left out. min / avg / max apply to time only.");
+            ImGui::SetTooltip("Evaluations of the right-hand side per run (one = all N components):\n"
+                              "the controller's count for the adaptive step (rejected attempts\n"
+                              "included), f per step x steps for the fixed one. CD family: passes x\n"
+                              "(explicit half 1 + implicit half: 1 per component linear in its own\n"
+                              "variable, 4 iterations otherwise, / N); Extr: substeps x the base;\n"
+                              "Comp: stages x the base; GBS: sum n_k + 1. Unknown for Newton-based\n"
+                              "implicit schemes and custom KRS - their curves are left out.\n"
+                              "min / avg / max apply to time only.");
         ImGui::SameLine();
         ImGui::RadioButton("steps##pcost", &win.perf_cost, 2);
         if (ImGui::IsItemHovered())
@@ -12678,16 +12700,18 @@ static void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                                   : "| no reference in this result: set reference substeps > 0 and run again");
             } else if (win.error_source == 3) {
                 ImGui::SameLine();
-                if (!r.e_end.empty() && r.adaptive)
+                const bool any_e = std::any_of(r.e_end.begin(), r.e_end.end(),
+                                               [](double v) { return std::isfinite(v); });
+                if (any_e && r.ref_prec > 0)
                     ImGui::TextDisabled("| y*(T): DOP853 in %s, %lld steps, its own error ~%.1e",
                                         r.ref_prec == 2 ? "qd" : "dd", r.ref_steps, r.ref_err);
-                else if (!r.e_end.empty())
+                else if (any_e)
                     ImGui::TextDisabled("| E(T) = Eref at t_max: %s x%s",
                                         c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
                 else
                     ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
                                        r.adaptive ? "| no y*(T) in this result: run again"
-                                                  : "| no E(T): needs \"endpoint only\", \"fit h to t_max\" and reference substeps > 0");
+                                                  : "| no E(T): set \"reference y*(T)\" (or \"endpoint only\") with \"fit h to t_max\" and run again");
             } else if (r.adaptive) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| an adaptive tab has only E(T)");

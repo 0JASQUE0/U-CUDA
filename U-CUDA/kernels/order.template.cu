@@ -120,13 +120,24 @@ __device__ __forceinline__ bool orderBadVec(const numb* X, numb maxValue) {
 // латентность одного расчёта, при большом числе — пропускная способность
 // загруженного GPU. Финальное состояние обязано уходить в глобальную память,
 // иначе компилятор вправе выбросить весь цикл целиком.
+// Время — %globaltimer (нс) вокруг ОДНОГО цикла шагов: ни запуск ядра, ни загрузка X0/a[],
+// ни запись результата в замер не входят. tspan[0] — самый ранний старт среди нитей
+// (atomicMin, хост ставит ~0), tspan[1] — самый поздний конец (atomicMax, хост ставит 0):
+// при replicas > 1 это время всего загруженного GPU, при 1 — одной траектории.
+__device__ __forceinline__ unsigned long long perfGlobalTimer() {
+    unsigned long long t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t) :: "memory");
+    return t;
+}
+
 extern "C" __global__ void perfIntegrateKernel(
     const int    nThreads,
     const numb* __restrict__ X0,          // [AMOUNTOFX]
     const numb* __restrict__ values,      // [AMOUNTOFVALUES]
     const numb   h,
     const long long nSteps,
-    numb* __restrict__ out)               // [nThreads * AMOUNTOFX]
+    numb* __restrict__ out,               // [nThreads * AMOUNTOFX]
+    unsigned long long* tspan)            // [2]: старт / конец цикла, нс; nullptr — без замера
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nThreads) return;
@@ -136,8 +147,19 @@ extern "C" __global__ void perfIntegrateKernel(
     numb X[AMOUNTOFX];
     for (int i = 0; i < AMOUNTOFX; ++i) X[i] = X0[i];
 
+    const unsigned long long t0 = perfGlobalTimer();
     for (long long n = 0; n < nSteps; ++n)
         calculateDiscreteModel(X, a, h);
+    // Конец цикла фиксируется после того, как результат последнего шага готов: без
+    // зависимости от X компилятор вправе прочитать таймер раньше, чем досчитана цепочка.
+    numb acc = 0;
+    for (int i = 0; i < AMOUNTOFX; ++i) acc += X[i];
+    unsigned long long t1;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1) : "d"((double)acc) : "memory");
+    if (tspan != nullptr) {
+        atomicMin(&tspan[0], t0);
+        atomicMax(&tspan[1], t1);
+    }
 
     for (int i = 0; i < AMOUNTOFX; ++i)
         out[(size_t)tid * (size_t)AMOUNTOFX + (size_t)i] = X[i];

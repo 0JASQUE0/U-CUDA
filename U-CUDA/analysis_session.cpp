@@ -1382,13 +1382,18 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
             if (!scheme_has_complex_core(spec.base) || !builtin_scheme_traits(spec.base, &p, &sym))
                 throw std::runtime_error("ExtrZ base '" + spec.base + "' has no complex core");
             return codegen_adaptive_extrapolation_complex(
-                sys, codegen_scheme_complex_core(sys, scheme_from_string(spec.base)), spec.n, p, spec.base);
+                sys, codegen_scheme_complex_core(sys, scheme_from_string(spec.base)), spec.n, p, spec.base,
+                scheme_rhs_per_step(sys, spec.base));
         }
         std::string body; int p = 1; bool sym = false;
         if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym))
             throw std::runtime_error("extrapolation base '" + spec.base + "' is unknown or has no step body");
+        // f базы: кастомная КРС непрозрачна — 0 (счётчик видит только F1); встроенная — по
+        // scheme_rhs_per_step, CD-семейство в том числе.
+        bool base_custom = false;
+        for (const auto& cs : custom_schemes) if (cs.name == spec.base) base_custom = true;
         return codegen_adaptive_extrapolation(sys, body, spec.n, p, sym, spec.base,
-                                              builtin_scheme_rhs_per_step(spec.base));
+                                              base_custom ? 0.0 : scheme_rhs_per_step(sys, spec.base));
     }
     throw std::runtime_error(adaptive_scheme_hint());
 }

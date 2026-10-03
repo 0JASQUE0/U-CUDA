@@ -11,6 +11,7 @@
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 #include "module_lru.h"
+#include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
 #include <algorithm>
 #include <atomic>
@@ -10206,17 +10207,19 @@ struct ParametricEngine::Impl {
             if (e != cudaSuccess) return fail(std::string("memcpy values: ") + cudaGetErrorString(e));
         }
 
-        struct EventPair {
-            cudaEvent_t a = nullptr, b = nullptr;
-            ~EventPair() { if (a) cudaEventDestroy(a); if (b) cudaEventDestroy(b); }
-        } ev;
-        if (cudaEventCreate(&ev.a) != cudaSuccess || cudaEventCreate(&ev.b) != cudaSuccess)
-            return fail("cudaEventCreate: could not create the timing events");
+        // Время меряет само ядро (%globaltimer вокруг цикла шагов, см. perfIntegrateKernel):
+        // события вокруг запуска захватывали ещё и задержку запуска (~6-8 мкс на WDDM).
+        OrderDevBuf d_tspan;
+        if (!d_tspan.alloc(2 * sizeof(unsigned long long), "perfTimer", err)) return fail(err);
+
+        // y(T) узла — для E(T) против эталона y*(T) (run_performance_any), как у адаптивного.
+        res.y_end.assign((size_t)n, std::vector<double>());
 
         // Ширина блока — 32: измерено, что дальше упирается в регистры, а не в
         // лимит блоков на SM. При replicas == 1 это один активный warp.
         const int blockSize = 32;
         const int gridSize  = (req.replicas + blockSize - 1) / blockSize;
+        bool first_node = true;
 
         for (int i = 0; i < n; ++i) {
             if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
@@ -10248,33 +10251,46 @@ struct ParametricEngine::Impl {
             numb      h_arg   = (numb)h_node;
             long long n_arg   = N;
             numb*     out_arg = d_out.as<numb>();
-            void* args[] = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg };
+            unsigned long long* ts_none = nullptr;
+            unsigned long long* ts_arg  = d_tspan.as<unsigned long long>();
+            void* args_warm[] = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg, &ts_none };
+            void* args[]      = { &nt_arg, &X0_arg, &val_arg, &h_arg, &n_arg, &out_arg, &ts_arg };
 
-            auto launch = [&](const char* what) -> bool {
+            auto launch = [&](const char* what, void** a) -> bool {
                 CUresult r = cuLaunchKernel(cached_order.kernel_perf, gridSize, 1, 1, blockSize, 1, 1,
-                                            0, nullptr, args, nullptr);
+                                            0, nullptr, a, nullptr);
                 if (r != CUDA_SUCCESS) { err = std::string("cuLaunchKernel(") + what + "): " + cu_err(r); return false; }
                 return true;
             };
-
-            for (int w = 0; w < req.warmup; ++w) {
-                if (!launch("perf warmup")) return fail(err);
+            auto sync = [&]() -> bool {
                 cudaError_t ce = cudaDeviceSynchronize();
-                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
-            }
+                if (ce != cudaSuccess) { err = std::string("perf kernel: ") + cudaGetErrorString(ce); return false; }
+                return true;
+            };
+
+            // Прогрев по времени: GPU поднимает частоту только под сплошной нагрузкой, а
+            // короткие запуски с синхронизацией между ними её не дают — без этого одно и то же
+            // ядро мерилось то на холостой частоте, то на рабочей (до 3-5 раз разницы).
+            // Пачка запусков подряд, без синхронизаций: ~300 мс перед первым узлом, ~20 мс
+            // перед каждым следующим. Потом — warmup запусков из настроек, как раньше.
+            if (!perf_burst_warmup(first_node ? 300.0 : 20.0,
+                                   [&]() { return launch("perf warmup", args_warm); }, sync))
+                return fail(err);
+            first_node = false;
+            for (int w = 0; w < req.warmup; ++w)
+                if (!launch("perf warmup", args_warm) || !sync()) return fail(err);
 
             double tmin = 0.0, tmax = 0.0, tsum = 0.0;
             int got = 0;
             for (int rep = 0; rep < req.repeats; ++rep) {
-                cudaEventRecord(ev.a, 0);
-                if (!launch("perf")) return fail(err);
-                cudaEventRecord(ev.b, 0);
-                cudaError_t ce = cudaEventSynchronize(ev.b);
-                if (ce != cudaSuccess) return fail(std::string("perf kernel: ") + cudaGetErrorString(ce));
-                float ms = 0.0f;
-                ce = cudaEventElapsedTime(&ms, ev.a, ev.b);
-                if (ce != cudaSuccess) return fail(std::string("cudaEventElapsedTime: ") + cudaGetErrorString(ce));
-                const double us = (double)ms * 1000.0;
+                const unsigned long long ts_init[2] = { ~0ULL, 0ULL };
+                cudaError_t ce = cudaMemcpy(d_tspan.p, ts_init, sizeof(ts_init), cudaMemcpyHostToDevice);
+                if (ce != cudaSuccess) return fail(std::string("memcpy timer: ") + cudaGetErrorString(ce));
+                if (!launch("perf", args) || !sync()) return fail(err);
+                unsigned long long ts[2] = { 0, 0 };
+                ce = cudaMemcpy(ts, d_tspan.p, sizeof(ts), cudaMemcpyDeviceToHost);
+                if (ce != cudaSuccess) return fail(std::string("memcpy timer: ") + cudaGetErrorString(ce));
+                const double us = ts[1] >= ts[0] ? (double)(ts[1] - ts[0]) * 1.0e-3 : 0.0;
                 if (got == 0) { tmin = tmax = us; }
                 else { if (us < tmin) tmin = us; if (us > tmax) tmax = us; }
                 tsum += us;
@@ -10289,6 +10305,16 @@ struct ParametricEngine::Impl {
                 res.t_min[(size_t)i] = tmin;
                 res.t_max[(size_t)i] = tmax;
                 res.t_avg[(size_t)i] = tsum / (double)got;
+            }
+
+            // y(T) первой реплики — только если узел кончился ровно в t_max (fit h to t_max):
+            // иначе сравнивать с y*(T) нечего, E(T) узла остаётся пустым.
+            if ((double)N * h_node > 0.0
+                && std::fabs((double)N * h_node - req.t_max) <= 1e-9 * (std::max)(1.0, std::fabs(req.t_max))) {
+                std::vector<numb> y((size_t)req.amountOfX);
+                cudaError_t ce = cudaMemcpy(y.data(), d_out.p, y.size() * sizeof(numb), cudaMemcpyDeviceToHost);
+                if (ce != cudaSuccess) return fail(std::string("memcpy y(T): ") + cudaGetErrorString(ce));
+                res.y_end[(size_t)i].assign(y.begin(), y.end());
             }
 
             if (req.progress)

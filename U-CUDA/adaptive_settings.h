@@ -9,6 +9,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -29,7 +30,7 @@ struct AdaptiveSettings {
     std::string hmax;                       // пусто — без ограничения
     std::string max_rej;                    // отказов подряд до шага с h_min; пусто — без предела,
                                             //   0 — без повторов (каждая попытка принимается)
-    std::string ctrl      = "Hairer";       // регулятор (встроенный или из библиотеки)
+    std::string ctrl      = "Hairer fast";  // регулятор (встроенный или из библиотеки)
     std::vector<std::string> ctrl_params;   // пусто — значения по умолчанию для схемы
     int         peak_interp = 2;            // сырые узлы: 0 — узел, 1 — парабола, 2 — Эрмит по f
     std::string max_points = "1000000";     // Analysis, сырые узлы: потолок узлов на траекторию
@@ -71,16 +72,72 @@ struct AdaptiveCtrlInfo {
     int         npar;
     const char* par[UCUDA_CTL_NPAR];     // имена параметров
     const char* tip;                     // подсказка
+    // Встроенный регулятор, написанный C-телом (id == UCUDA_CTRL_CUSTOM): тело и раздел
+    // подготовки едут в модуль как у C body из библиотеки, поэтому работает везде, где работает
+    // она (GPU-модули, cl.exe DLL, CPU-драйвер), без своего закона в ucuda_adaptive.cuh.
+    const char* body = nullptr;
+    const char* prep = nullptr;
 };
+
+// "Hairer numb" — схема "Hairer fast" (ucuda_ctrl_hairer: сразу 1/fac, в log2, норма через err^2,
+// facold — при принятии шага, без зажима по h_max) целиком в numb: норма — ucuda_ctl_lg2err2_numb,
+// log2 / exp2 — double. Медленнее на GeForce (FP64 = 1/32 от FP32); отличие от "Hairer fast" —
+// только округление float в регуляторе.
+inline const char* adaptive_hairer_numb_body() {
+    return
+        "// Hairer's dopri5 / dop853 step-size control, all in numb: the scheme of \"Hairer fast\"\n"
+        "// (h * 2^clamp(x, log2 fac1, log2 fac2), x = -expo1/2 log2(err^2) + beta log2 facold\n"
+        "// + log2 safe) with double log2 / exp2 and the error norm in numb. m.user[0] keeps\n"
+        "// beta log2 facold + log2 safe; c[0] safe, c[1] fac1, c[2] fac2, c[3] beta, c[4] kbeta.\n"
+        "// o.err is err^2 (err <= 1 <=> err^2 <= 1): no square root anywhere.\n"
+        "numb err2;\n"
+        "const numb lg  = ucuda_ctl_lg2err2_numb(in, err2);  // log2 err^2\n"
+        "const numb cst = m.nacc > 0 ? m.user[0] : in.k[4];\n"
+        "const numb xa  = in.k[0] * lg + cst;                // accept\n"
+        "const numb xr  = in.k[0] * lg + in.k[1];            // reject: no facold\n"
+        "numb hnew;\n"
+        "o.err = err2;\n"
+        "if (err2 <= 1) {\n"
+        "    o.accept = 1;\n"
+        "    const numb hi = in.nrej > 0 ? ucuda_fmin(in.k[3], (numb)0) : in.k[3];   // no growth after a rejection\n"
+        "    hnew = in.h * exp2(ucuda_fmin(hi, ucuda_fmax(in.k[2], xa)));\n"
+        "    const numb beta = in.c[3];   // log2 facold = max(log2 err, log2 1e-4)\n"
+        "    m.user[0] = beta == 0 ? in.k[1] : beta * ucuda_fmax((numb)0.5 * lg, in.k[5]) + in.k[1];\n"
+        "} else {\n"
+        "    o.accept = 0;\n"
+        "    hnew = in.h * exp2(ucuda_fmax(in.k[2], xr));\n"
+        "}\n"
+        "o.h = hnew;\n";
+}
+inline const char* adaptive_hairer_numb_prep() {
+    return
+        "// Once per trajectory: constants of the step body (in.k[0..5]), in log2, in numb.\n"
+        "k[0] = (numb)-0.5 * ((numb)1 / (q + 1) - c[4] * c[3]);   // -expo1/2\n"
+        "k[1] = log2(c[0]);                        // log2 safe\n"
+        "k[2] = log2(c[1]);                        // log2 fac1\n"
+        "k[3] = log2(c[2]);                        // log2 fac2\n"
+        "k[5] = log2((numb)1e-4);                  // log2 of the facold floor\n"
+        "k[4] = c[3] * k[5] + k[1];                // facold term before the first accepted step\n";
+}
 
 // all — весь список, включая законы, не собранные в этой сборке (UCUDA_AD_HAIRER_ONLY).
 inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count, bool all = false) {
     static const AdaptiveCtrlInfo k[] = {
-        { "Hairer", UCUDA_CTRL_HAIRER, 5, { "safe", "fac1", "fac2", "beta", "kbeta" },
+        { "Hairer fast", UCUDA_CTRL_HAIRER, 5, { "safe", "fac1", "fac2", "beta", "kbeta" },
           "Hairer's dopri5 / dop853 controller (PI with facold^beta),\n"
           "Hairer's initial step and end-point rule (x + 1.01h > xend).\n"
           "Accepts err <= 1. Defaults follow the scheme: dopri5 for RK45,\n"
-          "dop853 for the 8th-order methods." },
+          "dop853 for the 8th-order methods.\n"
+          "fast: straight for 1/fac and in log2 - h * 2^clamp(...), the error\n"
+          "norm through err^2 (no square root, no division on the way to the\n"
+          "next step), all in float; the step factor needs only 6 digits.\n"
+          "\"Hairer numb\" is the same scheme all in numb." },
+        { "Hairer numb", UCUDA_CTRL_CUSTOM, 5, { "safe", "fac1", "fac2", "beta", "kbeta" },
+          "The scheme of \"Hairer fast\" all in numb: error norm, log2 and exp2\n"
+          "in double. Differs from \"Hairer fast\" only by the float rounding\n"
+          "of the controller; slower on GeForce (FP64 runs at 1/32 of FP32).\n"
+          "Initial step and end-point rule as Hairer's.",
+          adaptive_hairer_numb_body(), adaptive_hairer_numb_prep() },
         { "SciPy", UCUDA_CTRL_SCIPY, 3, { "safety", "min_factor", "max_factor" },
           "scipy.integrate RK45 / DOP853 controller: elementary,\n"
           "scipy's initial step, accepts err < 1, no growth after a rejection." },
@@ -99,8 +156,8 @@ inline const AdaptiveCtrlInfo* adaptive_builtin_ctrls(int* count, bool all = fal
           "Defaults: H211b (b = 4)." },
     };
 #ifdef UCUDA_AD_HAIRER_ONLY
-    // только Хайрер (первый в списке), см. UCUDA_AD_HAIRER_ONLY
-    if (count) *count = all ? (int)(sizeof(k) / sizeof(k[0])) : 1;
+    // только Хайрер (оба — первые два в списке), см. UCUDA_AD_HAIRER_ONLY
+    if (count) *count = all ? (int)(sizeof(k) / sizeof(k[0])) : 2;
 #else
     (void)all;
     if (count) *count = (int)(sizeof(k) / sizeof(k[0]));
@@ -174,16 +231,16 @@ inline bool adaptive_find_user_ctrl(const std::string& name, AdaptiveUserCtrl* o
 }
 
 // Регулятор, которым на деле считается name. Пока из встроенных собран только Хайрер
-// (UCUDA_AD_HAIRER_ONLY): остаются он и C body из библиотеки, любое другое имя (SciPy, PI,
-// фильтры Сёдерлинда — встроенные и из библиотеки) — "Hairer".
+// (UCUDA_AD_HAIRER_ONLY): остаются он ("Hairer fast" и "Hairer numb") и C body из библиотеки,
+// любое другое имя (SciPy, PI, фильтры Сёдерлинда — встроенные и из библиотеки) — "Hairer fast".
 inline std::string adaptive_ctrl_effective(const std::string& name) {
 #ifdef UCUDA_AD_HAIRER_ONLY
     if (adaptive_find_builtin(name)) return name;
     int n = 0;
     const AdaptiveCtrlInfo* k = adaptive_builtin_ctrls(&n, true);
-    for (int i = 0; i < n; ++i) if (name == k[i].name) return "Hairer";   // встроенный, не собранный
+    for (int i = 0; i < n; ++i) if (name == k[i].name) return "Hairer fast";   // встроенный, не собранный
     AdaptiveUserCtrl u;
-    if (adaptive_find_user_ctrl(name, &u) && u.kind == kUserCtrlFilter) return "Hairer";
+    if (adaptive_find_user_ctrl(name, &u) && u.kind == kUserCtrlFilter) return "Hairer fast";
     return name;   // C body из библиотеки или неизвестное имя (его отвергнет adaptive_resolve_ctrl)
 #else
     return name;
@@ -192,7 +249,7 @@ inline std::string adaptive_ctrl_effective(const std::string& name) {
 
 // Шаблоны новых записей: встроенные Hairer и SciPy, выписанные C-телом (отправная точка
 // для своих), и известные фильтры Сёдерлинда (2003) с их полюсами. С UCUDA_AD_HAIRER_ONLY
-// список — только "Hairer (C)" (первый).
+// список — только "Hairer fast (C)" и "Hairer numb (C)" (первые два).
 struct AdaptiveCtrlPreset {
     const char* name;
     int         kind;
@@ -204,43 +261,53 @@ struct AdaptiveCtrlPreset {
     const char* prep;      // C body: раздел подготовки (nullptr — пусто)
 };
 
-// "Hairer (C)" — арифметика встроенного ucuda_ctrl_hairer (ветка float, без
-// UCUDA_AD_EXACT_CTL) один в один, константы — те же, что ucuda_ctl_prepare: на GPU и CPU
-// результат побитово равен встроенному, и шаг так же не делит в double.
+// "Hairer fast (C)" — встроенный "Hairer fast" (ucuda_ctrl_hairer, ветка float) один в один:
+// те же выражения и константы, что ucuda_ad_prepare_ctl (cc.he, lsafe, lfac1, lfac2, lc0), —
+// на GPU и CPU результат побитово равен встроенному. "Hairer numb (C)" — тело и подготовка
+// встроенного "Hairer numb" как есть.
 inline const AdaptiveCtrlPreset* adaptive_ctrl_presets(int* count) {
     static const AdaptiveCtrlPreset k[] = {
-        { "Hairer (C)", kUserCtrlBody, "safe, fac1, fac2, beta, kbeta", "0.9, 0.333, 6, 0, 0.2", 1,
+        { "Hairer fast (C)", kUserCtrlBody, "safe, fac1, fac2, beta, kbeta", "0.9, 0.333, 6, 0, 0.2", 1,
           "Hairer's dopri5 / dop853 controller written out as a C body: the same arithmetic\n"
-          "and the same results as the built-in \"Hairer\" (defaults of dop853; for dopri5:\n"
+          "and the same results as the built-in \"Hairer fast\" (defaults of dop853; for dopri5:\n"
           "0.9, 0.2, 10, 0.04, 0.75).",
-          "// Hairer's dopri5 / dop853 step-size control (facold^beta stabilisation), the same\n"
-          "// arithmetic as the built-in \"Hairer\": exponents in float through log2 / exp2,\n"
-          "// no double divisions per attempt (k[] comes from the prepare section).\n"
-          "// c[0] safe, c[1] fac1, c[2] fac2, c[3] beta, c[4] kbeta; m.user[0] keeps facold.\n"
-          "const numb beta = in.c[3];\n"
-          "const numb err = ucuda_ctl_err(in);          // RMS norm, 1 = on the tolerance\n"
-          "const numb facold = m.nacc > 0 ? m.user[0] : (numb)1e-4;\n"
-          "const float l11 = (float)in.k[2] * ucuda_ctl_log2(err);           // log2 err^expo1\n"
-          "const float lfac = beta == 0 ? l11 : l11 - (float)beta * ucuda_ctl_log2(facold);\n"
-          "const float isafe = (float)in.k[3];\n"
-          "const float fac = ucuda_fmaxf((float)in.k[1], ucuda_fminf((float)in.k[0], ucuda_ctl_exp2(lfac) * isafe));\n"
-          "numb hnew = in.h * (numb)(1.0f / fac);\n"
-          "o.err = err;\n"
-          "if (err <= 1) {\n"
+          "// Hairer's dopri5 / dop853 step-size control (facold^beta stabilisation) as the built-in\n"
+          "// \"Hairer fast\": straight for 1/fac and in log2 (float). Hairer's\n"
+          "//   fac = clamp(err^expo1 / facold^beta / safe, 1/fac2, 1/fac1), hnew = h / fac\n"
+          "// is hnew = h * 2^clamp(x, log2 fac1, log2 fac2), x = -expo1/2 log2(err^2) + beta log2 facold\n"
+          "// + log2 safe: no division, no square root. c[0] safe, c[1] fac1, c[2] fac2, c[3] beta,\n"
+          "// c[4] kbeta; m.user[0] keeps beta log2 facold + log2 safe (set once per accepted step).\n"
+          "// No h_max clamp: the driver clamps every attempt. o.err is err^2 (err <= 1 <=> err^2 <= 1).\n"
+          "numb err2;\n"
+          "const float lg  = ucuda_ctl_lg2err2(in, err2);         // log2 err^2\n"
+          "const float cst = (float)(m.nacc > 0 ? m.user[0] : in.k[4]);\n"
+          "const float xa  = (float)in.k[0] * lg + cst;           // accept\n"
+          "const float xr  = (float)in.k[0] * lg + (float)in.k[1];   // reject: no facold\n"
+          "numb hnew;\n"
+          "o.err = err2;\n"
+          "if (err2 <= 1) {\n"
           "    o.accept = 1;\n"
-          "    m.user[0] = ucuda_fmax(err, (numb)1e-4);\n"
-          "    if (in.hmax > 0 && hnew > in.hmax) hnew = in.hmax;\n"
-          "    if (in.nrej > 0) hnew = ucuda_fmin(hnew, in.h);   // no growth right after a rejection\n"
+          "    const float hi = in.nrej > 0 ? ucuda_fminf((float)in.k[3], 0.0f) : (float)in.k[3];   // no growth after a rejection\n"
+          "    hnew = in.h * (numb)ucuda_ctl_exp2(ucuda_fminf(hi, ucuda_fmaxf((float)in.k[2], xa)));\n"
+          "    const numb beta = in.c[3];   // log2 facold = max(log2 err, log2 1e-4)\n"
+          "    m.user[0] = beta == 0 ? in.k[1]\n"
+          "              : (numb)((float)beta * ucuda_fmaxf(0.5f * lg, -13.287712379549449f) + (float)in.k[1]);\n"
           "} else {\n"
           "    o.accept = 0;\n"
-          "    hnew = in.h * (numb)(1.0f / ucuda_fminf((float)in.k[0], ucuda_ctl_exp2(l11) * isafe));\n"
+          "    hnew = in.h * (numb)ucuda_ctl_exp2(ucuda_fmaxf((float)in.k[2], xr));\n"
           "}\n"
           "o.h = hnew;\n",
-          "// Once per trajectory: constants of the step body (in.k[0..7]).\n"
-          "k[0] = 1 / c[1];                          // 1 / fac1\n"
-          "k[1] = 1 / c[2];                          // 1 / fac2\n"
-          "k[2] = (numb)1 / (q + 1) - c[4] * c[3];   // expo1 = 1/(q+1) - kbeta beta\n"
-          "k[3] = 1 / c[0];                          // 1 / safe\n" },
+          "// Once per trajectory: constants of the step body (in.k[0..4]), in log2.\n"
+          "k[0] = (numb)(-0.5f * (float)((numb)1 / (q + 1) - c[4] * c[3]));   // -expo1/2\n"
+          "k[1] = (numb)ucuda_ctl_log2(c[0]);       // log2 safe\n"
+          "k[2] = (numb)ucuda_ctl_log2(c[1]);       // log2 fac1\n"
+          "k[3] = (numb)ucuda_ctl_log2(c[2]);       // log2 fac2\n"
+          "k[4] = (numb)((float)c[3] * ucuda_ctl_log2((numb)1e-4) + (float)k[1]);   // facold term before the first accepted step\n" },
+        { "Hairer numb (C)", kUserCtrlBody, "safe, fac1, fac2, beta, kbeta", "0.9, 0.333, 6, 0, 0.2", 1,
+          "Hairer's dopri5 / dop853 controller written out as a C body, all in numb:\n"
+          "the same arithmetic and the same results as the built-in \"Hairer numb\"\n"
+          "(defaults of dop853; for dopri5: 0.9, 0.2, 10, 0.04, 0.75).",
+          adaptive_hairer_numb_body(), adaptive_hairer_numb_prep() },
         { "SciPy (C)", kUserCtrlBody, "safety, min_factor, max_factor", "0.9, 0.2, 10", 0,
           "scipy.integrate RK45 / DOP853 controller written out as a C body\n"
           "(the built-in \"SciPy\").",
@@ -286,7 +353,7 @@ inline const AdaptiveCtrlPreset* adaptive_ctrl_presets(int* count) {
           "PI.3.3: kbeta = (2/3, -1/3).", "" },
     };
 #ifdef UCUDA_AD_HAIRER_ONLY
-    if (count) *count = 1;
+    if (count) *count = 2;
 #else
     if (count) *count = (int)(sizeof(k) / sizeof(k[0]));
 #endif
@@ -368,9 +435,17 @@ inline bool adaptive_resolve_ctrl(const std::string& name_in, int q, AdaptiveCtr
     if (const AdaptiveCtrlInfo* ci = adaptive_find_builtin(name)) {
         r.id = ci->id;
         for (int i = 0; i < ci->npar; ++i) r.par.push_back(ci->par[i]);
+        r.tip = ci->tip;
+        if (ci->body) {
+            // Встроенный C body ("Hairer numb"): в модуль — как тело из библиотеки, параметры,
+            // значения по умолчанию и правила h0 / последнего шага — Хайрера.
+            r.body = adaptive_ctrl_pack(ci->prep ? ci->prep : "", ci->body);
+            r.def = adaptive_ctrl_defaults(UCUDA_CTRL_HAIRER, q);
+            r.hairer_rules = true;
+            return true;
+        }
         r.def = adaptive_ctrl_defaults(ci->id, q);
         r.hairer_rules = ci->id == UCUDA_CTRL_HAIRER;
-        r.tip = ci->tip;
         return true;
     }
     AdaptiveUserCtrl u;
@@ -518,7 +593,9 @@ inline bool adaptive_build_params(const AdaptiveSettings& s, const AdaptiveCode&
 
     P.rtol = rtol;
     for (int i = 0; i < n; ++i) P.atol[i] = atol[i];
-    P.h0 = h0; P.hmin = hmin; P.hmax = hmax; P.span = span;
+    P.h0 = h0; P.hmin = hmin; P.span = span;
+    // Без ограничения — +inf, а не 0: попытка шага зажимает h одним сравнением h > hmax.
+    P.hmax = hmax > 0 ? (numb)hmax : std::numeric_limits<numb>::infinity();
     P.maxrej = maxrej_blank ? 0 : (maxrej == 0 ? UCUDA_AD_NO_RETRY : (int)maxrej);
     for (size_t i = 0; i < c.size() && i < UCUDA_CTL_NPAR; ++i) P.c[i] = c[i];
     P.q = code.q; P.nlo = code.nlo; P.ctrl = cr.id;

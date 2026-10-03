@@ -236,20 +236,30 @@ AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
 // плотный выход 3-го порядка. Нужно K >= 2. Принятый шаг с тем же h — побитово шаг
 // постоянного Extr / GBS (см. codegen.cpp).
 //   base_body — тело шага базы (как для wrap_extrapolation), base_rhs — вычислений f на
-//   шаг базы, 0 — неизвестно (тогда счётчик f видит только F1).
+//   шаг базы (scheme_rhs_per_step, может быть дробным), 0 — неизвестно (тогда счётчик f
+//   видит только F1).
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
-                                            const std::string& base_name, int base_rhs);
+                                            const std::string& base_name, double base_rhs);
 // ExtrZ(база|n1..nK): то же над комплексным ядром базы (codegen_scheme_complex_core), стадии и
 // суммы — ucmplx, Y и E — их Re; веса симметричные (extrapolation_symmetric(true, ...)).
+// base_rhs — как у codegen_adaptive_extrapolation.
 AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
                                                     const std::vector<int>& n, int p,
-                                                    const std::string& base_name);
+                                                    const std::string& base_name, double base_rhs = 0);
 // GBS 2-4 ... 2-4-6-8-10-12 (K = gbs_stage_count). f(X) первой стадии берётся из F0.
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K);
 // Вычислений f на шаг встроенной явной схемы постоянного шага; 0 — неизвестно (неявные, CD,
 // комплексные: f там по компонентам или внутри Ньютона).
 int builtin_scheme_rhs_per_step(const std::string& name);
+// Вычислений f на шаг любой схемы по имени, в единицах «полная f» (все N компонент); 0 —
+// неизвестно (неявные с Ньютоном, кастомная КРС, Comp/Extr над такой базой). Сверх таблицы
+// явных схем: Euler-Cromer, SEMP — по одной f на проход; CD-семейство — проходы x (явный
+// полушаг 1 + неявный), неявный полушаг (и стадия SIMP, и D) — 1 по компоненте, линейной по
+// своей переменной, CD_ITERS по нелинейной, делённое на N (поэтому дробное); комплексные CD
+// считаются так же (f в комплексной арифметике дороже, но вызов — один); GBS — sum n_k + 1;
+// Extr(база|n) / ExtrZ — sum n_k x база; Comp(база|g) — число g x база.
+double scheme_rhs_per_step(const System& s, const std::string& name);
 // Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
 // и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
 bool adaptive_scheme_name_supported(const std::string& name);

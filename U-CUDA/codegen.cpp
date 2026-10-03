@@ -3840,7 +3840,7 @@ void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, cons
 
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
-                                            const std::string& base_name, int base_rhs) {
+                                            const std::string& base_name, double base_rhs) {
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     const int N = (int)s.vars.size(), K = (int)n.size();
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
@@ -3889,7 +3889,9 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     o << "    }\n";
     extr_ad_finish(o, s, "AC_ea", "EC_ea");
 
-    AdaptiveCode c = extr_ad_code(s, P, Q, base_rhs > 0 ? (int)(cost * base_rhs) + 1 : 1);
+    // Вызовов f на попытку: все подшаги всех стадий + F1 = f(Y). Дробная f базы (неявный
+    // полушаг CD по компонентам) округляется уже в произведении.
+    AdaptiveCode c = extr_ad_code(s, P, Q, base_rhs > 0 ? (int)std::lround((double)cost * base_rhs) + 1 : 1);
     c.emb = o.str();
     return c;
 }
@@ -3900,7 +3902,7 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
 // extrapolation_order(K-1, p, true), и E = Re sum (alpha - beta) Z — его оценка.
 AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
                                                     const std::vector<int>& n, int p,
-                                                    const std::string& base_name) {
+                                                    const std::string& base_name, double base_rhs) {
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     const int N = (int)s.vars.size(), K = (int)n.size();
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
@@ -3938,7 +3940,10 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
     const auto fy = rhs_over(s, "Y");
     for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
 
-    AdaptiveCode c = extr_ad_code(s, P, Q, 1);   // f внутри комплексного ядра не считаем
+    // Как у Extr: подшаги стадий x f базы (комплексное ядро делает те же вызовы) + F1.
+    long long cost = 0;
+    for (int v : n) cost += v;
+    AdaptiveCode c = extr_ad_code(s, P, Q, base_rhs > 0 ? (int)std::lround((double)cost * base_rhs) + 1 : 1);
     c.emb = o.str();
     return c;
 }
@@ -4008,6 +4013,61 @@ int builtin_scheme_rhs_per_step(const std::string& name) {
     };
     for (const auto& t : kTab) if (name == t.name) return t.k;
     return 0;
+}
+
+// Неявный полушаг CD (и стадия SIMP, и шаг D): по компоненте — одно вычисление f_i, если она
+// линейна по своей переменной (аналитика), иначе CD_ITERS простых итераций; в единицах полной f.
+static double cd_implicit_sweep_rhs(const System& s) {
+    const int N = (int)s.vars.size();
+    if (N < 1 || (int)s.rhs.size() != N) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        Parser p(s.rhs[(size_t)i], s.latex);
+        PN coef, rem;
+        sum += cd_try_extract_linear(p.parse(), s.vars[(size_t)i], coef, rem) ? 1.0 : (double)CD_ITERS;
+    }
+    return sum / (double)N;
+}
+
+double scheme_rhs_per_step(const System& s, const std::string& name) {
+    if (const int k = builtin_scheme_rhs_per_step(name); k > 0) return (double)k;
+    ExtrapolationSpec es;
+    if (parse_extrapolation_name(name, &es)) {
+        long long cost = 0;
+        for (int v : es.n) cost += v;
+        return (double)cost * scheme_rhs_per_step(s, es.base);   // ExtrZ: ядро базы — те же f
+    }
+    CompositionSpec cs;
+    if (parse_composition_name(name, &cs))
+        return (double)cs.gammas.size() * scheme_rhs_per_step(s, cs.base);
+    const Scheme sch = scheme_from_name(name);
+    if (const int K = gbs_stage_count(sch); K >= 1) {
+        int cost = 1;                                 // f(X) на всех стадиях одна
+        for (int k = 1; k <= K; ++k) cost += 2 * k;   // n - 1 leapfrog + сглаживание
+        return (double)cost;
+    }
+    try {
+        switch (sch) {
+        case Scheme::EulerCromer:  return 1.0;
+        case Scheme::SEMP:         return 2.0;
+        case Scheme::SIMP:         return cd_implicit_sweep_rhs(s) + 1.0;
+        case Scheme::D:            return cd_implicit_sweep_rhs(s);
+        case Scheme::CD: case Scheme::CD10:
+        case Scheme::ComplexCD: case Scheme::ComplexCD10:
+            return 1.0 + cd_implicit_sweep_rhs(s);
+        case Scheme::ComplexCD4: case Scheme::ComplexCD4_10:
+        case Scheme::ComplexCD4SS01: case Scheme::ComplexCD4SS10:
+            return 2.0 * (1.0 + cd_implicit_sweep_rhs(s));
+        case Scheme::ComplexCD4S3: case Scheme::ComplexCD4S3_10:
+            return 3.0 * (1.0 + cd_implicit_sweep_rhs(s));
+        case Scheme::ComplexCD4S4: case Scheme::ComplexCD4S4_10:
+            return 4.0 * (1.0 + cd_implicit_sweep_rhs(s));
+        case Scheme::Map:          return 1.0;
+        default:                   return 0.0;   // Ньютон (Implicit Euler/Midpoint, Complex IE), кастомная КРС
+        }
+    } catch (const std::exception&) {
+        return 0.0;   // правая часть не разбирается — счёт неизвестен, а не ошибка
+    }
 }
 
 bool adaptive_scheme_name_supported(const std::string& name) {

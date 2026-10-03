@@ -262,6 +262,9 @@ void write_adaptive(std::ostringstream& o, const AdaptiveSettings& a,
     o << ",\"hmax\":"; jstr(o, a.hmax);
     o << ",\"max_rej\":"; jstr(o, a.max_rej);
     o << ",\"ctrl\":"; jstr(o, a.ctrl);
+    // 2 — имена после разделения Хайрера ("Hairer fast", "Hairer numb"). Без метки "Hairer" —
+    // прежний (float) закон, см. read_adaptive.
+    o << ",\"ctrl_v\":2";
     o << ",\"ctrl_params\":[";
     for (size_t i = 0; i < a.ctrl_params.size(); ++i) { if (i) o << ","; jstr(o, a.ctrl_params[i]); }
     o << "]";
@@ -284,10 +287,12 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
     p.expect('{');
     if (p.opt('}')) return;
     std::string def_name, def_use;   // ctrl_def: имя в сессии -> имя в библиотеке
+    int ctrl_v = 1;
     while (true) {
         const std::string k = p.str();
         p.expect(':');
         if      (k == "enabled")     a.enabled   = p.boolean();
+        else if (k == "ctrl_v")      { try { ctrl_v = std::stoi(p.str_or_num()); } catch (...) {} }
         else if (k == "raw_nodes")   a.raw_nodes = p.boolean();
         else if (k == "rtol")        a.rtol = p.str();
         else if (k == "atol")        a.atol = p.str();
@@ -329,6 +334,9 @@ void read_adaptive(JP& p, AdaptiveSettings& a) {
     }
     // Порядок ключей в файле любой, поэтому переименование — после разбора.
     if (!def_name.empty() && a.ctrl == def_name && def_use != def_name) a.ctrl = def_use;
+    // "Hairer" больше нет: без метки (сессии до разделения Хайрера) это float-закон — "Hairer fast",
+    // с меткой 2 — вариант в numb — "Hairer numb". Параметры те же.
+    if (a.ctrl == "Hairer") a.ctrl = ctrl_v < 2 ? "Hairer fast" : "Hairer numb";
     // Регулятор, которого в этой сборке нет (UCUDA_AD_HAIRER_ONLY), — на Хайрера с его
     // параметрами по умолчанию: чужие параметры к нему не подходят.
     if (adaptive_ctrl_effective(a.ctrl) != a.ctrl) {

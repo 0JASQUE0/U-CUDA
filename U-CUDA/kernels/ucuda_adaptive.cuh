@@ -109,7 +109,8 @@ struct UcudaAdaptParams {
     numb h0;                    // <= 0 — автоматически (select_initial_step)
     numb hmin;                  // <= 0 — max(10 ulp(t), 1e-12 * span), см. ucuda_ad_hmin_auto;
                                 //   заданный — не ниже 10 ulp(t) (ucuda_ad_try_x)
-    numb hmax;                  // <= 0 — без ограничения
+    numb hmax;                  // +inf — без ограничения (так пишет adaptive_build_params: в попытке
+                                //   одно сравнение h > hmax); выбор h0 понимает и прежний 0
     numb span;                  // длина всего интервала (нужна выбору h0)
     numb c[UCUDA_CTL_NPAR];     // параметры регулятора
     int  q;                     // порядок оценщика: показатель 1/(q+1)
@@ -135,7 +136,7 @@ struct UcudaCtlIn {
     const numb* c;      // параметры регулятора
     numb rtol;
     numb h;             // размер этой попытки
-    numb hmin, hmax;    // hmax <= 0 — без ограничения
+    numb hmin, hmax;    // hmax = +inf — без ограничения
     numb t;             // t_n
     int  n, nlo, q;
     int  nrej;          // сколько попыток этого шага уже отвергнуто
@@ -172,6 +173,12 @@ struct UcudaCtlConst {
     numb expo1;         // Hairer: 1/(q+1) - kbeta*beta
     numb expo;          // SciPy, I и отказы PI/Filter: -1/(q+1)
     numb isafe;         // Hairer: 1/safe
+    // "Hairer fast" — закон в log2 (ucuda_ctrl_hairer, ветка float), всё — float в numb:
+    numb he;            //   -expo1/2: показатель при log2(err^2)
+    numb lsafe;         //   log2 safe
+    numb lfac1, lfac2;  //   log2 fac1, log2 fac2 — зажим 1/fac в логарифмах
+    numb lc0;           //   beta log2(1e-4) + log2 safe: слагаемое facold до первого принятого шага
+                        //   (дальше его держит m.user[0])
     numb b1, b2, b3;    // PI: kI/k, kP/k; Filter: b1/k, b2/k, b3/k (c[3..5]/k, k = q+1)
     numb lth_pi;        // PI: log2 (th^(kI/k)) = kI log2 safety, th = safety^k — целевая ошибка
     numb lth_f;         // Filter: (b1 + b2 + b3) log2 safety
@@ -360,6 +367,108 @@ UCUDA_HD inline float ucuda_ctl_log2(numb x) {
 #endif
 }
 
+// 1/x во float без уточнения: на GPU — одна MUFU.RCP (__fdividef, ~2 ulp; x > 2^126 даёт 0 —
+// такой масштаб ловит проверка в ucuda_ctl_lg2err2), на CPU — обычное деление.
+UCUDA_HD inline float ucuda_frcp_fast(float x) {
+#ifdef __CUDA_ARCH__
+    return __fdividef(1.0f, x);
+#else
+    return 1.0f / x;
+#endif
+}
+
+// log2 положительного float: на GPU — MUFU.LG2 (__log2f, абсолютная ошибка ~2^-22 — регулятору
+// хватает с запасом), на CPU — встроенная ucuda_ctl_log2.
+UCUDA_HD inline float ucuda_ctl_log2f(float x) {
+#ifdef __CUDA_ARCH__
+    return __log2f(x);
+#else
+    return ucuda_ctl_log2((numb)x);
+#endif
+}
+
+// Норма ошибки для "Hairer fast" (и "Hairer fast (C)"): возвращает log2(err^2) — с ним работает закон
+// (log2 err = 1/2 log2 err^2: ни корня, ни деления на пути к следующему шагу), в err2 кладёт
+// квадрат нормы — для приёма (err <= 1 <=> err^2 <= 1), проверки на разлёт и лога попыток (o.err
+// у Хайрера — err^2; корня нет нигде). Масштаб atol + rtol*max(|y0|, |y1|) — во float (в double
+// это 2n операций FP64 на попытку), 1/масштаб — без уточнения. DOP853: err^2 = s5^2 / (n (s5 +
+// 0.01 s3)), log2 err^2 = 2 log2 s5 - log2 (n (s5 + 0.01 s3)) — два независимых log2. Суммы вне
+// [0, 1e30), масштаб вне [0, 1e37) (переполнение float, деление на ~0), inf, NaN — как в
+// ucuda_ctl_err_own: пересчёт в double. Добавочная норма (err_extra, LLE/LS) — в квадрате,
+// большая из двух, NaN насквозь.
+UCUDA_HD inline float ucuda_ctl_lg2err2(const UcudaCtlIn& in, numb& err2) {
+    const int n = in.n;
+    const float rtol = (float)in.rtol;
+    float s0 = 0, s1 = 0, smax = 0;
+    if (in.nlo >= 2) {
+        for (int i = 0; i < n; ++i) {
+            const float sc = rtol * ucuda_fmaxf(fabsf((float)in.y0[i]), fabsf((float)in.y1[i])) + (float)in.atol[i];
+            smax = ucuda_fmaxf(smax, sc);
+            const float r  = ucuda_frcp_fast(sc);
+            const float e0 = (float)in.yerr[i] * r;
+            const float e1 = (float)in.yerr[n + i] * r;
+            s0 += e0 * e0;
+            s1 += e1 * e1;
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            const float sc = rtol * ucuda_fmaxf(fabsf((float)in.y0[i]), fabsf((float)in.y1[i])) + (float)in.atol[i];
+            smax = ucuda_fmaxf(smax, sc);
+            const float e0 = (float)in.yerr[i] * ucuda_frcp_fast(sc);
+            s0 += e0 * e0;
+        }
+    }
+    float lg;
+    if (s0 < 1e30f && s1 < 1e30f && smax < 1e37f) {   // !(<) ловит и NaN
+        if (in.nlo < 2) {
+            err2 = (numb)(s0 * ucuda_frcp_fast((float)n));
+            lg = ucuda_ctl_log2f(s0) - ucuda_ctl_log2f((float)n);
+        } else if (s0 == 0 && s1 == 0) {
+            err2 = 0;
+            lg = ucuda_ctl_log2f(0.0f);   // -inf: шаг растёт до fac2
+        } else {
+            const float den = (s0 + 0.01f * s1) * (float)n;
+            err2 = (numb)(s0 * s0 * ucuda_frcp_fast(den));
+            lg = 2.0f * ucuda_ctl_log2f(s0) - ucuda_ctl_log2f(den);
+        }
+    } else {
+        const numb e = ucuda_ctl_err_exact(in);
+        err2 = e * e;
+        lg = 2.0f * ucuda_ctl_log2(e);
+    }
+    const numb x = in.err_extra;
+    if (x != x || x * x > err2) { err2 = x * x; lg = 2.0f * ucuda_ctl_log2(x); }   // NaN своей err остаётся
+    return lg;
+}
+
+// То же целиком в numb — для "Hairer numb" (C body в adaptive_settings.h): масштаб, 1/масштаб,
+// суммы, log2 — в double, без float-ветки и без пересчёта (переполнять нечего).
+UCUDA_HD inline numb ucuda_ctl_lg2err2_numb(const UcudaCtlIn& in, numb& err2) {
+    const int n = in.n;
+    numb s0 = 0, s1 = 0;
+    for (int i = 0; i < n; ++i) {
+        const numb r = 1 / ucuda_ctl_scale(in, i);
+        const numb e0 = in.yerr[i] * r;
+        s0 += e0 * e0;
+        if (in.nlo >= 2) { const numb e1 = in.yerr[n + i] * r; s1 += e1 * e1; }
+    }
+    numb lg;
+    if (in.nlo < 2) {
+        err2 = s0 / (numb)n;
+        lg = log2(err2);
+    } else if (s0 == 0 && s1 == 0) {
+        err2 = 0;
+        lg = log2((numb)0);   // -inf
+    } else {
+        const numb den = (s0 + (numb)0.01 * s1) * (numb)n;
+        err2 = s0 * s0 / den;
+        lg = 2 * log2(s0) - log2(den);
+    }
+    const numb x = in.err_extra;
+    if (x != x || x * x > err2) { err2 = x * x; lg = 2 * log2(x); }
+    return lg;
+}
+
 UCUDA_HD inline numb ucuda_ctl_pow(numb x, numb y) {
 #ifdef UCUDA_AD_EXACT_CTL
     return pow(x, y);
@@ -370,27 +479,17 @@ UCUDA_HD inline numb ucuda_ctl_pow(numb x, numb y) {
 
 UCUDA_HD inline numb ucuda_clamp(numb x, numb lo, numb hi) { return ucuda_fmin(hi, ucuda_fmax(lo, x)); }
 
+#ifdef UCUDA_AD_EXACT_CTL
+// Сверка с dop853.c: всё в double, как у Хайрера.
 UCUDA_HD inline void ucuda_ctrl_hairer(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     const numb safe = in.c[0], facc1 = in.cc->facc1, facc2 = in.cc->facc2;
     const numb beta = in.c[3], expo1 = in.cc->expo1;
     const numb err = ucuda_ctl_err(in);
     const numb facold = m.nacc > 0 ? m.user[0] : (numb)1e-4;
-#ifdef UCUDA_AD_EXACT_CTL
     const numb fac11 = ucuda_ctl_pow(err, expo1);
     numb fac = beta == 0 ? fac11 : fac11 / ucuda_ctl_pow(facold, beta);   // dop853: beta = 0
     fac = fmax(facc2, fmin(facc1, fac / safe));
     numb hnew = in.h / fac;
-#else
-    // Во float и в логарифмах: fac11 / facold^beta = 2^(expo1 log2 err - beta log2 facold),
-    // деление на safe — умножение на 1/safe, h / fac — умножение на 1/fac. NaN в err даёт,
-    // как и в double-ветке, fac = facc1 (fminf/fmaxf отбрасывают NaN).
-    (void)safe;
-    const float l11 = (float)expo1 * ucuda_ctl_log2(err);
-    const float lfac = beta == 0 ? l11 : l11 - (float)beta * ucuda_ctl_log2(facold);
-    const float isafe = (float)in.cc->isafe;
-    const float fac = ucuda_fmaxf((float)facc2, ucuda_fminf((float)facc1, ucuda_ctl_exp2(lfac) * isafe));
-    numb hnew = in.h * (numb)(1.0f / fac);
-#endif
     o.err = err;
     if (err <= 1) {
         o.accept = 1;
@@ -399,14 +498,44 @@ UCUDA_HD inline void ucuda_ctrl_hairer(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
         if (in.nrej > 0) hnew = ucuda_fmin(hnew, in.h);
     } else {
         o.accept = 0;
-#ifdef UCUDA_AD_EXACT_CTL
         hnew = in.h / fmin(facc1, fac11 / safe);
-#else
-        hnew = in.h * (numb)(1.0f / ucuda_fminf((float)facc1, ucuda_ctl_exp2(l11) * isafe));
-#endif
     }
     o.h = hnew;
 }
+#else
+// "Hairer fast": закон Хайрера, сразу для 1/fac и в log2 (float). У Хайрера
+//   fac = clamp(err^expo1 / facold^beta / safe, 1/fac2, 1/fac1), hnew = h / fac;
+// 1/x на положительных убывает, поэтому 1/fac = clamp(safe err^-expo1 facold^beta, fac1, fac2) =
+// 2^clamp(x, log2 fac1, log2 fac2), x = -expo1/2 log2(err^2) + (beta log2 facold + log2 safe):
+// ни деления, ни корня, ни умножения на 1/safe — log2 err^2, одно FMA, зажим, exp2, h * 2^x.
+// Слагаемое в скобках постоянно на все попытки шага: считается при принятии (m.user[0], float в
+// numb), до первого принятого — cc->lc0. Рост после отказа (min(hnew, h)) — верхняя граница 0
+// вместо log2 fac2. Зажима по h_max нет: его делает драйвер перед каждой попыткой. Отличие от
+// формулы Хайрера — единицы ulp float в h. NaN в err — как и прежде, h * fac1. o.err — err^2:
+// драйверу нужна только его конечность, лог попыток значение ошибки не показывает.
+UCUDA_HD inline void ucuda_ctrl_hairer(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
+    numb err2;
+    const float lg  = ucuda_ctl_lg2err2(in, err2);                           // log2 err^2
+    const float he  = (float)in.cc->he;
+    const float cst = (float)(m.nacc > 0 ? m.user[0] : in.cc->lc0);
+    const float xa  = he * lg + cst;                                         // принятие
+    const float xr  = he * lg + (float)in.cc->lsafe;                         // отказ: без facold
+    numb hnew;
+    o.err = err2;
+    if (err2 <= 1) {
+        o.accept = 1;
+        const float hi = in.nrej > 0 ? ucuda_fminf((float)in.cc->lfac2, 0.0f) : (float)in.cc->lfac2;
+        hnew = in.h * (numb)ucuda_ctl_exp2(ucuda_fminf(hi, ucuda_fmaxf((float)in.cc->lfac1, xa)));
+        const numb beta = in.c[3];   // log2 facold = max(log2 err, log2 1e-4) — без своего log2
+        m.user[0] = beta == 0 ? in.cc->lsafe
+                  : (numb)((float)beta * ucuda_fmaxf(0.5f * lg, -13.287712379549449f) + (float)in.cc->lsafe);
+    } else {
+        o.accept = 0;
+        hnew = in.h * (numb)ucuda_ctl_exp2(ucuda_fmaxf((float)in.cc->lfac1, xr));
+    }
+    o.h = hnew;
+}
+#endif
 
 UCUDA_HD inline void ucuda_ctrl_scipy(const UcudaCtlIn& in, UcudaCtlMem& m, UcudaCtlOut& o) {
     (void)m;
@@ -526,6 +655,13 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
 // пользовательского (ucuda_ctrl_custom_prep(c, q, k), печатает adaptive_ctrl_source).
 UCUDA_HD inline void ucuda_ad_prepare_ctl(const UcudaAdaptParams& P, UcudaCtlConst& cc) {
     ucuda_ctl_prepare(P, cc);
+    // Здесь, а не в ucuda_ctl_prepare: ucuda_ctl_log2 объявлен ниже неё. Выражения — те же, что
+    // в разделе подготовки пресета "Hairer fast (C)" (adaptive_settings.h): результаты побитово равны.
+    cc.he    = (numb)(-0.5f * (float)cc.expo1);
+    cc.lsafe = (numb)ucuda_ctl_log2(P.c[0]);
+    cc.lfac1 = (numb)ucuda_ctl_log2(P.c[1]);
+    cc.lfac2 = (numb)ucuda_ctl_log2(P.c[2]);
+    cc.lc0   = (numb)((float)P.c[3] * ucuda_ctl_log2((numb)1e-4) + (float)cc.lsafe);
 #ifdef UCUDA_HAS_CUSTOM_CTRL
     ucuda_ctrl_custom_prep(P.c, P.q, cc.k);
 #endif
@@ -672,7 +808,7 @@ UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, const numb* X, const numb* F
 template <class K>
 UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, const numb* X, const numb* F0, const numb* a,
                                         const UcudaAdaptParams& P, UcudaAdaptStats& st) {
-    const numb hmax = P.hmax > 0 ? P.hmax : P.span;
+    const numb hmax = (P.hmax > 0 && P.hmax < (numb)1e300) ? P.hmax : P.span;   // +inf (и 0) — без ограничения
     if (!(hmax > 0)) return 0;
     numb dnf = 0, dny = 0;
     for (int i = 0; i < n; ++i) {
@@ -796,7 +932,7 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
                                  : ucuda_ad_hmin_auto(S.t, P.span);
     {
         numb h = S.h;
-        if (P.hmax > 0 && h > P.hmax) h = P.hmax;
+        if (h > P.hmax) h = P.hmax;   // без ограничения P.hmax = +inf (adaptive_build_params); NaN проходит
         int forced = 0;
         if (!(h > hmin) || (P.maxrej > 0 && nrej >= P.maxrej)) { h = hmin; forced = 1; }   // !(>) ловит и NaN
         numb tn = S.t + h;
