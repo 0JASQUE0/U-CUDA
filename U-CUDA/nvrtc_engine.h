@@ -35,8 +35,8 @@ struct PhaseAdaptiveRequest {
 inline const char* const kNvrtcCancelled = "Cancelled by user";
 
 // Замер адаптивного шага (Order -> Performance): replicas одинаковых нитей интегрируют
-// [0, T] от ic и останавливаются ровно в T; время ОДНОГО запуска ядра по cudaEvents,
-// как у perfIntegrateKernel постоянного шага. Плотного выхода нет (UCUDA_AD_NO_DENSE),
+// [0, T] от ic и останавливаются ровно в T; время ОДНОГО запуска меряет само ядро (%globaltimer
+// вокруг init и цикла шагов), как у perfIntegrateKernel постоянного шага. Плотного выхода нет (UCUDA_AD_NO_DENSE),
 // состояние в регистрах (UCUDA_AD_STATIC_N) — ядро меряет сам шаг, а не запись.
 struct AdaptiveEndpointRequest {
     std::string rhs, emb;                 // тела AdaptiveCode (dprep/deval не нужны)

@@ -148,6 +148,9 @@ enum AdaptiveAxisKind {
     kAdAxisTol    = 4,    // rtol = v, atol = v * tol_ratio
     kAdAxisCtrl   = 10,   // + k: k-й параметр регулятора
 };
+// Коды уходят в ядро как есть (axisKind) — обязаны совпадать с UCUDA_AXIS_* (ucuda_adaptive.cuh).
+static_assert(kAdAxisSystem == UCUDA_AXIS_SYSTEM && kAdAxisRtol == UCUDA_AXIS_RTOL && kAdAxisAtol == UCUDA_AXIS_ATOL
+              && kAdAxisTol == UCUDA_AXIS_TOL && kAdAxisCtrl == UCUDA_AXIS_CTRL, "adaptive axis codes out of sync");
 struct AdaptiveRequest {
     bool   enabled = false;
     bool   raw_nodes = false;
@@ -225,7 +228,8 @@ struct Bifurcation1DRequest {
     // period-1 windows. Ignored by the continuation path.
     bool emit_all_samples = false;
 
-    // Адаптивный шаг (см. AdaptiveRequest). Continuation и CPU с ним пока не работают.
+    // Адаптивный шаг (см. AdaptiveRequest). Классика — ядро на точку; continuation — ядро в одну
+    // нить (GPU) или цепочка в cl.exe-DLL (CPU); классика на CPU — та же DLL кусками по потокам.
     AdaptiveRequest adaptive;
 
     // Если не пусто — engine запишет CSV с результатами по тому же формату,
@@ -434,7 +438,8 @@ struct LLE1DRequest {
     double max_value = 1.0e6;
 
     // Адаптивный шаг (см. AdaptiveRequest): шаг выбирает регулятор по базовой траектории,
-    // клоны делают тот же шаг. Только классический GPU-свип; h не используется.
+    // клоны делают тот же шаг; h не используется. Классика на GPU — ядро на точку; continuation
+    // (GPU — ядро в одну нить) и CPU — ucuda_lyap_chain / ucuda_lyap_classic_range (run_lyap_ad_seq).
     AdaptiveRequest adaptive;
 
     // Опциональный CSV.
@@ -1211,8 +1216,8 @@ struct PerfRequest {
     double      rhs_per_step = 0;         // вычислений f на шаг схемы, 0 — неизвестно
 
     // Адаптивный шаг: узлы — tol, лог-сетка tol_lo..tol_hi из tol_n точек; rtol = tol,
-    // atol_i = tol * (atol_i / rtol) исходных настроек. Только GPU (время — ядро
-    // endpoint_kernel_ad), ошибки E1/E2/Eref здесь нет — только E(T).
+    // atol_i = tol * (atol_i / rtol) исходных настроек. GPU — ядро endpoint_kernel_ad, CPU — тот же
+    // драйвер в cl.exe-DLL (AdaptiveCpuModule); ошибки E1/E2/Eref здесь нет — только E(T).
     bool        adaptive = false;
     std::string ad_rhs, ad_emb, ad_ctrl_body;
     UcudaAdaptParams ad_params{};

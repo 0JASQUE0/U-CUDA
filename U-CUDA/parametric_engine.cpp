@@ -3171,8 +3171,6 @@ struct ParametricEngine::Impl {
             watcher.join();
             if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
             collect(0, nPts, pk, tm, fl, st);
-            fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ true);
-            if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         } else {
             // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
             // стоимость точки с адаптивным шагом сильно разная.
@@ -3202,40 +3200,9 @@ struct ParametricEngine::Impl {
             finished.store(true, std::memory_order_relaxed);
             watcher.join();
             if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
-
-            // Снимок и CSV — как у классического GPU-пути.
-            res.snapshot.values.assign(values.begin(), values.end());
-            res.snapshot.initial_conditions.assign(x0.begin(), x0.end());
-            res.snapshot.tMax          = req.t_max;
-            res.snapshot.transientTime = req.transient_time;
-            res.snapshot.h             = req.h;
-            res.snapshot.gpu_fmad      = get_nvrtc_fmad();
-            res.snapshot.preScaller    = req.pre_scaller;
-            res.snapshot.writableVar   = req.writable_var;
-            res.snapshot.indexOfMutVar = mutIdx;
-            res.snapshot.range_lo      = (numb)req.param_lo;
-            res.snapshot.range_hi      = (numb)req.param_hi;
-            res.snapshot.log_scale     = req.log_scale;
-            res.snapshot.on_cpu        = true;
-            res.snapshot.step_control  = ad.desc;
-            if (!req.csv_output_path.empty()) {
-                {
-                    std::ofstream cfg(req.csv_output_path + "_config.csv");
-                    data_export::write_bif1d_config(cfg, res.snapshot);
-                }
-                std::ofstream out(req.csv_output_path);
-                if (out.is_open()) {
-                    out << std::setprecision(15);
-                    for (int j = 0; j < nPts; ++j) {
-                        const double pv = req.log_scale ? getValueByIdx_log_local((size_t)j, nPts, req.param_lo, req.param_hi)
-                                                        : getValueByIdx_local((size_t)j, nPts, req.param_lo, req.param_hi);
-                        data_export::write_bif1d_rows(out, pv, res.flags[(size_t)j],
-                                                      res.bifurcation_points[(size_t)j].data(),
-                                                      res.peak_times[(size_t)j].data());
-                    }
-                }
-            }
         }
+        fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
         return res;

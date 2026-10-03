@@ -51,12 +51,7 @@ __device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const nu
 {{CTRL_CUSTOM}}
 #include "ucuda_adaptive.cuh"
 
-// Оси свипа (axisKind[i]): система или настройка шага.
-#define UCUDA_AXIS_SYSTEM 0     // параметр / НУ — как у постоянного шага (par_or_var)
-#define UCUDA_AXIS_RTOL   2
-#define UCUDA_AXIS_ATOL   3     // atol одинаковый у всех переменных
-#define UCUDA_AXIS_TOL    4     // rtol = v, atol = v * tolRatio
-#define UCUDA_AXIS_CTRL   10    // + k: k-й параметр регулятора
+// Оси свипа (axisKind[i]) — UCUDA_AXIS_* и ucuda_ad_apply_axis в ucuda_adaptive.cuh.
 
 // Наблюдаемый сигнал: та же формула, что у loopCalculateDiscreteModel_int
 // (writableVar < 0 — комбинация первых переменных). Линейна, поэтому та же
@@ -111,10 +106,7 @@ __device__ __forceinline__ bool ucudaAdOut(const numb* x, const numb maxValue)
 __device__ __forceinline__ void ucudaAdApplyStepAxis(const int kind, const numb v, const numb tolRatio,
 	UcudaAdaptParams& P)
 {
-	if (kind == UCUDA_AXIS_RTOL) P.rtol = v;
-	else if (kind == UCUDA_AXIS_ATOL) { for (int j = 0; j < AMOUNTOFX; ++j) P.atol[j] = v; }
-	else if (kind == UCUDA_AXIS_TOL)  { P.rtol = v; for (int j = 0; j < AMOUNTOFX; ++j) P.atol[j] = v * tolRatio; }
-	else if (kind >= UCUDA_AXIS_CTRL && kind < UCUDA_AXIS_CTRL + UCUDA_CTL_NPAR) P.c[kind - UCUDA_AXIS_CTRL] = v;
+	ucuda_ad_apply_axis(kind, v, tolRatio, AMOUNTOFX, P);
 }
 
 // Настройки шага, общие для всех нитей (ядро узлов, UCUDA_AD_NODES_KERNEL), оси свипа не

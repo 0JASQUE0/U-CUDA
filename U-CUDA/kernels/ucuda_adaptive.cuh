@@ -125,6 +125,22 @@ struct UcudaAdaptParams {
                                 //   UCUDA_AD_NO_RETRY — без повторов (каждая попытка принимается)
 };
 
+// Оси свипа (axisKind): система или настройка шага. Те же коды — kAdAxis* в parametric_engine.h.
+#define UCUDA_AXIS_SYSTEM 0     // параметр / НУ — как у постоянного шага (par_or_var)
+#define UCUDA_AXIS_RTOL   2
+#define UCUDA_AXIS_ATOL   3     // atol одинаковый у всех переменных
+#define UCUDA_AXIS_TOL    4     // rtol = v, atol = v * tolRatio
+#define UCUDA_AXIS_CTRL   10    // + k: k-й параметр регулятора
+
+// Ось настройки шага (kind != UCUDA_AXIS_SYSTEM): значение v — в параметры P, n — размерность.
+UCUDA_HD inline void ucuda_ad_apply_axis(const int kind, const numb v, const numb tolRatio, const int n,
+                                         UcudaAdaptParams& P) {
+    if (kind == UCUDA_AXIS_RTOL) P.rtol = v;
+    else if (kind == UCUDA_AXIS_ATOL) { for (int j = 0; j < n; ++j) P.atol[j] = v; }
+    else if (kind == UCUDA_AXIS_TOL)  { P.rtol = v; for (int j = 0; j < n; ++j) P.atol[j] = v * tolRatio; }
+    else if (kind >= UCUDA_AXIS_CTRL && kind < UCUDA_AXIS_CTRL + UCUDA_CTL_NPAR) P.c[kind - UCUDA_AXIS_CTRL] = v;
+}
+
 // Вход регулятора. Норму ошибки он считает сам (по yerr и масштабу от y0, y1), см.
 // ucuda_ctl_err. Оценочное решение, если нужно, — y1 - yerr.
 struct UcudaCtlIn {
@@ -1324,14 +1340,6 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
     return 1;
 }
 
-// Ось настройки шага (kind != 0): значение v — в параметры P (коды — UCUDA_AXIS_* в adaptive_part.cu).
-UCUDA_HD inline void ucuda_lyap_apply_axis(const int kind, const numb v, const numb tolRatio, UcudaAdaptParams& P) {
-    if (kind == 2) P.rtol = v;
-    else if (kind == 3) { for (int j = 0; j < AMOUNTOFX; ++j) P.atol[j] = v; }
-    else if (kind == 4) { P.rtol = v; for (int j = 0; j < AMOUNTOFX; ++j) P.atol[j] = v * tolRatio; }
-    else if (kind >= 10 && kind < 10 + UCUDA_CTL_NPAR) P.c[kind - 10] = v;
-}
-
 // Свип 1D по цепочке точек — continuation (каждая точка стартует с конечного состояния
 // предыдущей; переносятся x, шаг и память регулятора — ucuda_ad_restart — и прикреплённые
 // клоны) или, при continuation = 0, классический (каждая точка — заново от baseX, направления
@@ -1368,8 +1376,8 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
 #endif
         }
         const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, continuation != 0 && reverse != 0);
-        if (axisKind == 0) a[mutParamIdx] = v;
-        else ucuda_lyap_apply_axis(axisKind, v, tolRatio, P);
+        if (axisKind == UCUDA_AXIS_SYSTEM) a[mutParamIdx] = v;
+        else ucuda_ad_apply_axis(axisKind, v, tolRatio, AMOUNTOFX, P);
         if (!continuation) { attached = false; seq = j; }
         if (!attached) {
             for (int i = 0; i < AMOUNTOFX; ++i) x[i] = baseX[i];
@@ -1424,8 +1432,8 @@ UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const i
 #endif
         }
         const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, false);
-        if (axisKind == 0) a[mutParamIdx] = v;
-        else ucuda_lyap_apply_axis(axisKind, v, tolRatio, P);
+        if (axisKind == UCUDA_AXIS_SYSTEM) a[mutParamIdx] = v;
+        else ucuda_ad_apply_axis(axisKind, v, tolRatio, AMOUNTOFX, P);
         ucuda_ad_init(S, Kf, AMOUNTOFX, baseX, (numb)0, a, P);
         numb res[NC];
         const int ok = ucuda_lyap_out(S.X, maxValue) ? 0
