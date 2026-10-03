@@ -1218,6 +1218,7 @@ struct PerfRequest {
     UcudaAdaptParams ad_params{};
     double      tol_lo = 1e-3, tol_hi = 1e-13;
     int         tol_n = 11;
+    std::string ad_desc;                  // регулятор и допуски — в _config.csv экспорта (PerfResult::ad_desc)
     std::string setup_error;              // ошибка сборки запроса на стороне UI
 
     std::shared_ptr<std::atomic<bool>>  cancel;
@@ -1254,6 +1255,7 @@ struct PerfResult {
 
     // ---- «Точность — затраты» ----
     bool adaptive = false;                // узлы — tol (axis_vals), а не h
+    std::string ad_desc;                  // настройки шага этого прогона (PerfRequest::ad_desc)
     std::vector<std::vector<double>> y_end;   // y(T) узла, [n_pts][amountOfX]; пусто — нет
     std::vector<double> e_end;            // E(T) против эталона; пусто — эталона не было
     std::vector<double> n_rhs;            // вычислений f за запуск (NaN — неизвестно)

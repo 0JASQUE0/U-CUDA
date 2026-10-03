@@ -158,6 +158,10 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     req.rhs_per_step = perf_rhs_per_step(s, c.scheme);
     if (c.adaptive.enabled && !s.sys.is_map) {
         req.adaptive = true;
+        const AdaptiveSettings& a = c.adaptive;
+        req.ad_desc = "controller " + a.ctrl + ", rtol " + a.rtol + ", atol " + a.atol
+                    + (a.hmax.empty() ? std::string() : ", h_max " + a.hmax)
+                    + (a.max_rej.empty() ? std::string() : ", max rejects " + a.max_rej);
         req.end_ref_prec = (c.perf_end_ref == 2) ? 2 : 1;
         if (!adaptive_scheme_name_ok(c.scheme)) {
             req.setup_error = adaptive_scheme_hint();
@@ -915,6 +919,7 @@ static PerfResult run_performance_adaptive(const PerfRequest& req, bool on_gpu) 
     PerfResult res;
     res.axis = req.axis;
     res.adaptive = true;
+    res.ad_desc = req.ad_desc;
     auto fail = [&](const std::string& msg) -> PerfResult { res.error = msg; return res; };
     if (req.repeats < 1 || req.replicas < 1 || req.warmup < 0) return fail("bad measurement settings");
     const int n = std::max(1, req.tol_n);

@@ -687,40 +687,49 @@ bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, P
           && wait_default_stream(rq.cancel, cancelled);
     }
     if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
-    std::vector<double> data(data_count), times(rq.raw ? (size_t)N * cap : 0), logs(log_count), st((size_t)N * 9), fh(N);
+    std::vector<double> st((size_t)N * 9), fh(N);
     std::vector<int> cnt(N), logc(N);
     if (ok) {
-        ok = cu_ok(cuMemcpyDtoH(data.data(), d_data, data_count * sizeof(double)), error_, "cpyData(ad)")
-          && (!rq.raw || cu_ok(cuMemcpyDtoH(times.data(), d_times, times.size() * sizeof(double)), error_, "cpyTimes(ad)"))
-          && cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(ad)")
-          && (log_count == 0 || cu_ok(cuMemcpyDtoH(logs.data(), d_log, log_count * sizeof(double)), error_, "cpyLog(ad)"))
+        ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(ad)")
           && cu_ok(cuMemcpyDtoH(logc.data(), d_logc, (size_t)N * sizeof(int)), error_, "cpyLogc(ad)")
           && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(double)), error_, "cpyStats(ad)")
           && cu_ok(cuMemcpyDtoH(fh.data(), d_fh, (size_t)N * sizeof(double)), error_, "cpyFh(ad)");
     }
-    free_all();
-    if (!ok) return false;
 
     out.traj.resize(N);
     if (rq.raw) out.times.resize(N);
     out.log.resize(N);
     out.stats.resize(N);
     out.final_h = fh;
-    for (int tid = 0; tid < N; ++tid) {
+    // Только записанное нитью (counts / log_counts): буфер — под потолок max points, заполнен обычно малой частью.
+    std::vector<double> buf;
+    for (int tid = 0; ok && tid < N; ++tid) {
         const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
-        const double* base = data.data() + (size_t)tid * cap * nx;
+        buf.resize((size_t)c * nx);
+        if (c > 0)
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(double),
+                                    buf.size() * sizeof(double)), error_, "cpyData(ad)");
+        if (!ok) break;
         auto& tr = out.traj[tid];
         tr.resize(c);
-        for (int i = 0; i < c; ++i) tr[i].assign(base + (size_t)i * nx, base + (size_t)(i + 1) * nx);
-        if (rq.raw) out.times[tid].assign(times.begin() + (size_t)tid * cap, times.begin() + (size_t)tid * cap + c);
-        const int lc = rq.log_cap > 0 ? (logc[tid] < rq.log_cap ? logc[tid] : rq.log_cap) : 0;
-        out.log[tid].assign(logs.begin() + (size_t)tid * rq.log_cap * 4,
-                            logs.begin() + (size_t)tid * rq.log_cap * 4 + (size_t)lc * 4);
+        for (int i = 0; i < c; ++i) tr[i].assign(buf.data() + (size_t)i * nx, buf.data() + (size_t)(i + 1) * nx);
+        if (rq.raw) {
+            out.times[tid].resize((size_t)c);
+            if (c > 0)
+                ok = cu_ok(cuMemcpyDtoH(out.times[tid].data(), d_times + (size_t)tid * cap * sizeof(double),
+                                        (size_t)c * sizeof(double)), error_, "cpyTimes(ad)");
+        }
+        const int lc = rq.log_cap > 0 ? (logc[tid] < 0 ? 0 : (logc[tid] < rq.log_cap ? logc[tid] : rq.log_cap)) : 0;
+        out.log[tid].resize((size_t)lc * 4);
+        if (ok && lc > 0)
+            ok = cu_ok(cuMemcpyDtoH(out.log[tid].data(), d_log + (size_t)tid * rq.log_cap * 4 * sizeof(double),
+                                    (size_t)lc * 4 * sizeof(double)), error_, "cpyLog(ad)");
         const double* s = st.data() + (size_t)tid * 9;
         AdaptiveStats& a = out.stats[tid];
         a.nacc = s[0]; a.nrej = s[1]; a.nforced = s[2]; a.nrhs = s[3];
         a.hmin = s[4]; a.hmax = s[5]; a.hmean = s[6];
         a.diverged = s[7] != 0; a.truncated = s[8] != 0;
     }
-    return true;
+    free_all();
+    return ok;
 }

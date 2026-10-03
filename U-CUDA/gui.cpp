@@ -11966,11 +11966,9 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
     if (had_ref) {
         sn.ref_scheme   = c.perf_ref_scheme;
         sn.ref_substeps = std::max(0, (int)parse_num(c.perf_ref_substeps_text, 4.0));
-        if (c.adaptive.enabled)
-            sn.adaptive_desc = "controller " + c.adaptive.ctrl + ", rtol " + c.adaptive.rtol + ", atol "
-                             + c.adaptive.atol + (c.adaptive.hmax.empty() ? std::string() : ", h_max " + c.adaptive.hmax)
-                             + (c.adaptive.max_rej.empty() ? std::string() : ", max rejects " + c.adaptive.max_rej);
     }
+    // Настройки шага — тоже из прогона (у адаптивного Eref нет вовсе, только E(T)).
+    if (c.perf_result.adaptive) sn.adaptive_desc = c.perf_result.ad_desc;
     // Настройки теста устойчивости — тоже фактические, из результата; в снимке
     // остаётся лишь раскладка слотов, которой в результате нет.
     sn.stab_k = c.stab_result.k;

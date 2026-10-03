@@ -3299,6 +3299,21 @@ struct ParametricEngine::Impl {
         return {};
     }
 
+    // Обе оси 2D — настройки шага, задевающие одно поле (rtol и tol, atol и tol, один параметр
+    // регулятора): ядро применяет оси по порядку, и Y затирала бы X. Пусто — всё в порядке.
+    static std::string ad_axes_overlap_error(int kx, int ky) {
+        auto fields = [](int k) -> unsigned {
+            if (k == kAdAxisRtol) return 1u;
+            if (k == kAdAxisAtol) return 2u;
+            if (k == kAdAxisTol)  return 3u;
+            if (k >= kAdAxisCtrl && k < kAdAxisCtrl + UCUDA_CTL_NPAR) return 4u << (k - kAdAxisCtrl);
+            return 0u;
+        };
+        if (fields(kx) & fields(ky))
+            return "both axes sweep the same step setting (rtol / atol / tol / controller parameter)";
+        return {};
+    }
+
     // Модуль узлов шага (raw_nodes) у БД, бассейнов и метрик: без плотного выхода и с
     // размерностью-константой — циклы драйвера разворачиваются, и состояние нити может
     // жить в регистрах, а не в локальной памяти (UCUDA_AD_N в ucuda_adaptive.cuh).
@@ -3900,7 +3915,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
-        } else {
+        } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
+            // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
         }
@@ -4323,6 +4339,8 @@ struct ParametricEngine::Impl {
             if (!e1.empty()) return fail(e1 + " (X axis)");
             const std::string e2 = ad_axis_range_error(req.adaptive.axis_kind[1], req.param_lo_2, req.param_hi_2);
             if (!e2.empty()) return fail(e2 + " (Y axis)");
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
         }
         const bool over_h  = req.sweep_over_h   || ad_x;
         const bool over_h2 = req.sweep_over_h_2 || ad_y;
@@ -4766,7 +4784,8 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
-        } else {
+        } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
+            // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
         }
@@ -5162,6 +5181,8 @@ struct ParametricEngine::Impl {
             if (!e1.empty()) return fail(e1 + " (X axis)");
             const std::string e2 = ad_axis_range_error(req.adaptive.axis_kind[1], req.param_lo_2, req.param_hi_2);
             if (!e2.empty()) return fail(e2 + " (Y axis)");
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
         }
         const bool over_h  = req.sweep_over_h   || ad_x;
         const bool over_h2 = req.sweep_over_h_2 || ad_y;
@@ -7315,6 +7336,10 @@ struct ParametricEngine::Impl {
         const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
         if (ad && (req.sweep_over_h || req.sweep_over_h_2))
             return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (ad) {
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
+        }
         const bool over_h  = req.sweep_over_h   || ad_x;
         const bool over_h2 = req.sweep_over_h_2 || ad_y;
 
@@ -7964,6 +7989,10 @@ struct ParametricEngine::Impl {
             return {};
         }
 
+        if (ad) {
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return e3;
+        }
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
             return "log scale requires param lo/hi > 0 (Y axis)";
         if (req.sweep_over_h && req.sweep_over_h_2)
