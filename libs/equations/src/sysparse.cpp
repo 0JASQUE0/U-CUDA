@@ -1,0 +1,888 @@
+﻿#include "ucuda/equations/sysparse.hpp"
+#include <vector>
+#include <set>
+#include <map>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <algorithm>
+#include <cctype>
+
+namespace {
+
+    const char BS = '\\';
+
+    // Преобразует модуль |..| и \left|..\right| в fabs(..).
+    std::string convert_abs(std::string s) {
+        s = std::regex_replace(s, std::regex(R"(\\left\|)"), "fabs(");
+        s = std::regex_replace(s, std::regex(R"(\\right\|)"), ")");
+        std::string r; bool open = true;
+        for (char ch : s) {
+            if (ch == '|') { r += open ? "fabs(" : ")"; open = !open; }
+            else r += ch;
+        }
+        return r;
+    }
+
+    std::string strip_env(std::string s) {
+        // \mathrm{d} -> d (производные в "d/dt" часто пишутся через \mathrm)
+        s = std::regex_replace(s, std::regex(R"(\\mathrm\s*\{([^}]*)\})"), "$1");
+        // \operatorname{...} -> ... (на всякий случай)
+        s = std::regex_replace(s, std::regex(R"(\\operatorname\s*\{([^}]*)\})"), "$1");
+        // команды масштабирования скобок: \big( \bigl( \bigr) \Big \bigg ... -> убрать,
+        // сама скобка остаётся. Также \! \, уже чистятся ниже.
+        s = std::regex_replace(s, std::regex(R"(\\(?:bigg|Bigg|big|Big)[lr]?)"), "");
+
+        // Переменные как функции времени: x(t), y ( t ) -> x, y.
+        // Убираем "( t )" с пробелами. Делаем это до разбора, т.к. иначе x(t)
+        // выглядит как вызов функции. Также чистим производную: d x(t) -> d x.
+        s = std::regex_replace(s, std::regex(R"(\s*\(\s*t\s*\)\s*)"), " ");
+        s = convert_abs(s);
+
+        // нижний индекс в фигурных скобках: x_{m} -> x_m, a_{ij} -> a_ij
+        s = std::regex_replace(s, std::regex(R"(_\s*\{([A-Za-z0-9]+)\})"), "_$1");
+        // верхний индекс-степень в скобках уже обрабатывается основным парсером (^{...})
+
+        // OCR-артефакт: пробелы вокруг десятичной точки между цифрами.
+        // "0 . 5" -> "0.5", "1. 25" -> "1.25" и т.п. Применяем несколько раз
+        // на случай цепочек.
+        for (int pass = 0; pass < 2; ++pass)
+            s = std::regex_replace(s, std::regex(R"((\d)\s*\.\s*(\d))"), "$1.$2");
+
+        static const std::vector<std::string> kill = {
+            "\\begin{cases}","\\end{cases}","\\begin{aligned}","\\end{aligned}",
+            "\\begin{array}","\\end{array}","\\left\\{","\\right.","\\left.","&",
+            "\\quad","\\;","\\,","\\!"," \\ "
+        };
+        for (auto& k : kill) {
+            size_t p;
+            while ((p = s.find(k)) != std::string::npos) s.erase(p, k.size());
+        }
+        s = std::regex_replace(s, std::regex(R"(\{[lcr|]+\})"), "");
+        return s;
+    }
+
+    // Снимает обёртывающие фигурные скобки и пунктуацию уравнений с одной строки/части.
+    std::string clean_part(std::string t) {
+        // убрать ведущие/замыкающие пробелы
+        auto trim = [](std::string& x) {
+            size_t a = x.find_first_not_of(" \t\n\r");
+            size_t b = x.find_last_not_of(" \t\n\r");
+            if (a == std::string::npos) { x.clear(); return; }
+            x = x.substr(a, b - a + 1);
+            };
+        trim(t);
+        auto count = [](const std::string& x, char ch) { size_t n = 0; for (char c : x) if (c == ch) ++n; return n; };
+        // Единый цикл: снимаем внешние пары {}, пустые {}, хвостовую пунктуацию и
+        // непарные скобки. Объединено, чтобы после удаления ';' снова проверить
+        // внешнюю пару (иначе "{...}=...}  ;" не очищается).
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            // пустые группы {}
+            size_t p;
+            while ((p = t.find("{}")) != std::string::npos) { t.erase(p, 2); changed = true; }
+            trim(t);
+            // завершающая пунктуация , ; .
+            while (!t.empty() && (t.back() == ',' || t.back() == ';' || t.back() == '.')) { t.pop_back(); changed = true; }
+            trim(t);
+            // внешняя пара { ... } охватывающая всё
+            if (t.size() >= 2 && t.front() == '{' && t.back() == '}') {
+                int depth = 0; bool wraps = true;
+                for (size_t i = 0; i < t.size(); ++i) {
+                    if (t[i] == '{') ++depth;
+                    else if (t[i] == '}') { --depth; if (depth == 0 && i + 1 != t.size()) { wraps = false; break; } }
+                }
+                if (wraps) { t = t.substr(1, t.size() - 2); changed = true; trim(t); }
+            }
+            // лишняя закрывающая } в конце, если открывающих меньше
+            if (!t.empty() && t.back() == '}' && count(t, '}') > count(t, '{')) { t.pop_back(); changed = true; }
+            trim(t);
+            // лишняя открывающая { в начале, если закрывающих меньше
+            if (!t.empty() && t.front() == '{' && count(t, '{') > count(t, '}')) { t.erase(t.begin()); changed = true; }
+            trim(t);
+        }
+        return t;
+    }
+
+    std::vector<std::string> split_rows(const std::string& s) {
+        std::vector<std::string> rows;
+        size_t start = 0;
+        for (size_t i = 0; i + 1 < s.size(); ++i) {
+            if (s[i] == BS && s[i + 1] == BS) {
+                rows.push_back(s.substr(start, i - start));
+                i += 1; start = i + 1;
+            }
+        }
+        rows.push_back(s.substr(start));
+        std::vector<std::string> out;
+        for (auto& r : rows) {
+            if (r.find_first_not_of(" \t\n\r") != std::string::npos) out.push_back(r);
+        }
+        return out;
+    }
+
+    // Map mode: strips the iteration index, turning x_{n+1} = f(x_n, y_n) into
+    // x = f(x, y). The index symbol is taken from the first "_{?+1}" (default n)
+    // and returned via sym so detect_alphabet does not file it as a parameter.
+    //
+    // Call AFTER strip_env (its flatten regex leaves _{n+1} alone because of the
+    // '+') and BEFORE insert_mult: that one scans names with isalpha only and
+    // never clears prev_operand on '_', so a surviving x_n would become "x_ * n".
+    std::string strip_iteration_index(std::string s, char& sym) {
+        std::smatch m;
+        sym = 'n';
+        if (std::regex_search(s, m, std::regex(R"(_\s*\{\s*([A-Za-z])\s*\+\s*1\s*\})")))
+            sym = std::string(m[1])[0];
+        const std::string c(1, sym);
+        // Order matters: longest form first, else "_{n+1}" would only lose "_n".
+        s = std::regex_replace(s, std::regex(R"(_\s*\{\s*)" + c + R"(\s*\+\s*1\s*\})"), "");
+        s = std::regex_replace(s, std::regex(R"(_\s*\{\s*)" + c + R"(\s*\})"), "");
+        s = std::regex_replace(s, std::regex(R"(_)" + c + R"((?![A-Za-z0-9_]))"), "");
+        return s;
+    }
+
+    // Map mode: the LHS is a bare name already (the index was stripped above).
+    // A greek command \theta is accepted too, as lhs_var does for \dot{\theta}.
+    std::string lhs_var_map(const std::string& lhs) {
+        std::smatch m;
+        if (std::regex_match(lhs, m, std::regex(R"(\s*\\?([A-Za-z]\w*)\s*)")))
+            return m[1];
+        return "";
+    }
+
+    std::string lhs_var(const std::string& lhs) {
+        std::smatch m;
+        // \dot — извлекаем базовое имя, затем ищем индекс _idx в ОСТАТКЕ строки
+        // (он может быть отделён скобками: {{\dot{x}}_{m}} -> base x, индекс _m)
+        {
+            std::smatch md;
+            std::string base;
+            size_t tail_pos = 0;
+            if (std::regex_search(lhs, md, std::regex(R"(\\dot\s*\{\s*\\([A-Za-z]+)\s*\})"))) {
+                // \dot{\theta} -> греческое имя theta
+                base = md[1];
+                tail_pos = md.position(0) + md.length(0);
+            }
+            else if (std::regex_search(lhs, md, std::regex(R"(\\dot\s*\\([A-Za-z]+))"))) {
+                // \dot\theta (без скобок) -> theta
+                base = md[1];
+                tail_pos = md.position(0) + md.length(0);
+            }
+            else if (std::regex_search(lhs, md, std::regex(R"(\\dot\s*\{\s*([A-Za-z]\w*)\s*\})"))) {
+                base = md[1];
+                tail_pos = md.position(0) + md.length(0);
+            }
+            else if (std::regex_search(lhs, md, std::regex(R"(\\dot\s*([A-Za-z]\w*))"))) {
+                base = md[1];
+                tail_pos = md.position(0) + md.length(0);
+            }
+            if (!base.empty()) {
+                // ищем _index в хвосте после \dot{...}
+                std::string tail = lhs.substr(tail_pos);
+                std::smatch mi;
+                if (std::regex_search(tail, mi, std::regex(R"(_(\w+))")))
+                    base += "_" + std::string(mi[1]);
+                return base;
+            }
+        }
+        // \frac{ d x }{ d t }  (знаменатель: t, \tau, или другая переменная)
+        if (std::regex_search(lhs, m, std::regex(R"(\\frac\s*\{\s*d\s*([A-Za-z]\w*)\s*\}\s*\{\s*d\s*\\?[A-Za-z]\w*\s*\})")))
+            return m[1];
+        // \frac{ d x }{ d \tau }  с греческой переменной дифференцирования (числитель обычный)
+        if (std::regex_search(lhs, m, std::regex(R"(\\frac\s*\{\s*d\s*([A-Za-z]\w*)\s*\}\s*\{\s*d\s*\\[A-Za-z]+\s*\})")))
+            return m[1];
+        // d x / d t   (знаменатель: t, \tau, ...)
+        if (std::regex_search(lhs, m, std::regex(R"(d\s*([A-Za-z]\w*)\s*/\s*d\s*\\?[A-Za-z]\w*)")))
+            return m[1];
+        // x'
+        if (std::regex_search(lhs, m, std::regex(R"(([A-Za-z]\w*)\s*')")))
+            return m[1];
+        return "";
+    }
+
+    // Токенизация правой части по известному алфавиту с вставкой '*'.
+    // Алфавит: точные имена (греческие как \sigma и обычные как x).
+    // Возвращает выражение с явными операторами, годное для основного парсера.
+    // Math functions the expression parser accepts. Mirrors known_funcs() in
+    // codegen.cpp — that one is the source of truth and raises "unknown
+    // function" for anything missing here.
+    const std::set<std::string>& math_funcs() {
+        static const std::set<std::string> f = {
+            "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
+            "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
+            "pow","atan2","fmod","floor","ceil"
+        };
+        return f;
+    }
+
+    std::string insert_mult(const std::string& rhs,
+        const std::set<std::string>& alpha_plain,   // x, y, b ...
+        const std::set<std::string>& alpha_greek) { // sigma, omega ...
+        std::string out;
+        size_t i = 0;
+        // нужен ли '*' между предыдущим токеном-операндом и следующим операндом
+        bool prev_operand = false;
+
+        auto emit_op = [&](const std::string& tok) {
+            if (prev_operand) out += " * ";
+            out += tok; prev_operand = true;
+            };
+
+        while (i < rhs.size()) {
+            char c = rhs[i];
+            if (std::isspace((unsigned char)c)) { out += c; ++i; continue; }
+            if (c == BS) {
+                // команда \name
+                size_t j = i + 1;
+                while (j < rhs.size() && std::isalpha((unsigned char)rhs[j])) ++j;
+                std::string name = rhs.substr(i + 1, j - i - 1);
+                // \cdot / \times — это ОПЕРАТОР умножения, не операнд
+                if (name == "cdot" || name == "times") {
+                    out += " * "; prev_operand = false; i = j; continue;
+                }
+                if (alpha_greek.count(name)) { emit_op("\\" + name); i = j; continue; }
+                // иначе функция (\sin, \cos, \tanh ...) или \left
+                if (prev_operand) out += " * ";
+                out += "\\" + name; prev_operand = false; i = j;
+                // степень на функции: \sin^{...} — скопировать ^{...} как часть функции,
+                // НЕ вставляя умножение между функцией и её аргументом
+                if (i < rhs.size() && rhs[i] == '^') {
+                    out += '^'; ++i;
+                    if (i < rhs.size() && rhs[i] == '{') {
+                        int depth = 0;
+                        do { out += rhs[i]; if (rhs[i] == '{') ++depth; else if (rhs[i] == '}') --depth; ++i; } while (i < rhs.size() && depth > 0);
+                    }
+                    else if (i < rhs.size()) { out += rhs[i]; ++i; }
+                }
+                continue;
+            }
+            if (std::isalpha((unsigned char)c)) {
+                // A whole-run function name beats the greedy alphabet scan below:
+                // otherwise "cos" with a parameter named c is eaten as c plus a
+                // junk tail "os". A space still separates letters, so "a cos(x)"
+                // keeps its run as "cos" and only a glued "acos(x)" reads as
+                // arc-cosine. A user symbol of the same name still wins.
+                {
+                    size_t w = i;
+                    while (w < rhs.size() && std::isalpha((unsigned char)rhs[w])) ++w;
+                    const std::string run = rhs.substr(i, w - i);
+                    if (math_funcs().count(run) && !alpha_plain.count(run)) {
+                        if (prev_operand) out += " * ";
+                        out += run; prev_operand = false; i = w; continue;
+                    }
+                }
+                // жадно режем по алфавиту обычных имён: ищем самое длинное совпадение
+                std::string best;
+                for (size_t L = 1; i + L <= rhs.size(); ++L) {
+                    if (!std::isalpha((unsigned char)rhs[i + L - 1])) break;
+                    std::string cand = rhs.substr(i, L);
+                    if (alpha_plain.count(cand)) best = cand;
+                }
+                if (!best.empty()) {
+                    // разбиваем подряд идущие односимвольные: bz -> b*z, если оба в алфавите
+                    emit_op(best); i += best.size(); continue;
+                }
+                // неизвестная буква (функция типа sin распознается дальше) — соберём слово
+                size_t j = i; while (j < rhs.size() && std::isalpha((unsigned char)rhs[j])) ++j;
+                std::string word = rhs.substr(i, j - i);
+                // константа pi — это операнд (как число), а не функция
+                if (word == "pi") { emit_op(word); i = j; continue; }
+                if (prev_operand) out += " * ";
+                out += word; prev_operand = false; // вероятно функция; '(' даст вызов
+                i = j; continue;
+            }
+            if (std::isdigit((unsigned char)c) || c == '.') {
+                size_t j = i; while (j < rhs.size() && (std::isdigit((unsigned char)rhs[j]) || rhs[j] == '.')) ++j;
+                emit_op(rhs.substr(i, j - i)); i = j; continue;
+            }
+            if (c == '(') { if (prev_operand) out += " * "; out += '('; prev_operand = false; ++i; continue; }
+            if (c == ')') { out += ')'; prev_operand = true; ++i; continue; }
+            if (c == '{') { out += '{'; prev_operand = false; ++i; continue; }
+            if (c == '}') { out += '}'; prev_operand = true; ++i; continue; }
+            if (c == '+' || c == '-' || c == '*' || c == '/' || c == '^' || c == ',') { out += c; prev_operand = false; ++i; continue; }
+            // прочее — копируем как есть
+            out += c; ++i;
+        }
+        out = std::regex_replace(out, std::regex("  +"), " ");
+        return out;
+    }
+
+} // namespace
+
+// Разбор определений функций: "h(x) = тело"
+// Принимает LaTeX или plain. Снимает окружения (\begin{aligned}, \big, ...),
+// разбивает по "\\", берёт части с '=' (пустые/служебные пропускает).
+FuncDefs parse_func_defs(const std::string& text) {
+    FuncDefs out;
+    // прогоняем через ту же очистку, что и систему: окружения, \big, \mathrm,
+    // индексы _{1}->_1, модуль |..|->fabs, (t)->убрать и т.п.
+    std::string s = strip_env(text);
+
+    // разбиваем по "\\" (как уравнения), плюс по переводам строк
+    std::vector<std::string> parts;
+    {
+        size_t start = 0;
+        for (size_t i = 0; i + 1 < s.size(); ++i) {
+            if (s[i] == '\\' && s[i + 1] == '\\') {
+                parts.push_back(s.substr(start, i - start));
+                i += 1; start = i + 1;
+            }
+        }
+        parts.push_back(s.substr(start));
+    }
+    // дополнительно режем каждую часть по переводам строк
+    std::vector<std::string> lines;
+    for (auto& p : parts) {
+        std::istringstream in(p);
+        std::string ln;
+        while (std::getline(in, ln)) lines.push_back(ln);
+    }
+
+    for (auto& line : lines) {
+        // пропускаем пустые/служебные (нет '=' и нет букв -> мусор)
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            bool has_alpha = false;
+            for (char ch : line) if (std::isalpha((unsigned char)ch)) { has_alpha = true; break; }
+            if (!has_alpha) continue;            // пустая строка/остаток окружения
+            // строка с буквами, но без '=' — возможно ошибка ввода; но если это
+            // остаток вроде "\end{aligned}" уже снят strip_env, пропустим тихо
+            if (line.find_first_not_of(" \t\r\n") == std::string::npos) continue;
+            continue; // мягко пропускаем, не валим весь разбор
+        }
+        std::string lhs = line.substr(0, eq);
+        std::string rhs = line.substr(eq + 1);
+
+        std::smatch m;
+        if (!std::regex_search(lhs, m, std::regex(R"(\s*([A-Za-z]\w*)\s*\(\s*([^)]*)\s*\))")))
+            continue; // не похоже на заголовок функции — пропускаем
+        std::string name = m[1];
+        std::string args_str = m[2];
+        FuncDef def;
+        std::string cur;
+        for (char c : args_str) {
+            if (c == ',') {
+                size_t a = cur.find_first_not_of(" \t");
+                size_t b = cur.find_last_not_of(" \t");
+                if (a != std::string::npos) def.args.push_back(cur.substr(a, b - a + 1));
+                cur.clear();
+            }
+            else cur += c;
+        }
+        {
+            size_t a = cur.find_first_not_of(" \t"); size_t b = cur.find_last_not_of(" \t");
+            if (a != std::string::npos) def.args.push_back(cur.substr(a, b - a + 1));
+        }
+
+        // тело — trim + завершающая пунктуация
+        size_t a = rhs.find_first_not_of(" \t");
+        if (a != std::string::npos) rhs = rhs.substr(a);
+        while (!rhs.empty() && (rhs.back() == ',' || rhs.back() == ';' || rhs.back() == '.' ||
+            rhs.back() == ' ' || rhs.back() == '\t')) rhs.pop_back();
+        // индексы и модуль уже сняты strip_env, но подстрахуемся
+        rhs = std::regex_replace(rhs, std::regex(R"(_\s*\{([A-Za-z0-9]+)\})"), "_$1");
+        def.body = convert_abs(rhs);
+        if (!def.body.empty()) out[name] = def;
+    }
+    if (out.empty())
+        throw std::runtime_error("no function definitions found (expected name(args) = body)");
+    return out;
+}
+
+namespace {
+    // Заменяет в выражении вызовы пользовательских функций их телами (инлайнинг).
+    // Поддержка одного уровня вложенности достаточна для типичных систем;
+    // для функций, вызывающих другие функции, применяем повторно до фикс-точки.
+    std::string inline_funcs_once(const std::string& expr, const FuncDefs& funcs, bool& changed) {
+        std::string out;
+        size_t i = 0;
+        while (i < expr.size()) {
+            // ищем идентификатор, за которым '('
+            if (std::isalpha((unsigned char)expr[i]) || expr[i] == '_') {
+                size_t j = i;
+                while (j < expr.size() && (std::isalnum((unsigned char)expr[j]) || expr[j] == '_')) ++j;
+                std::string name = expr.substr(i, j - i);
+                // пропускаем пробелы до '('
+                size_t k = j; while (k < expr.size() && std::isspace((unsigned char)expr[k])) ++k;
+                auto it = funcs.find(name);
+                if (it != funcs.end() && k < expr.size() && expr[k] == '(') {
+                    // парсим аргумент(ы) с учётом вложенных скобок
+                    int depth = 0; size_t argstart = k + 1; size_t p = k;
+                    std::vector<std::string> actual;
+                    std::string cur;
+                    for (p = k; p < expr.size(); ++p) {
+                        char c = expr[p];
+                        if (c == '(') { ++depth; if (depth == 1) continue; }
+                        if (c == ')') {
+                            --depth; if (depth == 0) {
+                                size_t a = cur.find_first_not_of(" \t"); size_t b = cur.find_last_not_of(" \t");
+                                if (a != std::string::npos) actual.push_back(cur.substr(a, b - a + 1));
+                                break;
+                            }
+                        }
+                        if (c == ',' && depth == 1) {
+                            size_t a = cur.find_first_not_of(" \t"); size_t b = cur.find_last_not_of(" \t");
+                            if (a != std::string::npos) actual.push_back(cur.substr(a, b - a + 1));
+                            cur.clear(); continue;
+                        }
+                        cur += c;
+                    }
+                    // p указывает на закрывающую ')'
+                    const FuncDef& def = it->second;
+                    if (actual.size() != def.args.size())
+                        throw std::runtime_error("function " + name + ": argument count mismatch");
+                    // подставляем тело, заменяя формальные аргументы на фактические
+                    std::string body = def.body;
+                    // замена идентификаторов-аргументов целиком (не подстрок)
+                    for (size_t ai = 0; ai < def.args.size(); ++ai) {
+                        const std::string& formal = def.args[ai];
+                        const std::string& act = actual[ai];
+                        std::string rep;
+                        size_t q = 0;
+                        while (q < body.size()) {
+                            if ((std::isalpha((unsigned char)body[q]) || body[q] == '_')) {
+                                size_t r = q;
+                                while (r < body.size() && (std::isalnum((unsigned char)body[r]) || body[r] == '_')) ++r;
+                                std::string id = body.substr(q, r - q);
+                                if (id == formal) rep += "(" + act + ")"; // оборачиваем для безопасности
+                                else rep += id;
+                                q = r;
+                            }
+                            else { rep += body[q]; ++q; }
+                        }
+                        body = rep;
+                    }
+                    out += "(" + body + ")"; // оборачиваем подставленное тело
+                    changed = true;
+                    i = p + 1;
+                    continue;
+                }
+                // не пользовательская функция — копируем имя как есть
+                out += name; i = j; continue;
+            }
+            out += expr[i]; ++i;
+        }
+        return out;
+    }
+
+    std::string inline_all_funcs(const std::string& expr, const FuncDefs& funcs) {
+        if (funcs.empty()) return expr;
+        std::string cur = expr;
+        for (int iter = 0; iter < 16; ++iter) { // защита от бесконечной рекурсии
+            bool changed = false;
+            cur = inline_funcs_once(cur, funcs, changed);
+            if (!changed) break;
+        }
+        return cur;
+    }
+} // namespace
+
+System parse_system_from_latex(const std::string& multiline_latex,
+    const std::vector<std::string>& alphabet,
+    ParamOrder order,
+    const FuncDefs& funcs,
+    bool discrete_map) {
+    // разделяем алфавит на греческие (многобуквенные имена команд) и обычные
+    std::set<std::string> alpha_plain, alpha_greek;
+    for (auto& a : alphabet) {
+        if (a.size() >= 2 && std::all_of(a.begin(), a.end(),
+            [](char ch) { return std::isalpha((unsigned char)ch); })
+            && std::islower((unsigned char)a[0]) == std::islower((unsigned char)a[0])) {
+            // эвристика: если имя длиннее 1 символа и встречается как \name -> греческое
+            alpha_greek.insert(a);
+        }
+        // также добавляем в plain для прямого совпадения (x, y, b и короткие)
+        if (a.size() == 1) alpha_plain.insert(a);
+        else alpha_plain.insert(a); // многобуквенные обычные тоже допустимы
+    }
+
+    std::string s = strip_env(multiline_latex);
+    if (discrete_map) { char sym = 'n'; s = strip_iteration_index(s, sym); }
+    std::vector<std::string> rows = split_rows(s);
+    if (rows.empty()) throw std::runtime_error("no equations found in OCR output");
+
+    System sys; sys.latex = true; sys.is_map = discrete_map;
+    std::set<std::string> used_syms;
+
+    for (auto& row : rows) {
+        // СНАЧАЛА снимаем внешние обёртки {...} со всего уравнения,
+        // иначе разрез по '=' внутри обёртки ломает баланс скобок.
+        std::string eqn = clean_part(row);
+        // пропускаем пустые/служебные строки (остатки \end{array}, пунктуация)
+        if (eqn.find_first_of("=") == std::string::npos) {
+            bool has_alpha = false;
+            for (char ch : eqn) if (std::isalpha((unsigned char)ch)) { has_alpha = true; break; }
+            if (!has_alpha) continue; // действительно пустая/служебная — пропускаем
+            throw std::runtime_error(discrete_map
+                ? "equation without '=' (expected x_{n+1} = ...): " + eqn
+                : "equation without '=' (LHS with derivative required): " + eqn);
+        }
+        size_t eq = eqn.find('=');
+        std::string lhs = clean_part(eqn.substr(0, eq));
+        std::string rhs = clean_part(eqn.substr(eq + 1));
+
+        std::string var = discrete_map ? lhs_var_map(lhs) : lhs_var(lhs);
+        if (var.empty())
+            throw std::runtime_error(discrete_map
+                ? "expected 'x_{n+1} = ...' in LHS: '" + lhs + "'"
+                : "cannot detect state variable in LHS: '" + lhs + "'");
+        sys.vars.push_back(var);
+
+        // инлайним вспомогательные функции (если заданы), затем умножение
+        std::string rhs_inlined = inline_all_funcs(rhs, funcs);
+        std::string rhs2 = insert_mult(rhs_inlined, alpha_plain, alpha_greek);
+        size_t a = rhs2.find_first_not_of(" \t");
+        if (a != std::string::npos) rhs2 = rhs2.substr(a);
+        sys.rhs.push_back(rhs2);
+    }
+
+    // параметры = символы алфавита, не являющиеся переменными И не константами
+    static const std::set<std::string> constants = { "pi" };
+    std::set<std::string> varset(sys.vars.begin(), sys.vars.end());
+
+    // множество допустимых параметров (из алфавита, не переменные, не константы)
+    std::set<std::string> param_set;
+    for (auto& a : alphabet)
+        if (!varset.count(a) && !constants.count(a)) param_set.insert(a);
+
+    std::vector<std::string> ordered;
+    if (order == ParamOrder::AsInAlphabet) {
+        // порядок как в alphabet
+        for (auto& a : alphabet)
+            if (param_set.count(a)) ordered.push_back(a);
+    }
+    else {
+        // AsInSystem: порядок первого появления в правых частях
+        std::set<std::string> seen;
+        for (const auto& rhs : sys.rhs) {
+            // ищем имена параметров как подстроки-идентификаторы в rhs
+            // (rhs уже содержит \greek и обычные имена)
+            size_t i = 0;
+            while (i < rhs.size()) {
+                // читаем идентификатор: \name или буквенно-цифровой с _
+                std::string tok;
+                if (rhs[i] == '\\') {
+                    size_t j = i + 1;
+                    while (j < rhs.size() && std::isalpha((unsigned char)rhs[j])) ++j;
+                    tok = rhs.substr(i + 1, j - i - 1); // имя без слеша
+                    i = j;
+                }
+                else if (std::isalpha((unsigned char)rhs[i]) || rhs[i] == '_') {
+                    size_t j = i;
+                    while (j < rhs.size() && (std::isalnum((unsigned char)rhs[j]) || rhs[j] == '_')) ++j;
+                    tok = rhs.substr(i, j - i);
+                    i = j;
+                }
+                else { ++i; continue; }
+
+                if (param_set.count(tok) && !seen.count(tok)) {
+                    seen.insert(tok);
+                    ordered.push_back(tok);
+                }
+            }
+        }
+        // если какой-то параметр объявлен в алфавите, но не встретился в rhs —
+        // добавим его в конец (в порядке алфавита), чтобы не потерять
+        for (auto& a : alphabet)
+            if (param_set.count(a) && !seen.count(a)) { ordered.push_back(a); seen.insert(a); }
+    }
+    sys.params = ordered;
+
+    return sys;
+}
+
+// detect_alphabet — авто-классификация идентификаторов из LaTeX/Plain текста.
+// Идентификаторы внутри производных → vars; остальные → params.
+
+DetectedAlphabet detect_alphabet(const std::string& text, bool discrete_map) {
+    DetectedAlphabet out;
+    char iter_sym = 'n';
+    // Множества для дедупликации; vectors хранят порядок появления.
+    std::set<std::string> var_set, param_set;
+
+    auto push_unique = [](std::vector<std::string>& v,
+                          std::set<std::string>& seen, const std::string& tok) {
+        if (seen.count(tok)) return;
+        seen.insert(tok);
+        v.push_back(tok);
+    };
+
+    // Names that must never end up in params. Keep in sync with known_funcs()
+    // in codegen.cpp plus common LaTeX commands and constants.
+    static const std::set<std::string> EXCLUDED = {
+        "sin","cos","tan","sec","csc","cot",
+        "arcsin","arccos","arctan",
+        "asin","acos","atan","atan2",
+        "sinh","cosh","tanh","asinh","acosh","atanh",
+        "exp","log","ln","log2","log10","sqrt","cbrt","pow","fmod",
+        "abs","fabs","max","min","floor","ceil",
+        "pi","infty","cdot","times","div","pm","mp","cdots","ldots",
+        "frac","dfrac","dot","ddot","left","right","big","Big","bigg","Bigg",
+        "begin","end",
+        "tau","theta",
+        "operatorname","mathrm","text","mathbf","mathit","mathcal"
+    };
+
+    // preprocess: убираем OCR-мусор и `\mathrm{d}`
+    // Делаем это до сканирования, чтобы дальше можно было искать только `d`/`t`.
+    std::string s = text;
+    auto str_replace_all = [&](const std::string& from, const std::string& to) {
+        if (from.empty()) return;
+        size_t p = 0;
+        while ((p = s.find(from, p)) != std::string::npos) {
+            s.replace(p, from.size(), to);
+            p += to.size();
+        }
+    };
+    str_replace_all("\\mathrm{d}", "d");
+    str_replace_all("\\mathrm{t}", "t");
+    str_replace_all("\\mathrm d",  "d");
+    str_replace_all("\\mathrm t",  "t");
+    str_replace_all("\\operatorname{d}", "d");
+    // Map mode: drop the iteration index first, while `_{n+1}` still has its
+    // braces — the flatten below only handles alphanumeric subscripts.
+    if (discrete_map) {
+        try { s = strip_iteration_index(s, iter_sym); }
+        catch (const std::regex_error&) {}
+    }
+    // Flatten `_{sub}` -> `_sub` so read_token grabs `x_m` as one identifier;
+    // matches what strip_env does for the AST parser.
+    try {
+        s = std::regex_replace(s, std::regex(R"(_\s*\{([A-Za-z0-9]+)\})"), "_$1");
+    } catch (const std::regex_error&) {}
+
+    // Reads one identifier token: {length, text}. Multi-char plain form so
+    // sin/sigma/rho stay whole (EXCLUDED filter matches full names only).
+    auto read_token = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
+        if (i >= src.size()) return { 0, "" };
+        char c = src[i];
+        if (c == '\\') {
+            size_t j = i + 1;
+            while (j < src.size() && std::isalpha((unsigned char)src[j])) ++j;
+            if (j > i + 1) return { j - i, src.substr(i, j - i) };
+            return { 1, "" };
+        }
+        if (std::isalpha((unsigned char)c) || c == '_') {
+            size_t j = i + 1;
+            while (j < src.size()
+                   && (std::isalnum((unsigned char)src[j]) || src[j] == '_'))
+                ++j;
+            return { j - i, src.substr(i, j - i) };
+        }
+        return { 0, "" };
+    };
+
+    // Хелпер: позиция первого не-пробельного символа начиная с i, либо npos.
+    auto skip_ws = [&](const std::string& src, size_t i) -> size_t {
+        while (i < src.size() && std::isspace((unsigned char)src[i])) ++i;
+        return i;
+    };
+
+    // Reads a `_sub` suffix (post-flatten form only) at position i.
+    // Returns {chars_consumed, "_sub"}; {0, ""} if nothing.
+    auto read_subscript = [&](const std::string& src, size_t i) -> std::pair<size_t, std::string> {
+        if (i >= src.size() || src[i] != '_') return { 0, "" };
+        size_t j = i + 1;
+        while (j < src.size()
+               && (std::isalnum((unsigned char)src[j]) || src[j] == '_'))
+            ++j;
+        if (j == i + 1) return { 0, "" };
+        return { j - i, src.substr(i, j - i) };
+    };
+
+    // Blanks out a byte range in `s`. Sections 1-3 use it to hide their
+    // consumed derivatives from section 4, which otherwise re-tokenises the
+    // var letters inside \dot{x}_m and dumps `x`/`_m` into params.
+    auto blank_range = [&](size_t a, size_t b) {
+        for (size_t k = a; k < b && k < s.size(); ++k) s[k] = ' ';
+    };
+
+    // 0) Map mode: no derivatives to key off, so vars are the LHS of each row.
+    // Sections 1-3 then find nothing and section 4 skips these via var_set.
+    if (discrete_map) {
+        size_t row = 0;
+        while (row < s.size()) {
+            size_t end = s.size();
+            for (size_t k = row; k + 1 < s.size(); ++k) {
+                if (s[k] == '\\' && s[k + 1] == '\\') { end = k; break; }
+                if (s[k] == '\n' || s[k] == '\r')     { end = k; break; }
+            }
+            std::string line = s.substr(row, end - row);
+            const size_t row_start = row;
+            row = (end >= s.size()) ? s.size()
+                                    : end + ((s[end] == '\\') ? 2 : 1);
+            size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            size_t a = skip_ws(line, 0);
+            auto [len, tok] = read_token(line, a);
+            if (len == 0 || tok.empty()) continue;
+            // Only when the LHS is exactly this name and nothing else.
+            if (skip_ws(line, a + len) != eq) continue;
+            std::string canon = tok;
+            if (canon[0] == '\\') canon.erase(0, 1);
+            push_unique(out.vars, var_set, canon);
+            // Hide it from section 4, which stores `\theta` but var_set has `theta`.
+            blank_range(row_start + a, row_start + a + len);
+        }
+    }
+
+    // 1) производные: \dot{X}, \dot X (+ optional `_sub` suffix)
+    for (size_t i = 0; i + 4 <= s.size(); ) {
+        if (s.compare(i, 4, "\\dot") == 0) {
+            size_t j = skip_ws(s, i + 4);
+            if (j < s.size() && s[j] == '{') {
+                size_t end = s.find('}', j + 1);
+                if (end != std::string::npos) {
+                    std::string inner = s.substr(j + 1, end - j - 1);
+                    size_t a = inner.find_first_not_of(" \t");
+                    size_t b = inner.find_last_not_of(" \t");
+                    if (a != std::string::npos) {
+                        std::string name = inner.substr(a, b - a + 1);
+                        auto [slen, sub] = read_subscript(s, end + 1);
+                        if (slen > 0) { name += sub; end += slen; }
+                        push_unique(out.vars, var_set, name);
+                    }
+                    blank_range(i, end + 1);
+                    i = end + 1;
+                    continue;
+                }
+                i = i + 4;
+                continue;
+            }
+            auto [len, tok] = read_token(s, j);
+            if (len > 0 && !tok.empty()) {
+                auto [slen, sub] = read_subscript(s, j + len);
+                if (slen > 0) { tok += sub; len += slen; }
+                push_unique(out.vars, var_set, tok);
+                blank_range(i, j + len);
+            }
+            i = j + (len > 0 ? len : 1);
+            continue;
+        }
+        ++i;
+    }
+
+    // 2) производные: \frac{d X}{d t}, \dfrac{...}{...}
+    auto try_frac_at = [&](size_t i) -> size_t {
+        // Возвращает индекс после frac-группы (если успешно), иначе 0.
+        const std::string& src = s;
+        size_t p = i;
+        if (p + 5 < src.size() && src.compare(p, 5, "\\frac") == 0) p += 5;
+        else if (p + 6 < src.size() && src.compare(p, 6, "\\dfrac") == 0) p += 6;
+        else return 0;
+        p = skip_ws(src, p);
+        if (p >= src.size() || src[p] != '{') return 0;
+        size_t num_end = src.find('}', p + 1);
+        if (num_end == std::string::npos) return 0;
+        std::string num = src.substr(p + 1, num_end - p - 1);
+        size_t q = skip_ws(src, num_end + 1);
+        if (q >= src.size() || src[q] != '{') return 0;
+        size_t den_end = src.find('}', q + 1);
+        if (den_end == std::string::npos) return 0;
+        std::string den = src.substr(q + 1, den_end - q - 1);
+        // numerator: `d X` — после ведущего `d` идёт переменная.
+        auto trim = [](std::string x) {
+            size_t a = x.find_first_not_of(" \t");
+            size_t b = x.find_last_not_of(" \t");
+            return (a == std::string::npos) ? std::string{} : x.substr(a, b - a + 1);
+        };
+        num = trim(num); den = trim(den);
+        if (num.empty() || den.empty()) return 0;
+        if (num[0] != 'd') return 0;
+        size_t k = 1;
+        while (k < num.size() && std::isspace((unsigned char)num[k])) ++k;
+        if (k >= num.size()) return 0;
+        std::string var;
+        if (num[k] == '\\') {
+            size_t e = k + 1;
+            while (e < num.size() && std::isalpha((unsigned char)num[e])) ++e;
+            var = num.substr(k, e - k);
+        } else if (std::isalpha((unsigned char)num[k])) {
+            var = std::string(1, num[k]);
+        } else {
+            return 0;
+        }
+        // denominator: должен начинаться с `d` и заканчиваться `t`/`\tau`/`\theta`.
+        if (den[0] != 'd') return 0;
+        // (не делаем strict-check на `t` — обычно OK; держим как valid)
+        if (!var.empty()) push_unique(out.vars, var_set, var);
+        return den_end + 1;
+    };
+
+    for (size_t i = 0; i < s.size(); ) {
+        if (s[i] == '\\') {
+            size_t nxt = try_frac_at(i);
+            if (nxt > 0) { blank_range(i, nxt); i = nxt; continue; }
+        }
+        ++i;
+    }
+
+    // 3) производные: dX/dt, X'
+    for (size_t i = 0; i + 1 < s.size(); ) {
+        // dX/dt: literal 'd', then var, optional ws, '/', 'd', then 't'/\tau...
+        if (s[i] == 'd' && i + 2 < s.size()) {
+            size_t j = i + 1;
+            std::string var;
+            if (j < s.size() && s[j] == '\\') {
+                size_t e = j + 1;
+                while (e < s.size() && std::isalpha((unsigned char)s[e])) ++e;
+                if (e > j + 1) { var = s.substr(j, e - j); j = e; }
+            } else if (j < s.size() && std::isalpha((unsigned char)s[j])) {
+                // Multi-char var + optional `_sub`. Slash-form is validated
+                // below by the mandatory `/dt` (or `/dtau`/`/dtheta`) tail.
+                auto [vlen, vtok] = read_token(s, j);
+                if (vlen > 0) { var = vtok; j += vlen; }
+                auto [slen, sub] = read_subscript(s, j);
+                if (slen > 0) { var += sub; j += slen; }
+            }
+            if (!var.empty() && var != "t") {
+                size_t k = skip_ws(s, j);
+                if (k < s.size() && s[k] == '/' && k + 1 < s.size() && s[k + 1] == 'd') {
+                    size_t m = k + 2;
+                    size_t tail_end = m;
+                    if (m < s.size() && s[m] == 't') tail_end = m + 1;
+                    else if (m < s.size() && s[m] == '\\') {
+                        auto [tlen, ttok] = read_token(s, m);
+                        if (tlen > 0) tail_end = m + tlen;
+                    }
+                    if (tail_end > m) {
+                        push_unique(out.vars, var_set, var);
+                        blank_range(i, tail_end);
+                        i = tail_end; continue;
+                    }
+                }
+            }
+        }
+        // X' — letter (+ optional `_sub`) followed by prime. Left of the
+        // letter must not itself be a letter, to avoid quoting mid-word.
+        if (s[i + 1] == '\'') {
+            char c = s[i];
+            bool left_ok = (i == 0) || !std::isalpha((unsigned char)s[i - 1]);
+            if (std::isalpha((unsigned char)c) && left_ok) {
+                push_unique(out.vars, var_set, std::string(1, c));
+                blank_range(i, i + 2);
+                i += 2; continue;
+            }
+        }
+        ++i;
+    }
+
+    // 4) params: everything else
+    for (size_t i = 0; i < s.size(); ) {
+        auto [len, tok] = read_token(s, i);
+        if (len == 0) { ++i; continue; }
+        i += len;
+        if (tok.empty()) continue;
+        std::string canon = tok;
+        if (canon[0] == '\\') canon.erase(0, 1);
+        if (EXCLUDED.count(canon)) continue;
+        if (canon == "t") continue;
+        // A bare iteration symbol left over from x_{n+1} is not a parameter.
+        if (discrete_map && canon == std::string(1, iter_sym)) continue;
+        if (var_set.count(tok)) continue;
+        push_unique(out.params, param_set, tok);
+    }
+
+    return out;
+}

@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "U-CUDA: build and run",
+      "type": "process",
+      "command": "${workspaceFolder}/build/windows/bin/Debug/U-CUDA.exe",
+      "options": { "cwd": "${workspaceFolder}/build/windows/bin/Debug" },
+      "dependsOn": "CMake: build Windows Debug",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: configure Windows Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "windows"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: build Windows Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "windows-debug", "--target", "U-CUDA"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "CMake: configure Windows Debug",
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "CMake: build",
+      "type": "cmake",
+      "command": "build",
+      "targets": ["U-CUDA"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc", "$msCompile"]
+    }
+  ]
+}
