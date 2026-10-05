@@ -75,9 +75,17 @@ void BasinsAnalysisSession::ensure_phase_slots() {
     if (phase_slots.size() > configs.size())
         phase_slots.resize(configs.size());
 }
+const char* basin_feature_name(int feature_code) {
+    if (feature_code < 0 || feature_code >= BF_FEATURE_COUNT) return "unknown";
+    return kBasinFeatureNames[feature_code];
+}
+
 void PhaseAnalysisSession::add_projection() {
     Projection p;
     int n = (int)projections.size();
+    // A map's iterates are not joined by a continuous path, so markers, not a
+    // polyline. sys is set right after load_from_record by start_phase_analysis.
+    p.draw_points = sys.is_map;
     p.label = "Projection " + std::to_string(n + 1);
     p.axis_x = 0;
     p.axis_y = (vars.size() > 1) ? 1 : 0;
@@ -85,9 +93,4 @@ void PhaseAnalysisSession::add_projection() {
     // для time domain: по умолчанию показываем все переменные
     p.show_var.assign(vars.size(), true);
     projections.push_back(std::move(p));
-}
-
-const char* basin_feature_name(int feature_code) {
-    if (feature_code < 0 || feature_code >= BF_FEATURE_COUNT) return "unknown";
-    return kBasinFeatureNames[feature_code];
 }

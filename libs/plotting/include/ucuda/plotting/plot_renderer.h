@@ -1,7 +1,4 @@
 ﻿#pragma once
-#ifdef _WIN32
-#include <windows.h>
-#endif
 #include <glad/glad.h>
 #include <cstdint>
 #include <string>
@@ -132,6 +129,10 @@ public:
     // Рисует 2D-линию (vbo с float[2] на вершину).
     void draw_line(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
+    // Толстая 2D-линия (geometry shader, как у draw_line_3d) с alpha-блендингом: внутри FBO,
+    // поэтому точки, нарисованные после, ложатся поверх. Нет программы — draw_line.
+    void draw_line_thick_2d(GLuint vbo, int point_count, const float mvp[16],
+        const float color[4], float line_width);
 
     // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS; этим же путём рисуются точки
     // 1D-бифуркационных диаграмм. marker < 0 — старый путь: сплошной квадрат, GL-состояние не
@@ -153,11 +154,16 @@ public:
     // Спец-значения: ячейки со значением >= 1e30, NaN или Inf шейдер отображает отдельным цветом
     // (используется engine'ом для diverged/spec). nodata_rgb — указатель на float[3] с этим
     // цветом; nullptr = тёмно-серый по умолчанию (0.12/0.12/0.14).
+    // Значения вне [vmin, vmax] по умолчанию прижимаются к краю палитры. below_rgb/above_rgb
+    // (float[3], оба или ни одного) вместо этого красят v < vmin и v > vmax своим цветом — так
+    // рисуется область устойчивости «как в статье»: неустойчивое белое, а не чёрное.
     void draw_heatmap(GLuint tex, float vmin, float vmax, int colormap_id,
                       float uv_off_x, float uv_off_y,
                       float uv_scale_x, float uv_scale_y,
                       int n_discrete = 0, bool reverse = false,
-                      const float* nodata_rgb = nullptr);
+                      const float* nodata_rgb = nullptr,
+                      const float* below_rgb = nullptr,
+                      const float* above_rgb = nullptr);
 
     // Рисует 3D-линию (vbo с float[3] на вершину). thick_style=false — старый быстрый путь:
     // program_3d_ + glLineWidth (в core-profile драйвер обычно клампит до 1px, α не блендится).
@@ -165,6 +171,18 @@ public:
     // включаем BLEND для честного alpha compositing. Depth test работает в обоих случаях.
     void draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width, bool thick_style = false);
+
+    // 3D points (vbo with float[3] per vertex) via GL_POINTS. Same program as
+    // draw_line_3d (VS_3D writes gl_PointSize), so the depth test behaves the
+    // same. Needed by discrete maps: consecutive iterates are not joined.
+    void draw_points_3d(GLuint vbo, int point_count, const float mvp[16],
+        const float color[4], float point_size);
+
+    // Толстая 3D-линия, окрашенная колормапой по значению в вершине (vbo_val — float на
+    // вершину; значение интерполируется вдоль сегмента). colormap_id — как у draw_heatmap,
+    // reverse: t := 1-t. NaN/Inf — верхний край шкалы. Нет geometry shader — не рисует.
+    void draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count, const float mvp[16],
+        int colormap_id, float vmin, float vmax, bool reverse, float alpha, float line_width);
 
     void end_frame();
 
@@ -192,8 +210,16 @@ private:
     GLuint program_points_ = 0;   // VS_2D + FS_POINT (маска формы маркера)
     GLuint program_3d_ = 0;
     GLuint program_3d_thick_ = 0;
+    GLuint program_2d_thick_ = 0;   // VS_2D + GS_3D_THICK + FS
+    GLint  loc_mvp_2d_thick_ = -1, loc_color_2d_thick_ = -1,
+           loc_viewport_2d_thick_ = -1, loc_thickness_2d_thick_ = -1;
+    GLuint program_3d_cmap_ = 0;    // VS_3D_VAL + GS_3D_THICK_VAL + FS_CMAP
+    GLint  loc_mvp_3d_cmap_ = -1, loc_viewport_3d_cmap_ = -1, loc_thickness_3d_cmap_ = -1,
+           loc_lut_3d_cmap_ = -1, loc_cmap_3d_cmap_ = -1, loc_vmin_3d_cmap_ = -1,
+           loc_vmax_3d_cmap_ = -1, loc_reverse_3d_cmap_ = -1, loc_alpha_3d_cmap_ = -1;
     GLuint program_heatmap_ = 0;
     GLint  loc_mvp_2d_ = -1, loc_color_2d_ = -1, loc_point_size_2d_ = -1;
+    GLint  loc_point_size_3d_ = -1;
     GLint  loc_mvp_points_ = -1, loc_color_points_ = -1,
            loc_point_size_points_ = -1, loc_marker_points_ = -1;
     GLint  loc_mvp_3d_ = -1, loc_color_3d_ = -1;
@@ -203,7 +229,8 @@ private:
            loc_heatmap_vmax_ = -1, loc_heatmap_cmap_ = -1,
            loc_heatmap_uv_off_ = -1, loc_heatmap_uv_scale_ = -1,
            loc_heatmap_discrete_n_ = -1, loc_heatmap_lut_ = -1,
-           loc_heatmap_reverse_ = -1, loc_heatmap_nodata_ = -1;
+           loc_heatmap_reverse_ = -1, loc_heatmap_nodata_ = -1,
+           loc_heatmap_oor_ = -1, loc_heatmap_below_ = -1, loc_heatmap_above_ = -1;
     GLuint heatmap_vbo_ = 0;     // ленивая инициализация fullscreen quad
     GLuint lut_tex_ = 0;         // 256x200 RGB8, см. ensure_lut_texture()
 

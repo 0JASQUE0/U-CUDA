@@ -19,7 +19,7 @@ void draw_legend(ImDrawList* dl,
         return (k < (int)global_visible.size()) ? global_visible[k] : true;
         };
 
-    float line_h = ImGui::GetTextLineHeight();
+    float line_h = plot_text_line_height();
     float row_h = line_h + 2;
     float marker_w = 14;
     float gap = 4;
@@ -29,7 +29,7 @@ void draw_legend(ImDrawList* dl,
     int visible_count = 0;
     for (int k = 0; k < (int)entries.size(); ++k) {
         if (!is_global_vis(k)) continue;
-        max_text_w = std::max(max_text_w, ImGui::CalcTextSize(entries[k].label.c_str()).x);
+        max_text_w = std::max(max_text_w, plot_text_size(entries[k].label.c_str()).x);
         ++visible_count;
     }
     if (visible_count == 0) return; // рисовать нечего
@@ -80,7 +80,7 @@ void draw_legend(ImDrawList* dl,
             // (и только по нему, не по подписи) открывает выбор цвета.
             if (out_clicks && ImGui::IsMouseHoveringRect(mmin, mmax, false))
                 dl->AddRect(mmin, mmax, plot_col_text(), 0.0f, 0, 1.5f);
-            dl->AddText(ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
+            plot_text(dl, ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
         }
         ImVec2 emin = ImVec2(leg_min.x + pad, row_y);
         ImVec2 emax = ImVec2(leg_max.x - pad, row_y + row_h);
@@ -117,4 +117,27 @@ void draw_legend(ImDrawList* dl,
         }
         ++row;
     }
+}
+
+void legend_color_popup(const char* pop_id, const std::string& target,
+                        std::map<std::string, ImVec4>& overrides, const ImVec4& current) {
+    if (!ImGui::BeginPopup(pop_id)) return;
+    ImGui::TextUnformatted(target.empty() ? "(series)" : target.c_str());
+    ImGui::Separator();
+    float f[3] = { current.x, current.y, current.z };
+    ImGui::SetNextItemWidth(260.0f);
+    // Override — только после реальной правки: открыть меню и закрыть — цвет остаётся палитровым.
+    if (ImGui::ColorEdit3("colour##legend_color", f) && !target.empty())
+        overrides[target] = ImVec4(f[0], f[1], f[2], 1.0f);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Click the swatch for the picker; drag the fields or type RGB / HSV / Hex.\n"
+                          "Transparency is set by the Alpha sliders of the plot.");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reset this colour", nullptr, false, overrides.count(target) != 0)) {
+        overrides.erase(target);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::MenuItem("Reset all colours", nullptr, false, !overrides.empty()))
+        overrides.clear();
+    ImGui::EndPopup();
 }

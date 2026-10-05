@@ -47,6 +47,33 @@ public:
     // Один вызов обслуживает и 1D-диаграмму, и 2D-карту: различает их axis_y.kind.
     OrderResult run_order(const OrderRequest& req);
 
+    // Performance — время счёта vs ошибка по той же одномерной сетке.
+    PerfResult run_performance(const PerfRequest& req);
+
+    // Stability — область устойчивости схемы на двумерной задаче Дальквиста.
+    StabilityResult run_stability(const StabilityRequest& req);
+
+    // Network — интегрирование сети связанных осцилляторов.
+    NetworkResult run_network(const NetworkRequest& req);
+
+    // Signal metrics — max/min/mean, частоты по пикам и параметры Хьорта
+    // на 1D-отрезке или 2D-сетке свипа.
+    SignalMetricsResult run_signal_metrics(const SignalMetricsRequest& req);
+
+    // Компилирует модуль под этот запрос, ничего не считая: тот же ключ кэша, что возьмёт
+    // соответствующий run_*, поэтому Run потом просто найдёт готовый модуль. Зовётся из фонового
+    // потока, пока пользователь ещё настраивает параметры или пока считается предыдущая задача;
+    // ошибки глотаются (не смогли прогреть — Run скомпилирует сам). Ждать не нужно: если Run
+    // обгонит прогрев того же ключа, он дождётся его результата вместо второй компиляции.
+    void prewarm(const Bifurcation1DRequest& req);
+    void prewarm(const Bifurcation2DRequest& req);
+    void prewarm(const LLE1DRequest& req);
+    void prewarm(const LLE2DRequest& req);
+    void prewarm(const LS1DRequest& req);
+    void prewarm(const LS2DRequest& req);
+    void prewarm(const BasinsRequest& req);
+    void prewarm(const SignalMetricsRequest& req);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -10,10 +10,10 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"step_h\":"; jstr(o, s.step_h); o << ",\n";
     o << "  \"sim_time\":"; jstr(o, s.sim_time); o << ",\n";
     o << "  \"skip_time\":"; jstr(o, s.skip_time); o << ",\n";
-    o << "  \"adaptive\":"; write_adaptive(o,s.adaptive); o << ",\n";
     o << "  \"scheme\":"; jstr(o, s.scheme); o << ",\n";
     o << "  \"symmetry_s\":"; jstr(o, s.symmetry_s); o << ",\n";
     o << "  \"decimation\":"; jstr(o, s.decimation); o << ",\n";
+    write_adaptive(o, s.adaptive, "  ", ",\n");
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
     o << "  \"legend_show_ic\":" << (s.legend_show_ic ? "true" : "false") << ",\n";
     o << "  \"use_gpu\":" << (s.use_gpu ? "true" : "false") << ",\n";
@@ -21,6 +21,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     // rebuilt from scratch on Start so a load never resurrects a running loop.
     o << "  \"continuation_mode\":" << (s.continuation_mode ? "true" : "false") << ",\n";
     o << "  \"continuation_delay_ms\":"; jstr(o, s.continuation_delay_ms); o << ",\n";
+    o << "  \"continuation_peaks_cap\":" << s.continuation_peaks_cap << ",\n";
     o << "  \"param_values\":"; jmap(o, s.param_values); o << ",\n";
     // ic_sets: [ {label, visible, values{...}} ]
     o << "  \"ic_sets\":[";
@@ -40,6 +41,9 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
         o << ",\"cls\":" << (p.custom_line_style ? "true" : "false");
         o << ",\"lw\":" << p.line_width << ",\"al\":" << p.alpha;
+        o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
+        if (p.y_log) o << ",\"ylog\":true";
+        if (p.point_alpha != 1.0f) o << ",\"pa\":" << p.point_alpha;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
@@ -53,7 +57,6 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
 
 
 bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
-    s.adaptive = {};
     try {
         JP p(json);
         p.expect('{');
@@ -65,14 +68,17 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "sim_time")   s.sim_time = p.str();
             else if (key == "skip_time")  s.skip_time = p.str();
             else if (key == "scheme")     s.scheme = p.str();
-    else if (key == "adaptive") read_adaptive(p,s.adaptive);
             else if (key == "symmetry_s") s.symmetry_s = p.str();
             else if (key == "decimation") s.decimation = p.str();
+            else if (key == "adaptive")   read_adaptive(p, s.adaptive);
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();
             else if (key == "legend_show_ic") s.legend_show_ic = p.boolean();
             else if (key == "use_gpu")        s.use_gpu = p.boolean();
             else if (key == "continuation_mode")     s.continuation_mode = p.boolean();
             else if (key == "continuation_delay_ms") s.continuation_delay_ms = p.str();
+            else if (key == "continuation_peaks_cap") {
+                try { s.continuation_peaks_cap = std::stoi(p.str_or_num()); } catch (...) {}
+            }
             else if (key == "param_values")   s.param_values = p.map_ss();
             else if (key == "ic_sets") {
                 s.ic_sets.clear();
@@ -113,6 +119,12 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
                             else if (k == "cls")   pr.custom_line_style = p.boolean();
                             else if (k == "lw")    pr.line_width = (float)std::stod(p.str_or_num());
                             else if (k == "al")    pr.alpha      = (float)std::stod(p.str_or_num());
+                        else if (k == "pts")   pr.draw_points = p.boolean();
+                        else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
+                            else if (k == "pts")   pr.draw_points = p.boolean();
+                            else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
+                            else if (k == "ylog")  pr.y_log = p.boolean();
+                            else if (k == "pa")    pr.point_alpha = (float)std::stod(p.str_or_num());
                             else if (k == "show_var") {
                                 pr.show_var.clear();
                                 p.expect('[');

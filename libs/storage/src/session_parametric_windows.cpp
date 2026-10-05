@@ -15,6 +15,7 @@ std::string session_to_json_parametric_windows(const std::vector<ParametricPlotW
         o << ",\"kind\":" << (int)w.kind;
         o << ",\"mode_2d\":" << (w.mode_2d ? "true" : "false");
         o << ",\"colored_1d\":" << (w.colored_1d ? "true" : "false");
+        o << ",\"metric\":" << w.metric;
         o << ",\"label\":"; jstr(o, w.label);
         o << ",\"label_is_manual\":" << (w.label_is_manual ? "true" : "false");
         o << ",\"members\":[";
@@ -48,6 +49,7 @@ bool session_from_json_parametric_windows(const std::string& json, std::vector<P
                                 else if (k == "kind")    w.kind    = (ParametricPlotWindow::Kind)std::stoi(p.str_or_num());
                                 else if (k == "mode_2d") w.mode_2d = p.boolean();
                                 else if (k == "colored_1d") w.colored_1d = p.boolean();
+                                else if (k == "metric")  w.metric  = std::stoi(p.str_or_num());
                                 else if (k == "label")   w.label   = p.str();
                                 else if (k == "label_is_manual") w.label_is_manual = p.boolean();
                                 else if (k == "members") {

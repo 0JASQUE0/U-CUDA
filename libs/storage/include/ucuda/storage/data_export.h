@@ -27,6 +27,9 @@ struct LS1DResult;
 struct LS2DResult;
 struct BasinsResult;
 struct FastSyncResult;
+struct OrderResult;
+struct PerfResult;
+struct StabilityResult;
 // AnalysisResult is defined in analysis_session.h.
 struct AnalysisResult;
 
@@ -136,6 +139,73 @@ bool export_lle2d(const LLE2DResult&         res, const std::string& path);
 bool export_ls2d (const LS2DResult&          res, const std::string& path);
 bool export_basins(const BasinsResult&       res, const std::string& path);
 bool export_fastsync(const FastSyncResult&   res, const std::string& path);
+
+// Order / Performance — снимок настроек для <path>_config.csv. Результат
+// движка не носит ни схемы, ни параметров системы (в отличие от остальных
+// вкладок, где снимок кладётся внутрь Result самим движком), поэтому его
+// приносит GUI: у Order оба расчёта строятся из одного конфига вкладки.
+struct OrderSnapshot {
+    std::string scheme;
+    std::string axis_x_name = "x";
+    std::string axis_y_name = "y";
+    std::vector<std::string> var_names;
+    std::vector<std::string> param_names;
+    std::vector<double> initial_conditions;
+    std::vector<double> values;          // a[], values[0] = symmetry s
+    double h = 0.0, t_max = 0.0, max_value = 0.0;
+    bool   snap_steps = true;
+    bool   endpoint_only = false;
+    // Устройство расчёта. Для замеров времени это ГЛАВНАЯ строка файла: GPU
+    // меряет ядро с replicas нитями, CPU — одну траекторию последовательно, и
+    // числа между устройствами не сопоставимы ни в каком масштабе. Два поля
+    // ниже — настройки NVRTC, и на CPU они не значат ничего; writer их там и
+    // не печатает, чтобы файл не выглядел снятым на GPU.
+    bool   use_gpu = true;
+    bool   gpu_fmad = true;
+    // Раздельная компиляция NVRTC (Settings -> Split compilation). Для замеров
+    // времени это не деталь: со split-компиляцией шаг не встраивается в ядро, и
+    // одна и та же задача считается в разы дольше. Файлы, снятые при разном
+    // значении, между собой не сравнимы.
+    bool   gpu_rdc = false;
+    // Только Performance.
+    int repeats = 0, warmup = 0, replicas = 0;
+    std::string ref_scheme;          // пусто — эталон не считался
+    int         ref_substeps = 0;
+    // Адаптивный шаг вкладки (узлы — tol): строка настроек для _config.csv, пусто — Fixed.
+    std::string adaptive_desc;
+
+    // Только Stability. Начальные условия и время счёта для неё смысла не
+    // имеют (шаг делается один, от базисных векторов), зато имеют смысл
+    // настройки теста и то, в какие a[] легли элементы матрицы.
+    double      stab_k = 0.0, stab_r = 0.0, stab_h = 0.0;
+    std::string stab_slots;          // "a = a[1], b = a[2], c = a[3], d = a[4]"
+    // Допуск области предпочтительности — с вкладки на момент экспорта: в
+    // результат он не входит (применяется при отрисовке).
+    double      stab_pref_tol = 1.0;
+};
+
+// Order: <path> — по строке на узел (1D) или на ячейку (2D):
+//   1D: "x,h_eff,p,E1,E2,status"
+//   2D: "x,y,h_eff,p,E1,E2,status" в row-major порядке сетки
+// status — код OrderStatus (0 ok, 1 diverged, 2 floor, 3 p<=0).
+bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::string& path);
+
+// Performance: <path> — по строке на узел,
+//   "x,h_eff,n_steps,E1,E2,E_ref,t_min_us,t_avg_us,t_max_us,status".
+// E_ref = max|y_h - y_ref| против эталонного метода (пусто, если не считался).
+// Время — микросекунды НА ОДИН запуск ядра, без копирований и компиляции
+// (см. PerfRequest). Узел, на котором замера не было, оставляет ячейки времени
+// пустыми, а не нулями.
+bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path);
+
+// Stability: <path> — по строке на ячейку в row-major порядке сетки,
+//   "sigma,omega,rho,stable,status".
+// stable — 1 при rho <= 1, иначе 0; у непосчитанной ячейки поле пустое, как и
+// rho. status — код StabilityStatus (0 ok, 1 матрица не построилась или шаг
+// дал nan/inf). Настройки теста (k, r, h) и элементы матрицы в нём не
+// печатаются построчно: они одинаковы для всей карты и уходят в _config.csv.
+bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
+                      const std::string& path);
 
 // Phase / TimeSeries — there is no engine-side CSV; the format is defined
 // fresh here. <path>_config.csv carries scheme + params + ICs + integration

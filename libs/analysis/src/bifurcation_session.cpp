@@ -10,7 +10,7 @@ namespace ucuda::analysis_detail {
 Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -48,7 +48,10 @@ Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
     req.transient_time = parse_d(bd.transient_text, 100.0);
     req.pre_scaller    = std::max(1, parse_i(bd.pre_scaller_text, 1));
     req.max_value      = parse_d(bd.max_value_text, 1.0e6);
+    req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
+    fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
     return req;
 }
 
@@ -66,7 +69,7 @@ void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult&& r) {
 Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -115,10 +118,13 @@ Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
     req.transient_time     = parse_d(bd.transient_text, 100.0);
     req.pre_scaller        = std::max(1, parse_i(bd.pre_scaller_text, 1));
     req.max_value          = parse_d(bd.max_value_text, 1.0e6);
+    req.emit_all_samples   = bd.plot_all_iterates;
     req.eps_dbscan         = parse_d(bd.eps_dbscan_text, 0.1);
     req.mult_peak          = parse_d(bd.mult_peak_text,     (double)::mult_peak);
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
+    fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
     return req;
 }
 
@@ -147,7 +153,9 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     BifurcationDiagramConfig bd;
     bd.label = "BD 1";
     bd.label_is_manual = false;   // fresh diagram → auto-label
-    bd.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    bd.h_text = default_h_from_record(r);
+    bd.scheme = default_scheme_from_record(r, bd.scheme);
+    bd.plot_all_iterates = default_all_iterates_from_record(r);
     bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -194,7 +202,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         Bifurcation2DResult r = engine.run_bifurcation_2d(req);
@@ -204,7 +212,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         Bifurcation1DResult r = engine.run_bifurcation_1d(req);
@@ -231,7 +239,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -248,7 +256,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            bd.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;

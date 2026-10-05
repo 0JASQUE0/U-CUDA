@@ -9,7 +9,7 @@ Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
     req.sweep_over_h = c.sweep_over_h;
     req.log_scale    = c.log_scale;
     req.use_cpu      = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -86,7 +86,8 @@ void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
 
     Dft1DConfig c;
     c.label = "DFT 1";
-    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -148,7 +149,7 @@ bool Dft1DAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
     Dft1DResult r = engine.run_dft_1d(req);
@@ -170,7 +171,7 @@ bool Dft1DAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         cancel_token.reset();
         progress_token.reset();
         return false;

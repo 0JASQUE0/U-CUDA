@@ -20,6 +20,8 @@
 //   AMOUNT_OF_X      — размерность системы
 //   AMOUNT_OF_VALUES — размер a[] (a[0] = symmetry s, a[1..M] = параметры)
 //   KRS_BODY         — тело calculateDiscreteModel из codegen
+//   REF_ENABLED      — 1, если нужна четвёртая, эталонная копия траектории
+//   KRS_REF_BODY     — тело шага эталонного метода (пусто при REF_ENABLED 0)
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 #define AMOUNTOFVALUES {{AMOUNT_OF_VALUES}}
@@ -62,6 +64,20 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
+// Эталонный метод (по умолчанию DOPRI78) — отдельная функция, а не параметр:
+// тело подставляется на компиляции, и когда эталон не нужен, всей ветки в ядре
+// нет вовсе. Это не косметика — DOPRI78 держит 13 стадий в локальных массивах,
+// и присутствие ветки в коде стоило бы регистров ВСЕМ расчётам вкладки, а не
+// только тем, что просили эталон.
+#define ORDER_REF_ENABLED {{REF_ENABLED}}
+
+#if ORDER_REF_ENABLED
+__device__ __host__ __forceinline__
+void calculateReferenceModel(numb* X, const numb* a, const numb h) {
+{{KRS_REF_BODY}}
+}
+#endif
+
 #include "cudaLibrary.cu"
 
 // ---------------------------------------------------------------------------
@@ -87,6 +103,68 @@ __device__ __forceinline__ bool orderBadVec(const numb* X, numb maxValue) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Замер времени счёта (вкладка графика Performance).
+//
+// Ядро НЕ считает ни ошибок, ни порядка: его время работы И ЕСТЬ измеряемая
+// величина — стоимость интегрирования одной траектории шагом h на nSteps
+// шагов. Ошибки для оси X приходят из отдельного, НЕ засекаемого прогона
+// orderEstimateKernel по той же сетке.
+//
+// Здесь намеренно нет ни cancelFlag, ни progressCounter: чтение
+// глобального флага раз в CHECK_INTERVAL шагов и atomicAdd прогресса — это
+// работа, которой в замеряемом интервале быть не должно. Отмена ловится
+// хостом МЕЖДУ запусками.
+//
+// nThreads одинаковых реплик считают одну и ту же задачу: при 1 меряется
+// латентность одного расчёта, при большом числе — пропускная способность
+// загруженного GPU. Финальное состояние обязано уходить в глобальную память,
+// иначе компилятор вправе выбросить весь цикл целиком.
+// Время — %globaltimer (нс) вокруг ОДНОГО цикла шагов: ни запуск ядра, ни загрузка X0/a[],
+// ни запись результата в замер не входят. tspan[0] — самый ранний старт среди нитей
+// (atomicMin, хост ставит ~0), tspan[1] — самый поздний конец (atomicMax, хост ставит 0):
+// при replicas > 1 это время всего загруженного GPU, при 1 — одной траектории.
+__device__ __forceinline__ unsigned long long perfGlobalTimer() {
+    unsigned long long t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t) :: "memory");
+    return t;
+}
+
+extern "C" __global__ void perfIntegrateKernel(
+    const int    nThreads,
+    const numb* __restrict__ X0,          // [AMOUNTOFX]
+    const numb* __restrict__ values,      // [AMOUNTOFVALUES]
+    const numb   h,
+    const long long nSteps,
+    numb* __restrict__ out,               // [nThreads * AMOUNTOFX]
+    unsigned long long* tspan)            // [2]: старт / конец цикла, нс; nullptr — без замера
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nThreads) return;
+
+    numb a[AMOUNTOFVALUES];
+    for (int i = 0; i < AMOUNTOFVALUES; ++i) a[i] = values[i];
+    numb X[AMOUNTOFX];
+    for (int i = 0; i < AMOUNTOFX; ++i) X[i] = X0[i];
+
+    const unsigned long long t0 = perfGlobalTimer();
+    for (long long n = 0; n < nSteps; ++n)
+        calculateDiscreteModel(X, a, h);
+    // Конец цикла фиксируется после того, как результат последнего шага готов: без
+    // зависимости от X компилятор вправе прочитать таймер раньше, чем досчитана цепочка.
+    numb acc = 0;
+    for (int i = 0; i < AMOUNTOFX; ++i) acc += X[i];
+    unsigned long long t1;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1) : "d"((double)acc) : "memory");
+    if (tspan != nullptr) {
+        atomicMin(&tspan[0], t0);
+        atomicMax(&tspan[1], t1);
+    }
+
+    for (int i = 0; i < AMOUNTOFX; ++i)
+        out[(size_t)tid * (size_t)AMOUNTOFX + (size_t)i] = X[i];
+}
+
 extern "C" __global__ void orderEstimateKernel(
     const int    nPtsX,
     const int    nPtsY,                   // 1 для 1D-свипа
@@ -104,9 +182,11 @@ extern "C" __global__ void orderEstimateKernel(
     const int    endpointOnly,            // 1 = сравнивать только в t = tMax
     const numb   maxValue,
     const numb   floorEps,                // относительный порог полки округления
+    const int    refSubsteps,             // шагов эталона на один грубый шаг (0 = эталона нет)
     numb* __restrict__ outP,
     numb* __restrict__ outE1,
     numb* __restrict__ outE2,
+    numb* __restrict__ outERef,           // max|y_h - y_ref|; NaN, когда эталона нет
     numb* __restrict__ outH,              // фактический h ячейки (после snap)
     int*  __restrict__ outStatus,
     const volatile int* cancelFlag,
@@ -167,6 +247,19 @@ extern "C" __global__ void orderEstimateKernel(
     numb e1 = (numb)0, e2 = (numb)0, scale = (numb)0;
     int  status = ORDER_OK;
 
+#if ORDER_REF_ENABLED
+    // Эталон идёт в локстепе с ГРУБОЙ копией: refM его шагов размера h1/refM на
+    // каждый шаг h1. Сравнение поэтому всегда в один и тот же момент времени, и
+    // хранить траекторию не нужно. refM > 1 обязателен, когда эталонный метод
+    // совпадает с испытуемым: при refM == 1 это была бы та же арифметика и
+    // разность тождественно нулевая.
+    const int  refM = (refSubsteps > 0) ? refSubsteps : 1;
+    const numb hRef = h1 / (numb)refM;
+    numb Xr[AMOUNTOFX];
+    for (int i = 0; i < AMOUNTOFX; ++i) Xr[i] = X0[i];
+    numb eRef = (numb)0;
+#endif
+
     size_t sinceReport = 0;
     for (long long n = 0; n < N; ++n) {
         calculateDiscreteModel(Xc, a, h1);
@@ -176,6 +269,9 @@ extern "C" __global__ void orderEstimateKernel(
         calculateDiscreteModel(Xf, a, h4);
         calculateDiscreteModel(Xf, a, h4);
         calculateDiscreteModel(Xf, a, h4);
+#if ORDER_REF_ENABLED
+        for (int q = 0; q < refM; ++q) calculateReferenceModel(Xr, a, hRef);
+#endif
 
         const bool last = (n == N - 1);
         if (!endpointOnly || last) {
@@ -186,11 +282,19 @@ extern "C" __global__ void orderEstimateKernel(
                 if (d2 > e2) e2 = d2;
                 const numb sc = fabs(Xf[i]);
                 if (sc > scale) scale = sc;
+#if ORDER_REF_ENABLED
+                const numb dr = fabs(Xc[i] - Xr[i]);
+                if (dr > eRef) eRef = dr;
+#endif
             }
         }
 
         if ((n % (long long)CHECK_INTERVAL) == 0 || last) {
-            if (orderBadVec(Xc, maxValue) || orderBadVec(Xm, maxValue) || orderBadVec(Xf, maxValue)) {
+            if (orderBadVec(Xc, maxValue) || orderBadVec(Xm, maxValue) || orderBadVec(Xf, maxValue)
+#if ORDER_REF_ENABLED
+                || orderBadVec(Xr, maxValue)
+#endif
+               ) {
                 status = ORDER_DIVERGED;
                 break;
             }
@@ -228,6 +332,143 @@ extern "C" __global__ void orderEstimateKernel(
     outP[gcell]      = p;
     outE1[gcell]     = e1;
     outE2[gcell]     = e2;
+    if (outERef != nullptr) {
+#if ORDER_REF_ENABLED
+        outERef[gcell] = (status == ORDER_DIVERGED) ? (numb)nan("") : eRef;
+#else
+        outERef[gcell] = (numb)nan("");
+#endif
+    }
     outH[gcell]      = hEff;
     outStatus[gcell] = status;
+}
+
+// ---------------------------------------------------------------------------
+// Область устойчивости на двумерной задаче Дальквиста.
+//
+// Тест: X' = A X, A = [[a, b], [c, d]], где элементы НЕ вводятся, а строятся в
+// каждом узле сетки из (sigma, omega) и двух настроек — коэффициента
+// несимметричности k и отношения недиагоналей r:
+//   d = 2*sigma/(1+k),  c = -sqrt(-(1/r)*(sigma^2*(k-1)^2/(k+1)^2 + omega^2)),
+//   b = r*c,            a = k*d.
+// При любом k это даёт tr A = 2*sigma и det A = sigma^2 + omega^2, то есть
+// собственные числа ровно sigma +- i*omega: k гоняет матрицу по семейству с
+// ОДНИМ И ТЕМ ЖЕ спектром, а r только масштабирует недиагонали. Поэтому
+// картинка в осях (sigma, omega) сравнима между разными k, и видно ровно то,
+// ради чего k заведён, — насколько схема чувствительна к несимметричности
+// задачи при неизменных собственных числах.
+//
+// Шаг делается ОДИН. Тест линеен и однороден (f(0) = 0), поэтому шаг любой
+// схемы — линейный оператор, и прогон от двух базисных векторов (1,0) и (0,1)
+// даёт столбцы матрицы усиления R целиком. Дальше rho = max|lambda(R)| через
+// след и определитель. Больше одного шага смысла не имеет: R_N = R^N, спектр
+// возводится в ту же степень, и корень N-й степени вернул бы то же число —
+// только с потерянными разрядами.
+//
+// Схема сюда не «вписывается» отдельно: гоняется ТО ЖЕ тело КРС, что и на
+// остальных вкладках, поэтому s = a[0], покомпонентный Гаусс-Зейдель неявных
+// полушагов, композиции и экстраполяции учитываются сами собой. Отсюда же
+// требование к кастомной КРС для этого режима — обращаться к a[1..4] как к
+// a, b, c, d.
+//
+// Сама R тоже уходит наружу (outR): по ней хост считает относительную ошибку
+// шага против точной экспоненты e^{hA} — области предпочтительности. Ошибка
+// считается на хосте одной функцией для GPU- и CPU-ветки (stability_step_error
+// в parametric_engine.cpp), чтобы карта не зависела от устройства.
+#define STAB_OK   0
+#define STAB_BAD  1   // матрица не построилась (k = -1, r = 0, r > 0) или R улетела
+
+extern "C" __global__ void stabilityRegionKernel(
+    const int    nPtsX,
+    const int    nPtsY,
+    const int    nCells,                  // ячеек в этом чанке
+    const int    cellOffset,              // сколько ячеек посчитано до чанка
+    const numb* __restrict__ sigVals,     // [nPtsX] — узлы по sigma
+    const numb* __restrict__ omVals,      // [nPtsY] — узлы по omega
+    const numb* __restrict__ values,      // [AMOUNTOFVALUES] базовые a[]
+    const int    idxA, const int idxB, const int idxC, const int idxD,  // куда в a[] класть элементы
+    const numb   k,                       // коэффициент несимметричности
+    const numb   r,                       // отношение недиагоналей, обязан быть < 0
+    const numb   h,                       // шаг, чей оператор перехода и диагонализуется
+    numb* __restrict__ outRho,
+    int*  __restrict__ outStatus,
+    // [4 * nPtsX*nPtsY], SoA: плоскость q (R00, R01, R10, R11) начинается с
+    // q * nPtsX*nPtsY — соседние нити пишут соседние адреса.
+    numb* __restrict__ outR)
+{
+    const int cell = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cell >= nCells) return;
+
+    const int gcell = cell + cellOffset;
+    const int plane = nPtsX * nPtsY;
+    const int ix = gcell % nPtsX;
+    const int iy = gcell / nPtsX;
+
+    const numb sig = sigVals[ix];
+    const numb om  = omVals[iy];
+
+    const numb kp1 = k + (numb)1;
+    const numb km1 = k - (numb)1;
+
+    // Подкоренное выражение отрицательно при r > 0: c тогда мнимое, и теста
+    // в вещественной арифметике не существует. Это не «плохая ячейка», а
+    // неверная настройка, но ловится она здесь — хост про sigma и omega узла
+    // не знает.
+    numb rad = (numb)0;
+    bool bad = (kp1 == (numb)0) || (r == (numb)0);
+    if (!bad) {
+        rad = -((numb)1 / r) * (sig * sig * km1 * km1 / (kp1 * kp1) + om * om);
+        if (rad < (numb)0 || isnan(rad)) bad = true;
+    }
+    if (bad) {
+        outRho[gcell] = (numb)nan("");
+        outStatus[gcell] = STAB_BAD;
+        for (int q = 0; q < 4; ++q) outR[q * plane + gcell] = (numb)nan("");
+        return;
+    }
+
+    const numb dEl = (numb)2 * sig / kp1;
+    const numb cEl = -sqrt(rad);
+    const numb bEl = r * cEl;
+    const numb aEl = k * dEl;
+
+    numb a[AMOUNTOFVALUES];
+    for (int i = 0; i < AMOUNTOFVALUES; ++i) a[i] = values[i];
+    a[idxA] = aEl; a[idxB] = bEl; a[idxC] = cEl; a[idxD] = dEl;
+
+    // Столбцы матрицы усиления: шаг от (1,0) и от (0,1).
+    numb R[4];   // R[0]=R00 R[1]=R01 R[2]=R10 R[3]=R11
+    for (int col = 0; col < 2; ++col) {
+        numb X[AMOUNTOFX];
+        for (int i = 0; i < AMOUNTOFX; ++i) X[i] = (numb)0;
+        X[col] = (numb)1;
+        calculateDiscreteModel(X, a, h);
+        R[col]     = X[0];
+        R[2 + col] = X[1];
+    }
+    for (int q = 0; q < 4; ++q) outR[q * plane + gcell] = R[q];
+
+    const numb tr  = R[0] + R[3];
+    const numb det = R[0] * R[3] - R[1] * R[2];
+    const numb disc = tr * tr * (numb)0.25 - det;
+
+    numb rho;
+    if (disc >= (numb)0) {
+        const numb sq = sqrt(disc);
+        const numb l1 = fabs(tr * (numb)0.5 + sq);
+        const numb l2 = fabs(tr * (numb)0.5 - sq);
+        rho = (l1 > l2) ? l1 : l2;
+    } else {
+        // Комплексно-сопряжённая пара: |lambda|^2 = tr^2/4 + (det - tr^2/4) = det,
+        // и при disc < 0 определитель заведомо положителен.
+        rho = sqrt(det);
+    }
+
+    if (isnan(rho) || isinf(rho)) {
+        outRho[gcell] = (numb)nan("");
+        outStatus[gcell] = STAB_BAD;
+    } else {
+        outRho[gcell] = rho;
+        outStatus[gcell] = STAB_OK;
+    }
 }

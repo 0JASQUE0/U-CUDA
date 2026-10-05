@@ -1,5 +1,4 @@
 ﻿#pragma once
-#include "ucuda/domain/adaptive_solver.h"
 // math_constants.h нужен только за CUDART_*-макросами, а их в проекте не
 // использует никто, поэтому подключаем его лишь там, где он заведомо доступен
 // без лишних ключей — в offline-сборке nvcc. Двум другим потребителям этого
@@ -15,7 +14,15 @@
 #include <math_constants.h>
 #endif
 
+// numb переопределяется макросом ДО include — тем же приёмом, что AMOUNTOFX
+// ниже. Так CPU-ветка вкладки Order собирает то же тело КРС в double-double
+// (kernels/ucuda_hp.h): в обычном double ричардсоновская разность E1 = |y_h -
+// y_h/2| садится на полку округления раньше, чем схема выходит на асимптотику.
+#ifdef UCUDA_NUMB_TYPE
+typedef UCUDA_NUMB_TYPE numb;
+#else
 typedef double numb;
+#endif
 
 // AMOUNTOFX оборачивается в #ifndef, чтобы NVRTC-вызывающие проекты могли
 // переопределить размерность системы через #define AMOUNTOFX N перед include.
@@ -186,8 +193,17 @@ constexpr int set_precision  = 15; // precision of numbers in writng final csv f
 // чтобы NVRTC-template мог их переопределить через #define перед include.
 
 constexpr int amount_GPU = 1920; // precision of numbers in writng final csv files
-constexpr numb pi	 = 3.1415926535897932384626433832795;
-constexpr numb euler = 2.7182818284590452353602874713527;
+// Значения тоже переопределяемы: в расширенной точности double-литерал обрезал
+// бы константу до 17 цифр, и весь выигрыш терялся бы на первом же pi в правой
+// части. Прелюдия krs_cpu подставляет сюда dd-константы из ucuda_hp.h.
+#ifndef UCUDA_PI
+#define UCUDA_PI 3.1415926535897932384626433832795
+#endif
+#ifndef UCUDA_EULER
+#define UCUDA_EULER 2.7182818284590452353602874713527
+#endif
+constexpr numb pi	 = UCUDA_PI;
+constexpr numb euler = UCUDA_EULER;
 //constexpr int blockSize_fixed = 1024;
 
 // ЗНАЧЕНИЕ УЗЛА ПАРАМЕТРИЧЕСКОЙ СЕТКИ — ЕДИНСТВЕННАЯ РЕАЛИЗАЦИЯ
@@ -432,4 +448,25 @@ UCUDA_HD inline numb ucuda_node_value_cont(int k, int nPts, numb lo, numb hi,
         return (numb)pow(10.0, reverse ? (l1 - (l1 - l0) * td) : (l0 + (l1 - l0) * td));
     }
     return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+}
+
+// Шагов постоянного h на отрезок перенормировки span = NT у LLE/LS: LLEKernelCUDA / LSKernelCUDA
+// (и их IC-версии), kernels/lle1d_cont / ls1d_cont, CPU-порты run_lle1d_cpu / run_ls1d_cpu и счёт
+// прогресса на хосте — все берут число шагов отсюда, в свипе по h и без него одинаково.
+// Округление к ближайшему: усечение (size_t)(NT/h) теряло бы шаг, когда NT/h в double чуть
+// меньше целого, ceil в свипе по h добавлял его, когда чуть больше. Если NT не кратно h, блок
+// длится k*h, а не NT, поэтому сумма логарифмов делится на проинтегрированное время nBlocks*k*h,
+// а не на tMax. 0 — отрезок короче полушага или вырожденные h/NT: точка невычислима, а не молча
+// считается с блоком другой длины.
+//
+// ВАЖНО: loopCalculateDiscreteModel_int и её CPU-порт cpu_loop_model после цикла делают ещё
+// preScaller шагов (проверка на неподвижную точку), т.е. вызов с n итерациями — это n + 1 шаг.
+// Поэтому блок из k шагов вызывается с k - 1 итерациями. Без этого каждый блок шёл k + 1 шаг,
+// а учитывался как k: все показатели завышались в (k+1)/k раз (Лоренц, h = 0.005: сумма LS -14.35
+// при NT = 0.1 и -17.08 при NT = 0.02 вместо -13.667).
+UCUDA_HD inline long long ucuda_steps_per_block(numb span, numb h) {
+    if (!(h > 0) || !(span > 0)) return 0;
+    const double r = (double)span / (double)h;
+    if (!(r >= 0.5) || !(r < 9.0e18)) return 0;
+    return (long long)floor(r + 0.5);
 }

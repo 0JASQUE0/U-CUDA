@@ -15,6 +15,15 @@ namespace ucuda::equations_detail {
 
 
     // Схемы
+    // Discrete map x_{n+1} = f(x_n): the right-hand side is the step, h unused.
+    // The temp buffer is required - updating in place would be Gauss-Seidel.
+    std::string scheme_map(const System& s) {
+        int N = (int)s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
+        o << "    numb X1[" << N << "];\n    int i;\n";
+        for (int i = 0; i < N; ++i) o << "    X1[" << i << "] = (" << f[i] << ");\n";
+        o << "    for (i = 0; i < " << N << "; i++)\n        X[i] = X1[i];\n"; return o.str();
+    }
+
     std::string scheme_euler(const System& s) {
         int N = s.vars.size(); auto f = rhs_over(s, "X"); std::ostringstream o;
         o << "    numb X1[" << N << "];\n    int i;\n";
@@ -46,31 +55,11 @@ namespace ucuda::equations_detail {
         o << "        else {\n            for (i = 0; i < N; i++) {\n                X1[i] = X[i] + 0.5 * h * k[i][j];\n            }\n        }\n    }\n"; return o.str();
     }
 
-    // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
-    // (7-й, b[1]) — z пока не используется, но оставлен под будущий адаптивный
-    // шаг по |y - z|. На каждый step X := y.
-    std::string scheme_dopri78(const System& s) {
-        int N = s.vars.size(); auto k = rhs_over(s, "X1"); std::ostringstream o;
 
-        o << "    static const numb M[13][12] = {\n";
-        o << "        {0,0,0,0,0,0,0,0,0,0,0,0},\n";
-        o << "        {0.05555555555556,0,0,0,0,0,0,0,0,0,0,0},\n";
-        o << "        {0.02083333333333,0.0625,0,0,0,0,0,0,0,0,0,0},\n";
-        o << "        {0.03125,0,0.09375,0,0,0,0,0,0,0,0,0},\n";
-        o << "        {0.3125,0,-1.171875,1.171875,0,0,0,0,0,0,0,0},\n";
-        o << "        {0.0375,0,0,0.1875,0.15,0,0,0,0,0,0,0},\n";
-        o << "        {0.04791013711111,0,0,0.1122487127778,-0.02550567377778,0.01284682388889,0,0,0,0,0,0},\n";
-        o << "        {0.01691798978729,0,0,0.387848278486,0.0359773698515,0.1969702142157,-0.1727138523405,0,0,0,0,0},\n";
-        o << "        {0.06909575335919,0,0,-0.6342479767289,-0.1611975752246,0.1386503094588,0.9409286140358,0.2116363264819,0,0,0,0},\n";
-        o << "        {0.183556996839,0,0,-2.468768084316,-0.2912868878163,-0.02647302023312,2.847838764193,0.2813873314699,0.1237448998633,0,0,0},\n";
-        o << "        {-1.215424817396,0,0,16.67260866595,0.9157418284168,-6.056605804357,-16.00357359416,14.8493030863,-13.37157573529,5.13418264818,0,0},\n";
-        o << "        {0.2588609164383,0,0,-4.774485785489,-0.435093013777,-3.049483332072,5.577920039936,6.155831589861,-5.062104586737,2.193926173181,0.1346279986593,0},\n";
-        o << "        {0.8224275996265,0,0,-11.65867325728,-0.7576221166909,0.7139735881596,12.07577498689,-2.12765911392,1.990166207049,-0.234286471544,0.1758985777079,0}\n";
-        o << "    };\n";
-        o << "    static const numb B[2][13] = {\n";
-        o << "        {0.04174749114153,0,0,0,0,-0.05545232861124,0.2393128072012,0.7035106694034,-0.7597596138145,0.6605630309223,0.1581874825101,-0.2381095387529,0.25},\n";
-        o << "        {0.02955321367635,0,0,0,0,-0.8286062764878,0.3112409000511,2.4673451906,-2.546941651842,1.443548583677,0.07941559588113,0.04444444444444,0}\n";
-        o << "    };\n";
+    std::string scheme_dopri78(const System& s, bool legacy ) {
+        int N = s.vars.size(); auto k = rhs_over(s, "X1"); std::ostringstream o;
+        md_table(o, "M[13][12]", legacy ? &kDopri78LegacyA[0][0] : &kDopri78A[0][0], 13, 12, 12);
+        md_table(o, "B[2][13]",  legacy ? &kDopri78LegacyB[0][0] : &kDopri78B[0][0], 2, 13, 13);
 
         o << "    numb X1[" << N << "];\n";
         o << "    numb X2[" << N << "];\n";
@@ -112,6 +101,48 @@ namespace ucuda::equations_detail {
         o << "    (void)z[0];\n";
 
         o << "    for (l = 0; l < N; ++l) X[l] = y[l];\n";
+        return o.str();
+    }
+
+
+    // Явный РК с постоянным шагом по таблице Бутчера: RK45 (S = 6) и DOP853
+    // (S = 12). A — строки стадий 0..S-1 с шагом ld (строка 0 нулевая,
+    // печатаются столбцы 0..S-2), b — S весов старшего решения. Форма кода
+    // та же, что у DOPRI78: стадии в цикле, таблицы const. Оценщики и
+    // стадия FSAL здесь не нужны — их считает адаптивный вариант.
+    std::string scheme_erk(const System& s, const MultiDoubleCoef* A, int ld,
+                           const MultiDoubleCoef* b, int S) {
+        int N = s.vars.size(); auto k = rhs_over(s, "X1"); std::ostringstream o;
+        const std::string sm1 = std::to_string(S - 1), ss = std::to_string(S);
+        md_table(o, ("M[" + ss + "][" + sm1 + "]").c_str(), A, S, S - 1, ld);
+        md_table(o, ("B[1][" + ss + "]").c_str(), b, 1, S, S);
+
+        o << "    numb X1[" << N << "];\n";
+        o << "    numb X2[" << N << "];\n";
+        o << "    numb k[" << N << "][" << S << "];\n";
+        o << "    int N = " << N << ";\n";
+        o << "    int i, j, l;\n";
+
+        o << "    for (i = 0; i < N; ++i) X1[i] = X[i];\n";
+        o << "    for (i = 0; i < " << S << "; ++i) {\n";
+        for (int v = 0; v < N; ++v)
+            o << "        k[" << v << "][i] = (" << k[v] << ");\n";
+        o << "        if (i != " << S - 1 << ") {\n";
+        o << "            for (l = 0; l < N; ++l) X2[l] = 0;\n";
+        o << "            for (j = 0; j < i + 1; ++j)\n";
+        o << "                for (l = 0; l < N; ++l)\n";
+        o << "                    X2[l] += M[i + 1][j] * k[l][j];\n";
+        o << "            for (l = 0; l < N; ++l)\n";
+        o << "                X1[l] = X[l] + h * X2[l];\n";
+        o << "        }\n";
+        o << "    }\n";
+
+        o << "    for (l = 0; l < N; ++l) X2[l] = 0;\n";
+        o << "    for (i = 0; i < " << S << "; ++i)\n";
+        o << "        for (l = 0; l < N; ++l)\n";
+        o << "            X2[l] += B[0][i] * k[l][i];\n";
+        o << "    for (l = 0; l < N; ++l)\n";
+        o << "        X[l] = X[l] + h * X2[l];\n";
         return o.str();
     }
 
@@ -371,7 +402,16 @@ namespace ucuda::equations_detail {
     }
 
 
-    std::string scheme_cd_common(const System& s, CdKind kind) {
+    // core_only -- ядро для ExtrZ: только проходы над Z[], объявленным снаружи,
+    // без перехода X -> Z на входе и без Re на выходе (см. codegen.hpp).
+    // flip_halves -- вариант {1-0} любой CD-схемы: в каждом проходе сначала
+    // неявная половина (h1, обратный порядок), потом явная (h2, прямой). Это
+    // та же композиция над сопряжённым базовым методом: условия порядка
+    // переходят в себя заменой N_k -> (-1)^(k+1) N_k, порядок и симметрия не
+    // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
+    // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
+    std::string scheme_cd_common(const System& s, CdKind kind, bool core_only ,
+                                 bool flip_halves ) {
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
@@ -393,25 +433,71 @@ namespace ucuda::equations_detail {
             for (int i = 0; i < N; ++i) cd_check_complex_safe(rhs_ast[i]);
 
         std::ostringstream o;
-        if (cx) {
+        if (cx && !core_only) {
             o << "    ucmplx Z[" << N << "];\n";
             for (int i = 0; i < N; ++i)
                 o << "    Z[" << i << "] = ucmplx(X[" << i << "], 0.0);\n";
         }
+        // Полушаги h1/h2 каждого прохода композиции — выражениями над
+        // объявленными выше переменными. Пусто у CD и Complex CD: у них ровно
+        // один проход на весь h.
+        std::vector<std::string> pass_h1, pass_h2;
         if (kind == CdKind::Real) {
             o << "    numb h1 = h * a[0];\n";
             o << "    numb h2 = h * (1 - a[0]);\n";
         }
         else if (kind == CdKind::Cx) {
-            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
+            o << kCcdImagDecl;
+            o << "    ucmplx h1 = ucmplx(a[0] * h,  h * ccd_im);\n";
+            o << "    ucmplx h2 = ucmplx((1 - a[0]) * h, -h * ccd_im);\n";
+        }
+        else if (kind == CdKind::Cx4ss01 || kind == CdKind::Cx4ss10) {
+            // Разбиение комплексное и фиксированное, a[0] не участвует:
+            // проход 1 -- (p, q), проход 2 -- (q, p). У {1-0} h1 -- это
+            // неявная половина, она идёт первой (см. emit_pass).
+            o << "    ucmplx cp = ucmplx(h / (numb)6, -h / (numb)6);   // (1-i)h/6\n";
+            o << "    ucmplx cq = ucmplx(h / (numb)3,  h / (numb)6);   // (2+i)h/6\n";
+            pass_h1 = { "cp", "cq" };
+            pass_h2 = { "cq", "cp" };
+            o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
+            o << "    ucmplx h2 = " << pass_h2[0] << ";\n";
         }
         else {
-            // gamma*h and conj(gamma)*h; s splits each of them inside its pass.
-            o << "    ucmplx g  = ucmplx(0.5 * h,  h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx gc = ucmplx(0.5 * h, -h * " << fmtnum(CCD_IMAG) << ");\n";
-            o << "    ucmplx h1 = g * a[0];\n";
-            o << "    ucmplx h2 = g * (1 - a[0]);\n";
+            // Комплексная композиция: s делит уже СВОЙ комплексный подшаг
+            // внутри прохода, поэтому здесь объявляются только сами подшаги,
+            // а h1/h2 перевыставляются перед каждым проходом.
+            // ccd_im нужен всем, кроме o4s3: у той свой коэффициент, и лишняя
+            // константа в теле была бы неиспользованной.
+            std::vector<std::string> cgs;
+            if (kind != CdKind::Cx4s3) o << kCcdImagDecl;
+            if (kind == CdKind::Cx4) {
+                // gamma*h and conj(gamma)*h.
+                o << "    ucmplx g  = ucmplx(0.5 * h,  h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx(0.5 * h, -h * ccd_im);\n";
+                cgs = { "g", "gc" };
+            }
+            else if (kind == CdKind::Cx4s4) {
+                // (gamma/2, conj/2, conj/2, gamma/2) — палиндром.
+                o << "    ucmplx g  = ucmplx(0.25 * h,  0.5 * h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx(0.25 * h, -0.5 * h * ccd_im);\n";
+                cgs = { "g", "gc", "gc", "g" };
+            }
+            else {
+                // (alpha, 1 - 2*alpha, alpha) — палиндром. Средний коэффициент
+                // выражен через alpha, а не литералом: тогда сумма подшагов
+                // равна h ТОЧНО и в плавающей арифметике тоже.
+                o << kCcd3Decl;
+                o << "    ucmplx ga = ucmplx(ccd3_re * h, ccd3_im * h);\n";
+                o << "    ucmplx gb = ucmplx(((numb)1 - (numb)2 * ccd3_re) * h,"
+                     " -(numb)2 * ccd3_im * h);\n";
+                cgs = { "ga", "gb", "ga" };
+            }
+            for (const std::string& g : cgs) {
+                pass_h1.push_back(g + " * a[0]");
+                pass_h2.push_back(g + " * (1 - a[0])");
+            }
+            o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
+            o << "    ucmplx h2 = " << pass_h2[0] << ";\n";
         }
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order. Сам разбор
@@ -422,30 +508,48 @@ namespace ucuda::equations_detail {
         // Complex CD4 зовёт его дважды с разными h1/h2, поэтому имена временных
         // переменных неявной ветки получают суффикс — иначе второй проход
         // переобъявил бы x0_cd в той же области видимости.
+        // У вариантов {1-0} (CCD4 (s-split)_{1-0} и flip_halves) половины
+        // меняются местами: неявная (h1, обратный порядок) первой, явная (h2,
+        // прямой порядок) второй.
+        const bool implicit_first = flip_halves || (kind == CdKind::Cx4ss10);
         auto emit_pass = [&](const char* sfx) {
         // Phi_{h1}: explicit half-step, forward order. Each X[i] update sees
         // the just-written values of X[0..i-1] (Euler-Cromer coupling).
-        for (int i = 0; i < N; ++i)
-            o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + h1 * ("
-              << emit_to_str(rhs_ast[i], nm) << ");\n";
-
-        for (int i = N - 1; i >= 0; --i)
-            emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
-                                  stv + ("[" + std::to_string(i) + "]"), nm,
-                                  "h2", sty, "x" + std::to_string(i) + "_cd" + sfx);
+        auto emit_explicit = [&](const char* step) {
+            for (int i = 0; i < N; ++i)
+                o << "    " << stv << "[" << i << "] = " << stv << "[" << i << "] + "
+                  << step << " * (" << emit_to_str(rhs_ast[i], nm) << ");\n";
+        };
+        auto emit_implicit = [&](const char* step) {
+            for (int i = N - 1; i >= 0; --i)
+                emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
+                                      stv + ("[" + std::to_string(i) + "]"), nm,
+                                      step, sty, "x" + std::to_string(i) + "_cd" + sfx);
+        };
+        if (implicit_first) { emit_implicit("h1"); emit_explicit("h2"); }
+        else                { emit_explicit("h1"); emit_implicit("h2"); }
         };  // emit_pass
 
-        emit_pass("");
-        if (kind == CdKind::Cx4) {
-            o << "    h1 = gc * a[0];\n";
-            o << "    h2 = gc * (1 - a[0]);\n";
-            emit_pass("_b");
+        if (pass_h1.empty()) {
+            emit_pass("");
+        }
+        else {
+            for (size_t k = 0; k < pass_h1.size(); ++k) {
+                if (k) {
+                    o << "    h1 = " << pass_h1[k] << ";\n";
+                    o << "    h2 = " << pass_h2[k] << ";\n";
+                }
+                // Суффикс временных неявной ветки: без него второй проход
+                // переобъявил бы x0_cd в той же области видимости.
+                const std::string sfx = k ? ("_" + std::to_string(k)) : std::string();
+                emit_pass(sfx.c_str());
+            }
         }
 
         // Наружу — только действительная часть: X[] вещественный и на входе, и
         // на выходе, поэтому вся обвязка (ядра, LLE/LS, бассейны, рендер) о
         // комплексности не знает.
-        if (cx)
+        if (cx && !core_only)
             for (int i = 0; i < N; ++i)
                 o << "    X[" << i << "] = Z[" << i << "].re;\n";
 
@@ -458,6 +562,14 @@ namespace ucuda::equations_detail {
     std::string scheme_complex_cd(const System& s)  { return scheme_cd_common(s, CdKind::Cx); }
 
     std::string scheme_complex_cd4(const System& s) { return scheme_cd_common(s, CdKind::Cx4); }
+
+    std::string scheme_complex_cd4_s3(const System& s) { return scheme_cd_common(s, CdKind::Cx4s3); }
+
+    std::string scheme_complex_cd4_s4(const System& s) { return scheme_cd_common(s, CdKind::Cx4s4); }
+
+    std::string scheme_complex_cd4_ss01(const System& s) { return scheme_cd_common(s, CdKind::Cx4ss01); }
+
+    std::string scheme_complex_cd4_ss10(const System& s) { return scheme_cd_common(s, CdKind::Cx4ss10); }
 
 
     // SEMP / SIMP — методы средней точки, у которых СТАДИЯ считается

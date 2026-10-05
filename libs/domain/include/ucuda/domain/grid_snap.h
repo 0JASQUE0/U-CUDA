@@ -61,6 +61,68 @@ inline bool SnapCursorToGrid(double cursor_x, double cursor_y,
     return true;
 }
 
+// БЛИЖАЙШИЙ узел, а не пиксельная полоса. Для 1D-графиков (Bif/LLE/LS) точки
+// рисуются россыпью, а не N цветными полосами, поэтому «узел, в чей пиксель
+// попал курсор» смысла не имеет — нужен ближайший посчитанный.
+//
+// Индекс и значение считаются в ОДНОЙ шкале и с одним знаменателем (n-1):
+// SnapCursorToGrid1D ниже делит диапазон на n равных частей для индекса, а
+// значение берёт по формуле с (n-1), и у краёв они расходятся на узел. На
+// лог-свипе это заметно больше всего: слева узлы густые, и промах на узел —
+// это заметная относительная ошибка в подписи.
+inline bool NearestNode1D(double cursor_x, double x_min, double x_max, int n,
+                          bool log_scale, int& out_idx, double& out_value)
+{
+    if (n < 1) return false;
+    if (cursor_x < x_min || cursor_x > x_max) return false;
+    if (n == 1) {
+        out_idx = 0;
+        out_value = (double)ucuda_node_value(0, 1, (numb)x_min, (numb)x_max);
+        return true;
+    }
+    // log_scale валиден только при положительных границах; живой чекбокс без
+    // прогона может долететь сюда с нулём — деградируем на линейную сетку.
+    const bool use_log = log_scale && x_min > 0.0 && x_max > 0.0 && cursor_x > 0.0;
+    double t;
+    if (use_log) {
+        const double l0 = std::log10(x_min), l1 = std::log10(x_max);
+        if (!(l1 > l0)) return false;
+        t = (std::log10(cursor_x) - l0) / (l1 - l0);
+    } else {
+        if (!(x_max > x_min)) return false;
+        t = (cursor_x - x_min) / (x_max - x_min);
+    }
+    int idx = (int)std::lround(t * (double)(n - 1));
+    idx = std::clamp(idx, 0, n - 1);
+    out_idx   = idx;
+    out_value = use_log ? (double)ucuda_node_value_log(idx, n, (numb)x_min, (numb)x_max)
+                        : (double)ucuda_node_value(idx, n, (numb)x_min, (numb)x_max);
+    return true;
+}
+
+// Половина расстояния до ближайшего соседнего узла — в той шкале, в какой
+// сетка реально разложена. Нужна как допуск «эта точка данных принадлежит
+// узлу idx»: линейный (hi-lo)/(n-1) на лог-свипе врёт в обе стороны — у
+// густого края он в десятки раз больше настоящего зазора (в допуск попадают
+// чужие узлы), у редкого меньше (не попадает ни один).
+inline double NodeHalfGap(double x_min, double x_max, int n, int idx, bool log_scale) {
+    if (n < 2) return 0.0;
+    const bool use_log = log_scale && x_min > 0.0 && x_max > 0.0;
+    auto val = [&](int k) -> double {
+        k = std::clamp(k, 0, n - 1);
+        return use_log ? (double)ucuda_node_value_log(k, n, (numb)x_min, (numb)x_max)
+                       : (double)ucuda_node_value(k, n, (numb)x_min, (numb)x_max);
+    };
+    const double v = val(idx);
+    double gap = 0.0;
+    if (idx > 0)     gap = std::abs(v - val(idx - 1));
+    if (idx < n - 1) {
+        const double g2 = std::abs(val(idx + 1) - v);
+        gap = (gap > 0.0) ? std::min(gap, g2) : g2;
+    }
+    return gap * 0.5;
+}
+
 // 1D-вариант — только X. Y-координата вызывающий трактует как непрерывную.
 // Тоже floor по пиксельной разбивке, отображаем позицию узла.
 // log_scale: узлы сетки движка распределены по getValueByIdx_log (лог-

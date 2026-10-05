@@ -6,8 +6,11 @@ namespace ucuda::ui_detail {
 // Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
 // Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
 // нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
-void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
+void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int idx) {
     BifurcationDiagramConfig& bd = s.diagrams[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Bifurcation;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", bd.label))
@@ -15,8 +18,8 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
-    draw_adaptive_controls(bd.adaptive);
+    draw_scheme_combo("Scheme", bd.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition): один combo с разделителем — сверху
@@ -30,9 +33,15 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                             bd.sweep_over_h,
                             bd.mode_2d ? &bd.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(bd.scheme, s.custom_schemes));
-    InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW);
-    InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(bd.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &bd.ad_axis, &bd.adaptive);
+    InputNumStr(bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        bd.sweep_over_h ? "h lo" : "Param lo", bd.param_lo_text); });
+    InputNumStr(bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        bd.sweep_over_h ? "h hi" : "Param hi", bd.param_hi_text); });
     ImGui::Checkbox("Log scale##bd_log", &bd.log_scale);
     if (bd.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
@@ -56,9 +65,15 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                                     bd.param_index_2, bd.sweep_over_var_2, bd.var_sweep_index_2,
                                     bd.sweep_over_h_2, &bd.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
-                                    scheme_uses_symmetry(bd.scheme, s.custom_schemes));
-        InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW);
-        InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, kFieldW);
+                                    scheme_uses_symmetry(bd.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &bd.ad_axis_2, &bd.adaptive);
+        InputNumStr(bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        bd.sweep_over_h_2 ? "h2 lo" : "Param2 lo", bd.param_lo_2_text); });
+        InputNumStr(bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        bd.sweep_over_h_2 ? "h2 hi" : "Param2 hi", bd.param_hi_2_text); });
         ImGui::Checkbox("Log scale##bd_log2", &bd.log_scale_2);
         if (bd.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         InputNumStr("DBSCAN eps", bd.eps_dbscan_text, kFieldW);
@@ -76,8 +91,29 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
 
     // Variable + resolution + inter-peaks
     draw_writable_var_combo(s.vars, bd.writable_var, "Writable var##bd_wv");
-    InputNumStr("Resolution", bd.n_pts_text, kFieldW);
-    if (!bd.mode_2d)
+    InputNumStr("Resolution", bd.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", bd.n_pts_text); });
+    // Every iterate vs peaks only. Inter-peaks is meaningless in the first mode
+    // (consecutive samples are one step apart by construction), so it is hidden.
+    if (ImGui::Checkbox("Plot every iterate (no peak filter)", &bd.plot_all_iterates))
+        bd.fit_request = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "On: the diagram gets every recorded iterate - the convention for\n"
+            "discrete maps, and the default for them.\n"
+            "Off: only local maxima (a Poincare section), the convention for flows.\n"
+            "For a map the peak filter drops the lower branch of every period-2\n"
+            "orbit and leaves the period-1 windows empty.");
+    // Адаптивный шаг пишет только пики (ядра адаптивного шага сырых отсчётов не выдают).
+    if (bd.plot_all_iterates && bd.adaptive.enabled && !model.is_map) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(not with the adaptive step: peaks only)");
+    }
+    // Inter-peak times are not filled in the all-iterates path (pushRaw writes
+    // zeros), so a stale toggle would plot a flat line at 0.
+    if (bd.plot_all_iterates) bd.plot_inter_peaks = false;
+    if (!bd.mode_2d && !bd.plot_all_iterates)
         if (ImGui::Checkbox("Plot inter-peaks instead of peak values", &bd.plot_inter_peaks))
             bd.fit_request = true;
 
@@ -109,11 +145,15 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
         f.max_value   = &bd.max_value_text;
-        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f);
+        f.adaptive      = &bd.adaptive;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp;
+        draw_integration_block("Integration##bd_int", bd.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
-    draw_named_num_fields("Initial conditions##bd_ic", s.vars,   bd.initial_conditions);
-    draw_named_num_fields("Parameters##bd_par",        s.params, bd.param_values);
+    draw_named_num_fields("Initial conditions##bd_ic", s.vars,   bd.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##bd_par",        s.params, bd.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##bd_csv", "Save to file", bd.csv_save_enabled,
                           "##csv_path", bd.csv_output_path,
                           "Path is kept even when save is off. Also writes <path>_config.csv.");
@@ -128,6 +168,7 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
             draw_regime_summary(bd.result_2d.flags);
+            draw_adaptive_stats(bd.result_2d.ad_stats);
         }
         else if (!bd.last_error.empty()) {
             draw_error_box("##par_err_2d", bd.last_error);
@@ -145,6 +186,7 @@ void draw_diagram_controls(BifurcationAnalysisSession& s, int idx) {
                 "OK: n_pts=%d, peaks total=%d (max per param=%d)",
                 bd.result.n_pts, total_peaks, max_peaks);
             draw_regime_summary(bd.result.flags);
+            draw_adaptive_stats(bd.result.ad_stats);
         }
         else if (!bd.last_error.empty()) {
             draw_error_box("##par_err", bd.last_error);
@@ -165,7 +207,7 @@ void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
         "##bd_tabs", "bd_tab_", (int)s.diagrams.size(),
         s.in_flight, s.running_diagram_index,
         [&s](int i) { return s.diagrams[i].label; },
-        [&s](int i) { draw_diagram_controls(s, i); },
+        [&model, &s](int i) { draw_diagram_controls(model, s, i); },
         [&s]() { s.add_diagram(); },
         s.request_select_diagram);
     s.request_select_diagram = -1;   // запрос потреблён этим кадром
@@ -181,6 +223,7 @@ ParamPlotKind to_param_plot_kind(ParametricPlotWindow::Kind kind) {
     switch (kind) {
     case ParametricPlotWindow::Kind::LLE: return ParamPlotKind::LLE;
     case ParametricPlotWindow::Kind::LS:  return ParamPlotKind::LS;
+    case ParametricPlotWindow::Kind::Metrics: return ParamPlotKind::Metrics;
     case ParametricPlotWindow::Kind::Bifurcation:
     default:                              return ParamPlotKind::Bifurcation;
     }
@@ -315,10 +358,15 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
             if (fit) bdact.fit_request_2d = false;
 
             const bool bd_busy = s.in_flight && s.is_2d_run && idx == s.running_diagram_index;
-            hb.popup_extras = [&bdact, &cb, bd_busy]() {
+            // Ctrl+T: обе оси карты — это и есть диапазоны свипа.
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text,   &BifurcationDiagramConfig::param_hi_text,
+                &BifurcationDiagramConfig::param_lo_2_text, &BifurcationDiagramConfig::param_hi_2_text) };
+            hb.popup_extras = [&bdact, &cb, bd_busy, &vrt, &model, &hb]() {
                 draw_export_menu_item(bd_busy, cb, [&bdact](const std::string& p) {
                     data_export::export_bif2d(bdact.result_2d, p);
                 });
+                draw_view_range_menu(vrt, hb.x_axis, hb.y_axis, hb.swap_axes, &model);
             };
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -331,6 +379,8 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                       bdact.result_2d.param_lo_2, bdact.result_2d.param_hi_2,
                       bdact.result_2d.min_val, bdact.result_2d.max_val,
                       fit);
+            handle_view_range_keys(vrt, hb.x_axis, hb.y_axis, plot_window_active(),
+                               hb.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -466,10 +516,18 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
             if (fit) bdact.fit_request = false;
 
             const bool c1d_busy = s.in_flight && !s.is_2d_run && idx == s.running_diagram_index;
-            hc.popup_extras = [&bdact, &cb, c1d_busy]() {
+            // Ctrl+T: X — диапазон свипа, Y — окно гистограммы плотности.
+            // Запись в ymin/ymax сама включает custom_y (см. ViewRangeTarget),
+            // иначе значения легли бы мимо: при авто-Y их никто не читает.
+            const std::vector<ViewRangeTarget> vrt = { vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text,        &BifurcationDiagramConfig::param_hi_text,
+                &BifurcationDiagramConfig::colored_1d_ymin_text, &BifurcationDiagramConfig::colored_1d_ymax_text,
+                &BifurcationDiagramConfig::colored_1d_custom_y) };
+            hc.popup_extras = [&bdact, &cb, c1d_busy, &vrt, &model, &hc]() {
                 draw_export_menu_item(c1d_busy, cb, [&bdact](const std::string& p) {
                     data_export::export_bif1d(bdact.result, p);
                 });
+                draw_view_range_menu(vrt, hc.x_axis, hc.y_axis, hc.swap_axes, &model);
             };
 
             // Тот же lo/hi/reverse-разбор, что и у классического scatter'а
@@ -492,6 +550,8 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                       ylo, yhi,
                       bdact.colored_1d_cache_vmin, bdact.colored_1d_cache_vmax,
                       fit);
+            handle_view_range_keys(vrt, hc.x_axis, hc.y_axis, plot_window_active(),
+                               hc.swap_axes, &model);
             ImGui::PopID();
         }
         return;
@@ -546,6 +606,9 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
     // Буферы точек (по одному на серию), свои у каждого окна — см.
     // window_point_bufs: между кадрами они держат capacity.
     auto& bufs = window_point_bufs(win.id, win.members.size());
+    // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
+    view.snap_x_nodes      = nullptr;
+    view.snap_x_node_count = 0;
 
     std::vector<PlotSeriesInput> series_in;
     std::vector<bool> init_vis;
@@ -556,6 +619,11 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
 
     bool any_fit = false;
     int  data_gen = 0;
+
+    // Сетка снапа фокусной (первой посчитанной) диаграммы окна — заполняется
+    // в цикле ниже теми же lo/hi/npts, по которым строятся точки.
+    double snap_lo_focus = 0.0, snap_hi_focus = 0.0;
+    int    snap_n_focus  = 0;
 
     for (size_t mi = 0; mi < win.members.size(); ++mi) {
         int idx = win.members[mi];
@@ -576,14 +644,22 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                         ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
+            // Сетка снапа — ровно та, по которой строятся точки ниже. Раньше
+            // она бралась из bd.result.param_lo/hi, а классический (не
+            // continuation) прогон их не заполняет: снап уходил на дефолты
+            // структуры, [0, 1], и курсор садился на узлы чужой сетки.
+            if (snap_n_focus == 0) {
+                snap_lo_focus = lo; snap_hi_focus = hi; snap_n_focus = npts;
+                set_snap_nodes(view, win.id, npts, lo, hi, bd.log_scale, rev, bd.continuation);
+            }
             for (int k = 0; k < npts; ++k) {
                 if (k < (int)bd.result.flags.size() &&
                     !regime_is_oscillation(bd.result.flags[k])) continue;
                 double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev, bd.continuation);
                 if (k >= (int)source.size()) continue;
                 for (double y : source[k]) {
-                    buf.push_back((float)x);
-                    buf.push_back((float)y);
+                    buf.push_back((double)x);
+                    buf.push_back((double)y);
                     ++total_pts;
                 }
             }
@@ -610,17 +686,28 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
     // Right-click "Export data..." for the bifurcation 1D line plot. The
     // submenu lists every diagram in the session that has a finished run
     // (not just this window's members — export isn't scoped to a window).
-    view.popup_extras = [&s, &cb]() {
+    // Ctrl+T: по X идёт свип, по Y — значение переменной, входа в расчёте у
+    // него нет, поэтому Y-пара остаётся нулевой. Целей столько же, сколько
+    // диаграмм в окне; первая (она же фокусная — по ней берутся snap-сетка и
+    // стиль точек) достаётся Ctrl+T, все — Ctrl+Shift+T.
+    std::vector<ViewRangeTarget> vrt;
+    for (int idx : win.members)
+        if (idx >= 0 && idx < (int)s.diagrams.size())
+            vrt.push_back(vr_target(s.diagrams, idx,
+                &BifurcationDiagramConfig::param_lo_text, &BifurcationDiagramConfig::param_hi_text));
+
+    view.popup_extras = [&s, &cb, &vrt, &model, &view]() {
         draw_export_submenu("bd", (int)s.diagrams.size(),
             [&s](int i) { return s.diagrams[i].label; },
             [&s](int i) { return s.diagrams[i].last_run_ok; },
             [&s](int i) { return s.in_flight && i == s.running_diagram_index; },
             [&s](int i, const std::string& p) { data_export::export_bif1d(s.diagrams[i].result, p); },
             cb);
+        draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
     };
 
-    // Snap X к узлам первой БД этого окна (см. apply_snap_x_from_first_member).
-    apply_snap_x_from_first_member(view, win.members, s.diagrams);
+    // Snap X к узлам фокусной БД — по той же сетке, что и её точки (см. выше).
+    apply_snap_x(view, snap_lo_focus, snap_hi_focus, snap_n_focus);
 
     // Маркер/размер точек — свойства вида (одни на окно): берём у фокусного
     // члена, тулбар выше держит остальных членов синхронно.
@@ -635,6 +722,7 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
 
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE0F1D, data_gen,
                 series_in, init_vis, glob_vis, any_fit);
+    handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
 
 
@@ -642,16 +730,19 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
 
 // Контролы одной LLE-кривой. Возвращает true, если пользователь нажал Run
 // для этой кривой.
-void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
+void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
     LLECurveConfig& c = s.curves[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::LLE;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
 
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
-    draw_adaptive_controls(c.adaptive);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target: параметры + разделитель + переменные (IC) + dt (h). См. BD.
@@ -660,12 +751,20 @@ void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                             c.sweep_over_h,
                             c.mode_2d ? &c.sweep_over_h_2 : nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget, !model.is_map,
+                            &c.ad_axis, &c.adaptive);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
     ImGui::Checkbox("Log scale##lle_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-    InputNumStr("Resolution", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
 
     draw_continuation_device_block(c, "lle", c.mode_2d || c.sweep_over_var, c.mode_2d);
 
@@ -682,9 +781,15 @@ void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                                     c.param_index_2, c.sweep_over_var_2, c.var_sweep_index_2,
                                     c.sweep_over_h_2, &c.sweep_over_h,
                                     /*note_when_empty*/ false, kComboW,
-                                    scheme_uses_symmetry(c.scheme, s.custom_schemes));
-        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW);
-        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW);
+                                    scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                                    &model, BroadcastField::SweepTarget2, !model.is_map,
+                                    &c.ad_axis_2, &c.adaptive);
+        InputNumStr(c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo2, {},
+                                        c.sweep_over_h_2 ? "h2 lo" : "Param2 lo", c.param_lo_2_text); });
+        InputNumStr(c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi2, {},
+                                        c.sweep_over_h_2 ? "h2 hi" : "Param2 hi", c.param_hi_2_text); });
         ImGui::Checkbox("Log scale##lle_log2", &c.log_scale_2);
         if (c.log_scale_2) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
         ImGui::TextDisabled("Grid is square (Resolution applies to both axes).");
@@ -701,19 +806,37 @@ void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
-        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f);
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRenorm;
+        draw_integration_block("Integration##lle_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     // LLE (Wolf/Benettin) (collapsible)
     if (ImGui::CollapsingHeader("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
-        ImGui::TextDisabled("eps = initial perturbation magnitude; NT = block length\n"
+        InputNumStr("vector transient", c.vtr_text, kFieldW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Tangent-vector transient: after the transient of the trajectory the\n"
+                "perturbations are attached and renormalised every NT for this long\n"
+                "(rounded to whole NT blocks) without adding their stretching to the sum.\n"
+                "While the random initial frame turns towards the Lyapunov directions it\n"
+                "collects ln(1/c) (c - its projection on them), and the exponents then\n"
+                "depend on that random frame as ~ln(1/c)/t_max: point-to-point noise.\n"
+                "It aligns as exp(-(L1 - L2) t), so take ~10/(L1 - L2), or 10-20%% of t_max.\n"
+                "Costs this much extra time for every perturbed copy. 0 - off.");
+        ImGui::TextDisabled(model.is_map
+            ? "eps = initial perturbation magnitude; NT = block length\n"
+              "between renormalizations (in iterations)."
+            : "eps = initial perturbation magnitude; NT = block length\n"
                             "between renormalizations (in time units).");
     }
 
-    draw_named_num_fields("Initial conditions##lle_ic", s.vars,   c.initial_conditions);
-    draw_named_num_fields("Parameters##lle_par",        s.params, c.param_values);
+    draw_named_num_fields("Initial conditions##lle_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##lle_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##lle_csv", "Save to file", c.csv_save_enabled,
                           "##lle_csv_path", c.csv_output_path,
                           "Path is kept even when save is off. Also writes <path>_config.csv.");
@@ -727,6 +850,7 @@ void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
             draw_regime_summary(c.result_2d.flags);
+            draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##lle_err", c.last_error);
@@ -736,6 +860,7 @@ void draw_lle_curve_controls(LLEAnalysisSession& s, int idx) {
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
             draw_regime_summary(c.result.flags);
+            draw_adaptive_stats(c.result.ad_stats);
         }
         else if (!c.last_error.empty()) {
             draw_error_box("##lle_err", c.last_error);

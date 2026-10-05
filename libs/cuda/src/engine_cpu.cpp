@@ -12,7 +12,8 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
                    int writableVar, numb maxValue,
-                   numb* data)
+                   numb* data,
+                   numb* boxMin , numb* boxMax )
 {
     for (size_t i = 0; i < iterations; ++i) {
         if (data != nullptr) {
@@ -23,6 +24,14 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
                 else                     data[i] = x[0];
             } else {
                 data[i] = x[writableVar];
+            }
+            // Описанный параллелепипед по всем переменным (Metrics -> Volume),
+            // в тех же сэмплах, что пишутся в data.
+            if (boxMin != nullptr) {
+                for (int j = 0; j < amountOfX; ++j) {
+                    if (i == 0 || x[j] < boxMin[j]) boxMin[j] = x[j];
+                    if (i == 0 || x[j] > boxMax[j]) boxMax[j] = x[j];
+                }
             }
             for (int j = 0; j < preScaller; ++j) step(x, a, h);
         }
@@ -59,13 +68,14 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
 // матрицу nPts x record_steps. Логика — построчная копия, включая параболическую интерполяцию,
 // сдвиг пиков влево на один и пересчёт timeOfPeaks в межпиковые интервалы.
 int cpu_peak_finder(const numb* data, size_t amountOfPoints,
-                    numb* outPeaks, numb* timeOfPeaks, numb h)
+                    numb* outPeaks, numb* timeOfPeaks, numb h,
+                    bool emit_all)
 {
     // Снимок knobs на весь вызов: GPU-двойник видит их как compile-time
     // константы, поэтому в пределах одной точки свипа они меняться не должны.
     const PeakConfig pc = get_peak_config();
 
-    if (!pc.do_calculate_peaks) {
+    if (emit_all || !pc.do_calculate_peaks) {
         int n = (int)amountOfPoints;
         if (n >= pc.max_amount_of_peaks) n = pc.max_amount_of_peaks;
         for (int i = 0; i < n; ++i) { outPeaks[i] = data[i]; timeOfPeaks[i] = (numb)0; }
@@ -145,18 +155,6 @@ float cpu_curand_uniform(CpuRandState* s) {
 }
 
 
-// run_bif1d_continuation_cpu — CPU-двойник run_bif1d_continuation.
-//
-// Зачем: GPU-версия гоняет ВЕСЬ свип в ОДНОМ потоке (gridDim = blockDim = 1, см.
-// bifurcation1d_cont.template.cu) — continuation последователен по построению, каждая точка
-// стартует с конечного x[] предыдущей, и распараллелить это нельзя, не сломав гистерезис.
-// Одиночный GPU-поток на зависимой FP64-цепочке — заведомо медленное железо.
-// КРС компилируется в нативную функцию шага через krs_cpu.h: это работает и для custom, и для
-// встроенных схем (req.krs_body в обоих случаях обычный C — у встроенных вывод codegen_scheme).
-//
-// Два отличия от GPU-двойника, оба в лучшую сторону: память — один блок траектории вместо
-// матрицы nPts x record_steps (GPU держит её трижды: d_data + d_outPeaks + d_timeOfPeaks); отмена
-// и прогресс работают на каждой точке свипа, а не только до запуска монолитного kernel'а.
 Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) {
     Bifurcation1DResult res;
     auto fail = [&](const std::string& msg) -> Bifurcation1DResult& {
@@ -164,19 +162,19 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     };
 
     // Та же валидация, что и у GPU-двойника.
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
+                                                              return fail("param_index out of range");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -197,7 +195,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -265,14 +263,18 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         // d_amountOfPeaks уходит СЫРОЙ REGIME_*, и peakFinderCUDA пропускает и
         // FP, и unbound. Раньше unbound на основном участке проходил дальше, и
         // пики искались в уже разошедшемся блоке.
-        if (flag != REGIME_OSCILLATION) {
+        // Emitting every sample keeps the fixed point: for a map a period-1
+        // orbit is a real branch, and the block already holds its iterates.
+        if (flag != REGIME_OSCILLATION &&
+            !(req.emit_all_samples && flag == REGIME_FIXED_POINT)) {
             res.flags[j] = flag;
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
             continue;
         }
 
         const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
-                                      peaks.data(), times.data(), timeStep);
+                                      peaks.data(), times.data(), timeStep,
+                                      req.emit_all_samples);
         res.flags[j] = n;
         if (n > 0) {
             res.bifurcation_points[j].assign(peaks.begin(),  peaks.begin() + n);
@@ -281,6 +283,8 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ true);
+    if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -302,17 +306,17 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
 
     // Диспетчер уже провалидировал req целиком; здесь — только то, от чего
     // зависит своя разметка буферов, плюс дешёвая страховка на прямой вызов.
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -331,7 +335,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -356,6 +360,8 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     res.snapshot.indexOfMutVar = req.sweep_over_var ? req.var_sweep_index : req.param_index;
     res.snapshot.range_lo      = req.param_lo;
     res.snapshot.range_hi      = req.param_hi;
+    res.snapshot.log_scale     = req.log_scale;
+    res.snapshot.on_cpu        = true;
 
     const std::string& OUT_FILE_PATH = req.csv_output_path;
     constexpr int set_precision = 15;
@@ -425,10 +431,13 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
                                   pointsInBlock, req.amountOfX,
                                   req.pre_scaller, req.writable_var,
                                   req.max_value, block.data());
-        if (flag != REGIME_OSCILLATION) { finish_point(flag); continue; }
+        // Same reasoning as above: a map's period-1 orbit is a branch, not a blank.
+        if (flag != REGIME_OSCILLATION &&
+            !(req.emit_all_samples && flag == REGIME_FIXED_POINT)) { finish_point(flag); continue; }
 
         const int n = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
-                                      peaks.data(), times.data(), timeStep);
+                                      peaks.data(), times.data(), timeStep,
+                                      req.emit_all_samples);
         res.flags[j] = n;
         if (n > 0) {
             res.bifurcation_points[j].assign(peaks.begin(), peaks.begin() + n);
@@ -447,39 +456,22 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
 }
 
 
-// run_lle1d_cpu — LLE(param) на CPU. Один код обслуживает два режима.
-//
-// continuation = false (классический свип): построчный порт LLEKernelCUDA — то, что GPU делает в
-//   каждом потоке. Точки независимы: x сбрасывается на initial_conditions, щуп берётся из RNG с
-//   subsequence = индекс точки (ровно как idx в kernel'е), прогревается transient_time, дальше
-//   цикл Бенеттина. Нужен для сверки CPU-ядра с GPU и для счёта без GPU.
-//
-// continuation = true: точки выстроены в цепочку, переносится не только траектория x[], но и САМ
-//   щуп y[] — к концу точки он уже развёрнут вдоль направления максимального растяжения, и
-//   следующей точке не надо разворачивать его заново из случайного направления, отчего кривая
-//   lambda(param) выходит глаже. GPU-двойника у режима нет и не будет: цепочка последовательна по
-//   построению и выродилась бы в один поток. Прогрев отрабатывается на КАЖДОЙ точке, но начиная
-//   со второй идёт NT-блоками с перенормировкой — щуп остаётся прицепленным и не теряет
-//   ориентацию, поэтому transient_time сохраняет прежний смысл, а результаты сравнимы с классикой.
-//
-// Внутри точки алгоритм в обоих режимах одинаков: Бенеттин с одним вектором возмущения,
-// перенормировка каждые NT единиц времени, lambda = sum(log(|dX|/eps)) / tMax.
 LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     LLE1DResult res;
     auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-    if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+                                                              return fail("param_index out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.NT <= 0.0)          return fail("NT must be > 0");
+    if (req.eps <= 0.0)         return fail("eps must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -496,11 +488,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);   // NT-блоков; от h не зависит
     const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
+    const int nWarm        = lyap_warm_blocks(req.vector_transient, req.NT);   // как в ядре
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // Число шагов в NT-блоке и в прогреве зависит от h, а при h-свипе h своё в
     // каждой точке — считаем их внутри цикла.
-    int ntSteps   = (int)(req.NT / req.h);
-    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
+    int ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)req.h);   // как в ядре
+    size_t skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)req.h);   // как в ядре
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -534,15 +527,13 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
 
     // Один NT-блок: продвинуть x и щуп, вернуть log(|dX|/eps) и вернуть щуп на
     // расстояние eps. Точная копия тела цикла LLEKernelCUDA.
+    // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
+    // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb& out_log) -> bool {
-        if (step.ensemble_fn()) {
-            if(!step.ensemble_fn()(x.data(),y.data(),1,a.data(),h_local,ntSteps,req.max_value)) return false;
-        } else {
-        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        }
 
         double d = 0.0;
         for (int l = 0; l < N; ++l) {
@@ -573,8 +564,8 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         if (req.sweep_over_h) {
             // Свипуем сам шаг: a[] не трогаем, пересчитываем число шагов.
             h_local   = p;
-            ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
+            ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)h_local);
+            skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -595,10 +586,12 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         }
 
         bool alive = true;
+        int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probe_attached) {
             // Первая точка (и любая после разрыва цепочки): выходим на аттрактор
             // одной траекторией, как классический свип, затем цепляем щуп.
-            if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps, N,
+            // Ровно skipSteps шагов: cpu_loop_model делает ещё шаг после цикла (как ядро).
+            if (skipSteps > 0 && cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps - 1, N,
                                1, 0, req.max_value, nullptr) == 0) {
                 alive = false;
             } else {
@@ -606,8 +599,11 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
                 probe_attached = true;
             }
         } else {
+            warm = settleBlocks > nWarm ? settleBlocks : nWarm;
+        }
+        {
             numb dummy;
-            for (int b = 0; b < settleBlocks && alive; ++b)
+            for (int b = 0; b < warm && alive; ++b)
                 if (!advance_block(dummy)) alive = false;
         }
 
@@ -619,7 +615,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         }
 
         if (alive) {
-            res.lyapunov[j] = (double)(sum / (numb)req.t_max);
+            res.lyapunov[j] = (double)(sum / ((numb)nBlocks * (numb)ntSteps * (numb)h_local));
             res.flags[j]    = REGIME_OSCILLATION;
         } else {
             // LLE не различает fixed point: единственная причина «не посчиталось»
@@ -637,6 +633,8 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
+    write_curve1d_csv(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -778,7 +776,7 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators ) {
 // run_ls1d_cpu — спектр Ляпунова LS(param) на CPU, оба режима (см. run_lle1d_cpu).
 // Внутри точки — построчный порт LSKernelCUDA: Бенеттин с N векторами возмущения и
 // ортогонализацией Грама-Шмидта каждые NT единиц времени,
-// lambda_k = sum(log(denominators[k]/eps)) / tMax.
+// lambda_k = sum(log(denominators[k]/eps)) / (nBlocks*k*h), k = ucuda_steps_per_block(NT, h).
 // В continuation переносятся траектория x[] и ВСЕ N щупов y[] — к концу точки они уже выстроены
 // вдоль собственных направлений растяжения. Отличие от LLE только в размере состояния (там один
 // щуп, здесь N плюс ортогонализация), поэтому точка дороже примерно в N раз.
@@ -786,18 +784,18 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     LS1DResult res;
     auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                              return fail("param_index вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.NT <= 0.0)          return fail("NT должно быть > 0");
-    if (req.eps <= 0.0)         return fail("eps должно быть > 0");
+                                                              return fail("param_index out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.NT <= 0.0)          return fail("NT must be > 0");
+    if (req.eps <= 0.0)         return fail("eps must be > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -814,10 +812,11 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     const int N            = req.amountOfX;
     const int nBlocks      = (int)(req.t_max / req.NT);
     const int settleBlocks = steps_from_time_int(req.transient_time, req.NT);
+    const int nWarm        = lyap_warm_blocks(req.vector_transient, req.NT);   // как в ядре
     if (nBlocks <= 0) return fail("computed t_max / NT <= 0");
     // См. run_lle1d_cpu: при h-свипе шаг свой в каждой точке.
-    int ntSteps   = (int)(req.NT / req.h);
-    size_t skipSteps = steps_from_time_size_t(req.transient_time, req.h);
+    int ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)req.h);   // как в ядре
+    size_t skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)req.h);   // как в ядре
     if (!req.sweep_over_h && ntSteps <= 0) return fail("computed NT / h <= 0");
 
     const int nPts = req.n_pts;
@@ -861,16 +860,14 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     // Один NT-блок: продвинуть траекторию и все щупы, ортогонализовать, вернуть
     // log(denominators[k]/eps) по каждому направлению и вернуть щупы на eps.
     // Точная копия тела цикла LSKernelCUDA.
+    // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
+    // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb* out_logs) -> bool {
-        if (step.ensemble_fn()) {
-            if(!step.ensemble_fn()(x.data(),y.data(),N,a.data(),h_local,ntSteps,req.max_value)) return false;
-        } else {
-        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, ntSteps, N,
+        if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
         for (int j = 0; j < N; ++j)
             if (cpu_loop_model(step.fn(), y.data() + (size_t)j * N, a.data(), h_local,
-                               ntSteps, N, 1, 0, req.max_value, nullptr) == 0) return false;
-        }
+                               (size_t)(ntSteps - 1), N, 1, 0, req.max_value, nullptr) == 0) return false;
 
         for (int k = 0; k < N; ++k)
             for (int l = 0; l < N; ++l)
@@ -899,8 +896,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                                           req.log_scale);
         if (req.sweep_over_h) {
             h_local   = p;
-            ntSteps   = (h_local > 0.0) ? (int)(req.NT / h_local) : 0;
-            skipSteps = steps_from_time_size_t(req.transient_time, h_local);
+            ntSteps   = (int)ucuda_steps_per_block((numb)req.NT, (numb)h_local);
+            skipSteps = (size_t)ucuda_steps_per_block((numb)req.transient_time, (numb)h_local);
         } else {
             a[(size_t)req.param_index] = p;
         }
@@ -919,8 +916,10 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         bool alive = true;
+        int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probes_attached) {
-            if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps, N,
+            // Ровно skipSteps шагов: cpu_loop_model делает ещё шаг после цикла (как ядро).
+            if (skipSteps > 0 && cpu_loop_model(step.fn(), x.data(), a.data(), h_local, skipSteps - 1, N,
                                1, 0, req.max_value, nullptr) == 0) {
                 alive = false;
             } else {
@@ -933,9 +932,10 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
                 probes_attached = true;
             }
         } else {
-            for (int b = 0; b < settleBlocks && alive; ++b)
-                if (!advance_block(nullptr)) alive = false;
+            warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        for (int b = 0; b < warm && alive; ++b)
+            if (!advance_block(nullptr)) alive = false;
 
         std::fill(sum.begin(), sum.end(), 0.0);
         for (int b = 0; alive && b < nBlocks; ++b) {
@@ -944,7 +944,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         if (alive) {
-            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / (numb)req.t_max);
+            const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * (numb)h_local;
+            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / tIntegrated);
             res.flags[j] = REGIME_OSCILLATION;
         } else {
             // Как и LLE, LS не различает fixed point — только расходимость.
@@ -958,6 +959,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
     }
 
+    fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
+    write_curve1d_csv(res, req.csv_output_path);
     res.ok = true;
     return res;
 }
@@ -974,26 +977,26 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     Dft1DResult res;
     auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
-    if (req.krs_body.empty())                                 return fail("krs_body пуст");
-    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+    if (req.krs_body.empty())                                 return fail("krs_body is empty");
+    if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
     if ((int)req.initial_conditions.size() != req.amountOfX)  return fail("initial_conditions.size() != amountOfX");
-    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("base_values слишком много");
+    if ((int)req.base_values.size() > kMaxAmountOfValues)     return fail("too many base_values");
     if (!req.sweep_over_h && !req.sweep_over_var &&
         (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
-                                                              return fail("param_index вне диапазона");
+                                                              return fail("param_index out of range");
     if (req.sweep_over_var &&
         (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
-                                                              return fail("var_sweep_index вне диапазона");
+                                                              return fail("var_sweep_index out of range");
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                              return fail("writable_var вне диапазона");
-    if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-    if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-    if (req.h <= 0.0)           return fail("h должно быть > 0");
-    if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-    if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-    if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                              return fail("writable_var out of range");
+    if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+    if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+    if (req.h <= 0.0)           return fail("h must be > 0");
+    if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+    if (req.transient_time < 0) return fail("transient_time must be >= 0");
+    if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
     if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-                                return fail("log-сетка по частоте требует freq lo/hi > 0");
+                                return fail("a log grid over frequency requires freq lo/hi > 0");
 
     KrsCpuStep step;
     std::vector<KrsCpuDiag> diags;
@@ -1010,7 +1013,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     const double worstCaseH = req.sweep_over_h
                             ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                             : req.h;
-    if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
     const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
     if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -1105,6 +1108,192 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     }
 
     res.ok = true;
+    return res;
+}
+
+
+inline numb cpu_sm_variance(numb s1, numb s2, size_t n) {
+    if (n == 0) return (numb)0;
+    const numb inv = (numb)1 / (numb)n;
+    const numb v = (s2 - s1 * s1 * inv) * inv;
+    return v < (numb)0 ? (numb)0 : v;
+}
+
+
+// run_metrics_cpu — CPU-ветка Metrics (только 1D). continuation = false: точки
+// независимы, как у calculateDiscreteModelMetricsCUDA (тот же выбор длин
+// транзиента и блока). continuation = true: цепочка с переносом x[], как у
+// signalMetricsContinuationKernel. Пики — cpu_peak_finder, батч-порт peakFinder;
+// PeakStream на GPU по построению ему эквивалентен (см. cudaLibrary.cu), поэтому
+// интервалы, а с ними и частоты, те же. Итог точки — копия smFinalize.
+SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool continuation) {
+    SignalMetricsResult res;
+    auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
+
+    KrsCpuStep step;
+    std::vector<KrsCpuDiag> diags;
+    if (!step.compile(req.krs_body, req.amountOfX, (int)req.base_values.size(), diags)) {
+        std::string msg = "CPU KRS:";
+        for (const auto& d : diags) {
+            msg += "\n";
+            if (d.line > 0) msg += "line " + std::to_string(d.line) + ": ";
+            msg += d.message;
+        }
+        return fail(msg);
+    }
+
+    // (std::min в скобках не пишем: windows.h тянет макрос min)
+    const double worstCaseH = req.sweep_over_h
+                            ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
+                            : req.h;
+    if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
+    const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
+    if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
+
+    const int  nPts = req.n_pts;
+    const int  mask = req.metric_mask & kSignalMetricAllMask;
+    const bool rev  = continuation && req.continuation_reverse;
+    res.dimension   = 1;
+    res.n_pts       = nPts;
+    res.param_lo    = req.param_lo;
+    res.param_hi    = req.param_hi;
+    res.log_scale   = req.log_scale;
+    res.metric_mask = mask;
+    res.continuation         = continuation;
+    res.continuation_reverse = rev;
+    res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+    const double NaN = std::numeric_limits<double>::quiet_NaN();
+    for (int m = 0; m < SIGM_COUNT; ++m)
+        if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, NaN);
+
+    const PeakConfig pc = get_peak_config();
+    std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    std::vector<numb> a(req.base_values.begin(), req.base_values.end());
+    std::vector<numb> block((size_t)maxPointsInBlock);
+    std::vector<numb> peaks((size_t)maxPointsInBlock);
+    std::vector<numb> times((size_t)maxPointsInBlock);
+    std::vector<numb> boxMin((size_t)req.amountOfX), boxMax((size_t)req.amountOfX);
+
+    for (int j = 0; j < nPts; ++j) {
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true;
+            res.error = "Cancelled by user";
+            return res;
+        }
+        const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi, rev, req.log_scale);
+        if (!continuation) {
+            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            a.assign(req.base_values.begin(), req.base_values.end());
+        }
+        numb h_local = (numb)req.h;
+        if (req.sweep_over_h)        h_local = (numb)p;
+        else if (req.sweep_over_var) x[(size_t)req.var_sweep_index] = (numb)p;
+        else                         a[(size_t)req.param_index]     = (numb)p;
+
+        // Длины — как у соответствующего GPU-ядра: у классики ucudaSetupSweepPoint
+        // (ceil при h-свипе, иначе общие на запуск), у цепочки — усечение.
+        int    pointsInBlock = 0;
+        size_t pointsForSkip = 0;
+        if (h_local > (numb)0) {
+            if (continuation) {
+                pointsInBlock = (int)(req.t_max / h_local / req.pre_scaller);
+                pointsForSkip = steps_from_time_size_t(req.transient_time, (double)h_local);
+            } else if (req.sweep_over_h) {
+                pointsInBlock = (int)std::ceil(req.t_max / h_local / req.pre_scaller);
+                pointsForSkip = (size_t)std::ceil(req.transient_time / h_local);
+            } else {
+                pointsInBlock = maxPointsInBlock;
+                pointsForSkip = steps_from_time_size_t(req.transient_time, req.h);
+            }
+        }
+        if (pointsInBlock > maxPointsInBlock) pointsInBlock = maxPointsInBlock;
+
+        auto done = [&]() {
+            if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
+        };
+        if (h_local <= (numb)0 || pointsInBlock <= 0) { done(); continue; }
+
+        int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                                  pointsForSkip, req.amountOfX,
+                                  continuation ? 1 : req.pre_scaller, /*writableVar*/ 0,
+                                  (numb)req.max_value, nullptr);
+        if (flag == REGIME_UNBOUND) { done(); continue; }
+
+        const bool wantBox = ((mask >> SIGM_VOLUME) & 1) != 0;
+        flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
+                              (size_t)pointsInBlock, req.amountOfX,
+                              req.pre_scaller, req.writable_var,
+                              (numb)req.max_value, block.data(),
+                              wantBox ? boxMin.data() : nullptr,
+                              wantBox ? boxMax.data() : nullptr);
+        if (flag != REGIME_OSCILLATION && flag != REGIME_FIXED_POINT) { done(); continue; }
+
+        CpuMetricsAccum acc;
+        CpuExtremaInterp ex;
+        for (int i = 0; i < pointsInBlock; ++i) {
+            acc.push(block[(size_t)i]);
+            if (req.minmax_interp) ex.push(block[(size_t)i]);
+        }
+
+        const numb dt = h_local * (numb)req.pre_scaller;
+        double r[SIGM_COUNT];
+        for (int m = 0; m < SIGM_COUNT; ++m) r[m] = NaN;
+        numb mxv = acc.mx, mnv = acc.mn;   // как smFinalize: интерполяция только расширяет
+        if (ex.haveMax && ex.mx > mxv) mxv = ex.mx;
+        if (ex.haveMin && ex.mn < mnv) mnv = ex.mn;
+        r[SIGM_MAX]   = (double)mxv;
+        r[SIGM_MIN]   = (double)mnv;
+        r[SIGM_RANGE] = (double)(mxv - mnv);
+        r[SIGM_MEAN]  = (double)(acc.shift + acc.s1 / (numb)acc.n);
+        if (wantBox) {
+            numb vol = (numb)1;
+            for (int jx = 0; jx < req.amountOfX; ++jx) vol *= boxMax[(size_t)jx] - boxMin[(size_t)jx];
+            r[SIGM_VOLUME] = (double)vol;
+        }
+        const numb varY  = cpu_sm_variance(acc.s1,  acc.s2,   acc.n);
+        const numb varD  = cpu_sm_variance(acc.sd,  acc.sd2,  acc.n > 1 ? acc.n - 1 : 0);
+        const numb varDD = cpu_sm_variance(acc.sdd, acc.sdd2, acc.n > 2 ? acc.n - 2 : 0);
+        r[SIGM_VARIANCE] = (double)varY;
+        if (varY > (numb)0 && varD > (numb)0) {
+            const numb mobRaw = std::sqrt(varD / varY);
+            r[SIGM_HJORTH_MOBILITY]   = (double)(mobRaw / dt);
+            r[SIGM_HJORTH_COMPLEXITY] = (double)(std::sqrt(varDD / varD) / mobRaw);
+        }
+        if (pc.do_calculate_peaks) {
+            const int nI = cpu_peak_finder(block.data(), (size_t)pointsInBlock,
+                                           peaks.data(), times.data(), dt, false);
+            if (nI > 0) {
+                // Тот же порядок сумм, что у IntervalStats в ядре.
+                numb sumInv = 0, sumT = 0, mnT = times[0], mxT = times[0];
+                for (int i = 0; i < nI; ++i) {
+                    const numb Ti = times[(size_t)i];
+                    if (Ti < mnT) mnT = Ti;
+                    if (Ti > mxT) mxT = Ti;
+                    sumT += Ti;
+                    if (Ti > (numb)0) sumInv += (numb)1 / Ti;
+                }
+                r[SIGM_MEAN_FREQ] = (double)(sumInv / (numb)nI);
+                r[SIGM_INT_MAX]   = (double)mxT;
+                r[SIGM_INT_MIN]   = (double)mnT;
+                r[SIGM_INT_RANGE] = (double)(mxT - mnT);
+                r[SIGM_INT_MEAN]  = (double)(sumT / (numb)nI);
+                std::sort(times.begin(), times.begin() + nI);
+                const numb med = (nI & 1) ? times[(size_t)(nI / 2)]
+                                          : (numb)0.5 * (times[(size_t)(nI / 2 - 1)] + times[(size_t)(nI / 2)]);
+                if (med > (numb)0) r[SIGM_MEDIAN_FREQ] = (double)((numb)1 / med);
+            } else if (flag == REGIME_FIXED_POINT) {
+                r[SIGM_MEAN_FREQ]   = 0.0;
+                r[SIGM_MEDIAN_FREQ] = 0.0;
+            }
+        }
+
+        res.flags[(size_t)j] = flag;
+        for (int m = 0; m < SIGM_COUNT; ++m)
+            if ((mask >> m) & 1) res.values[m][(size_t)j] = r[m];
+        done();
+    }
+
+    metrics_finish(res, req);
     return res;
 }
 }

@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Turns user equations into executable numerical source. It parses systems and expressions, evaluates expressions, maps scheme names, generates fixed-step schemes, and wraps schemes with adaptive integration code.
+Turns user equations into executable numerical source. It parses systems and expressions, evaluates expressions, maps scheme names, generates fixed-step and embedded adaptive schemes.
 
 ## Public API and internals
 
-Public APIs are `sysparse.hpp`, `codegen.hpp`, and `adaptive_codegen.h`. Private parsing/evaluation helpers are split across `expression_parser.cpp`, `system_evaluator.cpp`, and `expression_internal.h`.
+Public APIs are `sysparse.hpp` and `codegen.hpp`. Private parsing/evaluation helpers are split across `expression_parser.cpp`, `system_evaluator.cpp`, and `expression_internal.h`.
 
 ## Dependencies and consumers
 
@@ -20,7 +20,7 @@ Equation text enters the parser, produces a domain system, and then feeds expres
 
 ## Change this when
 
-Change parser syntax in parsing files, expression semantics in evaluator files, and numerical source layout in scheme/adaptive generators.
+Change parser syntax in parsing files, expression semantics in evaluator files, and numerical source layout in scheme generators.
 
 ## Build and checks
 
@@ -30,4 +30,4 @@ Build with `cmake --build --preset windows-debug --target ucuda_equations`. Run 
 
 Preserve accepted syntax, diagnostic meaning, generated function signatures, operation order, precision, and FMA-sensitive expressions. Generated source must remain valid for both native host compilation and NVRTC.
 
-See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [adaptive integration notes](../../ADAPTIVE_INTEGRATION.md).
+See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [integration notes](../../INTEGRATION.md).

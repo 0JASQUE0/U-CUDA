@@ -9,26 +9,34 @@
     BasinsResult ParametricEngine::Impl::run_basins(const BasinsRequest& req) {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
 
-        if (req.krs_body.empty())                                  return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне допустимого диапазона");
+        if (req.krs_body.empty())                                  return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of the allowed range");
         if ((int)req.initial_conditions.size() != req.amountOfX)   return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)      return fail("base_values слишком много");
-        if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
-        if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
-        if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (выбери разные переменные)");
-        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
-        if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan должно быть > 0");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)      return fail("too many base_values");
+        if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
+        if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
+        if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (pick different variables)");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+        if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        const bool ad = req.adaptive.enabled;   // адаптивный шаг: ядра из адаптивного модуля
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err)) return fail(err);
+        }
+        else if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        const CUfunction k_cdbscan      = ad ? cached_ad.kernel_cdbscan      : cached_basins.kernel_dbscan;
+        const CUfunction k_search_fixed = ad ? cached_ad.kernel_search_fixed : cached_basins.kernel_search_fixed;
+        const CUfunction k_search_clear = ad ? cached_ad.kernel_search_clear : cached_basins.kernel_search_clear;
 
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
@@ -48,7 +56,8 @@
         const double eps_dbscan                 = req.eps_dbscan;
         const std::string& OUT_FILE_PATH        = req.csv_output_path;
 
-        constexpr int blockSize_setup = 32;
+        // blockSize_setup здесь больше нет: ширина запуска берётся из настройки
+        // (launch_block_size), а полом бюджета памяти у бассейнов он не служил.
         constexpr int set_precision   = 15;
 
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
@@ -78,8 +87,10 @@
         int*    d_amountOfNeighbors = nullptr;
         int*    d_neighbors         = nullptr;
         int*    d_clearIdx          = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -125,7 +136,12 @@
         BAS_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),                                    "cudaMalloc d_helpfulArray");
         BAS_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
-        const size_t stepsPerCell   = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        if (ad) {
+            const int kinds[2] = { kAdAxisSystem, kAdAxisSystem };
+            if (!adArgs.alloc(req.adaptive, kinds, total_cells, res.error)) { cleanup(); return res; }
+        }
+        const size_t stepsPerCell   = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerCell);
         const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerCell;
@@ -193,15 +209,19 @@
         if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BAS_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), clamp blockSize_setup
-            int blockSize = (int)std::ceil((1024.0 * 48.0) / ((double)(amountOfInitialConditions + amountOfValues) * (double)sizeof(numb)));
+            // blockSize: ceil(48K / ((N + nValues) * sizeof(numb))), cap — настройка
+            // (Settings -> GPU launch); формула остаётся вторым потолком, см. run_lle_1d.
+            const size_t sharedPerThread = (size_t)(amountOfInitialConditions + amountOfValues) * sizeof(numb);
+            int blockSize = (int)std::ceil((1024.0 * 48.0) / (double)sharedPerThread);
             if (blockSize < 1)                blockSize = 1;
-            if (blockSize > blockSize_setup)  blockSize = blockSize_setup;
+            const int blockSizeCap = launch_block_size(sharedPerThread);
+            if (blockSize > blockSizeCap)     blockSize = blockSizeCap;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // calculateDiscreteModelAvgPeaksCUDA: интегрирование и фичи в одном ядре.
@@ -249,6 +269,32 @@
                 &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            if (ad) {
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats + iter * originalNPtsLimiter * 4;
+                void* args_ad[] = {
+                    &nPts_arg, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension_arg,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_avg_peak_chunk, &d_avg_interv_chunk, &d_helpful_chunk,
+                    &feature1_int, &feature2_int, &mult1_v, &mult2_v,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BAS_CHECK_CU(cuLaunchKernel(cached_ad.kernel_avg,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            shared_traj, nullptr, args_ad, nullptr),
+                             "cuLaunchKernel(basins adaptive)");
+            }
+            else
             BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_fused,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared_traj, nullptr, args_basins, nullptr),
@@ -260,8 +306,16 @@
             BAS_CANCEL_CHECK();
         }
 
-        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan)
-        int blockSize_db = blockSize_setup;
+        if (ad) {
+            std::vector<numb> h_adStats(total_cells * 4);
+            BAS_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, total_cells * 4 * sizeof(numb),
+                                 cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+            res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
+        }
+
+        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan).
+        // Динамической shared у dbscan-ядер нет — настройка идёт как есть.
+        int blockSize_db = launch_block_size(0);
         int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
         int amountOfData_int = (int)total_cells;
 
@@ -290,7 +344,7 @@
             // search_fixed_points: проверяет, остались ли -1-точки без cluster'а.
             void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
                                     &amountOfData_int, &d_clearIdx };
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_fixed,
+            BAS_CHECK_CU(cuLaunchKernel(k_search_fixed,
                                         gridSize_db, 1, 1, blockSize_db, 1, 1,
                                         0, nullptr, args_search, nullptr),
                          "cuLaunchKernel(search_fixed)");
@@ -302,7 +356,7 @@
             int resultClusters = 0;
             if (clearIdx == -1) {
                 // FP-точек не осталось — search_clear_points (Osc).
-                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_clear,
+                BAS_CHECK_CU(cuLaunchKernel(k_search_clear,
                                             gridSize_db, 1, 1, blockSize_db, 1, 1,
                                             0, nullptr, args_search, nullptr),
                              "cuLaunchKernel(search_clear)");
@@ -332,7 +386,7 @@
                 &amountOfData_int, &eps_arg, &resultClusters,
                 &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
             };
-            BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+            BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
                                         gridSize_db, 1, 1, blockSize_db, 1, 1,
                                         0, nullptr, args_db, nullptr),
                          "cuLaunchKernel(dbscan expand init)");
@@ -351,7 +405,7 @@
                     &amountOfData_int, &eps_arg, &resultClusters,
                     &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
                 };
-                BAS_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
+                BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
                                             gridSize_db, 1, 1, blockSize_db, 1, 1,
                                             0, nullptr, args_db2, nullptr),
                              "cuLaunchKernel(dbscan expand neighbor)");
@@ -463,21 +517,21 @@
             res.error = msg; return res;
         };
 
-        if (req.krs_body.empty())                                return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX вне допустимого диапазона");
-        if (req.n_pts <= 0)                                      return fail("n_pts должно быть > 0");
-        if (req.eps_dbscan <= 0.0)                               return fail("eps_dbscan должно быть > 0");
+        if (req.krs_body.empty())                                return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX out of the allowed range");
+        if (req.n_pts <= 0)                                      return fail("n_pts must be > 0");
+        if (req.eps_dbscan <= 0.0)                               return fail("eps_dbscan must be > 0");
         const size_t total_cells = (size_t)req.n_pts * (size_t)req.n_pts;
-        if (req.avg_peaks.size()     != total_cells)             return fail("avg_peaks: размер не совпадает с n_pts²");
-        if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: размер не совпадает с n_pts²");
-        if (req.helpful_array.size() != total_cells)             return fail("helpful_array: размер не совпадает с n_pts²");
+        if (req.avg_peaks.size()     != total_cells)             return fail("avg_peaks: size does not match n_pts²");
+        if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: size does not match n_pts²");
+        if (req.helpful_array.size() != total_cells)             return fail("helpful_array: size does not match n_pts²");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
         if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
 
-        constexpr int blockSize_setup = 32;
+        // Ширина запуска dbscan-ядер — из настройки (launch_block_size ниже).
         const double eps_dbscan = req.eps_dbscan;
 
         int*    d_helpfulArray      = nullptr;
@@ -534,7 +588,7 @@
         BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
         BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        const int blockSize_db = blockSize_setup;
+        const int blockSize_db = launch_block_size(0);   // dbscan-ядра без динамической shared
         const int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
         const int amountOfData_int = (int)total_cells;
 
@@ -646,4 +700,12 @@
         #undef BRC_CANCEL_CHECK
         res.ok = true;
         return res;
+    }
+
+    void ParametricEngine::Impl::prewarm_basins(const BasinsRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        if (req.adaptive.enabled) compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err, false);
+        else compile_basins_if_needed(req.krs_body, req.amountOfX, err, false);
     }

@@ -37,5 +37,12 @@ int main() {
     request.t_max = 1.0;
     auto result = sweep.run_bifurcation_1d(request);
     if (!result.ok) { std::cerr << result.error << '\n'; return 1; }
+    // Separate NVRTC compilation (Settings -> GPU): the step and the library are
+    // separate programs, each needing every header configCUDA.h pulls in.
+    set_nvrtc_rdc(true);
+    ParametricEngine split;
+    auto split_result = split.run_bifurcation_1d(request);
+    set_nvrtc_rdc(false);
+    if (!split_result.ok) { std::cerr << "rdc: " << split_result.error << '\n'; return 1; }
     std::cout << "CUDA execution and NVRTC resource loading passed\n";
 }

@@ -9,6 +9,74 @@
 
 HeatmapView::~HeatmapView() {
     if (data_tex_) glDeleteTextures(1, &data_tex_);
+    if (overlay_tex_) glDeleteTextures(1, &overlay_tex_);
+}
+
+void HeatmapView::upload_overlay(int nx, int ny, const unsigned char* mask) {
+    if (overlay_tex_ == 0 || overlay_tex_w_ != nx || overlay_tex_h_ != ny) {
+        if (overlay_tex_) { glDeleteTextures(1, &overlay_tex_); overlay_tex_ = 0; }
+        glGenTextures(1, &overlay_tex_);
+        glBindTexture(GL_TEXTURE_2D, overlay_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, nx, ny, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        overlay_tex_w_ = nx; overlay_tex_h_ = ny;
+    }
+    // Маска приходит в координатах данных. После swap ширина визуальной сетки
+    // равна высоте исходной, и ячейка (ix, iy) берётся из исходной (iy, ix) —
+    // та же перестановка, что у values в render().
+    auto inside = [&](int ix, int iy) -> bool {
+        if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) return false;
+        return swap_axes ? mask[(size_t)ix * (size_t)ny + (size_t)iy] != 0
+                         : mask[(size_t)iy * (size_t)nx + (size_t)ix] != 0;
+    };
+    // Контур толщиной w — ячейки области не дальше w шагов (по четырём
+    // соседям) от ячейки снаружи. Расстояние — BFS сразу от всех внешних
+    // ячеек, обрезанный на w: работа O(nx*ny) при любой толщине. Край СЕТКИ
+    // источником не служит: что за пределами посчитанного диапазона, неизвестно,
+    // и область, упёршаяся в край карты, контура там не получает.
+    const size_t n = (size_t)nx * (size_t)ny;
+    const int w = std::max(0, overlay_edge_width);
+    overlay_dist_.assign(n, std::numeric_limits<int>::max());
+    std::vector<int> frontier, next;
+    if (w > 0) {
+        for (int iy = 0; iy < ny; ++iy)
+            for (int ix = 0; ix < nx; ++ix)
+                if (!inside(ix, iy)) {
+                    overlay_dist_[(size_t)iy * (size_t)nx + (size_t)ix] = 0;
+                    frontier.push_back(iy * nx + ix);
+                }
+        for (int d = 1; d <= w && !frontier.empty(); ++d) {
+            next.clear();
+            for (int id : frontier) {
+                const int ix = id % nx, iy = id / nx;
+                const int nb[4][2] = { { ix - 1, iy }, { ix + 1, iy }, { ix, iy - 1 }, { ix, iy + 1 } };
+                for (const auto& q : nb) {
+                    if (q[0] < 0 || q[1] < 0 || q[0] >= nx || q[1] >= ny) continue;
+                    const size_t k = (size_t)q[1] * (size_t)nx + (size_t)q[0];
+                    if (overlay_dist_[k] <= d) continue;
+                    overlay_dist_[k] = d;
+                    next.push_back(q[1] * nx + q[0]);
+                }
+            }
+            frontier.swap(next);
+        }
+    }
+    overlay_buf_.assign(n, 0u);
+    for (int iy = 0; iy < ny; ++iy)
+        for (int ix = 0; ix < nx; ++ix) {
+            if (!inside(ix, iy)) continue;
+            const size_t k = (size_t)iy * (size_t)nx + (size_t)ix;
+            overlay_buf_[k] = (overlay_dist_[k] <= w) ? overlay_edge_color : overlay_fill_color;
+        }
+    // IM_COL32 кладёт R в младший байт, то есть в памяти little-endian байты
+    // идут R, G, B, A — ровно GL_RGBA / GL_UNSIGNED_BYTE.
+    glBindTexture(GL_TEXTURE_2D, overlay_tex_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RGBA, GL_UNSIGNED_BYTE, overlay_buf_.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void HeatmapView::ensure_tex(int w, int h) {
@@ -96,7 +164,7 @@ std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete)
 float colorbar_total_width(const std::vector<ColorbarTick>& ticks) {
     float max_tick_w = 0.0f;
     for (const auto& t : ticks)
-        max_tick_w = std::max(max_tick_w, ImGui::CalcTextSize(fmt_tick(t.label).c_str()).x);
+        max_tick_w = std::max(max_tick_w, plot_text_size(fmt_tick(t.label).c_str()).x);
     return kColorbarWidth + kColorbarGap + kColorbarTickLen + kColorbarTextGap
            + max_tick_w + 6.0f;
 }
@@ -106,9 +174,12 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
                    bool reverse, int n_discrete,
                    const std::vector<ColorbarTick>& ticks) {
     if (!dl || height <= 0.0f) return;
-    const float cb_x = top_left.x, cb_y = top_left.y, cb_h = height;
+    // Шкала короче отведённой высоты на 2.5% сверху и снизу: подпись крайнего тика стоит по
+    // центру штриха и иначе на полстроки вылезала за верх/низ блока (и за кадр Copy image).
+    const float inset = 0.025f * height;
+    const float cb_x = top_left.x, cb_y = top_left.y + inset, cb_h = height - 2.0f * inset;
     const ImU32 col_text = plot_col_text();
-    const float font_h   = ImGui::GetFontSize();
+    const float font_h   = plot_text_line_height();
 
     // Градиент: непрерывный режим — 256 полос (визуально не отличимо от LUT),
     // discrete — по одной полосе на диапазон, чтобы совпадало с квантованием
@@ -133,24 +204,32 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
                 plot_col_border());
 
     const double range = (double)vmax - (double)vmin;
+    // Подписи прореживаем по фактическому месту: шаг тиков шкала берёт от
+    // диапазона значений, а не от своей высоты, и на низком блоке (или при
+    // десятках дискретных полос) подписи наезжали друг на друга. Штрихи
+    // рисуются все — прячется только текст.
+    const float label_gap_min = font_h * 1.4f;
+    float last_label_y = -1e30f;
     for (const auto& t : ticks) {
         if (range <= 0.0) {
             // Вырожденный vmin == vmax: всё равно печатаем одну подпись по центру.
-            const float y = cb_y + cb_h * 0.5f;
-            dl->AddText(ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
-                               y - font_h * 0.5f),
-                        col_text, fmt_tick(t.label).c_str());
+            const float y = axis_px(cb_y + cb_h * 0.5f, cb_y, cb_h);
+            plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
+                                 px_center(y) - font_h * 0.5f),
+                      col_text, fmt_tick(t.label).c_str());
             continue;
         }
         float frac = t.frac;
         if (frac < -1e-4f || frac > 1.0f + 1e-4f) continue;
         frac = std::min(std::max(frac, 0.0f), 1.0f);
-        const float y = cb_y + cb_h * (1.0f - frac);
-        dl->AddLine(ImVec2(cb_x + kColorbarWidth, y),
-                    ImVec2(cb_x + kColorbarWidth + kColorbarTickLen, y), col_text);
-        dl->AddText(ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
-                           y - font_h * 0.5f),
-                    col_text, fmt_tick(t.label).c_str());
+        const float y = axis_px(cb_y + cb_h * (1.0f - frac), cb_y, cb_h);
+        fill_row_px(dl, y, cb_x + kColorbarWidth,
+                    cb_x + kColorbarWidth + kColorbarTickLen, col_text);
+        if (std::abs(y - last_label_y) < label_gap_min) continue;
+        last_label_y = y;
+        plot_text(dl, ImVec2(cb_x + kColorbarWidth + kColorbarTickLen + kColorbarTextGap,
+                             px_center(y) - font_h * 0.5f),
+                  col_text, fmt_tick(t.label).c_str());
     }
 }
 
@@ -166,6 +245,7 @@ void HeatmapView::render(PlotRenderer& renderer,
                          bool fit_request)
 {
     if (nx <= 0 || ny <= 0 || !values) {
+        overlay_mask = nullptr;   // одноразовый и на этом пути
         ImGui::Dummy(avail_size);
         return;
     }
@@ -176,6 +256,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // autofit (визуальный X теперь соответствует исходному data Y).
     if (swap_axes != swap_axes_cached_) {
         data_gen_cached = -1;
+        overlay_gen_cached_ = -1;
         view_valid = false;
         swap_axes_cached_ = swap_axes;
     }
@@ -247,9 +328,12 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 3. Layout. margin_right считается динамически под фактическую ширину
     //    числовых подписей colorbar'а — иначе тики типа "1.234e-05" вылезают
     //    за пределы avail_size и обрезаются.
-    const float margin_left   = 78.0f;
+    // Левый — под фактические подписи оси Y, измеренные прошлым кадром
+    // (см. left_margin_px_). Нижний держит тики + имя оси X, поэтому растёт
+    // вместе с кеглем подписей.
+    const float margin_left   = left_margin_px_;
     const float margin_top    = 20.0f;
-    const float margin_bottom = 46.0f;
+    const float margin_bottom = plot_bottom_margin();
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
 
     // Resolve the active number of discrete bands. discrete_levels overrides
@@ -275,7 +359,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
 
     ImGui::Dummy(avail_size);
-    ImVec2 img_pos = ImVec2(block_origin.x + margin_left, block_origin.y + margin_top);
+    // На целом пикселе — см. Plot2DView: дробный origin размывает картинку
+    // FBO и смещает рамку с тиками относительно неё.
+    ImVec2 img_pos = ImVec2(std::floor(block_origin.x + margin_left),
+                            std::floor(block_origin.y + margin_top));
 
     // 4. Маппинг view → UV данных. data range — фиксированные границы из
     //    engine'а; view может быть произвольным после zoom/pan.
@@ -328,6 +415,17 @@ void HeatmapView::render(PlotRenderer& renderer,
         return v;
     };
 
+    // Обратное к vis_pos: мировое значение по позиции в визуальном домене. Нужно тикам лог-оси —
+    // view_min/max хранятся в node-координатах, а подписывать надо параметр.
+    auto vis_world = [](double p, int n, double lo, double hi, bool log_scale, double step) {
+        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && step > 0.0) {
+            const double l0 = std::log10(lo), l1 = std::log10(hi);
+            const double kf = (p - lo) / step;
+            return std::pow(10.0, l0 + kf * (l1 - l0) / (double)(n - 1));
+        }
+        return p;
+    };
+
     // Значение узла — ОБЩАЯ с ядром реализация (ucuda_node_value* в configCUDA.h). Раньше здесь
     // стояла своя пара формул: линейная через lo + k*step и лог с умножением до деления — и то, и
     // другое расходилось с getValueByIdx в последних битах, а на правом конце оси заметнее.
@@ -362,9 +460,13 @@ void HeatmapView::render(PlotRenderer& renderer,
         plot_bg_color(br, bg, bb, ba);
         renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
     }
-    renderer.draw_heatmap(data_tex_, vmin, vmax, (int)colormap,
+    // Палитра этого кадра: подмена caller'а (colormap_override) важнее выбора пользователя.
+    const HeatmapColormap cmap_eff = colormap_override ? (HeatmapColormap)colormap_override : colormap;
+    renderer.draw_heatmap(data_tex_, vmin, vmax, (int)cmap_eff,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
-                          n_disc, reverse_colormap, nodata_color);
+                          n_disc, reverse_colormap, nodata_color,
+                          oor_custom ? oor_below : nullptr,
+                          oor_custom ? oor_above : nullptr);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
@@ -375,6 +477,44 @@ void HeatmapView::render(PlotRenderer& renderer,
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
                  img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
                  ImVec2(0, 1), ImVec2(1, 0));
+
+    // 6b. Слой-маска. Рисуется прямо в draw list поверх FBO-картинки тем же
+    //     маппингом view -> UV, что у основной текстуры: доля t ширины плота
+    //     смотрит в u = uv_off + t*uv_scale. Прямоугольник данных (u, v в
+    //     [0, 1]) обрезается по плоту аналитически, а не clip-rect'ом: при
+    //     сильном зуме его экранные углы уходили бы на миллионы пикселей, где
+    //     float-вершины теряют точность и ячейки слоя съезжали бы с ячеек карты.
+    if (overlay_mask) {
+        if (overlay_generation != overlay_gen_cached_ || overlay_tex_ == 0
+            || overlay_tex_w_ != nx || overlay_tex_h_ != ny
+            || overlay_fill_color != overlay_fill_cached_
+            || overlay_edge_color != overlay_edge_cached_
+            || overlay_edge_width != overlay_edge_width_cached_) {
+            upload_overlay(nx, ny, overlay_mask);
+            overlay_gen_cached_  = overlay_generation;
+            overlay_fill_cached_ = overlay_fill_color;
+            overlay_edge_cached_ = overlay_edge_color;
+            overlay_edge_width_cached_ = overlay_edge_width;
+        }
+        // t-диапазон, который занимают данные по оси, пересечённый с [0, 1].
+        auto span = [](float off, float scale, float& t_lo, float& t_hi) -> bool {
+            if (scale == 0.0f) return false;
+            const float a = (0.0f - off) / scale, b = (1.0f - off) / scale;
+            t_lo = std::max(0.0f, std::min(a, b));
+            t_hi = std::min(1.0f, std::max(a, b));
+            return t_hi > t_lo;
+        };
+        float tx0, tx1, ty0, ty1;
+        if (span(uv_off_x, uv_scale_x, tx0, tx1) && span(uv_off_y, uv_scale_y, ty0, ty1)) {
+            // Экранный Y растёт вниз, t_y — вверх: верх прямоугольника — ty1.
+            const ImVec2 p_min(img_pos.x + tx0 * (float)plot_w, img_pos.y + (1.0f - ty1) * (float)plot_h);
+            const ImVec2 p_max(img_pos.x + tx1 * (float)plot_w, img_pos.y + (1.0f - ty0) * (float)plot_h);
+            const ImVec2 uv_min(uv_off_x + tx0 * uv_scale_x, uv_off_y + ty1 * uv_scale_y);
+            const ImVec2 uv_max(uv_off_x + tx1 * uv_scale_x, uv_off_y + ty0 * uv_scale_y);
+            dl->AddImage((ImTextureID)(intptr_t)overlay_tex_, p_min, p_max, uv_min, uv_max);
+        }
+    }
+    overlay_mask = nullptr;   // одноразовый: см. heatmap_view.h
 
     // 7. Hit-test'ы — отдельные кнопки для плота и для зон осей. Pan по X / Y
     //    через drag ЛКМ в самой оси (как у Plot2DView), общий pan/zoom — ЛКМ
@@ -561,10 +701,14 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     // Снапшот заблокированных осей: AxisInfo::lock означает «интеракция эту ось
     // не двигает». Проще и надёжнее один раз восстановить её после ВСЕХ мутаций
-    // (wheel / pan / rect-zoom / double-click), чем расставлять проверки в
-    // каждой ветке. Восстановление — перед clamp_view() ниже.
-    const double lock_x_min = x_axis.view_min, lock_x_max = x_axis.view_max;
-    const double lock_y_min = y_axis.view_min, lock_y_max = y_axis.view_max;
+    // (wheel / pan / double-click), чем расставлять проверки в каждой ветке.
+    // Восстановление — перед clamp_view() ниже.
+    //
+    // Исключение — рамка ПКМ: она сильнее lock (см. plot_view_2d.cpp), поэтому
+    // применив её, снапшот ОБНОВЛЯЕМ, и восстановление становится для этих осей
+    // пустой операцией. Снапшот поэтому не const.
+    double lock_x_min = x_axis.view_min, lock_x_max = x_axis.view_max;
+    double lock_y_min = y_axis.view_min, lock_y_max = y_axis.view_max;
 
     // 8a. Wheel zoom (вокруг курсора) — оставляем только в плоте.
     if (plot_hov && io.MouseWheel != 0.0f) {
@@ -665,16 +809,21 @@ void HeatmapView::render(PlotRenderer& renderer,
             if (xb - xa > 1e-12 && yb - ya > 1e-12) {
                 x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
                 y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
+                // Рамка сильнее lock — переносим снапшот на выбранный участок.
+                lock_x_min = x_axis.view_min; lock_x_max = x_axis.view_max;
+                lock_y_min = y_axis.view_min; lock_y_max = y_axis.view_max;
             }
         } else if (rect_zoom_mode_ == 2) {
             double xa = std::min(rect_zoom_x0_, wx), xb = std::max(rect_zoom_x0_, wx);
             if (xb - xa > 1e-12) {
                 x_axis.view_min = xa + step_x * 0.5; x_axis.view_max = xb - step_x * 0.5;
+                lock_x_min = x_axis.view_min; lock_x_max = x_axis.view_max;
             }
         } else if (rect_zoom_mode_ == 3) {
             double ya = std::min(rect_zoom_y0_, wy), yb = std::max(rect_zoom_y0_, wy);
             if (yb - ya > 1e-12) {
                 y_axis.view_min = ya + step_y * 0.5; y_axis.view_max = yb - step_y * 0.5;
+                lock_y_min = y_axis.view_min; lock_y_max = y_axis.view_max;
             }
         }
         rect_zoom_mode_ = 0;
@@ -686,7 +835,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     else if (yax_dbl) { y_axis.view_min = param_lo_y; y_axis.view_max = param_hi_y; }
 
     // 8d-bis. Восстановление заблокированных осей — отменяет всё, что могли
-    // изменить wheel / pan / rect-zoom / double-click выше (см. снапшот).
+    // изменить wheel / pan / double-click выше (см. снапшот). Для рамки ПКМ
+    // операция пустая: снапшот уже перенесён на выбранный участок.
     if (x_axis.lock) { x_axis.view_min = lock_x_min; x_axis.view_max = lock_x_max; }
     if (y_axis.lock) { y_axis.view_min = lock_y_min; y_axis.view_max = lock_y_max; }
 
@@ -720,22 +870,27 @@ void HeatmapView::render(PlotRenderer& renderer,
     // выборе mult, не делящего N-1).
     auto compute_axis_ticks = [](double lo, double hi, int target_count,
                             double step_node, double node_origin, int n_nodes,
-                            double force_lo, double force_hi)
+                            double force_lo, double force_hi,
+                            float span_px, bool horizontal)
                         -> std::vector<double>
     {
         std::vector<double> out;
         double vr = hi - lo;
         if (std::abs(vr) < 1e-30) return out;
         double sx = nice_step(std::abs(vr), target_count);
+        // К узлам сетки шаг притягивается только пока они различимы (node_snap_visible),
+        // а ширина подписей меряется ПОСЛЕ снапа: узловые значения длиннее
+        // круглых («10.732» против «10.8»). См. plot_axis.h.
+        if (!node_snap_visible(step_node, std::abs(vr), span_px)) step_node = 0.0;
         double xstart;
         if (step_node > 0.0 && n_nodes > 1) {
             int mult = (int)std::lround(sx / step_node);
-            if (mult < 1) mult = 1;
+            mult = fit_node_step(step_node, node_origin, mult, lo, hi, span_px,
+                                 horizontal, xstart);
             sx = (double)mult * step_node;
-            int k_lo = (int)std::ceil((lo - node_origin) / step_node - 1e-9);
-            int k_start = (int)std::ceil((double)k_lo / (double)mult - 1e-9) * mult;
-            xstart = node_origin + (double)k_start * step_node;
         } else {
+            sx = horizontal ? fit_tick_step_x(sx, lo, hi, span_px)
+                            : fit_tick_step_y(sx, std::abs(vr), span_px);
             xstart = std::ceil(lo / sx) * sx;
         }
         int nt = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
@@ -748,17 +903,22 @@ void HeatmapView::render(PlotRenderer& renderer,
         // Форс-включение крайних узлов сетки (snap-режим при зуме). Порог "не
         // слишком близко" = 40% от sx — подписи не будут наезжать друг на
         // друга при обычных диапазонах.
-        const double gap_min = sx * 0.4;
+        // «Не слишком близко» решают сами подписи (tick_label_fits): доля от
+        // sx не знает ни их ширины, ни масштаба, а при зуме подпись границы —
+        // самая длинная на оси.
+        auto fits = [&](double v, double neighbor) {
+            return tick_label_fits(v, neighbor, lo, hi, span_px, horizontal);
+        };
         if (step_node > 0.0 && n_nodes > 1) {
             double first_node = node_origin;
             double last_node  = node_origin + (double)(n_nodes - 1) * step_node;
             if (last_node >= lo - step_node * 0.5 && last_node <= hi + step_node * 0.5) {
-                if (out.empty() || last_node - out.back() >= gap_min) {
+                if (out.empty() || fits(last_node, out.back())) {
                     out.push_back(last_node);
                 }
             }
             if (first_node >= lo - step_node * 0.5 && first_node <= hi + step_node * 0.5) {
-                if (out.empty() || out.front() - first_node >= gap_min) {
+                if (out.empty() || fits(first_node, out.front())) {
                     out.insert(out.begin(), first_node);
                 }
             }
@@ -768,67 +928,104 @@ void HeatmapView::render(PlotRenderer& renderer,
         // если он не кратен "красивому" nice_step шагу (напр. 0.001 при шаге
         // 0.005) -- баг, репортнутый для h-свипа в линейном масштабе.
         if (force_hi >= lo - 1e-12 && force_hi <= hi + 1e-12) {
-            if (out.empty() || force_hi - out.back() >= gap_min) out.push_back(force_hi);
+            if (out.empty() || fits(force_hi, out.back())) out.push_back(force_hi);
         }
         if (force_lo >= lo - 1e-12 && force_lo <= hi + 1e-12) {
-            if (out.empty() || out.front() - force_lo >= gap_min) out.insert(out.begin(), force_lo);
+            if (out.empty() || fits(force_lo, out.front())) out.insert(out.begin(), force_lo);
         }
         return out;
     };
 
+    // Фактическая ширина самой длинной подписи по Y за этот кадр — из неё
+    // считается левый отступ следующего кадра (см. left_margin_px_).
+    float y_tick_w_max = 0.0f;
     auto draw_x_ticks = [&]() {
+        // Log-масштаб: ячейки равномерны по ИНДЕКСУ узла, а узлы лог-распределены — значит по
+        // экрану ось логарифмическая, и декадные тики (log_axis_ticks) на ней законны. Раньше
+        // подписывались только концы view, причём прямо в node-координатах: под зумом это уже не
+        // параметр, а линейная позиция ячейки. Здесь и значения, и позиции идут через vis_world /
+        // vis_pos — те же формулы, по которым ставится крест.
+        if (vis_log_x && param_lo_x > 0.0 && param_hi_x > 0.0 && nx > 1 &&
+            std::abs(evis_x1 - evis_x0) > 1e-30) {
+            const double w0 = vis_world(evis_x0, nx, param_lo_x, param_hi_x, true, step_x);
+            const double w1 = vis_world(evis_x1, nx, param_lo_x, param_hi_x, true, step_x);
+            const ImU32 col_minor = dim_grid_col(col_axis);
+            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                       (float)plot_w, true)) {
+                const double vp = vis_pos(t.value, nx, param_lo_x, param_hi_x, true, step_x);
+                float px = axis_px(img_pos.x + (float)((vp - evis_x0) / (evis_x1 - evis_x0)) * plot_w,
+                                   img_pos.x, (float)plot_w);
+                fill_col_px(dl, px, img_pos.y + plot_h,
+                            img_pos.y + plot_h + (t.major ? 5.0f : 3.0f),
+                            t.major ? col_axis : col_minor);
+                if (!t.major) continue;
+                std::string lbl = fmt_tick(t.value);
+                ImVec2 ts = plot_text_size(lbl.c_str());
+                plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
+                          col_text, lbl.c_str());
+            }
+            return;
+        }
         // vis_view_min/max_x расширяют view на полшага ЛИНЕЙНОЙ сетки, чтобы цветовые ячейки
-        // центрировались на узлах. Для log-оси линейный полушаг у границ (например 0.001) даёт
-        // заметный сдвиг подписи — берём точный view_min/max без этого паддинга.
-        // invert: границы уже переставлены в evis_x0/x1, для log-оси делаем то же вручную.
-        double emin = vis_log_x
-                      ? (x_axis.invert ? x_axis.view_max : x_axis.view_min) : evis_x0;
-        double emax = vis_log_x
-                      ? (x_axis.invert ? x_axis.view_min : x_axis.view_max) : evis_x1;
+        // центрировались на узлах.
+        double emin = evis_x0;
+        double emax = evis_x1;
         double vrx = emax - emin;
         if (std::abs(vrx) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        // Log-масштаб: см. plot_axis.cpp draw_axis_x_grid -- нет настоящей
-        // лог-оси, поэтому вместо "красивых" линейных тиков (которые
-        // подписали бы значения, никогда не просимулированные) рисуем
-        // только границы текущего view.
-        std::vector<double> ticks = vis_log_x
-            ? std::vector<double>{ lo, hi }
-            : (x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x)
-                            : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x));
+        std::vector<double> ticks =
+            x_full_view ? compute_axis_ticks(lo, hi, 8, 0.0, 0.0, 0, param_lo_x, param_hi_x, (float)plot_w, true)
+                        : compute_axis_ticks(lo, hi, 8, step_x, param_lo_x, nx, param_lo_x, param_hi_x, (float)plot_w, true);
         for (double xv : ticks) {
-            float px = img_pos.x + (float)((xv - emin) / vrx) * plot_w;
-            dl->AddLine(ImVec2(px, img_pos.y + plot_h),
-                        ImVec2(px, img_pos.y + plot_h + 5.0f), col_axis, 1.0f);
+            float px = axis_px(img_pos.x + (float)((xv - emin) / vrx) * plot_w,
+                               img_pos.x, (float)plot_w);
+            fill_col_px(dl, px, img_pos.y + plot_h, img_pos.y + plot_h + 5.0f, col_axis);
             std::string lbl = fmt_tick(xv);
-            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-            dl->AddText(ImVec2(px - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
-                        col_text, lbl.c_str());
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
+                      col_text, lbl.c_str());
         }
     };
     auto draw_y_ticks = [&]() {
         // См. draw_x_ticks выше про vis_view-паддинг и log-масштаб.
-        // См. draw_x_ticks про invert.
-        double emin = vis_log_y
-                      ? (y_axis.invert ? y_axis.view_max : y_axis.view_min) : evis_y0;
-        double emax = vis_log_y
-                      ? (y_axis.invert ? y_axis.view_min : y_axis.view_max) : evis_y1;
+        if (vis_log_y && param_lo_y > 0.0 && param_hi_y > 0.0 && ny > 1 &&
+            std::abs(evis_y1 - evis_y0) > 1e-30) {
+            const double w0 = vis_world(evis_y0, ny, param_lo_y, param_hi_y, true, step_y);
+            const double w1 = vis_world(evis_y1, ny, param_lo_y, param_hi_y, true, step_y);
+            const ImU32 col_minor = dim_grid_col(col_axis);
+            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                       (float)plot_h, false)) {
+                const double vp = vis_pos(t.value, ny, param_lo_y, param_hi_y, true, step_y);
+                float py = axis_px(img_pos.y + (float)((evis_y1 - vp) / (evis_y1 - evis_y0)) * plot_h,
+                                   img_pos.y, (float)plot_h);
+                fill_row_px(dl, py, img_pos.x - (t.major ? 5.0f : 3.0f), img_pos.x,
+                            t.major ? col_axis : col_minor);
+                if (!t.major) continue;
+                std::string lbl = fmt_tick(t.value);
+                ImVec2 ts = plot_text_size(lbl.c_str());
+                y_tick_w_max = std::max(y_tick_w_max, ts.x);
+                plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, px_center(py) - ts.y * 0.5f),
+                          col_text, lbl.c_str());
+            }
+            return;
+        }
+        double emin = evis_y0;
+        double emax = evis_y1;
         double vry = emax - emin;
         if (std::abs(vry) < 1e-30) return;
         double lo = std::min(emin, emax), hi = std::max(emin, emax);
-        // См. draw_x_ticks выше.
-        std::vector<double> ticks = vis_log_y
-            ? std::vector<double>{ lo, hi }
-            : (y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
-                            : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y));
+        std::vector<double> ticks =
+            y_full_view ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
+                        : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false);
         for (double yv : ticks) {
-            float py = img_pos.y + (float)((emax - yv) / vry) * plot_h;
-            dl->AddLine(ImVec2(img_pos.x - 5.0f, py),
-                        ImVec2(img_pos.x,         py), col_axis, 1.0f);
+            float py = axis_px(img_pos.y + (float)((emax - yv) / vry) * plot_h,
+                               img_pos.y, (float)plot_h);
+            fill_row_px(dl, py, img_pos.x - 5.0f, img_pos.x, col_axis);
             std::string lbl = fmt_tick(yv);
-            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-            dl->AddText(ImVec2(img_pos.x - 8.0f - ts.x, py - ts.y * 0.5f),
-                        col_text, lbl.c_str());
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            y_tick_w_max = std::max(y_tick_w_max, ts.x);
+            plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, px_center(py) - ts.y * 0.5f),
+                      col_text, lbl.c_str());
         }
     };
     draw_x_ticks();
@@ -915,17 +1112,17 @@ void HeatmapView::render(PlotRenderer& renderer,
     // они учитывают swap_axes без мутации x_axis.name / y_axis.name.
     const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
     const char* yl = vis_y_name.empty() ? "y" : vis_y_name.c_str();
-    float font_h = ImGui::GetFontSize();
-    ImVec2 xs = ImGui::CalcTextSize(xl);
+    float font_h = plot_text_line_height();
+    ImVec2 xs = plot_text_size(xl);
     float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
-    dl->AddText(ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
+    plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
 
     // Y-метка повёрнута на -90° (читается снизу вверх, mathematical convention): рендерим
     // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
     // ТОЧНО -90° матрица имеет целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
     // сохраняется и шрифт остаётся чётким (AA-шум бывает только на произвольных углах). X-позиция
     // считается ДИНАМИЧЕСКИ за самыми широкими тиками, иначе подпись наезжает на длинные числа.
-    ImVec2 ts_yl = ImGui::CalcTextSize(yl);
+    ImVec2 ts_yl = plot_text_size(yl);
     if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
         // Считаем через тот же compute_axis_ticks, что и draw_y_ticks — иначе
@@ -937,11 +1134,11 @@ void HeatmapView::render(PlotRenderer& renderer,
             double lo = std::min(vis_view_min_y, vis_view_max_y);
             double hi = std::max(vis_view_min_y, vis_view_max_y);
             auto ticks = y_full_view
-                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y)
-                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y);
+                ? compute_axis_ticks(lo, hi, 6, 0.0, 0.0, 0, param_lo_y, param_hi_y, (float)plot_h, false)
+                : compute_axis_ticks(lo, hi, 6, step_y, param_lo_y, ny, param_lo_y, param_hi_y, (float)plot_h, false);
             for (double yv : ticks) {
                 std::string tl = fmt_tick(yv);
-                float w = ImGui::CalcTextSize(tl.c_str()).x;
+                float w = plot_text_size(tl.c_str()).x;
                 if (w > max_tick_w) max_tick_w = w;
             }
         }
@@ -951,12 +1148,16 @@ void HeatmapView::render(PlotRenderer& renderer,
         // label_gap — доп. зазор между самым широким тиком и Y-подписью: без него текст вплотную
         // касается цифр (оба span'а стыкуются в точке img_pos.x - max_tick_w - 8).
         const float label_gap = 6.0f;
+        // Оба измерения тиков: своё (compute_axis_ticks в vis-домене) и
+        // фактическое из draw_y_ticks. Берём большее — имя оси не должно
+        // наехать на цифры, даже если генераторы разошлись на краю диапазона.
+        max_tick_w = std::max(max_tick_w, y_tick_w_max);
         float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - label_gap - ts_yl.y);
         float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
         ImVec2 pivot(pivot_x, pivot_y);
 
         int idx_start = dl->VtxBuffer.Size;
-        dl->AddText(pivot, col_text, yl);
+        plot_text(dl, pivot, col_text, yl);
         int idx_end = dl->VtxBuffer.Size;
         for (int i = idx_start; i < idx_end; ++i) {
             ImDrawVert& v = dl->VtxBuffer[i];
@@ -967,10 +1168,15 @@ void HeatmapView::render(PlotRenderer& renderer,
         }
     }
 
+    // Левый отступ на следующий кадр — по тому, что реально нарисовано сейчас.
+    // Безусловно: без имени оси блок выше пропускается, но отступ под цифры
+    // всё равно нужен.
+    left_margin_px_ = plot_left_margin_for_width(y_tick_w_max, ts_yl.x > 0.0f);
+
     // 9. Colorbar справа — общая реализация (см. draw_colorbar). tick_vals те
     //    же, по которым выше зарезервирован margin_right.
     draw_colorbar(dl, ImVec2(img_pos.x + plot_w + kColorbarGap, img_pos.y),
-                  (float)plot_h, vmin, vmax, colormap,
+                  (float)plot_h, vmin, vmax, cmap_eff,
                   reverse_colormap, n_disc, tick_vals);
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.

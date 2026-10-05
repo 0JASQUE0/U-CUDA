@@ -15,9 +15,25 @@
 // свою копию этих чисел, и она молча разъезжалась при правке лэйаута.
 void plot_2d_margins(float& left, float& top, float& right, float& bottom);
 
+// То же, но левый отступ — под фактические подписи оси Y (plot_y_axis_margin).
+// Именно эту версию зовёт render; вариант выше остался для вызывающих, у
+// которых оси под рукой нет, и отдаёт прежний отступ «под худший случай».
+void plot_2d_margins_for(const AxisInfo& y, const char* y_name,
+                         float& left, float& top, float& right, float& bottom);
+
 struct PlotSeriesInput {
-    const float* points = nullptr;
-    int          n_points = 0;
+    // Координаты — АБСОЛЮТНЫЕ и 64-битные. Приведение к float делается ровно в одном
+    // месте, при заливке в VBO, и уже после вычитания начала координат (подробно —
+    // в шапке gpu_line_series.h). Раньше здесь стоял const float*, и точность
+    // терялась в каждом из трёх десятков мест упаковки: при сильном приближении
+    // шаг свипа оказывался меньше ULP float, и тысяча точек рисовалась четырьмя
+    // десятками столбцов.
+    //
+    // Тип именно double, а не numb: numb — точность СЧЁТА (и когда-то был float),
+    // а здесь нужна точность представления координат. Хранить float-результат в
+    // 64-битном буфере ничего не теряет, обратное — теряет.
+    const double* points = nullptr;
+    int           n_points = 0;
     ImVec4       color = ImVec4(1, 1, 1, 1);
     std::string  label;
 
@@ -48,20 +64,49 @@ struct PlotSeriesInput {
     int   points_override = -1;
     int   point_marker    = -1;    // PointMarker; только при points_override == 1
     float point_size_px   = 0.0f;  // <= 0 → point_size_px вью
+
+    // Форма маркера узла для режима Plot2DView::point_markers (маркеры ПОВЕРХ
+    // линии, см. ниже). -1 — кружок, как было. Отдельно от point_marker выше:
+    // тот относится к точечному GL-режиму, где линии нет вовсе, а здесь форма
+    // нужна как второй, независимый от цвета признак принадлежности кривой —
+    // три кривые одной вкладки (min/avg/max) различаются оттенком одного тона,
+    // и на тонкой сетке оттенка не хватает.
+    int   node_marker     = -1;
+
+    // Необязательные величины «за точкой» для всплывающей подсказки при
+    // наведении (см. Plot2DView::point_markers). Раскладка ПОТОЧЕЧНАЯ:
+    // point_tags[i * point_tag_count + k] — k-я величина i-й точки, имена даёт
+    // Plot2DView::point_tag_names. Длина массива = n_points * point_tag_count.
+    //
+    // Нужны там, где на осях лежат не те числа, о которых хочется спросить.
+    // На диаграмме производительности таких сразу три: шага h на осях нет
+    // вовсе, ось X — выбранный источник ошибки, а по Y в лог-режиме лежит
+    // log10(t), а не само время. nullptr — подсказка покажет сырые координаты.
+    const double* point_tags      = nullptr;
+    int           point_tag_count = 0;
 };
 
 class Plot2DView {
 public:
     AxisInfo x_axis;
     AxisInfo y_axis;
-    bool show_legend = true;
-    // If true, force the legend marker's alpha to 1.0 regardless of the
-    // per-series color.w — used by Phase / TimeDomain, where the "Alpha"
-    // slider is meant to fade the trajectory itself, not the swatch that
-    // identifies each IC in the legend.
-    bool legend_ignore_series_alpha = false;
 
-    // Пользовательские цвета серий: ПКМ по строке легенды -> RGB 0..255.
+    // Марджины, которыми пользовался последний render(). Левый зависит от
+    // длины подписей, поэтому наружу отдаётся именно использованное значение:
+    // colorbar в FastSync стоит рядом с плотом и обязан знать, где тот
+    // кончился ИМЕННО в этом кадре.
+    float last_margin_left   = 78.0f;
+    float last_margin_top    = 20.0f;
+    float last_margin_right  = 20.0f;
+    float last_margin_bottom = 46.0f;
+
+    bool show_legend = true;
+    // Прозрачность серии в легенду не уходит НИКОГДА — см. render(). Раньше
+    // это был флаг legend_ignore_series_alpha, который выставляли по одному
+    // виду (Phase, TimeDomain, Phase 3D, пики), и про остальные забывали:
+    // Alpha у точек бифуркационной диаграммы гасила ярлыки в легенде.
+
+    // Пользовательские цвета серий: ПКМ по квадрату легенды -> legend_color_popup.
     // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в
     // time domain прячут переменную или в окно параметрики добавляют диаграмму,
     // и цвет обязан остаться на СВОЕЙ кривой. Пустая карта = стандартный
@@ -92,6 +137,14 @@ public:
     // true: рисуем через GL_POINTS (для 1D-диаграмм).
     // false (по умолчанию): GL_LINE_STRIP, как для всех остальных графиков.
     bool points_mode = false;
+    // Вместе с points_mode: под точками рисуется и линия серии (Points + Custom line style).
+    // Линия — в FBO до точек: при imdraw_lines толстая (draw_line_thick_2d, line_thickness_px),
+    // иначе обычная GL-линия. Серии с points_override == 1 остаются точками без линии.
+    bool points_with_lines = false;
+    // Своя прозрачность точек (Points при Custom line style): >= 0 — альфа точек вместо альфы серии
+    // (линия остаётся со своей), и точки идут шейдерным путём со смешиванием. < 0 — альфа серии.
+    // Серии с points_override (маркеры, заданные вызывающим) её не берут.
+    float point_alpha = -1.0f;
     float point_size_px = 2.0f;
     // Форма маркера в points_mode (PointMarker). -1 (дефолт) — прежний
     // сплошной квадратный GL-пойнт без alpha-блендинга.
@@ -114,6 +167,16 @@ public:
     // непрерывной. Если курсор вне [min, max] — snap отключается для этой
     // конкретной точки. Заполнять поля должен caller ПЕРЕД render'ом.
     bool   snap_x_to_grid = false;
+
+    // Узлы сетки свипа ЦЕЛИКОМ — заполняет вызывающий той же функцией, что
+    // строит точки (sweep_value_at). Нужны, потому что узел мог посчитаться и
+    // не дать ни одной точки (режим не колебательный, λ не финитна) — привязка
+    // по одному лишь массиву точек такие узлы теряет, и курсор перепрыгивал
+    // через них. Заодно снимает вопрос о формуле: ни лог-флаг, ни конвенция
+    // continuation/reverse виду больше не нужны.
+    // Память живёт у вызывающего и должна пережить render() этого кадра.
+    const double* snap_x_nodes      = nullptr;
+    int           snap_x_node_count = 0;
     double snap_x_min = 0.0;
     double snap_x_max = 1.0;
     int    snap_x_n   = 0;
@@ -133,6 +196,9 @@ public:
     // BeginPopup/EndPopup. Используется, например, FastSync для "Invert depth
     // axis" пункта без необходимости open'ить отдельный popup.
     std::function<void()> popup_extras;
+    // «Copy image to clipboard» захватывает ещё столько пикселей справа от блока: там
+    // вызывающий рисует свой колорбар (FastSync), иначе картинка уходила без шкалы.
+    float screenshot_extra_right = 0.0f;
 
     // Crosshair-commit callback: fires on release of a crosshair gesture
     // (MMB or Shift+LMB) inside the plot, unless it was a double-click.
@@ -178,6 +244,20 @@ public:
     double   hover_circle_r     = std::numeric_limits<double>::quiet_NaN();
     unsigned hover_circle_color = 0xFFE0E0E0u;  // ARGB, как crosshair_*_color
 
+    // Маркеры узлов ПОВЕРХ линий + подсказка по наведению. Отдельный флаг, а не
+    // points_mode: тот переключает линию НА точки, а здесь нужно и то и другое —
+    // линия показывает тренд, маркеры показывают, где реальные замеры.
+    // Рисуются через ImDrawList (не через VBO): режим рассчитан на графики
+    // в десятки узлов, поэтому серии длиннее point_markers_max молча остаются
+    // без маркеров — иначе один фазовый портрет залил бы плот кружками
+    // и утопил бы кадр.
+    bool  point_markers     = false;
+    float point_marker_px   = 3.5f;
+    int   point_markers_max = 512;
+    // Подписи величин из PlotSeriesInput::point_tags, по одной на столбец.
+    // Недостающие имена показываются как "tag<k>".
+    std::vector<std::string> point_tag_names;
+
     // render:
     //  global_visible — внешний фильтр (галочки вкладки: показывать серию вообще),
     //                   строки с false в легенду не попадают совсем.
@@ -195,13 +275,16 @@ public:
 
 private:
     GpuLineSeriesSet series_cache_;
-    // Состояние меню цвета серии. ImGui immediate mode — жить между кадрами
-    // обязано здесь, а не в локальных переменных render(). Каналы держим
-    // ТЕКСТОМ, а не float'ами: поля построены на InputText с
-    // digit_step_input_callback (↑/↓ шагают разряд под курсором), как поля
-    // параметров во вкладках анализа.
+    // Начало координат, в котором залит series_cache_ (см. gpu_line_series.h).
+    // Выбирается при перезаливке по центру данных и живёт ровно столько же: матрица
+    // проекции обязана строиться в ТОМ ЖЕ начале, иначе серия уедет относительно осей.
+    // Поэтому оно и запоминается, а не берётся каждый кадр из текущего вида — тот
+    // меняется зумом и панорамированием, а VBO переливается только по data_generation.
+    double series_origin_x_ = 0.0;
+    double series_origin_y_ = 0.0;
+    // Подпись серии, чей цвет правит меню легенды (legend_color_popup). ImGui immediate mode —
+    // жить между кадрами обязано здесь, а не в локальных переменных render().
     std::string legend_color_target_;
-    std::string legend_color_text_[3];
     // Эффективная видимость серий на текущий кадр (visible[k] && global_visible[k]).
     // Обновляется в начале render(); do_autofit/fit_x/fit_y используют её,
     // чтобы НЕ включать скрытые серии в авто-диапазон.

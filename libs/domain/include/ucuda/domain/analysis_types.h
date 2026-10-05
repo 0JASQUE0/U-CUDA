@@ -21,6 +21,7 @@
 #include <vector>
 #include "ucuda/domain/configCUDA.h"   // typedef numb, REGIME_*, BF_* feature codes, mult_avg_* defaults
 #include "ucuda/domain/export_snapshot.h"  // snapshot structs embedded into *Result for right-click export
+#include "ucuda/domain/adaptive_settings.h" // UcudaAdaptParams: адаптивный шаг в свипах
 
 // PeakConfig — knobs configCUDA.h, настраиваемые из GUI (вкладка Settings).
 // В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот оборачивает свои дефолты
@@ -76,6 +77,48 @@ inline void clamp_peak_config(PeakConfig& c) {
 
 
 
+// Раздельная компиляция NVRTC: библиотека собирается без КРС и переиспользуется между сменами
+// схемы, шаг линкуется к ней отдельным модулем (см. build_module). По умолчанию включена;
+// выключение возвращает сборку одной единицей трансляции.
+
+
+
+// Ширина блока запуска (threads/block) для расчётных ядер. В отличие от PeakConfig и --fmad,
+// на PTX не влияет вовсе — это только аргумент cuLaunchKernel, поэтому смена значения НЕ
+// инвалидирует кэши модулей и применяется со следующего Run без перекомпиляции.
+//
+// Зачем настройка, а не константа: оптимум зависит от карты (число SM, регистров на SM) и от
+// размера сетки, а замерить это можно только на месте. Ширина НЕ влияет на результат счёта —
+// только на скорость.
+//
+// Значение — ЗАПРОС, а не приказ: каждый запуск дополнительно режет его под свой бюджет
+// динамической shared-памяти (launch_block_size в parametric_engine.cpp), иначе широкая
+// система не влезла бы в 48 КБ на блок и запуск падал бы на CUDA_ERROR_INVALID_VALUE.
+constexpr int kGpuBlockSizeMin     = 32;
+constexpr int kGpuBlockSizeMax     = 1024;
+// 32 — измеренный оптимум, а не наследство. Замер (RTX 2060 sm_75, 30 SM, Рёсслер RK4,
+// LLE/LS/слитая бифуркация, сетки 1e3..6.4e4 точек, ширины 32..256):
+//   - на КРУПНОЙ сетке (>= 6.4e4) все ширины в пределах +-7%, то есть безразличны;
+//   - на МЕЛКОЙ (1e3) широкий блок проигрывает до 2.5x: сетка из nPts/block блоков просто
+//     не покрывает 30 SM (при 256 это 4 блока на 30 мультипроцессоров);
+//   - потолок занятости здесь задают РЕГИСТРЫ (76-85 на поток -> ~26 варпов/SM), а не лимит
+//     блоков на SM, поэтому расширение блока и не может ничего выиграть.
+// Менять имеет смысл на другой карте — для того настройка и выведена в Settings.
+constexpr int kGpuBlockSizeDefault = 32;
+
+// Приводит к кратному варпу и в допустимый диапазон. Вызывать после любого внешнего ввода
+// (виджет Settings, _app_config.json) — set_gpu_block_size делает это сам.
+inline int clamp_gpu_block_size(int threads) {
+    threads = (threads / 32) * 32;
+    if (threads < kGpuBlockSizeMin) threads = kGpuBlockSizeMin;
+    if (threads > kGpuBlockSizeMax) threads = kGpuBlockSizeMax;
+    return threads;
+}
+
+// Потокобезопасны: пишет UI-поток (Settings), читают worker'ы при запуске ядер.
+
+
+
 // Единая индикация режимов (REGIME_* в configCUDA.h): -1 = fixed point, 0 = unbound,
 // 1 = oscillation. Контракт flags[] по типам расчёта:
 //   Bif1D / Bif2D / DFT  — СЫРОЙ выход peakFinder / DBSCAN: -1 = FP, 0 = unbound,
@@ -93,6 +136,37 @@ inline bool regime_is_oscillation(int flag) { return flag >  0; }
 inline bool regime_is_fixed_point(int flag) { return flag <  0; }
 inline bool regime_is_unbound    (int flag) { return flag == 0; }
 
+// Адаптивный шаг в свипах (ядра kernels/adaptive_part.cu). enabled == false — прежний
+// путь без изменений. Тела — AdaptiveCode схемы, params — adaptive_build_params. h
+// запроса — шаг вывода равномерной сетки; на узлах шага (raw_nodes) не участвует.
+// Ось свипа может менять не систему, а настройку шага: axis_kind[i] — код оси
+// (по порядку осей X, Y запроса), диапазон — тот же param_lo/hi(_2).
+enum AdaptiveAxisKind {
+    kAdAxisSystem = 0,    // параметр / НУ, как у постоянного шага
+    kAdAxisRtol   = 2,
+    kAdAxisAtol   = 3,    // один atol на все переменные
+    kAdAxisTol    = 4,    // rtol = v, atol = v * tol_ratio
+    kAdAxisCtrl   = 10,   // + k: k-й параметр регулятора
+};
+// Коды уходят в ядро как есть (axisKind) — обязаны совпадать с UCUDA_AXIS_* (ucuda_adaptive.cuh).
+static_assert(kAdAxisSystem == UCUDA_AXIS_SYSTEM && kAdAxisRtol == UCUDA_AXIS_RTOL && kAdAxisAtol == UCUDA_AXIS_ATOL
+              && kAdAxisTol == UCUDA_AXIS_TOL && kAdAxisCtrl == UCUDA_AXIS_CTRL, "adaptive axis codes out of sync");
+struct AdaptiveRequest {
+    bool   enabled = false;
+    bool   raw_nodes = false;
+    int    peak_interp = 2;              // узлы шага: 0 — узел, 1 — парабола, 2 — Эрмит по f
+    std::string rhs, emb, dprep, deval;  // тела AdaptiveCode
+    std::string ctrl_body;               // C body пользовательского регулятора, иначе пусто
+    UcudaAdaptParams params{};
+    int    axis_kind[2] = { kAdAxisSystem, kAdAxisSystem };
+    double tol_ratio = 1e-2;
+    int    lyap_renorm = 0;              // LLE/LS: 0 — ровно в k*NT, 1 — в первом узле после
+    // Ошибка сборки на стороне UI (не та схема, неразборный rtol...): движок вернёт
+    // её вместо расчёта.
+    std::string setup_error;
+    std::string desc;                    // для _config.csv: регулятор и допуски (fill_adaptive_request)
+};
+
 struct Bifurcation1DRequest {
     // КРС
     std::string krs_body;                    // тело calculateDiscreteModel из codegen
@@ -107,7 +181,8 @@ struct Bifurcation1DRequest {
     // (par_or_var = 0) свип идёт по начальному условию: var_sweep_index — 0-based индекс в
     // initial_conditions.
     // param_index == 0 — свип по самому a[0], коэффициенту симметрии s (его читают
-    // CD / Complex CD / Complex CD4 / SEMP / SIMP). Отдельного флага для этого нет:
+    // CD / Complex CD / Complex CD4 / CCD4 (o4s3) / CCD4 (o4s4) / SEMP / SIMP).
+    // Отдельного флага для этого нет:
     // слот a[0] ничем не отличается от остальных, поэтому валидаторы просто
     // пропускают 0 (раньше он отвергался как "зарезервированный").
     int  param_index    = 0;
@@ -146,6 +221,16 @@ struct Bifurcation1DRequest {
 
     // Защита от расхождения
     double max_value = 1.0e6;
+
+    // Plot every recorded iterate instead of only the peaks. A discrete map
+    // wants each x_n: the peak filter would drop the lower branch of every
+    // period-2 orbit, halve the period-doubling cascade and blank the
+    // period-1 windows. Ignored by the continuation path.
+    bool emit_all_samples = false;
+
+    // Адаптивный шаг (см. AdaptiveRequest). Классика — ядро на точку; continuation — ядро в одну
+    // нить (GPU) или цепочка в cl.exe-DLL (CPU); классика на CPU — та же DLL кусками по потокам.
+    AdaptiveRequest adaptive;
 
     // Если не пусто — engine запишет CSV с результатами по тому же формату,
     // что и NonLinAnal::bifurcation1D (для publication-quality пост-процессинга).
@@ -190,6 +275,10 @@ struct Bifurcation1DResult {
     // N > 0 = число найденных пиков (режим — oscillation). Нормализация к
     // -1/0/1 — regime_code(); экспорт читает N как есть (data_export.cpp).
     std::vector<int> flags;
+
+    // Адаптивный шаг: на точку по 4 числа — принятые, отвергнутые, вынужденные
+    // шаги и средний h. Пусто при постоянном шаге.
+    std::vector<double> ad_stats;
 
     // Snapshot of the request fields needed to reproduce the _config.csv
     // header on right-click export from the GUI. Filled by engine in
@@ -343,9 +432,15 @@ struct LLE1DRequest {
     // в единицах времени (NT), и размер возмущения (eps).
     double NT  = 1.0;
     double eps = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
 
     // Защита от расхождения.
     double max_value = 1.0e6;
+
+    // Адаптивный шаг (см. AdaptiveRequest): шаг выбирает регулятор по базовой траектории,
+    // клоны делают тот же шаг; h не используется. Классика на GPU — ядро на точку; continuation
+    // (GPU — ядро в одну нить) и CPU — ucuda_lyap_chain / ucuda_lyap_classic_range (run_lyap_ad_seq).
+    AdaptiveRequest adaptive;
 
     // Опциональный CSV.
     std::string csv_output_path;
@@ -381,6 +476,8 @@ struct LLE1DResult {
     // детектируется (см. комментарий к regime_code выше), поэтому -1 здесь
     // не появляется.
     std::vector<int>    flags;
+    // Адаптивный шаг: [i*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
     data_export::LLE1DSnapshot snapshot;
@@ -415,7 +512,9 @@ struct LS1DRequest {
     double t_max = 100.0;
     double NT  = 1.0;
     double eps = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value = 1.0e6;
+    AdaptiveRequest adaptive;   // см. LLE1DRequest::adaptive
     std::string csv_output_path;
 
     // See Bifurcation1DRequest::cancel.
@@ -444,6 +543,7 @@ struct LS1DResult {
     // flags[i] — REGIME_* (общий на все экспоненты): 1 = oscillation,
     // 0 = unbound. FP отдельно не детектируется, см. regime_code.
     std::vector<int> flags;
+    std::vector<double> ad_stats;   // адаптивный шаг: [i*4], см. LLE1DResult
 
     // Snapshot for right-click GUI export — see Bifurcation1DResult::snapshot.
     data_export::LS1DSnapshot snapshot;
@@ -499,7 +599,11 @@ struct LLE2DRequest {
     double t_max          = 100.0;
     double NT             = 1.0;
     double eps            = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value      = 1.0e6;
+
+    // Адаптивный шаг (см. LLE1DRequest::adaptive); axis_kind — по осям X, Y запроса.
+    AdaptiveRequest adaptive;
 
     std::string csv_output_path;
 
@@ -527,6 +631,7 @@ struct LLE2DResult {
     // -999 — разошлось, NaN/inf — численная проблема). Render отфильтрует.
     std::vector<double> values;
     std::vector<int>    flags;     // REGIME_*: 1=oscillation, 0=unbound (FP не детектируется)
+    std::vector<double> ad_stats;  // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Авто-нормализация для colormap'а: min/max по валидным значениям
     // (без 999/-999/nan/inf). Если валидных нет — обе 0.
@@ -582,6 +687,12 @@ struct Bifurcation2DRequest {
     int    pre_scaller    = 1;
     double max_value      = 1.0e6;
 
+    // Plot every recorded iterate instead of only the peaks. A discrete map
+    // wants each x_n: the peak filter would drop the lower branch of every
+    // period-2 orbit, halve the period-doubling cascade and blank the
+    // period-1 windows. Ignored by the continuation path.
+    bool emit_all_samples = false;
+
     // DBSCAN-порог: радиус эпсилон для кластеризации пиков.
     // Тот же смысл, что eps в bifurcation2D NonLinAnal (hostLibrary.cu:912).
     double eps_dbscan = 0.1;
@@ -593,6 +704,9 @@ struct Bifurcation2DRequest {
     // configCUDA.h. Само облако точек видно в Feature diagram (ProjType::FeatureDiagram).
     double mult_peak     = (double)::mult_peak;
     double mult_interval = (double)::mult_interval;
+
+    // Адаптивный шаг (см. AdaptiveRequest); axis_kind — по осям X, Y запроса.
+    AdaptiveRequest adaptive;
 
     std::string csv_output_path;
 
@@ -622,6 +736,8 @@ struct Bifurcation2DResult {
     // flags[] — СЫРОЙ выход dbscanCUDA: -1 = fixed point, 0 = unbound,
     // N > 0 = период. Нормализация — regime_code().
     std::vector<int>    flags;
+    // Адаптивный шаг: [cell*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
 
     // Авто-нормализация для colormap (без -1/nan).
     double min_val = 0.0;
@@ -666,7 +782,10 @@ struct LS2DRequest {
     double t_max          = 100.0;
     double NT             = 1.0;
     double eps            = 1.0e-4;
+    double vector_transient = 0.0;   // транзиент касательных векторов (время, кратно NT), 0 — нет
     double max_value      = 1.0e6;
+
+    AdaptiveRequest adaptive;   // см. LLE2DRequest::adaptive
 
     std::string csv_output_path;
 
@@ -696,6 +815,7 @@ struct LS2DResult {
     std::vector<double> values;
     // flags[iy*n + ix] — общий per-cell REGIME_* (1=oscillation, 0=unbound).
     std::vector<int>    flags;
+    std::vector<double> ad_stats;   // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Авто-нормализация per-plane (по валидным значениям, без 999/-999/nan).
     // Размер == n_exponents; если валидных нет — обе 0.
@@ -740,6 +860,9 @@ struct BasinsRequest {
     numb mult1    = mult_avg_peak;
     numb mult2    = mult_avg_interval;
 
+    // Адаптивный шаг (оси бассейна всегда НУ, axis_kind не читается).
+    AdaptiveRequest adaptive;
+
     std::string csv_output_path;
 
     // See Bifurcation1DRequest::cancel.
@@ -767,6 +890,7 @@ struct BasinsResult {
     std::vector<double> avg_peaks;       // 999 = no peaks / unbound, NaN→999
     std::vector<double> avg_intervals;
     std::vector<int>    helpful_array;   // -1=FP, 0=Unbound, 1=Osc
+    std::vector<double> ad_stats;        // адаптивный шаг: [cell*4], см. Bifurcation2DResult
 
     // Сводки для отрисовки.
     int    n_clusters = 0;               // max(basin_idx); min подсчитывается отдельно
@@ -979,6 +1103,21 @@ struct OrderRequest {
 
     double max_value = 1.0e6;
 
+    // Эталонное решение: четвёртая копия траектории, которую ведёт ДРУГОЙ метод
+    // (по умолчанию DOPRI78) с шагом h/ref_substeps, в локстепе с грубой копией.
+    // Даёт E_ref = max|y_h - y_ref| — не ричардсоновскую оценку, а саму ошибку
+    // метода на шаге h. Пустое тело или ref_substeps <= 0 выключают эталон
+    // НА КОМПИЛЯЦИИ: ветки в ядре тогда нет вовсе (см. order.template.cu).
+    std::string ref_krs_body;
+    int         ref_substeps = 0;
+
+    // Точность CPU-арифметики: 0 = double, 1 = double-double (~32 цифры),
+    // 2 = quad-double (~62). Коды совпадают с kOrderPrec* из order_session.h.
+    // Только для CPU-ветки: GPU-путь поле игнорирует, ядро собирается в
+    // обычном numb. Нужно там, где схема высокого порядка упирается в полку
+    // округления раньше, чем выходит на асимптотику.
+    int cpu_prec = 0;
+
     // See Bifurcation1DRequest::cancel / ::progress.
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
@@ -1012,6 +1151,7 @@ struct OrderResult {
     std::vector<double> p;        // оценка порядка
     std::vector<double> e1;       // max|y_h - y_h/2|
     std::vector<double> e2;       // max|y_h/2 - y_h/4|
+    std::vector<double> e_ref;    // max|y_h - y_ref|; всё NaN, если эталон не считался
     std::vector<double> h_eff;    // фактический шаг ячейки (после snap)
     std::vector<int>    status;
 
@@ -1022,5 +1162,434 @@ struct OrderResult {
     // растягивает шкалу так, что полка перестаёт читаться.
     double p_min = 0.0,  p_max = 0.0;
     double e1_min = 0.0, e1_max = 0.0;
+    double eref_min = 0.0, eref_max = 0.0;
 };
 
+// ---------------------------------------------------------------------------
+// Performance — замер времени счёта (третья вкладка графика на Order).
+//
+// По той же одномерной сетке узлов, что и Order, но меряется НЕ ошибка, а
+// время: на каждом узле запускается perfIntegrateKernel, который интегрирует
+// одну траекторию шагом этого узла, repeats раз подряд. В зачёт идёт только
+// сам запуск — cudaEvent стоят вплотную вокруг cuLaunchKernel, загрузки H2D
+// сделаны до цикла, выгрузка D2H — после, компиляция модуля не входит в замер
+// по определению (модуль общий с Order и к этому моменту уже готов).
+//
+// Ошибки E1/E2 для оси X берутся из ОТДЕЛЬНОГО, не засекаемого прогона
+// orderEstimateKernel по той же сетке: на графике «время vs ошибка» это ровно
+// та ошибка, ради которой заплачено измеренное время.
+struct PerfRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;   // [amountOfX]
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    OrderAxis axis;           // всегда одномерная: H или Value
+
+    double h       = 0.01;
+    double t_max   = 10.0;
+    bool   snap_steps    = true;
+    bool   endpoint_only = false;
+    double max_value = 1.0e6;
+
+    int repeats  = 20;   // засекаемых запусков на узел
+    int warmup   = 2;    // прогревочных запусков вне зачёта (первый тянет загрузку кода)
+    int replicas = 1;    // одинаковых потоков в замеряемом запуске
+
+    // Эталон для оси X (см. OrderRequest::ref_krs_body). На замер времени не
+    // влияет никак: считается в том же не засекаемом order-проходе, что E1/E2.
+    std::string ref_krs_body;
+    int         ref_substeps = 0;
+
+    // См. OrderRequest::cpu_prec. Здесь он меняет и ось времени: в расширенной
+    // точности меряется стоимость программной арифметики, а не double.
+    int cpu_prec = 0;
+
+    // ---- «Точность — затраты» (этап 7 адаптивного шага) ----
+    // Ошибка в конечной точке E(T) = max_i |y_i(T) - y*_i(T)| против эталона высокой
+    // точности: DOP853 постоянным шагом на CPU в dd (1) или qd (2), число шагов удваивается,
+    // пока два последних решения не сойдутся; 0 — без эталона. Считает order_session
+    // (run_performance_any), движку поля не нужны.
+    int         end_ref_prec = 0;
+    std::string end_ref_body;             // КРС DOP853 для эталона
+    double      rhs_per_step = 0;         // вычислений f на шаг схемы, 0 — неизвестно
+
+    // Адаптивный шаг: узлы — tol, лог-сетка tol_lo..tol_hi из tol_n точек; rtol = tol,
+    // atol_i = tol * (atol_i / rtol) исходных настроек. GPU — ядро endpoint_kernel_ad, CPU — тот же
+    // драйвер в cl.exe-DLL (AdaptiveCpuModule); ошибки E1/E2/Eref здесь нет — только E(T).
+    bool        adaptive = false;
+    std::string ad_rhs, ad_emb, ad_ctrl_body;
+    UcudaAdaptParams ad_params{};
+    double      tol_lo = 1e-3, tol_hi = 1e-13;
+    int         tol_n = 11;
+    std::string ad_desc;                  // регулятор и допуски — в _config.csv экспорта (PerfResult::ad_desc)
+    std::string setup_error;              // ошибка сборки запроса на стороне UI
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct PerfResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_pts = 0;
+    OrderAxis axis;
+    std::vector<double> axis_vals;
+
+    // Из order-прохода (та же раскладка, что в OrderResult, но всегда 1D).
+    std::vector<double> e1, e2, e_ref, p, h_eff;
+    std::vector<int>    status;
+
+    // Время ОДНОГО запуска в микросекундах, по repeats замерам на узел.
+    std::vector<double>    t_min, t_max, t_avg;
+    std::vector<long long> n_steps;   // шагов в замеряемом запуске
+
+    int repeats = 0, warmup = 0, replicas = 0;
+
+    // Диапазоны по узлам, у которых есть и время, и конечная положительная
+    // ошибка — по ним автоскейлится график «время vs ошибка».
+    double e1_min = 0.0, e1_max = 0.0;
+    double e2_min = 0.0, e2_max = 0.0;
+    double eref_min = 0.0, eref_max = 0.0;
+    double t_lo   = 0.0, t_hi   = 0.0;
+
+    int n_ok = 0, n_diverged = 0, n_floor = 0, n_nocontract = 0;
+
+    // ---- «Точность — затраты» ----
+    bool adaptive = false;                // узлы — tol (axis_vals), а не h
+    std::string ad_desc;                  // настройки шага этого прогона (PerfRequest::ad_desc)
+    std::vector<std::vector<double>> y_end;   // y(T) узла, [n_pts][amountOfX]; пусто — нет
+    std::vector<double> e_end;            // E(T) против эталона; пусто — эталона не было
+    std::vector<double> n_rhs;            // вычислений f за запуск (NaN — неизвестно)
+    std::vector<double> n_rej;            // отвергнутых попыток (адаптивный), иначе 0
+    double    ref_err = 0.0;              // оценка ошибки эталона (разность N и 2N шагов)
+    long long ref_steps = 0;              // шагов эталона
+    int       ref_prec = 0;               // PerfRequest::end_ref_prec
+};
+
+// ---------------------------------------------------------------------------
+// Stability — область устойчивости схемы на двумерной задаче Дальквиста
+// (см. stabilityRegionKernel в kernels/order.template.cu).
+//
+// Сетка всегда двумерная и всегда линейная: по X — sigma, по Y — omega, то
+// есть вещественная и мнимая части собственных чисел тестовой матрицы. Сама
+// матрица в каждом узле строится из (sigma, omega, k, r) так, чтобы спектр
+// был ровно sigma +- i*omega, кладётся в a[] по индексам idx_* и прогоняется
+// ОДИН шаг схемы от двух базисных векторов. Результат ячейки — rho =
+// max|lambda| матрицы усиления; граница области там, где rho = 1.
+//
+// Тело КРС приходит то же самое, что на остальных расчётах вкладки, поэтому
+// анализ работает для любой схемы из списка, включая кастомные. Система
+// обязана быть именно двумерным линейным тестом (library/Dahlquist 2D):
+// amountOfX != 2 движок отвергает.
+struct StabilityRequest {
+    std::string krs_body;
+    int amountOfX = 0;                        // обязан быть 2
+
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    // Куда в a[] класть элементы матрицы. Для library/Dahlquist 2D это 1..4,
+    // но индексы явные: переименовать или переставить параметры системы
+    // пользователю никто не запрещает.
+    int idx_a = 1, idx_b = 2, idx_c = 3, idx_d = 4;
+
+    double k = 1.0;    // коэффициент несимметричности; k = -1 запрещён
+    double r = -1.0;   // отношение недиагоналей; обязан быть < 0, иначе c мнимое
+    double h = 1.0;    // шаг, чей оператор перехода диагонализуется
+
+    double sigma_lo = -4.1, sigma_hi = 0.1;
+    double omega_lo = -2.75, omega_hi = 2.65;
+    int    n_pts = 256;                       // ОБЩЕЕ на обе оси: карта n x n
+
+    // Точность CPU-ветки, коды kOrderPrec* из order_session.h. GPU игнорирует.
+    int cpu_prec = 0;
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+enum StabilityStatus {
+    STAB_ST_OK  = 0,
+    STAB_ST_BAD = 1,   // матрица не построилась или шаг дал nan/inf
+};
+
+struct StabilityResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_pts_x = 0, n_pts_y = 0;
+    std::vector<double> sigma_vals, omega_vals;
+    double sigma_lo = 0.0, sigma_hi = 0.0, omega_lo = 0.0, omega_hi = 0.0;
+
+    double k = 0.0, r = 0.0, h = 0.0;
+
+    // Размера n_pts_x * n_pts_y, row-major (iy*n_pts_x + ix).
+    std::vector<double> rho;
+    std::vector<int>    status;
+
+    // Относительная ошибка одного шага против точного оператора перехода:
+    //   err = ||e^{hA} - R||_2 / ||e^{hA}||_2
+    // (спектральная норма, см. stability_step_error). Размер и раскладка те же,
+    // что у rho; непосчитанная ячейка — NaN, ячейка, где точная экспонента
+    // ушла в ноль или бесконечность, — +inf. Области предпочтительности
+    // (Fedoseev, Karimov, Legat, Butusov, Mathematics 10:4327, 2022) — это
+    // ячейки с rho <= 1 и err <= tol. Допуск в результат НЕ входит: он
+    // применяется при отрисовке, и его можно крутить без пересчёта.
+    std::vector<double> err;
+
+    int n_ok = 0, n_bad = 0;
+    int n_stable = 0;                 // ячеек с rho <= 1
+    double rho_min = 0.0, rho_max = 0.0;   // только по ячейкам со status OK
+    double err_min = 0.0, err_max = 0.0;   // только по конечным err ячеек со status OK
+};
+
+// Проверка запроса и раскладка сетки — общие для GPU- и CPU-ветки, иначе одни
+// и те же настройки принимались бы на одном устройстве и отвергались на
+// другом. stability_validate возвращает пустую строку, когда всё в порядке.
+std::string stability_validate(const StabilityRequest& req);
+void        stability_fill_axes(const StabilityRequest& req, StabilityResult& res);
+
+// Счётчики, число устойчивых ячеек и диапазон rho по чистым ячейкам. Функция
+// общая для GPU- и CPU-ветки: разойдись они здесь, одна и та же карта
+// подписывалась бы по-разному в зависимости от устройства.
+void stability_summarize(StabilityResult& res);
+
+// Относительная ошибка одного шага на тестовой матрице узла (sigma, omega):
+// ||e^{hA} - R||_2 / ||e^{hA}||_2, где A строится из (sigma, omega, k, r) по
+// тем же формулам, что в ядре, а R = [[R00, R01], [R10, R11]] — матрица
+// усиления схемы. Спектр A ровно sigma +- i*omega, поэтому экспонента берётся
+// в замкнутом виде:
+//   e^{hA} = e^{h*sigma} * (cos(h*omega) I + h*sinc(h*omega) (A - sigma I)).
+// Считается в double при любой точности CPU-ветки: сравнение идёт с допуском
+// порядка единицы, и разрядов double здесь с запасом.
+// Возвращает +inf, когда e^{hA} вырождается в 0 или inf, и NaN, когда
+// матрицу построить нельзя или R не конечна.
+double stability_step_error(double sigma, double omega, double k, double r, double h,
+                            double R00, double R01, double R10, double R11);
+
+// Ячейка области предпочтительности: посчитана, устойчива (rho <= 1) и
+// ошибка шага не больше допуска. Одно определение на карту, счётчик и экспорт.
+inline bool stability_cell_preferred(const StabilityResult& res, size_t i, double tol) {
+    if (i >= res.rho.size() || i >= res.err.size()) return false;
+    if (i < res.status.size() && res.status[i] != STAB_ST_OK) return false;
+    return res.rho[i] <= 1.0 && res.err[i] <= tol;   // NaN даёт false в обоих
+}
+int stability_count_preferred(const StabilityResult& res, double tol);
+
+// ---------------------------------------------------------------------------
+// Network — сеть связанных осцилляторов (см. kernels/network.template.cu).
+//
+// Топология приходит УЖЕ развёрнутой в CSR по узлу-приёмнику: движок графов не
+// знает, он получает дуги. Двунаправленное ребро — две дуги, вес каждой уже
+// умножен на глобальный множитель связи.
+//
+// Параметры у каждого узла свои: values[i * amountOfValues + k]. Тело связи —
+// готовый C-код из codegen_coupling (набор case-веток switch по номеру закона),
+// ровно как krs_body — готовый код шага.
+
+// Потолок числа узлов: сеть считается одним блоком, узел = поток, и состояние
+// всей сети держится в shared. Больше — это уже другой раскладкой ядра.
+constexpr int kMaxNetworkNodes = 256;
+
+struct NetworkRequest {
+    std::string krs_body;
+    std::string coupling_body;      // case-ветки switch(law); пусто = сеть без связи
+    int amountOfX = 0;              // размерность ОДНОГО узла
+    int n_nodes   = 0;
+
+    std::vector<double> values;     // [n_nodes * amountOfValues], a[0] = symmetry s
+    int amountOfValues = 0;
+    std::vector<double> initial_conditions;  // [n_nodes * amountOfX]
+
+    // CSR по приёмнику: edge_start[n_nodes+1], остальное [n_arcs].
+    std::vector<int>    edge_start;
+    std::vector<int>    edge_src;
+    std::vector<double> edge_w;
+    std::vector<int>    edge_law;
+
+    double h = 0.01;
+    double t_max = 100.0;
+    double transient = 0.0;
+    int    pre_scaller = 1;         // писать каждую pre_scaller-ю точку
+    int    max_points = 20000;      // потолок точек по времени; движок поднимет
+                                    // pre_scaller, если при заданном не влезает
+    double max_value = 1.0e6;
+
+    // See Bifurcation1DRequest::cancel / ::progress.
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+// Статусы узла; совпадают с NET_* в шаблоне ядра.
+enum NetworkNodeStatus {
+    NET_ST_OK       = 0,
+    NET_ST_DIVERGED = 1,
+};
+
+struct NetworkResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int n_nodes = 0, n_vars = 0, n_points = 0;
+    double h = 0.0;
+    double t0 = 0.0;                // время первой записанной точки
+    double dt = 0.0;                // шаг по времени между точками = h * pre_scaller
+    int pre_scaller = 1;            // ФАКТИЧЕСКИЙ (движок мог поднять под max_points)
+
+    // [point][node][var], плоско: data[(p * n_nodes + i) * n_vars + k].
+    // Точки после разлёта — NaN: расчёт сети останавливается целиком, как
+    // только разлетелся хоть один узел.
+    std::vector<double> data;
+    std::vector<int>    status;     // [n_nodes], NetworkNodeStatus
+    int n_diverged = 0;
+
+    // Диапазоны по переменной, по КОНЕЧНЫМ значениям — для автоскейла кривых
+    // и раскраски графа.
+    std::vector<double> vmin, vmax;
+};
+
+// Signal metrics — числовые характеристики записанного сигнала writable_var на
+// каждой точке свипа (1D-отрезок или 2D-сетка), вкладка Parametric -> Metrics.
+// Ядро calculateDiscreteModelMetricsCUDA (kernels/signal_metrics.template.cu)
+// интегрирует и считает всё на лету, траекторию не хранит.
+//
+// Номер метрики = строка выходного буфера ядра: порядок обязан совпадать с
+// SIGM_* в signal_metrics.template.cu.
+enum SignalMetric : int {
+    SIGM_MAX = 0,            // максимум сигнала на окне записи
+    SIGM_MIN,                // минимум
+    SIGM_RANGE,              // max - min
+    SIGM_MEAN,               // среднее
+    SIGM_MEAN_FREQ,          // средняя частота: mean(1/T_i) по межпиковым интервалам
+    SIGM_MEDIAN_FREQ,        // медианная частота: 1/median(T_i)
+    SIGM_VARIANCE,         // var(y) = Hjorth activity
+    SIGM_HJORTH_MOBILITY,    // sqrt(var(y')/var(y)), рад/время
+    SIGM_HJORTH_COMPLEXITY,  // mobility(y')/mobility(y)
+    // Межпиковые интервалы T_i (те же, что у частот). Номера — в конец, чтобы
+    // не сдвинуть сохранённые win.metric / metric_mask.
+    SIGM_INT_MAX,            // max(T_i)
+    SIGM_INT_MIN,            // min(T_i)
+    SIGM_INT_RANGE,          // max(T_i) - min(T_i)
+    SIGM_INT_MEAN,           // mean(T_i)
+    SIGM_VOLUME,             // prod_i (max x_i - min x_i) по всем переменным состояния
+    SIGM_COUNT
+};
+// Порядок показа (табы, CSV): номера метрик — это раскладка буфера ядра, а не
+// порядок, в котором их удобно читать.
+constexpr int kSignalMetricDisplayOrder[SIGM_COUNT] = {
+    SIGM_MAX, SIGM_MIN, SIGM_RANGE, SIGM_MEAN, SIGM_VOLUME,
+    SIGM_INT_MAX, SIGM_INT_MIN, SIGM_INT_RANGE, SIGM_INT_MEAN,
+    SIGM_MEAN_FREQ, SIGM_MEDIAN_FREQ,
+    SIGM_VARIANCE, SIGM_HJORTH_MOBILITY, SIGM_HJORTH_COMPLEXITY,
+};
+constexpr int kSignalMetricAllMask = (1 << SIGM_COUNT) - 1;
+
+// Короткое имя для таба/легенды и подпись оси (с единицами). Для отображений,
+// где время — это номер итерации (дискретные отображения), единицы те же по смыслу.
+const char* signal_metric_name(int m);
+const char* signal_metric_axis_label(int m);
+
+struct SignalMetricsRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+
+    std::vector<double> initial_conditions;  // длина == amountOfX
+    std::vector<double> base_values;         // все параметры системы (с a[0])
+
+    // 1 — отрезок по оси X (n_pts точек), 2 — квадратная сетка n_pts × n_pts.
+    int dimension = 1;
+
+    // Ось X — см. Bifurcation1DRequest.
+    int  param_index     = 0;
+    bool sweep_over_var  = false;
+    int  var_sweep_index = 0;
+    bool sweep_over_h    = false;
+    bool log_scale       = false;
+    double param_lo = 0.0;
+    double param_hi = 1.0;
+    // Ось Y (только dimension == 2) — см. Bifurcation2DRequest.
+    int  param_index_2     = 0;
+    bool sweep_over_var_2  = false;
+    int  var_sweep_index_2 = 0;
+    bool sweep_over_h_2    = false;
+    bool log_scale_2       = false;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    int n_pts = 500;
+
+    // Continuation (только 1D, свип по параметру или h): точка стартует с
+    // конечного x[] предыдущей; reverse — обход hi -> lo (гистерезис).
+    bool continuation = false;
+    bool continuation_reverse = false;
+    // Считать на CPU (только 1D). Для continuation это реальный выбор: GPU-ветка
+    // там однопоточная, и ядро процессора на цепочке быстрее.
+    bool use_cpu = false;
+
+    int writable_var = 0;                    // -1 = x0 + pi*x1 + e*x2, как у БД
+
+    double h = 0.01;
+    double transient_time = 0.0;
+    double t_max = 0.0;
+    int pre_scaller = 1;
+    double max_value = 1.0e6;
+
+    // Биты SignalMetric. Считаются всегда все (суммы почти бесплатны), маска
+    // решает, что отдать наружу и нужен ли буфер интервалов под медиану —
+    // единственную метрику, которой мало потоковых сумм.
+    int metric_mask = kSignalMetricAllMask;
+
+    // Адаптивный шаг (см. AdaptiveRequest): равномерная сетка или узлы шага (raw_nodes;
+    // средние по времени, экстремумы и пики — интерполяцией между узлами, см.
+    // metrics_adaptive_part.cu); Хьорт при нём не считается (NaN).
+    AdaptiveRequest adaptive;
+    // min/max по интерполированным экстремумам и при постоянном шаге (при
+    // адаптивном — всегда).
+    bool minmax_interp = false;
+
+    // Если не пусто — <path>_config.csv + <path>_<metric>.csv на каждую метрику.
+    std::string csv_output_path;
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct SignalMetricsResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    int dimension = 1;
+    int n_pts = 0;
+    // Снапшот диапазонов на момент Run — X/Y точек считаются по ним, а не по
+    // полям GUI (иначе график «прыгает» при правке до следующего Run).
+    double param_lo   = 0.0;
+    double param_hi   = 1.0;
+    double param_lo_2 = 0.0;
+    double param_hi_2 = 1.0;
+    bool   log_scale   = false;
+    bool   log_scale_2 = false;
+    int    metric_mask = 0;
+    // Снапшот continuation: точка k лежит в ucuda_node_value_cont(k, reverse).
+    bool   continuation = false;
+    bool   continuation_reverse = false;
+
+    // values[m] — метрика m: n_pts значений (1D) или n_pts² (2D, [iy*n_pts + ix]).
+    // Пусто, если бит m не стоял в маске. NaN — «не измерить» (см. ядро).
+    std::vector<double> values[SIGM_COUNT];
+    // REGIME_*: 1 = oscillation, -1 = fixed point, 0 = unbound.
+    std::vector<int> flags;
+    // Адаптивный шаг: [cell*4] — принятые, отвергнутые, вынужденные шаги, средний h.
+    std::vector<double> ad_stats;
+    // Автошкала по конечным значениям каждой метрики (обе 0, если таких нет).
+    double min_val[SIGM_COUNT] = {};
+    double max_val[SIGM_COUNT] = {};
+};
+
+// CSV одной таблицей: x [, y], regime, метрики из маски. Зовёт и движок
+// (csv_output_path), и ПКМ-экспорт с графика.
+bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);

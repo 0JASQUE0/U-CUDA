@@ -1,7 +1,5 @@
 ﻿#pragma once
 #include "ucuda/equations/codegen.hpp"
-#include "ucuda/equations/adaptive_codegen.h"
-#include <iomanip>
 #include <map>
 #include <set>
 #include <memory>
@@ -9,14 +7,32 @@
 #include <sstream>
 #include <stdexcept>
 #include <cctype>
+#include <climits>
+#include <limits>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 
 namespace ucuda::equations_detail {
 // Реализация парсера (обычный синтаксис + LaTeX) и кодгена схем.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
  // внутренняя линковка: всё ниже не видно из других .cpp/.cu
@@ -273,6 +289,31 @@ namespace ucuda::equations_detail {
     constexpr double CCD_IMAG = 0.28867513459481288225;
 
 
+    // В тело печатается ФОРМУЛА, а не это число: sqrt(3)/6 иррационален, и
+    // десятичный литерал нёс бы только 17 цифр независимо от того, в какой
+    // точности собрано тело. На dd/qd-ветке вкладки Order это держало бы
+    // полку округления на уровне double, то есть сводило бы расширенную
+    // точность к нулю на всех схемах семейства Complex CD.
+    // Один sqrt на шаг против четырёх обращений к константе — цена мелкая на
+    // фоне комплексной арифметики самой схемы.
+    const char* const kCcdImagDecl =
+        "    const numb ccd_im = sqrt((numb)3) / (numb)6;\n";
+
+
+    // Коэффициент палиндромной тройки CCD4 (o4s3): alpha — комплексный корень
+    // условий 2*alpha + beta = 1 и 2*alpha^3 + beta^3 = 0, то есть
+    // alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3)). Раскрыв знаменатель:
+    //   c = 2^(1/3),  D = 4 + 2c + c^2,
+    //   Re alpha = (2 + c/2) / D,   Im alpha = (c*sqrt(3)/2) / D.
+    // Считается в рантайме по той же причине, что и ccd_im: десятичный литерал
+    // обрезал бы константу до 17 цифр независимо от точности numb.
+    const char* const kCcd3Decl =
+        "    const numb ccd3_c  = cbrt((numb)2);\n"
+        "    const numb ccd3_d  = (numb)4 + (numb)2 * ccd3_c + ccd3_c * ccd3_c;\n"
+        "    const numb ccd3_re = ((numb)2 + (numb)0.5 * ccd3_c) / ccd3_d;\n"
+        "    const numb ccd3_im = (numb)0.5 * ccd3_c * sqrt((numb)3) / ccd3_d;\n";
+
+
     bool pn_contains_var(const PN& n, const std::string& v) ;
 
 
@@ -365,6 +406,10 @@ namespace ucuda::equations_detail {
 
 
     // Схемы
+    // Discrete map x_{n+1} = f(x_n): the right-hand side is the step, h unused.
+    // The temp buffer is required - updating in place would be Gauss-Seidel.
+    std::string scheme_map(const System& s) ;
+
     std::string scheme_euler(const System& s) ;
 
     std::string scheme_euler_cromer(const System& s) ;
@@ -376,7 +421,78 @@ namespace ucuda::equations_detail {
     // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
     // (7-й, b[1]) — z пока не используется, но оставлен под будущий адаптивный
     // шаг по |y - z|. На каждый step X := y.
-    std::string scheme_dopri78(const System& s) ;
+    //
+    // Коэффициент печатается суммой "(numb)(c0) + (numb)(c1) + ...": в double
+    // она сворачивается при компиляции в c0, в dd/qd CPU-ветки вкладки Order
+    // складывается точно (two_sum) и несёт 32/62 знака коэффициента.
+    std::string md_literal(const MultiDoubleCoef& r) ;
+
+    // "const numb <decl> = {...};" — rows x cols из таблицы с шагом
+    // строки ld (ld > cols — берётся левый верхний угол).
+    void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
+                  int rows, int cols, int ld) ;
+
+
+    std::string scheme_dopri78(const System& s, bool legacy = false) ;
+
+
+    // Явный РК с постоянным шагом по таблице Бутчера: RK45 (S = 6) и DOP853
+    // (S = 12). A — строки стадий 0..S-1 с шагом ld (строка 0 нулевая,
+    // печатаются столбцы 0..S-2), b — S весов старшего решения. Форма кода
+    // та же, что у DOPRI78: стадии в цикле, таблицы const. Оценщики и
+    // стадия FSAL здесь не нужны — их считает адаптивный вариант.
+    std::string scheme_erk(const System& s, const MultiDoubleCoef* A, int ld,
+                           const MultiDoubleCoef* b, int S) ;
+
+
+    // ---------- Адаптивный шаг: тела функций (см. AdaptiveCode в codegen.hpp) ----------
+    //
+    // Встроенная пара явного РК. A — стадии 0..S-1 с шагом строки ld, b — S весов
+    // старшего решения. Оценки ошибки — строки весов lo[m] = b - b^_m длины lc по стадиям
+    // 0..lc-1, где стадия S (если lc > S) — f(Y). Пишется сразу разность
+    // E_m = Y - Yhat_m = h*sum(lo_m*K), как у Хайрера и scipy, а не само оценочное решение:
+    // вычитать из Y близкое к нему Yhat значило бы терять в E ошибку округления eps*|y|,
+    // а так она eps*h*|f|.
+    // Стадия 0 не считается: это F0 = f(X), принятая с прошлого шага (FSAL у
+    // RK45 и DOP853; у DOPRI78 первая стадия тоже f(X)). Суммы идут в том же
+    // порядке, что у тела постоянного шага, поэтому Y побитово совпадает с ним.
+    // Стадии развёрнуты, и в суммы печатаются только ненулевые коэффициенты: умножение
+    // на 0 компилятор в FP64 выбросить не вправе (inf, NaN, -0), а ядра упираются в FP64.
+    // При конечных стадиях результат тот же до бита: x + 0*w = x, порядок остальных
+    // слагаемых прежний (у DOP853 нулей 16 из 66 в A, 4 из 12 в b, по 5 из 13 в оценках —
+    // ~30% умножений комбинаций стадий).
+    struct EmbSpec {
+        const MultiDoubleCoef* A; int ld;
+        const MultiDoubleCoef* b; int S;
+        const MultiDoubleCoef* lo[2]; int nlo; int lc;
+    };
+
+
+    std::string adaptive_emb_body(const System& s, const EmbSpec& e) ;
+
+
+    std::string adaptive_rhs_body(const System& s) ;
+
+
+    // Плотный выход RK45 — полином Шампайна 4-й степени, форма scipy:
+    // y(th) = X + h * sum_j Q_j th^(j+1), Q = K^T P. D = [X, hQ_0..hQ_3].
+    std::string rk45_dprep_body(const System& s) ;
+
+    std::string rk45_deval_body(const System& s) ;
+
+
+    // Плотный выход DOP853 — полином 7-й степени Хайрера, форма scipy
+    // (Dop853DenseOutput): три доп. стадии 13..15, затем D = [X, F0..F6].
+    std::string dop853_dprep_body(const System& s) ;
+
+    std::string dop853_deval_body(const System& s) ;
+
+
+    // Кубический Эрмит по концам шага (DOPRI78): D = [X, Y, hF0, hF1],
+    // y(th) = X + th*hF0 + th^2*(3d - 2hF0 - hF1) + th^3*(hF0 + hF1 - 2d), d = Y - X.
+    std::string hermite_dprep_body(const System& s) ;
+
+    std::string hermite_deval_body(const System& s) ;
 
 
     // ---------- Implicit schemes: Newton on a symbolic Jacobian ----------
@@ -520,10 +636,84 @@ namespace ucuda::equations_detail {
     // ~1.3x of RK4 either way, at ~2.7x the operation count (205 vs 76 for a
     // 3D system). As with CD itself, s != 1/2 breaks the symmetry of the inner
     // block and drops the whole thing to first order.
-    enum class CdKind { Real, Cx, Cx4 };
+    //
+    // CdKind::Cx4s3 / Cx4s4 -- СИММЕТРИЧНЫЕ варианты того же построения.
+    // Complex CD4 симметричной НЕ является: у композиции из двух стадий
+    // палиндромность требует g1 = g2, а тогда sum g = 1 и sum g^3 = 0
+    // несовместны и порядок падает до второго. Её четвёртый порядок держится
+    // не на симметрии, а на том, что нарушенное условие веса 4 (координата при
+    // [E1,E3]) чисто мнимое и его снимает Re. Замеренный дефект симметрии
+    // ||Psi_{-h}(Psi_h(x)) - x|| у неё O(h^8) — ниже собственной ошибки, но не
+    // ноль. Настоящая самосопряжённость начинается с трёх стадий:
+    //
+    //   o4s3: (alpha, 1 - 2*alpha, alpha), alpha = 1/(2 - 2^(1/3)*exp(2*pi*i/3))
+    //         = 0.3243964040201712 + 0.1345862724908067i. Комплексная ветвь
+    //         того же кубического уравнения, что даёт вещественный тройной
+    //         прыжок Йошиды (1.3512, -1.7024, 1.3512), но без шага назад:
+    //         Re у всех трёх коэффициентов положительна (min Re = 0.3244), а
+    //         константа ошибки в 215 раз меньше (||err||2 = 0.0247 против 5.29).
+    //   o4s4: (g/2, gc/2, gc/2, g/2) — это Complex CD4, симметризованная
+    //         композицией с собственной сопряжённой на половинном шаге. Решение
+    //         условий для четырёх палиндромных стадий единственно с точностью
+    //         до сопряжения и выходит ровно этим. ||err||2 = 0.00759.
+    //
+    // Обе палиндромны, то есть самосопряжены как КОМПЛЕКСНЫЕ композиции; взятое
+    // в конце шага Re оставляет дефект симметрии O(h^10) против O(h^8) у
+    // Complex CD4. Разложение ошибки по чётным степеням h замерено у обеих
+    // (экстраполяция Ричардсона по h^2 даёт наклон 6.0), поэтому в
+    // builtin_scheme_traits они помечены symmetric = true.
+    // При РАВНОЙ работе (одинаковом суммарном числе проходов CD) все три схемы
+    // дают одну и ту же ошибку с точностью до 4%: симметрия здесь достаётся
+    // даром, но и выигрыша в точности не приносит — она нужна ради обратимости
+    // отображения и законной h^2-экстраполяции.
+    // Обе, как и Complex CD4, требуют s = a[0] = 1/2.
+    //
+    // CdKind::Cx4ss01 -- CCD4 (s-split)_{0-1}, двойственная к Complex CD4: там
+    // комплексны внешние шаги, а CD внутри симметричен; здесь внешние шаги
+    // вещественные (h/2 и h/2), а комплексно само разбиение CD:
+    //   проход 1: h1 = (1-i)h/6, h2 = (2+i)h/6    (s1 = (1-i)/3)
+    //   проход 2: h1 = (2+i)h/6, h2 = (1-i)h/6    (s2 = 1 - s1)
+    // Полушаги a, b, b, a с a + b = 1/2 -- палиндром в смысле Phi/Phi*, поэтому
+    // КОМПЛЕКСНАЯ композиция самосопряжена и в log Psi нет h^2 и h^4. Оба
+    // коэффициента при h^3 чисто мнимые: 2(a^3 + b^3) = i/12 при N3 и
+    // -7i/72 при [N1, N2] (N_k -- ряд полушага Эйлера; знак -- для записи
+    // M = E*_a E_b E*_b E_a, правый множитель применяется первым),
+    // Re их снимает, первый вещественный член -- h^5, глобальный порядок 4.
+    // Среди двухпроходных CD со своими комплексными s_k решений порядка 4
+    // ровно две сопряжённые пары: Complex CD4 и эта.
+    // Замерено 4.0 на Лоренце и Рёсслере. Константа ошибки против Complex CD4
+    // зависит от задачи: Лоренц -- в 2.9 раза меньше, Рёсслер -- в 3.1 раза
+    // больше; по норме главного члена (веса 5) 0.0242 против 0.0134.
+    // Симметричной НЕ помечена, хотя комплексная композиция самосопряжена:
+    // мнимая часть появляется уже при h^3, и Re посреди пары шагов даёт дефект
+    // симметрии O(h^6) (у Complex CD4 -- O(h^8)); в глобальной ошибке есть h^5,
+    // экстраполяция Ричардсона по h^2 даёт 5, а не 6.
+    // Коэффициенты фиксированы, a[0] не читается: s здесь -- часть метода, а
+    // не ручка, и любое другое разбиение теряет порядок. Перестановка
+    // b, a, a, b тоже: коммутаторный член получает вещественную часть 1/12,
+    // и порядок падает до 2 -- на краях обязан стоять (1-i)/6.
+    //
+    // CdKind::Cx4ss10 -- CCD4 (s-split)_{1-0}: те же полушаги a, b, b, a, но в
+    // каждом проходе ПЕРВОЙ идёт неявная половина (обратный порядок), затем
+    // явная: E*_a, E_b | E*_b, E_a. Это та же композиция над сопряжённым
+    // базовым методом: N_2 меняет знак, член при N3 остаётся i/12, при
+    // [N1, N2] знак меняется на +7i/72 -- оба по-прежнему мнимые, порядок 4
+    // (замерено 4.0 на Лоренце и Рёсслере). Главный член ошибки на
+    // осцилляторе зеркален {0-1}, на нелинейных задачах выигрыш разный:
+    // Лоренц -- {0-1} в 10 раз точнее, Рёсслер -- {1-0} в 2.8 раза точнее.
+    enum class CdKind { Real, Cx, Cx4, Cx4s3, Cx4s4, Cx4ss01, Cx4ss10 };
 
 
-    std::string scheme_cd_common(const System& s, CdKind kind) ;
+    // core_only -- ядро для ExtrZ: только проходы над Z[], объявленным снаружи,
+    // без перехода X -> Z на входе и без Re на выходе (см. codegen.hpp).
+    // flip_halves -- вариант {1-0} любой CD-схемы: в каждом проходе сначала
+    // неявная половина (h1, обратный порядок), потом явная (h2, прямой). Это
+    // та же композиция над сопряжённым базовым методом: условия порядка
+    // переходят в себя заменой N_k -> (-1)^(k+1) N_k, порядок и симметрия не
+    // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
+    // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
+    std::string scheme_cd_common(const System& s, CdKind kind, bool core_only = false,
+                                 bool flip_halves = false) ;
 
 
     std::string scheme_cd(const System& s)          ;
@@ -531,6 +721,14 @@ namespace ucuda::equations_detail {
     std::string scheme_complex_cd(const System& s)  ;
 
     std::string scheme_complex_cd4(const System& s) ;
+
+    std::string scheme_complex_cd4_s3(const System& s) ;
+
+    std::string scheme_complex_cd4_s4(const System& s) ;
+
+    std::string scheme_complex_cd4_ss01(const System& s) ;
+
+    std::string scheme_complex_cd4_ss10(const System& s) ;
 
 
     // SEMP / SIMP — методы средней точки, у которых СТАДИЯ считается
@@ -712,3 +910,5 @@ namespace ucuda::equations_detail {
         return stack[0];
     }
 }
+
+namespace ucuda::equations_detail { std::string scheme_gbs(const System& s, int K); }

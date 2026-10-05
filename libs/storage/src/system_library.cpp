@@ -128,6 +128,9 @@ std::string record_to_json(const SystemRecord& r) {
     o << "{\n";
     kv(o, "name", r.name);
     kv(o, "note", r.note);
+    // String, not bool: record_from_json feeds unknown keys to parse_string(),
+    // which throws on a bool — so an older build must still be able to skip it.
+    kv(o, "kind", r.is_map ? "map" : "ode");
     kv(o, "mode", r.mode);
     kv(o, "latex_text", r.latex_text);
     kv(o, "plain_text", r.plain_text);
@@ -142,15 +145,33 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_midpoint", r.scheme_midpoint);
     kvbool(o, "scheme_rk4", r.scheme_rk4);
     kvbool(o, "scheme_dopri78", r.scheme_dopri78);
+    kvbool(o, "scheme_dopri78_legacy", r.scheme_dopri78_legacy);
+    kvbool(o, "scheme_rk45", r.scheme_rk45);
+    kvbool(o, "scheme_dop853", r.scheme_dop853);
     kvbool(o, "scheme_cd", r.scheme_cd);
     kvbool(o, "scheme_ccd", r.scheme_ccd);
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
+    kvbool(o, "scheme_ccd4s3", r.scheme_ccd4s3);
+    kvbool(o, "scheme_ccd4s4", r.scheme_ccd4s4);
+    kvbool(o, "scheme_ccd4ss01", r.scheme_ccd4ss01);
+    kvbool(o, "scheme_ccd4ss10", r.scheme_ccd4ss10);
+    kvbool(o, "scheme_cd10", r.scheme_cd10);
+    kvbool(o, "scheme_ccd10", r.scheme_ccd10);
+    kvbool(o, "scheme_ccd4_10", r.scheme_ccd4_10);
+    kvbool(o, "scheme_ccd4s3_10", r.scheme_ccd4s3_10);
+    kvbool(o, "scheme_ccd4s4_10", r.scheme_ccd4s4_10);
     kvbool(o, "scheme_ieuler", r.scheme_ieuler);
     kvbool(o, "scheme_imidpoint", r.scheme_imidpoint);
     kvbool(o, "scheme_semp", r.scheme_semp);
     kvbool(o, "scheme_simp", r.scheme_simp);
     kvbool(o, "scheme_d", r.scheme_dmethod);
     kvbool(o, "scheme_cieuler", r.scheme_cieuler);
+    kvbool(o, "scheme_gbs", r.scheme_gbs);
+    kvbool(o, "scheme_gbs24", r.scheme_gbs24);
+    kvbool(o, "scheme_gbs246", r.scheme_gbs246);
+    kvbool(o, "scheme_gbs2468", r.scheme_gbs2468);
+    kvbool(o, "scheme_gbs246810", r.scheme_gbs246810);
+    kvbool(o, "scheme_gbs24681012", r.scheme_gbs24681012);
     kvbool(o, "newton_full", r.newton_full);
     kv(o, "newton_tol", r.newton_tol);
     kv(o, "newton_max_iters", r.newton_max_iters);
@@ -158,13 +179,33 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
     kvmap(o, "param_values", r.param_values);
-    // custom_schemes: [ {"name": "...", "body": "..."}, ... ]
+    // custom_schemes: [ {"name": "...", "body": "...", "order": "2", "symmetric": "0"}, ... ]
+    // order/symmetric пишутся СТРОКАМИ: читатель ниже для любого значения
+    // зовёт parse_string(), и голое число его сломало бы.
     o << "  \"custom_schemes\": [";
     for (size_t k = 0; k < r.custom_schemes.size(); ++k) {
         const auto& cs = r.custom_schemes[k];
         if (k) o << ", ";
         o << "{\"name\": \"" << esc(cs.name)
-          << "\", \"body\": \"" << esc(cs.body) << "\"}";
+          << "\", \"body\": \"" << esc(cs.body)
+          << "\", \"order\": \"" << cs.order
+          << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0)
+          << "\", \"enabled\": \"" << (cs.enabled ? 1 : 0) << "\"}";
+    }
+    o << "],\n";
+    // Wrapper scheme names only ("Extr(RK4|1,2,4)", "Comp(CD|g1,g2,g1)"); the
+    // body is rebuilt by the resolver. The JSON key stays "extr_schemes" so
+    // that system.json files written before Comp existed still load.
+    o << "  \"extr_schemes\": [";
+    for (size_t k = 0; k < r.wrapper_schemes.size(); ++k) {
+        if (k) o << ", ";
+        o << "\"" << esc(r.wrapper_schemes[k]) << "\"";
+    }
+    o << "],\n";
+    o << "  \"disabled_wrappers\": [";
+    for (size_t k = 0; k < r.disabled_wrappers.size(); ++k) {
+        if (k) o << ", ";
+        o << "\"" << esc(r.disabled_wrappers[k]) << "\"";
     }
     o << "]\n";
     o << "}\n";
@@ -189,15 +230,33 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_midpoint") r.scheme_midpoint = p.parse_bool();
         else if (key == "scheme_rk4") r.scheme_rk4 = p.parse_bool();
         else if (key == "scheme_dopri78") r.scheme_dopri78 = p.parse_bool();
+        else if (key == "scheme_dopri78_legacy") r.scheme_dopri78_legacy = p.parse_bool();
+        else if (key == "scheme_rk45") r.scheme_rk45 = p.parse_bool();
+        else if (key == "scheme_dop853") r.scheme_dop853 = p.parse_bool();
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
         else if (key == "scheme_ccd") r.scheme_ccd = p.parse_bool();
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
+        else if (key == "scheme_ccd4s3") r.scheme_ccd4s3 = p.parse_bool();
+        else if (key == "scheme_ccd4s4") r.scheme_ccd4s4 = p.parse_bool();
+        else if (key == "scheme_ccd4ss01") r.scheme_ccd4ss01 = p.parse_bool();
+        else if (key == "scheme_ccd4ss10") r.scheme_ccd4ss10 = p.parse_bool();
+        else if (key == "scheme_cd10") r.scheme_cd10 = p.parse_bool();
+        else if (key == "scheme_ccd10") r.scheme_ccd10 = p.parse_bool();
+        else if (key == "scheme_ccd4_10") r.scheme_ccd4_10 = p.parse_bool();
+        else if (key == "scheme_ccd4s3_10") r.scheme_ccd4s3_10 = p.parse_bool();
+        else if (key == "scheme_ccd4s4_10") r.scheme_ccd4s4_10 = p.parse_bool();
         else if (key == "scheme_ieuler") r.scheme_ieuler = p.parse_bool();
         else if (key == "scheme_imidpoint") r.scheme_imidpoint = p.parse_bool();
         else if (key == "scheme_semp") r.scheme_semp = p.parse_bool();
         else if (key == "scheme_simp") r.scheme_simp = p.parse_bool();
         else if (key == "scheme_d") r.scheme_dmethod = p.parse_bool();
         else if (key == "scheme_cieuler") r.scheme_cieuler = p.parse_bool();
+        else if (key == "scheme_gbs") r.scheme_gbs = p.parse_bool();
+        else if (key == "scheme_gbs24") r.scheme_gbs24 = p.parse_bool();
+        else if (key == "scheme_gbs246") r.scheme_gbs246 = p.parse_bool();
+        else if (key == "scheme_gbs2468") r.scheme_gbs2468 = p.parse_bool();
+        else if (key == "scheme_gbs246810") r.scheme_gbs246810 = p.parse_bool();
+        else if (key == "scheme_gbs24681012") r.scheme_gbs24681012 = p.parse_bool();
         else if (key == "newton_full") r.newton_full = p.parse_bool();
         else if (key == "init_conditions") r.init_conditions = p.parse_map();
         else if (key == "param_values") r.param_values = p.parse_map();
@@ -217,6 +276,21 @@ SystemRecord record_from_json(const std::string& json) {
                         std::string cv = p.parse_string();
                         if (ck == "name") cs.name = cv;
                         else if (ck == "body") cs.body = cv;
+                        // Записи от старых версий этих ключей не содержат —
+                        // остаются дефолты (порядок 1, несимметричная), то есть
+                        // самое консервативное предположение.
+                        else if (ck == "order") {
+                            int v = 0;
+                            bool digits = !cv.empty() && cv.size() <= 2;
+                            for (char c : cv) {
+                                if (c < '0' || c > '9') { digits = false; break; }
+                                v = v * 10 + (c - '0');
+                            }
+                            if (digits && v >= 1) cs.order = v;
+                        }
+                        else if (ck == "symmetric") cs.symmetric = (cv == "1" || cv == "true");
+                        // Нет ключа — включена: так читаются старые system.json.
+                        else if (ck == "enabled") cs.enabled = !(cv == "0" || cv == "false");
                         p.ws();
                         if (p.peek() == ',') { ++p.i; continue; }
                         if (p.peek() == '}') { ++p.i; break; }
@@ -230,10 +304,43 @@ SystemRecord record_from_json(const std::string& json) {
                 }
             } else { ++p.i; }
         }
+        else if (key == "extr_schemes") {
+            // Плоский массив строк. Имена валидируются не здесь, а резолвером:
+            // непонятное имя отдаёт пустую КРС, то есть честную ошибку на Run,
+            // а не молчаливую подмену схемы.
+            p.ws();
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for extr_schemes");
+            ++p.i; p.ws();
+            if (p.peek() != ']') {
+                while (true) {
+                    r.wrapper_schemes.push_back(p.parse_string());
+                    p.ws();
+                    if (p.peek() == ',') { ++p.i; continue; }
+                    if (p.peek() == ']') { ++p.i; break; }
+                    break;
+                }
+            } else { ++p.i; }
+        }
+        else if (key == "disabled_wrappers") {
+            // Тот же плоский массив строк, что у extr_schemes.
+            p.ws();
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for disabled_wrappers");
+            ++p.i; p.ws();
+            if (p.peek() != ']') {
+                while (true) {
+                    r.disabled_wrappers.push_back(p.parse_string());
+                    p.ws();
+                    if (p.peek() == ',') { ++p.i; continue; }
+                    if (p.peek() == ']') { ++p.i; break; }
+                    break;
+                }
+            } else { ++p.i; }
+        }
         else {
             std::string val = p.parse_string();
             if (key == "name") r.name = val;
             else if (key == "note") r.note = val;
+            else if (key == "kind") r.is_map = (val == "map");
             else if (key == "mode") r.mode = val;
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;

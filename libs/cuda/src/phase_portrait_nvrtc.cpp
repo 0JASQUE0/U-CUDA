@@ -14,7 +14,7 @@ bool computePhasePortraitsNVRTC(
     const double* values, int amountOfValues,
     double h, int totalPoints, int skipPoints,
     std::vector<std::vector<std::vector<double>>>& outTrajectories,
-    std::string* err, std::vector<adaptive::Stats>* diagnostics)
+    std::string* err)
 {
     outTrajectories.clear();
     if (!g_engine.init()) { if (err)*err = g_engine.error(); return false; }
@@ -23,7 +23,7 @@ bool computePhasePortraitsNVRTC(
     if (!g_engine.compile(krs_body, amountOfX)) { if (err)*err = g_engine.error(); return false; }
     std::vector<double> ic(ic_flat, ic_flat + (size_t)N * amountOfX);
     std::vector<double> a(values, values + amountOfValues);
-    if (!g_engine.run_phase_portraits(ic, N, a, h, totalPoints, skipPoints, outTrajectories, diagnostics)) {
+    if (!g_engine.run_phase_portraits(ic, N, a, h, totalPoints, skipPoints, outTrajectories)) {
         if (err)*err = g_engine.error(); return false;
     }
     return true;
@@ -33,4 +33,26 @@ void prewarmPhasePortraitsNVRTC(const std::string& krs_body, int amountOfX) {
     if (krs_body.empty() || amountOfX <= 0) return;
     if (!g_engine.init()) return;
     g_engine.compile(krs_body, amountOfX);
+}
+
+void prewarmPhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq) {
+    if (rq.rhs.empty() || rq.amountOfX <= 0) return;
+    if (!g_engine.init()) return;
+    g_engine.prewarm_adaptive(rq);
+}
+
+bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out,
+                                        std::string* err)
+{
+    if (!g_engine.init()) { if (err) *err = g_engine.error(); return false; }
+    if (!g_engine.run_phase_portraits_adaptive(rq, out)) { if (err) *err = g_engine.error(); return false; }
+    return true;
+}
+
+bool computeAdaptiveEndpointNVRTC(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out,
+                                  std::string* err)
+{
+    if (!g_engine.init()) { if (err) *err = g_engine.error(); return false; }
+    if (!g_engine.run_adaptive_endpoint(rq, out)) { if (err) *err = g_engine.error(); return false; }
+    return true;
 }

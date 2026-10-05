@@ -1,24 +1,55 @@
 ﻿#pragma once
-#include "ucuda/domain/adaptive_solver.h"
 #include "ucuda/domain/system_record.h"
 #include "ucuda/domain/system.h"
 #include "ucuda/domain/analysis_types.h"
 class ParametricEngine;
+struct AdaptiveCode;
+#include "ucuda/domain/circuit_solver.h"
+#include "ucuda/domain/adaptive_settings.h"
 
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
 std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 
 // Тело calculateDiscreteModel для выбранной схемы: сперва ищется среди
-// пользовательских КРС по имени, иначе генерируется кодогеном. Пустая строка =
+// пользовательских КРС по имени, затем имя пробуется как экстраполяционная
+// обёртка "Extr(<база>|n...)", иначе генерируется кодогеном. Пустая строка =
 // нет валидной системы или схема не разобралась. Живёт здесь, а не в
 // analysis_session.cpp приватно, потому что тем же путём КРС резолвит
 // order_session.cpp.
+// ЕДИНСТВЕННЫЙ резолвер имени схемы: сюда же ходит PhaseAnalysisSession::
+// regenerate_krs, которая наполняет отладочную панель KRS.
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                    const System& sys,
-                                   const std::string& scheme, const adaptive::Options& options = {});
+                                   const std::string& scheme);
+
+// То же имя, но CPU-форма шага (codegen_scheme_cpu_equivalent под тем же
+// разбором имени). Только для отладочной панели: этот текст нигде не
+// компилируется, CPU-интегратор считает по байткоду AST.
+std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                       const System& sys,
+                                       const std::string& scheme);
+
+// Тела адаптивного шага по имени схемы — тот же разбор имени, что у compute_krs_for_scheme:
+// RK-пары (codegen_adaptive), GBS 2-4 ... (codegen_adaptive_gbs), Extr(база|n1..nK), K >= 2
+// (codegen_adaptive_extrapolation; база — встроенная или кастомная КРС). Схема без оценки
+// ошибки (и кастомная КРС с тем же именем) — std::runtime_error с текстом для UI.
+AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_schemes,
+                                      const System& sys, const std::string& scheme);
+
+// Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
+// t/h, so with h = 1 the computing time is exactly the iteration count.
+std::string default_h_from_record(const SystemRecord& r);
+
+// Session start scheme: "Map" for a map, otherwise left untouched.
+std::string default_scheme_from_record(const SystemRecord& r, std::string current);
+
+// Start value for BifurcationDiagramConfig::plot_all_iterates: a map's diagram
+// is built from every iterate, a flow's from peaks (a Poincare section).
+bool default_all_iterates_from_record(const SystemRecord& r);
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <string>
 #include <vector>
@@ -54,7 +85,13 @@ enum class ProjType {
     // n x n, ровно то, что он и умеет (colormap, colorbar, rect-zoom, tooltip, экспорт).
     RecurrencePlot,
     // Continuation diagram: scatter of peak values vs absolute simulated time.
-    ContinuationDiagram
+    ContinuationDiagram,
+    // Адаптивный шаг: h(t) принятых шагов линией, отвергнутые и вынужденные попытки —
+    // маркерами (лог попыток AnalysisResult::step_log).
+    StepSize,
+    // Адаптивный шаг: число отвергнутых попыток на каждом принятом шаге (маркеры) и его
+    // скользящее среднее — как часто регулятор пересчитывает шаг. Тот же лог попыток.
+    Rejections
 };
 
 inline std::uint64_t next_projection_id() {
@@ -73,6 +110,15 @@ struct Projection {
     // для TimeDomain: какие переменные выводить (по индексу). Размер синхр. с vars.
     std::vector<bool> show_var;
     bool open = true;        // окно открыто (крестик)
+    // Автоскейл ждёт ИМЕННО это окно. Раньше запрос жил один на сессию
+    // (PhaseAnalysisSession::fit_request) и гасился после прохода по всем
+    // проекциям — но окно, чей ImGui::Begin вернул false (свёрнуто или это
+    // невыбранная вкладка дока), в том кадре не рисовалось и автоскейл
+    // пропускало, а флаг уже был снят за него. В Custom все проекции
+    // сложены в один док, то есть видима всегда одна: остальные оставались
+    // неотмасштабированными. Теперь запрос сессии раздаётся по проекциям, и
+    // каждая гасит свой, когда действительно отрисовалась.
+    bool fit_pending = false;
 
     // Опционально: per-projection line styling. По дефолту false → быстрый GL shader-line путь
     // (glLineWidth клампится драйвером, alpha = 1). При true → ImDrawList::AddLine на сегмент с
@@ -81,6 +127,18 @@ struct Projection {
     bool  custom_line_style = false;
     float line_width        = 1.5f;
     float alpha             = 1.0f;
+
+    // Draw the trajectory as markers rather than a polyline (Phase2D/Phase3D).
+    // Consecutive iterates of a discrete map are not joined by a continuous
+    // path, so the connecting segments are an artefact: a Clifford attractor
+    // turns into a tangle of chords. Defaulted from the system type when the
+    // projection is created.
+    bool  draw_points     = false;
+    float point_size      = 2.0f;
+    // Альфа точек при Custom line style (своя, у линии — alpha выше).
+    float point_alpha     = 1.0f;
+    // Step size: ось Y в log10 (Plot2DView лог-оси Y не умеет — в буфер идёт log10 h).
+    bool  y_log           = false;
 
     int prev_ax = -1, prev_ay = -1;
 
@@ -177,7 +235,6 @@ struct RqaOutcome {
 // Результат расчёта: по одной траектории на каждое НУ.
 // trajectories[k] = траектория для k-го НУ (точки {x,y,z,...}).
 struct AnalysisResult {
-    std::vector<adaptive::Stats> adaptive_stats;
     std::vector<std::vector<std::vector<double>>> trajectories; // [ic][step][coord]
     std::vector<std::string> labels;   // подписи (из НУ)
     std::vector<bool> visible;         // видимость (из НУ)
@@ -190,9 +247,30 @@ struct AnalysisResult {
     // Final integrator state per IC (pre-decimation), so continuation mode can
     // seed the next chunk from the true X[] rather than a decimated sample.
     std::vector<std::vector<double>> final_states;
+    // Адаптивный шаг (при постоянном всё пусто). times[k] — моменты точек trajectories[k]
+    // на узлах шага, уже прореженные decimator'ом; на равномерной сетке пусто: там, как и
+    // при постоянном шаге, t = i * h * decimator.
+    bool adaptive = false;
+    bool raw_nodes = false;
+    std::vector<std::vector<double>> times;
+    // Лог попыток шага [ic][4*k]: t, h, err, код (1 — принят, 0 — отвергнут, 2 — вынужденный).
+    std::vector<std::vector<double>> step_log;
+    std::vector<AdaptiveStats> step_stats;
     bool ok = false;
+    bool cancelled = false;            // расчёт отменён (PhaseAnalysisSession::request_cancel)
     std::string error;
     int generation = 0;
+    // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
+    std::string circuit_status;
+    // Сама синтезированная схема — чтобы экспорт netlist'а выдавал РОВНО ТО,
+    // что считалось, а не пересобирал её заново по текущим полям UI.
+    bool                circuit_valid = false;
+    CircuitGraph        circuit_graph;
+    std::vector<double> circuit_scale;
+    std::vector<double> circuit_x0;
+    OpAmpModel          circuit_opamp;
+    double              circuit_h_ode = 0.0;
+    double              circuit_t_end_ode = 0.0;
 
     // RQA по проекциям типа RecurrencePlot. Пусто, если таких проекций нет или расчёт был
     // пропущен (continuation при снятой галочке). Внутри каждого — своя матрица n*n doubles,
@@ -225,6 +303,9 @@ struct PhaseAnalysisSession {
     // Пользовательские КРС из текущей системы (копия из SystemRecord).
     // Доступны в scheme combo вместе с built-in именами.
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     // Enabled built-in schemes for this system; empty = combo shows all built-ins.
     std::vector<std::string> enabled_builtin_schemes;
 
@@ -233,12 +314,33 @@ struct PhaseAnalysisSession {
     std::string step_h = "0.01";
     std::string sim_time = "250";       // время моделирования (с)
     std::string skip_time = "100";      // transient (с)
-    adaptive::Options adaptive;
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
     std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
     std::string decimation = "1";      // выводить каждую N-ю точку
+    // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
+    // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
+    AdaptiveSettings adaptive;
     bool auto_recompute = false;       // пересчитывать сразу при изменении
     bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
+
+    // Схемная траектория поверх ОДУ (фаза 4a плана): та же система, посчитанная как
+    // аналоговая схема на ОУ. Расхождение с идеальной ОДУ видно глазом, и сразу ясно,
+    // режет ли полоса ОУ, насыщается ли выход, или дело в масштабах.
+    //
+    // Считает CPU-решатель: GPU-путь компилирует ядро на каждый запуск, что для одной
+    // траектории дороже самого счёта. Его место — ансамбль фазы 6.
+    bool        circuit_show        = false;
+    bool        circuit_ideal_opamp = true;   // идеальный ОУ даёт ровно исходную ОДУ
+    std::string circuit_target_volt = "3";    // желаемая амплитуда переменной, В
+    // Шаг схемы НЕ равен шагу ОДУ: у схемы BDF2 второго порядка против RK4
+    // четвёртого, и на общем h=0.01 идеальная схема разошлась бы с ОДУ на
+    // величину порядка самого аттрактора — чисто из-за метода.
+    std::string circuit_substeps    = "10";
+    std::string circuit_gbw_mhz     = "3";
+    std::string circuit_vsat        = "13";
+    // Диалект экспорта. Multisim отбрасывает B-источники при импорте, и узлы
+    // умножителей остаются без источника — резисторы от них повисают.
+    bool        circuit_netlist_poly = false;
 
     // Continuation (live) mode — timer-driven chain of async recomputes that
     // seeds each new chunk from the last integrator state, so the attractor
@@ -258,8 +360,21 @@ struct PhaseAnalysisSession {
     // Accumulated recorded time (seconds) since continuation started; not persisted.
     double continuation_elapsed = 0.0;
     // [ic][var] xy-pairs: X = global time, Y = peak. Fed to ProjType::ContinuationDiagram.
-    std::vector<std::vector<std::vector<float>>> continuation_peaks;
-    int continuation_peaks_cap = 200000;   // pairs per (ic, var); oldest drop on overflow
+    std::vector<std::vector<std::vector<double>>> continuation_peaks;
+    // Pairs per (ic, var); oldest drop on overflow. Persisted, set in the
+    // Continuation row. Clamped to [kContPeaksCapMin, kContPeaksCapMax]: every
+    // variable is buffered, so memory = cap * 16 B * ICs * vars.
+    static constexpr int kContPeaksCapMin = 1000;
+    static constexpr int kContPeaksCapMax = 10000000;
+    int continuation_peaks_cap = 200000;
+    // Drop the oldest pairs above continuation_peaks_cap in every buffer. Called
+    // after each chunk and when the cap is lowered, so a paused loop shrinks too.
+    void trim_continuation_peaks();
+    // Append result.features' peaks with time offset `base` (continuation chunk).
+    void append_result_peaks(double base);
+    // Continuation off: the diagram shows the peaks of the last single run,
+    // rebuilt from result (not accumulated). Called after every result.
+    void rebuild_peaks_from_result();
     int continuation_peaks_gen = 0;        // bumped on every accumulation → Plot2DView reuploads
 
     // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.
@@ -270,6 +385,10 @@ struct PhaseAnalysisSession {
     // Перегенерировать krs_code из sys по текущему scheme. Зовётся при загрузке
     // системы и при смене метода. Дёшево (codegen быстрый).
     void regenerate_krs();
+    // Фоновая сборка GPU-ядра под текущие систему, схему и шаг: адаптивное (phase_kernel_ad),
+    // если адаптивный шаг включён, иначе ядро постоянного шага. Зовётся из regenerate_krs и при
+    // правке блока адаптивного шага; занятый прогрев не дублируется.
+    void prewarm_gpu();
 
     // несколько начальных условий (мультистабильность)
     std::vector<InitialConditionSet> ic_sets;
@@ -298,6 +417,12 @@ struct PhaseAnalysisSession {
     std::future<AnalysisResult> recompute_future;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
+    // Отмена идущего расчёта: токен создаёт recompute_async, request_cancel взводит. Слушает
+    // его ветка адаптивного шага (её траектория может идти сколько угодно шагов); постоянный
+    // шаг с известным числом шагов доходит до конца. Отменённый результат не заменяет
+    // прежний: poll() оставляет графики и пишет причину в result.error.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
+    void request_cancel();
 
     // Фоновый прогрев NVRTC-кэша сразу при смене system/scheme (см.
     // regenerate_krs) — к моменту реального Run модуль уже готов. Хранится
@@ -356,7 +481,6 @@ struct BifurcationDiagramConfig {
 
     // Схема интегрирования: built-in имя или имя custom-схемы (resolve через
     // session.custom_schemes на момент Run).
-    adaptive::Options adaptive;
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
 
@@ -401,6 +525,12 @@ struct BifurcationDiagramConfig {
     std::string transient_text     = "100";
     std::string pre_scaller_text   = "1";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     // CSV — путь хранится отдельно от флага, чтобы можно было выключить запись,
     // не удаляя сам путь (для повторного включения).
@@ -410,6 +540,14 @@ struct BifurcationDiagramConfig {
     // false → точки = значения пиков (bifurcation_points). true → межпиковые
     // интервалы (peak_times). Колонка 3 vs 2 в CSV.
     bool        plot_inter_peaks = false;
+
+    // true -> EVERY recorded iterate goes into the diagram, not only the local
+    // maxima. That is how diagrams for discrete maps are built: the peak filter
+    // (a Poincare section, which makes sense for flows) would drop the lower
+    // branch of every period-2 orbit, halve the period-doubling cascade and
+    // leave the periodic windows empty. The default comes from the system type
+    // - see default_all_iterates_from_record.
+    bool        plot_all_iterates = false;
 
     // Custom point style (аналог Projection::custom_line_style)
     // Действует на классическую 1D-scatter БД; к 2D- и Colored-1D-хитмапам
@@ -493,6 +631,9 @@ struct BifurcationAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -556,10 +697,16 @@ struct BifurcationAnalysisSession {
     // Async-Run для конкретной БД. Возвращает false если очередь занята.
     bool run_async(ParametricEngine& engine, int diagram_idx);
 
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int diagram_idx) const;
+
+
     // Cooperative cancel of the in-flight run. No-op if nothing is in flight.
     void request_cancel();
 
-    // Вызывается каждый тик из главного потока. Если future готова — применяет
+    // Вызывается каждый кадр из GUI-потока. Если future готова — применяет
     // результат к diagrams[running_diagram_index], сбрасывает in_flight.
     // Возвращает true в кадр завершения.
     bool poll();
@@ -573,7 +720,6 @@ struct LLECurveConfig {
     std::string label   = "LLE 1";
     bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
 
-    adaptive::Options adaptive;
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
 
@@ -597,10 +743,17 @@ struct LLECurveConfig {
     std::string t_max_text         = "100";
     std::string transient_text     = "100";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     // LLE-специфика.
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";       // NT (в единицах времени)
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
 
     // Continuation: точка стартует с состояния предыдущей. В отличие от БД
     // переносится не только траектория, но и вектор возмущения («щуп») —
@@ -659,6 +812,9 @@ struct LLEAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -696,6 +852,11 @@ struct LLEAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int curve_idx) const;
     void request_cancel();
     bool poll();
 };
@@ -709,7 +870,6 @@ struct Dft1DConfig {
     std::string label = "DFT 1";
     bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
 
-    adaptive::Options adaptive;
     std::string scheme     = "Euler";
     std::string symmetry_s = "0.5";       // a[0] для CD
 
@@ -805,6 +965,9 @@ struct Dft1DAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -898,7 +1061,7 @@ constexpr bool basin_feature_names_are_ascii() {
     return true;
 }
 static_assert(basin_feature_names_are_ascii(),
-              "kBasinFeatureNames: только ASCII — строки уходят в _config.csv");
+              "kBasinFeatureNames: ASCII only - the strings go into _config.csv");
 
 // Безопасный доступ по коду из снапшота/сессии: вне [0, BF_FEATURE_COUNT) отдаёт "unknown".
 // Нужен там, где код приходит из файла и мог быть записан другой версией приложения.
@@ -906,7 +1069,6 @@ const char* basin_feature_name(int feature_code);
 
 struct BasinsConfig {
     std::string label = "Basins";
-    adaptive::Options adaptive;
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";    // a[0] для CD
 
@@ -925,6 +1087,7 @@ struct BasinsConfig {
     std::string transient_text   = "50";
     std::string pre_scaller_text = "1";
     std::string max_value_text   = "1e6";
+    AdaptiveSettings adaptive;              // адаптивный шаг (оси сетки — всегда НУ)
     std::string eps_dbscan_text  = "0.5";
 
     bool        csv_save_enabled = false;
@@ -1042,6 +1205,9 @@ struct BasinsAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1131,7 +1297,6 @@ struct BasinsAnalysisSession {
 // Зеркалит BasinsConfig в стиле (multi-config, text-storage, futures worker).
 struct FastSyncConfig {
     std::string label  = "FastSync 1";
-    adaptive::Options adaptive;
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5"; // a[0] для CD
 
@@ -1216,6 +1381,10 @@ struct FastSyncConfig {
     // дальние (малый z) рисуются первыми, ближние сверху (взгляд «сверху», z↑); при true — взгляд
     // «снизу» (z↓).
     bool        invert_depth     = false;
+    // Attractor-mode: траектория в 3D (Plot3DView), третья ось — axis_z_var. Цвет, Line width
+    // и Alpha — те же, что у 2D. Глубина там честная (depth test), invert_depth не нужен.
+    bool        plot_3d          = false;
+    int         axis_z_var       = 2;
 
     // Состояние
     FastSyncResult result;
@@ -1230,6 +1399,9 @@ struct FastSyncAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1274,7 +1446,6 @@ struct LSCurveConfig {
     std::string label   = "LS 1";
     bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
 
-    adaptive::Options adaptive;
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
 
@@ -1298,9 +1469,16 @@ struct LSCurveConfig {
     std::string t_max_text         = "100";
     std::string transient_text     = "100";
     std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
 
     std::string eps_text       = "1e-4";
     std::string nt_text        = "1";
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
 
     // Continuation + выбор устройства — семантика как в LLECurveConfig
     // (переносятся траектория и ВСЕ N щупов; continuation только на CPU).
@@ -1362,6 +1540,9 @@ struct LyapunovSpectrumAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -1398,6 +1579,133 @@ struct LyapunovSpectrumAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+
+    // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
+    // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
+    // индекс плохой или КРС не собрался.
+    std::function<void(ParametricEngine&)> prewarm_task(int curve_idx) const;
+    void request_cancel();
+    bool poll();
+};
+
+// Signal metrics — вкладка Parametric -> Metrics. Числовые характеристики
+// записанного сигнала writable_var на каждой точке свипа: max / min / размах /
+// среднее, средняя и медианная частота по пикам, параметры Хьорта. UX зеркалит
+// LLECurveConfig (тот же свип, те же 1D-кривые и 2D-хитмапы), результат —
+// сразу несколько величин на точку, их выбирает таб-бар окна графика
+// (ParametricPlotWindow::metric).
+struct SignalMetricsConfig {
+    std::string label   = "Metrics 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+
+    // Свип по X — см. BifurcationDiagramConfig.
+    int         param_index     = 0;
+    bool        sweep_over_var  = false;
+    int         var_sweep_index = 0;
+    bool        sweep_over_h    = false;
+    bool        log_scale       = false;
+    std::string param_lo_text   = "0";
+    std::string param_hi_text   = "1";
+    std::string n_pts_text      = "500";
+
+    // Continuation и устройство — как у LLECurveConfig: цепочка только в 1D и
+    // только по параметру или h; CPU тоже только в 1D (в 2D выбор заблокирован).
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    bool        use_gpu              = true;
+
+    // Какой сигнал меряем (-1 = x0 + pi*x1 + e*x2, как у БД).
+    int         writable_var   = 0;
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string pre_scaller_text   = "1";
+    std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
+
+    // Биты SignalMetric (parametric_engine.h): какие метрики считать и
+    // показывать. По умолчанию все.
+    int         metric_mask = kSignalMetricAllMask;
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    SignalMetricsResult result;           // 1D
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим — квадратная сетка, Resolution на обе оси (см. LLECurveConfig).
+    bool        mode_2d           = false;
+    int         param_index_2     = 0;
+    bool        sweep_over_var_2  = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2    = false;
+    bool        log_scale_2       = false;
+    std::string param_lo_2_text   = "0";
+    std::string param_hi_2_text   = "1";
+
+    SignalMetricsResult result_2d;
+    bool        last_run_2d_ok     = false;
+    int         data_generation_2d = 0;
+    bool        fit_request_2d     = false;
+    int         colormap_idx       = -1;   // -1 = AppModel::heatmap_colormap
+};
+
+// Сессия Metrics — копия LLEAnalysisSession по устройству (одна задача в
+// полёте, свой future). 1D и 2D отдаёт один и тот же run_signal_metrics,
+// поэтому future один.
+struct SignalMetricsAnalysisSession {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<SignalMetricsConfig> configs;
+    int active_config_index  = 0;
+    int running_config_index = -1;
+
+    std::future<SignalMetricsResult> run_future;
+    bool is_2d_run = false;
+    bool in_flight = false;
+    std::chrono::steady_clock::time_point compute_start_time;
+
+    std::shared_ptr<std::atomic<bool>>  cancel_token;
+    std::shared_ptr<std::atomic<float>> progress_token;
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+    std::chrono::steady_clock::time_point last_run_completed_at;
+
+    SignalMetricsAnalysisSession() = default;
+    SignalMetricsAnalysisSession(SignalMetricsAnalysisSession&&) = default;
+    SignalMetricsAnalysisSession& operator=(SignalMetricsAnalysisSession&&) = default;
+    SignalMetricsAnalysisSession(const SignalMetricsAnalysisSession&) = delete;
+    SignalMetricsAnalysisSession& operator=(const SignalMetricsAnalysisSession&) = delete;
+
+    void load_from_record(const SystemRecord& r,
+                          const std::vector<std::string>& vars_,
+                          const std::vector<std::string>& params_);
+    void add_config();
+    void remove_config(int i);
+    bool run_async(ParametricEngine& engine, int config_idx);
+    std::function<void(ParametricEngine&)> prewarm_task(int config_idx) const;
     void request_cancel();
     bool poll();
 };

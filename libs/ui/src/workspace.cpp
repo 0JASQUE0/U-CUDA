@@ -373,7 +373,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
     static int                                          ls_init_exp_seen  = -999;
     auto& l1_views = ui_resource<std::array<std::unique_ptr<Plot2DView>,  6>, 18>();
     auto& l1_renderers = ui_resource<std::array<std::unique_ptr<PlotRenderer>, 6>, 19>();
-    static std::array<std::vector<std::vector<float>>, 6> l1_bufs;
+    static std::array<std::vector<std::vector<double>>, 6> l1_bufs;
     // Custom Basins (Level-3 kind=1) HeatmapView + renderer — hoisted so the
     // system-change block below can reset them alongside the other statics.
     auto& bsn_hv = ui_resource<HeatmapView, 20>();
@@ -537,6 +537,29 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
     if (!cs.ls_session.curves.empty())
         init_cmap_from_config(2, cs.ls_session.curves[0].colormap_idx);
 
+    // Автоскейл 2D-карт. Тот же узор, что в Parametric (draw_bifurcation_plot:
+    // "bool fit = bdact.fit_request_2d; if (fit) ... = false"): запрос живёт в
+    // конфиге подсессии и взводится приходом результата. Здесь в render уходило
+    // жёстко false, поэтому после первого прогона HeatmapView фиксировал вид
+    // (view_valid) и больше его не трогал: пересчёт в ДРУГОМ диапазоне рисовался
+    // в старых границах — при расширении диапазона это выглядело как "новый
+    // расчёт не сработал", потому что на экране оставался прежний узкий кусок.
+    //
+    // Забираем флаг у самой отрисовки, а не при сборке slots: карты сложены в
+    // один док, у невидимой вкладки Begin вернёт false, и съеденный за неё
+    // запрос пропал бы (ровно та же ловушка, что у Projection::fit_pending).
+    auto take_fit_2d = [&cs](int slot) {
+        bool* f = nullptr;
+        if      (slot == 0 && !cs.bif_session.diagrams.empty())
+            f = &cs.bif_session.diagrams[0].fit_request_2d;
+        else if (slot == 1 && !cs.lle_session.curves.empty())
+            f = &cs.lle_session.curves[0].fit_request_2d;
+        else if (slot == 2 && !cs.ls_session.curves.empty())
+            f = &cs.ls_session.curves[0].fit_request_2d;
+        if (!f || !*f) return false;
+        *f = false;
+        return true;
+    };
     for (int i = 0; i < 3; ++i) {
         if (!slots[i].show) continue;
         ensure_docked(slots[i].title);
@@ -613,7 +636,14 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                 const bool ls_busy = (i == 2) && cs.ls_session.in_flight
                                      && cs.ls_session.is_2d_run
                                      && cs.ls_session.running_curve_index == 0;
-                hv.popup_extras = [i, &cs, &cb, bd_busy, lle_busy, ls_busy]() {
+                // Ctrl+T: цель — ОБЩИЙ config вкладки, а не конфиг подсессии.
+                // Подсессии всё равно пересобираются из него срезами
+                // apply_shared_to_* на каждом Run, и запись в них пропала бы.
+                const std::vector<ViewRangeTarget> vrt = {
+                    vr_target_fixed("Shared config",
+                        &cs.shared.axis_x_lo_text, &cs.shared.axis_x_hi_text,
+                        &cs.shared.axis_y_lo_text, &cs.shared.axis_y_hi_text) };
+                hv.popup_extras = [i, &cs, &cb, bd_busy, lle_busy, ls_busy, &vrt, &model, &hv]() {
                     const bool busy = bd_busy || lle_busy || ls_busy;
                     draw_export_menu_item(busy, cb, [i, &cs](const std::string& path) {
                         if      (i == 0 && !cs.bif_session.diagrams.empty())
@@ -623,6 +653,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                         else if (i == 2 && !cs.ls_session.curves.empty())
                             data_export::export_ls2d(cs.ls_session.curves[0].result_2d, path);
                     });
+                    draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
                 };
 
                 // Route through LS-specific plane/vmin/vmax if the user
@@ -642,7 +673,9 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                           slots[i].lo_x, slots[i].hi_x,
                           slots[i].lo_y, slots[i].hi_y,
                           vmin_use, vmax_use,
-                          /*fit_request*/ false);
+                          take_fit_2d(i));
+                handle_view_range_keys(vrt, hv.x_axis, hv.y_axis, plot_window_active(),
+                               hv.swap_axes, &model);
                 ImGui::PopID();
             }
         }
@@ -892,8 +925,8 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                            /*reverse*/ false, d.continuation);
                 for (double y : source[p]) {
                     if (!std::isfinite(y)) continue;
-                    buf.push_back((float)px);
-                    buf.push_back((float)y);
+                    buf.push_back((double)px);
+                    buf.push_back((double)y);
                 }
             }
             PlotSeriesInput si;
@@ -921,8 +954,8 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                 if (!std::isfinite(y)) continue;
                 double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
                                            /*reverse*/ false, c.continuation);
-                buf.push_back((float)px);
-                buf.push_back((float)y);
+                buf.push_back((double)px);
+                buf.push_back((double)y);
                 ++total_pts;
             }
             PlotSeriesInput si;
@@ -952,8 +985,8 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                                    /*reverse*/ false, c.continuation);
                         double y = row[j];
                         if (!std::isfinite(y)) continue;
-                        buf.push_back((float)px);
-                        buf.push_back((float)y);
+                        buf.push_back((double)px);
+                        buf.push_back((double)y);
                         ++total_pts;
                     }
                     PlotSeriesInput si;
@@ -973,7 +1006,32 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
 
         // Right-click "Export data..." — паритет с Parametric, где он есть у
         // всех 1D-графиков. В Custom его не было ни на одном из 6 слотов.
-        view.popup_extras = [i, &lslots, &cs, &cb]() {
+        // Ctrl+T: срез идёт по своей оси общего config'а (слот 1 — X, 2 — Y),
+        // по Y — сама считаемая величина, входа в расчёте у неё нет.
+        //
+        // Писать нужно в ДЕЙСТВУЮЩИЕ поля, а не всегда в sweep_*. При
+        // inherit_sweep_from_2d (значение по умолчанию) effective_sweep_x/y
+        // читают axis_*, а sweep_* лежат мёртвым грузом: запись туда не меняла
+        // ни сам срез, ни 2D-карту, и Ctrl+T выглядел как ничего не делающий.
+        // Через axis_* диапазон заодно приезжает на соответствующую ось L2D —
+        // это и есть "та же зона" на двумерной диаграмме.
+        const bool  vr_slice_is_x = (lslots[i].cfg_idx == 1);
+        const bool  vr_inherited  = cs.shared.inherit_sweep_from_2d
+                                 && cs.shared.level_2d_enabled;
+        const std::vector<ViewRangeTarget> vrt = { vr_target_fixed(
+            vr_inherited ? (vr_slice_is_x ? "Shared config (2D X axis)"
+                                          : "Shared config (2D Y axis)")
+                         : (vr_slice_is_x ? "Shared config (X slice)"
+                                          : "Shared config (Y slice)"),
+            vr_inherited ? (vr_slice_is_x ? &cs.shared.axis_x_lo_text
+                                          : &cs.shared.axis_y_lo_text)
+                         : (vr_slice_is_x ? &cs.shared.sweep_x_lo_text
+                                          : &cs.shared.sweep_y_lo_text),
+            vr_inherited ? (vr_slice_is_x ? &cs.shared.axis_x_hi_text
+                                          : &cs.shared.axis_y_hi_text)
+                         : (vr_slice_is_x ? &cs.shared.sweep_x_hi_text
+                                          : &cs.shared.sweep_y_hi_text)) };
+        view.popup_extras = [i, &lslots, &cs, &cb, &vrt, &model, &view]() {
             const bool busy = (lslots[i].kind == L1Kind::Bif) ? cs.bif_session.in_flight
                             : (lslots[i].kind == L1Kind::LLE) ? cs.lle_session.in_flight
                                                               : cs.ls_session.in_flight;
@@ -990,6 +1048,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                         data_export::export_ls1d(cs.ls_session.curves[ci].result, path);
                 }
             });
+            draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
         };
 
         // Autofit whenever the underlying result changed (bif/lle/ls each
@@ -1012,6 +1071,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                     /*owner_id*/ (0xC10000 + i) ^ sys_owner_delta,
                     series_gen,
                     series_in, init_vis, glob_vis, fit);
+        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
         ImGui::PopID();
         ImGui::End();
     }
@@ -1039,6 +1099,16 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
     }
     // Level 3 Basins window (unchanged HeatmapView minimal renderer)
     if (cs.shared.level_phase_enabled && cs.shared.level3_kind == 1) {
+        // Автоскейл — как у 2D-карт выше (см. take_fit_2d): сюда тоже уходило
+        // жёсткое false, и карта, посчитанная в новой сетке НУ, рисовалась в
+        // границах предыдущего прогона.
+        auto take_fit_basins = [&cs]() {
+            if (cs.basins_session.configs.empty()) return false;
+            bool& f = cs.basins_session.configs[0].fit_request;
+            if (!f) return false;
+            f = false;
+            return true;
+        };
         std::string basins_title = "Custom Basins" + suffix;
         ensure_docked(basins_title);
         if (ImGui::Begin(basins_title.c_str())) {
@@ -1099,11 +1169,40 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                       r.axis_x_lo, r.axis_x_hi,
                                       r.axis_y_lo, r.axis_y_hi,
                                       vmin, vmax,
-                                      /*fit_request*/ false);
+                                      take_fit_basins());
                     }
                 }
             }
         ImGui::End();
     }
 }
+}
+
+using namespace ucuda::ui_detail;
+void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
+    if (!model.pending_netlist_export) return;
+    model.pending_netlist_export = false;
+    if (!cb.pick_save_file_netlist) return;
+
+    PhaseAnalysisSession& s = model.phase_session;
+    if (!s.result.circuit_valid) return;
+
+    const std::string path = cb.pick_save_file_netlist();
+    if (path.empty()) return;
+
+    NetlistOptions no;
+    no.title      = "U-CUDA synthesized circuit";
+    no.var_names  = s.vars;
+    no.rhs_text   = s.sys.rhs;
+    no.scale      = s.result.circuit_scale;
+    no.x0_volts   = s.result.circuit_x0;
+    no.opamp      = s.result.circuit_opamp;
+    no.h_ode      = s.result.circuit_h_ode;
+    no.t_end_ode  = s.result.circuit_t_end_ode;
+    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
+
+    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
+    std::ofstream f(path, std::ios::binary);
+    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
+    else     s.result.circuit_status = "cannot write " + path;
 }

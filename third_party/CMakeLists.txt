@@ -3,9 +3,9 @@ find_package(Threads REQUIRED)
 
 # Pin all GUI dependencies to compatible revisions on both platforms.
 FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG 4806a1924ff6181180bf5e4b8b79ab4394118875 SOURCE_SUBDIR ucuda-no-cmake)
+    GIT_TAG b61e56346a92cfcaf1f43a545ca37b0b32239654 SOURCE_SUBDIR ucuda-no-cmake)
 FetchContent_Declare(implot GIT_REPOSITORY https://github.com/epezent/implot.git
-    GIT_TAG 4707b245fbcd69075b1a8a74fa8d2435561b3134 SOURCE_SUBDIR ucuda-no-cmake)
+    GIT_TAG 524f9fcd48d76c13fdf94c5ffbba8787a1ff7e39 SOURCE_SUBDIR ucuda-no-cmake)
 FetchContent_Declare(implot3d GIT_REPOSITORY https://github.com/brenocq/implot3d.git
     GIT_TAG 41ae3e447c0de20ecab95d38a4b4dc0835a3efc2 SOURCE_SUBDIR ucuda-no-cmake)
 # These libraries are built below, avoiding their demo/test subprojects.

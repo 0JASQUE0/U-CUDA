@@ -8,14 +8,14 @@
                                  std::vector<double>& out, std::string& err)
     {
         const int n = (ax.kind == OrderAxisKind::None) ? 1 : ax.n_pts;
-        if (n <= 0)    { err = std::string(what) + ": число точек должно быть > 0"; return false; }
-        if (n > 100000){ err = std::string(what) + ": число точек слишком велико"; return false; }
+        if (n <= 0)    { err = std::string(what) + ": the number of points must be > 0"; return false; }
+        if (n > 100000){ err = std::string(what) + ": the number of points is too large"; return false; }
         out.assign((size_t)n, 0.0);
         if (ax.kind == OrderAxisKind::None) { out[0] = 0.0; return true; }
         if (n == 1) { out[0] = ax.lo; return true; }
         if (ax.log_scale) {
             if (!(ax.lo > 0.0) || !(ax.hi > 0.0)) {
-                err = std::string(what) + ": лог-масштаб требует обеих границ > 0";
+                err = std::string(what) + ": log scale requires both bounds > 0";
                 return false;
             }
             const double k = std::log(ax.hi / ax.lo) / (double)(n - 1);
@@ -45,48 +45,52 @@
         res.axis_y = req.axis_y;
         auto fail = [&](const std::string& msg) -> OrderResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX) return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX) return fail("initial_conditions.size() != amountOfX");
-        if (req.values.empty())                                  return fail("values пуст (нужен хотя бы a[0])");
-        if ((int)req.values.size() > kMaxAmountOfValues)         return fail("values слишком много");
-        if (!(req.h > 0.0))                                      return fail("h должно быть > 0");
-        if (!(req.t_max > 0.0))                                  return fail("t_max должно быть > 0");
-        if (req.axis_x.kind == OrderAxisKind::None)              return fail("ось X не задана");
+        if (req.values.empty())                                  return fail("values is empty (at least a[0] is required)");
+        if ((int)req.values.size() > kMaxAmountOfValues)         return fail("too many values");
+        if (!(req.h > 0.0))                                      return fail("h must be > 0");
+        if (!(req.t_max > 0.0))                                  return fail("t_max must be > 0");
+        if (req.axis_x.kind == OrderAxisKind::None)              return fail("the X axis is not set");
 
         const int amountOfValues = (int)req.values.size();
         auto check_axis_index = [&](const OrderAxis& ax, const char* what) -> bool {
             if (ax.kind != OrderAxisKind::Value) return true;
             if (ax.index < 0 || ax.index >= amountOfValues) {
-                res.error = std::string(what) + ": индекс параметра вне a[]";
+                res.error = std::string(what) + ": parameter index outside a[]";
                 return false;
             }
             return true;
         };
-        if (!check_axis_index(req.axis_x, "ось X")) return res;
-        if (!check_axis_index(req.axis_y, "ось Y")) return res;
+        if (!check_axis_index(req.axis_x, "X axis")) return res;
+        if (!check_axis_index(req.axis_y, "Y axis")) return res;
         if (req.axis_x.kind == OrderAxisKind::H && req.axis_y.kind == OrderAxisKind::H)
-            return fail("обе оси не могут свипать h");
+            return fail("both axes cannot sweep h");
         if (req.axis_x.kind == OrderAxisKind::Value && req.axis_y.kind == OrderAxisKind::Value
             && req.axis_x.index == req.axis_y.index)
-            return fail("обе оси свипают один и тот же параметр");
+            return fail("both axes sweep the same parameter");
 
         std::string err;
-        if (!order_axis_nodes(req.axis_x, "ось X", res.axis_x_vals, err)) return fail(err);
-        if (!order_axis_nodes(req.axis_y, "ось Y", res.axis_y_vals, err)) return fail(err);
+        if (!order_axis_nodes(req.axis_x, "X axis", res.axis_x_vals, err)) return fail(err);
+        if (!order_axis_nodes(req.axis_y, "Y axis", res.axis_y_vals, err)) return fail(err);
 
         res.n_pts_x = (int)res.axis_x_vals.size();
         res.n_pts_y = (req.axis_y.kind == OrderAxisKind::None) ? 1 : (int)res.axis_y_vals.size();
         if (req.axis_y.kind == OrderAxisKind::None) res.axis_y_vals.assign(1, 0.0);
 
         const size_t total_cells = (size_t)res.n_pts_x * (size_t)res.n_pts_y;
-        if (total_cells == 0) return fail("пустая сетка");
+        if (total_cells == 0) return fail("empty grid");
 
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
         cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_fastsync
 
-        if (!compile_order_module(req.amountOfX, amountOfValues, req.krs_body, err)) return fail(err);
+        // Эталон включается только когда есть И тело, И положительное число
+        // подшагов: одно без другого — это просьба посчитать пустоту.
+        const bool ref_on = !req.ref_krs_body.empty() && req.ref_substeps > 0;
+        if (!compile_order_module(true, req.amountOfX, amountOfValues, req.krs_body,
+                                  ref_on ? req.ref_krs_body : std::string(), err)) return fail(err);
 
         // Работа по ячейкам: h ячейки зависит только от той оси, что свипует h.
         auto cell_h = [&](int ix, int iy) -> double {
@@ -105,7 +109,7 @@
             }
         // 1e15 шагов — это уже «никогда не досчитается», и (long long) ниже
         // всё равно переполнится на произведении с числом ячеек.
-        if (totalSteps > 1.0e15) return fail("t_max / h слишком велико: работа не помещается в разумное время");
+        if (totalSteps > 1.0e15) return fail("t_max / h too large: the work does not fit into a reasonable time");
 
         const int    progressStride = progress_stride_for((size_t)maxStepsPerCell);
         const double ticksTotal     = totalSteps / (double)progressStride;
@@ -121,7 +125,7 @@
         if (cellsPerLaunch > total_cells)  cellsPerLaunch = total_cells;
 
         OrderDevBuf d_axisX, d_axisY, d_X0, d_values;
-        OrderDevBuf d_p, d_e1, d_e2, d_h, d_status;
+        OrderDevBuf d_p, d_e1, d_e2, d_eref, d_h, d_status;
         if (!d_axisX .alloc(res.axis_x_vals.size() * sizeof(numb), "axisXVals", err)) return fail(err);
         if (!d_axisY .alloc(res.axis_y_vals.size() * sizeof(numb), "axisYVals", err)) return fail(err);
         if (!d_X0    .alloc((size_t)req.amountOfX  * sizeof(numb), "X0",        err)) return fail(err);
@@ -129,6 +133,7 @@
         if (!d_p     .alloc(total_cells * sizeof(numb), "outP",      err)) return fail(err);
         if (!d_e1    .alloc(total_cells * sizeof(numb), "outE1",     err)) return fail(err);
         if (!d_e2    .alloc(total_cells * sizeof(numb), "outE2",     err)) return fail(err);
+        if (!d_eref  .alloc(total_cells * sizeof(numb), "outERef",   err)) return fail(err);
         if (!d_h     .alloc(total_cells * sizeof(numb), "outH",      err)) return fail(err);
         if (!d_status.alloc(total_cells * sizeof(int),  "outStatus", err)) return fail(err);
 
@@ -182,9 +187,11 @@
             int    endp_arg   = req.endpoint_only ? 1 : 0;
             numb   maxV_arg   = (numb)req.max_value;
             numb   feps_arg   = floorEps;
+            int    refSub_arg = ref_on ? req.ref_substeps : 0;
             numb*  outP_arg   = d_p.as<numb>();
             numb*  outE1_arg  = d_e1.as<numb>();
             numb*  outE2_arg  = d_e2.as<numb>();
+            numb*  outERef_arg = d_eref.as<numb>();
             numb*  outH_arg   = d_h.as<numb>();
             int*   outSt_arg  = d_status.as<int>();
             int*   cancel_arg = sig.cancelArg();
@@ -197,7 +204,8 @@
                 &axXKind, &axXIndex, &axYKind, &axYIndex,
                 &X0_arg, &values_arg,
                 &hBase_arg, &tMax_arg, &snap_arg, &endp_arg, &maxV_arg, &feps_arg,
-                &outP_arg, &outE1_arg, &outE2_arg, &outH_arg, &outSt_arg,
+                &refSub_arg,
+                &outP_arg, &outE1_arg, &outE2_arg, &outERef_arg, &outH_arg, &outSt_arg,
                 &cancel_arg, &prog_arg, &stride_arg
             };
 
@@ -229,7 +237,8 @@
         }
 
         {
-            std::vector<numb> hp(total_cells), he1(total_cells), he2(total_cells), hh(total_cells);
+            std::vector<numb> hp(total_cells), he1(total_cells), he2(total_cells),
+                              herf(total_cells), hh(total_cells);
             res.status.assign(total_cells, 0);
             auto dn = [&](void* src, void* dst, size_t bytes, const char* what) -> bool {
                 cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
@@ -239,16 +248,19 @@
             if (!dn(d_p.p,      hp.data(),         total_cells * sizeof(numb), "p"))      return fail(err);
             if (!dn(d_e1.p,     he1.data(),        total_cells * sizeof(numb), "e1"))     return fail(err);
             if (!dn(d_e2.p,     he2.data(),        total_cells * sizeof(numb), "e2"))     return fail(err);
+            if (!dn(d_eref.p,   herf.data(),       total_cells * sizeof(numb), "eRef"))   return fail(err);
             if (!dn(d_h.p,      hh.data(),         total_cells * sizeof(numb), "h"))      return fail(err);
             if (!dn(d_status.p, res.status.data(), total_cells * sizeof(int),  "status")) return fail(err);
 
             res.p.resize(total_cells); res.e1.resize(total_cells);
             res.e2.resize(total_cells); res.h_eff.resize(total_cells);
-            bool first_p = true, first_e = true;
+            res.e_ref.resize(total_cells);
+            bool first_p = true, first_e = true, first_er = true;
             for (size_t i = 0; i < total_cells; ++i) {
                 res.p[i]     = (double)hp[i];
                 res.e1[i]    = (double)he1[i];
                 res.e2[i]    = (double)he2[i];
+                res.e_ref[i] = (double)herf[i];
                 res.h_eff[i] = (double)hh[i];
                 switch (res.status[i]) {
                     case ORDER_ST_DIVERGED:   ++res.n_diverged;   break;
@@ -267,6 +279,11 @@
                     if (first_e) { res.e1_min = res.e1_max = res.e1[i]; first_e = false; }
                     else { if (res.e1[i] < res.e1_min) res.e1_min = res.e1[i];
                            if (res.e1[i] > res.e1_max) res.e1_max = res.e1[i]; }
+                }
+                if (std::isfinite(res.e_ref[i]) && res.e_ref[i] > 0.0) {
+                    if (first_er) { res.eref_min = res.eref_max = res.e_ref[i]; first_er = false; }
+                    else { if (res.e_ref[i] < res.eref_min) res.eref_min = res.e_ref[i];
+                           if (res.e_ref[i] > res.eref_max) res.eref_max = res.e_ref[i]; }
                 }
             }
         }

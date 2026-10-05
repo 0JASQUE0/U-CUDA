@@ -25,7 +25,6 @@ void session_compatibility() {
     require(session_from_json(old_json, loaded), "old phase session did not load");
     require(loaded.step_h == "0.02" && loaded.projections.size() == 1,
             "old phase values changed while loading");
-    require(loaded.adaptive.method == 0, "missing adaptive settings did not use legacy defaults");
 
     loaded.projections[0].custom_line_style = true;
     loaded.projections[0].line_width = 3.25f;

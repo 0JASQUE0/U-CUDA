@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/custom_session.h"
+#include "ucuda/domain/network_session.h"
+#include "ucuda/domain/order_session.h"
 #include "ucuda/domain/plot_window.h"
 #include <string>
 #include <vector>
@@ -40,6 +42,11 @@ bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s);
 std::string session_to_json_ls(const LyapunovSpectrumAnalysisSession& s);
 bool session_from_json_ls(const std::string& json, LyapunovSpectrumAnalysisSession& s);
 
+// Metrics-сессия (`_last_metrics.json`) — список конфигов с маской метрик.
+// Result не хранится.
+std::string session_to_json_metrics(const SignalMetricsAnalysisSession& s);
+bool session_from_json_metrics(const std::string& json, SignalMetricsAnalysisSession& s);
+
 // Dft1D-сессия — multi-config layout как у Basins/FastSync. Сохраняем
 // sweep/integration/IC/params/frequency-range/display/normalize/CSV.
 // Result и display_cache* в JSON не пишутся.
@@ -55,11 +62,27 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
 std::string session_to_json_fastsync(const FastSyncAnalysisSession& s);
 bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s);
 
+// Network-сессия — конфиги вместе с топологией (узлы, рёбра, законы связи).
+// Result не пишется: он на порядки больше сессии и восстанавливается одним Run.
+std::string session_to_json_network(const NetworkSession& s);
+bool session_from_json_network(const std::string& json, NetworkSession& s);
+
 // Parametric plot windows (AppModel::parametric_plot_windows) — the dynamic
 // window list, spans all 3 sessions so it's its own file (`_last_parametric_windows.json`)
 // rather than living inside one of the per-kind files above.
 std::string session_to_json_parametric_windows(const std::vector<ParametricPlotWindow>& wins);
 bool session_from_json_parametric_windows(const std::string& json, std::vector<ParametricPlotWindow>& wins);
+
+// Order-сессия (`_last_order.json`) — multi-config layout как у DFT1D.
+// Настройки отображения в неё не идут: они на окнах графика (ниже).
+std::string session_to_json_order(const OrderAnalysisSession& s);
+bool session_from_json_order(const std::string& json, OrderAnalysisSession& s);
+
+// Окна графиков Order (`_last_order_windows.json`) — вид окна, его члены и
+// настройки отображения. Отдельный файл по той же причине, что у параметрики:
+// это не часть ни одного конфига.
+std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wins);
+bool session_from_json_order_windows(const std::string& json, std::vector<OrderPlotWindow>& wins);
 
 // DFT1D plot windows (AppModel::dft1d_plot_windows) — same idea, its own file
 // (`_last_dft1d_windows.json`), minus the kind/mode_2d/colored_1d fields.
@@ -72,3 +95,10 @@ bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DP
 // any sub-session flow into the bundle automatically.
 std::string session_to_json_custom(const CustomSession& s);
 bool session_from_json_custom(const std::string& json, CustomSession& s);
+
+// Библиотека регуляторов шага (adaptive_ctrl_library() в adaptive_settings.h): файл
+// step_controllers.json в каталоге library. load — при старте, запоминает путь (нет
+// файла — пустая библиотека, не ошибка); save — после правки в редакторе и при импорте
+// регулятора из сессии (write_adaptive кладёт определение в сессию целиком).
+bool load_ctrl_library(const std::string& path, std::string* err = nullptr);
+bool save_ctrl_library(std::string* err = nullptr);

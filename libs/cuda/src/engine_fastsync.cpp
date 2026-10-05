@@ -8,16 +8,16 @@
         res.mode = req.mode;
         auto fail = [&](const std::string& msg) -> FastSyncResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                  return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                  return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)   return fail("amountOfX out of range");
         if ((int)req.ic_master.size()  != req.amountOfX)           return fail("ic_master.size() != amountOfX");
         if ((int)req.ic_slave.size()   != req.amountOfX)           return fail("ic_slave.size() != amountOfX");
         if ((int)req.k_forward.size()  != req.amountOfX)           return fail("k_forward.size() != amountOfX");
         if ((int)req.k_backward.size() != req.amountOfX)           return fail("k_backward.size() != amountOfX");
-        if ((int)req.values.size() > kMaxAmountOfValues)           return fail("values слишком много");
-        if (req.h <= 0.0)             return fail("h должно быть > 0");
-        if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr должно быть > 0");
-        if (req.pre_scaller <= 0)     return fail("pre_scaller должно быть > 0");
+        if ((int)req.values.size() > kMaxAmountOfValues)           return fail("too many values");
+        if (req.h <= 0.0)             return fail("h must be > 0");
+        if (req.iter_of_synchr <= 0)  return fail("iter_of_synchr must be > 0");
+        if (req.pre_scaller <= 0)     return fail("pre_scaller must be > 0");
 
         // Snapshot CSV-relevant request fields for GUI right-click export.
         // FastSync has no engine-side CSV writer, so this is consumed only by
@@ -65,9 +65,9 @@
 
         if (req.mode == 0) {
             // On Attractor
-            if (req.t_max <= 0.0)         return fail("t_max должно быть > 0");
-            if (req.transient_time < 0)   return fail("transient_time должно быть >= 0");
-            if (req.window <= (numb)0.0)  return fail("window должно быть > 0");
+            if (req.t_max <= 0.0)         return fail("t_max must be > 0");
+            if (req.transient_time < 0)   return fail("transient_time must be >= 0");
+            if (req.window <= (numb)0.0)  return fail("window must be > 0");
 
             // Two FS-specific kernels — НЕ calculateDiscreteModelCUDA:
             //   fillFSMasterTrajectory (template, single-thread) — фильтрует
@@ -79,7 +79,7 @@
             };
             if (!compile_fs_module(src_template_fs_attr, ":fs_attr", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_attr, err)) return fail(err);
+                                   exprs, pool_fs_attr, cached_fs_attr, err)) return fail(err);
 
             const int amountOfNTPoints      = (int)(req.window / req.h);
             const int amountOfCTPoints      = (int)(req.t_max / req.h);
@@ -88,7 +88,7 @@
             {
                 const double skip_d = req.transient_time / req.h;   // h > 0 проверен выше
                 if (!std::isfinite(skip_d) || skip_d > 1.0e15)
-                    return fail("transient_time / h слишком велико");
+                    return fail("transient_time / h too large");
                 amountOfPointsForSkip = (size_t)skip_d;
             }
             const int nPts                  = amountOfCTPoints / (req.pre_scaller > 0 ? req.pre_scaller : 1);
@@ -110,11 +110,6 @@
 
             size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(numb);
             size_t out_bytes  = (size_t)nPts * sizeof(numb);
-            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
-            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
-            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
-            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
-            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
             FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
             FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
             FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_Xs");
@@ -128,7 +123,11 @@
             // идут параллельно по точкам, так что по времени это 2 * iterOfSynchr * pts.
             // Первая версия отдавала весь бар первой фазе — он доходил до 90%
             // и там вставал.
-
+            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
+            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
+            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
+            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
+            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -194,7 +193,7 @@
                     &icRandom_i, &icEps_arg, &icSeed_arg, &gsWarmup_i,
                     &d_cancel_arg, &d_progress_arg
                 };
-                int blockSize = 32;
+                int blockSize = launch_block_size(0);   // fs_attr без динамической shared
                 int gridSize  = (nPts + blockSize - 1) / blockSize;
                 CUresult r = cuLaunchKernel(cached_fs_attr.kernel_fs_traj,
                                             gridSize, 1, 1, blockSize, 1, 1,
@@ -281,17 +280,17 @@
         }
         else {
             // On Grid
-            if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-            if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var вне диапазона");
-            if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var вне диапазона");
+            if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+            if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
+            if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
             if (req.axis_x_var == req.axis_y_var) return fail("axis_x_var == axis_y_var");
-            if (req.transient_time < 0)        return fail("transient_time должно быть >= 0");
-            if (req.transient_time_slave < 0)  return fail("transient_time_slave должно быть >= 0");
+            if (req.transient_time < 0)        return fail("transient_time must be >= 0");
+            if (req.transient_time_slave < 0)  return fail("transient_time_slave must be >= 0");
 
             std::vector<const char*> exprs = { "calculateDiscreteModelICCforFastSynchro" };
             if (!compile_fs_module(src_template_fs_grid, ":fs_grid", req.amountOfX, req.krs_body,
                                    req.type_of_synch, req.error_estim, req.fs_error_trs,
-                                   exprs, cached_fs_grid, err)) return fail(err);
+                                   exprs, pool_fs_grid, cached_fs_grid, err)) return fail(err);
 
             // Non-const: их адреса попадают в void*[] для cuLaunchKernel.
             int amountOfPointsInBlock = (int)(req.window / req.h / req.pre_scaller);
@@ -308,7 +307,7 @@
                 if (tt <= 0.0) return true;
                 const double skip_d = tt / req.h;
                 if (!std::isfinite(skip_d) || skip_d > 1.0e15) {
-                    err = std::string(what) + " / h слишком велико";
+                    err = std::string(what) + " / h too large";
                     return false;
                 }
                 out = (size_t)skip_d;
@@ -340,10 +339,6 @@
 
             #define FS_GCHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS1_FAIL; } } while(0)
 
-            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
-            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
-            const double ticksTotal     = (double)total_cells * ticksPerCell;
-            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             FS_GCHECK(cudaMalloc((void**)&d_data,    (size_t)nPtsLimiter * perCellBytes), "cudaMalloc d_data");
             FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(numb)),                  "cudaMalloc d_ranges");
             FS_GCHECK(cudaMalloc((void**)&d_idx_mv,  2 * sizeof(int)),                     "cudaMalloc d_idx_mv");
@@ -358,7 +353,9 @@
             // шагов на ячейку; проходы вперёд-назад после него не тикают, поэтому
             // бар доходит до ста на хвосте чанка и ждёт там.
             if (!sig.alloc(err)) goto FS1_FAIL;
-
+            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
+            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
+            const double ticksTotal     = (double)total_cells * ticksPerCell;
 
             {
                 numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
@@ -381,7 +378,7 @@
             // fillFSTransientIC с ОДНИМ TT на обоих и только для нефиксируемой IC: свипуемая сторона
             // стартовала сырой, а прогон в один поток на длинных TT ловил TDR.
 
-
+            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             for (size_t i = 0; i < amountOfIteration; ++i) {
                 size_t cur_limiter = nPtsLimiter;
                 if (i == amountOfIteration - 1) cur_limiter = total_cells - originalNPtsLimiter * i;
@@ -425,7 +422,7 @@
                     &icRandom_int, &icEps_arg, &icSeed_arg, &gsWarmup_int
                     ,&d_cancel_arg, &d_progress_arg, &progressStride_arg
                 };
-                int blockSize = 32;
+                int blockSize = launch_block_size((size_t)(amountOfIC_int + amountOfValues_int) * sizeof(numb));
                 int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
                 // Shared memory: kernel объявляет `extern __shared__ numb s[]` и кладёт туда
                 // localX[amountOfIC] + localValues[amountOfValues] на поток, т.е. blockSize × (IC +

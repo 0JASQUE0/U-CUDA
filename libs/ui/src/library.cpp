@@ -32,6 +32,9 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
 
     ImGui::Separator();
 
+    // Редактор рисует System tab по буферу-черновику, а маска схем глобальная
+    // и живёт в основной модели — иначе в редакторе показались бы скрытые схемы.
+    buf.hidden_schemes = model.hidden_schemes;
     if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
             draw_system_tab(buf, cb);
@@ -65,8 +68,19 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
 // метод (заглушка), кнопка пересчёта. Reset lambda — что делает «Reset to defaults»:
 // Analysis-tab передаёт model.from_record + start_phase_analysis, Custom-tab nullptr
 // (там перезагружаются из System tab или Run pipeline).
+// cbp — только ради диалога сохранения netlist'а. Необязателен: в Custom эту же
+// панель рисует уровень 3, где callbacks не прокинуты, и кнопка там неактивна.
 void draw_phase_controls(PhaseAnalysisSession& s,
-                                std::function<void()> on_reset_defaults) {
+                                std::function<void()> on_reset_defaults,
+                                AppModel* bc ,
+                                const GuiCallbacks* cbp ) {
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    // В Custom эту же панель рисует уровень 3, и источником там остаётся
+    // Custom: его Shared config и есть то, что уйдёт в расчёт.
+    if (bc && on_reset_defaults) {
+        bc->broadcast_source_tab = BroadcastTab::Phase;
+        bc->broadcast_source_idx = 0;
+    }
     bool changed = false;
 
     ImGui::Text("Phase portrait analysis");
@@ -81,11 +95,11 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Text("Method:"); ImGui::SameLine();
     changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
                                  [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes);
+                                 &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.wrapper_schemes);
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
-    if (is_custom_scheme(s.scheme, s.custom_schemes) && !s.use_gpu) {
+    if (scheme_needs_compiled_body(s.scheme, s.custom_schemes) && !s.use_gpu) {
         std::string why;
         if (!krs_cpu_backend_available(&why)) {
             ImGui::SameLine();
@@ -95,22 +109,14 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         }
     }
 
-    changed |= draw_adaptive_controls(s.adaptive);
-    if (!s.result.adaptive_stats.empty()) {
-        int accepted=0,rejected=0; double lo=0,hi=0;
-        for (const auto& stats:s.result.adaptive_stats) {
-            accepted+=stats.accepted; rejected+=stats.rejected;
-            if(stats.min_h>0 && (lo==0 || stats.min_h<lo)) lo=stats.min_h;
-            hi=std::max(hi,stats.max_h);
-        }
-        ImGui::Text("Adaptive: %d accepted, %d rejected; h %.3g .. %.3g",accepted,rejected,lo,hi);
+    // Time, step, decimation; for a map h = 1 and "time" is the iteration index.
+    if (!s.sys.is_map) {
+        ImGui::Text("Step h:"); ImGui::SameLine();
+        changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
     }
-    // время, шаг, децимация
-    ImGui::Text("Step h:"); ImGui::SameLine();
-    changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
-    ImGui::Text("Time(s):"); ImGui::SameLine();
+    ImGui::Text(s.sys.is_map ? "Iterations:" : "Time(s):"); ImGui::SameLine();
     changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
-    ImGui::Text("Skip(s):"); ImGui::SameLine();
+    ImGui::Text(s.sys.is_map ? "Skip:" : "Skip(s):"); ImGui::SameLine();
     changed |= InputNumStr("##ssk", s.skip_time, 70);
     // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
     // only show the field if the body actually references a[0].
@@ -120,6 +126,34 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     }
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
+    if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
+        // раздаются всем уровням; здесь они только показываются.
+        if (on_reset_defaults) {
+            if (draw_adaptive_block("phase_ad", s.adaptive, s.scheme, kAdUiRaw | kAdUiInterp | kAdUiMaxPts,
+                                    s.sys.is_map, bc)) {
+                changed = true;
+                s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
+            }
+        }
+        else
+            ImGui::TextDisabled(s.adaptive.enabled ? "Adaptive step (set in Custom -> Integration)."
+                                                   : "Fixed step (set in Custom -> Integration).");
+        if (s.adaptive.enabled && !s.adaptive.raw_nodes)
+            ImGui::TextDisabled("h above is the output step of the uniform grid.");
+        // Статистика последнего прогона: по строке на НУ.
+        if (s.result.adaptive) {
+            for (size_t k = 0; k < s.result.step_stats.size(); ++k) {
+                const AdaptiveStats& st = s.result.step_stats[k];
+                const std::string lab = k < s.result.labels.size() ? s.result.labels[k]
+                                                                  : "IC" + std::to_string(k + 1);
+                ImGui::TextDisabled("%s: %.0f accepted, %.0f rejected, %.0f forced, %.0f f-evals, "
+                                    "h in [%.3g, %.3g], mean %.3g%s", lab.c_str(), st.nacc, st.nrej,
+                                    st.nforced, st.nrhs, st.hmin, st.hmax, st.hmean,
+                                    st.diverged ? " (diverged)" : (st.truncated ? " (max points)" : ""));
+            }
+        }
+    }
     // шаг/время/децимация влияют на ось времени и сами данные: при их смене
     // просим автоскейл, чтобы time domain не "скакал" со старыми пределами.
     if (changed) s.fit_request = true;
@@ -133,6 +167,51 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Checkbox("Legend shows initial conditions", &s.legend_show_ic); ImGui::SameLine();
     ImGui::Checkbox("GPU", &s.use_gpu);
 
+    // Схемная траектория (фаза 4a). Отдельной секцией, а не ещё одной галкой в ряд:
+    // настройки тут про ЖЕЛЕЗО, и путать их с параметрами интегрирования нельзя.
+    if (ImGui::CollapsingHeader("Analog circuit overlay")) {
+        bool cch = ImGui::Checkbox("Overlay circuit trajectory", &s.circuit_show);
+        if (s.circuit_show) {
+            cch |= ImGui::Checkbox("Ideal op-amp", &s.circuit_ideal_opamp);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("An ideal op-amp reproduces the ODE exactly, so the two curves"
+                                  " coincide.\nSwitch it off to see what the hardware actually does.");
+            ImGui::Text("Target amplitude (V):"); ImGui::SameLine();
+            cch |= InputNumStr("##ctgt", s.circuit_target_volt, 70);
+            ImGui::SameLine(); ImGui::Text("Substeps:"); ImGui::SameLine();
+            cch |= InputNumStr("##csub", s.circuit_substeps, 60);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The circuit is integrated with BDF2 (2nd order) while the ODE"
+                                  " uses your chosen scheme.\nAt the same step the circuit would"
+                                  " drift from the ODE by the method alone.");
+            if (!s.circuit_ideal_opamp) {
+                ImGui::SameLine(); ImGui::Text("GBW (MHz):"); ImGui::SameLine();
+                cch |= InputNumStr("##cgbw", s.circuit_gbw_mhz, 70);
+                ImGui::SameLine(); ImGui::Text("Vsat (V):"); ImGui::SameLine();
+                cch |= InputNumStr("##cvsat", s.circuit_vsat, 70);
+            }
+            if (!s.result.circuit_status.empty())
+                ImGui::TextWrapped("%s", s.result.circuit_status.c_str());
+
+            ImGui::Checkbox("Multisim dialect (POLY)", &s.circuit_netlist_poly);
+            ImGui::SameLine(); ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Multisim drops behavioural B sources on import, which leaves"
+                                  " the multiplier nodes undriven\nand their resistors hanging by one"
+                                  " end. POLY sources survive the trip.");
+            ImGui::BeginDisabled(!s.result.circuit_valid || !bc);
+            // Только заявка. Диалог открывается после кадра: см.
+            // gui_process_deferred и AppModel::pending_netlist_export.
+            if (ImGui::Button("Export SPICE netlist...") && bc) {
+                bc->pending_netlist_export = true;
+            }
+            ImGui::EndDisabled();
+        }
+        if (cch) changed = true;
+    }
+
     // Continuation is Analysis-only: Custom-tab phase is a pipeline stage
     // whose queue would fight a timer-driven re-run.
     if (on_reset_defaults) {
@@ -145,13 +224,44 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 s.continuation_active  = false;
                 s.continuation_paused  = false;
                 s.continuation_elapsed = 0.0;
-                s.continuation_peaks.clear();
-                ++s.continuation_peaks_gen;
+                // Диаграмма возвращается к пикам одного (последнего) прогона.
+                s.rebuild_peaks_from_result();
             }
         }
         ImGui::SameLine();
         ImGui::Text("Frame delay (ms):"); ImGui::SameLine();
         InputNumStr("##cdelay", s.continuation_delay_ms, 70);
+        ImGui::SameLine();
+        ImGui::Text("Max peaks:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        // Правится по Enter/уходу фокуса: иначе, набирая 500000, пользователь
+        // на промежуточном "5" обрезал бы накопленный буфер до минимума.
+        if (ImGui::InputInt("##ccap", &s.continuation_peaks_cap, 0, 0,
+                            ImGuiInputTextFlags_EnterReturnsTrue)
+            || ImGui::IsItemDeactivatedAfterEdit()) {
+            s.continuation_peaks_cap = std::clamp(s.continuation_peaks_cap,
+                PhaseAnalysisSession::kContPeaksCapMin, PhaseAnalysisSession::kContPeaksCapMax);
+            s.trim_continuation_peaks();
+            ++s.continuation_peaks_gen;
+        }
+        if (ImGui::IsItemHovered()) {
+            // Буферов на IC — переменные плюс комбинированный ряд x0 + pi*x1 + e*x2
+            // (тот же, что у DBSCAN в 2D-бифуркации); пик — пара double (t, peak).
+            const int n_ic  = std::max(1, (int)s.ic_sets.size());
+            const int n_buf = (int)s.vars.size() + 1;
+            const double mb = (double)s.continuation_peaks_cap * 16.0 * n_ic * n_buf / 1.0e6;
+            ImGui::SetTooltip("Continuation diagram keeps the last N peaks per buffer;\n"
+                              "older ones are dropped. Range %d .. %d.\n"
+                              "\n"
+                              "Memory = N x 16 B x ICs x (variables + 1)\n"
+                              "  16 B: a peak is two doubles (time, value)\n"
+                              "  +1: the combined series x0 + pi*x1 + e*x2\n"
+                              "Now: %d x 16 B x %d x %d = %.1f MB\n"
+                              "(up to ~2x briefly while a buffer grows).",
+                              PhaseAnalysisSession::kContPeaksCapMin,
+                              PhaseAnalysisSession::kContPeaksCapMax,
+                              s.continuation_peaks_cap, n_ic, n_buf, mb);
+        }
     }
 
     ImGui::Separator();
@@ -203,7 +313,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::SetNextItemWidth(110);
         // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
         const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram",
-                                 "Recurrence plot", "Continuation diagram" };
+                                 "Recurrence plot", "Continuation diagram", "Step size", "Rejections" };
         int t = (int)pr.type;
         if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
             pr.type = (ProjType)t; s.fit_request = true;
@@ -336,6 +446,12 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs time)");
         }
+        else if (pr.type == ProjType::StepSize) {
+            ImGui::TextDisabled("(accepted h vs t; rejected and forced attempts as markers)");
+        }
+        else if (pr.type == ProjType::Rejections) {
+            ImGui::TextDisabled("(rejected attempts per accepted step vs t)");
+        }
         else { // TimeDomain — галочки переменных
             // Слотов на один больше числа переменных: последний — комбинация
             // x0 + pi*x1 + e*x2. При смене размера старые галочки переносим, а комбинацию
@@ -408,7 +524,11 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         const std::string cpu_key = s.scheme + "\n" + s.krs_code;
         if (cpu_cache_key != cpu_key) {
             try {
-                cpu_cache_body = codegen_scheme_cpu_equivalent(s.sys, scheme_from_name(s.scheme));
+                // Через тот же резолвер, что и GPU-форма. Раньше здесь стоял
+                // прямой scheme_from_name(s.scheme), а он на любое незнакомое
+                // имя молча отдаёт Scheme::Euler — панель показывала бы код
+                // Эйлера под заголовком "эквивалент" для каждой Extr(...).
+                cpu_cache_body = compute_krs_cpu_for_scheme(s.custom_schemes, s.sys, s.scheme);
             } catch (...) {
                 cpu_cache_body = "(generation failed)";
             }
@@ -454,7 +574,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     ImGui::Separator();
     // Recompute по кнопке или Ctrl+R, дисейблится во время async-расчёта.
-    // Авто-сохранение _last делает AppModel::tick, когда результат готов.
+    // Авто-сохранение _last делается в draw_gui::poll(), когда результат готов.
     bool do_recompute = false;
     if (s.continuation_active) {
         // Stop supersedes Recomputing... — the loop is expected to keep an
@@ -479,13 +599,26 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         if (ImGui::Button("Stop (continuation)", ImVec2(-1, 0))) {
             s.continuation_active = false;
             s.continuation_paused = false;
+            s.request_cancel();   // адаптивный кадр может идти долго — прервать и его
         }
         ImGui::PopStyleColor(3);
     }
     else if (s.in_flight) {
+        // Отмену слушает ветка адаптивного шага; у постоянного шага число шагов известно,
+        // и расчёт доходит до конца.
+        const bool can_cancel = s.adaptive.enabled && !s.sys.is_map && s.cancel_token != nullptr;
+        const bool cancel_sent = can_cancel && s.cancel_token->load(std::memory_order_relaxed);
+        const float bw = can_cancel ? (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f
+                                    : -1.0f;
         ImGui::BeginDisabled();
-        ImGui::Button("Recomputing...", ImVec2(-1, 0));
+        ImGui::Button(cancel_sent ? "Cancelling..." : "Recomputing...", ImVec2(bw, 0));
         ImGui::EndDisabled();
+        if (can_cancel) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(cancel_sent);
+            if (ImGui::Button("Cancel##phase_cancel", ImVec2(-1, 0))) s.request_cancel();
+            ImGui::EndDisabled();
+        }
     }
     else {
         do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));

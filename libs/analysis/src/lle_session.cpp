@@ -9,7 +9,7 @@ LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -42,7 +42,10 @@ LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.max_value      = parse_d(c.max_value_text, 1.0e6);
     req.NT             = parse_d(c.nt_text,  1.0);
     req.eps            = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
     return req;
 }
 
@@ -62,7 +65,7 @@ void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
 LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
                                         const LLECurveConfig& c) {
     LLE2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -105,7 +108,10 @@ LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.max_value          = parse_d(c.max_value_text, 1.0e6);
     req.NT                 = parse_d(c.nt_text,  1.0);
     req.eps                = parse_d(c.eps_text, 1.0e-4);
+    req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
     return req;
 }
 
@@ -136,7 +142,8 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     LLECurveConfig c;
     c.label = "LLE 1";
     c.label_is_manual = false;   // fresh curve → auto-label
-    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -180,7 +187,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LLE2DResult r = engine.run_lle_2d(req);
@@ -190,7 +197,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LLE1DResult r = engine.run_lle_1d(req);
@@ -216,7 +223,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -233,7 +240,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;

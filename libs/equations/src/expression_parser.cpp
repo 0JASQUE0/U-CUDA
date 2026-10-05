@@ -250,8 +250,8 @@ namespace ucuda::equations_detail {
     void cd_check_complex_safe(const PN& n) {
         if (!n) return;
         if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2"))
-            throw std::runtime_error("Complex CD: функция " + n->name +
-                " не определена в комплексной арифметике — выбери другую схему");
+            throw std::runtime_error("Complex CD: function " + n->name +
+                " is not defined in complex arithmetic - pick another scheme");
         cd_check_complex_safe(n->a);
         cd_check_complex_safe(n->b);
         for (const auto& c : n->args) cd_check_complex_safe(c);
@@ -410,6 +410,206 @@ namespace ucuda::equations_detail {
                 out[(size_t)i * N + j] = emit_to_str(pn_diff(ast, s.vars[j]), nm);
         }
         return out;
+    }
+
+    // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
+    // (7-й, b[1]) — z пока не используется, но оставлен под будущий адаптивный
+    // шаг по |y - z|. На каждый step X := y.
+    //
+    // Коэффициент печатается суммой "(numb)(c0) + (numb)(c1) + ...": в double
+    // она сворачивается при компиляции в c0, в dd/qd CPU-ветки вкладки Order
+    // складывается точно (two_sum) и несёт 32/62 знака коэффициента.
+    std::string md_literal(const MultiDoubleCoef& r) {
+        if (r.c[0] == 0.0) return "0";
+        std::string t;
+        for (int m = 0; m < 4 && r.c[m] != 0.0; ++m) {
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%.17g", r.c[m]);
+            t += (m ? " + (numb)(" : "(numb)(") + std::string(buf) + ")";
+        }
+        return t;
+    }
+
+    // "const numb <decl> = {...};" — rows x cols из таблицы с шагом
+    // строки ld (ld > cols — берётся левый верхний угол).
+    void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
+                  int rows, int cols, int ld) {
+        o << "    static const numb " << decl << " = {\n";
+        for (int i = 0; i < rows; ++i) {
+            o << "        {";
+            for (int j = 0; j < cols; ++j) o << (j ? ", " : "") << md_literal(v[i * ld + j]);
+            o << "}" << (i + 1 < rows ? "," : "") << "\n";
+        }
+        o << "    };\n";
+    }
+
+
+    std::string adaptive_emb_body(const System& s, const EmbSpec& e) {
+        const int N = (int)s.vars.size(), S = e.S;
+        const auto kx = rhs_over(s, "X1"), ky = rhs_over(s, "Y");
+        std::ostringstream o;
+        md_table(o, ("M[" + std::to_string(S) + "][" + std::to_string(S - 1) + "]").c_str(), e.A, S, S - 1, e.ld);
+        md_table(o, ("B[1][" + std::to_string(S) + "]").c_str(), e.b, 1, S, S);
+        o << "    static const numb L[" << e.nlo << "][" << e.lc << "] = {\n";
+        for (int m = 0; m < e.nlo; ++m) {
+            o << "        {";
+            for (int i = 0; i < e.lc; ++i) o << (i ? ", " : "") << md_literal(e.lo[m][i]);
+            o << "}" << (m + 1 < e.nlo ? "," : "") << "\n";
+        }
+        o << "    };\n";
+        auto nz = [](const MultiDoubleCoef& c) { return c.c[0] != 0.0; };
+        o << "    numb X1[" << N << "];\n";
+        o << "    numb X2[" << N << "];\n";
+        o << "    int N = " << N << ";\n";
+        o << "    int l;\n";
+        o << "    for (l = 0; l < N; ++l) W[l] = F0[l];\n";
+        for (int i = 1; i < S; ++i) {
+            o << "    for (l = 0; l < N; ++l) {\n";
+            o << "        X2[l] = 0;\n";
+            for (int j = 0; j < i; ++j)
+                if (nz(e.A[i * e.ld + j]))
+                    o << "        X2[l] += M[" << i << "][" << j << "] * W[" << j << " * N + l];\n";
+            o << "        X1[l] = X[l] + h * X2[l];\n";
+            o << "    }\n";
+            for (int v = 0; v < N; ++v)
+                o << "    W[" << i << " * N + " << v << "] = (" << kx[v] << ");\n";
+        }
+        o << "    for (l = 0; l < N; ++l) {\n";
+        o << "        X2[l] = 0;\n";
+        for (int i = 0; i < S; ++i)
+            if (nz(e.b[i])) o << "        X2[l] += B[0][" << i << "] * W[" << i << " * N + l];\n";
+        o << "        Y[l] = X[l] + h * X2[l];\n";
+        o << "    }\n";
+        for (int v = 0; v < N; ++v)
+            o << "    F1[" << v << "] = (" << ky[v] << ");\n";
+        o << "    for (l = 0; l < N; ++l) W[" << S << " * N + l] = F1[l];\n";
+        for (int m = 0; m < e.nlo; ++m) {
+            o << "    for (l = 0; l < N; ++l) {\n";
+            o << "        X2[l] = 0;\n";
+            for (int i = 0; i < e.lc; ++i)
+                if (nz(e.lo[m][i])) o << "        X2[l] += L[" << m << "][" << i << "] * W[" << i << " * N + l];\n";
+            o << "        E[" << m << " * N + l] = h * X2[l];\n";
+            o << "    }\n";
+        }
+        return o.str();
+    }
+
+
+    std::string adaptive_rhs_body(const System& s) {
+        const auto k = rhs_over(s, "X");
+        std::ostringstream o;
+        for (size_t v = 0; v < k.size(); ++v) o << "    F[" << v << "] = (" << k[v] << ");\n";
+        return o.str();
+    }
+
+
+    // Плотный выход RK45 — полином Шампайна 4-й степени, форма scipy:
+    // y(th) = X + h * sum_j Q_j th^(j+1), Q = K^T P. D = [X, hQ_0..hQ_3].
+    std::string rk45_dprep_body(const System& s) {
+        const int N = (int)s.vars.size();
+        std::ostringstream o;
+        md_table(o, "P[7][4]", &kRK45P[0][0], 7, 4, 4);
+        o << "    int N = " << N << ";\n";
+        o << "    int i, j, l;\n";
+        o << "    (void)Y; (void)F0; (void)F1; (void)a;\n";
+        o << "    for (l = 0; l < N; ++l) D[l] = X[l];\n";
+        o << "    for (j = 0; j < 4; ++j)\n";
+        o << "        for (l = 0; l < N; ++l) {\n";
+        o << "            numb acc = 0;\n";
+        o << "            for (i = 0; i < 7; ++i) acc += W[i * N + l] * P[i][j];\n";
+        o << "            D[(1 + j) * N + l] = h * acc;\n";
+        o << "        }\n";
+        return o.str();
+    }
+
+    std::string rk45_deval_body(const System& s) {
+        std::ostringstream o;
+        o << "    int N = " << s.vars.size() << ";\n";
+        o << "    for (int l = 0; l < N; ++l)\n";
+        o << "        Yo[l] = D[l] + th * (D[N + l] + th * (D[2 * N + l] + th * (D[3 * N + l] + th * D[4 * N + l])));\n";
+        return o.str();
+    }
+
+
+    // Плотный выход DOP853 — полином 7-й степени Хайрера, форма scipy
+    // (Dop853DenseOutput): три доп. стадии 13..15, затем D = [X, F0..F6].
+    std::string dop853_dprep_body(const System& s) {
+        const int N = (int)s.vars.size();
+        const auto kx = rhs_over(s, "X1");
+        std::ostringstream o;
+        md_table(o, "AE[3][15]", &kDop853AExt[0][0], 3, 15, 15);
+        md_table(o, "DD[4][16]", &kDop853D[0][0], 4, 16, 16);
+        o << "    numb X1[" << N << "];\n";
+        o << "    numb X2[" << N << "];\n";
+        o << "    int N = " << N << ";\n";
+        o << "    int i, j, l, r;\n";
+        o << "    for (i = 0; i < 3; ++i) {\n";
+        o << "        for (l = 0; l < N; ++l) X2[l] = 0;\n";
+        o << "        for (j = 0; j < 13 + i; ++j)\n";
+        o << "            for (l = 0; l < N; ++l)\n";
+        o << "                X2[l] += AE[i][j] * W[j * N + l];\n";
+        o << "        for (l = 0; l < N; ++l)\n";
+        o << "            X1[l] = X[l] + h * X2[l];\n";
+        for (int v = 0; v < N; ++v)
+            o << "        W[(13 + i) * N + " << v << "] = (" << kx[v] << ");\n";
+        o << "    }\n";
+        o << "    for (l = 0; l < N; ++l) {\n";
+        o << "        numb dy = Y[l] - X[l];\n";
+        o << "        D[l] = X[l];\n";
+        o << "        D[N + l] = dy;\n";
+        o << "        D[2 * N + l] = h * F0[l] - dy;\n";
+        o << "        D[3 * N + l] = 2 * dy - h * (F1[l] + F0[l]);\n";
+        o << "    }\n";
+        o << "    for (r = 0; r < 4; ++r)\n";
+        o << "        for (l = 0; l < N; ++l) {\n";
+        o << "            numb acc = 0;\n";
+        o << "            for (i = 0; i < 16; ++i) acc += DD[r][i] * W[i * N + l];\n";
+        o << "            D[(4 + r) * N + l] = h * acc;\n";
+        o << "        }\n";
+        return o.str();
+    }
+
+    std::string dop853_deval_body(const System& s) {
+        std::ostringstream o;
+        o << "    int N = " << s.vars.size() << ";\n";
+        o << "    numb u = 1 - th;\n";
+        o << "    for (int l = 0; l < N; ++l) {\n";
+        o << "        numb y = D[7 * N + l] * th;\n";
+        o << "        y = (y + D[6 * N + l]) * u;\n";
+        o << "        y = (y + D[5 * N + l]) * th;\n";
+        o << "        y = (y + D[4 * N + l]) * u;\n";
+        o << "        y = (y + D[3 * N + l]) * th;\n";
+        o << "        y = (y + D[2 * N + l]) * u;\n";
+        o << "        y = (y + D[N + l]) * th;\n";
+        o << "        Yo[l] = y + D[l];\n";
+        o << "    }\n";
+        return o.str();
+    }
+
+
+    // Кубический Эрмит по концам шага (DOPRI78): D = [X, Y, hF0, hF1],
+    // y(th) = X + th*hF0 + th^2*(3d - 2hF0 - hF1) + th^3*(hF0 + hF1 - 2d), d = Y - X.
+    std::string hermite_dprep_body(const System& s) {
+        std::ostringstream o;
+        o << "    int N = " << s.vars.size() << ";\n";
+        o << "    (void)a; (void)W;\n";
+        o << "    for (int l = 0; l < N; ++l) {\n";
+        o << "        D[l] = X[l];\n";
+        o << "        D[N + l] = Y[l];\n";
+        o << "        D[2 * N + l] = h * F0[l];\n";
+        o << "        D[3 * N + l] = h * F1[l];\n";
+        o << "    }\n";
+        return o.str();
+    }
+
+    std::string hermite_deval_body(const System& s) {
+        std::ostringstream o;
+        o << "    int N = " << s.vars.size() << ";\n";
+        o << "    for (int l = 0; l < N; ++l) {\n";
+        o << "        numb d = D[N + l] - D[l], f0 = D[2 * N + l], f1 = D[3 * N + l];\n";
+        o << "        Yo[l] = D[l] + th * (f0 + th * ((3 * d - 2 * f0 - f1) + th * (f0 + f1 - 2 * d)));\n";
+        o << "    }\n";
+        return o.str();
     }
 
 

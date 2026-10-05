@@ -6,7 +6,7 @@ namespace ucuda::analysis_detail {
 BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
                                           const BasinsConfig& c) {
     BasinsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -52,13 +52,10 @@ BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.feature2 = f2;
     req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, 0, 0, req.adaptive);
     return req;
 }
-
-
-// Сама таблица kBasinFeatureNames и её проверки (длина, только-ASCII) живут в
-// analysis_session.h рядом с enum BasinFeature: static_assert'у нужен constexpr-массив, а
-// constexpr в namespace scope несовместим с extern-объявлением.
 
 
 void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
@@ -106,9 +103,9 @@ void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
     // Схема и шаг ОБЯЗАНЫ совпадать с расчётом карты — иначе траектория не
     // обязана прийти в тот же аттрактор, что и ячейка сетки.
     ph.scheme       = c.scheme;
-    ph.adaptive = c.adaptive;
     ph.symmetry_s   = c.symmetry_s;
     ph.step_h       = c.h_text;
+    ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
     ph.param_values = c.param_values;
     // Своё время — единственное, чем портрет отличается от карты.
     ph.sim_time   = c.pp_t_max_text;
@@ -137,7 +134,8 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
 
     BasinsConfig c;
     c.label = "Basins 1";
-    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -207,6 +205,12 @@ void BasinsAnalysisSession::remove_config(int i) {
 }
 
 
+// Сама таблица kBasinFeatureNames и её проверки (длина, только-ASCII) живут в
+// analysis_session.h рядом с enum BasinFeature: static_assert'у нужен constexpr-массив, а
+// constexpr в namespace scope несовместим с extern-объявлением.
+
+
+
 bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
     if (config_idx < 0 || config_idx >= (int)configs.size()) return false;
     BasinsConfig& c = configs[config_idx];
@@ -216,7 +220,7 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
     BasinsResult r = engine.run_basins(req);
@@ -241,7 +245,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) 
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         cancel_token.reset();
         progress_token.reset();
         progress_phase_token.reset();
@@ -269,7 +273,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     if (!c.last_run_ok || c.result.avg_peaks.empty() ||
         c.result.avg_intervals.empty() || c.result.helpful_array.empty() ||
         c.result.n_pts <= 0) {
-        c.last_error = "Нет кэша фич — запусти полный Run сначала.";
+        c.last_error = "No feature cache - run a full Run first.";
         return false;
     }
 
@@ -278,7 +282,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     // если система не менялась — compile_basins_if_needed обойдётся no-op'ом.
     BasinsRequest sim_req = build_basins_request(*this, c);
     if (sim_req.krs_body.empty()) {
-        c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+        c.last_error = "krs_code is empty (no valid system or scheme)";
         return false;
     }
 
@@ -641,7 +645,6 @@ bool BasinsAnalysisSession::poll_phase() {
     return any;
 }
 
-using namespace ucuda::analysis_detail;
 void ensure_basins_spiral_cache(BasinsConfig& c) {
     if (c.basin_idx_spiral_gen == c.data_generation
         && c.basin_idx_spiral.size() == c.result.basin_idx.size()) return;
@@ -652,8 +655,6 @@ void ensure_basins_spiral_cache(BasinsConfig& c) {
     c.min_cluster_idx_spiral = -n_neg;
     c.basin_idx_spiral_gen   = c.data_generation;
 }
-
-using namespace ucuda::analysis_detail;
 const int* basins_display_ids(BasinsConfig& c) {
     if (c.result.basin_idx.empty()) return nullptr;
     if (!c.renumber_spiral) return c.result.basin_idx.data();

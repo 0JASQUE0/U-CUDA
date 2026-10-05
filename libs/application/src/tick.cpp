@@ -24,7 +24,47 @@ static void basins_phase_tick(AppModel& model) {
     }
 }
 
+// Автосохранение вкладки Order. Раньше _last_order.json писался только по
+// завершении расчёта, а _last_order_windows.json — по флагу, который ставили
+// лишь добавление/удаление окон и правка их членов. Всё прочее — новая или
+// удалённая вкладка, переименование, схема, поля, вид карты, колормапа,
+// лог-оси — до файла не доходило, пока не досчитается очередной Run, а при
+// выходе без Run терялось. Хуже того, файлы расходились между собой: окна
+// сохранялись со ссылкой на вкладку, которой в сохранённых конфигах ещё нет.
+//
+// Теперь оба файла пишутся, как только сериализация отличается от последней
+// записанной. Сериализация Order — несколько килобайт текста, сравнивать её
+// каждый кадр дешевле, чем расставлять флаг по сотне мест правки (включая
+// ПКМ-рассылку в конфиги Order с чужих вкладок).
+//
+// Писать можно только сессию ТЕКУЩЕЙ системы: после смены системы на другой
+// вкладке order_session держит старую, пока в Order не зайдут снова, и без
+// этой проверки её содержимое легло бы в файл новой системы.
+static void autosave_order_session(AppModel& model, SystemLibrary& lib) {
+    model.order_plot_windows_dirty = false;   // флаг поглощён сравнением ниже
+    if (model.loaded_name.empty()) return;
+    const OrderAnalysisSession& s = model.order_session;
+    if (s.loaded_system_name.empty() || s.loaded_system_name != model.name) return;
+
+    if (model.order_autosave_target != model.loaded_name) {
+        model.order_autosave_target = model.loaded_name;
+        model.order_autosave_json.clear();
+        model.order_windows_autosave_json.clear();
+    }
+    std::string jo = session_to_json_order(s);
+    if (jo != model.order_autosave_json) {
+        lib.save_session(model.loaded_name, "_last_order", jo);
+        model.order_autosave_json = std::move(jo);
+    }
+    std::string jw = session_to_json_order_windows(model.order_plot_windows);
+    if (jw != model.order_windows_autosave_json) {
+        lib.save_session(model.loaded_name, "_last_order_windows", jw);
+        model.order_windows_autosave_json = std::move(jw);
+    }
+}
+
 void AppModel::tick(SystemLibrary& lib) {
+    poll();
     auto& model = *this;
     // custom_schemes — единственное поле, которое может отредактироваться в System tab БЕЗ
     // переключения режима (без start_*_analysis). Чтобы scheme combo в Phase/Parametric/Basins/
@@ -40,6 +80,7 @@ void AppModel::tick(SystemLibrary& lib) {
     model.basins_session.custom_schemes      = model.custom_schemes;
     model.fastsync_session.custom_schemes    = model.custom_schemes;
     model.order_session.custom_schemes       = model.custom_schemes;
+    model.network_session.custom_schemes     = model.custom_schemes;
     // Custom tab owns 5 isolated sub-sessions — same per-frame sync applies.
     model.custom_session.custom_schemes                = model.custom_schemes;
     model.custom_session.bif_session.custom_schemes    = model.custom_schemes;
@@ -47,6 +88,23 @@ void AppModel::tick(SystemLibrary& lib) {
     model.custom_session.ls_session.custom_schemes     = model.custom_schemes;
     model.custom_session.phase_session.custom_schemes  = model.custom_schemes;
     model.custom_session.basins_session.custom_schemes = model.custom_schemes;
+    // Экстраполяционные обёртки — тем же покадровым синком и по тем же
+    // причинам: собранная в Library схема должна появиться в комбо сразу.
+    model.phase_session.wrapper_schemes       = model.enabled_wrapper_schemes();
+    model.bifurcation_session.wrapper_schemes = model.enabled_wrapper_schemes();
+    model.lle_session.wrapper_schemes         = model.enabled_wrapper_schemes();
+    model.ls_session.wrapper_schemes          = model.enabled_wrapper_schemes();
+    model.dft1d_session.wrapper_schemes       = model.enabled_wrapper_schemes();
+    model.basins_session.wrapper_schemes      = model.enabled_wrapper_schemes();
+    model.fastsync_session.wrapper_schemes    = model.enabled_wrapper_schemes();
+    model.order_session.wrapper_schemes       = model.enabled_wrapper_schemes();
+    model.network_session.wrapper_schemes     = model.enabled_wrapper_schemes();
+    model.custom_session.wrapper_schemes                = model.enabled_wrapper_schemes();
+    model.custom_session.bif_session.wrapper_schemes    = model.enabled_wrapper_schemes();
+    model.custom_session.lle_session.wrapper_schemes    = model.enabled_wrapper_schemes();
+    model.custom_session.ls_session.wrapper_schemes     = model.enabled_wrapper_schemes();
+    model.custom_session.phase_session.wrapper_schemes  = model.enabled_wrapper_schemes();
+    model.custom_session.basins_session.wrapper_schemes = model.enabled_wrapper_schemes();
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.
@@ -68,6 +126,40 @@ void AppModel::tick(SystemLibrary& lib) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_ls",
                              session_to_json_ls(model.ls_session));
+    }
+    {
+        // Индекс запоминаем ДО poll: он сбрасывает running_config_index.
+        const int met_idx = model.metrics_session.running_config_index;
+        if (model.metrics_session.poll()) {
+            if (!model.loaded_name.empty())
+                lib.save_session(model.loaded_name, "_last_metrics",
+                                 session_to_json_metrics(model.metrics_session));
+            // Вкладка новая: у сохранённых раскладок окон под неё окна нет, и
+            // посчитанный результат иначе некуда было бы смотреть. Окно заводится,
+            // только если конфиг не показан ни в одном окне своей размерности.
+            auto& cfgs = model.metrics_session.configs;
+            if (met_idx >= 0 && met_idx < (int)cfgs.size() &&
+                (cfgs[met_idx].mode_2d ? cfgs[met_idx].last_run_2d_ok : cfgs[met_idx].last_run_ok)) {
+                const bool m2d = cfgs[met_idx].mode_2d;
+                bool shown = false;
+                for (const auto& w : model.parametric_plot_windows)
+                    if (w.kind == ParametricPlotWindow::Kind::Metrics && w.mode_2d == m2d &&
+                        std::find(w.members.begin(), w.members.end(), met_idx) != w.members.end())
+                        shown = true;
+                if (!shown) {
+                    ParametricPlotWindow* target = nullptr;
+                    if (!m2d)   // 1D-окно оверлеит кривые — дописываемся в имеющееся
+                        for (auto& w : model.parametric_plot_windows)
+                            if (w.kind == ParametricPlotWindow::Kind::Metrics && !w.mode_2d) { target = &w; break; }
+                    if (target) {
+                        target->members.push_back(met_idx);
+                        model.parametric_plot_windows_dirty = true;
+                    } else {
+                        model.add_parametric_plot_window(ParametricPlotWindow::Kind::Metrics, m2d, { met_idx });
+                    }
+                }
+            }
+        }
     }
     // Plot windows list is UI-only (not tied to any session's poll()) — save
     // whenever add/remove/membership-edit touched it this frame, rather than
@@ -143,9 +235,17 @@ void AppModel::tick(SystemLibrary& lib) {
                              session_to_json_fastsync(model.fastsync_session));
     }
     // Order: тот же контракт, что у FastSync — без poll() in_flight никогда не
-    // сбросится и "Running" повиснет навсегда. Сессию на диск не пишем: своего
-    // _last_order.json у вкладки пока нет.
+    // сбросится и "Running" повиснет навсегда. Сессию и окна пишет
+    // autosave_order_session — по любому изменению, а не по завершении.
     model.order_session.poll();
+    autosave_order_session(model, lib);
+    // Network: тот же контракт, что у Order — без poll() in_flight никогда не
+    // сбросится и "Running" повиснет навсегда.
+    if (model.network_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_network",
+                             session_to_json_network(model.network_session));
+    }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
     // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
     // (add/close/rename таба, drag сплиттера, перенос окна между табами) — с одним лишь
@@ -176,7 +276,13 @@ void AppModel::tick(SystemLibrary& lib) {
     model.start_next_in_basins_queue();
     // То же для fastsync-очереди (независимая).
     model.start_next_in_fastsync_queue();
+    // То же для order-очереди (независимая).
+    model.start_next_in_order_queue();
+    // То же для network-очереди (независимая).
+    model.start_next_in_network_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
+    // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
+    model.poll_parametric_prewarm();
 
 }

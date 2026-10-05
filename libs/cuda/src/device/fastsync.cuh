@@ -1,9 +1,5 @@
 ﻿__device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1, numb* K, const numb* a, const numb h, const bool directionOfintegration)
 {
-#ifdef UC_ADAPTIVE_ENSEMBLE
-    uc_adaptive_sync(X,S1,K,a,h,directionOfintegration);
-#else
-
 	// Generic FastSynchro step. Раньше тело было ЗАХАРДКОЖЕНО под Lorenz CD;
 	// теперь делегируем сам ОДУ-шаг в user's `calculateDiscreteModel` (KRS_BODY
 	// от NVRTC template). FS-семантика:
@@ -30,7 +26,6 @@
 
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		X[i] += h * N[i];
-#endif
 }
 
 // Детектор разлёта для FastSynchro On Grid
@@ -598,11 +593,18 @@ struct PeakStream
 	numb   sumP, sumP2, sumI, sumI2;
 	numb   last;
 
+	// Emit every sample instead of peaks. A discrete map's bifurcation diagram
+	// plots each iterate x_n, not the local maxima of the sequence: the peak
+	// filter would drop the lower branch of every period-2 orbit and clip the
+	// bottom of the chaotic band. Feeds pushRaw() instead of push().
+	bool   emitAll;
+
 	__device__ __host__ void init(numb* peaks, numb* times, size_t base,
-		numb step, size_t len, int cap)
+		numb step, size_t len, int cap, bool all = false)
 	{
 		outPeaks = peaks; timeOfPeaks = times; peakBase = base;
 		sampleStep = step; scanLen = len; capacity = cap;
+		emitAll = all || !doCalculatePeaks;
 		w0 = w1 = w2 = (numb)0;
 		n = 0; nextI = 2; walking = false; done = false;
 		raw = 0; emitted = 0; anchorTime = (numb)0; haveAnchor = false;
@@ -714,4 +716,3 @@ struct PeakStream
 
 	__device__ __host__ int countRaw() const { return raw - 1; }
 };
-

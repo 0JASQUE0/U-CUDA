@@ -3,6 +3,7 @@
 #include "ucuda/domain/system_record.h"
 #include "ucuda/domain/analysis_types.h"
 class ParametricEngine;
+struct AdaptiveCode;
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -35,6 +36,36 @@ class ParametricEngine;
 //   1..M               — a[i], i-й параметр системы.
 constexpr int kOrderTargetH = -1;
 
+// Что запускает Run на этой вкладке. Живёт в конфиге, а не в окне графика:
+// "Run all" обязан знать, что именно считать для каждой вкладки, а окна
+// графиков к моменту запуска могут быть вообще закрыты.
+//   kOrderCalcOrder — порядок/ошибка по сетке (order.template.cu);
+//   kOrderCalcPerf  — время счёта vs достигнутая ошибка (perfIntegrateKernel);
+//   kOrderCalcStab  — область устойчивости на двумерной задаче Дальквиста
+//                     (stabilityRegionKernel). В отличие от первых двух этот
+//                     расчёт требует КОНКРЕТНОЙ системы — library/Dahlquist 2D:
+//                     сетка идёт по собственным числам тестовой матрицы, и
+//                     правая часть обязана быть линейной двумерной.
+constexpr int kOrderCalcOrder = 0;
+constexpr int kOrderCalcPerf  = 1;
+constexpr int kOrderCalcStab  = 2;
+
+// Точность CPU-арифметики (OrderConfig::cpu_precision).
+//   kOrderPrecDouble — numb, как везде в проекте и как на GPU;
+//   kOrderPrecDD     — double-double из kernels/ucuda_hp.h: мантисса 106 бит,
+//                      eps 4.9e-32 вместо 2.2e-16, счёт медленнее раз в 35;
+//   kOrderPrecQD     — quad-double оттуда же: мантисса 212 бит, eps 1.2e-63,
+//                      медленнее раз в 600 — только когда dd уже не хватает.
+// Зачем: полка округления в оценке порядка растёт как eps*|y|*sqrt(N), и в
+// double она приходит около 3e-13. Схема порядка p даёт E1 ~ h^p, поэтому при
+// p >= 8 пригодного окна по h почти не остаётся — кривая p(h) ложится на
+// полку раньше, чем схема выйдет на асимптотику. dd опускает полку на 16
+// десятичных порядков и возвращает окно вплоть до p = 16.
+// GPU-ветки это не касается: там всегда double.
+constexpr int kOrderPrecDouble = 0;
+constexpr int kOrderPrecDD     = 1;
+constexpr int kOrderPrecQD     = 2;
+
 struct OrderConfig {
     std::string label  = "Order";
     std::string scheme = "Euler";
@@ -47,13 +78,27 @@ struct OrderConfig {
     std::string axis_x_lo_text  = "1e-4";
     std::string axis_x_hi_text  = "1e-1";
     bool        axis_x_log      = true;    // лог-сетка УЗЛОВ по оси
+    // Число узлов. В 2D — ОБЩЕЕ на обе оси, отдельного axis_y_n_text нет:
+    // карта всегда N x N. Разные N по осям давали растянутые ячейки, из-за
+    // чего тонкая структура (например луч порядка у композиций) читалась
+    // по-разному вдоль X и вдоль Y.
     std::string axis_x_n_text   = "200";
 
     int         axis_y_target   = 0;
     std::string axis_y_lo_text  = "0";
     std::string axis_y_hi_text  = "1";
     bool        axis_y_log      = false;
-    std::string axis_y_n_text   = "200";
+
+    // Устройство расчёта. GPU — прежний путь через NVRTC и order.template.cu.
+    // CPU — та же арифметика тем же телом КРС, скомпилированным cl.exe
+    // (krs_cpu.h), но прогоны ПОСЛЕДОВАТЕЛЬНЫЕ: меряется время одной
+    // траектории, а не пропускная способность, поэтому replicas там не значат
+    // ничего и в UI гасятся. Формулы, пороги и коды статусов у обеих веток
+    // общие — см. run_order_cpu в order_session.cpp.
+    bool        use_gpu        = true;
+    // Точность CPU-арифметики: kOrderPrecDouble / kOrderPrecDD (см. выше).
+    // При use_gpu игнорируется.
+    int         cpu_precision  = kOrderPrecDouble;
 
     // ---- Интегрирование ----
     std::string h_text         = "0.01";   // базовый шаг, когда h не свипуется
@@ -72,37 +117,98 @@ struct OrderConfig {
     std::map<std::string, std::string> initial_conditions;
     std::map<std::string, std::string> param_values;
 
-    // ---- Отображение ----
-    // Масштаб ОСЕЙ ГРАФИКА, независимо от масштаба сетки узлов (axis_*_log):
-    // сетку можно набрать линейно, а смотреть в логарифме, и наоборот.
-    bool plot_x_log = true;
-    bool plot_y_log = true;     // для кривой ошибки; кривая p всегда линейна
-    // 0 = порядок p, 1 = кривая ошибки E1 (для 2D — то же, но heatmap).
-    int  active_plot_tab = 0;
-    // Показывать на кривой ошибки обе разности, а не только E1.
-    bool show_e2 = false;
-    // Опорная горизонталь на графике p — паспортный порядок выбранной схемы
-    // (kBuiltinSchemes в gui.cpp). 0 = не рисовать.
-    int  nominal_order = 0;
-    // Персистентный colormap 2D-карты; -1 = взять app-дефолт (как у Basins).
-    int  colormap_idx[2] = { -1, -1 };
-
     // ---- Результат ----
-    // Сигнатура нарисованного на прошлом кадре, по одной на вкладку графика
-    // (0 = p, 1 = ошибка). Меняется, когда меняется САМА рисуемая величина:
-    // новый расчёт, переключение lin/log, включение второй кривой. По её
-    // изменению запрашивается autofit — без этого Plot2DView подгоняет вид
-    // ровно один раз (do_autofit зовётся только при !view_valid ||
-    // fit_request || смене видимости), и после переключения с p на ошибку
-    // диапазон остаётся от p: кривая целиком уезжает за пределы вида.
-    // Транзиентное, не сериализуется.
-    int         plot_sig[2] = { -1, -1 };
-
+    // Настройки ОТОБРАЖЕНИЯ (масштаб осей, вторая кривая, колормапа) живут не
+    // здесь, а на окне графика (OrderPlotWindow): в одном окне лежат кривые
+    // нескольких вкладок, и масштаб оси у них обязан быть один.
     OrderResult result;
     bool        last_run_ok = false;
     std::string last_error;
     int         data_generation = 0;
     bool        fit_request = false;
+
+    // ---- Performance ----
+    // Замер времени счёта по той же оси X. Ось Y (2D-карта) здесь не
+    // участвует: диаграмма «время vs ошибка» одномерна по построению.
+    int         calc_kind = kOrderCalcOrder;
+
+    std::string perf_repeats_text  = "20";   // засекаемых запусков на узел
+    std::string perf_warmup_text   = "2";    // прогревочных запусков вне зачёта
+    // Одинаковых потоков в замеряемом запуске. 1 = латентность одного расчёта;
+    // большое число = пропускная способность загруженного GPU. Умолчание 1,
+    // потому что вопрос «сколько стоит ОДИН расчёт» задают чаще.
+    std::string perf_replicas_text = "1";
+
+    // Эталонный метод для третьей величины по оси X: E_ref = max|y_h - y_ref| —
+    // не ричардсоновская оценка, а сама ошибка схемы на шаге h. По умолчанию
+    // DOPRI78: восьмой порядок, и на рабочих шагах его собственная ошибка
+    // уходит под машинную точность решения, то есть он и есть «точный ответ».
+    std::string perf_ref_scheme = "DOPRI78";
+    // Шагов эталона на один шаг испытуемой схемы. Единицы хватает, пока методы
+    // разные; когда эталон совпадает с испытуемым, при равном шаге это была бы
+    // та же арифметика и разность тождественно нулевая — отсюда умолчание 4.
+    std::string perf_ref_substeps_text = "4";
+
+    // «Точность — затраты». Ошибка в конечной точке E(T) = max|y(T) - y*(T)| против
+    // эталона DOP853 постоянным шагом на CPU: 0 — нет, 1 — в dd, 2 — в qd. Это та ось,
+    // на которой Fixed- и адаптивные вкладки лежат на одном графике. Только у адаптивной
+    // вкладки (2 — qd, иначе dd): у Fixed E(T) — это Eref при "endpoint only" и подгонке h
+    // к t_max, своего эталона y*(T) у неё нет (build_perf_request, run_performance_any).
+    int         perf_end_ref = 0;
+    // Адаптивный шаг вкладки: включённый (и схема с оценкой ошибки) переводит
+    // Performance на узлы tol вместо h — лог-сетка perf_tol_lo..hi, rtol = tol,
+    // atol = tol * (atol / rtol) настроек. GPU — ядро endpoint_kernel_ad, CPU — тот же
+    // драйвер в cl.exe-DLL (AdaptiveCpuModule), одна траектория последовательно.
+    AdaptiveSettings adaptive;
+    std::string perf_tol_lo_text = "1e-3";
+    std::string perf_tol_hi_text = "1e-13";
+    std::string perf_tol_n_text  = "11";
+
+    PerfResult  perf_result;
+    bool        perf_last_run_ok = false;
+    int         perf_data_generation = 0;
+    bool        perf_fit_request = false;
+
+    // ---- Stability ----
+    // Область устойчивости на двумерной задаче Дальквиста. Оси карты жёстко
+    // заданы смыслом расчёта (sigma и omega — вещественная и мнимая части
+    // собственных чисел тестовой матрицы), поэтому общий селектор осей выше
+    // здесь не участвует и в этом режиме гасится.
+    //
+    // Элементы матрицы НЕ вводятся: в каждом узле они пересчитываются из
+    // (sigma, omega) и двух настроек —
+    //   d = 2*sigma/(1+k),  c = -sqrt(-(1/r)*(sigma^2*(k-1)^2/(k+1)^2 + omega^2)),
+    //   b = r*c,            a = k*d,
+    // что при любом k даёт спектр ровно sigma +- i*omega. k гоняет матрицу по
+    // семейству с одним и тем же спектром, r масштабирует недиагонали.
+    std::string stab_k_text = "1";     // коэффициент несимметричности; -1 запрещён
+    std::string stab_r_text = "-1";    // обязан быть отрицательным, иначе c мнимое
+    // Шаг, чей оператор перехода диагонализуется. По умолчанию 1: тогда оси
+    // читаются прямо как h*sigma и h*omega — классическая безразмерная
+    // картинка, и ровно этот случай считает матлабовский скрипт.
+    std::string stab_h_text = "1";
+
+    std::string stab_sig_lo_text = "-4.1";
+    std::string stab_sig_hi_text = "0.1";
+    std::string stab_om_lo_text  = "-2.75";
+    std::string stab_om_hi_text  = "2.65";
+    std::string stab_n_text      = "256";   // ОБЩЕЕ на обе оси: карта N x N
+
+    // Индексы a[], в которые кладутся элементы матрицы. Для library/Dahlquist 2D
+    // это 1..4 (params a, b, c, d), но переименовать или переставить параметры
+    // пользователю никто не запрещает, поэтому индексы явные.
+    int stab_idx_a = 1, stab_idx_b = 2, stab_idx_c = 3, stab_idx_d = 4;
+
+    // Допуск области предпочтительности: ячейка устойчива И относительная
+    // ошибка шага ||e^{hA} - R|| / ||e^{hA}|| не больше этого числа. 1 — порог
+    // из статьи (Fedoseev et al., 2022). В расчёт не входит: применяется при
+    // отрисовке и экспорте, поэтому его правка пересчёта не требует.
+    std::string stab_pref_tol_text = "1";
+
+    StabilityResult stab_result;
+    bool            stab_last_run_ok = false;
+    int             stab_data_generation = 0;
+    bool            stab_fit_request = false;
 };
 
 struct OrderAnalysisSession {
@@ -110,6 +216,8 @@ struct OrderAnalysisSession {
     std::vector<std::string> params;
     System sys;
     std::vector<CustomScheme> custom_schemes;
+    // Wrapper names for the combo; the resolver builds the body from the name.
+    std::vector<std::string>  wrapper_schemes;
     std::vector<std::string> enabled_builtin_schemes;
     std::string loaded_system_name;
 
@@ -119,6 +227,11 @@ struct OrderAnalysisSession {
     int running_config_index = -1;
 
     std::future<OrderResult> run_future;
+    // Каждый расчёт вкладки возвращает свой тип, поэтому у каждого своё
+    // future; running_kind (kOrderCalc*) говорит poll'у, какое забирать.
+    std::future<PerfResult>       perf_future;
+    std::future<StabilityResult>  stab_future;
+    int  running_kind = kOrderCalcOrder;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
 
@@ -157,3 +270,10 @@ struct OrderAnalysisSession {
 // Сколько грубых шагов сделает ячейка при данных h и t_max — та же формула,
 // что в ядре. Нужна UI, чтобы показать N и предупредить о нецелом t_max/h.
 long long order_steps_for_h(double h, double t_max, bool snap);
+
+// Допуск Ньютона, с которым вкладка собирает неявные схемы при выбранной
+// точности; 0 — системная настройка не трогается (режим double). Неявная
+// схема останавливает Ньютон по ||dX|| < newton_tol, и системные 1e-10 стали
+// бы потолком раньше арифметики. Функция публичная, потому что UI показывает
+// подставленное значение: молча менять чужую настройку нельзя.
+double order_newton_tol_for_precision(int prec);

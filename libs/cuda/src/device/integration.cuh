@@ -195,8 +195,8 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 			sample = x[writableVar];
 		}
 
-		if (doCalculatePeaks) peaks.push(sample);
-		else                  peaks.pushRaw(sample);
+		if (peaks.emitAll) peaks.pushRaw(sample);
+		else               peaks.push(sample);
 
 		for (int j = 0; j < preScaller; ++j)
 			calculateDiscreteModel(x, values, h);
@@ -488,7 +488,8 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	const int		peakCapacity,
 	const volatile int* cancelFlag,   // device-side, polled once per CHECK_INTERVAL steps
 	int*			progressCounter,  // device-side; one atomic per progressStride steps of work
-	const int		progressStride)   // 0 = не считать прогресс
+	const int		progressStride,   // 0 = не считать прогресс
+	const bool		emitAllSamples)   // true = every iterate, not just the peaks
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -522,7 +523,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
 		peaks.init(outPeaks, timeOfPeaks, (size_t)idx * peakStride,
-			h_local * (numb)preScaller, iters_local, peakCapacity);
+			h_local * (numb)preScaller, iters_local, peakCapacity, emitAllSamples);
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
@@ -530,9 +531,14 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
-		if (flag == REGIME_OSCILLATION) {
+		//
+		// Emitting every sample takes the fixed point too: for a map a period-1
+		// orbit is a legitimate single branch, and the samples are already in the
+		// buffer (the FP verdict is decided after the loop has run in full).
+		// Dropping it is what leaves the periodic windows blank.
+		if (flag == REGIME_OSCILLATION || (peaks.emitAll && flag == REGIME_FIXED_POINT)) {
 			if (maxValueCheckerArray != nullptr)
-				maxValueCheckerArray[idx] = doCalculatePeaks ? peaks.count() : peaks.countRaw();
+				maxValueCheckerArray[idx] = peaks.emitAll ? peaks.countRaw() : peaks.count();
 			// Добивка до ожидаемого числа тиков — см. тот же блок ниже.
 			if (progressCounter != nullptr && progressStride > 0) {
 				const size_t totalSteps = skip_local + iters_local;

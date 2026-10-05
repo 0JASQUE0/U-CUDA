@@ -4,6 +4,7 @@
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace {
 
@@ -113,6 +114,59 @@ bool parse_string_field(const std::string& s, const std::string& key, std::strin
     return true;
 }
 
+// Списки имён (hidden_tabs / hidden_schemes) лежат в JSON одной строкой через
+// запятую: элементы — латинские идентификаторы вкладок и имена встроенных схем,
+// запятых в них нет. Полноценный JSON-массив потребовал бы парсера, которого у
+// этого файла нет, а формат "a,b,c" читается глазами не хуже.
+std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find(',', i);
+        if (j == std::string::npos) j = s.size();
+        // Пробелы вокруг элемента терпим: файл могли править руками.
+        size_t b = i, e = j;
+        while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+        if (e > b) out.emplace_back(s, b, e - b);
+        i = j + 1;
+    }
+    return out;
+}
+
+// То же для списков, элементы которых могут содержать запятую (имена систем
+// в hidden_systems): разделитель — '\n', он в однострочных именах невозможен,
+// а json_escape/parse_string_field переживают его без потерь.
+std::vector<std::string> split_lines(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find('\n', i);
+        if (j == std::string::npos) j = s.size();
+        if (j > i) out.emplace_back(s, i, j - i);
+        i = j + 1;
+    }
+    return out;
+}
+
+std::string join_lines(const std::vector<std::string>& v) {
+    std::string out;
+    for (const auto& s : v) {
+        if (!out.empty()) out.push_back('\n');
+        out += s;
+    }
+    return out;
+}
+
+std::string join_csv(const std::vector<std::string>& v) {
+    std::string out;
+    for (const auto& s : v) {
+        if (!out.empty()) out.push_back(',');
+        out += s;
+    }
+    return out;
+}
+
 // Экранирует строку для записи в JSON (кавычки, слэши, управляющие символы).
 std::string json_escape(const std::string& s) {
     std::string o;
@@ -152,6 +206,10 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     bool bv = false;
     if (parse_bool_field(body, "use_builtin_font", bv))
         out.use_builtin_font = bv;
+    if (parse_bool_field(body, "plot_math_font", bv))
+        out.plot_math_font = bv;
+    if (parse_float_field(body, "plot_font_scale", fv))
+        out.plot_font_scale = fv;
     int iv = 0;
     if (parse_int_field(body, "heatmap_colormap", iv))
         out.heatmap_colormap = iv;
@@ -188,9 +246,28 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     parse_double_field(body, "peak_threshold",       out.peak.peak_threshold);
     parse_int_field   (body, "peak_max_amount",      out.peak.max_amount_of_peaks);
 
+    // Отсутствие ключа = ничего не скрыто (конфиг от версии без настройки);
+    // пустая строка — тоже, split_csv вернёт пустой список.
+    std::string csv;
+    if (parse_string_field(body, "hidden_tabs", csv))
+        out.hidden_tabs = split_csv(csv);
+    csv.clear();
+    if (parse_string_field(body, "hidden_schemes", csv))
+        out.hidden_schemes = split_csv(csv);
+    std::string lines;
+    if (parse_string_field(body, "hidden_systems", lines))
+        out.hidden_systems = split_lines(lines);
+
     // Отсутствие ключа оставляет дефолт true (= дефолт NVRTC), поэтому конфиг,
     // записанный до появления настройки, читается без изменения поведения.
     parse_bool_field  (body, "nvrtc_fmad",           out.nvrtc_fmad);
+    parse_bool_field  (body, "nvrtc_rdc",            out.nvrtc_rdc);
+
+    // Как и nvrtc_fmad: отсутствие ключа оставляет дефолт. Кламп здесь, а не только в UI —
+    // значение из файла могло быть поправлено руками (0, 100, 4096).
+    int bs = 0;
+    if (parse_int_field(body, "gpu_block_size", bs))
+        out.gpu_block_size = clamp_gpu_block_size(bs);
     return true;
 }
 
@@ -203,6 +280,8 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "{\n";
         f << "  \"ui_scale_override\": " << cfg.ui_scale_override << ",\n";
         f << "  \"use_builtin_font\": "  << (cfg.use_builtin_font ? "true" : "false") << ",\n";
+        f << "  \"plot_math_font\": "    << (cfg.plot_math_font ? "true" : "false") << ",\n";
+        f << "  \"plot_font_scale\": "   << cfg.plot_font_scale << ",\n";
         f << "  \"heatmap_colormap\": "  << cfg.heatmap_colormap << ",\n";
         f << "  \"basins_colormap\": "        << cfg.basins_colormap << ",\n";
         f << "  \"basins_avgpk_colormap\": "  << cfg.basins_avgpk_colormap << ",\n";
@@ -225,7 +304,12 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"peak_eps_interpeak\": "   << cfg.peak.eps_interPeak_delta << ",\n";
         f << "  \"peak_threshold\": "       << cfg.peak.peak_threshold      << ",\n";
         f << "  \"peak_max_amount\": "      << cfg.peak.max_amount_of_peaks << ",\n";
-        f << "  \"nvrtc_fmad\": "           << (cfg.nvrtc_fmad ? "true" : "false") << "\n";
+        f << "  \"hidden_tabs\": \""         << json_escape(join_csv(cfg.hidden_tabs))    << "\",\n";
+        f << "  \"hidden_schemes\": \""      << json_escape(join_csv(cfg.hidden_schemes)) << "\",\n";
+        f << "  \"hidden_systems\": \""      << json_escape(join_lines(cfg.hidden_systems)) << "\",\n";
+        f << "  \"nvrtc_fmad\": "           << (cfg.nvrtc_fmad ? "true" : "false") << ",\n";
+        f << "  \"nvrtc_rdc\": "            << (cfg.nvrtc_rdc ? "true" : "false") << ",\n";
+        f << "  \"gpu_block_size\": "       << cfg.gpu_block_size << "\n";
         f << "}\n";
         if (!f) return false;
     }

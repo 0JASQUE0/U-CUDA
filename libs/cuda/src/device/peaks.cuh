@@ -1,6 +1,7 @@
 ﻿__device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 	const size_t amountOfPoints, numb* outPeaks, numb* timeOfPeaks, numb h,
-	const size_t peakStartIndex, const int peakCapacity)
+	const size_t peakStartIndex, const int peakCapacity,
+	const bool emitAll)
 {
 	// Peaks may live in buffers whose per-thread stride is NOT sizeOfBlock (the
 	// 2D path sizes them by max_amount_of_peaks instead of by trajectory length).
@@ -10,7 +11,7 @@
 	// which is what keeps the writes inside a short peak buffer.
 	const int peakCap = peakCapacity;
 
-	if (doCalculatePeaks) {
+	if (doCalculatePeaks && !emitAll) {
 		// Переменная для хранения найденных пиков
 		int amountOfPeaks = 0;
 
@@ -127,7 +128,7 @@
 
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
-	const size_t peakStride, const int peakCapacity)
+	const size_t peakStride, const int peakCapacity, const bool emitAllSamples)
 {
 	// Вычисляем индекс потока, в котором находимся в даный момент
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -138,7 +139,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 	// FP и Unbound проносим сквозь этап без изменений: код режима остаётся в
 	// массиве и дальше читается DBSCAN'ом (см. dbscanCUDA / avgPeakFinderCUDA).
 	// Для REGIME_OSCILLATION значение перезаписывается числом найденных пиков.
-	if ( amountOfPeaks[idx] == REGIME_FIXED_POINT )
+	// Emitting every sample takes the fixed point too: for a map a period-1
+	// orbit is a real branch and its samples are already in data[].
+	if ( amountOfPeaks[idx] == REGIME_FIXED_POINT && !emitAllSamples )
 	{
 		amountOfPeaks[idx] = REGIME_FIXED_POINT;
 		return;
@@ -556,6 +559,76 @@ __device__ __host__ numb distance(numb x1, numb y1, numb x2, numb y2)
 
 	//return hypot(dx, dy);
 	return sqrt(dx*dx + dy*dy);
+}
+
+// КВАДРАТ расстояния — для сравнения с порогом, где корень не нужен.
+// Единственный потребитель — внутренний цикл dbscan(): там это сравнение выполняется
+// O(P^2) раз на ячейку, а numb = double, и на потребительских картах FP64-sqrt идёт
+// по 1/32 от FP32. Замер (RTX 2060, Рёсслер, сетка 96x96, ~366 пиков на ячейку):
+// один только отказ от корня даёт 1.41x всему ядру dbscan.
+//
+// Сравнение `d*d < eps*eps` эквивалентно `sqrt(d*d) < eps` математически, но не
+// побитово: на самой границе, где расстояние отличается от eps в последнем разряде,
+// округление sqrt может решить иначе. На замере (>10^9 сравнений, оба режима —
+// и mult_interval = 0, и 2D с mult_interval = 4) число кластеров совпало во всех
+// ячейках. eps здесь и так пользовательский допуск, а не физическая константа.
+__device__ __host__ __forceinline__ numb distance2(numb x1, numb y1, numb x2, numb y2)
+{
+	const numb dx = x2 - x1;
+	const numb dy = y2 - y1;
+	return dx*dx + dy*dy;
+}
+
+// Просеивание вниз для ucuda_heapsort.
+__device__ __host__ __forceinline__ void ucuda_sift_down(numb* a, int root, int n)
+{
+	for (;;) {
+		int child = 2 * root + 1;
+		if (child >= n) break;
+		if (child + 1 < n && a[child] < a[child + 1]) ++child;
+		if (!(a[root] < a[child])) break;
+		const numb t = a[root]; a[root] = a[child]; a[child] = t;
+		root = child;
+	}
+}
+
+// Пирамидальная сортировка по возрастанию. Выбрана из-за трёх свойств, каждое из
+// которых здесь обязательно: на месте (лишней памяти на поток нет), гарантированные
+// O(n log n) БЕЗ худшего случая (в отличие от быстрой сортировки: ряд пиков почти
+// упорядочен кусками, и quicksort с наивным опорным съехал бы в O(n^2) — ровно туда,
+// откуда мы уходим), и никакой рекурсии (стек на поток в CUDA дорог).
+__device__ __host__ void ucuda_heapsort(numb* a, int n)
+{
+	for (int start = n / 2 - 1; start >= 0; --start) ucuda_sift_down(a, start, n);
+	for (int end = n - 1; end > 0; --end) {
+		const numb t = a[0]; a[0] = a[end]; a[end] = t;
+		ucuda_sift_down(a, 0, end);
+	}
+}
+
+// Число связных компонент eps-графа для ОДНОМЕРНОГО набора точек.
+//
+// Это не эвристика, а точный ответ той же задачи, что решает общий обход в dbscan():
+// связность там транзитивная и порога minPts нет, то есть кластеры — это компоненты
+// связности графа «расстояние < eps» (одиночная связь). В одномерии такие компоненты
+// это в точности максимальные отрезки отсортированного ряда, внутри которых соседние
+// значения ближе eps. Значит, достаточно отсортировать и посчитать разрывы.
+//
+// Отсюда O(P log P) вместо O(P^2): при P = 2500 это ~56 тысяч операций против
+// 6.25 миллионов.
+//
+// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов.
+// Сравнение `!(gap < eps)` повторяет порог общего пути ровно, включая строгость.
+__device__ __host__ int ucuda_components_1d(const numb* values, numb* scratch,
+	const int amountOfPeaks, const numb eps)
+{
+	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i];
+	ucuda_heapsort(scratch, amountOfPeaks);
+
+	int clusters = 1;
+	for (int i = 1; i < amountOfPeaks; ++i)
+		if (!(scratch[i] - scratch[i - 1] < eps)) ++clusters;
+	return clusters;
 }
 
 // Функция DBSCAN

@@ -43,11 +43,11 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "level_1d_enabled")        c.level_1d_enabled = q.boolean();
                         else if (k == "level_phase_enabled")     c.level_phase_enabled = q.boolean();
                         else if (k == "scheme")                  c.scheme = q.str();
-                        else if(k == "adaptive") read_adaptive(q,c.adaptive);
                         else if (k == "symmetry_s")              c.symmetry_s = q.str();
                         else if (k == "h_text")                  c.h_text = q.str();
                         else if (k == "t_max_text")              c.t_max_text = q.str();
                         else if (k == "transient_text")          c.transient_text = q.str();
+                        else if (k == "adaptive")                read_adaptive(q, c.adaptive);
                         else if (k == "pre_scaller_text")        c.pre_scaller_text = q.str();
                         else if (k == "max_value_text")          c.max_value_text = q.str();
                         else if (k == "initial_conditions")      c.initial_conditions = q.map_ss();

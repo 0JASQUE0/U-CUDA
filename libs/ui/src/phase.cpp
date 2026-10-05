@@ -19,6 +19,29 @@ void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) {
 
 // Подпись под "OK: ..." — печатается только если есть что показать кроме
 // колебательного режима (иначе строка была бы шумом на каждом успешном run'е).
+// Сводка адаптивного шага по свипу: st — по 4 числа на точку (принятые, отвергнутые,
+// вынужденные шаги, средний h), пусто при постоянном шаге.
+void draw_adaptive_stats(const std::vector<double>& st) {
+    if (st.size() < 4) return;
+    double acc = 0, rej = 0, frc = 0, hsum = 0, hmin = 0, hmax = 0;
+    size_t n = 0;
+    for (size_t i = 0; i + 3 < st.size(); i += 4) {
+        acc += st[i]; rej += st[i + 1]; frc += st[i + 2];
+        const double hm = st[i + 3];
+        if (hm > 0) {
+            if (n == 0 || hm < hmin) hmin = hm;
+            if (n == 0 || hm > hmax) hmax = hm;
+            hsum += hm; ++n;
+        }
+    }
+    const double att = acc + rej;
+    ImGui::TextDisabled("Adaptive step: mean h %.3g (%.3g..%.3g over points), %.0f accepted, "
+                        "%.0f rejected (%.1f%%), %.0f forced",
+                        n ? hsum / (double)n : 0.0, hmin, hmax, acc, rej,
+                        att > 0 ? 100.0 * rej / att : 0.0, frc);
+}
+
+
 void draw_regime_summary(const std::vector<int>& flags) {
     int fp = 0, unb = 0, osc = 0;
     count_regimes(flags, fp, unb, osc);
@@ -95,6 +118,12 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
         for (size_t k = 0; k < s.projections.size(); ++k)
             renderers.push_back(std::make_unique<PlotRenderer>());
     }
+    // Запрос автоскейла раздаём по проекциям и сразу гасим сессионный: дальше
+    // каждая проекция отвечает за свой флаг сама (см. Projection::fit_pending).
+    if (s.fit_request) {
+        for (auto& p : s.projections) p.fit_pending = true;
+        s.fit_request = false;
+    }
     int pr_to_remove = -1;
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
@@ -136,29 +165,21 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // for a state-space trajectory.
                     projection_views(pr).view2d->show_zero_x = false;
                     projection_views(pr).view2d->show_zero_y = false;
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    projection_views(pr).view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
                     // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
-                    draw_style_toolbar("Custom line style", "phase2d", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##phase2d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##phase2d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    projection_views(pr).view2d->imdraw_lines      = pr.custom_line_style;
-                    projection_views(pr).view2d->line_thickness_px = pr.line_width;
+                    draw_proj_line_style(pr, "phase2d",
+                        "Draw iterates as markers instead of a polyline.\n"
+                        "Default for discrete maps: consecutive iterates are\n"
+                        "not joined by a continuous path, so the connecting\n"
+                        "segments are an artefact.");
 
                     // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
                     // локальный — render() ниже забирает точки синхронно. static тут был
                     // бесполезен (clear()+resize() всё равно убивает capacity) и опасен:
                     // три вызова draw_projection_windows делили бы один буфер.
-                    std::vector<std::vector<float>> series_data(res.trajectories.size());
+                    std::vector<std::vector<double>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.trajectories.size());
@@ -182,14 +203,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         if (as_point) {
                             if (!traj.empty()) {
                                 const auto& pt = traj.back();
-                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
                             }
                         } else {
                             buf.reserve(traj.size() * 2);
                             for (const auto& pt : traj) {
-                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
                             }
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
@@ -222,7 +243,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Диаграмма признаков: точечный график (значение пика; интервал до
@@ -261,7 +282,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // нулевая линия по Y тут осмысленна, по X нет.
                     projection_views(pr).view2d->show_zero_x = false;
                     projection_views(pr).view2d->show_zero_y = true;
-                    projection_views(pr).view2d->legend_ignore_series_alpha = true;
                     // ε-окружность под курсором: радиус eps в ТЕХ ЖЕ осях, в которых
                     // уложены точки (множители уже применены), поэтому накрытые ею пики —
                     // то, что dbscan сольёт в один кластер. Без DBSCAN-конфига радиуса нет
@@ -284,7 +304,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     projection_views(pr).view2d->imdraw_lines = false;
 
                     // Локальный буфер — см. series_data в ветке Phase2D выше.
-                    std::vector<std::vector<float>> feat_data(res.features.size());
+                    std::vector<std::vector<double>> feat_data(res.features.size());
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.features.size());
                     std::vector<bool> init_vis(res.features.size(), true);
@@ -302,8 +322,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             for (size_t p = 0; p < n; ++p) {
                                 if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
                                     continue;
-                                buf.push_back((float)(fp.peaks[p]     * mp));
-                                buf.push_back((float)(fp.intervals[p] * mi));
+                                buf.push_back((double)(fp.peaks[p]     * mp));
+                                buf.push_back((double)(fp.intervals[p] * mi));
                             }
                             total_pts += buf.size() / 2;
                         }
@@ -353,7 +373,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::TimeDomain) {
@@ -366,23 +386,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // y=0 rarely coincides with a meaningful reference.
                     projection_views(pr).view2d->show_zero_x = false;
                     projection_views(pr).view2d->show_zero_y = false;
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    projection_views(pr).view2d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
                     // путь (1px, α=1). Аналогично Phase2D.
-                    draw_style_toolbar("Custom line style", "timedomain", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##timedomain", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##timedomain",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    projection_views(pr).view2d->imdraw_lines      = pr.custom_line_style;
-                    projection_views(pr).view2d->line_thickness_px = pr.line_width;
+                    draw_proj_line_style(pr, "timedomain",
+                        "Draw the samples as markers instead of a polyline\n"
+                        "(on step nodes: where the adaptive step actually landed).");
 
                     double h = parse_ratio_or(s.step_h, 0.01);  if (h <= 0) h = 0.01;
                     int dec = parse_int_or(s.decimation, 1);    if (dec < 1) dec = 1;
@@ -398,7 +408,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         pr.show_var[(size_t)nvars] = false;
                     }
 
-                    projection_views(pr).view2d->x_axis.name = "t";
+                    // step_h == 1 for a map, so dt above equals decimation: the
+                    // X axis already counts iterations, only the label changes.
+                    projection_views(pr).view2d->x_axis.name = s.sys.is_map ? "n" : "t";
                     projection_views(pr).view2d->y_axis.name = "value";
 
                     projection_views(pr).view2d->pad_x = false;
@@ -406,7 +418,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     // серии: одна на (траектория k, видимая переменная vi).
                     // Локальный буфер — см. ветку Phase2D выше.
-                    std::vector<std::vector<float>> series_data;
+                    std::vector<std::vector<double>> series_data;
 
                     std::vector<PlotSeriesInput> series_in;
                     std::vector<bool> init_vis;
@@ -435,9 +447,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             series_data.emplace_back();
                             auto& buf = series_data.back();
                             buf.reserve(n * 2);
+                            // Узлы адаптивного шага идут неравномерно: время — из
+                            // результата, а не t * dt.
+                            const std::vector<double>* tk =
+                                (res.raw_nodes && k < res.times.size()) ? &res.times[k] : nullptr;
                             for (int t = 0; t < n; ++t) {
-                                buf.push_back((float)(t * dt));
-                                buf.push_back((float)(is_combo
+                                buf.push_back(tk && t < (int)tk->size() ? (*tk)[(size_t)t] : (double)(t * dt));
+                                buf.push_back((double)(is_combo
                                     ? combo_var_value(traj[t], nvars)
                                     : traj[t][vi < (int)traj[t].size() ? vi : 0]));
                             }
@@ -473,7 +489,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
@@ -578,14 +594,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         pr.rqa_colormap = cmap_idx;
                     }
                     ImGui::Checkbox("reverse colormap", &projection_views(pr).viewrp->reverse_colormap);
-                    hint("Инвертирует шкалу. Для матрицы расстояний это переключает, каким концом "
-                         "шкалы читается близость точек; для бинарной — какой уровень тёмный.");
+                    hint("Inverts the scale. For the distance matrix this switches which end of "
+                         "the scale reads as closeness of points; for the binary one, which level is dark.");
 
                     ImGui::Checkbox("autoscale color", &projection_views(pr).viewrp->autoscale);
-                    hint("Включено: шкала берётся из данных — 0..max(D) для матрицы расстояний и "
-                         "0..1 для бинарной. Выключено: границы задаются вручную полями ниже.\n"
-                         "Ручной диапазон полезен, чтобы сравнивать две матрицы по одной шкале, но "
-                         "на бинарном виде он ломает соответствие уровней 0/1 полосам colorbar'а.");
+                    hint("On: the scale is taken from the data - 0..max(D) for the distance matrix and "
+                         "0..1 for the binary one. Off: the bounds are set manually in the fields below.\n"
+                         "A manual range is useful for comparing two matrices on one scale, but "
+                         "on the binary view it breaks the match between levels 0/1 and the colorbar bands.");
                     if (!projection_views(pr).viewrp->autoscale) {
                         // Ровно как в draw_heatmap_toolbar: текст парсится каждый кадр, значение
                         // кладётся в float-поля вью (parse_ratio_or понимает и дроби вида 1/3).
@@ -599,24 +615,24 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     ImGui::SeparatorText("Lines");
                     ch |= InputNumStr("Theiler window", pr.rqa_theiler_text, 100.0f);
-                    hint("Пары с |i-j| <= w исключаются полностью. Для потоков "
-                        "обязательно: без окна соседние по времени точки дают ложные диагонали и завышают DET/LAM.");
+                    hint("Pairs with |i-j| <= w are excluded entirely. For flows this is "
+                        "mandatory: without the window, points adjacent in time give false diagonals and inflate DET/LAM.");
                     ch |= InputNumStr("l_min", pr.rqa_lmin_text, 100.0f);
                     ch |= InputNumStr("v_min", pr.rqa_vmin_text, 100.0f);
 
                     ImGui::SeparatorText("Sampling");
                     ch |= InputNumStr("RP points (n)", pr.rqa_points_text, 100.0f);
-                    hint("Сторона матрицы. Траектория равномерно прореживается до n точек; метрики "
-                        "считаются по ТОЙ ЖЕ матрице, что нарисована. Потолок 4096 (4096^2 doubles = "
-                        "134 МБ и на GPU, и в памяти хоста).\n"
-                        "Замеры на RTX: 512 ~ 3 мс, 1024 ~ 6 мс, 2048 ~ 20 мс, 4096 ~ 70 мс.");
+                    hint("Side of the matrix. The trajectory is decimated uniformly to n points; the metrics "
+                        "are computed on THE SAME matrix that is drawn. The ceiling is 4096 (4096^2 doubles = "
+                        "134 MB both on the GPU and in host memory).\n"
+                        "Measured on an RTX: 512 ~ 3 ms, 1024 ~ 6 ms, 2048 ~ 20 ms, 4096 ~ 70 ms.");
                     ch |= ImGui::Checkbox("network measures (clustering, transitivity)", &pr.rqa_network);
-                    hint("Подсчёт треугольников сети рекуррентности: O(RR*n^3). Замеры: +30 мс на "
-                        "n=2048, +85 мс на n=4096 сверх обычного расчёта. Поэтому по умолчанию выключено.");
+                    hint("Counting triangles of the recurrence network: O(RR*n^3). Measured: +30 ms at "
+                        "n=2048, +85 ms at n=4096 on top of the usual computation. That is why it is off by default.");
                     ch |= ImGui::Checkbox("compute in continuation mode", &pr.rqa_in_continuation);
-                    hint("В continuation кадр идёт раз в ~50 мс, а RQA на n=2048 стоит ~20 мс из них "
-                        "(на 4096 — 70 мс, то есть кадр уже не выдерживается). Если не укладывается, снимите "
-                        "галочку: траектории продолжат считаться, RQA замрёт до обычного Recompute.");
+                    hint("In continuation a frame comes once every ~50 ms, and RQA at n=2048 costs ~20 ms of that "
+                        "(at 4096 it is 70 ms, i.e. the frame no longer holds). If it does not fit, clear the "
+                        "checkbox: trajectories keep being computed, RQA freezes until the next ordinary Recompute.");
 
                     if (ch) s.rqa_dirty = true;
                     ImGui::EndPopup();
@@ -640,23 +656,23 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         const rqa::Metrics& M = rq->metrics;
                         struct Row { const char* name; double val; const char* tip; };
                         const Row rows[] = {
-                            { "RR",     M.RR,     "Recurrence rate: доля рекуррентных пар вне окна Тейлера" },
-                            { "DET",    M.DET,    "Determinism: доля точек, лежащих на диагоналях длины >= l_min" },
-                            { "L",      M.L,      "Средняя длина диагональной линии, в отсчётах" },
-                            { "L_max",  M.L_max,  "Самая длинная диагональ (без LOI), в отсчётах" },
+                            { "RR",     M.RR,     "Recurrence rate: fraction of recurrent pairs outside the Theiler window" },
+                            { "DET",    M.DET,    "Determinism: fraction of points lying on diagonals of length >= l_min" },
+                            { "L",      M.L,      "Mean diagonal line length, in samples" },
+                            { "L_max",  M.L_max,  "Longest diagonal (excluding the LOI), in samples" },
                             { "DIV",    M.DIV,    "1 / L_max" },
-                            { "ENTR",   M.ENTR,   "Энтропия Шеннона распределения диагоналей, нат" },
+                            { "ENTR",   M.ENTR,   "Shannon entropy of the diagonal length distribution, nats" },
                             { "RATIO",  M.RATIO,  "DET / RR" },
-                            { "LAM",    M.LAM,    "Laminarity: доля точек на вертикалях длины >= v_min" },
-                            { "TT",     M.TT,     "Trapping time: средняя вертикаль, в отсчётах" },
-                            { "V_max",  M.V_max,  "Самая длинная вертикаль, в отсчётах" },
-                            { "V_ENTR", M.V_ENTR, "Энтропия распределения вертикалей, нат" },
-                            { "TREND",  M.TREND,  "Наклон линейной регрессии RR по номеру диагонали (RR на отсчёт)" },
-                            { "T1",     M.T1,     "Время возврата 1-го рода, в отсчётах" },
-                            { "T2",     M.T2,     "Время возврата 2-го рода (по началам вертикальных блоков)" },
-                            { "W",      M.W,      "Средняя длина белой вертикали, в отсчётах" },
-                            { "W_max",  M.W_max,  "Самая длинная белая вертикаль, в отсчётах" },
-                            { "RTE",    M.RTE,    "Recurrence time entropy, нормирована на [0,1]" },
+                            { "LAM",    M.LAM,    "Laminarity: fraction of points on verticals of length >= v_min" },
+                            { "TT",     M.TT,     "Trapping time: mean vertical, in samples" },
+                            { "V_max",  M.V_max,  "Longest vertical, in samples" },
+                            { "V_ENTR", M.V_ENTR, "Entropy of the vertical length distribution, nats" },
+                            { "TREND",  M.TREND,  "Slope of the linear regression of RR on diagonal index (RR per sample)" },
+                            { "T1",     M.T1,     "Recurrence time of the first kind, in samples" },
+                            { "T2",     M.T2,     "Recurrence time of the second kind (from the starts of vertical blocks)" },
+                            { "W",      M.W,      "Mean white vertical length, in samples" },
+                            { "W_max",  M.W_max,  "Longest white vertical, in samples" },
+                            { "RTE",    M.RTE,    "Recurrence time entropy, normalised to [0,1]" },
                         };
                         if (ImGui::BeginTable("rqa_metrics", 6,
                                 ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
@@ -713,8 +729,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         pr.rqa_view_mode_applied = pr.rqa_view_mode;
                     }
 
-                    projection_views(pr).viewrp->x_axis.name = "t_j, s";
-                    projection_views(pr).viewrp->y_axis.name = "t_i, s";
+                    projection_views(pr).viewrp->x_axis.name = s.sys.is_map ? "n_j" : "t_j, s";
+                    projection_views(pr).viewrp->y_axis.name = s.sys.is_map ? "n_i" : "t_i, s";
                     // Свой экспорт вместо phase_popup_extras: из этого окна нужны матрица и
                     // метрики, а не траектории. Траекторный экспорт оставлен вторым пунктом —
                     // он тут тоже осмыслен (RQA считалась именно по ним).
@@ -742,7 +758,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                       (i ^ owner_id_delta) ^ 0x5251A0, data_gen,
                                       n, n, values,
                                       rq->t0, rq->t1, rq->t0, rq->t1,
-                                      vlo, vhi, s.fit_request);
+                                      vlo, vhi, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::Phase3D) {
@@ -752,8 +768,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 }
                 else {
                     if (!projection_views(pr).view3d) projection_views(pr).view3d = std::make_unique<Plot3DView>();
-                    // Alpha slider fades the trajectory, not the legend swatch.
-                    projection_views(pr).view3d->legend_ignore_series_alpha = true;
 
                     // Toolbar над плотом: opt-in custom line styling (толщина + α). В 3D нет
                     // ImDrawList-fallback (потерялся бы depth-sorting), толщина идёт через
@@ -768,8 +782,27 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             ch |= ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Points##phase3d", &pr.draw_points);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
+                                          "Default for discrete maps.");
+                    if (pr.draw_points) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(110);
+                        ImGui::SliderFloat("size##phase3dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
+                        if (pr.custom_line_style) {   // своя альфа точек (см. draw_proj_line_style)
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(110);
+                            ImGui::SliderFloat("alpha##phase3dpt", &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+                        }
+                    }
+                    projection_views(pr).view3d->point_alpha = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
                     projection_views(pr).view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     projection_views(pr).view3d->custom_line_style = pr.custom_line_style;
+                    projection_views(pr).view3d->points_mode       = pr.draw_points;
+                    projection_views(pr).view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
+                    projection_views(pr).view3d->point_size_px     = pr.point_size;
 
                     projection_views(pr).view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
                     projection_views(pr).view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
@@ -789,9 +822,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         auto& buf = series_data[k];
                         buf.reserve(traj.size() * 3);
                         for (const auto& pt : traj) {
-                            buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
-                            buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
-                            buf.push_back((float)pt[az < (int)pt.size() ? az : 0]);
+                            buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                            buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
+                            buf.push_back((double)pt[az < (int)pt.size() ? az : 0]);
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
                         if (s.legend_show_ic) lab = ic_legend_text(res, k);
@@ -818,13 +851,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view3d->popup_extras = phase_popup_extras;
                     projection_views(pr).view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             else if (pr.type == ProjType::ContinuationDiagram) {
                 const int av = pr.axis_x;
                 if (s.continuation_peaks.empty()) {
-                    ImGui::TextDisabled("No data. Enable Continuation (live) and press Recompute.");
+                    ImGui::TextDisabled("No data. Press Recompute (Continuation (live) accumulates across runs).");
                 }
                 else {
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
@@ -835,11 +868,10 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
                     else                                    ax_name = s.vars[av < nv_ax ? av : 0];
 
-                    projection_views(pr).view2d->x_axis.name = "t, s";
+                    projection_views(pr).view2d->x_axis.name = s.sys.is_map ? "n" : "t, s";
                     projection_views(pr).view2d->y_axis.name = "peak " + ax_name;
                     projection_views(pr).view2d->show_zero_x = false;
                     projection_views(pr).view2d->show_zero_y = true;
-                    projection_views(pr).view2d->legend_ignore_series_alpha = true;
 
                     draw_style_toolbar("Custom point style", "contdiag", pr.custom_line_style,
                         [&pr]() {
@@ -860,7 +892,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     size_t total_pts = 0;
                     for (size_t k = 0; k < s.continuation_peaks.size(); ++k) {
                         const auto& per_var = s.continuation_peaks[k];
-                        const float* pts = nullptr;
+                        const double* pts = nullptr;
                         int          np  = 0;
                         if (av >= 0 && av < (int)per_var.size()) {
                             const auto& buf = per_var[(size_t)av];
@@ -898,17 +930,175 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, s.fit_request);
+                        series_in, init_vis, glob_vis, pr.fit_pending);
+                }
+            }
+            // h(t) адаптивного шага: принятые шаги линией, отвергнутые попытки —
+            // крестиками, вынужденные (на h_min) — квадратами. Данные — лог попыток.
+            else if (pr.type == ProjType::StepSize) {
+                if (!res.ok || !res.adaptive || res.step_log.empty()) {
+                    ImGui::TextDisabled("No data. The step-size plot needs the adaptive step "
+                                        "(Step size -> Adaptive step).");
+                }
+                else {
+                    if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
+                    // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
+                    const bool prev_ylog = pr.y_log;
+                    ImGui::Checkbox("log Y##stepsize", &pr.y_log);
+                    if (pr.y_log != prev_ylog) pr.fit_pending = true;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
+                                          "(stiff parts, rejections near h_min) become readable.");
+                    ImGui::SameLine();
+                    draw_proj_line_style(pr, "stepsize",
+                        "Draw the accepted steps as markers instead of a line.");
+                    projection_views(pr).view2d->x_axis.name = "t";
+                    projection_views(pr).view2d->y_axis.name = pr.y_log ? "log10 h" : "h";
+                    projection_views(pr).view2d->show_zero_x = false;
+                    projection_views(pr).view2d->show_zero_y = false;
+
+                    std::vector<std::vector<double>> bufs;
+                    bufs.reserve(res.step_log.size() * 3);   // указатели серий не должны переехать
+                    std::vector<PlotSeriesInput> series_in;
+                    std::vector<bool> init_vis, glob_vis;
+                    for (size_t k = 0; k < res.step_log.size(); ++k) {
+                        const std::vector<double>& lg = res.step_log[k];
+                        std::vector<double> acc, rej, frc;
+                        for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
+                            const double t = lg[r], code = lg[r + 3];
+                            double hh = lg[r + 1];
+                            if (pr.y_log) {
+                                if (!(hh > 0)) continue;   // log10 не определён
+                                hh = std::log10(hh);
+                            }
+                            if (code == 0) { rej.push_back(t); rej.push_back(hh); continue; }
+                            acc.push_back(t); acc.push_back(hh);
+                            if (code == 2) { frc.push_back(t); frc.push_back(hh); }
+                        }
+                        const std::string who = (k < res.labels.size()) ? res.labels[k]
+                                                                        : ("IC" + std::to_string(k + 1));
+                        const bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        struct Part { std::vector<double>* v; const char* name; int marker; ImVec4 col; };
+                        const Part parts[3] = {
+                            { &acc, "h",        -1, ic_base_color((int)k) },
+                            { &rej, "rejected", (int)PointMarker::Cross,  ImVec4(0.90f, 0.30f, 0.30f, 1.0f) },
+                            { &frc, "forced",   (int)PointMarker::Square, ImVec4(1.00f, 0.65f, 0.20f, 1.0f) },
+                        };
+                        for (const Part& part : parts) {
+                            if (part.v->empty()) continue;
+                            bufs.push_back(std::move(*part.v));
+                            PlotSeriesInput si;
+                            si.points = bufs.back().data();
+                            si.n_points = (int)(bufs.back().size() / 2);
+                            si.color = part.col;
+                            if (part.marker >= 0) {
+                                si.points_override = 1;
+                                si.point_marker    = part.marker;
+                                si.point_size_px   = 4.0f;
+                            }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
+                            si.label = std::string(part.name) + " [" + who + "]";
+                            series_in.push_back(si);
+                            init_vis.push_back(true);
+                            glob_vis.push_back(ic_vis);
+                        }
+                    }
+                    int data_gen = s.data_generation * 1000 + (pr.y_log ? 507 : 7);   // log Y — другие данные
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    projection_views(pr).view2d->popup_extras = phase_popup_extras;
+                    projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, pr.fit_pending);
+                }
+            }
+            // Отказы адаптивного шага: у каждого принятого шага — сколько попыток ему
+            // отвергли (маркер, шаги без отказов не рисуются; вынужденные — квадратом), и
+            // скользящее среднее по kWin принятым шагам — доля лишних вычислений схемы.
+            // Точка стоит в начале шага. Данные — лог попыток, как у Step size.
+            else if (pr.type == ProjType::Rejections) {
+                if (!res.ok || !res.adaptive || res.step_log.empty()) {
+                    ImGui::TextDisabled("No data. The rejections plot needs the adaptive step "
+                                        "(Step size -> Adaptive step).");
+                }
+                else {
+                    if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
+                    draw_proj_line_style(pr, "rejections",
+                        "Draw the moving mean as markers instead of a line.");
+                    projection_views(pr).view2d->x_axis.name = "t";
+                    projection_views(pr).view2d->y_axis.name = "rejected per step";
+                    projection_views(pr).view2d->show_zero_x = false;
+                    projection_views(pr).view2d->show_zero_y = false;
+
+                    constexpr int kWin = 100;
+                    std::vector<std::vector<double>> bufs;
+                    bufs.reserve(res.step_log.size() * 3);   // указатели серий не должны переехать
+                    std::vector<PlotSeriesInput> series_in;
+                    std::vector<bool> init_vis, glob_vis;
+                    for (size_t k = 0; k < res.step_log.size(); ++k) {
+                        const std::vector<double>& lg = res.step_log[k];
+                        std::vector<double> rej, frc, mean;
+                        int cnt = 0, wsum = 0, wn = 0, wpos = 0;
+                        int win[kWin] = {};
+                        for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
+                            const double code = lg[r + 3];
+                            if (code == 0) { ++cnt; continue; }
+                            const double t = lg[r];
+                            if (code == 2) { frc.push_back(t); frc.push_back(cnt); }
+                            else if (cnt > 0) { rej.push_back(t); rej.push_back(cnt); }
+                            wsum += cnt - (wn == kWin ? win[wpos] : 0);
+                            win[wpos] = cnt; wpos = (wpos + 1) % kWin;
+                            if (wn < kWin) ++wn;
+                            mean.push_back(t); mean.push_back((double)wsum / wn);
+                            cnt = 0;
+                        }
+                        const std::string who = (k < res.labels.size()) ? res.labels[k]
+                                                                        : ("IC" + std::to_string(k + 1));
+                        const bool ic_vis = (k < s.ic_sets.size()) ? s.ic_sets[k].visible : true;
+                        struct Part { std::vector<double>* v; const char* name; int marker; ImVec4 col; };
+                        const Part parts[3] = {
+                            { &mean, "mean of 100 steps", -1, ic_base_color((int)k) },
+                            { &rej,  "rejected",          (int)PointMarker::Cross,  ImVec4(0.90f, 0.30f, 0.30f, 1.0f) },
+                            { &frc,  "forced",            (int)PointMarker::Square, ImVec4(1.00f, 0.65f, 0.20f, 1.0f) },
+                        };
+                        for (const Part& part : parts) {
+                            if (part.v->empty()) continue;
+                            bufs.push_back(std::move(*part.v));
+                            PlotSeriesInput si;
+                            si.points = bufs.back().data();
+                            si.n_points = (int)(bufs.back().size() / 2);
+                            si.color = part.col;
+                            if (part.marker >= 0) {
+                                si.points_override = 1;
+                                si.point_marker    = part.marker;
+                                si.point_size_px   = 4.0f;
+                            }
+                            else if (pr.custom_line_style) si.color.w = pr.alpha;   // α — линии, не маркерам
+                            si.label = std::string(part.name) + " [" + who + "]";
+                            series_in.push_back(si);
+                            init_vis.push_back(true);
+                            glob_vis.push_back(ic_vis);
+                        }
+                    }
+                    int data_gen = s.data_generation * 1000 + 8;
+                    ImVec2 avail  = ImGui::GetContentRegionAvail();
+                    ImVec2 origin = ImGui::GetCursorScreenPos();
+                    projection_views(pr).view2d->popup_extras = phase_popup_extras;
+                    projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
+                        series_in, init_vis, glob_vis, pr.fit_pending);
                 }
             }
             ImGui::PopID();
+            // Окно реально отрисовалось в этом кадре — автоскейл до него дошёл.
+            // Гасим здесь, а не после цикла: у невидимых окон Begin вернул
+            // false, и их запрос должен дожить до кадра, когда их покажут.
+            // Ветка "No data" тоже гасит: фитить нечего, а приход результата
+            // взведёт fit_request заново.
+            pr.fit_pending = false;
         }
         ImGui::End();
         if (!open) pr_to_remove = i; // окно закрыто крестиком
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
-    // автоскейл применён ко всем окнам в этом кадре — сбрасываем запрос
-    s.fit_request = false;
 }
 
 

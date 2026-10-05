@@ -82,7 +82,7 @@ void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     }
     // Custom КРС на CPU требует внешнего компилятора — та же проверка, что и в
     // draw_phase_controls; без него молча возвращаем GPU.
-    if (is_custom_scheme(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
+    if (scheme_needs_compiled_body(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
         std::string why;
         if (!krs_cpu_backend_available(&why)) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom scheme requires GPU: %s)", why.c_str());
@@ -243,13 +243,16 @@ void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
 
 void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Basins;
+    model.broadcast_source_idx = s.active_config_index;
 
     ImGui::Text("Basins of attraction");
     ImGui::TextDisabled("DBSCAN clustering in (avgPeak, avgInterval) plane.");
 
     // Run / Run all... — сразу под пикером системы, над таб-баром: управляют активным конфигом
     // и должны быть доступны без прокрутки. "Run all..." кладёт выбранные индексы в
-    // model.basins_queue; AppModel::tick запускает следующий элемент после poll.
+    // model.basins_queue; draw_gui тикает очередь после poll'ов.
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;
@@ -295,8 +298,8 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
-    draw_adaptive_controls(c.adaptive);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Axes (X, Y по двум IC-переменным)
@@ -318,7 +321,9 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     } else {
         ImGui::TextDisabled("No variables (load a system first)");
     }
-    InputNumStr("Resolution", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
 
     // Writable var (для peak finder)
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##bas_wv");
@@ -334,7 +339,9 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration", c.scheme, s.custom_schemes, f);
+        f.adaptive      = &c.adaptive;
+        f.adaptive_opts = kAdUiRaw | kAdUiInterp;
+        draw_integration_block("Integration", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
     // Features (DBSCAN axes + plot data) (collapsible)
@@ -377,8 +384,10 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
 
     draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
-                          "Values for non-axis variables.");
-    draw_named_num_fields("Parameters", s.params, c.param_values);
+                          "Values for non-axis variables.",
+                          &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters", s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
 
     // Phase portraits from basins (collapsible)
     // Отдельные окна 2D / Time domain по одной представительной точке из
@@ -397,6 +406,7 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             c.result.n_pts, c.result.n_pts,
             c.result.n_clusters, -c.result.min_cluster_idx);
         draw_regime_summary(c.result.helpful_array);
+        draw_adaptive_stats(c.result.ad_stats);
     } else if (!c.last_error.empty()) {
         draw_error_box("##basins_err", c.last_error);
     }
@@ -427,9 +437,9 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     const unsigned base_oid = basins_base_oid(s.active_config_index);
     auto& renderer = ui_resource<std::unique_ptr<PlotRenderer>, 7>();
     // hm_basins — на уровне файла (basins_heatmaps()), см. комментарий у объявления.
-    auto& hm_avgpk = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 1001>();
-    auto& hm_avgint = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 1002>();
-    auto& hm_states = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 1003>();
+    auto& hm_avgpk = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 80>();
+    auto& hm_avgint = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 81>();
+    auto& hm_states = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 8>();
     auto& scatter_views = ui_resource<std::map<unsigned, std::unique_ptr<Plot2DView>>, 9>();
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
     auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
@@ -487,10 +497,22 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             }
         });
     };
-    hm_basins_v.popup_extras = basins_export_extras;
-    hm_avgpk_v.popup_extras  = basins_export_extras;
-    hm_avgint_v.popup_extras = basins_export_extras;
-    hm_states_v.popup_extras = basins_export_extras;
+    // Ctrl+T: у четырёх карт обе оси — сетка начальных условий, то есть прямо
+    // поля расчёта. Scatter живёт в пространстве фич (avgPeak, avgInterval) и
+    // диапазонов расчёта по своим осям не имеет — ему только экспорт.
+    const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, s.active_config_index,
+        &BasinsConfig::axis_x_lo_text, &BasinsConfig::axis_x_hi_text,
+        &BasinsConfig::axis_y_lo_text, &BasinsConfig::axis_y_hi_text) };
+    auto grid_extras = [&](HeatmapView& hv) {
+        return [&basins_export_extras, &vrt, &model, &hv]() {
+            basins_export_extras();
+            draw_view_range_menu(vrt, hv.x_axis, hv.y_axis, hv.swap_axes, &model);
+        };
+    };
+    hm_basins_v.popup_extras = grid_extras(hm_basins_v);
+    hm_avgpk_v.popup_extras  = grid_extras(hm_avgpk_v);
+    hm_avgint_v.popup_extras = grid_extras(hm_avgint_v);
+    hm_states_v.popup_extras = grid_extras(hm_states_v);
     scatter_v.popup_extras   = basins_export_extras;
 
     // Inner tab-bar — переключение по 5 видам.
@@ -606,6 +628,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
+        handle_view_range_keys(vrt, hm_basins_v.x_axis, hm_basins_v.y_axis, plot_window_active(),
+                               hm_basins_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 1) {
         hm_avgpk_v.x_axis.name = ax_x;
@@ -615,6 +639,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                          n, n, c.result.avg_peaks.data(),
                          xlo, xhi, ylo, yhi,
                          c.result.avg_peaks_min, c.result.avg_peaks_max, fit);
+        handle_view_range_keys(vrt, hm_avgpk_v.x_axis, hm_avgpk_v.y_axis, plot_window_active(),
+                               hm_avgpk_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 2) {
         hm_avgint_v.x_axis.name = ax_x;
@@ -624,6 +650,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                           n, n, c.result.avg_intervals.data(),
                           xlo, xhi, ylo, yhi,
                           c.result.avg_intervals_min, c.result.avg_intervals_max, fit);
+        handle_view_range_keys(vrt, hm_avgint_v.x_axis, hm_avgint_v.y_axis, plot_window_active(),
+                               hm_avgint_v.swap_axes, &model);
     }
     else if (c.active_plot_tab == 3) {
         // States: рисуем helpful_array КАК ЕСТЬ, в канонических REGIME_*
@@ -641,6 +669,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                           n, n, buf.data(),
                           xlo, xhi, ylo, yhi,
                           -1.0, 1.0, fit);
+        handle_view_range_keys(vrt, hm_states_v.x_axis, hm_states_v.y_axis, plot_window_active(),
+                               hm_states_v.swap_axes, &model);
         // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
         ImGui::TextDisabled("Levels: -1 = FixedPoint, 0 = Unbound, 1 = Oscillation");
     }
@@ -655,7 +685,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         int min_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
 
         // Сгруппируем точки по basin_idx.
-        std::map<int, std::vector<float>> bufs;
+        std::map<int, std::vector<double>> bufs;
         int valid_pts = 0;
         for (size_t k = 0; k < total; ++k) {
             int id = src_idx[k];
@@ -664,8 +694,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             if (!std::isfinite(xp) || !std::isfinite(yp)) continue;
             if (xp ==  kSentinelNoData || xp == -kSentinelNoData ||
                 yp ==  kSentinelNoData || yp == -kSentinelNoData) continue;
-            bufs[id].push_back((float)xp);
-            bufs[id].push_back((float)yp);
+            bufs[id].push_back((double)xp);
+            bufs[id].push_back((double)yp);
             ++valid_pts;
         }
         if (valid_pts == 0) {
@@ -676,7 +706,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         // Буферы локальные: render() ниже забирает точки синхронно, дольше
         // вызова указатели не нужны (static здесь ещё и делил бы память между
         // config'ами бассейнов).
-        std::vector<std::vector<float>> series_buffers;
+        std::vector<std::vector<double>> series_buffers;
         std::vector<std::string>        series_labels;
         series_buffers.reserve(bufs.size());
         series_labels.reserve(bufs.size());
@@ -796,12 +826,16 @@ void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
 // Mode 0 = On Attractor (trajectory + per-point error); Mode 1 = On Grid.
 void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     FastSyncAnalysisSession& s = model.fastsync_session;
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::FastSync;
+    model.broadcast_source_idx = s.active_config_index;
 
     // Source of truth для custom-схем — AppModel (редактируются в Library).
     // load_from_record() сохраняет снапшот ОДНОКРАТНО при входе в режим, поэтому
     // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
     // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
     s.custom_schemes = model.custom_schemes;
+    s.wrapper_schemes   = model.enabled_wrapper_schemes();
 
     ImGui::Text("Fast Synchro");
     ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
@@ -864,8 +898,8 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::Separator();
 
     // Scheme
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
-    draw_adaptive_controls(c.adaptive);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
     ImGui::Separator();
@@ -887,7 +921,9 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo(axis_role_y, &c.axis_y_var, items.data(), (int)items.size());
         InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
         InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
-        InputNumStr("Resolution", c.n_pts_text, kFieldW);
+        InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
         // Какую сторону перебирать по сетке: master IC (legacy default) или slave IC.
         ImGui::Checkbox("Vary slave IC (master fixed)##fs_gridswap", &c.grid_swap_master_slave);
         ImGui::TextDisabled("Off: grid sweeps master IC, slave fixed. On: grid sweeps slave IC, master fixed.");
@@ -900,14 +936,28 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
+        // 3D-портрет — только когда есть третья переменная.
+        const bool can_3d = s.vars.size() >= 3;
+        if (!can_3d) c.plot_3d = false;
+        ImGui::BeginDisabled(!can_3d);
+        ImGui::Checkbox("3D plot##fs_plot3d", &c.plot_3d);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(can_3d ? "Phase portrait in 3D, coloured by the sync error."
+                                     : "Needs at least three state variables.");
+        if (c.plot_3d) {
+            if (c.axis_z_var < 0 || c.axis_z_var >= (int)s.vars.size()) c.axis_z_var = 2;
+            ImGui::SetNextItemWidth(kComboW);
+            ImGui::Combo("Display Z var", &c.axis_z_var, items.data(), (int)items.size());
+        }
         ImGui::Separator();
     }
 
     // Integration (collapsible)
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("h",                c.h_text, kFieldW);
+        if (!model.is_map) InputNumStr("h",  c.h_text, kFieldW);
         if (c.mode == 0) {
-            InputNumStr("t_max",        c.t_max_text, kFieldW);
+            InputNumStr(model.is_map ? "iterations" : "t_max", c.t_max_text, kFieldW);
         }
         if (c.mode == 1) {
             // On Grid: у каждой системы свой транзиент. Свипуемая сеткой
@@ -1006,7 +1056,8 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     // Parameters (collapsible, placed under Synchro runtime)
-    draw_named_num_fields("Parameters", s.params, c.param_values);
+    draw_named_num_fields("Parameters", s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
 
     // Парные сворачиваемые секции: клик по любому заголовку сворачивает обе половины.
     // Общее состояние навязывается каждому заголовку через SetNextItemOpen каждый кадр,

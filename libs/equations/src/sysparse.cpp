@@ -122,6 +122,35 @@ namespace {
         return out;
     }
 
+    // Map mode: strips the iteration index, turning x_{n+1} = f(x_n, y_n) into
+    // x = f(x, y). The index symbol is taken from the first "_{?+1}" (default n)
+    // and returned via sym so detect_alphabet does not file it as a parameter.
+    //
+    // Call AFTER strip_env (its flatten regex leaves _{n+1} alone because of the
+    // '+') and BEFORE insert_mult: that one scans names with isalpha only and
+    // never clears prev_operand on '_', so a surviving x_n would become "x_ * n".
+    std::string strip_iteration_index(std::string s, char& sym) {
+        std::smatch m;
+        sym = 'n';
+        if (std::regex_search(s, m, std::regex(R"(_\s*\{\s*([A-Za-z])\s*\+\s*1\s*\})")))
+            sym = std::string(m[1])[0];
+        const std::string c(1, sym);
+        // Order matters: longest form first, else "_{n+1}" would only lose "_n".
+        s = std::regex_replace(s, std::regex(R"(_\s*\{\s*)" + c + R"(\s*\+\s*1\s*\})"), "");
+        s = std::regex_replace(s, std::regex(R"(_\s*\{\s*)" + c + R"(\s*\})"), "");
+        s = std::regex_replace(s, std::regex(R"(_)" + c + R"((?![A-Za-z0-9_]))"), "");
+        return s;
+    }
+
+    // Map mode: the LHS is a bare name already (the index was stripped above).
+    // A greek command \theta is accepted too, as lhs_var does for \dot{\theta}.
+    std::string lhs_var_map(const std::string& lhs) {
+        std::smatch m;
+        if (std::regex_match(lhs, m, std::regex(R"(\s*\\?([A-Za-z]\w*)\s*)")))
+            return m[1];
+        return "";
+    }
+
     std::string lhs_var(const std::string& lhs) {
         std::smatch m;
         // \dot — извлекаем базовое имя, затем ищем индекс _idx в ОСТАТКЕ строки
@@ -175,6 +204,18 @@ namespace {
     // Токенизация правой части по известному алфавиту с вставкой '*'.
     // Алфавит: точные имена (греческие как \sigma и обычные как x).
     // Возвращает выражение с явными операторами, годное для основного парсера.
+    // Math functions the expression parser accepts. Mirrors known_funcs() in
+    // codegen.cpp — that one is the source of truth and raises "unknown
+    // function" for anything missing here.
+    const std::set<std::string>& math_funcs() {
+        static const std::set<std::string> f = {
+            "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
+            "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
+            "pow","atan2","fmod","floor","ceil"
+        };
+        return f;
+    }
+
     std::string insert_mult(const std::string& rhs,
         const std::set<std::string>& alpha_plain,   // x, y, b ...
         const std::set<std::string>& alpha_greek) { // sigma, omega ...
@@ -217,6 +258,20 @@ namespace {
                 continue;
             }
             if (std::isalpha((unsigned char)c)) {
+                // A whole-run function name beats the greedy alphabet scan below:
+                // otherwise "cos" with a parameter named c is eaten as c plus a
+                // junk tail "os". A space still separates letters, so "a cos(x)"
+                // keeps its run as "cos" and only a glued "acos(x)" reads as
+                // arc-cosine. A user symbol of the same name still wins.
+                {
+                    size_t w = i;
+                    while (w < rhs.size() && std::isalpha((unsigned char)rhs[w])) ++w;
+                    const std::string run = rhs.substr(i, w - i);
+                    if (math_funcs().count(run) && !alpha_plain.count(run)) {
+                        if (prev_operand) out += " * ";
+                        out += run; prev_operand = false; i = w; continue;
+                    }
+                }
                 // жадно режем по алфавиту обычных имён: ищем самое длинное совпадение
                 std::string best;
                 for (size_t L = 1; i + L <= rhs.size(); ++L) {
@@ -426,7 +481,8 @@ namespace {
 System parse_system_from_latex(const std::string& multiline_latex,
     const std::vector<std::string>& alphabet,
     ParamOrder order,
-    const FuncDefs& funcs) {
+    const FuncDefs& funcs,
+    bool discrete_map) {
     // разделяем алфавит на греческие (многобуквенные имена команд) и обычные
     std::set<std::string> alpha_plain, alpha_greek;
     for (auto& a : alphabet) {
@@ -442,10 +498,11 @@ System parse_system_from_latex(const std::string& multiline_latex,
     }
 
     std::string s = strip_env(multiline_latex);
+    if (discrete_map) { char sym = 'n'; s = strip_iteration_index(s, sym); }
     std::vector<std::string> rows = split_rows(s);
     if (rows.empty()) throw std::runtime_error("no equations found in OCR output");
 
-    System sys; sys.latex = true;
+    System sys; sys.latex = true; sys.is_map = discrete_map;
     std::set<std::string> used_syms;
 
     for (auto& row : rows) {
@@ -457,15 +514,19 @@ System parse_system_from_latex(const std::string& multiline_latex,
             bool has_alpha = false;
             for (char ch : eqn) if (std::isalpha((unsigned char)ch)) { has_alpha = true; break; }
             if (!has_alpha) continue; // действительно пустая/служебная — пропускаем
-            throw std::runtime_error("equation without '=' (LHS with derivative required): " + eqn);
+            throw std::runtime_error(discrete_map
+                ? "equation without '=' (expected x_{n+1} = ...): " + eqn
+                : "equation without '=' (LHS with derivative required): " + eqn);
         }
         size_t eq = eqn.find('=');
         std::string lhs = clean_part(eqn.substr(0, eq));
         std::string rhs = clean_part(eqn.substr(eq + 1));
 
-        std::string var = lhs_var(lhs);
+        std::string var = discrete_map ? lhs_var_map(lhs) : lhs_var(lhs);
         if (var.empty())
-            throw std::runtime_error("cannot detect state variable in LHS: '" + lhs + "'");
+            throw std::runtime_error(discrete_map
+                ? "expected 'x_{n+1} = ...' in LHS: '" + lhs + "'"
+                : "cannot detect state variable in LHS: '" + lhs + "'");
         sys.vars.push_back(var);
 
         // инлайним вспомогательные функции (если заданы), затем умножение
@@ -534,8 +595,9 @@ System parse_system_from_latex(const std::string& multiline_latex,
 // detect_alphabet — авто-классификация идентификаторов из LaTeX/Plain текста.
 // Идентификаторы внутри производных → vars; остальные → params.
 
-DetectedAlphabet detect_alphabet(const std::string& text) {
+DetectedAlphabet detect_alphabet(const std::string& text, bool discrete_map) {
     DetectedAlphabet out;
+    char iter_sym = 'n';
     // Множества для дедупликации; vectors хранят порядок появления.
     std::set<std::string> var_set, param_set;
 
@@ -578,6 +640,12 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
     str_replace_all("\\mathrm d",  "d");
     str_replace_all("\\mathrm t",  "t");
     str_replace_all("\\operatorname{d}", "d");
+    // Map mode: drop the iteration index first, while `_{n+1}` still has its
+    // braces — the flatten below only handles alphanumeric subscripts.
+    if (discrete_map) {
+        try { s = strip_iteration_index(s, iter_sym); }
+        catch (const std::regex_error&) {}
+    }
     // Flatten `_{sub}` -> `_sub` so read_token grabs `x_m` as one identifier;
     // matches what strip_env does for the AST parser.
     try {
@@ -629,6 +697,35 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
     auto blank_range = [&](size_t a, size_t b) {
         for (size_t k = a; k < b && k < s.size(); ++k) s[k] = ' ';
     };
+
+    // 0) Map mode: no derivatives to key off, so vars are the LHS of each row.
+    // Sections 1-3 then find nothing and section 4 skips these via var_set.
+    if (discrete_map) {
+        size_t row = 0;
+        while (row < s.size()) {
+            size_t end = s.size();
+            for (size_t k = row; k + 1 < s.size(); ++k) {
+                if (s[k] == '\\' && s[k + 1] == '\\') { end = k; break; }
+                if (s[k] == '\n' || s[k] == '\r')     { end = k; break; }
+            }
+            std::string line = s.substr(row, end - row);
+            const size_t row_start = row;
+            row = (end >= s.size()) ? s.size()
+                                    : end + ((s[end] == '\\') ? 2 : 1);
+            size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            size_t a = skip_ws(line, 0);
+            auto [len, tok] = read_token(line, a);
+            if (len == 0 || tok.empty()) continue;
+            // Only when the LHS is exactly this name and nothing else.
+            if (skip_ws(line, a + len) != eq) continue;
+            std::string canon = tok;
+            if (canon[0] == '\\') canon.erase(0, 1);
+            push_unique(out.vars, var_set, canon);
+            // Hide it from section 4, which stores `\theta` but var_set has `theta`.
+            blank_range(row_start + a, row_start + a + len);
+        }
+    }
 
     // 1) производные: \dot{X}, \dot X (+ optional `_sub` suffix)
     for (size_t i = 0; i + 4 <= s.size(); ) {
@@ -781,6 +878,8 @@ DetectedAlphabet detect_alphabet(const std::string& text) {
         if (canon[0] == '\\') canon.erase(0, 1);
         if (EXCLUDED.count(canon)) continue;
         if (canon == "t") continue;
+        // A bare iteration symbol left over from x_{n+1} is not a parameter.
+        if (discrete_map && canon == std::string(1, iter_sym)) continue;
         if (var_set.count(tok)) continue;
         push_unique(out.params, param_set, tok);
     }

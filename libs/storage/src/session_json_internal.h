@@ -1,11 +1,19 @@
 ﻿#pragma once
 #include "ucuda/storage/session_io.h"
+#include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <sstream>
-#include <iomanip>
 #include <cctype>
 #include <stdexcept>
 
 namespace ucuda::storage_detail {
+
+
+
+
+
+
 
 
 // сериализация
@@ -74,10 +82,6 @@ namespace ucuda::storage_detail {
     };
 
 
-void write_adaptive(std::ostringstream& o, const adaptive::Options& a) ;
-
-void read_adaptive(JP& p, adaptive::Options& a) ;
-
 
 // ---- RQA-поля проекции ----
 // Пишутся ТОЛЬКО когда источник реально выбран (rqa_source != None). Иначе файлы всех
@@ -89,6 +93,49 @@ void write_rqa_fields(std::ostringstream& o, const Projection& p) ;
 
 // true, если ключ был RQA-шный и уже разобран.
 bool read_rqa_field(const std::string& k, JP& p, Projection& pr) ;
+
+
+// ---- Библиотека регуляторов шага ----
+void write_str_array(std::ostringstream& o, const std::vector<std::string>& v) ;
+
+
+void read_str_array(JP& p, std::vector<std::string>& v) ;
+
+
+void write_user_ctrl(std::ostringstream& o, const AdaptiveUserCtrl& u) ;
+
+
+void read_user_ctrl(JP& p, AdaptiveUserCtrl& u) ;
+
+
+// Тот же ли регулятор считается (имя и описание не в счёт).
+bool same_ctrl_definition(const AdaptiveUserCtrl& a, const AdaptiveUserCtrl& b) ;
+
+
+// Регулятор из сессии (ctrl_def) -> библиотека; возвращает имя, под которым он там есть.
+// Нет такого имени — добавляется как есть. Есть с тем же определением — оно и есть. Есть, но
+// считает иначе (правили после сохранения сессии, или сессия с другой машины), — сессия
+// получает своё: запись с тем же определением под любым именем или новая "<имя> (session)".
+// Раньше библиотека молча побеждала, и сессия считалась не тем регулятором, что сохранён.
+std::string import_session_ctrl(const AdaptiveUserCtrl& u) ;
+
+
+// ---- Адаптивный шаг ----
+// Вложенный объект "adaptive" пишется, только если настройки отличаются от
+// умолчания: сессии без адаптивного шага не меняются ни на байт, а старые
+// читаются как Fixed (ключа нет — остаются дефолты AdaptiveSettings).
+void write_adaptive(std::ostringstream& o, const AdaptiveSettings& a,
+                    const char* prefix, const char* suffix) ;
+
+
+void read_adaptive(JP& p, AdaptiveSettings& a) ;
+
+
+// Регулятор заменён (read_adaptive): ось свипа по параметру прежнего регулятора
+// (kAdAxisCtrl + k) указывала бы теперь на другой параметр Хайрера или на c[k], которого
+// он не читает, и свип молча считал бы не то. Такая ось возвращается к обычной цели свипа.
+// Зовётся и после регулятора, и после осей: порядок ключей в файле любой.
+void drop_foreign_ctrl_axes(const AdaptiveSettings& a, int& ax, int& ax2) ;
 
 // BifurcationAnalysisSession
 
@@ -107,6 +154,7 @@ bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::string& 
 // что у parametric (массив объектов), отличаются только поля per-«прогон».
 
 
+
 void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) ;
 
 
@@ -115,6 +163,7 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) ;
 
 // LyapunovSpectrumAnalysisSession — `_last_ls.json`. Поля LSCurveConfig
 // идентичны LLECurveConfig — копия LLE-сериализатора.
+
 
 
 void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) ;
@@ -165,6 +214,47 @@ void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c) ;
 bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key) ;
 
 
+// ---------------------------------------------------------------------------
+// NetworkSession JSON — multi-config layout как у basins/fastsync, плюс две
+// вложенные коллекции: узлы (переопределения параметров и НУ, положение в
+// редакторе) и рёбра. Результат расчёта не пишется — он на порядки больше
+// самой сессии и восстанавливается одним Run.
+// Переопределения узла: пустое значение значит «берём общее», и таблица UI
+// заводит такой ключ на КАЖДЫЙ параметр каждого узла просто потому, что по нему
+// кликнули. В файл они не идут — иначе сессия из 256 узлов распухает на
+// тысячи пустых строк, не неся ничего.
+void jmap_nonempty(std::ostringstream& o, const std::map<std::string, std::string>& m) ;
+
+
+void write_network_config(std::ostringstream& o, const NetworkConfig& c) ;
+
+
+bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) ;
+
+
+// SignalMetricsAnalysisSession — `_last_metrics.json`. Структура как у LLE:
+// массив конфигов, результат не хранится (после загрузки — Run заново).
+
+
+
+void write_metrics_config(std::ostringstream& o, const SignalMetricsConfig& c) ;
+
+
+bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string& key) ;
+
+
+// DFT1D plot windows: same flat-array shape as parametric windows, minus
+// kind/mode_2d/colored_1d (DFT1D has only one display kind).
+// OrderAnalysisSession — `_last_order.json`. Multi-config layout как у
+// DFT1D/Basins/FastSync. Настройки ОТОБРАЖЕНИЯ здесь не пишутся: они живут на
+// окнах графика (`_last_order_windows.json`), а не на конфиге. Result, как
+// везде, не сохраняется.
+void write_order_config(std::ostringstream& o, const OrderConfig& c) ;
+
+
+bool read_order_field(JP& p, OrderConfig& c, const std::string& key) ;
+
+
 // Custom-tab bundle: shared config + five embedded sub-session objects.
 
 
@@ -175,4 +265,11 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
 // the per-window dock layout inside each tab (keyed off the tab-derived
 // dockspace id in ws_dock_id).
 void write_workspace(std::ostringstream& o, const CustomWorkspace& ws) ;
+
+
+// ---- Библиотека регуляторов шага (step_controllers.json) ----
+bool load_ctrl_library(const std::string& path, std::string* err) ;
+
+
+bool save_ctrl_library(std::string* err) ;
 }

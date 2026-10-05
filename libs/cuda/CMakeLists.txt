@@ -1,4 +1,5 @@
 ucuda_library(cuda
+    src/circuit_nvrtc.cpp
     src/cudaLibrary.cu
     src/cudaMacros.cu
     src/engine_basins.cpp
@@ -9,6 +10,7 @@ ucuda_library(cuda
     src/engine_lle.cpp
     src/engine_ls.cpp
     src/engine_order.cpp
+    src/engine_results.cpp
     src/engine_runtime.cpp
     src/host_basins.cu
     src/host_bifurcation.cu

@@ -2,6 +2,169 @@
 
 
 
+    // БД 1D с адаптивным шагом на CPU: AdaptiveCpuModule (cl.exe) собирает адаптивные тела,
+    // kernels/adaptive_part.cu и PeakStream в DLL, её вход ucuda_cpu_ad_bif — построчная копия
+    // calculateDiscreteModelPeaksAdCUDA (классика) и ...AdContCUDA (continuation). Раскладка
+    // пиков, флагов и статистики — как у GPU-путей, результат собирается так же. Классика
+    // раздаётся потокам по кускам точек (точки независимы, порядок результата не зависит
+    // от раздачи); continuation — одна цепочка в этом потоке. Валидация общая с GPU-путями:
+    // классика приходит из run_bif1d после проверок, continuation — из диспетчера.
+    Bifurcation1DResult ParametricEngine::Impl::run_bif1d_cpu_ad(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        const bool cont = req.continuation;
+        if (!ad.setup_error.empty())                                 return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.sweep_over_var) {
+            if (cont) return fail("continuation requires a param sweep, not an IC sweep");
+            if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
+                return fail("var_sweep_index out of range");
+        } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+            return fail("param_index out of range");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+
+        AdaptiveCpuModule mod;
+        {
+            std::vector<KrsCpuDiag> diags;
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
+                             peak_config_defines(), diags) || !mod.bif()) {
+                std::string e = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                if (diags.empty()) e += " no dense output for this scheme";
+                return fail(e);
+            }
+        }
+
+        // Строка пиков и число отсчётов — как у run_bif1d / run_bif1d_continuation_ad.
+        const int    nPts  = req.n_pts;
+        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (iters == 0 || iters > (size_t)(std::numeric_limits<int>::max)())
+            return fail("computed amount of points <= 0 (t_max/h/pre_scaller too small)");
+        const size_t cap        = (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride = ad.raw_nodes ? cap : (iters < cap ? iters : cap);
+        const int    peakCapacity = (int)peakStride;
+        const int    mutIdx = req.sweep_over_var ? req.var_sweep_index : (ad_axis ? 0 : req.param_index);
+        const std::vector<double> values = req.base_values, x0 = req.initial_conditions;
+
+        res.n_pts        = nPts;
+        res.record_steps = (int)peakStride;
+        res.flags.assign((size_t)nPts, 0);
+        res.bifurcation_points.assign((size_t)nPts, {});
+        res.peak_times.assign((size_t)nPts, {});
+        res.ad_stats.assign((size_t)nPts * 4, 0.0);
+        if (cont) {
+            res.param_lo = req.param_lo;
+            res.param_hi = req.param_hi;
+            res.continuation_reverse = req.continuation_reverse;
+        }
+
+        // Строки [i0, i1) из плоских буферов DLL — в результат (как у GPU-путей).
+        auto collect = [&](int i0, int i1, const std::vector<double>& pk, const std::vector<double>& tm,
+                           const std::vector<int>& fl, const std::vector<double>& st) {
+            for (int j = i0; j < i1; ++j) {
+                const size_t r = (size_t)(j - i0);
+                int n = fl[r];
+                res.flags[(size_t)j] = n;
+                if (n > (int)peakStride) n = (int)peakStride;
+                if (n > 0) {
+                    res.bifurcation_points[(size_t)j].assign(pk.begin() + r * peakStride, pk.begin() + r * peakStride + n);
+                    res.peak_times[(size_t)j].assign(tm.begin() + r * peakStride, tm.begin() + r * peakStride + n);
+                }
+                for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)j * 4 + q] = st[r * 4 + q];
+            }
+        };
+
+        volatile int cancelFlag = 0;
+        std::atomic<int> donePts{ 0 };
+        std::atomic<bool> finished{ false };
+        // Отмену переносит во флаг DLL, готовые точки — в прогресс.
+        std::thread watcher([&]() {
+            while (!finished.load(std::memory_order_relaxed)) {
+                if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                if (req.progress)
+                    req.progress->store((float)donePts.load(std::memory_order_relaxed) / (float)nPts,
+                                        std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+        auto call = [&](int i0, int i1, std::vector<double>& pk, std::vector<double>& tm, std::vector<int>& fl,
+                        std::vector<double>& st, int* prog) {
+            return mod.bif()(cont ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi,
+                             req.continuation_reverse ? 1 : 0, req.log_scale ? 1 : 0, req.sweep_over_var ? 1 : 0,
+                             mutIdx, values.data(), (int)values.size(), x0.data(), &ad.params, ad.axis_kind[0],
+                             ad.tol_ratio, req.writable_var, req.max_value, pk.data(), tm.data(), fl.data(),
+                             (unsigned long long)peakStride, peakCapacity, req.transient_time, req.t_max, req.h,
+                             req.pre_scaller, (unsigned long long)iters, ad.raw_nodes ? 1 : 0, ad.peak_interp,
+                             st.data(), &cancelFlag, prog);
+        };
+        if (cont) {
+            // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
+            std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
+            std::vector<int> fl((size_t)nPts);
+            int prog = 0;
+            std::thread pump([&]() {
+                while (!finished.load(std::memory_order_relaxed)) {
+                    donePts.store(*(volatile int*)&prog, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            const int ok = call(0, nPts, pk, tm, fl, st, &prog);
+            finished.store(true, std::memory_order_relaxed);
+            pump.join();
+            watcher.join();
+            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            collect(0, nPts, pk, tm, fl, st);
+        } else {
+            // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
+            // стоимость точки с адаптивным шагом сильно разная.
+            constexpr int kChunk = 4;
+            unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) hw = 1;
+            const int nChunks  = (nPts + kChunk - 1) / kChunk;
+            const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)nChunks);
+            std::atomic<int> nextChunk{ 0 };
+            std::atomic<bool> aborted{ false };
+            auto worker = [&]() {
+                std::vector<double> pk((size_t)kChunk * peakStride), tm((size_t)kChunk * peakStride), st((size_t)kChunk * 4);
+                std::vector<int> fl((size_t)kChunk);
+                for (;;) {
+                    const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                    if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
+                    const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
+                    int prog = 0;
+                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
+                }
+            };
+            std::vector<std::thread> pool;
+            for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
+            finished.store(true, std::memory_order_relaxed);
+            watcher.join();
+            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        }
+        fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        res.ok = true;
+        return res;
+    }
+
+
     // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu. Идея: брать оригинальный код
     // почти как есть, чтобы при обновлениях NonLinAnal перенос был механическим diff → patch.
     // ОБЯЗАТЕЛЬНЫЕ изменения (помечены комментарием [ADAPT]):
@@ -16,13 +179,19 @@
     //     в NVRTC-bundle
     //   - результат пишется в Bifurcation1DResult (память + CSV), не в файл
     Bifurcation1DResult ParametricEngine::Impl::run_bif1d(const Bifurcation1DRequest& req) {
+        // Ось rtol / atol / tol — только положительные значения. Проверка — до всех веток
+        // (continuation и CPU уходят из диспетчера раньше общей валидации ниже).
+        if (req.adaptive.enabled && req.adaptive.setup_error.empty()) {
+            const std::string e = ad_axis_range_error(req.adaptive.axis_kind[0], req.param_lo, req.param_hi);
+            if (!e.empty()) { Bifurcation1DResult r; r.error = e; return r; }
+        }
         // Continuation требует sequential x-carry — это совсем другой путь
         // (single-thread kernel). Отказываем при IC-sweep (не имеет смысла:
         // continuation подразумевает param как непрерывный параметр).
         if (req.continuation) {
             if (req.sweep_over_var) {
                 Bifurcation1DResult r;
-                r.error = "continuation требует param-sweep, не IC-sweep";
+                r.error = "continuation requires a param sweep, not an IC sweep";
                 return r;
             }
             // Continuation-ветка возвращается ДО общего блока валидации ниже,
@@ -31,9 +200,12 @@
             // диспетчера, там дублировать не нужно.
             if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
                 Bifurcation1DResult r;
-                r.error = "log scale требует param lo/hi > 0";
+                r.error = "log scale requires param lo/hi > 0";
                 return r;
             }
+            // Адаптивный шаг: CPU — нативная цепочка (run_bif1d_cpu_ad), GPU — ядро в одну нить.
+            if (req.adaptive.enabled)
+                return req.use_cpu ? run_bif1d_cpu_ad(req) : run_bif1d_continuation_ad(req);
             // h-свип теперь поддержан обеими ветками: шаг пересчитывается в
             // каждой точке, буфер блока выделен под худший случай.
             // CPU-ветка — до ensure_init: она не трогает CUDA вообще, так что
@@ -46,37 +218,45 @@
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
         // валидация
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
         // base_values уже идёт со сдвигом +1 (a[0] зарезервирован):
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
+        // Адаптивный шаг: h — шаг вывода, свипать его бессмысленно; ось может свипать
+        // настройку шага (rtol, atol, tol, параметр регулятора) — тогда индекс не нужен.
+        const bool ad      = req.adaptive.enabled;
+        const bool ad_axis = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        if (ad && req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
         if (req.sweep_over_h) {
             if (req.param_lo <= 0.0 || req.param_hi <= 0.0)
-                return fail("h lo/hi должны быть > 0 при sweep_over_h");
+                return fail("h lo/hi must be > 0 with sweep_over_h");
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
-        } else {
+                return fail("var_sweep_index out of range");
+        } else if (!ad_axis) {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
         // writable_var == -1 — sentinel "combination of first vars" (порт MATLAB
         // выбора x[0]+pi*x[1]+euler*x[2] в loopCalculateDiscreteModel_int).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0");
+            return fail("log scale requires param lo/hi > 0");
 
         // Классический свип на CPU — для счёта без GPU и для сверки ядра с GPU
         // (то же место в конвейере, что у run_lle_1d / run_ls_1d). Стоит после
         // общей валидации и до ensure_init: CUDA этой ветке не нужна вовсе.
-        if (req.use_cpu) return run_bif1d_cpu(req);
+        // Адаптивный шаг — своя CPU-ветка на тексте GPU-ядра (run_bif1d_cpu_ad).
+        if (req.use_cpu) return ad ? run_bif1d_cpu_ad(req) : run_bif1d_cpu(req);
 
         // dt-sweep: t_max/transient_time фиксированы, число шагов на GPU
         // пересчитывается из h per-thread (см. hSweepAxis в
@@ -92,8 +272,12 @@
         cuCtxSetCurrent(context);
 
         // компиляция или cache hit
-        if (!compile_if_needed(req.krs_body, req.amountOfX,
-                               req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                      req.sweep_over_var ? 0 : 1, err)) return fail(err);
+        }
+        else if (!compile_if_needed(req.krs_body, req.amountOfX,
+                                    req.sweep_over_var ? 0 : 1, err)) return fail(err);
 
         // ПОРТ NonLinAnal::bifurcation1D (hostLibrary.cu:165-655).
         // Локальные имена мапятся на аргументы функции NonLinAnal для удобства
@@ -136,10 +320,13 @@
         // не превышает эту аллокацию (см. actualIterations).
         double worstCaseH = (hSweepAxis != -1) ? ranges[0] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
+        // На узлах шага число отсчётов заранее неизвестно, но пиков в строке всё равно
+        // не больше max_amount_of_peaks + 1 — под это и строка.
+        if (ad && req.adaptive.raw_nodes) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Пики живут в собственных коротких строках, а не в буферах длиной
         // в траекторию — см. run_bif2d. Для 1D это важнее, чем для 2D: здесь оба
@@ -173,7 +360,7 @@
         // ядра сами отсекают лишние потоки через `if (idx >= nPtsLimiter) return`, а последний чанк
         // кратным 32 не бывает и всегда считался нормально. Зато при n_pts < 32 округление давало
         // 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
+        if (nPtsLimiter == 0) return fail("n_pts must be > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         // Host buffers (порт строк 257-264 NL)
@@ -182,6 +369,7 @@
         std::vector<numb> h_outPeaks   (nPtsLimiter * peakStride);
         std::vector<numb> h_timeOfPeaks(nPtsLimiter * peakStride);
         std::vector<int>    h_amountOfPeaks(nPtsLimiter);
+        std::vector<numb>   h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         // Device buffers (порт строк 297-306 NL, без d_meanFreq/d_medianFreq)
         numb* d_ranges            = nullptr;
@@ -192,8 +380,10 @@
         RunSignals sig;                       // прогресс и отмена в mapped-памяти
         numb* d_outPeaks          = nullptr;
         numb* d_timeOfPeaks       = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -236,7 +426,13 @@
         BIF_CHECK(cudaMalloc((void**)&d_timeOfPeaks,       nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_timeOfPeaks");
         BIF_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                   "cudaMalloc d_amountOfPeaks");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
-        const size_t stepsPerPoint  = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        if (ad) {
+            const int kinds[2] = { req.adaptive.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+            res.ad_stats.assign((size_t)nPts * 4, 0.0);
+        }
+        const size_t stepsPerPoint  = ad ? kAdProgressUnits
+                                         : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerPoint);
         const double ticksPerPoint  = (double)(stepsPerPoint / (size_t)progressStride);
         const double ticksTotal     = (double)nPts * ticksPerPoint;
@@ -266,6 +462,8 @@
         res.snapshot.indexOfMutVar = indicesOfMutVars[0];
         res.snapshot.range_lo      = ranges[0];
         res.snapshot.range_hi      = ranges[1];
+        res.snapshot.log_scale     = req.log_scale;
+        res.snapshot.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
 
         // Config CSV (порт строк 331-376 NL — упрощённо, только если путь задан)
         if (!OUT_FILE_PATH.empty()) {
@@ -286,12 +484,15 @@
         // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             // последний чанк может быть меньше
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            int blockSize = 32;
+            // Ширина блока — настройка (Settings -> GPU launch), ужатая под shared этого ядра.
+            int blockSize = launch_block_size(
+                (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb));
             int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             // [ADAPT] <<<>>> → cuLaunchKernel. Траектория и поиск пиков — одно
@@ -318,6 +519,7 @@
             int*   d_cancel_arg              = sig.cancelArg();
             int*   d_progress_arg            = sig.progressArg();
             int    progressStride_arg        = progressStride;
+            bool   emitAllSamples_arg        = req.emit_all_samples;
             sig.resetTicks();
 
             void* args_fused[] = {
@@ -329,11 +531,39 @@
                 &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
                 &par_or_var_arg, &hSweepAxis_arg, &transientTime_arg, &tMax_arg,
                 &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
-                &d_cancel_arg, &d_progress_arg, &progressStride_arg
+                &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                &emitAllSamples_arg
             };
 
             unsigned int shared = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
 
+            if (ad) {
+                // Та же раскладка пиков, что у слитого ядра; шагом управляет регулятор.
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats;
+                void* args_ad[] = {
+                    &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfInitialConditions_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_outPeaks, &d_timeOfPeaks, &d_amountOfPeaks,
+                    &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BIF_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
+                                            gridSize, 1, 1, blockSize, 1, 1,
+                                            shared, nullptr, args_ad, nullptr),
+                             "cuLaunchKernel(bif1d adaptive)");
+            }
+            else
             BIF_CHECK_CU(cuLaunchKernel(cached.kernel_fused,
                                         gridSize, 1, 1, blockSize, 1, 1,
                                         shared, nullptr, args_fused, nullptr),
@@ -348,6 +578,13 @@
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
             BIF_CHECK(cudaMemcpy(h_amountOfPeaks.data(),  d_amountOfPeaks,  nPtsLimiter * sizeof(int),                                    cudaMemcpyDeviceToHost), "memcpy h_amountOfPeaks");
             BIF_CHECK(cudaMemcpy(h_timeOfPeaks.data(),    d_timeOfPeaks,    nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+            if (ad) {
+                BIF_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, nPtsLimiter * 4 * sizeof(numb),
+                                     cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+                for (size_t k = 0; k < nPtsLimiter; ++k)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[(originalNPtsLimiter * iter + k) * 4 + q] = (double)h_adStats[k * 4 + q];
+            }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after D2H");
 
             // CSV + аккумуляция результата (порт строк 574-608 NL)
@@ -416,20 +653,20 @@
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
         if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                                     return fail("param_index вне диапазона");
+                                                                     return fail("param_index out of range");
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                     return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -443,7 +680,7 @@
         const double worstCaseH = req.sweep_over_h
                                 ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                                 : req.h;
-        if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+        if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
         const int amountOfPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
         if (amountOfPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -565,11 +802,13 @@
         // Передаём явно по той же причине, что и actualIterations выше.
         size_t peakStride_arg   = 0;
         int    peakCapacity_arg = 0;
+        // 11th parameter: emit every iterate instead of peaks (discrete maps).
+        bool   emitAllSamples_arg = req.emit_all_samples;
         void* peak_args[] = {
             &d_data, &sizeOfBlock_s, &nBlocks,
             &d_amountOfPeaks, &d_outPeaks, &d_timeOfPeaks, &timeStep,
             &d_actualIterations,
-            &peakStride_arg, &peakCapacity_arg
+            &peakStride_arg, &peakCapacity_arg, &emitAllSamples_arg
         };
         int    peakBlock = 32;
         int    peakGrid  = (nPts + peakBlock - 1) / peakBlock;
@@ -622,6 +861,174 @@
         cleanup();
         #undef C_CHECK
         #undef C_CHECK_CU
+        fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
+        res.ok = true;
+        return res;
+    }
+
+
+    // run_bif1d_continuation_ad — continuation с адаптивным шагом. Одна нить идёт по
+    // точкам цепочки (calculateDiscreteModelPeaksAdContCUDA) и переносит из точки в точку
+    // X, предложенный шаг и память регулятора; пики пишутся сразу в короткие строки, как
+    // у адаптивного ядра обычного свипа, поэтому отдельного прохода peakFinderCUDA нет.
+    Bifurcation1DResult ParametricEngine::Impl::run_bif1d_continuation_ad(const Bifurcation1DRequest& req) {
+        Bifurcation1DResult res;
+        auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
+
+        const AdaptiveRequest& ad = req.adaptive;
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad.setup_error.empty())                                 return fail(ad.setup_error);
+        if (req.sweep_over_h)
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
+        if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
+                                                                     return fail("param_index out of range");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        if (!compile_ad_cont_if_needed(ad, req.krs_body, req.amountOfX, err)) return fail(err);
+
+        // Строка пиков — как у run_bif1d: на равномерной сетке не длиннее записи, на узлах
+        // шага число отсчётов заранее неизвестно, и строка — под потолок пиков.
+        const int nPts = req.n_pts;
+        const size_t iters = (size_t)std::ceil(req.t_max / req.h / (double)req.pre_scaller);
+        if (iters == 0) return fail("computed amount of points <= 0 (t_max/h/pre_scaller too small)");
+        const size_t cap = (size_t)max_amount_of_peaks + 1;
+        const size_t peakStride = ad.raw_nodes ? cap : (iters < cap ? iters : cap);
+        const int    peakCapacity = (int)peakStride;
+
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        int*  d_flags      = nullptr;
+        numb* d_outPeaks   = nullptr;
+        numb* d_timeOfPeaks= nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;   // однопоточное ядро: тик на точку
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues)  cudaFree(d_baseValues);
+            if (d_baseX)       cudaFree(d_baseX);
+            if (d_flags)       cudaFree(d_flags);
+            if (d_outPeaks)    cudaFree(d_outPeaks);
+            if (d_timeOfPeaks) cudaFree(d_timeOfPeaks);
+            sig.release();
+        };
+        #define CA_CHECK(call, where) do { cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); cleanup(); return res; } } while(0)
+        #define CA_CHECK_CU(call, where) do { CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { res.error = std::string(where) + ": " + cu_err(_r); cleanup(); return res; } } while(0)
+
+        const size_t rowBytes = (size_t)nPts * peakStride * sizeof(numb);
+        CA_CHECK(cudaMalloc((void**)&d_baseValues,  (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "cudaMalloc d_baseValues");
+        CA_CHECK(cudaMalloc((void**)&d_baseX,       (size_t)req.amountOfX * sizeof(numb)), "cudaMalloc d_baseX");
+        CA_CHECK(cudaMalloc((void**)&d_flags,       (size_t)nPts * sizeof(int)),          "cudaMalloc d_flags");
+        CA_CHECK(cudaMalloc((void**)&d_outPeaks,    rowBytes),                             "cudaMalloc d_outPeaks");
+        CA_CHECK(cudaMalloc((void**)&d_timeOfPeaks, rowBytes),                             "cudaMalloc d_timeOfPeaks");
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, res.error)) { cleanup(); return res; }
+        }
+        if (!sig.alloc(res.error)) { cleanup(); return res; }
+
+        const std::vector<numb> values_staged_ = to_numb(req.base_values);
+        const std::vector<numb> x_staged_      = to_numb(req.initial_conditions);
+        if (!values_staged_.empty())
+            CA_CHECK(cudaMemcpy(d_baseValues, values_staged_.data(), values_staged_.size() * sizeof(numb),
+                                cudaMemcpyHostToDevice), "memcpy d_baseValues");
+        CA_CHECK(cudaMemcpy(d_baseX, x_staged_.data(), (size_t)req.amountOfX * sizeof(numb),
+                            cudaMemcpyHostToDevice), "memcpy d_baseX");
+        CA_CHECK(cudaDeviceSynchronize(), "sync after H2D");
+
+        int    nPts_arg        = nPts;
+        numb   lo_arg          = (numb)req.param_lo;
+        numb   hi_arg          = (numb)req.param_hi;
+        int    reverse_arg     = req.continuation_reverse ? 1 : 0;
+        int    logScale_arg    = req.log_scale ? 1 : 0;
+        int    mutParamIdx_arg = ad_axis ? 0 : req.param_index;
+        int    amountOfValues_arg = (int)req.base_values.size();
+        int    writableVar_arg = req.writable_var;
+        numb   maxValue_arg    = (numb)req.max_value;
+        size_t peakStride_arg  = peakStride;
+        int    peakCapacity_arg= peakCapacity;
+        UcudaAdaptParams* d_adp_arg = adArgs.params;
+        int*   d_axis_arg      = adArgs.axis;
+        numb   tolRatio_arg    = (numb)ad.tol_ratio;
+        numb   transient_arg   = (numb)req.transient_time;
+        numb   tRec_arg        = (numb)req.t_max;
+        numb   dtOut_arg       = (numb)req.h;
+        int    preScaller_arg  = req.pre_scaller;
+        size_t iters_arg       = iters;
+        int    raw_arg         = ad.raw_nodes ? 1 : 0;
+        int    interp_arg      = ad.peak_interp;
+        int*   d_cancel_arg    = sig.cancelArg();
+        int*   d_progress_arg  = sig.progressArg();
+        numb*  d_adStats_arg   = adArgs.stats;
+        void* args[] = {
+            &nPts_arg, &lo_arg, &hi_arg, &reverse_arg, &logScale_arg, &mutParamIdx_arg,
+            &d_baseValues, &amountOfValues_arg, &d_baseX, &writableVar_arg, &maxValue_arg,
+            &d_outPeaks, &d_timeOfPeaks, &d_flags, &peakStride_arg, &peakCapacity_arg,
+            &d_adp_arg, &d_axis_arg, &tolRatio_arg, &transient_arg, &tRec_arg, &dtOut_arg,
+            &preScaller_arg, &iters_arg, &raw_arg, &interp_arg,
+            &d_cancel_arg, &d_progress_arg, &d_adStats_arg
+        };
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+        CA_CHECK_CU(cuLaunchKernel(cached_ad_cont.kernel, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
+                    "cuLaunchKernel(bif1d adaptive continuation)");
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
+            { cleanup(); return res; }
+        CA_CHECK(cudaDeviceSynchronize(), "sync after adaptive continuation");
+        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
+        }
+
+        std::vector<numb> h_outPeaks((size_t)nPts * peakStride), h_timeOfPeaks((size_t)nPts * peakStride);
+        std::vector<int>  h_flags((size_t)nPts);
+        std::vector<numb> h_adStats((size_t)nPts * 4);
+        CA_CHECK(cudaMemcpy(h_outPeaks.data(),    d_outPeaks,    rowBytes, cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
+        CA_CHECK(cudaMemcpy(h_timeOfPeaks.data(), d_timeOfPeaks, rowBytes, cudaMemcpyDeviceToHost), "memcpy h_timeOfPeaks");
+        CA_CHECK(cudaMemcpy(h_flags.data(),       d_flags, (size_t)nPts * sizeof(int), cudaMemcpyDeviceToHost), "memcpy h_flags");
+        CA_CHECK(cudaMemcpy(h_adStats.data(),     adArgs.stats, (size_t)nPts * 4 * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy adaptive stats");
+
+        res.n_pts        = nPts;
+        res.record_steps = (int)peakStride;
+        res.param_lo     = req.param_lo;
+        res.param_hi     = req.param_hi;
+        res.continuation_reverse = req.continuation_reverse;
+        res.flags.assign((size_t)nPts, 0);
+        res.bifurcation_points.assign((size_t)nPts, {});
+        res.peak_times.assign((size_t)nPts, {});
+        res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
+        for (int j = 0; j < nPts; ++j) {
+            int n = h_flags[(size_t)j];
+            res.flags[(size_t)j] = n;
+            if (n > (int)peakStride) n = (int)peakStride;
+            if (n > 0) {
+                const numb* pr = h_outPeaks.data()    + (size_t)j * peakStride;
+                const numb* tr = h_timeOfPeaks.data() + (size_t)j * peakStride;
+                res.bifurcation_points[(size_t)j].assign(pr, pr + n);
+                res.peak_times[(size_t)j].assign(tr, tr + n);
+            }
+        }
+        cleanup();
+        #undef CA_CHECK
+        #undef CA_CHECK_CU
+        if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+        fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
+        if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
         return res;
     }
@@ -634,19 +1041,20 @@
     Bifurcation2DResult ParametricEngine::Impl::run_bif2d(const Bifurcation2DRequest& req) {
         Bifurcation2DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
+        if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
 
         // валидация
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
-        if (req.n_pts <= 0)          return fail("n_pts должно быть > 0");
-        if (req.h <= 0.0)            return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)        return fail("t_max должно быть > 0");
-        if (req.transient_time < 0)  return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)    return fail("pre_scaller должно быть > 0");
-        if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan должно быть > 0");
-        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var вне диапазона");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
+        if (req.n_pts <= 0)          return fail("n_pts must be > 0");
+        if (req.h <= 0.0)            return fail("h must be > 0");
+        if (req.t_max <= 0.0)        return fail("t_max must be > 0");
+        if (req.transient_time < 0)  return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)    return fail("pre_scaller must be > 0");
+        if (req.eps_dbscan <= 0.0)   return fail("eps_dbscan must be > 0");
+        if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
 
         // par_or_var + swap_xy (та же логика что у run_lle_2d)
         auto check_param = [&](int p1based) -> bool {
@@ -664,34 +1072,54 @@
         bool log_axis_x = req.log_scale, log_axis_y = req.log_scale_2;  // см. run_lle_2d
 
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось X)");
+            return fail("log scale requires param lo/hi > 0 (X axis)");
         if (req.log_scale_2 && !(req.param_lo_2 > 0.0 && req.param_hi_2 > 0.0))
-            return fail("log scale требует param lo/hi > 0 (ось Y)");
+            return fail("log scale requires param lo/hi > 0 (Y axis)");
 
         if (req.sweep_over_h && req.sweep_over_h_2)
-            return fail("sweep_over_h и sweep_over_h_2 не могут быть true одновременно");
+            return fail("sweep_over_h and sweep_over_h_2 cannot both be true");
 
-        if (req.sweep_over_h || req.sweep_over_h_2) {
+        // Адаптивный шаг: h — шаг вывода, его не свипают. Ось настройки шага (rtol, atol,
+        // tol, параметр регулятора) при разборе осей ведёт себя как ось h: вторую ось
+        // определяет система. Если настройки шага на обеих осях, система не свипается.
+        const bool ad   = req.adaptive.enabled;
+        const bool ad_x = ad && req.adaptive.axis_kind[0] != kAdAxisSystem;
+        const bool ad_y = ad && req.adaptive.axis_kind[1] != kAdAxisSystem;
+        if (ad && (req.sweep_over_h || req.sweep_over_h_2))
+            return fail("the step h is not swept with the adaptive step: sweep rtol / atol instead");
+        if (ad) {
+            const std::string e3 = ad_axes_overlap_error(req.adaptive.axis_kind[0], req.adaptive.axis_kind[1]);
+            if (!e3.empty()) return fail(e3);
+        }
+        const bool over_h  = req.sweep_over_h   || ad_x;
+        const bool over_h2 = req.sweep_over_h_2 || ad_y;
+
+        if (over_h && over_h2) {
+            par_or_var = 1;
+            idx_axis_x = 0; idx_axis_y = 0;
+            ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
+            ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
+        } else if (over_h || over_h2) {
             // См. run_lle_2d -- симметрично по слотам, swap_xy не нужен.
-            hSweepAxis = req.sweep_over_h ? 0 : 1;
-            bool other_is_var = req.sweep_over_h ? req.sweep_over_var_2 : req.sweep_over_var;
-            par_or_var = other_is_var ? 0 : 1;
+            hSweepAxis = over_h ? 0 : 1;
+            par_or_var = par_or_var_2d(over_h, over_h2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
 
-            if (req.sweep_over_h) {
+            if (over_h) {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index_2))   return fail("param_index_2 (ось Y) вне диапазона");
+                    if (!check_param(req.param_index_2))   return fail("param_index_2 (Y axis) out of range");
                     idx_axis_y = req.param_index_2;
                 } else {
-                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                    if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                     idx_axis_y = req.var_sweep_index_2;
                 }
                 idx_axis_x = 0;
             } else {
                 if (par_or_var == 1) {
-                    if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+                    if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
                     idx_axis_x = req.param_index;
                 } else {
-                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
+                    if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
                     idx_axis_x = req.var_sweep_index;
                 }
                 idx_axis_y = 0;
@@ -701,40 +1129,46 @@
             // ось — параметр или НУ, где отрицательные значения совершенно законны (свип sigma от
             // -5 до 5 к шагу отношения не имеет). Раньше условие требовало > 0 от ОБЕИХ осей и
             // заворачивало такой прогон сообщением про h. У run_lle_2d / run_ls_2d проверки нет вовсе.
-            const double h_lo = req.sweep_over_h ? req.param_lo : req.param_lo_2;
-            const double h_hi = req.sweep_over_h ? req.param_hi : req.param_hi_2;
-            if (h_lo <= 0.0 || h_hi <= 0.0)
-                return fail(std::string("h lo/hi должны быть > 0 при свипе по dt (h) (ось ")
-                            + (req.sweep_over_h ? "X" : "Y") + ")");
+            const double h_lo = over_h ? req.param_lo : req.param_lo_2;
+            const double h_hi = over_h ? req.param_hi : req.param_hi_2;
+            // Параметр регулятора может быть и отрицательным; шаг и допуски — нет.
+            const int  kind_h = over_h ? req.adaptive.axis_kind[0] : req.adaptive.axis_kind[1];
+            const bool any_sign = ad && kind_h >= kAdAxisCtrl;
+            if (!any_sign && (h_lo <= 0.0 || h_hi <= 0.0))
+                return fail(std::string("lo/hi must be > 0 on the axis of h / rtol / atol (axis ")
+                            + (over_h ? "X" : "Y") + ")");
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var == req.sweep_over_var_2) {
-            par_or_var = req.sweep_over_var ? 0 : 1;
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
             if (par_or_var == 1) {
-                if (!check_param(req.param_index))   return fail("param_index (ось X) вне диапазона");
-                if (!check_param(req.param_index_2)) return fail("param_index_2 (ось Y) вне диапазона");
+                if (!check_param(req.param_index))   return fail("param_index (X axis) out of range");
+                if (!check_param(req.param_index_2)) return fail("param_index_2 (Y axis) out of range");
                 idx_axis_x = req.param_index;
                 idx_axis_y = req.param_index_2;
             } else {
-                if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (ось X) вне диапазона");
-                if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
+                if (!check_var(req.var_sweep_index))   return fail("var_sweep_index (X axis) out of range");
+                if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
                 idx_axis_x = req.var_sweep_index;
                 idx_axis_y = req.var_sweep_index_2;
             }
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else if (req.sweep_over_var && !req.sweep_over_var_2) {
-            par_or_var = 2;
-            if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (ось X) вне диапазона");
-            if (!check_param(req.param_index_2))  return fail("param_index_2 (ось Y) вне диапазона");
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
+            if (!check_var(req.var_sweep_index))  return fail("var_sweep_index (X axis) out of range");
+            if (!check_param(req.param_index_2))  return fail("param_index_2 (Y axis) out of range");
             idx_axis_x = req.var_sweep_index;
             idx_axis_y = req.param_index_2;
             ranges_lo_x = req.param_lo;   ranges_hi_x = req.param_hi;
             ranges_lo_y = req.param_lo_2; ranges_hi_y = req.param_hi_2;
         } else {
-            par_or_var = 2;
-            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (ось Y) вне диапазона");
-            if (!check_param(req.param_index))     return fail("param_index (ось X) вне диапазона");
+            par_or_var = par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                       req.sweep_over_var, req.sweep_over_var_2);
+            if (!check_var(req.var_sweep_index_2)) return fail("var_sweep_index_2 (Y axis) out of range");
+            if (!check_param(req.param_index))     return fail("param_index (X axis) out of range");
             idx_axis_x = req.var_sweep_index_2;
             idx_axis_y = req.param_index;
             ranges_lo_x = req.param_lo_2; ranges_hi_x = req.param_hi_2;
@@ -744,11 +1178,15 @@
         }
 
         int logAxisMask = (log_axis_x ? 1 : 0) | (log_axis_y ? 2 : 0);
+        if (ad) hSweepAxis = -1;   // адаптивная ось правит настройку шага, а не h
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        if (ad) {
+            if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
+        }
+        else if (!compile_bif2d_if_needed(req.krs_body, req.amountOfX, par_or_var, err)) return fail(err);
 
         // локальные переменные (порт hostLibrary.cu:bifurcation2D)
         const int    nPts                       = req.n_pts;
@@ -774,18 +1212,19 @@
 
         constexpr int  blockSize_setup          = 32;
         constexpr int  set_precision            = 15;
-        // Launch width. 32 = один варп на блок, а потолок по числу блоков на SM
-        // режет занятость примерно вдвое. blockSize_setup остаётся полом бюджета.
-        constexpr int  blockSize_launch         = 128;
+        // Ширина запуска переехала в настройку (Settings -> GPU launch, launch_block_size).
+        // Локальное 128 здесь было прототипом этой идеи; замер показал, что на крупной 2D-сетке
+        // ширина безразлична (+-7%), а на мелкой 128 проигрывает — дефолт поэтому 32.
 
         // dt-sweep: буфер должен вмещать худший случай (минимальный h в
         // диапазоне h-оси) -- см. run_bif1d.
         double worstCaseH = (hSweepAxis == 0) ? ranges[0] : (hSweepAxis == 1) ? ranges[2] : h;
         int amountOfPointsInBlock = (int)std::ceil(tMax / worstCaseH / preScaller);
+        if (ad && req.adaptive.raw_nodes) amountOfPointsInBlock = (int)max_amount_of_peaks + 1;
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
 
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Буферы пиков больше НЕ длиной в траекторию: peakFinder всё равно отдаёт
         // не больше max_amount_of_peaks. "+1" — стадия межпиковых интервалов съедает
@@ -820,7 +1259,7 @@
         // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
         // run_bif1d: ядра сами отсекают лишние потоки, а при числе ячеек сетки < 32 округление
         // давало 0, и Run падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("сетка пуста (n_pts должно быть > 0)");
+        if (nPtsLimiter == 0) return fail("the grid is empty (n_pts must be > 0)");
 
         size_t originalNPtsLimiter = nPtsLimiter;
 
@@ -830,13 +1269,15 @@
         // Шаг кратен CHECK_INTERVAL (тики ставятся в уже существующей проверке)
         // и выбран так, чтобы ячейка отчиталась около 64 раз за всю работу:
         // этого хватает для гладкого бара и не создаёт давки на одном адресе.
-        const size_t stepsPerCell = amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
+        const size_t stepsPerCell = ad ? kAdProgressUnits
+                                       : amountOfPointsForSkip + (size_t)amountOfPointsInBlock;
         const int    progressStride = progress_stride_for(stepsPerCell);
         const double ticksPerCell   = (double)(stepsPerCell / (size_t)progressStride);
         const double ticksTotal     = (double)total_cells * ticksPerCell;
 
         // host buffers
         std::vector<int> h_dbscanResult(nPtsLimiter);
+        std::vector<numb> h_adStats(ad ? nPtsLimiter * 4 : 0);
 
         // device buffers
         numb* d_ranges            = nullptr;
@@ -855,8 +1296,10 @@
         // downclock between launches; on the same stream kernels are ordered
         // implicitly and the GPU stays under continuous load.
         CUstream stream = nullptr;
+        AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
+            adArgs.release();
             if (d_ranges)            cudaFree(d_ranges);
             if (d_indicesOfMutVars)  cudaFree(d_indicesOfMutVars);
             if (d_initialConditions) cudaFree(d_initialConditions);
@@ -902,6 +1345,12 @@
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
+        if (ad) {
+            // swap_xy бывает только при двух системных осях, поэтому коды осей идут как есть.
+            const int kinds[2] = { req.adaptive.axis_kind[0], req.adaptive.axis_kind[1] };
+            if (!adArgs.alloc(req.adaptive, kinds, nPtsLimiter, res.error)) { cleanup(); return res; }
+            res.ad_stats.assign(total_cells * 4, 0.0);
+        }
 
         BIF2D_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BIF2D_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -951,17 +1400,17 @@
         // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             BIF2D_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             size_t cur_limiter = originalNPtsLimiter;
             if (iter == amountOfIteration - 1)
                 cur_limiter = total_cells - (originalNPtsLimiter * iter);
 
-            // 48 KB shared — потолок блока без opt-in: широкая система (много X и a[])
-            // при 128 потоках в него не влезет, и запуск упадёт на CUDA_ERROR_INVALID_VALUE.
+            // Ширина блока — настройка, ужатая под 48 KB shared на блок (launch_block_size):
+            // широкая система (много X и a[]) при 128 потоках в потолок не влезет, и запуск
+            // упал бы на CUDA_ERROR_INVALID_VALUE.
             const size_t sharedPerThread = (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb);
-            int blockSize = blockSize_launch;
-            while (blockSize > blockSize_setup && sharedPerThread * (size_t)blockSize > 48u * 1024u)
-                blockSize /= 2;
+            int blockSize = launch_block_size(sharedPerThread);
             int gridSize  = (int)((cur_limiter + blockSize - 1) / blockSize);
 
             // 1. calculateDiscreteModelPeaksCUDA (dimension=2): интегрирование и поиск
@@ -988,6 +1437,7 @@
             int*   d_progress_arg            = sig.progressArg();
             int    progressStride_arg        = progressStride;
             int    peakCapacity_arg          = peakCapacity;
+            bool   emitAllSamples_arg        = req.emit_all_samples;
 
             void* args_fused[] = {
                 &nPts_int,
@@ -1018,10 +1468,37 @@
                 &peakCapacity_arg,
                 &d_cancel_arg,
                 &d_progress_arg,
-                &progressStride_arg
+                &progressStride_arg,
+                &emitAllSamples_arg
             };
             sig.resetTicks();
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
+            if (ad) {
+                UcudaAdaptParams* d_adp_arg = adArgs.params;
+                int*   d_axis_arg        = adArgs.axis;
+                numb   tolRatio_arg      = (numb)req.adaptive.tol_ratio;
+                numb   dtOut_arg         = h;
+                int    raw_arg           = req.adaptive.raw_nodes ? 1 : 0;
+                int    interp_arg        = req.adaptive.peak_interp;
+                size_t progressUnits_arg = kAdProgressUnits;
+                numb*  d_adStats_arg     = adArgs.stats;
+                void* args_ad[] = {
+                    &nPts_int, &nPtsLimiter_int, &amountOfCalculatedPoints, &dimension_arg,
+                    &d_ranges, &d_indicesOfMutVars, &d_initialConditions, &amountOfIC_int,
+                    &d_values, &amountOfValues_int, &writableVar_int, &maxValue_arg,
+                    &d_outPeaks, &d_intervals, &d_amountOfPeaks,
+                    &logAxisMask_arg, &peakStride_arg, &peakCapacity_arg,
+                    ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
+                    &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
+                    &d_cancel_arg, &d_progress_arg, &progressStride_arg,
+                    &progressUnits_arg, &d_adStats_arg
+                };
+                BIF2D_CHECK_CU(cuLaunchKernel(cached_ad.kernel_peaks,
+                                              gridSize, 1, 1, blockSize, 1, 1,
+                                              shared_traj, stream, args_ad, nullptr),
+                               "cuLaunchKernel(bif2d adaptive)");
+            }
+            else
             BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_fused,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           shared_traj, stream, args_fused, nullptr),
@@ -1051,7 +1528,7 @@
                 &peakStride_arg,
                 &helpfulStride_arg
             };
-            BIF2D_CHECK_CU(cuLaunchKernel(cached_bif2d.kernel_dbscan,
+            BIF2D_CHECK_CU(cuLaunchKernel(ad ? cached_ad.kernel_dbscan : cached_bif2d.kernel_dbscan,
                                           gridSize, 1, 1, blockSize, 1, 1,
                                           0, stream, args_dbscan, nullptr),
                            "cuLaunchKernel(bif2d dbscan)");
@@ -1073,6 +1550,9 @@
             BIF2D_CHECK(cudaMemcpy(h_dbscanResult.data(), d_dbscanResult,
                                    cur_limiter * sizeof(int), cudaMemcpyDeviceToHost),
                         "memcpy h_dbscanResult");
+            if (ad)
+                BIF2D_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, cur_limiter * 4 * sizeof(numb),
+                                       cudaMemcpyDeviceToHost), "memcpy adaptive stats");
 
             for (size_t k = 0; k < cur_limiter; ++k) {
                 size_t kernel_idx = originalNPtsLimiter * iter + k;
@@ -1091,6 +1571,9 @@
                 // попадал в автошкалу colormap'а как «период 0».
                 res.values[out_idx] = (double)period;
                 res.flags[out_idx]  = period;
+                if (ad)
+                    for (int q = 0; q < 4; ++q)
+                        res.ad_stats[out_idx * 4 + q] = (double)h_adStats[k * 4 + q];
             }
         }
 
@@ -1134,4 +1617,33 @@
         #undef BIF2D_CHECK_CU
         res.ok = true;
         return res;
+    }
+
+
+    void ParametricEngine::Impl::prewarm_bif1d(const Bifurcation1DRequest& req) {
+        if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        if (req.adaptive.enabled && req.continuation)
+            compile_ad_cont_if_needed(req.adaptive, req.krs_body, req.amountOfX, err, false);
+        else if (req.adaptive.enabled)
+            compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+        else if (req.continuation && !req.use_cpu) compile_bif1d_cont_if_needed(req.krs_body, req.amountOfX, err, false);
+        else compile_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
+    }
+
+    void ParametricEngine::Impl::prewarm_bif2d(const Bifurcation2DRequest& req) {
+        std::string err;
+        if (!ensure_init(err)) return;
+        cuCtxSetCurrent(context);
+        if (req.adaptive.enabled) {
+            // par_or_var адаптивного прогона разбирает run_bif2d; греем самый частый случай.
+            compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX,
+                                 par_or_var_2d(false, false, req.sweep_over_var, req.sweep_over_var_2), err, false);
+            return;
+        }
+        compile_bif2d_if_needed(req.krs_body, req.amountOfX,
+                                par_or_var_2d(req.sweep_over_h, req.sweep_over_h_2,
+                                              req.sweep_over_var, req.sweep_over_var_2), err, false);
     }

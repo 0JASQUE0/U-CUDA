@@ -1,0 +1,63 @@
+* Lorenz chaotic oscillator -- reference fixture for U-CUDA circuit synthesis
+*
+* Scaling: Cuomo & Oppenheim, PRL 71(1), 1993.  u = x/10, v = y/10, w = z/20
+*   du/dt = sigma*(v - u)
+*   dv/dt = r*u - v - 20*u*w
+*   dw/dt = 5*u*v - b*w                      sigma = 16, r = 45.6, b = 4
+*
+* Component values are DERIVED here, not quoted from the paper (see README.md).
+* Design rule: every integrator uses C = 10 nF and a unit resistor of 100 kOhm,
+* so 1/(R_unit*C) = 1000 1/s and a term with coefficient k needs R = 100k/k.
+* One ODE time unit therefore equals 1 ms of circuit time.
+*
+* Op-amps are IDEAL (VCVS, gain 1e6) and the multipliers are the ideal AD633
+* transfer W = (X1-X2)*(Y1-Y2)/10 with Z = 0.  This fixture is the correctness
+* oracle only; non-idealities belong to phase 2.5.
+*
+* Nodes
+*   n_u  n_v  n_w    state, +u +v +w  [V]
+*   n_un n_vn        inverted state, -u -v
+*   n_m1             +u*w/10   (AD633 fed with +u, +w)
+*   n_m2             -u*v/10   (AD633 fed with -u, +v -- saves one inverter)
+*   s_*              summing junctions (virtual ground)
+
+* ---- integrator U:  dU/dt = -(1/C) * [ V(n_vn)/6.25k + V(n_u)/6.25k ]
+*                           = 1000 * 16 * (v - u)
+RU1 n_vn s_u   6250          ; sigma  = 16      -> 100k/16
+RU2 n_u  s_u   6250          ; sigma  = 16
+CU  s_u  n_u   10n
+EU  n_u  0  0 s_u  1E6
+
+* ---- integrator V:  = 1000 * ( 45.6*u - v - 200*(u*w/10) )
+RV1 n_un s_v   2192.982456140351   ; r = 45.6   -> 100k/45.6
+RV2 n_v  s_v   100000              ; unit coefficient
+RV3 n_m1 s_v   500                 ; 20*u*w = 200*(u*w/10) -> 100k/200
+CV  s_v  n_v   10n
+EV  n_v  0  0 s_v  1E6
+
+* ---- integrator W:  = 1000 * ( 50*(-(-u*v/10)) - 4*w )
+RW1 n_m2 s_w   2000          ; 5*u*v = 50*(u*v/10) -> 100k/50
+RW2 n_w  s_w   25000         ; b = 4              -> 100k/4
+CW  s_w  n_w   10n
+EW  n_w  0  0 s_w  1E6
+
+* ---- unity inverters, needed to get the signs right
+RIU1 n_u  s_iu 100000
+RIU2 s_iu n_un 100000
+EUN  n_un 0  0 s_iu 1E6
+
+RIV1 n_v  s_iv 100000
+RIV2 s_iv n_vn 100000
+EVN  n_vn 0  0 s_iv 1E6
+
+* ---- multipliers (ideal AD633 transfer)
+BM1 n_m1 0 V = V(n_u)*V(n_w)/10
+BM2 n_m2 0 V = V(n_un)*V(n_v)/10
+
+* ---- start-up kick: without it the circuit sits at the origin
+.IC V(n_u)=0.1 V(n_v)=0.1 V(n_w)=0.1
+
+* 50 ODE time units = 50 ms of circuit time; matches the reference CSV
+.TRAN 1U 50M 0 1U UIC
+
+.END

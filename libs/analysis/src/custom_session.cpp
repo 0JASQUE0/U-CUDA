@@ -22,12 +22,12 @@ std::string fmt_d(double v) {
 template <typename Cfg>
 void copy_integrator_and_state(const CustomTabSharedConfig& s, Cfg& c) {
     c.scheme           = s.scheme;
-    c.adaptive = s.adaptive;
     c.symmetry_s       = s.symmetry_s;
     c.h_text           = s.h_text;
     c.t_max_text       = s.t_max_text;
     c.transient_text   = s.transient_text;
     c.max_value_text   = s.max_value_text;
+    c.adaptive         = s.adaptive;
     // Not every config has pre_scaller_text (LLE/LS don't); apply where it
     // exists via a separate overload set below.
     c.initial_conditions = s.initial_conditions;
@@ -288,12 +288,12 @@ void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession&
     // typically wants several ICs the shared field can't express. Ensure at least one slot exists so
     // recompute_async has something to run.
     ph.scheme     = s.scheme;
-    ph.adaptive = s.adaptive;
     ph.symmetry_s = s.symmetry_s;
     ph.step_h     = s.h_text;
     ph.sim_time   = s.t_max_text;
     ph.skip_time  = s.transient_text;
     ph.param_values = s.param_values;
+    ph.adaptive     = s.adaptive;
     pin_swept_h(s, ph.step_h);
     if (ph.ic_sets.empty()) {
         InitialConditionSet ic;
@@ -332,10 +332,9 @@ void CustomSession::load_from_record(const SystemRecord& r,
     shared = CustomTabSharedConfig{};
 
     // Seed shared config from the record's defaults.
-    shared.adaptive = {};
-    shared.scheme         = "Euler";
+    shared.scheme         = default_scheme_from_record(r, "Euler");
     shared.symmetry_s     = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
-    shared.h_text         = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    shared.h_text         = default_h_from_record(r);
     // Seed L1D integrator overrides from the same shared defaults; user
     // can drift them apart later in the L1D detail panel.
     shared.l1d_h_text         = shared.h_text;

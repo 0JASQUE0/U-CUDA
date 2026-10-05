@@ -16,17 +16,41 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
     refresh_auto_labels(model);
     prune_projection_views();
-    // переключатель режимов
+
+    // Ctrl+Z / Ctrl+Shift+Z — отмена и повтор МАССОВЫХ команд: "Calculation
+    // range from view" (Ctrl+T / Ctrl+Shift+T) и "Apply to all calculation tabs".
+    // Обычные правки полей в стек не идут. Стек свой у каждой вкладки, и
+    // работают хоткеи по ОТКРЫТОЙ (см. AppModel::undo_stacks).
+    // Условие !WantTextInput принципиально: внутри активного InputText Ctrl+Z —
+    // это undo самого ImGui (stb_textedit, 99 шагов), и перехват здесь сломал бы
+    // набор текста. Alt исключён, чтобы не срабатывать на Ctrl+Alt+Z.
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && !io.KeyAlt && !io.WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+            if (io.KeyShift) do_redo(model);
+            else             do_undo(model);
+        }
+    }
+
+    // переключатель режимов. Скрытые в Settings вкладки пропускаем; SameLine
+    // ставится ПЕРЕД кнопкой, иначе скрытая оставляла бы разрыв в ряду.
+    // Если активной оказалась скрытая вкладка (маску принесли из конфига или
+    // правкой файла) — уводим в Library: рисовать её содержимое без кнопки
+    // в ряду значит запереть пользователя в режиме, из которого не видно выхода.
+    for (const auto& t : kModeTabs)
+        if (!t.always && t.mode == model.app_mode && model.tab_hidden(t.id))
+            model.app_mode = AppModel::AppMode::Library;
     int mode = (int)model.app_mode;
-    ImGui::RadioButton("Library", &mode, (int)AppModel::AppMode::Library); ImGui::SameLine();
-    ImGui::RadioButton("Phase analysis", &mode, (int)AppModel::AppMode::Analysis); ImGui::SameLine();
-    ImGui::RadioButton("Parametric", &mode, (int)AppModel::AppMode::Parametric); ImGui::SameLine();
-    ImGui::RadioButton("1D DFT", &mode, (int)AppModel::AppMode::Dft1D); ImGui::SameLine();
-    ImGui::RadioButton("Basins", &mode, (int)AppModel::AppMode::Basins); ImGui::SameLine();
-    ImGui::RadioButton("Fast Synchro", &mode, (int)AppModel::AppMode::FastSync); ImGui::SameLine();
-    ImGui::RadioButton("Custom", &mode, (int)AppModel::AppMode::Custom); ImGui::SameLine();
-    ImGui::RadioButton("Order", &mode, (int)AppModel::AppMode::Order); ImGui::SameLine();
-    ImGui::RadioButton("Settings", &mode, (int)AppModel::AppMode::Settings);
+    {
+        bool first_tab = true;
+        for (const auto& t : kModeTabs) {
+            if (!t.always && model.tab_hidden(t.id)) continue;
+            if (!first_tab) ImGui::SameLine();
+            first_tab = false;
+            ImGui::RadioButton(t.label, &mode, (int)t.mode);
+        }
+    }
 
     // Правый край ряда вкладок, в координатах окна. Нужен системному комбо
     // ниже: оно центрируется, но не должно наезжать на вкладки. Снимаем
@@ -80,6 +104,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (lsp.in_flight)
         busy = busy_from(lsp, BusyKind::LS,
                          running_label(lsp.curves, lsp.running_curve_index, "LS"));
+    else if (model.metrics_session.in_flight)
+        busy = busy_from(model.metrics_session, BusyKind::Metrics,
+                         running_label(model.metrics_session.configs,
+                                       model.metrics_session.running_config_index, "metrics"));
     else if (dft.in_flight)
         busy = busy_from(dft, BusyKind::Dft1D,
                          running_label(dft.configs, dft.running_config_index, "dft1d"));
@@ -137,7 +165,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
         // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[10] = {
+        DoneCand candidates[11] = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -150,6 +178,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               &model.ls_session.last_run_label,
               model.ls_session.last_run_succeeded,
               model.ls_session.last_run_seconds },
+            { BusyKind::Metrics, model.metrics_session.last_run_completed_at,
+              &model.metrics_session.last_run_label,
+              model.metrics_session.last_run_succeeded,
+              model.metrics_session.last_run_seconds },
             { BusyKind::Dft1D,  model.dft1d_session.last_run_completed_at,
               &model.dft1d_session.last_run_label,
               model.dft1d_session.last_run_succeeded,
@@ -221,6 +253,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue.size();
             else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
             else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue.size();
+            else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue.size();
             else                                      queue_n = model.parametric_queue.size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
@@ -273,6 +306,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Bif:      model.bifurcation_session.request_cancel(); break;
                     case BusyKind::LLE:      model.lle_session.request_cancel();         break;
                     case BusyKind::LS:       model.ls_session.request_cancel();          break;
+                    case BusyKind::Metrics:  model.metrics_session.request_cancel();     break;
                     case BusyKind::Dft1D:    model.dft1d_session.request_cancel();       break;
                     case BusyKind::Basins:   model.basins_session.request_cancel();      break;
                     case BusyKind::FastSync: model.fastsync_session.request_cancel();    break;
@@ -285,6 +319,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 model.dft1d_queue.clear();
                 model.basins_queue.clear();
                 model.fastsync_queue.clear();
+                model.order_queue.clear();
                 model.custom_queue.clear();
             }
             ImGui::PopStyleColor(3);
@@ -301,10 +336,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
            || model.bifurcation_session.in_flight
            || model.lle_session.in_flight
            || model.ls_session.in_flight
+           || model.metrics_session.in_flight
            || model.dft1d_session.in_flight
            || model.basins_session.in_flight
            || model.fastsync_session.in_flight
            || model.order_session.in_flight
+           || model.network_session.in_flight
            || model.custom_session.any_in_flight();
         const float combo_w = 240.0f;
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
@@ -320,13 +357,37 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
         if (ImGui::BeginCombo("##topsyssel", preview.c_str())) {
+            int listed = 0;
             for (const auto& nm : lib.list()) {
+                // Ticked off in the Library tab. The active system stays listed
+                // regardless, so the combo never previews a name it can't show.
+                if (model.system_hidden(nm) && model.name != nm) continue;
+                ++listed;
                 if (ImGui::Selectable(nm.c_str(), model.name == nm))
                     apply_system_switch(model, lib, nm);
             }
+            if (listed == 0) ImGui::TextDisabled("(all systems hidden in Library)");
             ImGui::EndCombo();
         }
         if (any_in_flight) ImGui::EndDisabled();
+
+        // Что сделала последняя массовая команда / Ctrl+Z / Ctrl+Shift+Z.
+        // Держим несколько секунд: "Apply to..." правит и невидимые сейчас
+        // вкладки, и без строки в шапке это неотличимо от "ничего не произошло".
+        //
+        // Рисуем СТРОГО ПОСЛЕ комбо. Раньше строка стояла между рядом вкладок и
+        // комбо и ломала ему раскладку: край ряда (mode_tabs_end_x) снимается
+        // ДО неё, а комбо центрируется абсолютным SetCursorPosX — длинное
+        // сообщение заезжало ровно туда, куда становится комбо. Здесь же оно
+        // занимает свободное место справа и ни на что не влияет.
+        if (!model.undo_note.empty()) {
+            if (ImGui::GetTime() - model.undo_note_time > 4.0) {
+                model.undo_note.clear();
+            } else {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", model.undo_note.c_str());
+            }
+        }
     }
     // При входе в Analysis/Parametric решаем, нужно ли (пере)инициализировать сессию. Init идёт,
     // когда: 1) система сменилась относительно той, для которой собиралась session; 2) session ещё
@@ -347,8 +408,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Custom;
     bool entering_order  = (AppModel::AppMode)mode == AppModel::AppMode::Order &&
                            model.app_mode != AppModel::AppMode::Order;
+    bool entering_network = (AppModel::AppMode)mode == AppModel::AppMode::Network &&
+                            model.app_mode != AppModel::AppMode::Network;
     if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync
-        || entering_custom || entering_order) {
+        || entering_custom || entering_order || entering_network) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -377,6 +440,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jl, model.lle_session, session_from_json_lle, "_last_lle");
             std::string js = lib.load_session(model.loaded_name, "_last_ls");
             apply_session_json(model, js, model.ls_session, session_from_json_ls, "_last_ls");
+            std::string jm = lib.load_session(model.loaded_name, "_last_metrics");
+            apply_session_json(model, jm, model.metrics_session, session_from_json_metrics, "_last_metrics");
             std::string jw = lib.load_session(model.loaded_name, "_last_parametric_windows");
             model.load_or_init_parametric_plot_windows(jw);
         }
@@ -405,13 +470,39 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jb, model.basins_session, session_from_json_basins, "_last_basins");
         }
     }
-    // Order: своего _last_order.json пока нет, поэтому после init'а просто
-    // остаются дефолты из записи библиотеки — ничего не восстанавливаем.
     auto order_need_init = model.order_session.loaded_system_name != model.name
                         || model.order_session.vars.empty()
                         || model.order_session.vars   != model.known_vars
                         || model.order_session.params != model.known_params;
-    if (entering_order && order_need_init) model.start_order_analysis();
+    if (entering_order && order_need_init) {
+        model.start_order_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jo = lib.load_session(model.loaded_name, "_last_order");
+            apply_session_json(model, jo, model.order_session, session_from_json_order, "_last_order");
+            std::string jw = lib.load_session(model.loaded_name, "_last_order_windows");
+            model.load_or_init_order_plot_windows(jw);
+            order_autosave_seed(model);
+        }
+    }
+    auto network_need_init = model.network_session.loaded_system_name != model.name
+                          || model.network_session.vars.empty()
+                          || model.network_session.vars   != model.known_vars
+                          || model.network_session.params != model.known_params;
+    if (entering_network && network_need_init) {
+        model.start_network_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jn = lib.load_session(model.loaded_name, "_last_network");
+            apply_session_json(model, jn, model.network_session, session_from_json_network, "_last_network");
+        }
+    }
+    // Окна могли не появиться вовсе: несохранённая система (loaded_name пуст,
+    // грузить нечего), сессия из старой сборки без файла окон, вкладка открыта
+    // впервые. Проверяем каждый кадр, а не только на входе, — иначе Order
+    // рисовал бы пустой экран без единого окна и без способа его завести.
+    if ((AppModel::AppMode)mode == AppModel::AppMode::Order
+        && model.order_plot_windows.empty()
+        && !model.order_session.configs.empty())
+        model.load_or_init_order_plot_windows({});
     auto fastsync_need_init = model.fastsync_session.loaded_system_name != model.name
                            || model.fastsync_session.vars.empty()
                            || model.fastsync_session.vars   != model.known_vars
@@ -486,7 +577,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     model.from_record(lib.load(model.loaded_name));   // reference from disk
                     model.start_phase_analysis();
                 }
-            });
+            }, &model, &cb);
         }
         ImGui::End();
         draw_projection_windows(model.phase_session, cb);
@@ -535,14 +626,41 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Order) {
-        // Order mode: панель настроек + одно окно графика (кривая p или
-        // 2D-карта — по тому, включён ли в конфиге 2D map).
+        // Order mode: панель настроек + динамический список окон графика
+        // (кривая p, кривая ошибки, 2D-карта, диаграмма производительности).
         if (ImGui::Begin("Order Controls")) {
             draw_order_controls(model, lib);
         }
         ImGui::End();
-        if (ImGui::Begin("Accuracy order")) {
-            draw_order_plot(model, cb);
+        draw_order_plot_windows(model, cb);
+    }
+    else if (model.app_mode == AppModel::AppMode::Network) {
+        // Network mode: панель настроек + граф + кривые узлов + растр.
+        // Окна фиксированные (в отличие от Order): собирать из них
+        // произвольные комбинации пока незачем, а смотреть на сеть сразу в
+        // трёх разрезах нужно всегда.
+        auto& net_renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 501>();
+        auto& net_series_view = ui_resource<Plot2DView, 502>();
+        auto& net_raster_view = ui_resource<HeatmapView, 503>();
+        auto& rnd_series = net_renderers[0];
+        if (!rnd_series) rnd_series = std::make_unique<PlotRenderer>();
+        auto& rnd_raster = net_renderers[1];
+        if (!rnd_raster) rnd_raster = std::make_unique<PlotRenderer>();
+
+        if (ImGui::Begin("Network Controls")) {
+            draw_network_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Network Graph")) {
+            draw_network_graph_window(model);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Node Series")) {
+            draw_network_series_window(model, *rnd_series, net_series_view);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Spatiotemporal")) {
+            draw_network_raster_window(model, *rnd_raster, net_raster_view);
         }
         ImGui::End();
     }
@@ -563,6 +681,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             load_app_config(get_exe_dir_with_sep(), cfg);
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
+            cfg.plot_math_font         = m.plot_math_font;
+            cfg.plot_font_scale        = m.plot_font_scale;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
             cfg.basins_avgpk_colormap  = m.basins_avgpk_colormap;
@@ -573,6 +693,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
+            cfg.nvrtc_rdc              = m.nvrtc_rdc;
+            cfg.gpu_block_size         = m.gpu_block_size;
+            cfg.hidden_tabs            = m.hidden_tabs;
+            cfg.hidden_schemes         = m.hidden_schemes;
+            cfg.hidden_systems         = m.hidden_systems;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
 
@@ -617,6 +742,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("Off: Windows Segoe UI TTF (recommended, crisp at any scale).");
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
 
+            float plot_fs = model.plot_font_scale;
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderFloat("Plot font size", &plot_fs, 0.5f, 3.0f, "%.2fx")) {
+                set_plot_font_scale(plot_fs);
+                model.plot_font_scale = plot_font_scale();   // клампнутое значение
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Size of every label on the plots (ticks, axis names,");
+            ImGui::TextDisabled("legend, colorbar), relative to the UI font. Plot margins");
+            ImGui::TextDisabled("follow it, so labels stay inside the diagram block.");
+
+            bool math_font = model.plot_math_font;
+            if (ImGui::Checkbox("LaTeX-style labels on plots", &math_font)) {
+                model.plot_math_font = math_font;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("On: serif math typesetting for every label on the plots —");
+            ImGui::TextDisabled("\"sigma\" prints as a greek glyph, x1 as x with a subscript,");
+            ImGui::TextDisabled("variables go italic, 1e-05 becomes a power of ten.");
+            ImGui::TextDisabled("Computer Modern (the TeX face) is picked up from fonts\\ if");
+            ImGui::TextDisabled("present; otherwise Times New Roman. Off: plain UI font.");
+
             ImGui::Separator();
             ImGui::Text("Axes");
             int tp = model.tick_precision;
@@ -642,6 +789,70 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 persist_settings(model);
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
+
+            // Видимость вкладок и схем. Обе маски — чисто интерфейсные: на
+            // расчёты, сохранённые сессии и system.json они не влияют, только
+            // убирают лишнее из виду. Живут в _app_config.json, одна на
+            // приложение, как и остальные настройки этой вкладки.
+            ImGui::Separator();
+            ImGui::Text("Tabs");
+            ImGui::TextDisabled("Which analysis tabs appear in the top row. Library and");
+            ImGui::TextDisabled("Settings are always shown. Hiding a tab does not touch its");
+            ImGui::TextDisabled("sessions: ticking it back brings everything as it was.");
+            for (const auto& t : kModeTabs) {
+                if (t.always) continue;
+                bool on = !model.tab_hidden(t.id);
+                ImGui::PushID(t.id);
+                if (ImGui::Checkbox(t.label, &on)) {
+                    AppModel::set_name_hidden(model.hidden_tabs, t.id, !on);
+                    persist_settings(model);
+                }
+                ImGui::PopID();
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Integration schemes");
+            ImGui::TextDisabled("Which built-in schemes are offered in \"Schemes to generate\"");
+            ImGui::TextDisabled("on the System tab. Unticking one only hides the checkbox:");
+            ImGui::TextDisabled("a system that already has the scheme enabled keeps generating");
+            ImGui::TextDisabled("it, and the System tab says so.");
+            {
+                auto set_all_schemes = [&](bool shown) {
+                    for (const auto& b : kBuiltinSchemes)
+                        AppModel::set_name_hidden(model.hidden_schemes, b.name, !shown);
+                    persist_settings(model);
+                };
+                if (ImGui::Button("Show all##schemes")) set_all_schemes(true);
+                ImGui::SameLine();
+                if (ImGui::Button("Hide all##schemes")) set_all_schemes(false);
+                ImGui::SameLine();
+                int n_on = 0;
+                for (const auto& b : kBuiltinSchemes)
+                    if (!model.scheme_hidden(b.name)) ++n_on;
+                ImGui::Text("%d / %d shown", n_on, kBuiltinSchemeCount);
+
+                // Раскладка — как в System tab: группа порядка одной строкой,
+                // чтобы список читался теми же блоками, что и там.
+                int  shown_order   = 0;
+                bool first_in_line = true;
+                for (const auto& b : kBuiltinSchemes) {
+                    if (b.order != shown_order) {
+                        ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                        shown_order   = b.order;
+                        first_in_line = true;
+                    }
+                    if (!first_in_line) ImGui::SameLine();
+                    first_in_line = false;
+                    bool on = !model.scheme_hidden(b.name);
+                    ImGui::PushID(b.name);
+                    if (ImGui::Checkbox(b.name, &on)) {
+                        AppModel::set_name_hidden(model.hidden_schemes, b.name, !on);
+                        persist_settings(model);
+                    }
+                    ImGui::PopID();
+                    if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+                }
+            }
 
             // Colormaps: какие из 200 карт slanCM показывать в пикере.
             // Держать в combo все 200 неудобно, поэтому набор набирается
@@ -863,6 +1074,63 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 "on fractal basin boundaries they may differ visibly. The value in");
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                 "effect at Run time is written into every exported _config.csv.");
+
+            ImGui::Separator();
+            ImGui::Text("Kernel compilation");
+            ImGui::TextDisabled("Parametric analyses only; phase portraits build their own tiny");
+            ImGui::TextDisabled("kernel and are unaffected.");
+
+            if (ImGui::Checkbox("Split compilation (-rdc + link)##nvrtc_rdc", &model.nvrtc_rdc)) {
+                set_nvrtc_rdc(model.nvrtc_rdc);
+                persist_settings(model);
+            }
+            if (model.nvrtc_rdc) {
+                ImGui::TextDisabled("On: the NonLinAnal library compiles once and is reused, only");
+                ImGui::TextDisabled("the step is rebuilt when the scheme changes. Measured on a 1D");
+                ImGui::TextDisabled("bifurcation: 62 ms per scheme switch instead of 1700 ms.");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "The step is called instead of being inlined, so FMA contraction");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "across that boundary is gone. Measured on Lorenz: 13 of 14 schemes");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "bit-identical, Complex Implicit Euler differs by up to 3e-10 (with");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "FMA off both agree exactly). Maps and phase portraits may therefore");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                    "disagree in the last digits on such schemes.");
+            } else {
+                ImGui::TextDisabled("Off: every kernel is built as one translation unit, library");
+                ImGui::TextDisabled("included, exactly as before. Slow on a scheme change, but the");
+                ImGui::TextDisabled("step is inlined and results stay bit-comparable with older runs.");
+            }
+
+            // GPU launch width. В отличие от FMA и peak-knobs, на результат не влияет вовсе:
+            // это аргумент cuLaunchKernel, а не опция компиляции, поэтому кэши модулей не
+            // инвалидируются и перекомпиляции нет — новое значение действует со следующего Run.
+            ImGui::Separator();
+            ImGui::Text("GPU launch width");
+            ImGui::TextDisabled("Threads per CUDA block. Affects speed only, never the numbers:");
+            ImGui::TextDisabled("kernels are not recompiled, the new value applies on the next Run.");
+
+            // Значения кратны варпу. Ширину сверх этого списка не предлагаем: за 256 занятость
+            // упирается в регистры, а shared-бюджет режет блок обратно (см. launch_block_size).
+            static const int kWidths[]      = { 32, 64, 96, 128, 192, 256 };
+            static const char* kWidthNames[] = { "32 (default)", "64", "96", "128", "192", "256" };
+            int widthIdx = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(kWidths); ++i)
+                if (kWidths[i] == model.gpu_block_size) { widthIdx = i; break; }
+            if (ImGui::Combo("Threads per block##gpu_block_size", &widthIdx, kWidthNames, IM_ARRAYSIZE(kWidthNames))) {
+                model.gpu_block_size = clamp_gpu_block_size(kWidths[widthIdx]);
+                set_gpu_block_size(model.gpu_block_size);
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Measured on a 30-SM Turing card: on large grids every width is");
+            ImGui::TextDisabled("within a few percent, while on small 1D sweeps a wide block");
+            ImGui::TextDisabled("leaves most SMs idle and loses up to 2.5x. Occupancy here is");
+            ImGui::TextDisabled("capped by registers, not by blocks per SM, so 32 is a fine");
+            ImGui::TextDisabled("default -- try wider only on a different GPU.");
+            ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
+            ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
         }
         ImGui::End();
     }

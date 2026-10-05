@@ -17,7 +17,8 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     LSCurveConfig c;
     c.label = "LS 1";
     c.label_is_manual = false;   // fresh curve → auto-label
-    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     for (const auto& p : params) {
@@ -61,7 +62,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LS2DResult r = engine.run_ls_2d(req);
@@ -71,7 +72,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             return false;
         }
         LS1DResult r = engine.run_ls_1d(req);
@@ -97,7 +98,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -114,7 +115,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code пуст (нет валидной системы или scheme)";
+            c.last_error = "krs_code is empty (no valid system or scheme)";
             cancel_token.reset();
             progress_token.reset();
             return false;

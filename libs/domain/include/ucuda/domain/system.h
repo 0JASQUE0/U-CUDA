@@ -12,6 +12,13 @@ struct System {
     std::vector<std::string> rhs;
     bool latex = false;
 
+    // Discrete map: rhs is x_{n+1} directly, not a derivative. It lives here for
+    // the same reason as the Newton knobs below - build_system() is the single
+    // System factory and its result is copied into every session. The config's
+    // scheme is then ignored, so a stale session JSON holding some older scheme
+    // cannot substitute a different step for the map.
+    bool is_map = false;
+
     // Newton knobs for the implicit schemes. They live here (and not in every
     // per-analysis config) because AppModel::build_system() is the single System
     // factory and its result is copied into every session, so codegen sees them

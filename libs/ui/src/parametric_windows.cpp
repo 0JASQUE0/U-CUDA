@@ -14,8 +14,12 @@ parametric_matching_items(AppModel& model, ParametricPlotWindow::Kind kind, bool
         auto& cs = model.lle_session.curves;
         for (int i = 0; i < (int)cs.size(); ++i)
             if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
-    } else {
+    } else if (kind == ParametricPlotWindow::Kind::LS) {
         auto& cs = model.ls_session.curves;
+        for (int i = 0; i < (int)cs.size(); ++i)
+            if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
+    } else {
+        auto& cs = model.metrics_session.configs;
         for (int i = 0; i < (int)cs.size(); ++i)
             if (cs[i].mode_2d == mode_2d) out.push_back({ i, cs[i].label });
     }
@@ -25,14 +29,16 @@ parametric_matching_items(AppModel& model, ParametricPlotWindow::Kind kind, bool
 
 int parametric_type_index_of(ParametricPlotWindow::Kind kind, bool mode_2d) {
     int base = kind == ParametricPlotWindow::Kind::Bifurcation ? 0
-             : kind == ParametricPlotWindow::Kind::LLE ? 2 : 4;
+             : kind == ParametricPlotWindow::Kind::LLE ? 2
+             : kind == ParametricPlotWindow::Kind::LS  ? 4 : 6;
     return base + (mode_2d ? 1 : 0);
 }
 
 
 void parametric_type_from_index(int t, ParametricPlotWindow::Kind& kind, bool& mode_2d) {
     kind    = (t < 2) ? ParametricPlotWindow::Kind::Bifurcation
-            : (t < 4) ? ParametricPlotWindow::Kind::LLE : ParametricPlotWindow::Kind::LS;
+            : (t < 4) ? ParametricPlotWindow::Kind::LLE
+            : (t < 6) ? ParametricPlotWindow::Kind::LS : ParametricPlotWindow::Kind::Metrics;
     mode_2d = (t % 2) == 1;
 }
 
@@ -161,6 +167,9 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
             case ParametricPlotWindow::Kind::LS:
                 draw_ls_plot(model, lib, cb, win, *renderer, *view, hm_map);
                 break;
+            case ParametricPlotWindow::Kind::Metrics:
+                draw_metrics_plot(model, lib, cb, win, *renderer, *view, hm_map);
+                break;
             }
             ImGui::PopID();
         }
@@ -182,8 +191,11 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
 // draw_basins_controls) + dynamic Plot windows (mirrors draw_parametric_
 // controls' manager + draw_bifurcation_plot's colored_1d heatmap toolbar).
 
-void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
+void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int idx) {
     Dft1DConfig& c = s.configs[idx];
+    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
+    model.broadcast_source_tab = BroadcastTab::Dft1D;
+    model.broadcast_source_idx = idx;
 
     ImGui::SetNextItemWidth(kComboW);
     if (InputTextStr("Label", c.label))
@@ -191,8 +203,8 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
     ImGui::Separator();
 
     // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes);
-    draw_adaptive_controls(c.adaptive);
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
     ImGui::Separator();
 
     // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
@@ -202,9 +214,14 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
                             c.param_index, c.sweep_over_var, c.var_sweep_index,
                             c.sweep_over_h, nullptr,
                             /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes));
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW);
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW);
+                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
+                            &model, BroadcastField::SweepTarget, !model.is_map);
+    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
+                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
+    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
+                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
     ImGui::Checkbox("Log scale##dft_log", &c.log_scale);
     if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
 
@@ -215,7 +232,9 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
 
     // Variable + Resolution X
     draw_writable_var_combo(s.vars, c.writable_var, "Writable var##dft_wv");
-    InputNumStr("Resolution X", c.n_pts_text, kFieldW);
+    InputNumStr("Resolution X", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution X", c.n_pts_text); });
     ImGui::Separator();
 
     // ----- Resolution Y / Frequency range (обязательные поля для rangesFreq;
@@ -247,10 +266,10 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("В дБ power и amplitude совпадают тождественно:\n"
+                ImGui::SetTooltip("In dB power and amplitude are identically equal:\n"
                                   "20*log10(sqrt(P)) = 10*log10(P).\n"
-                                  "Различаются они только в линейной шкале —\n"
-                                  "мощность давит слабые пики квадратично.");
+                                  "They differ only on a linear scale -\n"
+                                  "power suppresses weak peaks quadratically.");
         }
         ImGui::BeginDisabled(!c.db_scale);
         InputNumStr("dB floor", c.db_floor_text, kFieldW);
@@ -259,9 +278,9 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Нижняя граница логарифмической шкалы.\n"
-                                  "Всё, что слабее, прижимается к этому значению —\n"
-                                  "иначе нулевая ячейка дала бы -inf.");
+                ImGui::SetTooltip("Lower bound of the logarithmic scale.\n"
+                                  "Everything weaker is pinned to this value -\n"
+                                  "otherwise a zero bin would give -inf.");
         }
         ImGui::EndDisabled();
     }
@@ -275,11 +294,13 @@ void draw_dft1d_diagram_controls(Dft1DAnalysisSession& s, int idx) {
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
         f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f);
+        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
     }
 
-    draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions);
-    draw_named_num_fields("Parameters##dft_par",        s.params, c.param_values);
+    draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
+    draw_named_num_fields("Parameters##dft_par",        s.params, c.param_values,
+                          nullptr, &model, BroadcastField::Param);
     draw_csv_output_block("CSV output##dft_csv", "Save to file", c.csv_save_enabled,
                           "##dft_csv_path", c.csv_output_path,
                           "Writes <path>_config.csv, _AkCOS.csv, _BkSIN.csv.");

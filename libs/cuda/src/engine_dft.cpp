@@ -13,7 +13,7 @@
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_cont, src_template_dft_cont,
+        if (!compile_simple_cont_if_needed(pool_dft_cont, cached_dft_cont, src_template_dft_cont,
                                            "dft1dContinuationKernel", "dft1d_cont.cu", ":dftcont",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -21,7 +21,7 @@
         const double worstCaseH = req.sweep_over_h
                                 ? ((req.param_lo < req.param_hi) ? req.param_lo : req.param_hi)
                                 : req.h;
-        if (worstCaseH <= 0.0) return fail("h должно быть > 0 (при h-свипе — весь диапазон)");
+        if (worstCaseH <= 0.0) return fail("h must be > 0 (for an h-sweep, over the whole range)");
         const int maxPointsInBlock = (int)std::ceil(req.t_max / worstCaseH / req.pre_scaller);
         if (maxPointsInBlock <= 0) return fail("amountOfPointsInBlock <= 0");
 
@@ -141,26 +141,26 @@
         // Валидация — как в run_dft1d_classical, минус param_index/var_sweep_index:
         // свипуемая величина здесь h, индексы параметра/НУ не участвуют вовсе
         // (именно поэтому старый путь ломался на системах без параметров).
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
         // param_lo/hi (= границы h) проверены на положительность в run_dft_1d.
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
-        if (!compile_simple_cont_if_needed(cached_dft_hsweep, src_template_dft_hsweep,
+        if (!compile_simple_cont_if_needed(pool_dft_hsweep, cached_dft_hsweep, src_template_dft_hsweep,
                                            "dft1dHSweepKernel", "dft1d_hsweep.cu", ":dfthsweep",
                                            req.krs_body, req.amountOfX, err))
             return fail(err);
@@ -168,7 +168,7 @@
         const int    nPts  = req.n_pts;
         const int    nFreq = req.n_freq;
         const double worstCaseH = (req.param_lo < req.param_hi) ? req.param_lo : req.param_hi;
-        if (worstCaseH <= 0.0) return fail("h lo/hi должны быть > 0 при свипе по dt (h)");
+        if (worstCaseH <= 0.0) return fail("h lo/hi must be > 0 when sweeping over dt (h)");
 
         // Самый мелкий шаг диапазона задаёт длину буфера. Считаем в double и
         // проверяем до сужения в int: t_max/h_lo легко перевалит за 2^31, и без
@@ -176,9 +176,9 @@
         // внятного сообщения.
         const double maxBlockD = std::ceil(req.t_max / worstCaseH / (double)req.pre_scaller);
         if (!(maxBlockD >= 1.0))
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
         if (maxBlockD > 2.0e9)
-            return fail("h lo слишком мал: блок > 2e9 сэмплов (подними h lo, t_max или pre_scaller)");
+            return fail("h lo too small: block > 2e9 samples (raise h lo, t_max or pre_scaller)");
         const int maxPointsInBlock = (int)maxBlockD;
 
         // --- Memory budget: как в run_dft1d_classical, но на систему берётся
@@ -201,8 +201,8 @@
 
         size_t nPtsLimiter = availableMemory / memPerSystem;
         if (nPtsLimiter == 0)
-            return fail("не хватает памяти GPU даже на одну точку h-свипа "
-                        "(блок " + std::to_string(maxPointsInBlock) + " сэмплов)");
+            return fail("not enough GPU memory even for a single h-sweep point "
+                        "(block " + std::to_string(maxPointsInBlock) + " samples)");
         if (nPtsLimiter > (size_t)nPts) nPtsLimiter = (size_t)nPts;
         const size_t originalNPtsLimiter = nPtsLimiter;
 
@@ -315,7 +315,8 @@
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            const int blockSize = 32;
+            // Ядро h-свипа динамическую shared не берёт (launch с 0) — настройка идёт как есть.
+            const int blockSize = launch_block_size(0);
             const int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             int    nPts_arg                 = nPts;
@@ -406,7 +407,7 @@
         // поэтому стоят до ensure_init внутри самих функций.
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
             Dft1DResult r;
-            r.error = "log scale требует param lo/hi > 0";
+            r.error = "log scale requires param lo/hi > 0";
             return r;
         }
         // h-свип: границы — это сам шаг, нулевой/отрицательный шаг не считается
@@ -414,13 +415,13 @@
         // log_scale выше (см. те же проверки в run_bif1d / run_lle_1d).
         if (req.sweep_over_h && !(req.param_lo > 0.0 && req.param_hi > 0.0)) {
             Dft1DResult r;
-            r.error = "h lo/hi должны быть > 0 при свипе по dt (h)";
+            r.error = "h lo/hi must be > 0 when sweeping over dt (h)";
             return r;
         }
         if (req.continuation) {
             if (req.sweep_over_var) {
                 Dft1DResult r;
-                r.error = "continuation требует param-sweep, не IC-sweep";
+                r.error = "continuation requires a param sweep, not an IC sweep";
                 return r;
             }
             return req.use_cpu ? run_dft1d_cpu(req, /*continuation*/ true)
@@ -454,31 +455,31 @@
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
         // валидация (как run_bif1d + n_freq/freq range)
-        if (req.krs_body.empty())                                   return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX вне [1," + std::to_string(kMaxAmountOfX) + "]");
+        if (req.krs_body.empty())                                   return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)     return fail("amountOfX out of [1," + std::to_string(kMaxAmountOfX) + "]");
         if ((int)req.initial_conditions.size() != req.amountOfX)    return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)       return fail("too many base_values");
         if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
-                return fail("var_sweep_index вне диапазона");
+                return fail("var_sweep_index out of range");
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                return fail("param_index вне диапазона");
+                return fail("param_index out of range");
         }
         // writable_var == -1 — sentinel "combination" (см. loopCalculateDiscreteModel_int
         // / Bifurcation1DRequest::writable_var) — тот же calculateDiscreteModelCUDA,
         // так что DFT1D поддерживает её точно так же.
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                    return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                    return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -513,7 +514,7 @@
         int amountOfPointsInBlock = (int)(tMax / h / preScaller);
         size_t amountOfPointsForSkip = steps_from_time_size_t(transientTime, h);
         if (amountOfPointsInBlock <= 0)
-            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller слишком малы)");
+            return fail("computed amountOfPointsInBlock <= 0 (t_max/h/pre_scaller too small)");
 
         // Memory budget: как run_bif1d, но выход DFT (AkCOS/BkSIN, nPtsLimiter*n_freq каждый)
         // обычно намного меньше, чем outPeaks/timeOfPeaks (nPtsLimiter*amountOfPointsInBlock) —
@@ -544,7 +545,7 @@
         // Округления вниз до кратного blockSize_setup здесь больше нет — по той же причине, что в
         // run_bif1d: ядра сами отсекают лишние потоки, а при n_pts < 32 округление давало 0, и Run
         // падал с сообщением про нехватку памяти, которая была ни при чём.
-        if (nPtsLimiter == 0) return fail("n_pts должно быть > 0");
+        if (nPtsLimiter == 0) return fail("n_pts must be > 0");
         size_t originalNPtsLimiter = nPtsLimiter;
 
         std::vector<numb> h_AkCOS(nPtsLimiter * (size_t)nFreq);
@@ -668,11 +669,15 @@
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
             DFT_CANCEL_CHECK();
-            if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
+            // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
+            if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
                 nPtsLimiter = nPts - (originalNPtsLimiter * iter);
 
-            int blockSize = 32;
+            // Обе стадии (траектория и DFT_custom) запускаются одной шириной, поэтому режем её
+            // по shared более требовательной из них — траектории.
+            int blockSize = launch_block_size(
+                (size_t)ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb));
             int gridSize  = (int)((nPtsLimiter + blockSize - 1) / blockSize);
 
             int    nPts_int                  = nPts;
@@ -823,24 +828,24 @@
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
-        if (req.krs_body.empty())                                    return fail("krs_body пуст");
-        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX вне диапазона");
+        if (req.krs_body.empty())                                    return fail("krs_body is empty");
+        if (req.amountOfX <= 0 || req.amountOfX > kMaxAmountOfX)      return fail("amountOfX out of range");
         if ((int)req.initial_conditions.size() != req.amountOfX)     return fail("initial_conditions.size() != amountOfX");
-        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("base_values слишком много");
+        if ((int)req.base_values.size() > kMaxAmountOfValues)        return fail("too many base_values");
         if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
-                                                                     return fail("param_index вне диапазона");
+                                                                     return fail("param_index out of range");
         // writable_var == -1 — sentinel "combination" (см. run_bif1d_continuation).
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
-                                                                     return fail("writable_var вне диапазона");
-        if (req.n_pts <= 0)         return fail("n_pts должно быть > 0");
-        if (req.n_freq <= 0)        return fail("n_freq должно быть > 0");
-        if (req.freq_hi <= req.freq_lo) return fail("freq_hi должно быть > freq_lo");
+                                                                     return fail("writable_var out of range");
+        if (req.n_pts <= 0)         return fail("n_pts must be > 0");
+        if (req.n_freq <= 0)        return fail("n_freq must be > 0");
+        if (req.freq_hi <= req.freq_lo) return fail("freq_hi must be > freq_lo");
         if (req.freq_log_scale && !(req.freq_lo > 0.0 && req.freq_hi > 0.0))
-            return fail("log scale по частоте требует freq_lo/freq_hi > 0");
-        if (req.h <= 0.0)           return fail("h должно быть > 0");
-        if (req.t_max <= 0.0)       return fail("t_max должно быть > 0");
-        if (req.transient_time < 0) return fail("transient_time должно быть >= 0");
-        if (req.pre_scaller <= 0)   return fail("pre_scaller должно быть > 0");
+            return fail("log scale over frequency requires freq_lo/freq_hi > 0");
+        if (req.h <= 0.0)           return fail("h must be > 0");
+        if (req.t_max <= 0.0)       return fail("t_max must be > 0");
+        if (req.transient_time < 0) return fail("transient_time must be >= 0");
+        if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
 
         std::string err;
         if (!ensure_init(err)) return fail(err);

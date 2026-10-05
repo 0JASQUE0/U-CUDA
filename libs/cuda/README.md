@@ -30,4 +30,4 @@ Build with `cmake --build --preset windows-debug --target ucuda_cuda` and repeat
 
 NVCC and NVRTC must consume the same device algorithm sources. Preserve kernel names, parameters, launch assumptions, operation order, precision, and FMA behavior. Windows uses NVCC with MSVC; Linux uses NVCC with the configured GCC host compiler.
 
-See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [adaptive integration notes](../../ADAPTIVE_INTEGRATION.md).
+See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [integration notes](../../INTEGRATION.md).

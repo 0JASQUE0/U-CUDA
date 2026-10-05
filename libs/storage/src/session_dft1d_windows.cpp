@@ -3,8 +3,6 @@
 using namespace ucuda::storage_detail;
 
 
-// DFT1D plot windows: same flat-array shape as parametric windows, minus
-// kind/mode_2d/colored_1d (DFT1D has only one display kind).
 std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins) {
     std::ostringstream o;
     o << "{\n  \"windows\":[";

@@ -3,6 +3,7 @@
 #include "ucuda/domain/system_record.h"
 #include "ucuda/domain/analysis_types.h"
 class ParametricEngine;
+struct AdaptiveCode;
 #include <deque>
 #include <string>
 #include <vector>
@@ -34,7 +35,6 @@ struct CustomTabSharedConfig {
     bool level_phase_enabled = true;
 
     // Integrator group (shared across all levels)
-    adaptive::Options adaptive;
     std::string scheme           = "Euler";
     std::string symmetry_s       = "0.5";
     std::string h_text           = "0.01";
@@ -42,6 +42,9 @@ struct CustomTabSharedConfig {
     std::string transient_text   = "100";
     std::string pre_scaller_text = "1";
     std::string max_value_text   = "1e6";
+    // Адаптивный шаг — общий для всех уровней (2D, 1D, Phase): apply_shared_to_*
+    // раздают его вместе со схемой и шагом.
+    AdaptiveSettings adaptive;
 
     // ---- Initial conditions + RHS parameters (both maps mirror
     // BifurcationDiagramConfig::initial_conditions / param_values) ----
@@ -217,6 +220,8 @@ struct CustomSession {
     std::vector<std::string> params;
     System                   sys;
     std::vector<CustomScheme> custom_schemes;
+    // Имена экстраполяционных обёрток для комбо; тело даёт резолвер по имени.
+    std::vector<std::string>  wrapper_schemes;   // "Extr(...)" / "Comp(...)" names
     std::vector<std::string> enabled_builtin_schemes;
     std::string              loaded_system_name;
 
@@ -300,7 +305,7 @@ struct CustomSession {
     // Called by the drainer when the pipeline drains (queue empty + no
     // sub-session in flight). Promotes each level's `pending` signature
     // → `committed` and marks committed_ok from the sub-session's
-    // last_run_* flags. Called from AppModel::tick after poll_all returns true.
+    // last_run_* flags. Called from draw_gui after poll_all returns true.
     void commit_pending_signatures();
 };
 

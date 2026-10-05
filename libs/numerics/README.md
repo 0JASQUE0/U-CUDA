@@ -30,4 +30,4 @@ Build with `cmake --build --preset windows-debug --target ucuda_numerics` or the
 
 MSVC is the native compiler path on Windows and GCC is used on Linux. Preserve generated ABI, solver defaults, floating-point precision, and step ordering so CPU/GPU comparisons remain meaningful.
 
-See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [adaptive integration notes](../../ADAPTIVE_INTEGRATION.md).
+See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [integration notes](../../INTEGRATION.md).

@@ -48,7 +48,7 @@ void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
 
-    draw_dft1d_diagram_controls(s, s.active_config_index);
+    draw_dft1d_diagram_controls(model, s, s.active_config_index);
 
     // Plot windows: dynamic list, mirrors Parametric's manager section
     // No Type combo needed (DFT1D has only one display kind); "Members..."
@@ -226,10 +226,16 @@ void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb
         if (fit) c.fit_request = false;
 
         const bool busy = s.in_flight && idx == s.running_config_index;
-        hc.popup_extras = [&c, &cb, busy]() {
+        // Ctrl+T: X — свип параметра, Y — окно частот, которое DFT реально
+        // считает (freq_lo/hi уходят в запрос, а не режут готовую картинку).
+        const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, idx,
+            &Dft1DConfig::param_lo_text, &Dft1DConfig::param_hi_text,
+            &Dft1DConfig::freq_lo_text,  &Dft1DConfig::freq_hi_text) };
+        hc.popup_extras = [&c, &cb, busy, &vrt, &model, &hc]() {
             draw_export_menu_item(busy, cb, [&c](const std::string& p) {
                 data_export::export_dft1d(c.result, p);
             });
+            draw_view_range_menu(vrt, hc.x_axis, hc.y_axis, hc.swap_axes, &model);
         };
 
         double lo = c.result.param_lo, hi = c.result.param_hi;
@@ -247,6 +253,8 @@ void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb
                   c.result.freq_lo, c.result.freq_hi,
                   c.display_cache_vmin, c.display_cache_vmax,
                   fit);
+        handle_view_range_keys(vrt, hc.x_axis, hc.y_axis, plot_window_active(),
+                               hc.swap_axes, &model);
         ImGui::PopID();
     }
 }

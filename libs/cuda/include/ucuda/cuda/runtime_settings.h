@@ -5,3 +5,7 @@ PeakConfig get_peak_config();
 uint64_t   peak_config_epoch();
 void set_nvrtc_fmad(bool enabled);
 bool get_nvrtc_fmad();
+void set_nvrtc_rdc(bool enabled);
+bool get_nvrtc_rdc();
+void set_gpu_block_size(int threads);
+int  get_gpu_block_size();

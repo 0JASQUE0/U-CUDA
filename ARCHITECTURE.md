@@ -68,7 +68,7 @@ Closing the application releases UI and plotting resources before ImGui, GLFW, a
 
 NVCC builds the static CUDA implementation from `libs/cuda/src`. Runtime NVRTC compilation loads templates from `resources/kernels`. [cmake/PackRuntime.cmake](cmake/PackRuntime.cmake) copies templates and assembles the flat runtime headers from the same domain and CUDA sources used by the normal build.
 
-When device helpers, `configCUDA.h`, adaptive integration, or kernel includes change, update the packer input list and run `gpu_smoke` from a clean runtime kernel directory. Cache keys must include every option that changes generated PTX, including FMA behavior and runtime algorithm knobs.
+When device helpers, `configCUDA.h` or kernel includes change, update the packer input list and run `gpu_smoke` from a clean runtime kernel directory. Cache keys must include every option that changes generated PTX, including FMA behavior and runtime algorithm knobs.
 
 ## Persistence and ownership
 

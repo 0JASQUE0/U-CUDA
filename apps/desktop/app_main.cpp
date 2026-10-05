@@ -17,6 +17,7 @@
 
 #include "ucuda/application/app_model.h"
 #include "ucuda/storage/app_config.h"
+#include "ucuda/storage/session_io.h"
 #include "ucuda/plotting/plot_axis.h"
 #include "ucuda/ui/gui.h"
 #include "ucuda/storage/system_library.h"
@@ -27,7 +28,7 @@
 #include "ucuda/platform/platform_paths.h"
 #include "ucuda/platform/platform_posix.h"
 #ifdef _WIN32
-#include <commdlg.h>          // GetOpenFileName
+#include <shobjidl.h>         // IFileDialog: современный диалог файлов
 #endif
 #include <memory>
 #include <string>
@@ -44,6 +45,53 @@ static const char* OCR_SCRIPT_NAME = "ocr_server.py";
 
 static bool dir_exists(const std::string& p) {
     return std::filesystem::is_directory(p);
+}
+
+static bool file_exists(const std::string& p) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(p, ec);
+}
+
+// Серифная пара под LaTeX-подписи графиков (plot_text в plot_axis.h).
+struct MathFontPaths {
+    std::string roman;    // пусто = серифа нет, верстаем текущим UI-шрифтом
+    std::string italic;   // пусто = курсива нет, переменные идут прямым
+};
+
+// Порядок поиска: env U_CUDA_FONTS, fonts/ рядом с exe (туда их кладёт
+// PackRuntime), resources/fonts исходного дерева. В каталоге пробуем известные
+// имена Computer Modern / Latin Modern — шрифт достаточно положить в fonts/.
+static MathFontPaths resolve_math_font_paths(const std::string& exe_dir_with_sep) {
+    std::vector<std::string> dirs;
+    if (const char* env = std::getenv("U_CUDA_FONTS"); env && *env)
+        dirs.push_back(std::string(env) + "/");
+    dirs.push_back(exe_dir_with_sep + "fonts/");
+#ifdef U_CUDA_RESOURCE_DIR
+    dirs.push_back(std::string(U_CUDA_RESOURCE_DIR) + "/fonts/");
+#endif
+
+    static const char* kPairs[][2] = {
+        { "cmunrm.otf",                   "cmunti.otf"                  },  // Computer Modern Unicode (лежит в репозитории)
+        { "cmunrm.ttf",                   "cmunti.ttf"                  },  // он же, если взят из TTF-сборки
+        { "lmroman10-regular.otf",        "lmroman10-italic.otf"        },  // Latin Modern
+        { "LatinModernRoman-Regular.ttf", "LatinModernRoman-Italic.ttf" },
+        { "texgyretermes-regular.otf",    "texgyretermes-italic.otf"    },  // Times-клон из TeX Gyre
+    };
+    for (const std::string& d : dirs)
+        for (const auto& pair : kPairs)
+            if (file_exists(d + pair[0]))
+                return { d + pair[0],
+                         file_exists(d + pair[1]) ? d + pair[1] : std::string() };
+
+    // Times New Roman есть на любой Windows и покрывает латиницу, греческий и
+    // кириллицу. Не Computer Modern, но засечки те же по духу.
+    MathFontPaths p;
+    if (file_exists("C:\\Windows\\Fonts\\times.ttf")) {
+        p.roman = "C:\\Windows\\Fonts\\times.ttf";
+        if (file_exists("C:\\Windows\\Fonts\\timesi.ttf"))
+            p.italic = "C:\\Windows\\Fonts\\timesi.ttf";
+    }
+    return p;
 }
 
 // Paths returned by resolve_library_paths. `library` is the writable
@@ -132,48 +180,108 @@ static std::string resolve_python_exe(const std::string& project_dir) {
 }
 
 #ifdef _WIN32
-static std::string pick_image_file_win() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.bmp\0All\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn)) return std::string(filename);
-    return "";
+
+
+// Современный диалог файлов (Common Item Dialog, COM) вместо GetOpenFileName /
+// GetSaveFileName.
+//
+// Устаревшие общие диалоги загружают в процесс расширения оболочки, и сбойное
+// расширение роняет хозяина. Симптом был именно такой: падение ВНУТРИ диалога с
+// нарушением прав доступа, воспроизводившееся и на чистом main, где никакого
+// нового кода нет. Общий диалог единственный на все три вызова, чтобы разойтись
+// им было негде.
+static std::string com_file_dialog(bool save, const COMDLG_FILTERSPEC* filters,
+                                   UINT n_filters, const wchar_t* def_ext) {
+    // GLFW уже инициализирует COM apartment-threaded, но зависеть от чужого
+    // порядка инициализации не хочется. S_FALSE (уже инициализирован) тоже
+    // требует парного CoUninitialize, поэтому проверяем SUCCEEDED, а не S_OK.
+    const HRESULT ci = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool need_uninit = SUCCEEDED(ci);
+
+    std::string out;
+    IFileDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
+                                  nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
+    if (SUCCEEDED(hr) && dlg) {
+        if (n_filters) dlg->SetFileTypes(n_filters, filters);
+        if (def_ext)   dlg->SetDefaultExtension(def_ext);
+        DWORD opts = 0;
+        if (SUCCEEDED(dlg->GetOptions(&opts))) {
+            // FORCEFILESYSTEM: не отдавать виртуальные элементы оболочки, для
+            // которых нет пути на диске.
+            dlg->SetOptions(opts | FOS_FORCEFILESYSTEM
+                            | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+        }
+        if (SUCCEEDED(dlg->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+                PWSTR wpath = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wpath)) && wpath) {
+                    // В ANSI, как отдавал прежний диалог: остальной код открывает
+                    // файлы УЗКИМИ путями, и смена кодировки здесь сломала бы их.
+                    const int n = WideCharToMultiByte(CP_ACP, 0, wpath, -1, nullptr, 0, nullptr, nullptr);
+                    if (n > 1) {
+                        out.resize((size_t)n - 1);
+                        WideCharToMultiByte(CP_ACP, 0, wpath, -1, &out[0], n, nullptr, nullptr);
+                    }
+                    CoTaskMemFree(wpath);
+                }
+                item->Release();
+            }
+        }
+        dlg->Release();
+    }
+    if (need_uninit) CoUninitialize();
+    return out;
 }
 
-// Save-file dialog for plot CSV export. OFN_OVERWRITEPROMPT makes Windows
-// confirm before clobbering an existing file. Default extension is appended
-// when the user types a bare filename. Mirrors pick_image_file_win above.
+static std::string pick_image_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Images", L"*.png;*.jpg;*.jpeg;*.bmp" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
+// Диалог сохранения для правого клика "Export data..." на диаграммах.
+// Возвращает выбранный абсолютный путь либо пустую строку при отмене.
 static std::string pick_save_csv_file_win() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "CSV\0*.csv\0All\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = "csv";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOREADONLYRETURN;
-    if (GetSaveFileNameA(&ofn)) return std::string(filename);
-    return "";
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"CSV", L"*.csv" }, { L"All files", L"*.*" } };
+    return com_file_dialog(true, f, 2, L"csv");
+}
+
+// Диалог открытия текстового файла: таблица коэффициентов композиции в
+// конструкторе схем. Расширения перечислены те, в которых такие таблицы
+// обычно и лежат; "All files" оставлен, потому что у выписанной из статьи
+// таблицы расширения может не быть вовсе.
+static std::string pick_open_text_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Coefficient tables", L"*.txt;*.dat;*.csv" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
+// Диалог сохранения SPICE-netlist'а.
+static std::string pick_save_netlist_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"SPICE netlist", L"*.cir;*.net" }, { L"All files", L"*.*" } };
+    return com_file_dialog(true, f, 2, L"cir");
 }
 #else
-static std::string pick_file_linux(bool save) {
+static std::string pick_file_linux(bool save, const char* filter, const char* ext) {
     std::vector<std::string> args = {"zenity", "--file-selection"};
-    if (save) args.insert(args.end(), {"--save", "--confirm-overwrite", "--filename=export.csv", "--file-filter=CSV | *.csv"});
-    else args.push_back("--file-filter=Images | *.png *.jpg *.jpeg *.bmp");
+    if (save) args.insert(args.end(), {"--save", "--confirm-overwrite", std::string("--filename=export.") + ext});
+    args.push_back(std::string("--file-filter=") + filter);
     std::string out;
     try {
         if (platform::run(args, out) != 0) return {};
         if (!out.empty() && out.back() == '\n') out.pop_back();
-        if (save && !out.empty() && std::filesystem::path(out).extension().empty()) out += ".csv";
+        if (save && !out.empty() && std::filesystem::path(out).extension().empty()) out += std::string(".") + ext;
         return out;
     } catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return {}; }
 }
-static std::string pick_image_file_win() { return pick_file_linux(false); }
-static std::string pick_save_csv_file_win() { return pick_file_linux(true); }
+static std::string pick_image_file_win() { return pick_file_linux(false, "Images | *.png *.jpg *.jpeg *.bmp", ""); }
+static std::string pick_save_csv_file_win() { return pick_file_linux(true, "CSV | *.csv", "csv"); }
+static std::string pick_open_text_file_win() { return pick_file_linux(false, "Coefficient tables | *.txt *.dat *.csv", ""); }
+static std::string pick_save_netlist_file_win() { return pick_file_linux(true, "SPICE netlist | *.cir *.net", "cir"); }
 #endif
 
 static void set_clipboard_win(const std::string& text) {
@@ -192,6 +300,9 @@ int main() {
     LibraryPaths lib_paths = resolve_library_paths(dir);
     seed_library_if_missing(lib_paths.library, lib_paths.tmpl);
     const std::string& library_dir = lib_paths.library;
+    std::string ctrl_error;
+    if (!load_ctrl_library(library_dir + "/step_controllers.json", &ctrl_error))
+        std::fprintf(stderr, "Step controllers: %s\n", ctrl_error.c_str());
 
     std::string python_exe = resolve_python_exe(dir);
 
@@ -220,7 +331,8 @@ int main() {
     AppModel model(ocr_fn);
     model.app_mode = AppModel::AppMode::Analysis;
     model.start_phase_analysis();
-    model.alphabet_text = "x,y,z,sigma,rho,beta";
+    model.vars_text   = "x, y, z";
+    model.params_text = "sigma, rho, beta";
 
     SystemLibrary library(library_dir);
 
@@ -228,6 +340,8 @@ int main() {
     cb.pick_image_file = pick_image_file_win;
     cb.set_clipboard_text = set_clipboard_win;
     cb.pick_save_file_csv = pick_save_csv_file_win;
+    cb.pick_save_file_netlist = pick_save_netlist_file_win;
+    cb.pick_open_file_text = pick_open_text_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).
@@ -272,6 +386,12 @@ int main() {
     ImPlot::CreateContext();
     ImPlot3D::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // Раскладка окон — рядом с exe, как и _app_config.json. По умолчанию ImGui
+    // берёт imgui.ini из текущей папки, а она зависит от способа запуска (у
+    // сгенерированного .sln это каталог проекта), и раскладка «терялась».
+    // Строка обязана жить до DestroyContext: ImGui хранит только указатель.
+    static const std::string imgui_ini_path = dir + "imgui.ini";
+    ImGui::GetIO().IniFilename = imgui_ini_path.c_str();
     ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     // Тема выбирается чуть ниже после load_app_config (model.dark_theme может
     // приехать из настроек). Здесь только дефолтная инициализация.
@@ -300,6 +420,8 @@ int main() {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
+        model.plot_math_font   = app_cfg.plot_math_font;
+        model.plot_font_scale  = app_cfg.plot_font_scale;
         // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
         // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.
         model.heatmap_colormap = colormap_id_or(app_cfg.heatmap_colormap, model.heatmap_colormap);
@@ -311,11 +433,19 @@ int main() {
             model.tick_precision = app_cfg.tick_precision;
         model.dark_theme = app_cfg.dark_theme;
 
+        // Маски видимости из Settings: какие вкладки показывать в верхнем ряду
+        // и какие встроенные схемы предлагать в "Schemes to generate".
+        // Ставим ДО восстановления last_app_mode — draw_gui уведёт в Library,
+        // если сохранённая вкладка теперь скрыта.
+        model.hidden_tabs    = app_cfg.hidden_tabs;
+        model.hidden_schemes = app_cfg.hidden_schemes;
+        model.hidden_systems = app_cfg.hidden_systems;
+
         // Restore last-used AppMode. Clamp to the valid enum range so a
         // future rename/reorder of AppMode doesn't crash the app on an old
-        // config file. Kept in sync with app_model.h::AppMode (8 entries).
-        constexpr int kAppModeCount = 8;
-        if (app_cfg.last_app_mode >= 0 && app_cfg.last_app_mode < kAppModeCount)
+        // config file. Счётчик живёт в самом enum'е (AppModel::kAppModeCount):
+        // литерал здесь отстал на Order и гасил его восстановление.
+        if (app_cfg.last_app_mode >= 0 && app_cfg.last_app_mode < AppModel::kAppModeCount)
             model.app_mode = (AppModel::AppMode)app_cfg.last_app_mode;
 
         // Restore last-loaded system: if the name still exists in the library,
@@ -334,18 +464,27 @@ int main() {
         model.peak = app_cfg.peak;
         clamp_peak_config(model.peak);
         model.nvrtc_fmad = app_cfg.nvrtc_fmad;
+        model.nvrtc_rdc  = app_cfg.nvrtc_rdc;
+        model.gpu_block_size = clamp_gpu_block_size(app_cfg.gpu_block_size);
     }
     // Пушим до первого Run: движок создаётся лениво, а конфиг глобальный и
     // должен быть актуален уже на самой первой компиляции NVRTC.
     set_peak_config(model.peak);
     set_nvrtc_fmad(model.nvrtc_fmad);
+    set_nvrtc_rdc(model.nvrtc_rdc);
+    set_gpu_block_size(model.gpu_block_size);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
+    // Клампится внутри: конфиг мог быть правлен руками.
+    set_plot_font_scale(model.plot_font_scale);
+    model.plot_font_scale = plot_font_scale();
 
     // applied = -1 / opposite → форсируем apply на первом кадре.
     float applied_ui_scale     = -1.0f;
     bool  applied_font_builtin = !model.use_builtin_font;  // !=, форсирует первый apply
     bool  applied_dark_theme   = !model.dark_theme;        // != — то же самое для темы
+    bool  applied_math_font    = !model.plot_math_font;    // != — и для LaTeX-подписей
+    const MathFontPaths math_fonts = resolve_math_font_paths(dir);
     auto apply_ui_scale = [&](float scale) {
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
@@ -385,7 +524,31 @@ int main() {
             cfg.GlyphOffset.y = 1.0f * (float)(int)(cfg.SizePixels / 13.0f);
             io.Fonts->AddFontDefault(&cfg);
         }
+
+        // LaTeX-подписи графиков: серифная пара (прямой + курсив) в том же
+        // атласе, что и UI-шрифт. Кегль здесь номинальный — plot_text рисует
+        // размером текущего шрифта, а 1.92 печёт глифы под запрошенный размер.
+        ImFont* math_roman  = nullptr;
+        ImFont* math_italic = nullptr;
+        if (model.plot_math_font && !math_fonts.roman.empty()) {
+            ImFontConfig cfg;
+            // Oversample 3 против 2 у UI-шрифта: внутри прогона ImGui двигает
+            // глифы дробными advance'ами, а тонкие засечки Times/CM на 15px
+            // мылятся от этого заметнее, чем гротеск.
+            cfg.OversampleH = 3;
+            cfg.OversampleV = 1;
+            cfg.PixelSnapH  = false;
+            math_roman = io.Fonts->AddFontFromFileTTF(
+                math_fonts.roman.c_str(), 15.0f * scale, &cfg);
+            if (!math_fonts.italic.empty())
+                math_italic = io.Fonts->AddFontFromFileTTF(
+                    math_fonts.italic.c_str(), 15.0f * scale, &cfg);
+        }
         io.Fonts->Build();
+        // Атлас только что пересобран — старые ImFont* мертвы, пушим новые до
+        // ближайшего NewFrame.
+        set_plot_math_fonts(math_roman, math_italic);
+        set_plot_math_enabled(model.plot_math_font);
         // В ImGui 1.92+ backend сам обновит fonts texture при следующем NewFrame
         // через ImTextureData::Status — ручных Destroy/Create не нужно.
 
@@ -416,6 +579,7 @@ int main() {
             model.bifurcation_session.in_flight ||
             model.lle_session.in_flight ||
             model.ls_session.in_flight ||
+            model.metrics_session.in_flight ||
             model.basins_session.in_flight ||
             model.dft1d_session.in_flight ||
             model.fastsync_session.in_flight ||
@@ -435,11 +599,13 @@ int main() {
         float wanted_scale = model.effective_ui_scale();
         if (wanted_scale != applied_ui_scale ||
             model.use_builtin_font != applied_font_builtin ||
-            model.dark_theme       != applied_dark_theme) {
+            model.dark_theme       != applied_dark_theme   ||
+            model.plot_math_font   != applied_math_font) {
             apply_ui_scale(wanted_scale);
             applied_ui_scale     = wanted_scale;
             applied_font_builtin = model.use_builtin_font;
             applied_dark_theme   = model.dark_theme;
+            applied_math_font    = model.plot_math_font;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -491,6 +657,10 @@ int main() {
                 model.pending_screenshot.active = false;
             }
         }
+
+        // Действия, которым нужен платформенный модальный диалог: только вне
+        // кадра ImGui, иначе его цикл сообщений вызовет рекурсивную отрисовку.
+        gui_process_deferred(model, cb);
 
         glfwSwapBuffers(window);
     }

@@ -41,11 +41,32 @@
 		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
 	}
 
+	// Одномерный случай. Нулевой множитель схлопывает свою ось в константу, и
+	// расстояние вырождается в модуль разности по второй оси — а это задача, которую
+	// ucuda_components_1d решает сортировкой за O(P log P) вместо O(P^2).
+	//
+	// Случай не экзотический, а ДЕФОЛТНЫЙ: mult_interval = 0 в configCUDA.h, то есть
+	// период по умолчанию меряется только по значениям пиков, межпиковый интервал не
+	// участвует. Когда нулевые оба множителя, все точки садятся в начало координат —
+	// ветка отвечает «один кластер», что и есть верный ответ.
+	//
+	// scratch — helpfulArray: обход сюда не заходит, значит метки и стек не нужны, а
+	// места (sizeOfHelpfulArray >= amountOfPeaks) хватает с запасом. Сами буферы пиков
+	// не трогаем: сортируется копия.
+	if (multPeak == 0 || multInterval == 0) {
+		const numb* axis = (multInterval == 0) ? (data + startDataIndex)
+		                                       : (intervals + startDataIndex);
+		return ucuda_components_1d(axis, helpfulArray + hBase, amountOfPeaks, eps);
+	}
+
 	// Ёмкость стека обхода. Пока инвариант про две половины helpfulArray
 	// выполняется, sp < stackCap истинно всегда и проверка ничего не меняет;
 	// если инвариант когда-нибудь сломается, мы потеряем соседа вместо записи
 	// в ячейку соседней системы.
 	const int stackCap = sizeOfHelpfulArray - amountOfPeaks;
+
+	// Порог сравниваем в квадрате — см. distance2.
+	const numb eps2 = eps * eps;
 
 	// Обход: каждая непосещённая точка заводит кластер и разворачивается до
 	// опустошения стека.
@@ -67,10 +88,24 @@
 		int sp  = 0;    // глубина стека
 		int cur = i;    // точка, соседей которой разворачиваем
 		for (;;) {
-			for (int k = 0; k < amountOfPeaks - 1; k++) {
+			// Координаты cur инвариантны по всему внутреннему циклу, но сами по себе из
+			// глобальной памяти не выносятся: data, intervals и helpfulArray — все numb*,
+			// компилятор обязан считать их потенциально алиасящимися, а цикл в helpfulArray
+			// ПИШЕТ. Из-за этого обе координаты перечитывались на каждой итерации — две
+			// лишние загрузки из DRAM на сравнение. Явные локальные копии это снимают
+			// (замер: 1.18x всему ядру dbscan при ~366 пиках на ячейку).
+			const numb curX = data[startDataIndex + cur];
+			const numb curY = intervals[startDataIndex + cur];
+			// k идёт по ВСЕМ пикам. Раньше стояло `k < amountOfPeaks - 1`: последний пик
+			// не мог стать ничьим соседом, всегда заводил собственный кластер, и это
+			// компенсировалось вычитанием единицы из ответа. Компенсация давала верное
+			// число только когда последний пик был изолирован; если он примыкал к уже
+			// найденному кластеру — период завышался на единицу, а если СВЯЗЫВАЛ два
+			// кластера — ещё и мешал им слиться.
+			for (int k = 0; k < amountOfPeaks; k++) {
 				if (cur == k || helpfulArray[hBase + k] != 0) continue;
-				if (distance(data[startDataIndex + cur], intervals[startDataIndex + cur],
-					data[startDataIndex + k], intervals[startDataIndex + k]) < eps) {
+				if (distance2(curX, curY,
+					data[startDataIndex + k], intervals[startDataIndex + k]) < eps2) {
 					helpfulArray[hBase + k] = cluster;
 					if (sp < stackCap)
 						helpfulArray[hBase + amountOfPeaks + sp++] = (numb)k;
@@ -81,12 +116,9 @@
 		}
 	}
 
-	// Последний пик из внутренних циклов исключён (k < amountOfPeaks - 1), поэтому
-	// соседом он не становится никогда и на последней итерации всегда заводит
-	// собственный кластер — его и вычитает "- 1". Оставлено как было: это вопрос
-	// к самому алгоритму, а не к очереди. Зато теперь компенсация ТОЧНА: раньше
-	// она была верна лишь тогда, когда обход к этому моменту успевал опустеть.
-	return cluster - 1;
+	// Возвращаем число кластеров как есть. Прежнее "- 1" компенсировало исключение
+	// последнего пика из внутренних циклов; теперь исключения нет, и вычитать нечего.
+	return cluster;
 }
 
 // Глобальная функция DBSCAN
@@ -164,7 +196,8 @@ __global__ void LLEKernelCUDA(
 	const int		logAxisMask,
 	const volatile int* cancelFlag,
 	int*			progressCounter,
-	const int		progressStride)
+	const int		progressStride,
+	const numb	vectorTransient)
 {
 	extern __shared__ numb s[];
 	numb* x = s + threadIdx.x * amountOfInitialConditions;
@@ -187,22 +220,38 @@ __global__ void LLEKernelCUDA(
 		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 
-	// Degenerate/zero step: ceil(NT/h_local) below would divide by zero.
+	// tMax/NT (# of NT-blocks) stays host-computed & uniform -- it's h-independent.
+	// Steps per block come from ucuda_steps_per_block (configCUDA.h), rounded to
+	// nearest in both branches: (size_t)(NT/h) lost a step whenever NT/h landed just
+	// below an integer in double (0.1/0.005 = 19.999...), ceil gained one just above.
+	// A block then lasts k*h, not exactly NT, so the sum below is divided by the time
+	// actually integrated (sizeOfBlock*k*h), not by tMax. Skip-steps (transient/h)
+	// are recomputed per-thread only when swept; an off-by-one there doesn't bias.
+	size_t amountOfNTPoints = (size_t)ucuda_steps_per_block(NT, h_local);
+
+	// Degenerate/zero step, or NT shorter than half a step: no block to integrate.
 	// Flag the point as unusable instead of crashing/hanging the thread.
 	// nan("") (CUDA math API function), not the NAN macro -- NVRTC doesn't
 	// pull in <math.h> here, so the macro is undefined even though builtin
 	// device functions like sqrt/pow/log (used elsewhere in this file) are.
-	if (h_local <= 0) {
+	if (h_local <= 0 || amountOfNTPoints == 0) {
 		resultArray[idx] = nan("");
 		return;
 	}
+	// The loop adds one more step after its iterations (see ucuda_steps_per_block),
+	// so a block of amountOfNTPoints steps is amountOfNTPoints - 1 iterations.
+	const size_t blockIters = amountOfNTPoints > 0 ? amountOfNTPoints - 1 : 0;
 
-	// tMax/NT (# of NT-blocks) stays host-computed & uniform -- it's h-independent.
-	// Only steps-per-block (NT/h) and skip-steps (transient/h) depend on h, so only
-	// those are recomputed per-thread when swept, rounded up so we never fall short
-	// of transientTime/NT.
-	size_t amountOfNTPoints = (hSweepAxis != -1) ? (size_t)ceil(NT / h_local) : (size_t)(NT / h);
-	size_t amountOfPointsForSkip_local = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local) : (size_t)amountOfPointsForSkip;
+	// Транзиент — ровно round(transientTime / h) шагов, как блоки (ucuda_steps_per_block), в свипе
+	// по h и без него одинаково. loopCalculateDiscreteModel_int делает после цикла ещё шаг, поэтому
+	// ниже он зовётся с amountOfPointsForSkip_local - 1 итерациями; раньше транзиент шёл на шаг
+	// дольше заданного, и клоны стартовали в другой фазе, чем у адаптивного шага (T0 ровно).
+	(void)amountOfPointsForSkip;
+	// Транзиент касательных векторов: первые warmBlocks блоков клоны перенормируются, но их
+	// растяжение в сумму не идёт — пока рамка выравнивается, в ней копится ln(1/c) от
+	// случайного начального направления, и показатель зависел бы от него как ~ln(1/c)/tMax.
+	const int warmBlocks = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;
+	size_t amountOfPointsForSkip_local = (size_t)ucuda_steps_per_block(transientTime, h_local);
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		x[i] = initialConditions[i];
@@ -239,9 +288,10 @@ __global__ void LLEKernelCUDA(
 	// тем же числом шагов, и считать её значило бы удвоить ожидаемый итог.
 	// Отмена же передаётся в оба цикла.
 	int ticks = 0;
-	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * (size_t)amountOfNTPoints;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * (size_t)amountOfNTPoints;
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+	int flag = amountOfPointsForSkip_local == 0 ? 1
+		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
@@ -291,22 +341,14 @@ __global__ void LLEKernelCUDA(
 
 	numb result = 0;
 
-	for (int i = 0; i < sizeOfBlock; ++i)
+	for (int i = 0; i < warmBlocks + sizeOfBlock; ++i)
 	{
 		//bool flag = loopCalculateDiscreteModel(x, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error;*/ }
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
-#ifdef UC_ADAPTIVE_ENSEMBLE
-        if ((cancelFlag && *cancelFlag) || !uc_adaptive_ensemble(x,y,1,localValues,h_local,amountOfNTPoints,maxValue)) {
-            resultArray[idx] = 999;
-            ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
-            return;
-
-        }
-#else
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, progressCounter, progressStride, &ticks);
 
 		if (flag == 0) {
@@ -315,7 +357,7 @@ __global__ void LLEKernelCUDA(
 			return;
 		}
 
-		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, nullptr, 0, nullptr);
 
 		if (flag == 0) {
@@ -323,8 +365,6 @@ __global__ void LLEKernelCUDA(
 			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
-
-#endif
 
 		numb tempData = 0;
 		numb tempData2 = 0;
@@ -346,7 +386,7 @@ __global__ void LLEKernelCUDA(
 			tempData = 1e-14;
 		}
 
-		result += log(tempData);
+		if (i >= warmBlocks) result += log(tempData);
 
 		//if (tempData != 0)
 		//	tempData = (1 / tempData);
@@ -358,7 +398,7 @@ __global__ void LLEKernelCUDA(
 		}
 	}
 
-	resultArray[idx] = result / tMax;
+	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h_local);
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
@@ -399,7 +439,10 @@ __global__ void LLEKernelICCUDA(
 
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-	size_t amountOfNTPoints = NT / h;
+	size_t amountOfNTPoints = (size_t)ucuda_steps_per_block(NT, h);   // см. LLEKernelCUDA
+	// The loop adds one more step after its iterations (see ucuda_steps_per_block),
+	// so a block of amountOfNTPoints steps is amountOfNTPoints - 1 iterations.
+	const size_t blockIters = amountOfNTPoints > 0 ? amountOfNTPoints - 1 : 0;
 
 	if (idx >= nPtsLimiter)
 		return;
@@ -441,8 +484,10 @@ __global__ void LLEKernelICCUDA(
 		z[i] /= zPower;
 	}
 
-	loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip,
-		amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Транзиент — ровно amountOfPointsForSkip шагов (цикл делает ещё шаг после итераций).
+	if (amountOfPointsForSkip > 0)
+		loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip - 1,
+			amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 	//Calculating
 
@@ -454,11 +499,11 @@ __global__ void LLEKernelICCUDA(
 
 	for (int i = 0; i < sizeOfBlock; ++i)
 	{
-		bool flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfNTPoints,
+		bool flag = loopCalculateDiscreteModel_int(x, localValues, h, blockIters,
 			amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		if (!flag) { resultArray[idx] = 0; result;/* goto Error;*/ }
 
-		flag = loopCalculateDiscreteModel_int(y, localValues, h, amountOfNTPoints,
+		flag = loopCalculateDiscreteModel_int(y, localValues, h, blockIters,
 			amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
 
@@ -487,7 +532,7 @@ __global__ void LLEKernelICCUDA(
 		}
 	}
 
-	resultArray[idx] = result / tMax;
+	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h);
 }
 
 // projectionOperator + gramSchmidtProcess + LSKernelCUDA — выведены из
@@ -681,7 +726,8 @@ __global__ void LSKernelCUDA(
 	const int logAxisMask,
 	const volatile int* cancelFlag,
 	int* progressCounter,
-	const int progressStride)
+	const int progressStride,
+	const numb vectorTransient)
 {
 	extern __shared__ numb s[];
 
@@ -718,15 +764,28 @@ __global__ void LSKernelCUDA(
 		h_local = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 		                                    : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 
+	// See LLEKernelCUDA above for the tMax/NT vs NT/h reasoning.
+	size_t amountOfNTPoints = (size_t)ucuda_steps_per_block(NT, h_local);
+
 	// Degenerate/zero step -- see LLEKernelCUDA above. LS writes N doubles/thread.
-	if (h_local <= 0) {
+	if (h_local <= 0 || amountOfNTPoints == 0) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = nan("");
 		return;
 	}
+	// The loop adds one more step after its iterations (see ucuda_steps_per_block),
+	// so a block of amountOfNTPoints steps is amountOfNTPoints - 1 iterations.
+	const size_t blockIters = amountOfNTPoints > 0 ? amountOfNTPoints - 1 : 0;
 
-	// See LLEKernelCUDA above for the tMax/NT vs NT/h reasoning.
-	size_t amountOfNTPoints = (hSweepAxis != -1) ? (size_t)ceil(NT / h_local) : (size_t)(NT / h);
-	size_t amountOfPointsForSkip_local = (hSweepAxis != -1) ? (size_t)ceil(transientTime / h_local) : (size_t)amountOfPointsForSkip;
+	// Транзиент — ровно round(transientTime / h) шагов, как блоки (ucuda_steps_per_block), в свипе
+	// по h и без него одинаково. loopCalculateDiscreteModel_int делает после цикла ещё шаг, поэтому
+	// ниже он зовётся с amountOfPointsForSkip_local - 1 итерациями; раньше транзиент шёл на шаг
+	// дольше заданного, и клоны стартовали в другой фазе, чем у адаптивного шага (T0 ровно).
+	(void)amountOfPointsForSkip;
+	// Транзиент касательных векторов: первые warmBlocks блоков клоны перенормируются, но их
+	// растяжение в сумму не идёт — пока рамка выравнивается, в ней копится ln(1/c) от
+	// случайного начального направления, и показатель зависел бы от него как ~ln(1/c)/tMax.
+	const int warmBlocks = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;
+	size_t amountOfPointsForSkip_local = (size_t)ucuda_steps_per_block(transientTime, h_local);
 
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 	{
@@ -790,9 +849,10 @@ __global__ void LSKernelCUDA(
 	// Тики — только по ведущей траектории (как в LLEKernelCUDA): N копий
 	// делают столько же шагов каждая, и счёт по ним раздул бы ожидаемый итог.
 	int ticks = 0;
-	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)sizeOfBlock * amountOfNTPoints;
+	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * amountOfNTPoints;
 
-	int flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+	int flag = amountOfPointsForSkip_local == 0 ? 1
+		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 		1, cancelFlag, progressCounter, progressStride, &ticks);
 
 	if (flag == 0) {
@@ -814,16 +874,9 @@ __global__ void LSKernelCUDA(
 
 	//numb result = 0;
 
-	for (int i = 0; i < sizeOfBlock; ++i)
+	for (int i = 0; i < warmBlocks + sizeOfBlock; ++i)
 	{
-#ifdef UC_ADAPTIVE_ENSEMBLE
-        if ((cancelFlag && *cancelFlag) || !uc_adaptive_ensemble(x,y,AMOUNTOFX,localValues,h_local,amountOfNTPoints,maxValue)) {
-            for(int m=0;m<amountOfInitialConditions;++m) resultArray[idx*amountOfInitialConditions+m]=999;
-            ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
-            return;
-        }
-#else
-		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, progressCounter, progressStride, &ticks);
 		if (flag == 0) {
 			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
@@ -832,7 +885,7 @@ __global__ void LSKernelCUDA(
 		}
 		for (int j = 0; j < amountOfInitialConditions; ++j)
 		{
-			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
+			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 				1, cancelFlag, nullptr, 0, nullptr);
 			if (flag == 0) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
@@ -840,8 +893,6 @@ __global__ void LSKernelCUDA(
 				return;
 			}
 		}
-
-#endif
 
 		//I'M STOPPED HERE!!!!!!!!!!!!
 
@@ -858,7 +909,7 @@ __global__ void LSKernelCUDA(
 
 		for (int k = 0; k < amountOfInitialConditions; ++k)
 		{
-			result[k] += log(denominators[k] / eps);
+			if (i >= warmBlocks) result[k] += log(denominators[k] / eps);
 
 			for (int j = 0; j < amountOfInitialConditions; ++j) {
 				y[k * amountOfInitialConditions + j] = (numb)(x[j] + z[k * amountOfInitialConditions + j] * eps);
@@ -866,8 +917,9 @@ __global__ void LSKernelCUDA(
 		}
 	}
 
+	const numb tIntegrated = (numb)sizeOfBlock * (numb)amountOfNTPoints * h_local;
 	for (int i = 0; i < amountOfInitialConditions; ++i)
-		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
+		resultArray[idx * amountOfInitialConditions + i] = result[i] / tIntegrated;
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 
@@ -919,7 +971,10 @@ __global__ void LSKernelICCUDA(
 
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-	size_t amountOfNTPoints = NT / h;
+	size_t amountOfNTPoints = (size_t)ucuda_steps_per_block(NT, h);   // см. LLEKernelCUDA
+	// The loop adds one more step after its iterations (see ucuda_steps_per_block),
+	// so a block of amountOfNTPoints steps is amountOfNTPoints - 1 iterations.
+	const size_t blockIters = amountOfNTPoints > 0 ? amountOfNTPoints - 1 : 0;
 
 	if (idx >= nPtsLimiter)
 		return;
@@ -962,8 +1017,10 @@ __global__ void LSKernelICCUDA(
 		}
 	}
 
-	loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip,
-		amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
+	// Транзиент — ровно amountOfPointsForSkip шагов (цикл делает ещё шаг после итераций).
+	if (amountOfPointsForSkip > 0)
+		loopCalculateDiscreteModel_int(x, localValues, h, amountOfPointsForSkip - 1,
+			amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 
 	//Calculating
 
@@ -980,13 +1037,13 @@ __global__ void LSKernelICCUDA(
 
 	for (int i = 0; i < sizeOfBlock; ++i)
 	{
-		bool flag = loopCalculateDiscreteModel_int(x, localValues, h, amountOfNTPoints,
+		bool flag = loopCalculateDiscreteModel_int(x, localValues, h, blockIters,
 			amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		if (!flag) { for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 0;/* goto Error;*/ }
 
 		for (int j = 0; j < amountOfInitialConditions; ++j)
 		{
-			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h, amountOfNTPoints,
+			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h, blockIters,
 				amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 			if (!flag) { for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 0;/* goto Error; */ }
 		}
@@ -1014,8 +1071,9 @@ __global__ void LSKernelICCUDA(
 		}
 	}
 
+	const numb tIntegrated = (numb)sizeOfBlock * (numb)amountOfNTPoints * h;
 	for (int i = 0; i < amountOfInitialConditions; ++i)
-		resultArray[idx * amountOfInitialConditions + i] = result[i] / tMax;
+		resultArray[idx * amountOfInitialConditions + i] = result[i] / tIntegrated;
 }
 
 // Нахождение среднего значения пиков и межпиковых интервалов
@@ -1419,7 +1477,16 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 		return;
 	}
 
-	if (sqrt((data[idxCurPoint] - data[idx]) * (data[idxCurPoint] - data[idx]) + (intervals[idxCurPoint] - intervals[idx]) * (intervals[idxCurPoint] - intervals[idx])) <= eps)
+	// Сравниваем КВАДРАТ расстояния с квадратом порога — тот же критерий без FP64-sqrt
+	// (см. distance2 выше). Порог нестрогий, каким и был: <= , а не <.
+	//
+	// Координаты текущей точки одинаковы для ВСЕХ потоков запуска, но в прежней записи
+	// каждая читалась дважды — выражение (a-b)*(a-b) раскрывалось в четыре загрузки из
+	// глобальной памяти вместо двух. Ядро запускается на всю сетку на каждом шаге обхода,
+	// и оно памятью и ограничено, так что лишние загрузки тут дороже самого корня.
+	const numb curX = data[idxCurPoint];
+	const numb curY = intervals[idxCurPoint];
+	if (distance2(curX, curY, data[idx], intervals[idx]) <= eps * eps)
 	{
 		labels[idx] = labels[idxCurPoint];						// Даем точке кластер. Предполагаем, что у idxCurPoint не может не быть кластера
 		neighbors[atomicAdd(amountOfNeighbors, 1)] = idx;		// Фиксируем индекс найденного соседа - его ждет та же участь

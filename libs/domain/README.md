@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Defines shared plain C++ types: systems and records, analysis requests/results, session data, export snapshots, plot-window descriptions, numerical configuration, RQA types, parsing helpers, and the adaptive solver. It exists so storage and computation exchange data without depending on GUI or application state.
+Defines shared plain C++ types: systems and records, analysis requests/results, session data, export snapshots, plot-window descriptions, numerical configuration, RQA types, parsing helpers. It exists so storage and computation exchange data without depending on GUI or application state.
 
 ## Public API and internals
 
-Key headers include `system.h`, `system_record.h`, `analysis_types.h`, `analysis_session.h`, `export_snapshot.h`, `plot_window.h`, `configCUDA.h`, and `adaptive_solver.h`. `session_defaults.cpp` provides non-inline defaults.
+Key headers include `system.h`, `system_record.h`, `analysis_types.h`, `analysis_session.h`, `export_snapshot.h`, `plot_window.h`, `configCUDA.h`. `session_defaults.cpp` provides non-inline defaults.
 
 ## Dependencies and consumers
 
@@ -30,4 +30,4 @@ Build with `cmake --build --preset windows-debug --target ucuda_domain` or the c
 
 Keep defaults, field meaning, numerical precision, operation order, and serialized names compatible. Domain code must compile with both MSVC on Windows and GCC on Linux and must remain independent of GUI availability.
 
-See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [adaptive integration notes](../../ADAPTIVE_INTEGRATION.md).
+See [the library map](../README.md), [the architecture document](../../ARCHITECTURE.md), and [integration notes](../../INTEGRATION.md).

@@ -1,5 +1,7 @@
 file(GLOB_RECURSE UC_RUNTIME_INPUTS CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/resources/kernels/*.cu"
+    "${PROJECT_SOURCE_DIR}/resources/kernels/*.h"
+    "${PROJECT_SOURCE_DIR}/resources/kernels/*.cuh"
     "${PROJECT_SOURCE_DIR}/libs/cuda/src/*.cu"
     "${PROJECT_SOURCE_DIR}/libs/cuda/src/*.cuh"
     "${PROJECT_SOURCE_DIR}/libs/cuda/include/*.cuh"

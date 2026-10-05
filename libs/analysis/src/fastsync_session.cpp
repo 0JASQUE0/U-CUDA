@@ -6,7 +6,7 @@ namespace ucuda::analysis_detail {
 FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
                                               const FastSyncConfig& c) {
     FastSyncRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
     req.amountOfX = (int)s.vars.size();
 
     // values[0] = a[0] (symmetry для CD), затем по параметрам.
@@ -105,7 +105,8 @@ void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
 
     FastSyncConfig c;
     c.label = "FastSync 1";
-    c.h_text = r.step_h.empty() ? std::string("0.01") : r.step_h;
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
 
     // Параметры — из record, остальные секции инициализируем нулями.
@@ -169,7 +170,7 @@ bool FastSyncAnalysisSession::run(ParametricEngine& engine, int config_idx) {
     FastSyncConfig& c = configs[config_idx];
     c.last_error.clear();
     FastSyncRequest req = build_fastsync_request(*this, c);
-    if (req.krs_body.empty()) { c.last_error = "krs_code пуст"; return false; }
+    if (req.krs_body.empty()) { c.last_error = "krs_code is empty"; return false; }
     FastSyncResult r = engine.run_fastsync(req);
     bool ok = r.ok;
     apply_fastsync_result(c, std::move(r));
@@ -188,7 +189,7 @@ bool FastSyncAnalysisSession::run_async(ParametricEngine& engine, int config_idx
 
     FastSyncRequest req = build_fastsync_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code пуст";
+        c.last_error = "krs_code is empty";
         cancel_token.reset(); progress_token.reset();
         return false;
     }
