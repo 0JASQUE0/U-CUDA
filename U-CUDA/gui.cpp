@@ -1082,9 +1082,14 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         if (on_pick) on_pick(nm);
         picked = true;
     };
-    // enabled_builtins empty/null = no filter. Currently-selected built-in stays visible
-    // even if not enabled, so sessions saved with a now-disabled scheme aren't stranded.
-    const bool filter = enabled_builtins && !enabled_builtins->empty();
+    // enabled_builtins null = no filter. Empty = no built-in is ticked: that is still
+    // "no filter" only while the combo would otherwise be empty; a system that offers
+    // custom KRS or wrappers (e.g. Izhikevich, whose reset lives in custom schemes)
+    // gets just those. Currently-selected built-in stays visible even if not enabled,
+    // so sessions saved with a now-disabled scheme aren't stranded.
+    bool has_other = wrapper_schemes && !wrapper_schemes->empty();
+    for (const auto& cs : custom_schemes) if (cs.enabled) { has_other = true; break; }
+    const bool filter = enabled_builtins && (!enabled_builtins->empty() || has_other);
     auto is_enabled = [&](const char* m) {
         if (!filter) return true;
         for (const auto& n : *enabled_builtins) if (n == m) return true;
@@ -13368,8 +13373,7 @@ static void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     draw_label_rename("Label##net", c.label);
 
-    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {},
-                      s.enabled_builtin_schemes.empty() ? nullptr : &s.enabled_builtin_schemes,
+    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                       nullptr, s.sys.is_map, &s.wrapper_schemes);
 
     IntegrationFields f;
