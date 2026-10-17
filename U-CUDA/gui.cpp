@@ -952,10 +952,13 @@ static const BuiltinScheme kBuiltinSchemes[] = {
     { "DOPRI78",                  8, &AppModel::scheme_dopri78,
       "Dormand-Prince RK8(7)13M, 13 stages, order 8 (the 7th-order\n"
       "embedded solution is computed but not used).\n"
-      "Coefficients refined from the published fractions by solving\n"
-      "all 200 order conditions to 1.8e-39 and stored to ~62 digits:\n"
-      "double uses the nearest double, dd/qd in the Order tab get\n"
-      "the full precision. Error floor ~1e-38 in dd (was ~1e-17).\n"
+      "Coefficients refined from the published fractions: the values\n"
+      "the authors chose (c2..c8, c10, c12 = c13 = 1, rows 2-6,\n"
+      "a75, a76, b13 = 1/4, b^12 = 2/45) are kept exact, the rest\n"
+      "solve all 200 + 85 order conditions to ~1e-65 (corrections\n"
+      "<= 1.4e-17) and are stored to ~62 digits: double uses the\n"
+      "nearest double, dd/qd in the Order tab get the full precision.\n"
+      "No coefficient error floor in dd/qd (was ~1e-17).\n"
       "Note: the leading error term is minimized (the M in 13M), so\n"
       "the observed order at practical steps is ~9-10, reaching 8\n"
       "only at small h." },
@@ -1079,9 +1082,14 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         if (on_pick) on_pick(nm);
         picked = true;
     };
-    // enabled_builtins empty/null = no filter. Currently-selected built-in stays visible
-    // even if not enabled, so sessions saved with a now-disabled scheme aren't stranded.
-    const bool filter = enabled_builtins && !enabled_builtins->empty();
+    // enabled_builtins null = no filter. Empty = no built-in is ticked: that is still
+    // "no filter" only while the combo would otherwise be empty; a system that offers
+    // custom KRS or wrappers (e.g. Izhikevich, whose reset lives in custom schemes)
+    // gets just those. Currently-selected built-in stays visible even if not enabled,
+    // so sessions saved with a now-disabled scheme aren't stranded.
+    bool has_other = wrapper_schemes && !wrapper_schemes->empty();
+    for (const auto& cs : custom_schemes) if (cs.enabled) { has_other = true; break; }
+    const bool filter = enabled_builtins && (!enabled_builtins->empty() || has_other);
     auto is_enabled = [&](const char* m) {
         if (!filter) return true;
         for (const auto& n : *enabled_builtins) if (n == m) return true;
@@ -5529,9 +5537,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 
         // GPU KRS body (what NVRTC compiles).
         ImGui::SeparatorText("KRS (GPU, NVRTC)");
-        std::string body_gpu = s.krs_code.empty()
-            ? std::string("(empty — press Regenerate or change Method)")
-            : s.krs_code;
+        std::string body_gpu = !s.krs_code.empty() ? s.krs_code
+            : !s.krs_error.empty() ? "(empty: " + s.krs_error + ")"
+            : std::string("(empty — press Regenerate or change Method)");
         std::vector<char> buf_gpu(body_gpu.begin(), body_gpu.end());
         buf_gpu.resize(body_gpu.size() + 1);
         buf_gpu[body_gpu.size()] = '\0';
@@ -13409,8 +13417,7 @@ static void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     draw_label_rename("Label##net", c.label);
 
-    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {},
-                      s.enabled_builtin_schemes.empty() ? nullptr : &s.enabled_builtin_schemes,
+    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                       nullptr, s.sys.is_map, &s.wrapper_schemes);
 
     IntegrationFields f;
