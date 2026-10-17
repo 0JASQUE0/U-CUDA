@@ -397,6 +397,13 @@ UCUDA_HD inline ucmplx abs(ucmplx z)  { return fabs(z); }
 // (SystemEvaluator) зовёт эти же перегрузки.
 UCUDA_HD inline ucmplx floor(ucmplx z) { return ucmplx(floor(z.re), 0); }
 UCUDA_HD inline ucmplx ceil(ucmplx z)  { return ucmplx(ceil(z.re), 0); }
+// Производная fabs в якобиане неявных схем — copysign(1, u) (pn_diff в codegen.cpp).
+// У Complex Implicit Euler u комплексный: знак берётся по Re u, как у fabs при
+// im == 0. Якобиан ньютону нужен лишь приближённый (невязка считается с точным
+// fabs(z) = |z|), а мнимая часть состояния — порядка шага. Та же функция
+// работает в CPU-байткоде (apply_func2 в codegen.cpp), так что CPU и GPU
+// считают один и тот же ньютон.
+UCUDA_HD inline ucmplx copysign(numb a, ucmplx b) { return ucmplx(copysign(a, b.re), 0); }
 
 // Линейная сетка: узел k из nPts на [lo, hi], inclusive по обоим концам.
 // Вырожденные случаи повторяют прежний getValueByIdx (nPts == 1 -> hi): это то,
