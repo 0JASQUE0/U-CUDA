@@ -29,12 +29,18 @@
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- CUDA build customization: the toolkit CUDA_PATH points to (any version), else the newest known one
+       installed into this Visual Studio. Override with /p:UcudaCudaVer=12.8. -->
+  <PropertyGroup Label="UcudaCuda">
+    <UcudaCudaDir>$(CUDA_PATH.TrimEnd('\'))</UcudaCudaDir>
+    <UcudaCudaVer Condition="'$(UcudaCudaVer)' == '' And '$(UcudaCudaDir)' != ''">$([System.IO.Path]::GetFileName('$(UcudaCudaDir)').TrimStart('v'))</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props')">13.0</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props')">12.8</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props')">12.6</UcudaCudaVer>
+    <UcudaCudaBase>$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer)</UcudaCudaBase>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
-    <!-- Pick whichever CUDA toolset is actually installed on this machine,
-         so the project builds unmodified on 12.6, 12.8 and 13.0 dev machines. -->
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props')" />
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props')" />
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props') And !Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props')" />
+    <Import Project="$(UcudaCudaBase).props" Condition="Exists('$(UcudaCudaBase).props')" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -223,8 +229,10 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets')" />
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets')" />
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets') And !Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.targets') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets')" />
+    <Import Project="$(UcudaCudaBase).targets" Condition="Exists('$(UcudaCudaBase).targets')" />
   </ImportGroup>
+  <!-- Without the customization every CudaCompile item is skipped silently and the build fails only at link time. -->
+  <Target Name="UcudaCheckCuda" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('$(UcudaCudaBase).targets')" Text="CUDA build customization not found: '$(UcudaCudaBase).targets' (CUDA_PATH='$(CUDA_PATH)'). The MSBuild running this build has no CUDA integration for that version: build with the Visual Studio 2022 MSBuild, or install the toolkit's Visual Studio integration." />
+  </Target>
 </Project>
