@@ -17,9 +17,18 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
 // order_session.cpp.
 // ЕДИНСТВЕННЫЙ резолвер имени схемы: сюда же ходит PhaseAnalysisSession::
 // regenerate_krs, которая наполняет отладочную панель KRS.
+// err (если не nullptr) получает причину пустой КРС: текст отказа кодгена
+// (cd_check_complex_safe, jac_check_differentiable, ...) или резолвера
+// обёрток; пусто — причина не известна (нет системы). Сама КРС от err не зависит.
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                    const System& sys,
-                                   const std::string& scheme);
+                                   const std::string& scheme,
+                                   std::string* err = nullptr);
+
+// Текст ошибки для запуска с пустой КРС: причина из compute_krs_for_scheme,
+// иначе общая фраза. Только для пути отказа — КРС генерируется заново.
+std::string krs_empty_error(const std::vector<CustomScheme>& custom_schemes,
+                            const System& sys, const std::string& scheme);
 
 // То же имя, но CPU-форма шага (codegen_scheme_cpu_equivalent под тем же
 // разбором имени). Только для отладочной панели: этот текст нигде не
@@ -374,7 +383,8 @@ struct PhaseAnalysisSession {
     // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.
     System sys;                        // правые части и т.д.
     std::string krs_code;              // тело calculateDiscreteModel (для NVRTC)
-    bool use_gpu = true;               // расчёт через NVRTC на GPU (CPU оставлен в коде)
+    std::string krs_error;             // почему krs_code пуст (отказ кодгена), см. compute_krs_for_scheme
+    bool use_gpu = true;              // расчёт через NVRTC на GPU (CPU оставлен в коде)
 
     // Перегенерировать krs_code из sys по текущему scheme. Зовётся при загрузке
     // системы и при смене метода. Дёшево (codegen быстрый).
