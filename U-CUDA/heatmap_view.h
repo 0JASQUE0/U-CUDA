@@ -155,6 +155,25 @@ public:
     // (release). Leave unset in Parametric to keep the classic LMB-pan behaviour.
     std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_drag;
 
+    // Режим ячейки для hover-подсказки: подпись (regime_label) для ячейки (nx_idx, ny_idx) в
+    // координатах ДАННЫХ, как у on_left_click, или nullptr, если режим колебательный. Подпись
+    // заменяет «diverged» у спец-значения и дописывается строкой под обычным значением. Если
+    // колбэк задан, а ячейка со спец-значением колебательная, подсказка пишет «no value»; без
+    // колбэка спец-значение остаётся «diverged» (FastSync, Order: там это и есть расходимость).
+    // Одноразовый, как overlay_mask: render() его забирает и сбрасывает, поэтому caller
+    // назначает его перед каждым render(), и захваченные данные обязаны жить до конца вызова.
+    std::function<const char*(int nx_idx, int ny_idx)> cell_regime;
+    // Имя значения в подсказке ("<имя> = 1.23"); nullptr — "lambda". Строка обязана жить до
+    // конца render() (обычно литерал).
+    const char* value_name = nullptr;
+    // Значение ячейки с подписью режима — сам код режима (Bif 2D: -1 / 0; Basins: id кластера,
+    // States, -1 у равновесия в Feature 2): подсказка пишет «Equilibrium (-1)» / «Unbound (0)»
+    // вместо строки «<имя> = -1». Колебательные ячейки показывают значение как обычно.
+    // value_name и value_is_regime_code одноразовые, как cell_regime: render() сбрасывает их в
+    // умолчания, и карта, которая их не задала, не унаследует их от прошлого кадра (окно Bif
+    // рисует одной вью и карту 2D, и colored 1D).
+    bool value_is_regime_code = false;
+
     // Crosshair overlay — vertical and horizontal lines drawn on top of the heatmap at the given
     // world coordinates. NaN disables the corresponding axis (both NaN by default → nothing
     // rendered, zero cost). Used by the Custom tab to visualise fix_x/fix_y slider positions across

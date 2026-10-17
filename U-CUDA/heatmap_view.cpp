@@ -244,6 +244,13 @@ void HeatmapView::render(PlotRenderer& renderer,
                          double engine_vmin, double engine_vmax,
                          bool fit_request)
 {
+    // Одноразовый (см. heatmap_view.h): забираем сразу, чтобы он не пережил вызов ни на одном пути.
+    const std::function<const char*(int, int)> regime_of = std::move(cell_regime);
+    const char* const value_nm   = value_name ? value_name : "lambda";
+    const bool        value_code = value_is_regime_code;
+    cell_regime          = nullptr;
+    value_name           = nullptr;
+    value_is_regime_code = false;
     if (nx <= 0 || ny <= 0 || !values) {
         overlay_mask = nullptr;   // одноразовый и на этом пути
         ImGui::Dummy(avail_size);
@@ -1197,12 +1204,23 @@ void HeatmapView::render(PlotRenderer& renderer,
             double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
+            // Режим — по индексам ДАННЫХ: после swap визуальный (ix, iy) — это (iy, ix).
+            const char* regime = !regime_of ? nullptr
+                               : (swap_axes ? regime_of(iy, ix) : regime_of(ix, iy));
+            const bool special = !std::isfinite(v) || v == 999.0 || v == -999.0;
             ImGui::BeginTooltip();
-            if (!std::isfinite(v) || v == 999.0 || v == -999.0) {
-                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda: diverged", xn, snap_x, yn, snap_y);
-            } else {
-                ImGui::Text("%s = %.6g\n%s = %.6g\nlambda = %.6g", xn, snap_x, yn, snap_y, v);
-            }
+            if (regime && value_code && !special)
+                ImGui::Text("%s = %.6g\n%s = %.6g\n%s (%.6g)", xn, snap_x, yn, snap_y, regime, v);
+            else if (special && regime)
+                ImGui::Text("%s = %.6g\n%s = %.6g\n%s", xn, snap_x, yn, snap_y, regime);
+            else if (special)
+                ImGui::Text("%s = %.6g\n%s = %.6g\n%s: %s", xn, snap_x, yn, snap_y, value_nm,
+                            regime_of ? "no value" : "diverged");
+            else if (regime)
+                ImGui::Text("%s = %.6g\n%s = %.6g\n%s = %.6g\n%s", xn, snap_x, yn, snap_y,
+                            value_nm, v, regime);
+            else
+                ImGui::Text("%s = %.6g\n%s = %.6g\n%s = %.6g", xn, snap_x, yn, snap_y, value_nm, v);
             ImGui::EndTooltip();
         }
     }

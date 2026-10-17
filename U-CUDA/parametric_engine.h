@@ -135,6 +135,12 @@ inline int regime_code(int flag) {
 inline bool regime_is_oscillation(int flag) { return flag >  0; }
 inline bool regime_is_fixed_point(int flag) { return flag <  0; }
 inline bool regime_is_unbound    (int flag) { return flag == 0; }
+// Подпись режима в UI — одна на все диаграммы (подсказки хитмап, сводки, легенды). Принимает и
+// сырые флаги, как regime_code(). "Diverged" сюда не входит: отдельного кода расходимости нет,
+// nan/inf ядра пишут в unbound.
+inline const char* regime_label(int flag) {
+    return flag < 0 ? "Equilibrium" : (flag == 0 ? "Unbound" : "Oscillation");
+}
 
 // Адаптивный шаг в свипах (ядра kernels/adaptive_part.cu). enabled == false — прежний
 // путь без изменений. Тела — AdaptiveCode схемы, params — adaptive_build_params. h
