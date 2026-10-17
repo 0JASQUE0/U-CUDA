@@ -127,8 +127,8 @@ namespace {
     // and returned via sym so detect_alphabet does not file it as a parameter.
     //
     // Call AFTER strip_env (its flatten regex leaves _{n+1} alone because of the
-    // '+') and BEFORE insert_mult: that one scans names with isalpha only and
-    // never clears prev_operand on '_', so a surviving x_n would become "x_ * n".
+    // '+') and BEFORE insert_mult: x_n is not in the alphabet, so that one would
+    // take x, keep prev_operand over '_', and a surviving x_n would become "x_ * n".
     std::string strip_iteration_index(std::string s, char& sym) {
         std::smatch m;
         sym = 'n';
@@ -258,6 +258,10 @@ namespace {
                 continue;
             }
             if (std::isalpha((unsigned char)c)) {
+                // Identifier: a letter, then letters, digits and '_' (V1, V_1,
+                // atan2, log10) - the same rule as the AST parser's. Reading
+                // letters only split V1 into "V * 1" and atan2( into "atan2 * (".
+                auto ident_char = [](char ch) { return std::isalnum((unsigned char)ch) || ch == '_'; };
                 // A whole-run function name beats the greedy alphabet scan below:
                 // otherwise "cos" with a parameter named c is eaten as c plus a
                 // junk tail "os". A space still separates letters, so "a cos(x)"
@@ -265,17 +269,19 @@ namespace {
                 // arc-cosine. A user symbol of the same name still wins.
                 {
                     size_t w = i;
-                    while (w < rhs.size() && std::isalpha((unsigned char)rhs[w])) ++w;
+                    while (w < rhs.size() && ident_char(rhs[w])) ++w;
                     const std::string run = rhs.substr(i, w - i);
                     if (math_funcs().count(run) && !alpha_plain.count(run)) {
                         if (prev_operand) out += " * ";
                         out += run; prev_operand = false; i = w; continue;
                     }
                 }
-                // жадно режем по алфавиту обычных имён: ищем самое длинное совпадение
+                // жадно режем по алфавиту обычных имён: ищем самое длинное совпадение.
+                // Цифры и '_' входят в имя, но только если такое имя есть в алфавите:
+                // при одном x в алфавите x2 по-прежнему читается как x * 2.
                 std::string best;
                 for (size_t L = 1; i + L <= rhs.size(); ++L) {
-                    if (!std::isalpha((unsigned char)rhs[i + L - 1])) break;
+                    if (!ident_char(rhs[i + L - 1])) break;
                     std::string cand = rhs.substr(i, L);
                     if (alpha_plain.count(cand)) best = cand;
                 }

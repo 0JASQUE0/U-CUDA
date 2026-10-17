@@ -103,33 +103,45 @@ namespace { // внутренняя линковка: всё ниже не ви�
             return false;
         }
         PN term() {
-            PN n = powr();
+            PN n = unary();
             for (;;) {
                 if (latex) {
                     ws();
-                    if (i + 5 <= s.size() && s.compare(i, 5, "\\cdot") == 0) { i += 5; auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; continue; }
+                    if (i + 5 <= s.size() && s.compare(i, 5, "\\cdot") == 0) { i += 5; auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; continue; }
                 }
                 char c = peek();
-                if (c == '*') { eat('*'); auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; }
-                else if (c == '/') { eat('/'); auto t = mk(Node::Div); t->a = n; t->b = powr(); n = t; }
-                else if (latex && at_primary_start()) { auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; }
+                if (c == '*') { eat('*'); auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; }
+                else if (c == '/') { eat('/'); auto t = mk(Node::Div); t->a = n; t->b = unary(); n = t; }
+                else if (latex && at_primary_start()) { auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; }
                 else break;
             }
             return n;
         }
-        PN powr() {
-            PN base = unary();
-            if (peek() == '^') {
-                eat('^'); auto t = mk(Node::Pow); t->a = base;
-                t->b = latex ? braced_arg() : powr(); return t;
-            }
-            return base;
-        }
+        // Унарный минус слабее степени, как в математике: -x^2 = -(x^2),
+        // 2*-x^2 = 2*(-(x^2)). Раньше основание степени бралось через unary(),
+        // и -x^2 молча превращался в (-x)^2.
         PN unary() {
             char c = peek();
             if (c == '-') { eat('-'); auto t = mk(Node::Neg); t->a = unary(); return t; }
             if (c == '+') { eat('+'); return unary(); }
-            return primary();
+            return powr();
+        }
+        PN powr() {
+            PN base = primary();
+            if (peek() == '^') {
+                eat('^'); auto t = mk(Node::Pow); t->a = base;
+                t->b = exponent(); return t;
+            }
+            return base;
+        }
+        // Показатель: в LaTeX один токен или группа {..}, в обычном синтаксисе —
+        // снова powr(), поэтому ^ правоассоциативна. Знак перед показателем
+        // разрешён в обоих режимах: x^-1, x^-y^2 = x^(-(y^2)).
+        PN exponent() {
+            char c = peek();
+            if (c == '-') { eat('-'); auto t = mk(Node::Neg); t->a = exponent(); return t; }
+            if (c == '+') { eat('+'); return exponent(); }
+            return latex ? braced_arg() : powr();
         }
         PN primary_single() {
             ws();
@@ -280,7 +292,15 @@ namespace { // внутренняя линковка: всё ниже не ви�
         switch (n->kind) {
         case Node::Num:o << fmtnum(n->num); break;
         case Node::Sym:o << nm.resolve(n->name); break;
-        case Node::Neg:o << "-"; emit_child(n->a, nm, o, prec(Node::Neg)); break;
+        case Node::Neg:
+            o << "-";
+            // "- -x" и "-(-x)^2" дают Neg(Neg(..)); без скобок вышло бы "--X[0]" —
+            // в C это декремент состояния. То же для отрицательного литерала.
+            if (n->a->kind == Node::Neg || (n->a->kind == Node::Num && std::signbit(n->a->num))) {
+                o << "("; emit(n->a, nm, o); o << ")";
+            }
+            else emit_child(n->a, nm, o, prec(Node::Neg));
+            break;
         case Node::Add:emit_child(n->a, nm, o, 1); o << " + "; emit_child(n->b, nm, o, 1); break;
         case Node::Sub:emit_child(n->a, nm, o, 1); o << " - "; emit_child(n->b, nm, o, 2); break;
         case Node::Mul:emit_child(n->a, nm, o, 2); o << " * "; emit_child(n->b, nm, o, 2); break;
@@ -1735,7 +1755,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
     enum FuncId : int {
         F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
         F_SINH, F_COSH, F_TANH, F_EXP, F_LOG, F_LOG2, F_LOG10,
-        F_SQRT, F_CBRT, F_FABS,
+        F_SQRT, F_CBRT, F_FABS, F_FLOOR, F_CEIL,
         // F_COPYSIGN is emitted only by pn_diff (derivative of fabs); the user-facing
         // parser does not accept it, so it is absent from known_funcs().
         F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN
@@ -1749,6 +1769,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         if (nm == "exp")return F_EXP; if (nm == "log")return F_LOG; if (nm == "log2")return F_LOG2;
         if (nm == "log10")return F_LOG10; if (nm == "sqrt")return F_SQRT; if (nm == "cbrt")return F_CBRT;
         if (nm == "fabs" || nm == "abs")return F_FABS;
+        if (nm == "floor")return F_FLOOR; if (nm == "ceil")return F_CEIL;
         if (nm == "pow")return F_POW; if (nm == "atan2")return F_ATAN2; if (nm == "fmod")return F_FMOD;
         if (nm == "copysign")return F_COPYSIGN;
         throw std::runtime_error("eval: unknown function " + nm);
@@ -1804,6 +1825,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         case F_EXP:return std::exp(x); case F_LOG:return std::log(x); case F_LOG2:return std::log2(x);
         case F_LOG10:return std::log10(x); case F_SQRT:return std::sqrt(x); case F_CBRT:return std::cbrt(x);
         case F_FABS:return std::fabs(x);
+        case F_FLOOR:return std::floor(x); case F_CEIL:return std::ceil(x);
         } return 0;
     }
     double apply_func2(int fid, double a, double b) {
@@ -1817,7 +1839,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
     // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
     // atan2/fmod комплексного смысла не имеют и до сюда не доходят: система с
-    // ними отсекается в cd_check_complex_safe ещё на кодгене.
+    // ними отсекается в cd_check_complex_safe ещё на кодгене. floor/ceil
+    // кусочно-постоянны, и их продолжение — константа floor(Re z) (см. configCUDA.h).
     ucmplx apply_func1(int fid, ucmplx x) {
         switch (fid) {
         case F_SIN:return sin(x); case F_COS:return cos(x); case F_TAN:return tan(x);
@@ -1826,6 +1849,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         case F_EXP:return exp(x); case F_LOG:return log(x); case F_LOG2:return log2(x);
         case F_LOG10:return log10(x); case F_SQRT:return sqrt(x); case F_CBRT:return cbrt(x);
         case F_FABS:return fabs(x);
+        case F_FLOOR:return floor(x); case F_CEIL:return ceil(x);
         } return ucmplx(0, 0);
     }
     ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {

@@ -391,6 +391,12 @@ UCUDA_HD inline ucmplx cbrt(ucmplx z) {
 // (cd_check_complex_safe), с внятным сообщением вместо ошибки NVRTC.
 UCUDA_HD inline ucmplx fabs(ucmplx z) { return ucmplx(ucmplx_abs(z), 0); }
 UCUDA_HD inline ucmplx abs(ucmplx z)  { return fabs(z); }
+// floor/ceil кусочно-постоянны: вблизи нецелой точки их аналитическое
+// продолжение — та же константа, поэтому берётся вещественная часть, мнимая
+// обнуляется. При im == 0 совпадает с вещественной функцией; CPU-интерпретатор
+// (SystemEvaluator) зовёт эти же перегрузки.
+UCUDA_HD inline ucmplx floor(ucmplx z) { return ucmplx(floor(z.re), 0); }
+UCUDA_HD inline ucmplx ceil(ucmplx z)  { return ucmplx(ceil(z.re), 0); }
 
 // Линейная сетка: узел k из nPts на [lo, hi], inclusive по обоим концам.
 // Вырожденные случаи повторяют прежний getValueByIdx (nPts == 1 -> hi): это то,
