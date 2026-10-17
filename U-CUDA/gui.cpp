@@ -5537,9 +5537,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 
         // GPU KRS body (what NVRTC compiles).
         ImGui::SeparatorText("KRS (GPU, NVRTC)");
-        std::string body_gpu = s.krs_code.empty()
-            ? std::string("(empty — press Regenerate or change Method)")
-            : s.krs_code;
+        std::string body_gpu = !s.krs_code.empty() ? s.krs_code
+            : !s.krs_error.empty() ? "(empty: " + s.krs_error + ")"
+            : std::string("(empty — press Regenerate or change Method)");
         std::vector<char> buf_gpu(body_gpu.begin(), body_gpu.end());
         buf_gpu.resize(body_gpu.size() + 1);
         buf_gpu[body_gpu.size()] = '\0';
@@ -5696,6 +5696,23 @@ static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int&
     }
 }
 
+// Режим ячейки для подсказки хитмапы (HeatmapView::cell_regime). flags — коды режима (сырые или
+// REGIME_*, см. regime_code); row_stride — длина строки: n у карт n×n, 0 — один флаг на колонку
+// (colored 1D, DFT: строки там — бины Y / частоты одной точки свипа). with_oscillation — подписать
+// и колебательные ячейки (карта States, где значение и есть код режима); иначе у них nullptr и
+// подсказка показывает само значение. flags ловится по ссылке — колбэк одноразовый и не
+// переживает render().
+static std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                              int row_stride,
+                                                              bool with_oscillation = false) {
+    return [&flags, row_stride, with_oscillation](int ix, int iy) -> const char* {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        if (k >= flags.size()) return nullptr;
+        if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
+        return regime_label(flags[k]);
+    };
+}
+
 // Подпись под "OK: ..." — печатается только если есть что показать кроме
 // колебательного режима (иначе строка была бы шумом на каждом успешном run'е).
 // Сводка адаптивного шага по свипу: st — по 4 числа на точку (принятые, отвергнутые,
@@ -5724,8 +5741,10 @@ static void draw_regime_summary(const std::vector<int>& flags) {
     int fp = 0, unb = 0, osc = 0;
     count_regimes(flags, fp, unb, osc);
     if (fp == 0 && unb == 0) return;
-    ImGui::TextDisabled("regimes: %d fixed point / %d unbound / %d oscillation",
-                        fp, unb, osc);
+    ImGui::TextDisabled("regimes: %d %s / %d %s / %d %s",
+                        fp,  regime_label(REGIME_FIXED_POINT),
+                        unb, regime_label(REGIME_UNBOUND),
+                        osc, regime_label(REGIME_OSCILLATION));
 }
 
 // Рисует окна проекций (каждая — отдельное docking-окно с графиком). Optional `before_begin`
@@ -7211,6 +7230,10 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
                 draw_view_range_menu(vrt, hb.x_axis, hb.y_axis, hb.swap_axes, &model);
             };
 
+            // Значение ячейки — сырой выход DBSCAN: число кластеров пиков, -1 / 0 — коды режима.
+            hb.cell_regime = regime_cell_label(bdact.result_2d.flags, bdact.result_2d.n_pts);
+            hb.value_name = "period";
+            hb.value_is_regime_code = true;
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hb.render(renderer, origin, avail,
@@ -7382,6 +7405,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             double x0 = rev ? hi : lo;
             double x1 = rev ? lo : hi;
 
+            hc.cell_regime = regime_cell_label(bdact.result.flags, 0);   // флаг на колонку
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hc.render(renderer, origin, avail,
@@ -7796,6 +7820,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
                 draw_view_range_menu(vrt, heatmap.x_axis, heatmap.y_axis, heatmap.swap_axes, &model);
             };
 
+            heatmap.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail,
@@ -8163,6 +8188,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
                 draw_view_range_menu(vrt, heatmap_ls.x_axis, heatmap_ls.y_axis, heatmap_ls.swap_axes, &model);
             };
 
+            heatmap_ls.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap_ls.render(renderer, origin, avail,
@@ -8599,6 +8625,7 @@ static void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCall
             // Поколение данных несёт и номер метрики: смена таба — это другие
             // значения в той же ячейке, и текстура обязана перестроиться.
             const int gen = cact.data_generation_2d * SIGM_COUNT + m;
+            heatmap.cell_regime = regime_cell_label(r.flags, r.n_pts);
             ImVec2 avail_sz = ImGui::GetContentRegionAvail();
             ImVec2 origin   = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail_sz,
@@ -9282,6 +9309,7 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         double x0 = rev ? hi : lo;
         double x1 = rev ? lo : hi;
 
+        hc.cell_regime = regime_cell_label(c.result.flags, 0);   // флаг на точку свипа (колонку)
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hc.render(renderer, origin, avail,
@@ -9976,6 +10004,10 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         // не инвалидируется при toggle галки и пиксели остаются от прошлой версии.
         // Сам swap_axes уже отлавливается через HeatmapView::swap_axes_cached_.
         int hm_basins_gen = c.data_generation * 2 + (c.renumber_spiral ? 1 : 0);
+        // id бассейна: <= -1 — кластер равновесий, 0 — unbound, >= 1 — колебательный.
+        hm_basins_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_basins_v.value_name = "basin";
+        hm_basins_v.value_is_regime_code = true;
         hm_basins_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 0u, hm_basins_gen,
                           n, n, buf.data(),
@@ -9987,6 +10019,9 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
     else if (c.active_plot_tab == 1) {
         hm_avgpk_v.x_axis.name = ax_x;
         hm_avgpk_v.y_axis.name = ax_y;
+        // У равновесия здесь последняя точка траектории — настоящее значение, не код.
+        hm_avgpk_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_avgpk_v.value_name = "feature 1";
         hm_avgpk_v.render(*renderer, origin, avail,
                          /*owner_id*/ base_oid + 1u, c.data_generation,
                          n, n, c.result.avg_peaks.data(),
@@ -9998,6 +10033,10 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
     else if (c.active_plot_tab == 2) {
         hm_avgint_v.x_axis.name = ax_x;
         hm_avgint_v.y_axis.name = ax_y;
+        // У равновесия avgPeakFinderCUDA пишет сюда -1 — код, а не величину фичи.
+        hm_avgint_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_avgint_v.value_name = "feature 2";
+        hm_avgint_v.value_is_regime_code = true;
         hm_avgint_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 2u, c.data_generation,
                           n, n, c.result.avg_intervals.data(),
@@ -10017,6 +10056,8 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
             buf[k] = (double)regime_code(c.result.helpful_array[k]);
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
+        hm_states_v.cell_regime = regime_cell_label(c.result.helpful_array, n, /*with_oscillation*/ true);
+        hm_states_v.value_is_regime_code = true;
         hm_states_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
@@ -10025,7 +10066,10 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
         handle_view_range_keys(vrt, hm_states_v.x_axis, hm_states_v.y_axis, plot_window_active(),
                                hm_states_v.swap_axes, &model);
         // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
-        ImGui::TextDisabled("Levels: -1 = FixedPoint, 0 = Unbound, 1 = Oscillation");
+        ImGui::TextDisabled("Levels: %d = %s, %d = %s, %d = %s",
+                            REGIME_FIXED_POINT, regime_label(REGIME_FIXED_POINT),
+                            REGIME_UNBOUND,     regime_label(REGIME_UNBOUND),
+                            REGIME_OSCILLATION, regime_label(REGIME_OSCILLATION));
     }
     else if (c.active_plot_tab == 4) {
         // Scatter (avgPeak, avgInterval), точки сгруппированы по basin_idx.
@@ -15513,6 +15557,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
         double vmin, vmax;
         int    data_gen;
         int    owner_id;
+        const std::vector<int>* flags;   // режим ячейки для подсказки (regime_cell_label)
     };
     L2Slot slots[3] = {};
     if (cs.shared.level_2d_enabled) {
@@ -15523,7 +15568,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                          d.result_2d.param_lo, d.result_2d.param_hi,
                          d.result_2d.param_lo_2, d.result_2d.param_hi_2,
                          d.result_2d.min_val, d.result_2d.max_val,
-                         d.data_generation_2d, 0xCB1F2D ^ sys_owner_delta };
+                         d.data_generation_2d, 0xCB1F2D ^ sys_owner_delta, &d.result_2d.flags };
         }
         if (cs.shared.lle2d_enabled && !cs.lle_session.curves.empty()) {
             auto& c = cs.lle_session.curves[0];
@@ -15532,7 +15577,7 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
                          c.result_2d.min_val, c.result_2d.max_val,
-                         c.data_generation_2d, 0xCE1E2D ^ sys_owner_delta };
+                         c.data_generation_2d, 0xCE1E2D ^ sys_owner_delta, &c.result_2d.flags };
         }
         if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
             auto& c = cs.ls_session.curves[0];
@@ -15548,7 +15593,8 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                          c.result_2d.n_pts, values_default,
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
-                         vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta };
+                         vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta,
+                         &c.result_2d.flags };
         }
     }
     // One-time init of per-slot HeatmapView colormap from the sub-session config (or app default).
@@ -15705,6 +15751,12 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 double        vmin_use   = (i == 2 && ls_plane) ? ls_vmin  : slots[i].vmin;
                 double        vmax_use   = (i == 2 && ls_plane) ? ls_vmax  : slots[i].vmax;
                 int           gen_use    = (i == 2 && ls_plane) ? ls_gen   : slots[i].data_gen;
+                if (slots[i].flags)
+                    hv.cell_regime = regime_cell_label(*slots[i].flags, slots[i].n_pts);
+                if (i == 0) {   // Bif 2D: значение — период, -1 / 0 — коды режима (как в Parametric)
+                    hv.value_name = "period";
+                    hv.value_is_regime_code = true;
+                }
 
                 ImVec2 avail  = ImGui::GetContentRegionAvail();
                 ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -16201,6 +16253,9 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                                               ? cs.vars[bc.axis_x_var] : "x";
                         bsn_hv.y_axis.name = (bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size())
                                               ? cs.vars[bc.axis_y_var] : "y";
+                        bsn_hv.cell_regime = regime_cell_label(r.helpful_array, r.n_pts);
+                        bsn_hv.value_name = "basin";
+                        bsn_hv.value_is_regime_code = true;
                         ImVec2 avail  = ImGui::GetContentRegionAvail();
                         ImVec2 origin = ImGui::GetCursorScreenPos();
                         bsn_hv.render(bsn_renderer, origin, avail,

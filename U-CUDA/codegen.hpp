@@ -651,6 +651,12 @@ public:
     // остаются вещественными: комплексных значений в них нет.
     void eval_complex(const ucmplx* X, const double* a, ucmplx* deriv) const;
 
+    // Первая функция правых частей, у которой нет комплексного смысла (atan2,
+    // fmod), или пустая строка. eval_complex/eval_jacobian_complex дали бы на ней
+    // 0, поэтому CPU-путь обязан отказать комплексной схеме заранее — так же, как
+    // GPU-путь отказывает на кодгене (cd_check_complex_safe, правило общее).
+    const std::string& complex_unsafe_function() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

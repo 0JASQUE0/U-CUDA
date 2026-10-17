@@ -1145,8 +1145,11 @@ public:
                 out += shown;
                 out += " (wrapper) =====\n";
                 if (shown != w) { out += "// "; out += w; out += "\n"; }
-                const std::string body = compute_krs_for_scheme(custom_schemes, sys, w);
-                out += body.empty() ? std::string("// (could not build: base scheme missing or invalid)\n")
+                std::string why;
+                const std::string body = compute_krs_for_scheme(custom_schemes, sys, w, &why);
+                out += body.empty() ? "// (could not build: "
+                                      + (why.empty() ? std::string("base scheme missing or invalid") : why)
+                                      + ")\n"
                                     : body;
                 out += "\n";
             }

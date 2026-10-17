@@ -339,6 +339,7 @@ struct PhaseRunInputs {
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
+    std::string krs_error;   // причина пустой krs_code (отказ кодгена), пусто — не известна
     // krs_code для custom схемы содержит тело дословно (см. regenerate_krs).
     // Флаг нужен, чтобы CPU-ветка знала: это сырой C, а не codegen-вывод.
     bool        krs_is_custom = false;
@@ -757,7 +758,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
     else if (in.use_gpu) {
         if (in.krs_code.empty()) {
-            result.error = "no KRS generated (check system)";
+            result.error = in.krs_error.empty() ? "no KRS generated (check system)" : in.krs_error;
             return result;
         }
         calc_ok = computePhasePortraitsNVRTC(in.krs_code, dim,
@@ -773,6 +774,12 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага
         // (см. krs_cpu.h) и гоняется тем же циклом, что и встроенные схемы.
+        // Пустое тело (Extr над базой, на которой отказал кодген) собралось бы в шаг,
+        // который ничего не делает, — застывшая траектория вместо причины.
+        if (in.krs_code.empty()) {
+            result.error = in.krs_error.empty() ? "no KRS generated (check system)" : in.krs_error;
+            return result;
+        }
         KrsCpuStep step;
         std::vector<KrsCpuDiag> diags;
         if (!step.compile(in.krs_code, dim, (int)a.size(), diags)) {
@@ -802,11 +809,26 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             result.error = std::string("parse error: ") + e.what();
             return result;
         }
+        // A map ignores the scheme field - see compute_krs_for_scheme.
+        const IntScheme isch = in.sys.is_map ? IntScheme::Map
+                                             : int_scheme_from_string(in.scheme);
+        // Те же отказы, что у GPU-пути на кодгене (cd_check_complex_safe, jac_over), —
+        // сюда кодген не доходит. Без них комплексная схема молча считала бы atan2/fmod
+        // нулём, а неявная без якобиана выдавала бы "diverged (nan/inf)" вместо причины.
+        // Именно отказ, а не исключение: у future этого расчёта нет catch.
+        if (int_scheme_complex_state(isch) && !evaluator->complex_unsafe_function().empty()) {
+            result.error = in.scheme + ": function " + evaluator->complex_unsafe_function()
+                         + " is not defined in complex arithmetic - pick another scheme";
+            return result;
+        }
+        if ((isch == IntScheme::ImplicitEuler || isch == IntScheme::ImplicitMidpoint
+             || isch == IntScheme::ComplexIEuler) && !evaluator->has_jacobian()) {
+            result.error = in.scheme + ": the right-hand side is not differentiable (floor/ceil/fmod), "
+                           "no Jacobian can be built - pick an explicit scheme";
+            return result;
+        }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
-            // A map ignores the scheme field - see compute_krs_for_scheme.
-            const IntScheme isch = in.sys.is_map ? IntScheme::Map
-                                                 : int_scheme_from_string(in.scheme);
             bool ok = computePhasePortraitCPU(*evaluator, isch,
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
@@ -1016,6 +1038,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.use_gpu      = s.use_gpu;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
+    in.krs_error    = s.krs_error;
     in.krs_is_custom = false;
     // For a map krs_code is always codegen output; custom KRS do not apply.
     if (!s.sys.is_map) {
@@ -1218,7 +1241,7 @@ void PhaseAnalysisSession::regenerate_krs() {
     // пришлось бы в оба места: панель KRS рисует именно krs_code, а Run идёт
     // через compute_krs_for_scheme. Разъехавшись, они показывали бы одно, а
     // считали другое — поэтому теперь резолвер ровно один.
-    krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme);
+    krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme, &krs_error);
     prewarm_gpu();
 }
 
@@ -1266,9 +1289,20 @@ void PhaseAnalysisSession::prewarm_gpu() {
 // КРС их объявил автор, у встроенной берём из паспорта. Неизвестная база — отказ, а не
 // тихий откат на Эйлер. Одна функция на все обёртки — иначе они разъехались бы по тому,
 // что считают допустимой базой.
+// Кодген отказывает исключением с читаемой причиной (cd_check_complex_safe,
+// jac_check_differentiable, ...). Наверх уходит пустая КРС, а причина — в *err:
+// без неё пользователь видел только "КРС пуста" и гадал, что не так с системой.
+template <class F>
+static std::string krs_try(std::string* err, F&& f) {
+    try { return f(); }
+    catch (const std::exception& e) { if (err) *err = e.what(); }
+    catch (...) { if (err) *err = "code generation failed"; }
+    return {};
+}
+
 static bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const System& sys,
                                  const std::string& base_name, std::string (*gen)(const System&, Scheme),
-                                 std::string& body, int& p, bool& sym) {
+                                 std::string& body, int& p, bool& sym, std::string* err = nullptr) {
     p = 1; sym = false;
     for (const auto& cs : custom_schemes) {
         if (cs.name == base_name) {
@@ -1277,8 +1311,7 @@ static bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes
         }
     }
     if (!builtin_scheme_traits(base_name, &p, &sym)) return false;
-    try { body = gen(sys, scheme_from_string(base_name)); }
-    catch (...) { return false; }
+    body = krs_try(err, [&] { return gen(sys, scheme_from_string(base_name)); });
     return !body.empty();
 }
 
@@ -1287,15 +1320,22 @@ static bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes
 static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
                                        const System& sys,
                                        const std::string& scheme,
-                                       std::string (*gen)(const System&, Scheme)) {
+                                       std::string (*gen)(const System&, Scheme),
+                                       std::string* err) {
+    if (err) err->clear();
+    auto refuse = [err](std::string why) -> std::string {
+        if (err) *err = std::move(why);
+        return {};
+    };
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
         if (sys.rhs.empty()) return {};
-        try { return gen(sys, Scheme::Map); } catch (...) { return {}; }
+        return krs_try(err, [&] { return gen(sys, Scheme::Map); });
     }
     for (const auto& cs : custom_schemes) {
-        if (cs.name == scheme) return cs.body;
+        if (cs.name == scheme)
+            return cs.body.empty() ? refuse("custom KRS '" + scheme + "' has an empty body") : cs.body;
     }
     if (sys.rhs.empty()) return {};
 
@@ -1303,10 +1343,14 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     // встроенной берём из паспорта. Неизвестная база — отказ, а не тихий
     // откат на Эйлер: пустая КРС наверху превращается в честную ошибку.
     // Общее для ОБЕИХ обёрток — иначе Extr и Comp разъехались бы по тому,
-    // что считают допустимой базой.
-    auto resolve_base = [&](const std::string& base_name, std::string& body,
+    // что считают допустимой базой. Отказ кодгена на базе (Extr(Complex CD|...)
+    // при atan2) несёт свою причину; иначе база просто не найдена.
+    auto resolve_base = [&](const char* kind, const std::string& base_name, std::string& body,
                             int& p, bool& sym) -> bool {
-        return resolve_wrapper_base(custom_schemes, sys, base_name, gen, body, p, sym);
+        if (resolve_wrapper_base(custom_schemes, sys, base_name, gen, body, p, sym, err)) return true;
+        if (err && err->empty())
+            *err = std::string(kind) + " base '" + base_name + "' is unknown or has no step body";
+        return false;
     };
 
     ExtrapolationSpec spec;
@@ -1315,48 +1359,49 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
         // комплексных CD-схем. Кастомная КРС с тем же именем перекрыла бы
         // встроенную (см. выше) — её ядро не выделить, поэтому отказ.
         for (const auto& cs : custom_schemes)
-            if (cs.name == spec.base) return {};
+            if (cs.name == spec.base)
+                return refuse("ExtrZ needs a built-in complex base, '" + spec.base + "' is a custom KRS");
         int p = 1; bool sym = false;
         if (!scheme_has_complex_core(spec.base) || !builtin_scheme_traits(spec.base, &p, &sym))
-            return {};
-        try {
+            return refuse("ExtrZ base '" + spec.base + "' has no complex core");
+        return krs_try(err, [&] {
             const std::string core = codegen_scheme_complex_core(sys, scheme_from_string(spec.base));
             return wrap_extrapolation_complex(core, (int)sys.vars.size(), spec.n, p, spec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
     if (parse_extrapolation_name(scheme, &spec)) {
         int  p = 1; bool sym = false; std::string base_body;
-        if (!resolve_base(spec.base, base_body, p, sym)) return {};
-        try {
+        if (!resolve_base("extrapolation", spec.base, base_body, p, sym)) return {};
+        return krs_try(err, [&] {
             return wrap_extrapolation(base_body, (int)sys.vars.size(),
                                       spec.n, p, sym, spec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
 
     CompositionSpec cspec;
     if (parse_composition_name(scheme, &cspec)) {
         int  p = 1; bool sym = false; std::string base_body;
-        if (!resolve_base(cspec.base, base_body, p, sym)) return {};
-        try {
+        if (!resolve_base("composition", cspec.base, base_body, p, sym)) return {};
+        return krs_try(err, [&] {
             return wrap_composition(base_body, sys, cspec.gammas, p, sym, cspec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
 
-    try {
-        return gen(sys, scheme_from_string(scheme));
-    }
-    catch (...) {
-        return {};
-    }
+    return krs_try(err, [&] { return gen(sys, scheme_from_string(scheme)); });
 }
 
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                           const System& sys,
-                                          const std::string& scheme) {
-    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme);
+                                          const std::string& scheme,
+                                          std::string* err) {
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme, err);
+}
+
+std::string krs_empty_error(const std::vector<CustomScheme>& custom_schemes,
+                            const System& sys, const std::string& scheme) {
+    std::string err;
+    compute_krs_for_scheme(custom_schemes, sys, scheme, &err);
+    return err.empty() ? "krs_code is empty (no valid system or scheme)" : err;
 }
 
 AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_schemes,
@@ -1385,9 +1430,10 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
                 sys, codegen_scheme_complex_core(sys, scheme_from_string(spec.base)), spec.n, p, spec.base,
                 scheme_rhs_per_step(sys, spec.base));
         }
-        std::string body; int p = 1; bool sym = false;
-        if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym))
-            throw std::runtime_error("extrapolation base '" + spec.base + "' is unknown or has no step body");
+        std::string body, why; int p = 1; bool sym = false;
+        if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym, &why))
+            throw std::runtime_error(!why.empty() ? why
+                : "extrapolation base '" + spec.base + "' is unknown or has no step body");
         // f базы: кастомная КРС непрозрачна — 0 (счётчик видит только F1); встроенная — по
         // scheme_rhs_per_step, CD-семейство в том числе.
         bool base_custom = false;
@@ -1405,7 +1451,7 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
 std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                        const System& sys,
                                        const std::string& scheme) {
-    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme_cpu_equivalent);
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme_cpu_equivalent, nullptr);
 }
 
 void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
@@ -1664,7 +1710,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             return false;
         }
         Bifurcation2DResult r = engine.run_bifurcation_2d(req);
@@ -1674,7 +1720,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             return false;
         }
         Bifurcation1DResult r = engine.run_bifurcation_1d(req);
@@ -1713,7 +1759,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1730,7 +1776,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1980,7 +2026,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LLE2DResult r = engine.run_lle_2d(req);
@@ -1990,7 +2036,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LLE1DResult r = engine.run_lle_1d(req);
@@ -2028,7 +2074,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -2045,7 +2091,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -2241,7 +2287,7 @@ bool Dft1DAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     Dft1DResult r = engine.run_dft_1d(req);
@@ -2262,7 +2308,7 @@ bool Dft1DAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset();
         progress_token.reset();
         return false;
@@ -2489,7 +2535,7 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     BasinsResult r = engine.run_basins(req);
@@ -2513,7 +2559,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) 
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset();
         progress_token.reset();
         progress_phase_token.reset();
@@ -2549,7 +2595,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     // если система не менялась — compile_basins_if_needed обойдётся no-op'ом.
     BasinsRequest sim_req = build_basins_request(*this, c);
     if (sim_req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
 
@@ -3183,7 +3229,7 @@ bool FastSyncAnalysisSession::run(ParametricEngine& engine, int config_idx) {
     FastSyncConfig& c = configs[config_idx];
     c.last_error.clear();
     FastSyncRequest req = build_fastsync_request(*this, c);
-    if (req.krs_body.empty()) { c.last_error = "krs_code is empty"; return false; }
+    if (req.krs_body.empty()) { c.last_error = krs_empty_error(custom_schemes, sys, c.scheme); return false; }
     FastSyncResult r = engine.run_fastsync(req);
     bool ok = r.ok;
     apply_fastsync_result(c, std::move(r));
@@ -3201,7 +3247,7 @@ bool FastSyncAnalysisSession::run_async(ParametricEngine& engine, int config_idx
 
     FastSyncRequest req = build_fastsync_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset(); progress_token.reset();
         return false;
     }
@@ -3447,7 +3493,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LS2DResult r = engine.run_ls_2d(req);
@@ -3457,7 +3503,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LS1DResult r = engine.run_ls_1d(req);
@@ -3495,7 +3541,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -3512,7 +3558,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -3732,7 +3778,7 @@ bool SignalMetricsAnalysisSession::run_async(ParametricEngine& engine, int confi
 
     SignalMetricsRequest req = build_metrics_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     cancel_token   = std::make_shared<std::atomic<bool>>(false);
