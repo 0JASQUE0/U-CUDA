@@ -802,11 +802,26 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             result.error = std::string("parse error: ") + e.what();
             return result;
         }
+        // A map ignores the scheme field - see compute_krs_for_scheme.
+        const IntScheme isch = in.sys.is_map ? IntScheme::Map
+                                             : int_scheme_from_string(in.scheme);
+        // Те же отказы, что у GPU-пути на кодгене (cd_check_complex_safe, jac_over), —
+        // сюда кодген не доходит. Без них комплексная схема молча считала бы atan2/fmod
+        // нулём, а неявная без якобиана выдавала бы "diverged (nan/inf)" вместо причины.
+        // Именно отказ, а не исключение: у future этого расчёта нет catch.
+        if (int_scheme_complex_state(isch) && !evaluator->complex_unsafe_function().empty()) {
+            result.error = in.scheme + ": function " + evaluator->complex_unsafe_function()
+                         + " is not defined in complex arithmetic - pick another scheme";
+            return result;
+        }
+        if ((isch == IntScheme::ImplicitEuler || isch == IntScheme::ImplicitMidpoint
+             || isch == IntScheme::ComplexIEuler) && !evaluator->has_jacobian()) {
+            result.error = in.scheme + ": the right-hand side is not differentiable (floor/ceil/fmod), "
+                           "no Jacobian can be built - pick an explicit scheme";
+            return result;
+        }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
-            // A map ignores the scheme field - see compute_krs_for_scheme.
-            const IntScheme isch = in.sys.is_map ? IntScheme::Map
-                                                 : int_scheme_from_string(in.scheme);
             bool ok = computePhasePortraitCPU(*evaluator, isch,
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);

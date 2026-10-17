@@ -491,14 +491,21 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // deliberately provides no ucmplx overload for them. Catch them here, at
     // codegen time, so the user gets the reason instead of an NVRTC template
     // error from the middle of a generated kernel.
+    // The rule itself lives in cd_find_complex_unsafe: SystemEvaluator asks the same
+    // question for the CPU path, which never goes through codegen.
+    const std::string* cd_find_complex_unsafe(const PN& n) {
+        if (!n) return nullptr;
+        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2")) return &n->name;
+        if (const std::string* f = cd_find_complex_unsafe(n->a)) return f;
+        if (const std::string* f = cd_find_complex_unsafe(n->b)) return f;
+        for (const auto& c : n->args)
+            if (const std::string* f = cd_find_complex_unsafe(c)) return f;
+        return nullptr;
+    }
     void cd_check_complex_safe(const PN& n) {
-        if (!n) return;
-        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2"))
-            throw std::runtime_error("Complex CD: function " + n->name +
+        if (const std::string* f = cd_find_complex_unsafe(n))
+            throw std::runtime_error("Complex CD: function " + *f +
                 " is not defined in complex arithmetic - pick another scheme");
-        cd_check_complex_safe(n->a);
-        cd_check_complex_safe(n->b);
-        for (const auto& c : n->args) cd_check_complex_safe(c);
     }
 
     // ---------- Symbolic differentiation (implicit schemes) ----------
@@ -1059,9 +1066,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
         auto Jn = jac_over(s, stn);    // Jacobian, same point as the residual
 
         if (cx) {
-            // Те же запреты, что у Complex CD: у fabs/floor/fmod нет
-            // аналитического продолжения в комплексную плоскость, и шаг с
-            // мнимой частью по ним считать нечем.
+            // Те же запреты, что у Complex CD: у atan2/fmod нет комплексного
+            // смысла, и шаг с мнимой частью по ним считать нечем (floor/ceil/fmod
+            // уже отсёк jac_over). fabs разрешён: |z| и copysign(1, Re u) в
+            // якобиане — см. configCUDA.h.
             for (int i = 0; i < N; ++i) {
                 Parser p(s.rhs[i], s.latex);
                 cd_check_complex_safe(p.parse());
@@ -1816,8 +1824,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // Комплексные версии — те же id, те же формулы, что и в device-коде: обе
     // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
     // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
-    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: система с
-    // ними отсекается в cd_check_complex_safe ещё на кодгене.
+    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: на GPU систему
+    // с ними отсекает cd_check_complex_safe на кодгене, а CPU-путь кодген не
+    // зовёт и спрашивает complex_unsafe_function() перед комплексной схемой.
     ucmplx apply_func1(int fid, ucmplx x) {
         switch (fid) {
         case F_SIN:return sin(x); case F_COS:return cos(x); case F_TAN:return tan(x);
@@ -1828,9 +1837,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
         case F_FABS:return fabs(x);
         } return ucmplx(0, 0);
     }
+    // F_COPYSIGN приходит только из якобиана (производная fabs) и всегда с
+    // литералом 1 первым аргументом — поэтому a.re. atan2/fmod сюда не доходят:
+    // CPU-путь отказывает им заранее (SystemEvaluator::complex_unsafe_function).
     ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {
         switch (fid) {
         case F_POW:return pow(a, b);
+        case F_COPYSIGN:return copysign(a.re, b);
         } return ucmplx(0, 0);
     }
 
@@ -1887,6 +1900,9 @@ struct SystemEvaluator::Impl {
     // Побитово это нейтрально — смена знака в IEEE точна.
     std::vector<char> diag_rem_neg, diag_coef_neg;
     std::vector<std::vector<Instr>> diag_coef, diag_rem;
+    // Первая функция правых частей без комплексного смысла (cd_find_complex_unsafe),
+    // пусто — таких нет.
+    std::string complex_unsafe;
     bool   newton_full = false;
     double newton_tol = 1e-10;
     int    newton_max_iters = 8;
@@ -1923,6 +1939,8 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
         // оценка глубины стека: число push не превышает длину программы
         int depth = (int)impl_->programs[i].size() + 4;
         if (depth > maxdepth) maxdepth = depth;
+        if (impl_->complex_unsafe.empty())
+            if (const std::string* f = cd_find_complex_unsafe(ast)) impl_->complex_unsafe = *f;
 
         // Разложение по своей переменной — для диагонально-неявных схем.
         PN coef, rem;
@@ -1986,6 +2004,8 @@ void SystemEvaluator::eval(const double* X, const double* a, double* deriv) cons
 }
 
 bool SystemEvaluator::has_jacobian() const { return !impl_->jac_programs.empty(); }
+
+const std::string& SystemEvaluator::complex_unsafe_function() const { return impl_->complex_unsafe; }
 
 void SystemEvaluator::eval_jacobian(const double* X, const double* a, double* J) const {
     const int n = impl_->dim;
