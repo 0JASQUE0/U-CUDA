@@ -9020,6 +9020,14 @@ struct ParametricEngine::Impl {
         const int logAxisMask = (req.axis_x_symlog ? (1 << (UCUDA_SYMLOG_SHIFT + 0)) : 0)
                               | (req.axis_y_symlog ? (1 << (UCUDA_SYMLOG_SHIFT + 1)) : 0);
 
+        // Время фаз печатается в консоль в конце расчёта: компиляция модуля, счёт
+        // (траектории + признаки), DBSCAN и весь run_basins.
+        using bas_clock = std::chrono::steady_clock;
+        const auto bas_t0 = bas_clock::now();
+        auto bas_secs = [](bas_clock::time_point a, bas_clock::time_point b) {
+            return std::chrono::duration<double>(b - a).count();
+        };
+
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
@@ -9028,6 +9036,7 @@ struct ParametricEngine::Impl {
             if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err)) return fail(err);
         }
         else if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
+        const auto bas_t_compiled = bas_clock::now();
 
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
@@ -9299,6 +9308,8 @@ struct ParametricEngine::Impl {
             res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
         }
 
+        const auto bas_t_sim = bas_clock::now();
+
         // 2. DBSCAN — обход в ширину на GPU (basins_dbscan_bfs). Прогресс фазы — доля
         // размеченных ячеек, обновляется на каждом уровне обхода.
         if (req.progress_phase) req.progress_phase->store(2, std::memory_order_relaxed);
@@ -9313,6 +9324,7 @@ struct ParametricEngine::Impl {
             if (res.error.empty()) { res.cancelled = true; res.error = "Cancelled by user"; }
             cleanup(); return res;
         }
+        const auto bas_t_dbscan = bas_clock::now();
 
         // 3. D2H результаты
         res.n_pts       = nPts;
@@ -9383,6 +9395,11 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef BAS_CHECK
         #undef BAS_CHECK_CU
+        std::fprintf(stderr, "[basins] %dx%d %s: compile %.3f s, sim %.3f s, DBSCAN %.3f s, total %.3f s (clusters +%d/%d)\n",
+                     nPts, nPts, ad ? "adaptive" : "fixed",
+                     bas_secs(bas_t0, bas_t_compiled), bas_secs(bas_t_compiled, bas_t_sim),
+                     bas_secs(bas_t_sim, bas_t_dbscan), bas_secs(bas_t0, bas_clock::now()),
+                     amountOfClusters, amountOfNegativeClusters);
         res.ok = true;
         return res;
     }
@@ -9406,6 +9423,7 @@ struct ParametricEngine::Impl {
         if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: size does not match n_pts²");
         if (req.helpful_array.size() != total_cells)             return fail("helpful_array: size does not match n_pts²");
 
+        const auto brc_t0 = std::chrono::steady_clock::now();
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
@@ -9447,6 +9465,7 @@ struct ParametricEngine::Impl {
         if (req.progress) req.progress->store(0.0f, std::memory_order_relaxed);
         int amountOfClusters         = 0;
         int amountOfNegativeClusters = 0;
+        const auto brc_t_db0 = std::chrono::steady_clock::now();
         if (!basins_dbscan_bfs(cached_basins.kernel_bfs_seed, cached_basins.kernel_bfs_expand,
                                d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
                                total_cells, eps_dbscan, req.cancel, req.progress,
@@ -9455,6 +9474,7 @@ struct ParametricEngine::Impl {
             cleanup(); return res;
         }
 
+        const auto brc_t_db1 = std::chrono::steady_clock::now();
         res.n_pts = req.n_pts;
         res.basin_idx.assign(total_cells, 0);
         BRC_CHECK(cudaMemcpy(res.basin_idx.data(), d_dbscanResult, total_cells * sizeof(int), cudaMemcpyDeviceToHost), "memcpy basin_idx D2H");
@@ -9463,6 +9483,11 @@ struct ParametricEngine::Impl {
 
         cleanup();
         #undef BRC_CHECK
+        std::fprintf(stderr, "[basins recluster] %dx%d: DBSCAN %.3f s, total %.3f s (clusters +%d/%d)\n",
+                     req.n_pts, req.n_pts,
+                     std::chrono::duration<double>(brc_t_db1 - brc_t_db0).count(),
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - brc_t0).count(),
+                     amountOfClusters, amountOfNegativeClusters);
         res.ok = true;
         return res;
     }
