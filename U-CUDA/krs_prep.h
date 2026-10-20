@@ -1,15 +1,22 @@
 ﻿#pragma once
-// Стадия предрасчёта КРС ("CD fast").
+// Стадия предрасчёта КРС ("CD fast", пользовательские КРС с блоком предрасчёта).
 //
-// Тело шага, как его выдаёт codegen_scheme, самодостаточно: в его начале, между
-// строками-маркерами kKrsPrepBegin / kKrsPrepEnd, стоят константы вида
-//     const numb <имя> = <выражение>;
-// — выражения над a[] и h (и над предыдущими константами), без X[]. Вставленное
-// как есть, тело считает их на каждом шаге; так оно и работает везде, где о
-// предрасчёте не знают (CPU-DLL, обёртки Extr/Comp, FastSync, устойчивость в Order).
+// Тело шага может начинаться блоком между строками-маркерами kKrsPrepBegin /
+// kKrsPrepEnd (перед маркером допускаются только пробелы). В блоке — то, что не
+// зависит от состояния X: выражения над a[] и h. Вставленное как есть, тело считает
+// блок на каждом шаге; так оно и работает везде, где о предрасчёте не знают
+// (CPU-DLL, обёртки Extr/Comp, FastSync, устойчивость в Order).
+//
+// Две формы блока:
+//   1) константы — каждая строка "const numb <имя> = <выражение>;" (так пишет codegen
+//      для CD fast). Шаг пользуется именами;
+//   2) массив — первая строка блока "numb P[<K>];", дальше произвольный C-код, который
+//      заполняет P[0..K-1] (циклы, целые, временные — что угодно, но без X[]). Шаг читает
+//      P[]. Так пишутся пользовательские КРС (Matreshka 4.0 v3).
+// Обе сводятся к одному: код предрасчёта пишет в P[], шаг читает из const numb* P.
 //
 // Горячие циклы ядер (loopCalculateDiscreteModel*, Metrics, Network, Order ->
-// Performance, фазовый портрет Analysis) зовут ucudaKrsPrep(P, a, h) один раз до
+// Performance, фазовый портрет Analysis) зовут ucudaKrsPrep(pre, a, h) один раз до
 // траектории и calculateDiscreteModelP на каждом шаге. Определения для них движок
 // печатает из этого разбора (krs_prep_inline_defs / krs_prep_lib_defs). Без
 // предрасчёта (все прочие схемы) cudaLibrary.cu определяет их пустой структурой и
@@ -18,6 +25,7 @@
 //
 // Header-only: его читает и codegen, и движки, а пробники, линкуемые с
 // parametric_engine.obj, не должны тянуть за собой codegen.obj.
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -28,54 +36,79 @@ inline const char* const kKrsPrepBegin = "    // @ucuda-krs-prep-begin";
 inline const char* const kKrsPrepEnd   = "    // @ucuda-krs-prep-end";
 
 struct KrsPrepSplit {
-    std::vector<std::string> names, exprs;   // константы в порядке объявления
-    std::string step;                        // тело шага без блока констант
+    int n = 0;            // число слотов P[]
+    std::string prep;     // код предрасчёта: пишет P[0..n-1], видит a и h
+    std::string step;     // тело шага: читает P[] (const numb* const P)
 };
 
-// false — в теле нет блока предрасчёта (или он пуст / не той формы).
-inline bool krs_split_prep(const std::string& body, KrsPrepSplit& out) {
-    out = KrsPrepSplit();
-    // Блок обязан стоять В НАЧАЛЕ тела: обёртка (Extr, Comp) печатает тело
-    // базы с отступом внутри своего блока, и там оно должно остаться как есть.
-    const std::string beg = std::string(kKrsPrepBegin) + "\n";
-    const std::string end = std::string(kKrsPrepEnd) + "\n";
-    if (body.compare(0, beg.size(), beg) != 0) return false;
-    const size_t e = body.find(end, beg.size());
-    if (e == std::string::npos) return false;
-    const std::string decl = "    const numb ";
-    size_t p = beg.size();
-    while (p < e) {
-        const size_t nl = body.find('\n', p);
-        if (nl == std::string::npos || nl > e) return false;
-        const std::string line = body.substr(p, nl - p);
-        p = nl + 1;
-        if (line.size() < decl.size() + 5 || line.compare(0, decl.size(), decl) != 0
-            || line.back() != ';') return false;
-        const size_t eq = line.find(" = ", decl.size());
-        if (eq == std::string::npos) return false;
-        out.names.push_back(line.substr(decl.size(), eq - decl.size()));
-        out.exprs.push_back(line.substr(eq + 3, line.size() - eq - 4));
+namespace krs_prep_detail {
+inline std::string trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace((unsigned char)s[a])) ++a;
+    while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+    return s.substr(a, b - a);
+}
+// Строки текста без '\r' (тело пользовательской КРС может прийти с CRLF).
+inline std::vector<std::string> lines_of(const std::string& body) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : body) {
+        if (c == '\r') continue;
+        if (c == '\n') { out.push_back(cur); cur.clear(); }
+        else cur += c;
     }
-    if (out.names.empty()) return false;
-    out.step = body.substr(e + end.size());
-    return true;
+    out.push_back(cur);
+    return out;
 }
+}  // namespace krs_prep_detail
 
-// "const numb <имя> = <arr>[k];" для каждой константы — шапка тела шага.
-inline std::string krs_prep_loads(const KrsPrepSplit& sp, const char* arr) {
-    std::ostringstream o;
-    for (size_t k = 0; k < sp.names.size(); ++k)
-        o << "    const numb " << sp.names[k] << " = " << arr << "[" << k << "];\n";
-    return o.str();
-}
-// Тело предрасчёта: константы по порядку (следующая может читать предыдущую),
-// каждая сразу в свой слот.
-inline std::string krs_prep_stores(const KrsPrepSplit& sp, const char* arr) {
-    std::ostringstream o;
-    for (size_t k = 0; k < sp.names.size(); ++k)
-        o << "    const numb " << sp.names[k] << " = " << sp.exprs[k] << ";\n"
-          << "    " << arr << "[" << k << "] = " << sp.names[k] << ";\n";
-    return o.str();
+// false — в теле нет блока предрасчёта (или он не той формы).
+inline bool krs_split_prep(const std::string& body, KrsPrepSplit& out) {
+    using namespace krs_prep_detail;
+    out = KrsPrepSplit();
+    const std::vector<std::string> L = lines_of(body);
+    // Блок обязан стоять В НАЧАЛЕ тела: обёртка (Extr, Comp) печатает тело базы
+    // внутри своего блока или лямбды, и там оно должно остаться как есть.
+    size_t i = 0;
+    while (i < L.size() && trim(L[i]).empty()) ++i;
+    if (i >= L.size() || trim(L[i]) != trim(kKrsPrepBegin)) return false;
+    size_t e = i + 1;
+    while (e < L.size() && trim(L[e]) != trim(kKrsPrepEnd)) ++e;
+    if (e >= L.size() || e == i + 1) return false;
+
+    std::ostringstream prep, step;
+    const std::string first = trim(L[i + 1]);
+    if (first.compare(0, 7, "numb P[") == 0) {
+        // Форма 2: "numb P[K];" и произвольный код.
+        const size_t rb = first.find(']');
+        if (rb == std::string::npos || first.substr(rb) != "];") return false;
+        const std::string k = first.substr(7, rb - 7);
+        if (k.empty() || k.size() > 4) return false;
+        for (char c : k) if (!std::isdigit((unsigned char)c)) return false;
+        out.n = std::stoi(k);
+        if (out.n <= 0) return false;
+        for (size_t j = i + 2; j < e; ++j) prep << L[j] << "\n";
+    } else {
+        // Форма 1: константы, по одной на строку; каждая сразу в свой слот, шаг
+        // получает их обратно под теми же именами.
+        const std::string decl = "const numb ";
+        for (size_t j = i + 1; j < e; ++j) {
+            const std::string t = trim(L[j]);
+            if (t.compare(0, decl.size(), decl) != 0 || t.back() != ';') return false;
+            const size_t eq = t.find(" = ", decl.size());
+            if (eq == std::string::npos) return false;
+            const std::string name = t.substr(decl.size(), eq - decl.size());
+            const std::string expr = t.substr(eq + 3, t.size() - eq - 4);
+            prep << "    const numb " << name << " = " << expr << ";\n"
+                 << "    P[" << out.n << "] = " << name << ";\n";
+            step << "    const numb " << name << " = P[" << out.n << "];\n";
+            ++out.n;
+        }
+    }
+    for (size_t j = e + 1; j < L.size(); ++j) step << L[j] << "\n";
+    out.prep = prep.str();
+    out.step = step.str();
+    return true;
 }
 
 // Единая единица трансляции: #define UCUDA_KRS_HAS_PREP, struct UcudaKrsPre,
@@ -86,12 +119,14 @@ inline std::string krs_prep_inline_defs(const KrsPrepSplit& sp, bool device_only
                                 : "__device__ __host__ __forceinline__\n";
     std::ostringstream o;
     o << "#define UCUDA_KRS_HAS_PREP 1\n"
-      << "struct UcudaKrsPre { numb c[" << sp.names.size() << "]; };\n"
-      << q << "void ucudaKrsPrep(UcudaKrsPre& P, const numb* a, const numb h) {\n"
-      << krs_prep_stores(sp, "P.c")
+      << "struct UcudaKrsPre { numb c[" << sp.n << "]; };\n"
+      << q << "void ucudaKrsPrep(UcudaKrsPre& ucuda_pre, const numb* a, const numb h) {\n"
+      << "    numb* const P = ucuda_pre.c;\n"
+      << sp.prep
       << "}\n"
-      << q << "void calculateDiscreteModelP(numb* X, const numb* a, const numb h, const UcudaKrsPre& P) {\n"
-      << krs_prep_loads(sp, "P.c") << sp.step
+      << q << "void calculateDiscreteModelP(numb* X, const numb* a, const numb h, const UcudaKrsPre& ucuda_pre) {\n"
+      << "    const numb* const P = ucuda_pre.c;\n"
+      << sp.step
       << "}\n";
     return o.str();
 }
@@ -102,15 +137,15 @@ inline std::string krs_prep_inline_defs(const KrsPrepSplit& sp, bool device_only
 // и обёртки библиотечной половины над ними (с extern-объявлениями).
 inline const char* krs_prep_fn_params()   { return "numb* P, const numb* a, const numb h"; }
 inline const char* krs_step_p_fn_params() { return "numb* X, const numb* a, const numb h, const numb* P"; }
-inline std::string krs_prep_fn_body(const KrsPrepSplit& sp)   { return krs_prep_stores(sp, "P"); }
-inline std::string krs_step_p_fn_body(const KrsPrepSplit& sp) { return krs_prep_loads(sp, "P") + sp.step; }
+inline std::string krs_prep_fn_body(const KrsPrepSplit& sp)   { return sp.prep; }
+inline std::string krs_step_p_fn_body(const KrsPrepSplit& sp) { return sp.step; }
 
 inline std::string krs_prep_lib_defs(const KrsPrepSplit& sp) {
     std::ostringstream o;
     o << "\nextern \"C\" __device__ void krs_prep(" << krs_prep_fn_params() << ");"
       << "\nextern \"C\" __device__ void krs_step_p(" << krs_step_p_fn_params() << ");\n"
       << "#define UCUDA_KRS_HAS_PREP 1\n"
-      << "struct UcudaKrsPre { numb c[" << sp.names.size() << "]; };\n"
+      << "struct UcudaKrsPre { numb c[" << sp.n << "]; };\n"
       << "__device__ __host__ __forceinline__\n"
       << "void ucudaKrsPrep(UcudaKrsPre& P, const numb* a, const numb h) { krs_prep(P.c, a, h); }\n"
       << "__device__ __host__ __forceinline__\n"
