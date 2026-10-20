@@ -328,7 +328,8 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     CompositionSpec cspec;
     if (parse_composition_name(scheme_name, &cspec))
         return scheme_uses_symmetry(cspec.base, custom_schemes);
-    return scheme_name == "CD" || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+    return scheme_name == "CD" || scheme_name == "CD fast"
+        || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
         || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
         || scheme_name == "CD_{1-0}" || scheme_name == "Complex CD_{1-0}"
         || scheme_name == "Complex CD4_{1-0}" || scheme_name == "CCD4 (o4s3)_{1-0}"
@@ -825,6 +826,13 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "basic method: order 2 and symmetry as in CD.\n"
       "Measured: Lorenz 1.03x, Rossler 1.6x larger error than CD.\n"
       "The plain name is the {0-1} variant (explicit half first)." },
+    { "CD fast",                  2, &AppModel::scheme_cdfast,
+      "CD with a precompute stage: h1, h2 and every reciprocal\n"
+      "denominator 1/(1 - h2*coef) whose coef does not depend on\n"
+      "the state are computed once per trajectory, before the\n"
+      "first step; the implicit half-step then multiplies instead\n"
+      "of dividing. Same method and order as CD; the result\n"
+      "differs from CD only at round-off level." },
     { "Complex CD",               2, &AppModel::scheme_ccd,
       "CD with complex half-steps:\n"
       "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
@@ -3624,7 +3632,7 @@ static std::string wrapper_name_field(const char* id, std::string& text,
 // только при a[0] = 0.5; проверить это в кодогене нельзя (значение приходит в
 // рантайме), поэтому предупреждаем здесь.
 static bool extr_base_needs_half_s(const std::string& nm) {
-    return nm == "CD" || nm == "Complex CD" || nm == "Complex CD4"
+    return nm == "CD" || nm == "CD fast" || nm == "Complex CD" || nm == "Complex CD4"
         || nm == "CCD4 (o4s3)" || nm == "CCD4 (o4s4)"
         || nm == "CD_{1-0}" || nm == "Complex CD_{1-0}" || nm == "Complex CD4_{1-0}"
         || nm == "CCD4 (o4s3)_{1-0}" || nm == "CCD4 (o4s4)_{1-0}"

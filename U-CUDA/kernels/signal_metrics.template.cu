@@ -234,6 +234,8 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 	numb xPrev[AMOUNTOFX];
 	numb checker;
 	size_t sinceReport = 0;
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
 
 	for (size_t i = 0; i < amountOfIterations; ++i)
 	{
@@ -265,7 +267,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 		}
 
 		for (int j = 0; j < preScaller; ++j)
-			calculateDiscreteModel(x, values, h);
+			calculateDiscreteModelP(x, values, h, krsPre);
 
 		if (i % CHECK_INTERVAL == 0) {
 			if (progressCounter != nullptr && progressStride > 0) {
@@ -294,7 +296,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModel(x, values, h);
+		calculateDiscreteModelP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)

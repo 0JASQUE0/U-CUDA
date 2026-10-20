@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
+#include "krs_prep.h"  // стадия предрасчёта КРС (CD fast)
 #include "module_lru.h"
 #include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
@@ -2576,13 +2577,24 @@ struct ParametricEngine::Impl {
     // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
     // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
     // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
-    bool build_module(const SrcSnapshot& snap,
+    bool build_module(const SrcSnapshot& snap_in,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
+        // циклы cudaLibrary.cu зовут ucudaKrsPrep / calculateDiscreteModelP. Их определения
+        // встают в шаблон: одной единицей трансляции — перед #include "cudaLibrary.cu"
+        // (сам calculateDiscreteModel остаётся самодостаточным для прочих вызовов), при
+        // раздельной сборке — обёртками над krs_prep / krs_step_p модуля КРС сразу после
+        // #include "cudaLibrary.cuh". Шаблон меняется, значит меняется и ключ библиотеки.
+        KrsPrepSplit prep_sp;
+        bool has_prep = false;
+        for (const auto& sub : subs)
+            if (sub.first == "{{KRS_BODY}}") has_prep = krs_split_prep(sub.second, prep_sp);
+        SrcSnapshot snap = snap_in;
         // Раздельная сборка: библиотека без КРС компилируется один раз на (шаблон, размерность,
         // настройки) и переиспользуется, шаг живёт в своём модуле, склейка — cuLink. Замерено на
         // bifurcation2d + implicit midpoint: смена КРС 0.25 с против ~15 с одной единицей
@@ -2592,6 +2604,20 @@ struct ParametricEngine::Impl {
             std::vector<std::pair<const KrsFn*, std::string>> krs_fns;
             std::string krs_all, amount_of_x = "3";
             std::string lib_key = src_name;
+            static const KrsFn kPrepFn  = { "", "krs_prep",   krs_prep_fn_params(),   "" };
+            static const KrsFn kStepPFn = { "", "krs_step_p", krs_step_p_fn_params(), "" };
+            if (has_prep) {
+                krs_fns.emplace_back(&kPrepFn,  krs_prep_fn_body(prep_sp));
+                krs_fns.emplace_back(&kStepPFn, krs_step_p_fn_body(prep_sp));
+                // Тела обеих выводятся из KRS_BODY, который ниже и так входит в ключ.
+                if (!krs_insert_after_line(snap.tmpl, "#include \"cudaLibrary.cuh\"",
+                                           krs_prep_lib_defs(prep_sp))) {
+                    // Шаблон без этой строки: шаг остаётся самодостаточным, циклы
+                    // берут пустой предрасчёт из cudaLibrary.cu.
+                    krs_fns.clear();
+                    snap.tmpl = snap_in.tmpl;
+                }
+            }
             for (const auto& sub : subs) {
                 if (const KrsFn* f = krs_fn(sub.first)) {
                     krs_fns.emplace_back(f, sub.second);
@@ -2637,8 +2663,12 @@ struct ParametricEngine::Impl {
                          lib_err.c_str());
         }
 
-        std::string src = snap.tmpl;
+        // snap_in, а не snap: после неудачной раздельной сборки в snap.tmpl остались бы
+        // её обёртки над krs_prep / krs_step_p.
+        std::string src = snap_in.tmpl;
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
+        if (has_prep)
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", krs_prep_inline_defs(prep_sp));
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как

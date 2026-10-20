@@ -1343,12 +1343,43 @@ namespace { // внутренняя линковка: всё ниже не ви�
     }
     // saved — имя временной под X_saved в итерационной ветке: у Complex CD4 два
     // прохода живут в одной области видимости, поэтому имя приходит снаружи.
+    // Предрасчёт ("CD fast"): константа шага — имя и выражение над a[] и h.
+    using PrepList = std::vector<std::pair<std::string, std::string>>;
+    bool pn_free_of_vars(const PN& n, const std::vector<std::string>& vars) {
+        for (const std::string& v : vars) if (pn_contains_var(n, v)) return false;
+        return true;
+    }
+
+    // prep != nullptr -- вариант "CD fast": если коэффициент при своей
+    // переменной не зависит ни от одной переменной состояния (state_vars),
+    // обратный знаменатель 1/(1 - hs*coef) уходит в prep под именем prep_name,
+    // а шаг умножает на него вместо деления.
     void emit_diag_implicit_eq(std::ostringstream& o, const PN& rhs_ast,
                                const std::string& v, const std::string& x,
                                const NameMap& nm, const char* hs, const char* sty,
-                               const std::string& saved) {
+                               const std::string& saved,
+                               PrepList* prep = nullptr,
+                               const std::vector<std::string>* state_vars = nullptr,
+                               const std::string& prep_name = std::string()) {
         PN coef, rem;
         const bool linear = cd_try_extract_linear(rhs_ast, v, coef, rem);
+
+        if (linear && prep && !pn_is_zero(coef) && pn_free_of_vars(coef, *state_vars)) {
+            char dsgn = peel_sign(coef, '-', '+');
+            std::string coef_c = wrap_paren(emit_to_str(coef, nm), needs_paren_after_mul(coef));
+            prep->emplace_back(prep_name, "(numb)1 / (1 " + std::string(1, dsgn) + " "
+                                          + mul_step(coef, coef_c, hs) + ")");
+            if (pn_is_zero(rem))
+                o << "    " << x << " = " << x << " * " << prep_name << ";\n";
+            else {
+                char nsgn = peel_sign(rem, '+', '-');
+                std::string rem_c = wrap_paren(emit_to_str(rem, nm), needs_paren_after_mul(rem));
+                o << "    " << x << " = (" << x
+                  << " " << nsgn << " " << mul_step(rem, rem_c, hs)
+                  << ") * " << prep_name << ";\n";
+            }
+            return;
+        }
 
         if (linear && pn_is_zero(coef)) {
             // v absent from f_i -> explicit one-shot update.
@@ -1511,7 +1542,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
     // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
     std::string scheme_cd_common(const System& s, CdKind kind, bool core_only = false,
-                                 bool flip_halves = false) {
+                                 bool flip_halves = false, bool fast = false) {
+        // fast -- "CD fast": только вещественный CD. h1, h2 и обратные
+        // знаменатели, не зависящие от состояния, идут в блок предрасчёта
+        // (см. krs_split_prep в codegen.hpp).
+        if (fast && kind != CdKind::Real)
+            throw std::runtime_error("CD fast: only the real CD is supported");
+        PrepList prep;
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
@@ -1542,7 +1579,11 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // объявленными выше переменными. Пусто у CD и Complex CD: у них ровно
         // один проход на весь h.
         std::vector<std::string> pass_h1, pass_h2;
-        if (kind == CdKind::Real) {
+        if (kind == CdKind::Real && fast) {
+            prep.emplace_back("h1", "h * a[0]");
+            prep.emplace_back("h2", "h * (1 - a[0])");
+        }
+        else if (kind == CdKind::Real) {
             o << "    numb h1 = h * a[0];\n";
             o << "    numb h2 = h * (1 - a[0]);\n";
         }
@@ -1624,7 +1665,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
             for (int i = N - 1; i >= 0; --i)
                 emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
                                       stv + ("[" + std::to_string(i) + "]"), nm,
-                                      step, sty, "x" + std::to_string(i) + "_cd" + sfx);
+                                      step, sty, "x" + std::to_string(i) + "_cd" + sfx,
+                                      fast ? &prep : nullptr, &s.vars,
+                                      "cdf_r" + std::to_string(i) + sfx);
         };
         if (implicit_first) { emit_implicit("h1"); emit_explicit("h2"); }
         else                { emit_explicit("h1"); emit_implicit("h2"); }
@@ -1653,6 +1696,14 @@ namespace { // внутренняя линковка: всё ниже не ви�
             for (int i = 0; i < N; ++i)
                 o << "    X[" << i << "] = Z[" << i << "].re;\n";
 
+        if (fast) {
+            std::ostringstream full;
+            full << kKrsPrepBegin << "\n";
+            for (const auto& c : prep)
+                full << "    const numb " << c.first << " = " << c.second << ";\n";
+            full << kKrsPrepEnd << "\n" << o.str();
+            return full.str();
+        }
         return o.str();
     }
 
@@ -1957,6 +2008,9 @@ struct SystemEvaluator::Impl {
     // считают hs * |rem| и hs * |coef|, а знак попадает в оператор формулы.
     // Побитово это нейтрально — смена знака в IEEE точна.
     std::vector<char> diag_rem_neg, diag_coef_neg;
+    // coef не зависит от переменных состояния (и не ноль): "CD fast" умножает
+    // на 1/(1 -+ hs*|coef|) вместо деления, как его GPU-предрасчёт.
+    std::vector<char> diag_coef_free;
     std::vector<std::vector<Instr>> diag_coef, diag_rem;
     // Первая функция правых частей без комплексного смысла (cd_find_complex_unsafe),
     // пусто — таких нет.
@@ -1986,6 +2040,7 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
     impl_->diag_linear.assign((size_t)impl_->dim, 0);
     impl_->diag_rem_neg.assign((size_t)impl_->dim, 0);
     impl_->diag_coef_neg.assign((size_t)impl_->dim, 0);
+    impl_->diag_coef_free.assign((size_t)impl_->dim, 0);
     impl_->diag_coef.resize(impl_->dim);
     impl_->diag_rem.resize(impl_->dim);
     int maxdepth = 8;
@@ -2005,6 +2060,9 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
         if (cd_try_extract_linear(ast, sys.vars[i], coef, rem)) {
             // Зеркалим emit_diag_implicit_eq вплоть до формы выражения: сперва
             // тот же вынос знака, затем тот же порядок умножений.
+            // "CD fast" берёт обратный знаменатель из предрасчёта только там,
+            // где coef не зависит от состояния, — то же условие, что в кодогене.
+            impl_->diag_coef_free[(size_t)i] = !pn_is_zero(coef) && pn_free_of_vars(coef, sys.vars);
             impl_->diag_rem_neg[(size_t)i]  = (peel_sign(rem,  '+', '-') == '-');
             impl_->diag_coef_neg[(size_t)i] = (peel_sign(coef, '-', '+') == '+');
             ByteCompiler bcc{ impl_->diag_coef[i], var_index, param_index };
@@ -2098,13 +2156,16 @@ int    SystemEvaluator::newton_max_iters() const { return impl_->newton_max_iter
 // Случаи coef == 0 и rem == 0 отдельно не разбираются: на GPU они лишь убирают
 // из текста деление на 1 и прибавление нуля, а это побитово тождественные
 // операции (деление на 1.0 и сложение с 0.0 в IEEE точны).
-bool SystemEvaluator::solve_diag_implicit(int i, double* X, const double* a, double hs) const {
+bool SystemEvaluator::solve_diag_implicit(int i, double* X, const double* a, double hs,
+                                          bool recip) const {
     if (i < 0 || i >= impl_->dim || !impl_->diag_linear[(size_t)i]) return false;
     double* st = impl_->stack.data();
     const double num = run_program(impl_->diag_rem[(size_t)i],  X, a, st, hs);
     const double den = run_program(impl_->diag_coef[(size_t)i], X, a, st, hs);
-    X[i] = (impl_->diag_rem_neg[(size_t)i]  ? X[i] - num : X[i] + num)
-         / (impl_->diag_coef_neg[(size_t)i] ? 1 + den    : 1 - den);
+    const double xn  = impl_->diag_rem_neg[(size_t)i]  ? X[i] - num : X[i] + num;
+    const double d   = impl_->diag_coef_neg[(size_t)i] ? 1 + den    : 1 - den;
+    // "CD fast": X * (1/d), как предрасчитанный cdf_r<i> на GPU.
+    X[i] = (recip && impl_->diag_coef_free[(size_t)i]) ? xn * (1.0 / d) : xn / d;
     return true;
 }
 
@@ -3088,6 +3149,7 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::RK45:             return scheme_erk(s, &kRK45A[0][0], 6, &kRK45B[0][0], 6);
     case Scheme::DOP853:           return scheme_erk(s, &kDop853A[0][0], 11, kDop853B, 12);
     case Scheme::CD:               return scheme_cd(s);
+    case Scheme::CDFast:           return scheme_cd_common(s, CdKind::Real, false, false, true);
     case Scheme::ComplexCD:        return scheme_complex_cd(s);
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
     case Scheme::ComplexCD4S3:     return scheme_complex_cd4_s3(s);
@@ -3222,6 +3284,7 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "RK45")              return Scheme::RK45;
     if (name == "DOP853")            return Scheme::DOP853;
     if (name == "CD")                return Scheme::CD;
+    if (name == "CD fast")           return Scheme::CDFast;
     if (name == "Complex CD")        return Scheme::ComplexCD;
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
     if (name == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
@@ -3271,6 +3334,7 @@ const SchemeRow kSchemeRows[] = {
     { "CD",                     2, true  },  // самосопряжённая при a[0] = 1/2
     // {1-0}: неявная половина первой; порядок и симметрия как у исходных.
     { "CD_{1-0}",               2, true  },
+    { "CD fast",                2, true  },  // CD с предрасчётом констант шага
     { "Complex CD",             2, false },
     { "Complex CD_{1-0}",       2, false },
     { "Complex Implicit Euler", 2, false },
@@ -4130,7 +4194,7 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
         case Scheme::SEMP:         return 2.0;
         case Scheme::SIMP:         return cd_implicit_sweep_rhs(s) + 1.0;
         case Scheme::D:            return cd_implicit_sweep_rhs(s);
-        case Scheme::CD: case Scheme::CD10:
+        case Scheme::CD: case Scheme::CD10: case Scheme::CDFast:
         case Scheme::ComplexCD: case Scheme::ComplexCD10:
             return 1.0 + cd_implicit_sweep_rhs(s);
         case Scheme::ComplexCD4: case Scheme::ComplexCD4_10:

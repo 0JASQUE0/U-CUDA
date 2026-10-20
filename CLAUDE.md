@@ -122,6 +122,11 @@ D:\U-CUDA\
 
 ### Runtime Code Generation
 - **codegen.cpp / .hpp** — Converts user system to code, glues with template from `kernels/`
+- **krs_prep.h** — header-only: стадия предрасчёта КРС ("CD fast"). Тело шага начинается блоком
+  `const numb <имя> = <выражение над a[], h>;` между маркерами `// @ucuda-krs-prep-begin/end` и
+  работает как есть; `build_module` / Analysis-ядро разбирают блок и дают горячим циклам
+  `ucudaKrsPrep` (раз до траектории) + `calculateDiscreteModelP`. У прочих схем это пустая
+  структура и прямой вызов шага (умолчания в `cudaLibrary.cu`), код не меняется
 - **nvrtc_engine.cpp / .h** — NVRTC wrapper: compiles resulting `.cu`, returns `CUmodule`/`CUfunction`
 - **parametric_engine.cpp / .h** — Bifurcation/LLE/LS sweeps via NVRTC
 - **phase_portrait_nvrtc.cpp / .h** — Phase portrait integration via NVRTC

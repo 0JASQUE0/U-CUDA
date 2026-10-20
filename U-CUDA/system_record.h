@@ -66,6 +66,7 @@ struct SystemRecord {
     bool scheme_rk45     = false;         // RK45 — Dormand-Prince 5(4)
     bool scheme_dop853   = false;         // DOP853 — Хайрер 8(5,3)
     bool scheme_cd       = false;
+    bool scheme_cdfast   = false;   // CD fast (CD с предрасчётом констант шага)
     bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
     bool scheme_ccd4s3   = false;   // CCD4 (o4s3) — симметричная тройка (a, 1-2a, a)

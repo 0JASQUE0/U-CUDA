@@ -1,6 +1,7 @@
 ﻿#include "nvrtc_engine.h"
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include "perf_warmup.h"       // прогрев GPU перед замером Performance
+#include "krs_prep.h"          // стадия предрасчёта КРС (CD fast)
 #include <cuda.h>
 #include <nvrtc.h>
 #include <chrono>
@@ -191,9 +192,21 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     // configCUDA.h сам объявляет numb и AMOUNTOFX (второе — под #ifndef, первое
     // повторным typedef того же типа, что легально), поэтому порядок безопасен.
     if (needs_complex) src << "#include \"configCUDA.h\"\n";
+    // Стадия предрасчёта (krs_prep.h, "CD fast"): константы шага — один раз до
+    // траектории. У прочих схем — пустая структура и прямой вызов шага.
+    KrsPrepSplit prep_sp;
+    std::string prep_defs;
+    if (krs_split_prep(krs_body, prep_sp))
+        prep_defs = krs_prep_inline_defs(prep_sp, true);
+    else
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n"
+                    "__device__ __forceinline__ void calculateDiscreteModelP(numb* X, const numb* a, const numb h,"
+                    " const UcudaKrsPre&) { calculateDiscreteModel(X, a, h); }\n";
     src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
         << krs_body << "\n"
         << "}\n"
+        << prep_defs
         // Ядро на N траекторий: поток tid считает траекторию для НУ номер tid.
         // Все траектории параллельны. Параметры values общие для всех потоков.
         // Layout НУ:    ic[tid*AMOUNTOFX + k]
@@ -204,11 +217,13 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
         << "    if (tid >= N) return;\n"
         << "    numb X[AMOUNTOFX];\n"
         << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
-        << "    for (int s=0;s<skip;++s) calculateDiscreteModel(X, values, h);\n"
+        << "    UcudaKrsPre krsPre;\n"
+        << "    ucudaKrsPrep(krsPre, values, h);\n"
+        << "    for (int s=0;s<skip;++s) calculateDiscreteModelP(X, values, h, krsPre);\n"
         << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
         << "    for (int t=0;t<total;++t) {\n"
         << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
-        << "        calculateDiscreteModel(X, values, h);\n"
+        << "        calculateDiscreteModelP(X, values, h, krsPre);\n"
         << "    }\n"
         << "}\n";
     std::string code = src.str();

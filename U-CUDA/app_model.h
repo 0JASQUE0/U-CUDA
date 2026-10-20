@@ -366,6 +366,7 @@ public:
     bool scheme_rk45 = false;
     bool scheme_dop853 = false;
     bool scheme_cd = false;
+    bool scheme_cdfast = false;   // CD fast: CD с предрасчётом констант шага
     // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
     // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
     bool scheme_ccd = false;
@@ -1089,6 +1090,7 @@ public:
                 { scheme_imidpoint,"Implicit Midpoint", Scheme::ImplicitMidpoint },
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_cd10, "CD_{1-0}", Scheme::CD10 },
+                { scheme_cdfast,   "CD fast",           Scheme::CDFast },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
                 { scheme_ccd10, "Complex CD_{1-0}", Scheme::ComplexCD10 },
                 { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },

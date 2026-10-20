@@ -194,6 +194,7 @@ SystemRecord AppModel::to_record() const {
     r.scheme_rk45 = scheme_rk45;
     r.scheme_dop853 = scheme_dop853;
     r.scheme_cd = scheme_cd;
+    r.scheme_cdfast = scheme_cdfast;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
     r.scheme_ccd4s3 = scheme_ccd4s3;
@@ -257,6 +258,7 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_rk45 = r.scheme_rk45;
     scheme_dop853 = r.scheme_dop853;
     scheme_cd = r.scheme_cd;
+    scheme_cdfast = r.scheme_cdfast;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
     scheme_ccd4s3 = r.scheme_ccd4s3;
@@ -301,7 +303,7 @@ void AppModel::from_record(const SystemRecord& r) {
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_dopri78_legacy
         || scheme_rk45 || scheme_dop853
-        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
+        || scheme_cd || scheme_cdfast || scheme_ccd || scheme_ccd4|| scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
         || scheme_ccd4ss10
         || scheme_cd10 || scheme_ccd10 || scheme_ccd4_10 || scheme_ccd4s3_10 || scheme_ccd4s4_10
         || scheme_ieuler || scheme_imidpoint
@@ -328,7 +330,7 @@ void AppModel::clear() {
     is_map = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
-        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
+        = scheme_cd = scheme_cdfast = scheme_ccd = scheme_ccd4= scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
         = scheme_ccd4ss10
         = scheme_cd10 = scheme_ccd10 = scheme_ccd4_10 = scheme_ccd4s3_10 = scheme_ccd4s4_10
         = scheme_ieuler = scheme_imidpoint

@@ -118,6 +118,21 @@ __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const n
 }
 #endif // __CUDACC_RTC__
 
+// Стадия предрасчёта КРС (codegen.hpp, krs_split_prep). Схема с предрасчётом
+// ("CD fast") приходит со своими UcudaKrsPre / ucudaKrsPrep / calculateDiscreteModelP
+// и UCUDA_KRS_HAS_PREP — их вставляет движок перед #include "cudaLibrary.cu".
+// У прочих схем структура пустая, а шаг — прямой вызов calculateDiscreteModel:
+// после инлайна код тот же, что был до введения предрасчёта.
+// Горячие циклы зовут ucudaKrsPrep один раз до траектории — a[] и h в них не меняются.
+#ifndef UCUDA_KRS_HAS_PREP
+struct UcudaKrsPre {};
+__device__ __host__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}
+__device__ __host__ __forceinline__
+void calculateDiscreteModelP(numb* X, const numb* a, const numb h, const UcudaKrsPre&) {
+	calculateDiscreteModel(X, a, h);
+}
+#endif
+
 __device__ __host__ numb sign(numb x) {
 	if (x > 0)
 		return 1.0;
@@ -1085,6 +1100,8 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 {
 
 	numb xPrev[AMOUNTOFX];
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
 	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
@@ -1100,7 +1117,7 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 
 		// Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории )
 		for ( int j = 0; j < preScaller; ++j )
-			calculateDiscreteModel(x, values, h);
+			calculateDiscreteModelP(x, values, h, krsPre);
 
 		// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 		if ( isnan( x[writableVar] ) || isinf( x[writableVar] ) )
@@ -1129,6 +1146,8 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
 	numb checker;
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
 	size_t sinceReport = 0;
 	// Обратный отсчёт до проверки вместо i % CHECK_INTERVAL: деление size_t на
 	// каждом шаге стоило ~12% времени ядра. Проверки — те же i = 0, 100, 200, ...
@@ -1163,11 +1182,11 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {
 				//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-				calculateDiscreteModel(x, values, h);
+				calculateDiscreteModelP(x, values, h, krsPre);
 			}
 		}
 		else
-			calculateDiscreteModel(x, values, h);
+			calculateDiscreteModelP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = CHECK_INTERVAL - 1;
@@ -1217,7 +1236,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	//#pragma unroll
 	for (int j = 0; j < preScaller; ++j) {
 		//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-		calculateDiscreteModel(x, values, h);
+		calculateDiscreteModelP(x, values, h, krsPre);
 	}
 
 	// Возврат — REGIME_* из configCUDA.h:
@@ -1266,6 +1285,8 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	// Обратный отсчёт до проверки вместо i % CHECK_INTERVAL: деление size_t на
 	// каждом шаге стоило ~12% времени ядра. Проверки — те же i = 0, 100, 200, ...
 	int untilCheck = 0;
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
 
 	for (size_t i = 0; i < amountOfIterations; ++i)
 	{
@@ -1286,7 +1307,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 		else               peaks.push(sample);
 
 		for (int j = 0; j < preScaller; ++j)
-			calculateDiscreteModel(x, values, h);
+			calculateDiscreteModelP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = CHECK_INTERVAL - 1;
@@ -1318,7 +1339,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModel(x, values, h);
+		calculateDiscreteModelP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)

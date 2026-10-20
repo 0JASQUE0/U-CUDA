@@ -32,6 +32,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "RK45")              return IntScheme::RK45;
     if (s == "DOP853")            return IntScheme::DOP853;
     if (s == "CD")                return IntScheme::CD;
+    if (s == "CD fast")           return IntScheme::CDFast;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
     if (s == "CCD4 (o4s3)")       return IntScheme::ComplexCD4S3;
@@ -221,8 +222,8 @@ constexpr int CD_ITERS = 4;
 // разойтись пути не могут; остаточная разница — только FMA-контракция, которой
 // на GPU управляет настройка --fmad.
 void solve_diag_implicit(const SystemEvaluator& ev, double* X, const double* a,
-                         double hs, int i, double* k1) {
-    if (ev.solve_diag_implicit(i, X, a, hs)) return;
+                         double hs, int i, double* k1, bool recip = false) {
+    if (ev.solve_diag_implicit(i, X, a, hs, recip)) return;
     const double saved = X[i];
     for (int it = 0; it < CD_ITERS; ++it) {
         ev.eval(X, a, k1);
@@ -248,8 +249,10 @@ void solve_diag_implicit_cx(const SystemEvaluator& ev, ucmplx* Z, const double* 
 // уравнение относительно X[i] — см. solve_diag_implicit.
 // flip -- вариант CD_{1-0}: сначала неявный полушаг h1 (обратный порядок),
 // затем явный h2 (прямой).
+// recip -- "CD fast": там, где коэффициент при своей переменной не зависит от
+// состояния, умножение на 1/d вместо деления (на GPU 1/d предрасчитан).
 void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
-             int n, double* k1, bool flip = false) {
+             int n, double* k1, bool flip = false, bool recip = false) {
     const double s = a[0];
     const double h1 = h * s;
     const double h2 = h * (1.0 - s);
@@ -270,7 +273,7 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
     }
     // Φ*_h2: неявный полушаг, обратный порядок.
     for (int i = n - 1; i >= 0; --i)
-        solve_diag_implicit(ev, X, a, h2, i, k1);
+        solve_diag_implicit(ev, X, a, h2, i, k1, recip);
 }
 
 // Complex CD: та же композиция, что step_cd, но полушаги комплексные —
@@ -771,6 +774,7 @@ bool computePhasePortraitCPU(
         case IntScheme::RK45:
         case IntScheme::DOP853:           step_erk(ev, X.data(), a, h, n, erk_table(scheme), kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
+        case IntScheme::CDFast:           step_cd(ev, X.data(), a, h, n, k1.data(), false, true); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4S3:     step_complex_cd4_s3(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
