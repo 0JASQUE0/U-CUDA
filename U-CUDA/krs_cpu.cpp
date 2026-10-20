@@ -628,6 +628,12 @@ std::string make_ad_module_source(const std::string& rhs, const std::string& emb
          "    const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);\n"
          "    return ucuda_node_value_log(n, nPts, lo, hi);\n"
          "}\n"
+         // getValueByIdx_symlog — ±log-сетка бассейнов (ucudaSetupSweepPointAd зовёт её всегда).
+         "static inline numb getValueByIdx_symlog(const int idx, const int nPts, const numb lo, const numb hi,\n"
+         "                                        const int valueNumber) {\n"
+         "    const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);\n"
+         "    return ucuda_node_value_symlog(n, nPts, lo, hi);\n"
+         "}\n"
       << peak_stream
       << (dense ? metrics_pieces : std::string())
       << "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"

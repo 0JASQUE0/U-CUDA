@@ -364,6 +364,11 @@ __device__ __host__ numb getValueByIdxLog(const int idx, const int nPts,
 __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const int nPts,
 	const numb startRange, const numb finishRange, const int valueNumber);
 
+// То же для симметричной лог-сетки бассейнов (±log, ucuda_node_value_symlog) -- требует
+// startRange, finishRange > 0 и чётного nPts >= 4. Декларация здесь по той же причине.
+__device__ __host__ __forceinline__ numb getValueByIdx_symlog(const int idx, const int nPts,
+	const numb startRange, const numb finishRange, const int valueNumber);
+
 // Поиск пиков в data[startDataIndex; startDataIndex + amountOfPoints).
 // peakFinder дополнительно кладёт значения пиков в outPeaks, моменты времени
 // в timeOfPeaks (те, что != nullptr) и возвращает число найденных пиков.

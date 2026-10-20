@@ -138,7 +138,7 @@ __device__ __host__ numb chua_inner(numb x, numb m, numb d, numb kslope, numb mu
 
 	while (iter < MAX_ITER) {
 		// Базовый случай: масштаб стал слишком маленьким
-		if (d < 1e-14) {
+		if (d < (numb)1e-14) {
 			return sg_prod * (-x) - offset;
 		}
 
@@ -247,7 +247,7 @@ __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb ks
 
 	while (iter < MAX_ITER) {
 		// Базовый случай рекурсии
-		if (abs(d) < 1e-14) {
+		if (abs(d) < (numb)1e-14) {
 			return sg_prod * (-x) - offset;
 		}
 
@@ -420,6 +420,31 @@ numb fsRandSymmetric(unsigned long long seed, unsigned long long cell, int comp)
 	// Старшие 53 бита → [0, 1), затем в [-1, 1).
 	numb u = (numb)(h >> 11) * (numb)(1.0 / 9007199254740992.0);
 	return (numb)2 * u - (numb)1;
+}
+
+// Опрос флага отмены. Флаг лежит в mapped host memory (RunSignals): каждое его чтение —
+// некэшируемый LDG.STRONG.SYS через PCIe (~2 мкс). Пока его читал каждый варп на каждой
+// проверке, ядра стояли на нём (LLE 2D: 94% простоя, ядро в 3.3 раза медленнее). Поэтому хост
+// опрашивают только блоки с номером, кратным 64; увидев отмену, блок поднимает зеркало в памяти
+// устройства, а его читают все (L2, без PCIe). Опрашивающий блок сам идёт в ~3 раза медленнее,
+// поэтому хвост сетки им НЕ отдан: последние блоки — критический путь ядра, и с ними LLE 2D
+// проигрывал 1.5 раза. Цена — в последней неполной волне отмена может дождаться конца её блоков.
+// Зеркало после отмены остаётся 1 — хост сбрасывает его во всех модулях
+// (ParametricEngine::Impl::reset_cancel_mirrors), иначе следующий запуск модуля сразу «отменится».
+extern "C" { __device__ volatile int g_ucudaCancelMirror = 0; }
+
+__device__ __host__ __forceinline__ bool ucudaCancelRequested(const volatile int* cancelFlag)
+{
+	if (cancelFlag == nullptr) return false;
+#ifdef __CUDA_ARCH__
+	if (g_ucudaCancelMirror != 0) return true;
+	if ((blockIdx.x & 63u) != 0) return false;
+	if (*cancelFlag == 0) return false;
+	g_ucudaCancelMirror = 1;
+	return true;
+#else
+	return *cancelFlag != 0;
+#endif
 }
 
 // Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
@@ -683,7 +708,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 				}
 				// Отмена отдаёт тот же sentinel, что и разлёт: результат
 				// отменённого прогона хост выбрасывает целиком.
-				if (cancelFlag != nullptr && *cancelFlag != 0) return fsDivergedError();
+				if (ucudaCancelRequested(cancelFlag)) return fsDivergedError();
 			}
 			calculateDiscreteModelforFastSynchro(Xm, arrayZeros, arrayZeros, values, h, 1);
 
@@ -980,7 +1005,7 @@ struct PeakStream
 		if (doInterpolatePeaks) {
 			const numb denom = w0 - (numb)2.0 * w1 + w2;
 			numb delta = 0.0;
-			if (fabs(denom) > 1e-12)
+			if (fabs(denom) > (numb)1e-12)
 				delta = 0.5 * (w0 - w2) / denom;
 			value = w1 - 0.25 * (w0 - w2) * delta;
 			time  = (numb)(j - 1) + delta;
@@ -1105,6 +1130,9 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	numb xPrev[AMOUNTOFX];
 	numb checker;
 	size_t sinceReport = 0;
+	// Обратный отсчёт до проверки вместо i % CHECK_INTERVAL: деление size_t на
+	// каждом шаге стоило ~12% времени ядра. Проверки — те же i = 0, 100, 200, ...
+	int untilCheck = 0;
 
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	for (size_t i = 0; i < amountOfIterations; ++i)
@@ -1141,7 +1169,8 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 		else
 			calculateDiscreteModel(x, values, h);
 
-		if (i % CHECK_INTERVAL == 0) {
+		if (--untilCheck < 0) {
+			untilCheck = CHECK_INTERVAL - 1;
 			if (progressCounter != nullptr && progressStride > 0) {
 				sinceReport += CHECK_INTERVAL;
 				if (sinceReport >= (size_t)progressStride) {
@@ -1154,7 +1183,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 			}
 			// Cancel отдаёт REGIME_UNBOUND: результат отменённого прогона
 			// хост всё равно выбрасывает, нового кода режима заводить не стали.
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (ucudaCancelRequested(cancelFlag)) return REGIME_UNBOUND;
 			checker = 0;
 			//#pragma unroll
 			for (int j = 0; j < AMOUNTOFX; ++j) {
@@ -1234,6 +1263,9 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	numb xPrev[AMOUNTOFX];
 	numb checker;
 	size_t sinceReport = 0;
+	// Обратный отсчёт до проверки вместо i % CHECK_INTERVAL: деление size_t на
+	// каждом шаге стоило ~12% времени ядра. Проверки — те же i = 0, 100, 200, ...
+	int untilCheck = 0;
 
 	for (size_t i = 0; i < amountOfIterations; ++i)
 	{
@@ -1256,7 +1288,8 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 		for (int j = 0; j < preScaller; ++j)
 			calculateDiscreteModel(x, values, h);
 
-		if (i % CHECK_INTERVAL == 0) {
+		if (--untilCheck < 0) {
+			untilCheck = CHECK_INTERVAL - 1;
 			if (progressCounter != nullptr && progressStride > 0) {
 				sinceReport += CHECK_INTERVAL;
 				if (sinceReport >= (size_t)progressStride) {
@@ -1267,7 +1300,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 					sinceReport = 0;
 				}
 			}
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (ucudaCancelRequested(cancelFlag)) return REGIME_UNBOUND;
 			checker = 0;
 			for (int j = 0; j < AMOUNTOFX; ++j)
 				checker = checker + abs(x[j]);
@@ -1400,6 +1433,10 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 		for (int i = 0; i < dimension; ++i) {
 			if (i == hSweepAxis) continue;
 			bool isLog = (logAxisMask >> i) & 1;
+			// ±log — только у бассейнов (оси НУ); остальные свипы этот бит не ставят.
+			if ((logAxisMask >> (UCUDA_SYMLOG_SHIFT + i)) & 1)
+				localX[indicesOfMutVars[i]] = getValueByIdx_symlog(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+			else
 			localX[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
 			                                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		}
@@ -1935,6 +1972,15 @@ __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const 
 	return ucuda_node_value_log(n, nPts, startRange, finishRange);
 }
 
+// getValueByIdx для симметричной лог-сетки бассейнов (±log): узел — ucuda_node_value_symlog
+// (configCUDA.h), извлечение индекса — как у getValueByIdx_log.
+__device__ __host__ __forceinline__ numb getValueByIdx_symlog(const int idx, const int nPts,
+	const numb startRange, const numb finishRange, const int valueNumber)
+{
+	const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);
+	return ucuda_node_value_symlog(n, nPts, startRange, finishRange);
+}
+
 // Находит пики в интервале [startDataIndex; startDataIndex + amountOfPoints] в "data" массиве
 //peakFinder(data, idx* sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
 
@@ -2055,7 +2101,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 							numb denom = data[j - 1] - (numb)2.0 * data[j] + data[j + 1];
 							numb delta = 0.0;
 							//denom == (numb)0.0 ? delta = 0.0 : delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
-							if (fabs(denom) > 1e-12) {
+							if (fabs(denom) > (numb)1e-12) {
 								delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
 							}
 							outPeaks[peakBase + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
@@ -2633,12 +2679,14 @@ __device__ __host__ void ucuda_heapsort(numb* a, int n)
 // Отсюда O(P log P) вместо O(P^2): при P = 2500 это ~56 тысяч операций против
 // 6.25 миллионов.
 //
-// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов.
+// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов,
+// scale — множитель оси (mult_peak / mult_interval): умножаем при копировании, а не
+// на месте в буфере пиков, — то же произведение, на запись меньше.
 // Сравнение `!(gap < eps)` повторяет порог общего пути ровно, включая строгость.
 __device__ __host__ int ucuda_components_1d(const numb* values, numb* scratch,
-	const int amountOfPeaks, const numb eps)
+	const int amountOfPeaks, const numb eps, const numb scale)
 {
-	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i];
+	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i] * scale;
 	ucuda_heapsort(scratch, amountOfPeaks);
 
 	int clusters = 1;
@@ -2673,23 +2721,9 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 	int cluster = 0;
 
-	for (size_t i = hBase; i < hBase + sizeOfHelpfulArray; ++i) {
-		helpfulArray[i] = 0;
-	}
-
 	//for (int i = 0; i < amountOfPeaks; i++) {
 	//	helpfulArray[startDataIndex + i] = (int)(100*sqrt(data[startDataIndex + i] * data[startDataIndex + i] + intervals[startDataIndex + i] * intervals[startDataIndex + i]));
 	//}
-
-	// Масштабирование осей признаков перед кластеризацией. Раньше здесь стояли
-	// constexpr mult_peak / mult_interval из configCUDA.h — теперь множители
-	// приходят аргументами, чтобы каждая 2D-диаграмма могла настроить их сама
-	// (дефолты в объявлении dbscanCUDA — те же константы, поэтому legacy-путь
-	// hostLibrary.cu ведёт себя как прежде).
-	for (size_t i = 0; i < amountOfPeaks; i++) {
-		data[startDataIndex + i] = data[startDataIndex + i] * multPeak;
-		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
-	}
 
 	// Одномерный случай. Нулевой множитель схлопывает свою ось в константу, и
 	// расстояние вырождается в модуль разности по второй оси — а это задача, которую
@@ -2702,12 +2736,35 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 	//
 	// scratch — helpfulArray: обход сюда не заходит, значит метки и стек не нужны, а
 	// места (sizeOfHelpfulArray >= amountOfPeaks) хватает с запасом. Сами буферы пиков
-	// не трогаем: сортируется копия.
+	// не трогаем: сортируется копия, масштабированная при копировании.
+	//
+	// Ветка стоит ДО обнуления и масштабирования общего пути: раньше оба шли первыми,
+	// и одномерный путь платил за обнуление всего helpfulArray (2 * max_amount_of_peaks
+	// = 5000 элементов на поток при сотне пиков) и за запись масштабированных пиков на
+	// место, хотя не нуждался ни в том, ни в другом. Это была треть простоя ядра
+	// (ncu, БД 2D 256x256 float: lg_throttle на записях); БД 2D целиком 0.64 -> 0.56 с,
+	// результат бит-в-бит.
 	if (multPeak == 0 || multInterval == 0) {
-		const numb* axis = (multInterval == 0) ? (data + startDataIndex)
-		                                       : (intervals + startDataIndex);
-		return ucuda_components_1d(axis, helpfulArray + hBase, amountOfPeaks, eps);
+		const bool byPeak = (multInterval == 0);
+		const numb* axis = byPeak ? (data + startDataIndex) : (intervals + startDataIndex);
+		return ucuda_components_1d(axis, helpfulArray + hBase, amountOfPeaks, eps,
+		                           byPeak ? multPeak : multInterval);
 	}
+
+	// Масштабирование осей признаков перед кластеризацией. Раньше здесь стояли
+	// constexpr mult_peak / mult_interval из configCUDA.h — теперь множители
+	// приходят аргументами, чтобы каждая 2D-диаграмма могла настроить их сама
+	// (дефолты в объявлении dbscanCUDA — те же константы, поэтому legacy-путь
+	// hostLibrary.cu ведёт себя как прежде).
+	for (size_t i = 0; i < amountOfPeaks; i++) {
+		data[startDataIndex + i] = data[startDataIndex + i] * multPeak;
+		intervals[startDataIndex + i] = intervals[startDataIndex + i] * multInterval;
+	}
+
+	// Обнуляются только метки [0, amountOfPeaks): вторая половина helpfulArray — стек
+	// обхода, он пишется (sp++) раньше, чем читается (--sp), и обнулять его незачем.
+	for (int i = 0; i < amountOfPeaks; ++i)
+		helpfulArray[hBase + i] = 0;
 
 	// Ёмкость стека обхода. Пока инвариант про две половины helpfulArray
 	// выполняется, sp < stackCap истинно всегда и проверка ничего не меняет;
@@ -2804,6 +2861,229 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 	const size_t hStride = (helpfulStride != 0) ? helpfulStride : sizeOfBlock;
 
 	outData[idx] = dbscan(data, intervals, helpfulArray, idx * pStride, amountOfPeaks[idx], (int)hStride, idx, eps, outData, multPeak, multInterval, idx * hStride);
+}
+
+// Наибольшее число пиков в куске (REGIME_* < 0 не мешают: *out обнулён хостом). Хост
+// читает его перед dbscanWarpCUDA, чтобы выбрать ёмкость буфера в shared memory.
+__global__ void ucudaMaxPeaksCUDA(const int* amountOfPeaks, const int n, int* out)
+{
+	int m = 0;
+	for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < n; i += blockDim.x * gridDim.x)
+		m = max(m, amountOfPeaks[i]);
+	for (int o = 16; o > 0; o >>= 1) m = max(m, __shfl_down_sync(0xffffffffu, m, o));
+	if ((threadIdx.x & 31) == 0 && m > 0) atomicMax(out, m);
+}
+
+// Одномерная ветка dbscan() (multPeak == 0 || multInterval == 0) — по ВАРПУ на ячейку.
+//
+// В dbscanCUDA ячейку ведёт один поток: копия пиков и пирамидальная сортировка идут по
+// глобальной памяти, у соседних потоков варпа адреса отстоят на целую строку пиков, и
+// ядро стоит на памяти (ncu: lg_throttle + long_scoreboard ~99% простоя). Здесь пики
+// ячейки лежат подряд, варп грузит их объединённо в shared, сортирует битонически и
+// считает разрывы >= eps всеми 32 дорожками. Отсортированный ряд тот же, что у
+// ucuda_heapsort, поэтому и число кластеров совпадает бит-в-бит (сверено на 16384
+// ячейках, float и double). Замер (RTX 2060, синтетика): 100-300 пиков на ячейку —
+// x43 float / x14 double, 2000-2500 — x14 / x5.
+//
+// cap — ёмкость строки shared на варп (степень двойки >= max числа пиков в куске, см.
+// ucudaMaxPeaksCUDA); dynamic shared = warpsPerBlock * cap * sizeof(numb). Ячейка, где
+// пиков больше cap, уходит на прежний путь силами одной дорожки — запасной случай.
+// Двумерная ветка (оба множителя ненулевые) сюда не ходит: хост зовёт dbscanCUDA.
+__device__ __forceinline__ numb ucudaPosInf()
+{
+	return sizeof(numb) == 8 ? (numb)__longlong_as_double(0x7ff0000000000000LL)
+	                         : (numb)__int_as_float(0x7f800000);
+}
+
+__global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
+	const int* amountOfPeaks, const numb* intervals, numb* helpfulArray,
+	const numb eps, int* outData, const numb multPeak, const numb multInterval,
+	const size_t peakStride, const size_t helpfulStride, const int cap)
+{
+	extern __shared__ unsigned char ucudaDbscanSmem[];
+	numb* sh = reinterpret_cast<numb*>(ucudaDbscanSmem) + (size_t)(threadIdx.x >> 5) * cap;
+	const int lane = threadIdx.x & 31;
+	const int cell = (int)((blockIdx.x * (size_t)blockDim.x + threadIdx.x) >> 5);
+	if (cell >= amountOfBlocks) return;   // весь варп разом: cell одинаков на варп
+
+	const int P = amountOfPeaks[cell];
+	// Коды режима и вырожденные случаи — как в dbscanCUDA / dbscan().
+	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND) { if (lane == 0) outData[cell] = P; return; }
+	if (P == 1) { if (lane == 0) outData[cell] = 1; return; }
+
+	const bool byPeak = (multInterval == 0);
+	const numb* axis  = (byPeak ? data : intervals) + (size_t)cell * peakStride;
+	const numb  scale = byPeak ? multPeak : multInterval;
+	if (P > cap) {
+		if (lane == 0)
+			outData[cell] = ucuda_components_1d(axis, helpfulArray + (size_t)cell * helpfulStride, P, eps, scale);
+		return;
+	}
+
+	// Хвост до степени двойки — +inf: уходит в конец и в подсчёт разрывов не попадает.
+	int n = 2;
+	while (n < P) n <<= 1;
+	const numb inf = ucudaPosInf();
+	for (int i = lane; i < n; i += 32) sh[i] = (i < P) ? axis[i] * scale : inf;
+	__syncwarp();
+
+	for (int k = 2; k <= n; k <<= 1) {
+		for (int j = k >> 1; j > 0; j >>= 1) {
+			for (int i = lane; i < n; i += 32) {
+				const int ixj = i ^ j;
+				if (ixj > i) {
+					const numb a = sh[i], b = sh[ixj];
+					const bool up = (i & k) == 0;
+					if (up ? (b < a) : (a < b)) { sh[i] = b; sh[ixj] = a; }
+				}
+			}
+			__syncwarp();
+		}
+	}
+
+	// Тот же порог, что в ucuda_components_1d: `!(gap < eps)`, включая строгость.
+	int gaps = 0;
+	for (int i = 1 + lane; i < P; i += 32)
+		if (!(sh[i] - sh[i - 1] < eps)) ++gaps;
+	for (int o = 16; o > 0; o >>= 1) gaps += __shfl_down_sync(0xffffffffu, gaps, o);
+	if (lane == 0) outData[cell] = gaps + 1;
+}
+
+// Union-find для dbscanWarp2DCUDA: корень — элемент, который указывает сам на себя.
+// Дорожки варпа сливают компоненты одновременно; atomicCAS вешает БОЛЬШИЙ корень под
+// меньший, только если он всё ещё корень, поэтому циклов нет, а гонка лишь повторяет
+// попытку. Итог (число корней) от порядка слияний не зависит.
+__device__ __forceinline__ int ucudaUfFind(volatile int* par, int a)
+{
+	// Сжатие путей делением пополам (как в ECL-CC): каждый пройденный узел перевешивается
+	// на деда. Безопасно при параллельных слияниях: родитель всегда меньше потомка (слияние
+	// вешает больший корень под меньший), и перевешивание лишь укорачивает путь к тому же
+	// корню. Без него в плотном кластере (тысячи пиков в пределах eps — точка покоя во
+	// float, где шум не даёт сработать eps_fixed_point) деревья вытягивались в цепочки.
+	int curr = par[a];
+	if (curr != a) {
+		int next, prev = a;
+		while (curr > (next = par[curr])) {
+			par[prev] = next;
+			prev = curr;
+			curr = next;
+		}
+	}
+	return curr;
+}
+
+__device__ __forceinline__ void ucudaUfUnite(int* par, int a, int b)
+{
+	for (;;) {
+		a = ucudaUfFind(par, a);
+		b = ucudaUfFind(par, b);
+		if (a == b) return;
+		if (a > b) { const int t = a; a = b; b = t; }
+		if (atomicCAS(&par[b], b, a) == b) return;
+	}
+}
+
+// Двумерная ветка dbscan() (оба множителя ненулевые) — по ВАРПУ на ячейку.
+//
+// dbscan() считает здесь компоненты связности графа «distance2 < eps^2» обходом за
+// O(P^2) сравнений одним потоком по глобальной памяти. Тут: пары (пик, интервал),
+// умноженные на множители, грузятся в shared, сортируются по первой координате, и каждая
+// дорожка сравнивает свою точку только с соседями по сортировке, пока dx*dx < eps^2
+// (дальше по сортировке dx только растёт, а distance2 >= dx*dx и после округления, так что
+// ни одной связи не теряется). Связи сливаются в union-find; кластеров столько, сколько
+// корней. Набор связей тот же — то же distance2 над теми же произведениями, — значит и
+// число кластеров совпадает с dbscan() бит-в-бит.
+//
+// Сортировка — битоническая сеть «с переворотом»: все компараторы кладут меньшее на
+// меньший индекс, поэтому элементы за концом ряда ведут себя как +inf и в памяти не нужны
+// (без добивки до степени двойки).
+//
+// cap — ёмкость строки shared на варп в элементах (>= max числа пиков в куске); строка —
+// x[cap], y[cap] (numb) и par[cap] (int). cap == 0 — shared не хватило: те же шаги идут
+// по глобальной памяти, сортировка на месте в буферах пиков (после DBSCAN их никто не
+// читает), par — в helpfulArray. Ячейка с пиками больше cap — тоже по глобальной памяти.
+__global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
+	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
+	const numb eps, int* outData, const numb multPeak, const numb multInterval,
+	const size_t peakStride, const size_t helpfulStride, const int cap)
+{
+	extern __shared__ unsigned char ucudaDbscanSmem[];
+	const int lane = threadIdx.x & 31;
+	const int warp = threadIdx.x >> 5;
+	const int cell = (int)((blockIdx.x * (size_t)blockDim.x + threadIdx.x) >> 5);
+	if (cell >= amountOfBlocks) return;
+
+	const int P = amountOfPeaks[cell];
+	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND) { if (lane == 0) outData[cell] = P; return; }
+	if (P == 1) { if (lane == 0) outData[cell] = 1; return; }
+
+	numb* gx = data      + (size_t)cell * peakStride;
+	numb* gy = intervals + (size_t)cell * peakStride;
+	numb* x; numb* y; int* par;
+	if (P <= cap) {
+		numb* base = reinterpret_cast<numb*>(ucudaDbscanSmem) + (size_t)warp * cap * 2;
+		x = base;
+		y = base + cap;
+		par = reinterpret_cast<int*>(reinterpret_cast<numb*>(ucudaDbscanSmem) + (size_t)(blockDim.x >> 5) * cap * 2)
+		    + (size_t)warp * cap;
+	}
+	else {
+		x = gx;
+		y = gy;
+		par = reinterpret_cast<int*>(helpfulArray + (size_t)cell * helpfulStride);
+	}
+	for (int i = lane; i < P; i += 32) {
+		x[i] = gx[i] * multPeak;
+		y[i] = gy[i] * multInterval;
+		par[i] = i;
+	}
+	__syncwarp();
+
+	// Битоническая сеть «с переворотом», компараторы (i, p), i < p, меньшее — на i.
+	int n = 2;
+	while (n < P) n <<= 1;
+	for (int k = 2; k <= n; k <<= 1) {
+		const int half = k >> 1;
+		for (int t = lane; t < (n >> 1); t += 32) {
+			const int off = t & (half - 1);
+			const int i = (t - off) * 2 + off;
+			const int p = i + (k - 1 - 2 * off);
+			if (p < P && x[p] < x[i]) {
+				const numb tx = x[i], ty = y[i];
+				x[i] = x[p]; y[i] = y[p]; x[p] = tx; y[p] = ty;
+			}
+		}
+		__syncwarp();
+		for (int j = half >> 1; j > 0; j >>= 1) {
+			for (int t = lane; t < (n >> 1); t += 32) {
+				const int off = t & (j - 1);
+				const int i = (t - off) * 2 + off;
+				const int p = i + j;
+				if (p < P && x[p] < x[i]) {
+					const numb tx = x[i], ty = y[i];
+					x[i] = x[p]; y[i] = y[p]; x[p] = tx; y[p] = ty;
+				}
+			}
+			__syncwarp();
+		}
+	}
+
+	const numb eps2 = eps * eps;
+	for (int i = lane; i < P; i += 32) {
+		const numb xi = x[i], yi = y[i];
+		for (int j = i + 1; j < P; ++j) {
+			const numb dx = x[j] - xi;
+			if (dx * dx >= eps2) break;
+			if (distance2(xi, yi, x[j], y[j]) < eps2) ucudaUfUnite(par, i, j);
+		}
+	}
+	__syncwarp();
+
+	int roots = 0;
+	for (int i = lane; i < P; i += 32)
+		if (par[i] == i) ++roots;
+	for (int o = 16; o > 0; o >>= 1) roots += __shfl_down_sync(0xffffffffu, roots, o);
+	if (lane == 0) outData[cell] = roots;
 }
 
 // ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
@@ -3030,7 +3310,7 @@ __global__ void LLEKernelCUDA(
 
 		tempData = sqrt(tempData);
 
-		if (tempData <= 1e-14) {
+		if (tempData <= (numb)1e-14) {
 			//resultArray[idx] = -99999999;
 			//return;
 			tempData = 1e-14;
@@ -3044,7 +3324,7 @@ __global__ void LLEKernelCUDA(
 		//	tempData = eps;
 		tempData = (1 / tempData);
 		for (int j = 0; j < amountOfInitialConditions; ++j) {
-			y[j] = (numb)(x[j] - ((x[j] - y[j]  + 1e-14) * tempData));
+			y[j] = (numb)(x[j] - ((x[j] - y[j]  + (numb)1e-14) * tempData));
 		}
 	}
 
@@ -3802,7 +4082,8 @@ void feature_needs(int feat, bool& sp, bool& sp2, bool& si, bool& si2)
 {
 	sp = sp2 = si = si2 = false;
 	switch (feat) {
-		case BF_AVG_PEAKS:           case BF_LOG_AVG_PEAKS:        sp  = true;             break;
+		case BF_AVG_PEAKS:           case BF_LOG_AVG_PEAKS:
+		case BF_SLOG_AVG_PEAKS:                                    sp  = true;             break;
 		case BF_AVG_INTERVALS:       case BF_LOG_AVG_INTERVALS:    si  = true;             break;
 		case BF_RMS_PEAKS:           case BF_LOG_RMS_PEAKS:        sp2 = true;             break;
 		case BF_RMS_INTERVALS:       case BF_LOG_RMS_INTERVALS:    si2 = true;             break;
@@ -3832,6 +4113,12 @@ numb compute_basin_feature(int feat,
 		case BF_LOG_RMS_INTERVALS:    return rms_i > 0 ? log10(rms_i) : (numb)-999;
 		case BF_LOG_STDEV_PEAKS:      return std_p > 0 ? log10(std_p) : (numb)-999;
 		case BF_LOG_STDEV_INTERVALS:  return std_i > 0 ? log10(std_i) : (numb)-999;
+		case BF_SLOG_AVG_PEAKS: {
+			const numb a = mean_p < 0 ? -mean_p : mean_p;
+			if (!(a > (numb)BF_SLOG_FLOOR)) return (numb)0;   // и NaN
+			const numb v = log10(a / (numb)BF_SLOG_FLOOR);
+			return mean_p < 0 ? -v : v;
+		}
 		default:                      return (numb)-999;
 	}
 }
@@ -3846,8 +4133,9 @@ numb compute_basin_feature(int feat,
 // the running sums PeakStream already keeps, so neither buffer is needed: the
 // cell integrates, accumulates, and writes its two features.
 //
-// hSweepAxis / logAxisMask are fixed at -1 / 0: BasinsRequest has no such
-// fields, and run_basins passed exactly these constants to the split path.
+// hSweepAxis is fixed at -1: BasinsRequest has no h axis. logAxisMask carries
+// only the ±log bits of the IC axes (UCUDA_SYMLOG_SHIFT + i); 0 is the linear
+// grid the kernel always had.
 __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3875,6 +4163,7 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	const int		feature2,
 	const numb		mult1,
 	const numb		mult2,
+	const int		logAxisMask,
 	const volatile int* cancelFlag,
 	int*			progressCounter,
 	const int		progressStride)
@@ -3894,7 +4183,7 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	size_t iters_local;
 	if (!ucudaSetupSweepPoint(nPts, amountOfCalculatedPoints, idx, dimension, ranges, h,
 			indicesOfMutVars, initialConditions, amountOfInitialConditions,
-			values, amountOfValues, -1, 0,
+			values, amountOfValues, -1, logAxisMask,
 			transientTime, tMax, preScaller,
 			amountOfPointsForSkip, amountOfIterations,
 			localX, localValues, h_local, skip_local, iters_local)) {

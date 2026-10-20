@@ -1032,6 +1032,7 @@ enum class BasinFeature : int {
     LogRMSIntervals     = 9,
     LogStDevPeaks       = 10,
     LogStDevIntervals   = 11,
+    SLogAvgPeaks        = 12,
 };
 
 // Названия признаков, индексируемые кодом BF_* / BasinFeature. ЕДИНСТВЕННЫЙ список на проект:
@@ -1054,6 +1055,7 @@ inline constexpr const char* kBasinFeatureNames[BF_FEATURE_COUNT] = {
     "sign*log10|avg peaks|", "sign*log10|avg intervals|",
     "log10 RMS peaks",       "log10 RMS intervals",
     "log10 StDev peaks",     "log10 StDev intervals",
+    "sign*log10(|avg peaks|/1e-12)",
 };
 
 // Страховка от возврата не-ASCII: подпись обязана пережить чтение файла в любой однобайтовой
@@ -1082,6 +1084,9 @@ struct BasinsConfig {
     std::string axis_x_hi_text = "10";
     std::string axis_y_lo_text = "-10";
     std::string axis_y_hi_text = "10";
+    // ±log-сетка по оси (BasinsRequest::axis_*_symlog): lo/hi тогда — границы |x| (> 0).
+    bool axis_x_symlog = false;
+    bool axis_y_symlog = false;
     std::string n_pts_text = "100";
 
     int writable_var = 0;

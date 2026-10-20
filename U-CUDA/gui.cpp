@@ -110,7 +110,9 @@ static ImVec4 ic_var_shade(int ic_index, int vi, int nv) {
 // ядро) и num_parse_detail::kPi (его подставляет разбор полей ввода). Если они
 // разъедутся, пользователь введёт "pi" и получит не то число, которое считает
 // GPU, — молча. Поэтому сверка на этапе компиляции.
-static_assert(static_cast<double>(::pi) == num_parse_detail::kPi,
+// Сравнение — в numb: при numb = float ядро видит pi, округлённое до float, и поле ввода
+// после приведения к numb даёт ровно его же.
+static_assert(::pi == static_cast<numb>(num_parse_detail::kPi),
               "pi in num_parse.h diverged from configCUDA.h");
 
 // Значение комбинации в точке траектории — зеркалит формулу ядра. Константы
@@ -2214,13 +2216,15 @@ struct ViewRangeValues {
     // invert — только про отрисовку, view_min/view_max остаются упорядоченными;
     // min/max здесь страховка от конфига, пришедшего из чужой руки.
     ViewRangeValues v;
-    {
+    // ±log-ось (бассейны): вид живёт в координатах узлов, а значения по ним идут немонотонно
+    // (-hi..-lo, +lo..+hi) — диапазоном [lo, hi] его не записать, такую ось не трогаем.
+    if (!ax.symlog) {
         const double span = ax.view_max - ax.view_min;
         v.has_x = true;
         v.x_lo = fmt_view_bound((std::min)(ax.view_min, ax.view_max), span);
         v.x_hi = fmt_view_bound((std::max)(ax.view_min, ax.view_max), span);
     }
-    if (src_has_y) {
+    if (src_has_y && !ay.symlog) {
         const double span = ay.view_max - ay.view_min;
         v.has_y = true;
         v.y_lo = fmt_view_bound((std::min)(ay.view_min, ay.view_max), span);
@@ -9693,15 +9697,27 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             c.axis_y_var = (s.vars.size() > 1) ? 1 : 0;
         const std::vector<const char*> items = c_str_list(s.vars);
 
+        // ±log — сетка легаси basinsOfAttraction_logAxes: |x| по логарифму на [lo, hi] по обе
+        // стороны от нуля, lo/hi тогда — границы модуля. Условия проверяет run_basins.
+        auto symlog_toggle = [](const char* id, bool& on) {
+            ImGui::SameLine();
+            ImGui::Checkbox(id, &on);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("|x| log-spaced on [lo, hi] on both sides of 0\n"
+                                  "(nodes -hi..-lo, +lo..+hi, monotone).\n"
+                                  "lo, hi > 0; Resolution even.");
+        };
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Axis X (IC)", &c.axis_x_var, items.data(), (int)items.size());
-        InputNumStr("X lo", c.axis_x_lo_text, kFieldW);
-        InputNumStr("X hi", c.axis_x_hi_text, kFieldW);
+        symlog_toggle("\xC2\xB1log##bas_xsym", c.axis_x_symlog);
+        InputNumStr(c.axis_x_symlog ? "|X| lo" : "X lo", c.axis_x_lo_text, kFieldW);
+        InputNumStr(c.axis_x_symlog ? "|X| hi" : "X hi", c.axis_x_hi_text, kFieldW);
 
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Axis Y (IC)", &c.axis_y_var, items.data(), (int)items.size());
-        InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
-        InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
+        symlog_toggle("\xC2\xB1log##bas_ysym", c.axis_y_symlog);
+        InputNumStr(c.axis_y_symlog ? "|Y| lo" : "Y lo", c.axis_y_lo_text, kFieldW);
+        InputNumStr(c.axis_y_symlog ? "|Y| hi" : "Y hi", c.axis_y_hi_text, kFieldW);
     } else {
         ImGui::TextDisabled("No variables (load a system first)");
     }
@@ -9967,6 +9983,11 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
     size_t total = (size_t)n * (size_t)n;
     double xlo = c.result.axis_x_lo, xhi = c.result.axis_x_hi;
     double ylo = c.result.axis_y_lo, yhi = c.result.axis_y_hi;
+    // Шкала осей — свойство посчитанной сетки (результата), а не текущих галок конфига.
+    for (HeatmapView* hv : { &hm_basins_v, &hm_avgpk_v, &hm_avgint_v, &hm_states_v }) {
+        hv->x_axis.symlog = c.result.axis_x_symlog;
+        hv->y_axis.symlog = c.result.axis_y_symlog;
+    }
 
     auto axis_name = [&](int var_idx) -> std::string {
         if (var_idx >= 0 && var_idx < (int)s.vars.size())
@@ -11329,6 +11350,23 @@ static void order_rehome_config(AppModel& model, int idx) {
     model.order_plot_windows_dirty = true;
 }
 
+// Предупреждение у выбора dd/qd (точность CPU-ветки и эталон y*(T)) в сборке с numb = float.
+// Тело КРС, коэффициенты и всё, что хост держит в numb, проходят через float, и выигрыш
+// расширенной точности может пропасть, а результат — оказаться неверным. При numb = double
+// строка не появляется.
+static void order_float_build_warning() {
+    if (sizeof(numb) >= sizeof(double)) return;
+    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+                       "Warning: this build uses numb = float - dd/qd results may be incorrect");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "U-CUDA was compiled with numb = float (configCUDA.h). double-double and\n"
+            "quad-double rebuild the KRS body in extended precision, but the code\n"
+            "generator, the host side and everything stored in numb still go through\n"
+            "float, so the extra digits may be lost or the result may be wrong.\n"
+            "For order estimates and reference solutions rebuild with numb = double.");
+}
+
 static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     OrderAnalysisSession& s = model.order_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -11501,6 +11539,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "The same KRS body is rebuilt with numb = ucuda::dd / ucuda::qd;\n"
             "each build is cached separately, so switching does not recompile.");
     if (c.use_gpu) ImGui::EndDisabled();
+    if (!c.use_gpu && c.cpu_precision > 0) order_float_build_warning();
 
     if (!c.use_gpu) {
         std::string why;
@@ -11655,6 +11694,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     "(X: E(T) in the Performance window). Needs \"fit h to t_max\": a node\n"
                     "that ends at N*h != t_max has no E(T). Computed after the timing and\n"
                     "not part of it. none: E(T) is Eref at t_max (\"endpoint only\").");
+            if (c.perf_end_ref == 1 || c.perf_end_ref == 2) order_float_build_warning();
         } else {
             // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
             const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
@@ -11668,6 +11708,7 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
                     "successive answers agree, so y* is exact to far below any error on\n"
                     "the plot. The adaptive step has no h grid, so E(T) is its only error.");
+            order_float_build_warning();
         }
         ImGui::Separator();
         // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU

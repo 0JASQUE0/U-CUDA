@@ -848,6 +848,10 @@ struct BasinsRequest {
     int axis_y_var = 1;       // 0-based индекс по Y
     double axis_x_lo = -10.0, axis_x_hi = 10.0;
     double axis_y_lo = -10.0, axis_y_hi = 10.0;
+    // ±log-сетка по оси (ucuda_node_value_symlog, порт легаси basinsOfAttraction_logAxes):
+    // |x| лог-равномерно на [lo, hi] по обе стороны от нуля. Требует lo, hi > 0 и чётного n_pts >= 4.
+    bool   axis_x_symlog = false;
+    bool   axis_y_symlog = false;
     int    n_pts = 200;
 
     int    writable_var   = 0;
@@ -890,6 +894,7 @@ struct BasinsResult {
     double axis_x_lo = 0.0, axis_x_hi = 0.0;
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int axis_x_var = 0, axis_y_var = 1;
+    bool axis_x_symlog = false, axis_y_symlog = false;   // как в BasinsRequest
 
     // Все four-поля размер n_pts² row-major (iy*n + ix):
     std::vector<int>    basin_idx;       // ≥1 = Osc cluster; ≤-1 = FP cluster; 0 = Unbound

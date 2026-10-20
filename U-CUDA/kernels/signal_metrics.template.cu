@@ -98,7 +98,7 @@ struct ExtremaInterp
 			if (isMax || isMin) {
 				const numb denom = y0 - (numb)2.0 * y1 + y2;
 				numb v = y1;
-				if (fabs(denom) > 1e-12) {
+				if (fabs(denom) > (numb)1e-12) {
 					const numb delta = (numb)0.5 * (y0 - y2) / denom;
 					v = y1 - (numb)0.25 * (y0 - y2) * delta;
 				}

@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>   // std::swap in the implicit-scheme LU
 #include <memory>
+#include <type_traits>
 // Драйвер адаптивного шага целиком: на CPU размерность известна только во
 // время выполнения, массивы состояния — под потолок UCUDA_AD_MAXN.
 // Раскладка (структуры регулятора) уже пришла через integrator.h -> adaptive_settings.h;
@@ -838,6 +839,17 @@ struct CpuAdaptiveKrs {
     int  S = 0, lc = 0, nlo = 0;
     double M[13][12] = {}, B[13] = {}, L[2][14] = {};
     double P45[7][4] = {}, AE[3][15] = {}, DD[4][16] = {};
+    // Драйвер ucuda_adaptive.cuh считает в numb, SystemEvaluator — в double. При numb = double
+    // f — это eval как есть; при float состояние переводится на границе, а параметры берутся
+    // из a_host (они постоянны весь прогон), а не из указателя драйвера.
+    const double* a_host = nullptr;
+    void f(const double* X, const double* a, double* F) const { ev->eval(X, a, F); }
+    void f(const float* X, const float*, float* F) const {
+        double x[UCUDA_AD_MAXN], d[UCUDA_AD_MAXN];
+        for (int l = 0; l < n; ++l) x[l] = X[l];
+        ev->eval(x, a_host, d);
+        for (int l = 0; l < n; ++l) F[l] = (float)d[l];
+    }
 
     CpuAdaptiveKrs(const SystemEvaluator& e, int dim, IntScheme sch) : ev(&e), n(dim) {
         if (sch == IntScheme::RK45) {
@@ -867,24 +879,24 @@ struct CpuAdaptiveKrs {
         }
     }
 
-    void rhs(const double* X, const double* a, double* F) const { ev->eval(X, a, F); }
+    void rhs(const numb* X, const numb* a, numb* F) const { f(X, a, F); }
 
-    void emb(const double* X, const double* F0, const double* a, const double h,
-             double* Y, double* E, double* F1, double* W) const {
-        double X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
+    void emb(const numb* X, const numb* F0, const numb* a, const numb h,
+             numb* Y, numb* E, numb* F1, numb* W) const {
+        numb X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
         for (int l = 0; l < n; ++l) W[l] = F0[l];
         for (int i = 1; i < S; ++i) {
             for (int l = 0; l < n; ++l) X2[l] = 0;
             for (int j = 0; j < i; ++j)
                 for (int l = 0; l < n; ++l) X2[l] += M[i][j] * W[j * n + l];
             for (int l = 0; l < n; ++l) X1[l] = X[l] + h * X2[l];
-            ev->eval(X1, a, W + i * n);
+            f(X1, a, W + i * n);
         }
         for (int l = 0; l < n; ++l) X2[l] = 0;
         for (int i = 0; i < S; ++i)
             for (int l = 0; l < n; ++l) X2[l] += B[i] * W[i * n + l];
         for (int l = 0; l < n; ++l) Y[l] = X[l] + h * X2[l];
-        ev->eval(Y, a, F1);
+        f(Y, a, F1);
         for (int l = 0; l < n; ++l) W[S * n + l] = F1[l];
         for (int m = 0; m < nlo; ++m) {
             for (int l = 0; l < n; ++l) X2[l] = 0;
@@ -895,27 +907,27 @@ struct CpuAdaptiveKrs {
         }
     }
 
-    void dprep(const double* X, const double* Y, const double* F0, const double* F1,
-               const double* a, const double h, double* W, double* D) const {
+    void dprep(const numb* X, const numb* Y, const numb* F0, const numb* F1,
+               const numb* a, const numb h, numb* W, numb* D) const {
         if (kind == RK45) {
             for (int l = 0; l < n; ++l) D[l] = X[l];
             for (int j = 0; j < 4; ++j)
                 for (int l = 0; l < n; ++l) {
-                    double acc = 0;
+                    numb acc = 0;
                     for (int i = 0; i < 7; ++i) acc += W[i * n + l] * P45[i][j];
                     D[(1 + j) * n + l] = h * acc;
                 }
         } else if (kind == DOP853) {
-            double X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
+            numb X1[UCUDA_AD_MAXN], X2[UCUDA_AD_MAXN];
             for (int i = 0; i < 3; ++i) {
                 for (int l = 0; l < n; ++l) X2[l] = 0;
                 for (int j = 0; j < 13 + i; ++j)
                     for (int l = 0; l < n; ++l) X2[l] += AE[i][j] * W[j * n + l];
                 for (int l = 0; l < n; ++l) X1[l] = X[l] + h * X2[l];
-                ev->eval(X1, a, W + (13 + i) * n);
+                f(X1, a, W + (13 + i) * n);
             }
             for (int l = 0; l < n; ++l) {
-                const double dy = Y[l] - X[l];
+                const numb dy = Y[l] - X[l];
                 D[l] = X[l];
                 D[n + l] = dy;
                 D[2 * n + l] = h * F0[l] - dy;
@@ -923,7 +935,7 @@ struct CpuAdaptiveKrs {
             }
             for (int r = 0; r < 4; ++r)
                 for (int l = 0; l < n; ++l) {
-                    double acc = 0;
+                    numb acc = 0;
                     for (int i = 0; i < 16; ++i) acc += DD[r][i] * W[i * n + l];
                     D[(4 + r) * n + l] = h * acc;
                 }
@@ -935,14 +947,14 @@ struct CpuAdaptiveKrs {
         }
     }
 
-    void deval(const double* D, const double th, double* Yo) const {
+    void deval(const numb* D, const numb th, numb* Yo) const {
         if (kind == RK45) {
             for (int l = 0; l < n; ++l)
                 Yo[l] = D[l] + th * (D[n + l] + th * (D[2 * n + l] + th * (D[3 * n + l] + th * D[4 * n + l])));
         } else if (kind == DOP853) {
-            const double u = 1 - th;
+            const numb u = 1 - th;
             for (int l = 0; l < n; ++l) {
-                double y = D[7 * n + l] * th;
+                numb y = D[7 * n + l] * th;
                 y = (y + D[6 * n + l]) * u;
                 y = (y + D[5 * n + l]) * th;
                 y = (y + D[4 * n + l]) * u;
@@ -953,7 +965,7 @@ struct CpuAdaptiveKrs {
             }
         } else {
             for (int l = 0; l < n; ++l) {
-                const double d = D[n + l] - D[l], f0 = D[2 * n + l], f1 = D[3 * n + l];
+                const numb d = D[n + l] - D[l], f0 = D[2 * n + l], f1 = D[3 * n + l];
                 Yo[l] = D[l] + th * (f0 + th * ((3 * d - 2 * f0 - f1) + th * (f0 + f1 - 2 * d)));
             }
         }
@@ -986,42 +998,47 @@ bool computePhasePortraitCPU_adaptive(
         }
         ~CtrlScope() { g_ctrl_custom = prev; g_ctrl_prep = prev_prep; }
     } ctrl_scope(ctrl_fn, prep_fn);
-    const CpuAdaptiveKrs K(ev, dim, scheme);
+    CpuAdaptiveKrs K(ev, dim, scheme);
+    K.a_host = a;
     // Состояние велико (стадии, плотный выход) — в куче, не на стеке.
     std::unique_ptr<UcudaAdaptState> Sp(new UcudaAdaptState());
     UcudaAdaptState& S = *Sp;
-    std::vector<double> logbuf((size_t)(log_cap > 0 ? log_cap : 0) * 4);
-    ucuda_ad_init(S, K, dim, ic, 0.0, a, P, log_cap > 0 ? logbuf.data() : nullptr, log_cap);
-    const double tEnd = t_skip + t_rec;
+    // Драйвер считает в numb (как GPU), интерфейс функции — в double. Параметры драйвер только
+    // передаёт в K: при numb = double это a как есть, при float K берёт их из a_host.
+    const std::vector<numb> X0(ic, ic + dim);
+    const numb* an = std::is_same<numb, double>::value ? reinterpret_cast<const numb*>(a) : nullptr;
+    std::vector<numb> logbuf((size_t)(log_cap > 0 ? log_cap : 0) * 4);
+    ucuda_ad_init(S, K, dim, X0.data(), (numb)0, an, P, log_cap > 0 ? logbuf.data() : nullptr, log_cap);
+    const numb tSkip = (numb)t_skip, tEnd = (numb)(t_skip + t_rec);
     // Отмена — как у phase_kernel_ad: раз в 1024 принятых шага; сетка — ucuda_ad_advance_to,
     // развёрнутый ради проверки между шагами (те же вызовы, тот же результат).
     auto cancelled = [&]() {
         return (S.st.nacc & 1023ULL) == 0 && cancel != nullptr && cancel->load(std::memory_order_relaxed);
     };
     bool cut = false;
-    while (S.t < t_skip && !S.diverged && !cut) {
-        ucuda_ad_step(S, K, a, P, t_skip);
+    while (S.t < tSkip && !S.diverged && !cut) {
+        ucuda_ad_step(S, K, an, P, tSkip);
         cut = cancelled();
     }
     if (!raw) {
-        std::vector<double> y((size_t)dim);
+        std::vector<numb> y((size_t)dim);
         traj.reserve((size_t)(total > 0 ? total : 0));
         for (int c = 0; c < total && !S.diverged && !cut; ++c) {
-            double tt = t_skip + (double)c * dt;
+            numb tt = tSkip + (numb)c * (numb)dt;
             if (tt > tEnd) tt = tEnd;
             while (S.t < tt && !S.diverged && !cut) {
-                ucuda_ad_step(S, K, a, P, tEnd);
+                ucuda_ad_step(S, K, an, P, tEnd);
                 cut = cancelled();
             }
             if (S.diverged || cut) break;
-            ucuda_ad_eval(S, K, a, P, tt, y.data());
-            traj.push_back(y);
+            ucuda_ad_eval(S, K, an, P, tt, y.data());
+            traj.emplace_back(y.begin(), y.end());
         }
     } else if (max_pts > 0 && !S.diverged && !cut) {
         traj.emplace_back(S.X, S.X + dim);
         times.push_back(S.t);
         while (S.t < tEnd && (int)traj.size() < max_pts && !S.diverged && !cut) {
-            ucuda_ad_step(S, K, a, P, tEnd);
+            ucuda_ad_step(S, K, an, P, tEnd);
             if (S.diverged) break;
             traj.emplace_back(S.X, S.X + dim);
             times.push_back(S.t);

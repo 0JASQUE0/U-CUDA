@@ -282,6 +282,17 @@ namespace { // внутренняя линковка: всё ниже не ви�
             && s.find("inf") == std::string::npos && s.find("nan") == std::string::npos) s += ".0";
         return s;
     }
+    // "u / c" с числовым c печатается как "u * ((numb)1 / c)": обратная сворачивается
+    // компилятором в литерал (double/float), а деление в FP64 — это ~10 инструкций на
+    // конвейере, который у ядер и так узкое место. На dd/qd-ветке (numb = dd/qd)
+    // (numb)1 / c считается в рантайме в полной точности — литерал 1/c в double срезал
+    // бы её. Расхождение с честным делением — 1 ulp. "c1 / c2" не трогаем: это и так
+    // константа, а правильно округлённое c1/c2 точнее c1 * (1/c2). Байткод CPU делает то же.
+    bool div_by_reciprocal(const PN& n) {
+        if (n->kind != Node::Div || n->b->kind != Node::Num || n->a->kind == Node::Num) return false;
+        const double c = std::fabs(n->b->num);
+        return std::isfinite(c) && c >= 1e-30 && c <= 1e30;
+    }
     void emit(const PN& n, const NameMap& nm, std::ostream& o);
     void emit_child(const PN& n, const NameMap& nm, std::ostream& o, int pp) {
         bool paren = prec(n->kind) < pp;
@@ -290,7 +301,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
     }
     void emit(const PN& n, const NameMap& nm, std::ostream& o) {
         switch (n->kind) {
-        case Node::Num:o << fmtnum(n->num); break;
+        // Литерал всегда через (numb): голый "0.5" — double, и при numb = float всё
+        // выражение уходило в FP64 (F2F + DFMA). Отрицательный — в скобках, чтобы
+        // остаться атомом. Текст "(numb)0.0" сравнивается в jac_emit (Am = I - hc*J).
+        case Node::Num:
+            if (std::signbit(n->num)) o << "((numb)" << fmtnum(n->num) << ")";
+            else                      o << "(numb)" << fmtnum(n->num);
+            break;
         case Node::Sym:o << nm.resolve(n->name); break;
         case Node::Neg:
             o << "-";
@@ -304,7 +321,11 @@ namespace { // внутренняя линковка: всё ниже не ви�
         case Node::Add:emit_child(n->a, nm, o, 1); o << " + "; emit_child(n->b, nm, o, 1); break;
         case Node::Sub:emit_child(n->a, nm, o, 1); o << " - "; emit_child(n->b, nm, o, 2); break;
         case Node::Mul:emit_child(n->a, nm, o, 2); o << " * "; emit_child(n->b, nm, o, 2); break;
-        case Node::Div:emit_child(n->a, nm, o, 2); o << " / "; emit_child(n->b, nm, o, 3); break;
+        case Node::Div:
+            emit_child(n->a, nm, o, 2);
+            if (div_by_reciprocal(n)) { o << " * ((numb)1 / "; emit_child(n->b, nm, o, 3); o << ")"; }
+            else                      { o << " / ";            emit_child(n->b, nm, o, 3); }
+            break;
         case Node::Pow: {
             if (n->b->kind == Node::Num) {
                 double e = n->b->num; int ie = (int)e;
@@ -710,7 +731,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         int N = s.vars.size();
         auto f0 = rhs_over(s, "X"); auto f1 = rhs_over(s, "X1"); std::ostringstream o;
         o << "    numb X1[" << N << "];\n";
-        for (int i = 0; i < N; ++i)o << "    X1[" << i << "] = X[" << i << "] + 0.5 * h * (" << f0[i] << ");\n";
+        for (int i = 0; i < N; ++i)o << "    X1[" << i << "] = X[" << i << "] + (numb)0.5 * h * (" << f0[i] << ");\n";
         for (int i = 0; i < N; ++i)o << "    X[" << i << "] = X[" << i << "] + h * (" << f1[i] << ");\n"; return o.str();
     }
     std::string scheme_rk4(const System& s) {
@@ -719,9 +740,9 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "    for (i = 0; i < N; i++) {\n        X1[i] = X[i];\n    }\n";
         o << "    for (j = 0; j < 4; j++) {\n";
         for (int i = 0; i < N; ++i)o << "        k[" << i << "][j] = (" << k[i] << ");\n";
-        o << "        if (j == 3) {\n            for (i = 0; i < N; i++) {\n            X[i] = X[i] + h * (k[i][0] + 2 * k[i][1] + 2 * k[i][2] + k[i][3]) / 6;\n            }\n        }\n";
+        o << "        if (j == 3) {\n            for (i = 0; i < N; i++) {\n            X[i] = X[i] + h * (k[i][0] + 2 * k[i][1] + 2 * k[i][2] + k[i][3]) * ((numb)1 / (numb)6);\n            }\n        }\n";
         o << "        else if (j == 2) {\n            for (i = 0; i < N; i++) {\n            X1[i] = X[i] + h * k[i][j];\n            }\n        }\n";
-        o << "        else {\n            for (i = 0; i < N; i++) {\n                X1[i] = X[i] + 0.5 * h * k[i][j];\n            }\n        }\n    }\n"; return o.str();
+        o << "        else {\n            for (i = 0; i < N; i++) {\n                X1[i] = X[i] + (numb)0.5 * h * k[i][j];\n            }\n        }\n    }\n"; return o.str();
     }
     // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — static
     // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
@@ -741,11 +762,18 @@ namespace { // внутренняя линковка: всё ниже не ви�
         }
         return t;
     }
+    // Квалификатор таблиц коэффициентов. При numb = float хвосты ~1e-51 ниже денормалей float,
+    // NVRTC перестаёт считать инициализатор константным, а static __device__ с динамической
+    // инициализацией запрещён — поэтому там таблица обычная локальная. Хвосты остаются: их
+    // складывают dd/qd CPU-ветки вкладки Order. При double текст прежний.
+    const char* md_table_qual() {
+        return sizeof(numb) < sizeof(double) ? "    const numb " : "    static const numb ";
+    }
     // "static const numb <decl> = {...};" — rows x cols из таблицы с шагом
     // строки ld (ld > cols — берётся левый верхний угол).
     void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
                   int rows, int cols, int ld) {
-        o << "    static const numb " << decl << " = {\n";
+        o << md_table_qual() << decl << " = {\n";
         for (int i = 0; i < rows; ++i) {
             o << "        {";
             for (int j = 0; j < cols; ++j) o << (j ? ", " : "") << md_literal(v[i * ld + j]);
@@ -871,7 +899,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         std::ostringstream o;
         md_table(o, ("M[" + std::to_string(S) + "][" + std::to_string(S - 1) + "]").c_str(), e.A, S, S - 1, e.ld);
         md_table(o, ("B[1][" + std::to_string(S) + "]").c_str(), e.b, 1, S, S);
-        o << "    static const numb L[" << e.nlo << "][" << e.lc << "] = {\n";
+        o << md_table_qual() << "L[" << e.nlo << "][" << e.lc << "] = {\n";
         for (int m = 0; m < e.nlo; ++m) {
             o << "        {";
             for (int i = 0; i < e.lc; ++i) o << (i ? ", " : "") << md_literal(e.lo[m][i]);
@@ -1132,10 +1160,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "    const int  ndim = " << N << ";\n";
         if (cx)
             // Переприсваивается между проходами, поэтому не const.
-            o << "    ucmplx hc = ucmplx(a[0] * h, h * " << fmtnum(CIE_IMAG) << ");\n";
+            o << "    ucmplx hc = ucmplx(a[0] * h, h * (numb)" << fmtnum(CIE_IMAG) << ");\n";
         else
             o << "    const numb hc = "
-              << (kind == ImplicitKind::Euler ? "h" : "(0.5 * h)") << ";\n";
+              << (kind == ImplicitKind::Euler ? "h" : "((numb)0.5 * h)") << ";\n";
         o << "    const numb ntol = " << fmtnum(tol) << ";\n";
         o << "    int it, ik, ir, ic, ip, sing, refresh;\n";
         if (cx) {
@@ -1167,8 +1195,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
             for (int j = 0; j < N; ++j) {
                 const std::string& d = Jn[(size_t)i * N + j];
                 o << "            Am[" << (i * N + j) << "] = ";
-                if (d == "0.0") o << lit(i == j ? "1.0" : "0.0") << ";\n";
-                else if (i == j) o << "1.0 - hc * (" << d << ");\n";
+                if (d == "(numb)0.0") o << lit(i == j ? "1.0" : "0.0") << ";\n";
+                else if (i == j) o << "(numb)1.0 - hc * (" << d << ");\n";
                 else             o << "-hc * (" << d << ");\n";
             }
         }
@@ -1191,7 +1219,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // would only turn the correction into inf and then nan, killing a
         // trajectory that is otherwise alive; leaving the step on the predictor
         // costs one order locally and nothing globally.
-        o << "                if (" << absf << "(dgn) < 1e-30) { sing = 1; break; }\n";
+        o << "                if (" << absf << "(dgn) < (numb)1e-30) { sing = 1; break; }\n";
         o << "                for (ir = ik + 1; ir < ndim; ir++) {\n";
         o << "                    mlt = Am[ir * ndim + ik] / dgn;\n";
         o << "                    Am[ir * ndim + ik] = mlt;\n";
@@ -1240,7 +1268,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             // factor. Without this a frozen Jacobian diverges outright on a stiff
             // nonlinear system (measured on Van der Pol, mu = 100, h >= 0.01);
             // refreshing recovers the full-Newton answer at half the Jacobians.
-            o << "        if (nrm > 0.25 * prevn) refresh = 1;\n";
+            o << "        if (nrm > (numb)0.25 * prevn) refresh = 1;\n";
         o << "        prevn = nrm;\n";
         o << "    }\n\n";
 
@@ -1250,7 +1278,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         else if (kind == ImplicitKind::Midpoint)
             // Xn holds the stage value Y; recover the endpoint from it.
             for (int i = 0; i < N; ++i)
-                o << "    X[" << i << "] = 2.0 * Xn[" << i << "] - X[" << i << "];\n";
+                o << "    X[" << i << "] = (numb)2.0 * Xn[" << i << "] - X[" << i << "];\n";
         else
             // Комплексный проход кладёт результат обратно в Z: второй проход
             // стартует с него, а после второго Re Z уходит в X.
@@ -1263,7 +1291,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             // Второй полушаг — сопряжённый: tau2 = h*(1 - a[0]) - i*h*CIE_IMAG.
             // tau1 + tau2 = h при любом a[0], но h^2-член гасится только при
             // a[0] = 1/2, и только там метод второго порядка.
-            o << "\n    hc = ucmplx((1 - a[0]) * h, -h * " << fmtnum(CIE_IMAG) << ");\n";
+            o << "\n    hc = ucmplx((1 - a[0]) * h, -h * (numb)" << fmtnum(CIE_IMAG) << ");\n";
             emit_pass();
             // Наружу — только Re, как у Complex CD: всё вокруг
             // calculateDiscreteModel остаётся вещественным.
@@ -1527,8 +1555,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
             // Разбиение комплексное и фиксированное, a[0] не участвует:
             // проход 1 -- (p, q), проход 2 -- (q, p). У {1-0} h1 -- это
             // неявная половина, она идёт первой (см. emit_pass).
-            o << "    ucmplx cp = ucmplx(h / (numb)6, -h / (numb)6);   // (1-i)h/6\n";
-            o << "    ucmplx cq = ucmplx(h / (numb)3,  h / (numb)6);   // (2+i)h/6\n";
+            o << "    ucmplx cp = ucmplx(h * ((numb)1 / (numb)6), -h * ((numb)1 / (numb)6));   // (1-i)h/6\n";
+            o << "    ucmplx cq = ucmplx(h * ((numb)1 / (numb)3),  h * ((numb)1 / (numb)6));   // (2+i)h/6\n";
             pass_h1 = { "cp", "cq" };
             pass_h2 = { "cq", "cp" };
             o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
@@ -1544,14 +1572,14 @@ namespace { // внутренняя линковка: всё ниже не ви�
             if (kind != CdKind::Cx4s3) o << kCcdImagDecl;
             if (kind == CdKind::Cx4) {
                 // gamma*h and conj(gamma)*h.
-                o << "    ucmplx g  = ucmplx(0.5 * h,  h * ccd_im);\n";
-                o << "    ucmplx gc = ucmplx(0.5 * h, -h * ccd_im);\n";
+                o << "    ucmplx g  = ucmplx((numb)0.5 * h,  h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx((numb)0.5 * h, -h * ccd_im);\n";
                 cgs = { "g", "gc" };
             }
             else if (kind == CdKind::Cx4s4) {
                 // (gamma/2, conj/2, conj/2, gamma/2) — палиндром.
-                o << "    ucmplx g  = ucmplx(0.25 * h,  0.5 * h * ccd_im);\n";
-                o << "    ucmplx gc = ucmplx(0.25 * h, -0.5 * h * ccd_im);\n";
+                o << "    ucmplx g  = ucmplx((numb)0.25 * h,  (numb)0.5 * h * ccd_im);\n";
+                o << "    ucmplx gc = ucmplx((numb)0.25 * h, -(numb)0.5 * h * ccd_im);\n";
                 cgs = { "g", "gc", "gc", "g" };
             }
             else {
@@ -1805,7 +1833,12 @@ namespace { // внутренняя линковка: всё ниже не ви�
             case Node::Add: compile(n->a); compile(n->b); out.push_back({ OP_ADD,0,0 }); break;
             case Node::Sub: compile(n->a); compile(n->b); out.push_back({ OP_SUB,0,0 }); break;
             case Node::Mul: compile(n->a); compile(n->b); out.push_back({ OP_MUL,0,0 }); break;
-            case Node::Div: compile(n->a); compile(n->b); out.push_back({ OP_DIV,0,0 }); break;
+            case Node::Div:
+                // Как emit: u / c -> u * (1 / c), чтобы CPU совпадал с ядром.
+                compile(n->a);
+                if (div_by_reciprocal(n)) { out.push_back({ OP_PUSH_CONST, 0, 1.0 / n->b->num }); out.push_back({ OP_MUL,0,0 }); }
+                else                      { compile(n->b); out.push_back({ OP_DIV,0,0 }); }
+                break;
             case Node::Pow: compile(n->a); compile(n->b); out.push_back({ OP_POW,0,0 }); break;
             case Node::Neg: compile(n->a); out.push_back({ OP_NEG,0,0 }); break;
             case Node::Call: {
@@ -3636,7 +3669,7 @@ std::string scheme_gbs(const System& s, int K) {
     o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { X0_gbs[i_gbs] = X[i_gbs]; AC_gbs[i_gbs] = (numb)0; }\n";
     o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
     o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
-    o << "        const numb hs_gbs = h / (numb)n_gbs;\n";
+    o << "        const numb hs_gbs = h * ((numb)1 / (numb)n_gbs);\n";
     o << "        // старт: явный Эйлер на первый подшаг\n";
     o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";
     for (int i = 0; i < N; ++i)
@@ -3746,12 +3779,12 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
           << " of h/" << n[k] << "\n";
         if (inl) {
             o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) {\n";
-            o << "        const numb h = h_ex / (numb)" << fmtnum((double)n[k]) << ";\n";
+            o << "        const numb h = h_ex * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
         } else {
-            o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h / (numb)"
-              << fmtnum((double)n[k]) << ");\n";
+            o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h * ((numb)1 / (numb)"
+              << fmtnum((double)n[k]) << "));\n";
         }
         o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] += "
           << (alpha_exact ? ex_rat_expr(arat[(size_t)k])
@@ -3812,7 +3845,7 @@ std::string wrap_extrapolation_complex(const std::string& core_body, int N,
         o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s")
           << " of h/" << n[k] << ", no Re in between\n";
         o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) {\n";
-        o << "        const numb h = h_ex / (numb)" << fmtnum((double)n[k]) << ";\n";
+        o << "        const numb h = h_ex * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
         emit_indented(o, core_body, "    ");
         o << "    }\n";
         o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] = AC_ex[i_ex] + "
@@ -3922,11 +3955,11 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) X[i_ea] = X0_ea[i_ea];\n";
         if (inl) {
             o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
-            o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+            o << "        const numb h = h_ea * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
         } else {
-            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h / (numb)" << fmtnum((double)n[k]) << ");\n";
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h * ((numb)1 / (numb)" << fmtnum((double)n[k]) << "));\n";
         }
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { AC_ea[i_ea] += " << w.alpha[(size_t)k]
           << " * X[i_ea]; EC_ea[i_ea] += " << w.diff[(size_t)k] << " * X[i_ea]; }\n";
@@ -3974,7 +4007,7 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
           << ", no Re in between\n";
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) Z[i_ea] = Z0_ea[i_ea];\n";
         o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
-        o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+        o << "        const numb h = h_ea * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
         emit_indented(o, core_body, "    ");
         o << "    }\n";
         // Сумма — тем же выражением, что у постоянного ExtrZ (AC = AC + alpha * Z).
@@ -4024,7 +4057,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
          "EC_gbs[i_gbs] = (numb)0; }\n";
     o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
     o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
-    o << "        const numb hs_gbs = h / (numb)n_gbs;\n";
+    o << "        const numb hs_gbs = h * ((numb)1 / (numb)n_gbs);\n";
     o << "        // старт: явный Эйлер на первый подшаг, f(X) — F0 драйвера\n";
     o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) {\n";
     o << "            Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";

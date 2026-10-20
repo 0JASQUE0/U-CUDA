@@ -101,6 +101,10 @@
 #define UCUDA_AD_HAIRER_ONLY 1
 #endif
 
+// Порог «конечного» значения в numb для проверок вида !(x <= UCUDA_AD_BIG) (ловят inf и NaN).
+// (numb)1e300 при numb = float — уже inf, и такая проверка пропускала бы inf.
+#define UCUDA_AD_BIG ((numb)(sizeof(numb) < sizeof(double) ? 1e38 : 1e300))
+
 // Параметры адаптивного шага — один экземпляр на запуск. Только numb и int
 // фиксированного размера: хост заполняет ту же структуру и передаёт её в ядро.
 struct UcudaAdaptParams {
@@ -773,8 +777,10 @@ UCUDA_HD inline numb ucuda_ad_hmin_auto(numb t, numb span) {
 #else
     // CPU: nextafter в CRT — вызов на каждой попытке; у 0 < t < 1e308 следующее число вверх —
     // соседний битовый код (результат тот же). Остальное — через CRT.
+    // Битовый трюк — только для numb = double: у float ulp другой, и 10 ulp double ниже его
+    // разрешения (t + h_min == t, вынужденный шаг не двигал бы время).
     numb u;
-    if (t > 0 && t < (numb)1e308) {
+    if (sizeof(numb) == sizeof(double) && t > 0 && t < (numb)1e308) {
         const double d = (double)t;
         unsigned long long b; memcpy(&b, &d, sizeof b); ++b;
         double up; memcpy(&up, &b, sizeof up);
@@ -824,7 +830,7 @@ UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, const numb* X, const numb* F
 template <class K>
 UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, const numb* X, const numb* F0, const numb* a,
                                         const UcudaAdaptParams& P, UcudaAdaptStats& st) {
-    const numb hmax = (P.hmax > 0 && P.hmax < (numb)1e300) ? P.hmax : P.span;   // +inf (и 0) — без ограничения
+    const numb hmax = (P.hmax > 0 && P.hmax < UCUDA_AD_BIG) ? P.hmax : P.span;   // +inf (и 0) — без ограничения
     if (!(hmax > 0)) return 0;
     numb dnf = 0, dny = 0;
     for (int i = 0; i < n; ++i) {
@@ -901,7 +907,7 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
     S.last_forced = 0; S.diverged = 0; S.nrej_run = 0;
     S.log_n = 0;
     ucuda_ad_prepare_ctl(P, S.cc);
-    if (hc > 0 && hc <= (numb)1e300) S.h = hc;   // !(<=) отсекает и inf, и NaN
+    if (hc > 0 && hc <= UCUDA_AD_BIG) S.h = hc;   // !(<=) отсекает и inf, и NaN
     else S.h = P.h0 > 0 ? P.h0
              : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, S.X, S.F0, a, P, S.st)
                               : ucuda_ad_h0(k, n, S.X, S.F0, a, P, S.st));
@@ -970,7 +976,7 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
         UcudaCtlOut o;
         ucuda_step_ctrl(P.ctrl, in, S.mem, o);
 
-        const int finite = o.err <= (numb)1e300;   // !(<=) ловит и NaN
+        const int finite = o.err <= UCUDA_AD_BIG;   // !(<=) ловит и NaN
         if (forced && !finite) { S.diverged = 1; return 0; }
         // Без повторов принимается любая попытка с конечной ошибкой; NaN/inf — как обычный
         // отказ: шаг уменьшается, а на h_min разлёт ловится выше. Так же — приём регулятором
@@ -1183,10 +1189,10 @@ UCUDA_HD inline void ucuda_lyap_renorm(const numb* x, const numb eps, numb* y, n
             d += t * t;
         }
         d = sqrt(d);
-        if (d <= 1e-14) d = 1e-14;
+        if (d <= (numb)1e-14) d = (numb)1e-14;
         acc[0] += log(d);
         const numb inv = 1 / d;
-        for (int j = 0; j < n; ++j) y[j] = (numb)(x[j] - ((x[j] - y[j] + 1e-14) * inv));
+        for (int j = 0; j < n; ++j) y[j] = (numb)(x[j] - ((x[j] - y[j] + (numb)1e-14) * inv));
     } else {
         numb den[NC];
         for (int k = 0; k < NC; ++k)

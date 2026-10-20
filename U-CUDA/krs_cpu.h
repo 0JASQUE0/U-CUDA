@@ -110,7 +110,7 @@ struct UcudaCtlOut;
 class CtrlCpuFn {
 public:
     using Fn     = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
-    using PrepFn = void (*)(const double* c, int q, double* k);   // раздел подготовки (numb = double)
+    using PrepFn = void (*)(const numb* c, int q, numb* k);   // раздел подготовки (DLL собрана с numb из configCUDA.h)
     CtrlCpuFn() = default;
     ~CtrlCpuFn();
     CtrlCpuFn(const CtrlCpuFn&) = delete;
