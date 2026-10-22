@@ -125,13 +125,6 @@ double stability_step_error(double sigma, double omega, double k, double r, doub
     return nd / ne;
 }
 
-int stability_count_preferred(const StabilityResult& res, double tol) {
-    int n = 0;
-    for (size_t i = 0; i < res.rho.size(); ++i)
-        if (stability_cell_preferred(res, i, tol)) ++n;
-    return n;
-}
-
 SignalMetricsResult ParametricEngine::run_signal_metrics(const SignalMetricsRequest& req) {
     return impl_->run_signal_metrics(req);
 }

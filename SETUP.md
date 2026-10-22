@@ -79,6 +79,21 @@ ctest --preset linux-debug
 
 Для Release замените `linux-debug` на `linux-release`. Windows presets используют MSVC, не MinGW.
 
+### Совместимость CUDA и драйвера
+
+Приложение компилирует пользовательские схемы через NVRTC во время работы. Драйвер NVIDIA должен поддерживать PTX, который выдаёт выбранная версия NVRTC: успешная сборка через `nvcc` этого не гарантирует. Ошибка `the provided PTX was compiled with an unsupported toolchain` означает, что нужно обновить драйвер либо выбрать совместимую версию CUDA/NVRTC. См. [ограничения совместимости NVIDIA](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
+
+На Linux отдельную установленную версию NVRTC можно выбрать при конфигурации:
+
+```bash
+cmake --preset linux-debug \
+  -DCUDA_nvrtc_LIBRARY=/path/to/nvrtc/lib/libnvrtc.so \
+  -DCUDA_nvrtc_builtins_LIBRARY=/path/to/nvrtc/lib/libnvrtc-builtins.so \
+  -DCMAKE_BUILD_RPATH=/path/to/nvrtc/lib
+```
+
+В одном каталоге должны находиться NVRTC и её builtins одной версии. Замените пример пути своим; эти параметры также можно сохранить в локальном, игнорируемом Git файле `CMakeUserPresets.json`. На Windows используйте совместимый с драйвером CUDA Toolkit и собирайте через Windows presets.
+
 ## 3. OCR и данные пользователя
 
 В Windows необязательное OCR-окружение устанавливается отдельно:

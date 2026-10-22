@@ -1,5 +1,6 @@
 ﻿#include "ucuda/cuda/nvrtc_engine.h"
 #include "ucuda/cuda/parametric_engine.h"
+#include "ucuda/cuda/circuit_nvrtc.h"
 #include "ucuda/platform/platform_paths.h"
 #include <cuda.h>
 #include <cmath>
@@ -44,5 +45,9 @@ int main() {
     auto split_result = split.run_bifurcation_1d(request);
     set_nvrtc_rdc(false);
     if (!split_result.ok) { std::cerr << "rdc: " << split_result.error << '\n'; return 1; }
+    // Circuit kernels must also resolve resources beside the executable on both OSes.
+    bool circuit_ok = false;
+    const std::string circuit_report = circuit_nvrtc_selftest(&circuit_ok);
+    if (!circuit_ok) { std::cerr << circuit_report; return 1; }
     std::cout << "CUDA execution and NVRTC resource loading passed\n";
 }

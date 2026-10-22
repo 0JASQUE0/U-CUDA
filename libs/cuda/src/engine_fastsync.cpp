@@ -110,14 +110,6 @@
 
             size_t traj_bytes = (size_t)traj_len_pts * (size_t)amountOfIC_int * sizeof(numb);
             size_t out_bytes  = (size_t)nPts * sizeof(numb);
-            FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
-            FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
-            FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_Xs");
-            FS_CHECK(cudaMalloc((void**)&d_X0,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_X0");
-            FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(numb)), "cudaMalloc d_values");
-            FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kF");
-            FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kB");
-            if (!sig.alloc(err)) goto FS0_FAIL;
             // Бар делится между двумя фазами по их доле работы. Заполнение
             // окна идёт в один поток и стоит skip + pts шагов; проходы вперёд-назад
             // идут параллельно по точкам, так что по времени это 2 * iterOfSynchr * pts.
@@ -128,6 +120,15 @@
             const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
             const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
             const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
+
+            FS_CHECK(cudaMalloc((void**)&d_timeDomain, traj_bytes), "cudaMalloc d_timeDomain");
+            FS_CHECK(cudaMalloc((void**)&d_output,     out_bytes),  "cudaMalloc d_output");
+            FS_CHECK(cudaMalloc((void**)&d_Xs,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_Xs");
+            FS_CHECK(cudaMalloc((void**)&d_X0,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_X0");
+            FS_CHECK(cudaMalloc((void**)&d_values,     amountOfValues_int * sizeof(numb)), "cudaMalloc d_values");
+            FS_CHECK(cudaMalloc((void**)&d_kF,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kF");
+            FS_CHECK(cudaMalloc((void**)&d_kB,         amountOfIC_int * sizeof(numb)), "cudaMalloc d_kB");
+            if (!sig.alloc(err)) goto FS0_FAIL;
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -339,6 +340,11 @@
 
             #define FS_GCHECK(x, m) do { cudaError_t _e = (x); if (_e != cudaSuccess) { err = std::string(m) + ": " + cudaGetErrorString(_e); goto FS1_FAIL; } } while(0)
 
+            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
+            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
+            const double ticksTotal     = (double)total_cells * ticksPerCell;
+            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
+
             FS_GCHECK(cudaMalloc((void**)&d_data,    (size_t)nPtsLimiter * perCellBytes), "cudaMalloc d_data");
             FS_GCHECK(cudaMalloc((void**)&d_ranges,  4 * sizeof(numb)),                  "cudaMalloc d_ranges");
             FS_GCHECK(cudaMalloc((void**)&d_idx_mv,  2 * sizeof(int)),                     "cudaMalloc d_idx_mv");
@@ -353,9 +359,6 @@
             // шагов на ячейку; проходы вперёд-назад после него не тикают, поэтому
             // бар доходит до ста на хвосте чанка и ждёт там.
             if (!sig.alloc(err)) goto FS1_FAIL;
-            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
-            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
-            const double ticksTotal     = (double)total_cells * ticksPerCell;
 
             {
                 numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
@@ -378,7 +381,6 @@
             // fillFSTransientIC с ОДНИМ TT на обоих и только для нефиксируемой IC: свипуемая сторона
             // стартовала сырой, а прогон в один поток на длинных TT ловил TDR.
 
-            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             for (size_t i = 0; i < amountOfIteration; ++i) {
                 size_t cur_limiter = nPtsLimiter;
                 if (i == amountOfIteration - 1) cur_limiter = total_cells - originalNPtsLimiter * i;

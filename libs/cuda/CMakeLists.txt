@@ -24,7 +24,7 @@ ucuda_library(cuda
     src/phase_portrait_nvrtc.cpp
     src/runtime_settings.cpp
 )
-target_link_libraries(ucuda_cuda PUBLIC ucuda::domain PRIVATE ucuda::numerics ucuda::platform ucuda_export_format CUDA::cudart CUDA::cuda_driver CUDA::nvrtc Threads::Threads)
+target_link_libraries(ucuda_cuda PUBLIC ucuda::domain ucuda::numerics PRIVATE ucuda::platform ucuda_export_format CUDA::cudart CUDA::cuda_driver CUDA::nvrtc Threads::Threads)
 target_include_directories(ucuda_cuda PRIVATE "${PROJECT_SOURCE_DIR}/libs/cuda/include/ucuda/cuda")
 set_target_properties(ucuda_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 if(MSVC)

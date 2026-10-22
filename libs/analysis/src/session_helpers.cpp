@@ -205,7 +205,7 @@ FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vec
 
 
 // Парсит значение (число или дробь a/b) в double; пусто -> fallback.
-inline double parse_val(const std::string& s, double fallback) {
+double parse_val(const std::string& s, double fallback) {
     return parse_num(s, fallback);   // тело — в num_parse.h, одно на проект
 }
 
@@ -510,7 +510,7 @@ std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
 // Парсит double, понимая дробь "a/b" — поведение симметрично с parse_val
 // (см. строки 10–18 этого же файла, которой пользуется Phase). Иначе
 // Parametric получал бы "8/3" как 8, а Phase как 2.667.
-inline double parse_d(const std::string& s, double def) {
+double parse_d(const std::string& s, double def) {
     return parse_num(s, def);   // историческое имя, см. num_parse.h
 }
 

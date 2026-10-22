@@ -1,5 +1,7 @@
 ﻿#include "engine_impl.h"
 #include "engine_helpers.h"
+#include <cstdlib>
+#include <cstring>
 
 namespace ucuda::cuda_detail {
 
@@ -37,11 +39,10 @@ int launch_block_size(size_t sharedPerThread) {
 //   UCUDA_NVRTC_MAXRREG=<n> — потолок регистров на поток, для опытов с занятостью.
 // storage держит строку ключа, на которую указывает opts, до вызова компилятора.
 void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string& storage) {
-    char v[16];
-    DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_LINEINFO", v, sizeof v);
-    if (n > 0 && n < sizeof v && v[0] == '1') opts.push_back("--generate-line-info");
-    n = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", v, sizeof v);
-    if (n > 0 && n < sizeof v) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
+    const char* v = std::getenv("UCUDA_NVRTC_LINEINFO");
+    if (v && v[0] == '1' && std::strlen(v) < 16) opts.push_back("--generate-line-info");
+    v = std::getenv("UCUDA_NVRTC_MAXRREG");
+    if (v && *v && std::strlen(v) < 16) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
 }
 
 
@@ -548,15 +549,10 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
 
         char arch[64];
         std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
+        const std::string cuda_include = platform::cuda_include_dir();
+        const std::string cuda_include_opt = cuda_include.empty() ? std::string() : "-I" + cuda_include;
         if (cuda_include_opt.empty()) {
-            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+            err = "CUDA Toolkit headers not found - NVRTC will not find math_constants.h "
                   "(install the CUDA Toolkit or set CUDA_PATH=...)";
             nvrtcDestroyProgram(&prog);
             return false;
@@ -688,11 +684,10 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         CUjit_option jopt[2];
         void*        jval[2];
         unsigned     nj = 0;
-        char li[16];
-        DWORD lin = GetEnvironmentVariableA("UCUDA_NVRTC_LINEINFO", li, sizeof li);
-        if (lin > 0 && lin < sizeof li && li[0] == '1') { jopt[nj] = CU_JIT_GENERATE_LINE_INFO; jval[nj++] = (void*)(size_t)1; }
-        lin = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", li, sizeof li);
-        if (lin > 0 && lin < sizeof li) { jopt[nj] = CU_JIT_MAX_REGISTERS; jval[nj++] = (void*)(size_t)std::atoi(li); }
+        const char* li = std::getenv("UCUDA_NVRTC_LINEINFO");
+        if (li && li[0] == '1' && std::strlen(li) < 16) { jopt[nj] = CU_JIT_GENERATE_LINE_INFO; jval[nj++] = (void*)(size_t)1; }
+        li = std::getenv("UCUDA_NVRTC_MAXRREG");
+        if (li && *li && std::strlen(li) < 16) { jopt[nj] = CU_JIT_MAX_REGISTERS; jval[nj++] = (void*)(size_t)std::atoi(li); }
         CUresult r = cuLinkCreate(nj, nj ? jopt : nullptr, nj ? jval : nullptr, &st);
         if (r != CUDA_SUCCESS) { err = "cuLinkCreate: " + cu_err(r); return false; }
         auto fail = [&](const std::string& what, CUresult rr) {
@@ -831,15 +826,10 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h,
         // curand_kernel.h и т.п.). Берём CUDA_PATH из окружения — его проставляет
         // CUDA Toolkit installer.
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
+        const std::string cuda_include = platform::cuda_include_dir();
+        const std::string cuda_include_opt = cuda_include.empty() ? std::string() : "-I" + cuda_include;
         if (cuda_include_opt.empty()) {
-            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+            err = "CUDA Toolkit headers not found - NVRTC will not find math_constants.h "
                   "(install the CUDA Toolkit or set CUDA_PATH=...)";
             nvrtcDestroyProgram(&prog);
             return false;
@@ -885,9 +875,8 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         void*        mval[1] = { nullptr };
         unsigned     nm = 0;
         {
-            char v[16];
-            const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_MAXRREG", v, sizeof v);
-            if (n > 0 && n < sizeof v) { mval[0] = (void*)(size_t)std::atoi(v); nm = 1; }
+            const char* v = std::getenv("UCUDA_NVRTC_MAXRREG");
+            if (v && *v && std::strlen(v) < 16) { mval[0] = (void*)(size_t)std::atoi(v); nm = 1; }
         }
         CUresult r = cuModuleLoadDataEx(&mod, ptx.c_str(), nm, nm ? mopt : nullptr, nm ? mval : nullptr);
         if (r != CUDA_SUCCESS) {

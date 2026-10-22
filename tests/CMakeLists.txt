@@ -6,6 +6,8 @@ add_test(NAME adaptive_cpu COMMAND adaptive_test)
 add_test(NAME adaptive_gpu COMMAND adaptive_test --gpu)
 set_tests_properties(adaptive_gpu PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(adaptive_cpu adaptive_gpu PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
+# The full GPU suite also compiles each generated scheme with NVRTC.
+set_tests_properties(adaptive_gpu PROPERTIES TIMEOUT 600)
 
 add_executable(architecture_test architecture_test.cpp)
 target_link_libraries(architecture_test PRIVATE ucuda::application ucuda::storage)

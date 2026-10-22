@@ -385,7 +385,7 @@ void refresh_auto_labels(AppModel& model) {
 // теперь одна реализация на весь проект (см. комментарий там же о том, из-за
 // чего пять разных версий расходились). Имя сохранено: оно стоит примерно в
 // сорока местах и читается по месту лучше, чем голое parse_num.
-[[nodiscard]] inline double parse_ratio_or(const std::string& v, double def) {
+[[nodiscard]] double parse_ratio_or(const std::string& v, double def) {
     // Round-trip через numb: интерфейс обязан показывать и отдавать в расчёт
     // РОВНО то число, которое увидит ядро. Сегодня numb == double и это no-op,
     // но если numb станет float — подпись оси, кламп fix-значения и привязка
@@ -398,7 +398,7 @@ void refresh_auto_labels(AppModel& model) {
 // Тело переехало в num_parse.h к parse_num_int — там же объяснено, почему
 // вторая копия этого разбора (на std::stoi, в analysis_session.cpp) молча
 // врала на "512/2". Имя сохранено: оно стоит по месту в gui.cpp.
-[[nodiscard]] inline int parse_int_or(const std::string& v, int def) {
+[[nodiscard]] int parse_int_or(const std::string& v, int def) {
     return parse_num_int(v, def);
 }
 
@@ -406,7 +406,7 @@ void refresh_auto_labels(AppModel& model) {
 // Распарсилось ли поле вообще. parse_num молча отдаёт default, и вызывающий не
 // отличает «поле пустое» от «в поле ноль»; пробуем два разных дефолта —
 // совпали, значит число прочиталось.
-[[nodiscard]] inline bool parse_num_ok(const std::string& v, double& out) {
+[[nodiscard]] bool parse_num_ok(const std::string& v, double& out) {
     const double a = parse_ratio_or(v, 0.0);
     const double b = parse_ratio_or(v, 1.0);
     if (a != b) return false;

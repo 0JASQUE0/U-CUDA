@@ -1384,7 +1384,12 @@ inline bool stability_cell_preferred(const StabilityResult& res, size_t i, doubl
     if (i < res.status.size() && res.status[i] != STAB_ST_OK) return false;
     return res.rho[i] <= 1.0 && res.err[i] <= tol;   // NaN даёт false в обоих
 }
-int stability_count_preferred(const StabilityResult& res, double tol);
+inline int stability_count_preferred(const StabilityResult& res, double tol) {
+    int n = 0;
+    for (size_t i = 0; i < res.rho.size(); ++i)
+        if (stability_cell_preferred(res, i, tol)) ++n;
+    return n;
+}
 
 // ---------------------------------------------------------------------------
 // Network — сеть связанных осцилляторов (см. kernels/network.template.cu).

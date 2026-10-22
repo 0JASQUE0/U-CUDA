@@ -1,8 +1,6 @@
 ﻿#include "ucuda/cuda/circuit_nvrtc.h"
 
-#define NOMINMAX          // иначе макросы min/max из windows.h ломают std::min/std::max
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "ucuda/platform/platform_paths.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,15 +12,6 @@
 #include <nvrtc.h>
 
 namespace {
-
-std::string exe_dir() {
-    char buf[MAX_PATH];
-    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0) return ".";
-    std::string p(buf, n);
-    const size_t pos = p.find_last_of("\\/");
-    return pos == std::string::npos ? std::string(".") : p.substr(0, pos);
-}
 
 // Тот же приём, что в parametric_engine: NVRTC спотыкается и о BOM, и о не-ASCII
 // внутри комментариев, потому что разбирает файл как device-код.
@@ -73,7 +62,7 @@ bool CircuitGpuRunner::build(const CircuitGraph& g, const CircuitSolverConfig& s
     if (!scfg.opamp.ideal && !comp_.empty()) comp_.back() = scfg.opamp.vsat;
 
     std::string terr;
-    std::string src = read_template(exe_dir() + "/kernels/circuit.template.cu", terr);
+    std::string src = read_template(platform::executable_dir() + "/kernels/circuit.template.cu", terr);
     if (src.empty()) return fail("circuit nvrtc: " + terr);
     const std::string ph = "{{CIRCUIT_BODY}}";
     const size_t at = src.find(ph);
