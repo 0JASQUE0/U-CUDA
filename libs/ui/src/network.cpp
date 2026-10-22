@@ -475,8 +475,7 @@ void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     draw_label_rename("Label##net", c.label);
 
-    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {},
-                      s.enabled_builtin_schemes.empty() ? nullptr : &s.enabled_builtin_schemes,
+    draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                       nullptr, s.sys.is_map, &s.wrapper_schemes);
 
     IntegrationFields f;

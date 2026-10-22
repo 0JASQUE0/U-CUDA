@@ -58,6 +58,15 @@ IntScheme int_scheme_from_string(const std::string& s) {
     return IntScheme::Euler;
 }
 
+bool int_scheme_complex_state(IntScheme s) {
+    return s == IntScheme::ComplexCD || s == IntScheme::ComplexCD4
+        || s == IntScheme::ComplexCD4S3 || s == IntScheme::ComplexCD4S4
+        || s == IntScheme::ComplexCD4SS01 || s == IntScheme::ComplexCD4SS10
+        || s == IntScheme::ComplexCD10 || s == IntScheme::ComplexCD4_10
+        || s == IntScheme::ComplexCD4S3_10 || s == IntScheme::ComplexCD4S4_10
+        || s == IntScheme::ComplexIEuler;
+}
+
 // DOPRI78: та же таблица, что у codegen::scheme_dopri78 (kDopri78A/B в
 // codegen.cpp); CPU-интегратор считает в double и берёт ближайший double c[0].
 namespace {
@@ -710,12 +719,7 @@ bool computePhasePortraitCPU(
     // Комплексные буферы нужны только Complex CD — для остальных схем это два
     // пустых вектора, без аллокаций.
     std::vector<ucmplx> Zc, Kc;
-    const bool cx_state = (scheme == IntScheme::ComplexCD || scheme == IntScheme::ComplexCD4
-                           || scheme == IntScheme::ComplexCD4S3 || scheme == IntScheme::ComplexCD4S4
-                           || scheme == IntScheme::ComplexCD4SS01 || scheme == IntScheme::ComplexCD4SS10
-                           || scheme == IntScheme::ComplexCD10 || scheme == IntScheme::ComplexCD4_10
-                           || scheme == IntScheme::ComplexCD4S3_10 || scheme == IntScheme::ComplexCD4S4_10
-                           || scheme == IntScheme::ComplexIEuler);
+    const bool cx_state = int_scheme_complex_state(scheme);
     if (cx_state) { Zc.resize(n); Kc.resize(n); }
     // Newton workspace, allocated only for the implicit schemes.
     std::vector<double> Xn, Fv, Am;

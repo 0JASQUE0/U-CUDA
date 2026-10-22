@@ -149,7 +149,7 @@ bool Dft1DAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     Dft1DResult r = engine.run_dft_1d(req);
@@ -171,7 +171,7 @@ bool Dft1DAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     Dft1DRequest req = build_dft1d_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset();
         progress_token.reset();
         return false;

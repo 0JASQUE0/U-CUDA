@@ -471,6 +471,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         double vmin, vmax;
         int    data_gen;
         int    owner_id;
+        const std::vector<int>* flags;   // режим ячейки для подсказки (regime_cell_label)
     };
     L2Slot slots[3] = {};
     if (cs.shared.level_2d_enabled) {
@@ -481,7 +482,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                          d.result_2d.param_lo, d.result_2d.param_hi,
                          d.result_2d.param_lo_2, d.result_2d.param_hi_2,
                          d.result_2d.min_val, d.result_2d.max_val,
-                         d.data_generation_2d, 0xCB1F2D ^ sys_owner_delta };
+                         d.data_generation_2d, 0xCB1F2D ^ sys_owner_delta, &d.result_2d.flags };
         }
         if (cs.shared.lle2d_enabled && !cs.lle_session.curves.empty()) {
             auto& c = cs.lle_session.curves[0];
@@ -490,7 +491,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
                          c.result_2d.min_val, c.result_2d.max_val,
-                         c.data_generation_2d, 0xCE1E2D ^ sys_owner_delta };
+                         c.data_generation_2d, 0xCE1E2D ^ sys_owner_delta, &c.result_2d.flags };
         }
         if (cs.shared.ls2d_enabled && !cs.ls_session.curves.empty()) {
             auto& c = cs.ls_session.curves[0];
@@ -506,7 +507,8 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                          c.result_2d.n_pts, values_default,
                          c.result_2d.param_lo, c.result_2d.param_hi,
                          c.result_2d.param_lo_2, c.result_2d.param_hi_2,
-                         vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta };
+                         vmin, vmax, c.data_generation_2d, 0xC152D0 ^ sys_owner_delta,
+                         &c.result_2d.flags };
         }
     }
     // One-time init of per-slot HeatmapView colormap from the sub-session config (or app default).
@@ -663,6 +665,12 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                 double        vmin_use   = (i == 2 && ls_plane) ? ls_vmin  : slots[i].vmin;
                 double        vmax_use   = (i == 2 && ls_plane) ? ls_vmax  : slots[i].vmax;
                 int           gen_use    = (i == 2 && ls_plane) ? ls_gen   : slots[i].data_gen;
+                if (slots[i].flags)
+                    hv.cell_regime = regime_cell_label(*slots[i].flags, slots[i].n_pts);
+                if (i == 0) {   // Bif 2D: значение — период, -1 / 0 — коды режима (как в Parametric)
+                    hv.value_name = "period";
+                    hv.value_is_regime_code = true;
+                }
 
                 ImVec2 avail  = ImGui::GetContentRegionAvail();
                 ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -1159,6 +1167,9 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                               ? cs.vars[bc.axis_x_var] : "x";
                         bsn_hv.y_axis.name = (bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size())
                                               ? cs.vars[bc.axis_y_var] : "y";
+                        bsn_hv.cell_regime = regime_cell_label(r.helpful_array, r.n_pts);
+                        bsn_hv.value_name = "basin";
+                        bsn_hv.value_is_regime_code = true;
                         ImVec2 avail  = ImGui::GetContentRegionAvail();
                         ImVec2 origin = ImGui::GetCursorScreenPos();
                         bsn_hv.render(bsn_renderer, origin, avail,

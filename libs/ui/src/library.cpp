@@ -503,9 +503,9 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
         // GPU KRS body (what NVRTC compiles).
         ImGui::SeparatorText("KRS (GPU, NVRTC)");
-        std::string body_gpu = s.krs_code.empty()
-            ? std::string("(empty — press Regenerate or change Method)")
-            : s.krs_code;
+        std::string body_gpu = !s.krs_code.empty() ? s.krs_code
+            : !s.krs_error.empty() ? "(empty: " + s.krs_error + ")"
+            : std::string("(empty — press Regenerate or change Method)");
         std::vector<char> buf_gpu(body_gpu.begin(), body_gpu.end());
         buf_gpu.resize(body_gpu.size() + 1);
         buf_gpu[body_gpu.size()] = '\0';

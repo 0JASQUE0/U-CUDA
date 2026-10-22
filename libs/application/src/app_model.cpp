@@ -1164,6 +1164,7 @@ void AppModel::propagate_to_sessions() {
     // Phase кеширует krs_code. Принудительно инвалидируем — snapshot_phase
     // на ближайшем Run пересчитает его от свежего sys / custom_schemes.
     phase_session.krs_code.clear();
+    phase_session.krs_error.clear();
 }
 
 // Peak-knobs: число -> текст буфера ввода

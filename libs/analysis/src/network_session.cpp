@@ -419,7 +419,7 @@ bool NetworkSession::run_async(ParametricEngine& engine, int config_idx) {
         return false;
     }
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     if (req.n_nodes <= 0) {

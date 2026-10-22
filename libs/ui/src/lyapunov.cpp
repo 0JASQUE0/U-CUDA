@@ -91,6 +91,7 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                 draw_view_range_menu(vrt, heatmap.x_axis, heatmap.y_axis, heatmap.swap_axes, &model);
             };
 
+            heatmap.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail,
@@ -461,6 +462,7 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                 draw_view_range_menu(vrt, heatmap_ls.x_axis, heatmap_ls.y_axis, heatmap_ls.swap_axes, &model);
             };
 
+            heatmap_ls.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap_ls.render(renderer, origin, avail,
@@ -902,6 +904,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             // Поколение данных несёт и номер метрики: смена таба — это другие
             // значения в той же ячейке, и текстура обязана перестроиться.
             const int gen = cact.data_generation_2d * SIGM_COUNT + m;
+            heatmap.cell_regime = regime_cell_label(r.flags, r.n_pts);
             ImVec2 avail_sz = ImGui::GetContentRegionAvail();
             ImVec2 origin   = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail_sz,

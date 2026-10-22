@@ -228,7 +228,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
     else if (in.use_gpu) {
         if (in.krs_code.empty()) {
-            result.error = "no KRS generated (check system)";
+            result.error = in.krs_error.empty() ? "no KRS generated (check system)" : in.krs_error;
             return result;
         }
         calc_ok = computePhasePortraitsNVRTC(in.krs_code, dim,
@@ -244,6 +244,12 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага
         // (см. krs_cpu.h) и гоняется тем же циклом, что и встроенные схемы.
+        // Пустое тело (Extr над базой, на которой отказал кодген) собралось бы в шаг,
+        // который ничего не делает, — застывшая траектория вместо причины.
+        if (in.krs_code.empty()) {
+            result.error = in.krs_error.empty() ? "no KRS generated (check system)" : in.krs_error;
+            return result;
+        }
         KrsCpuStep step;
         std::vector<KrsCpuDiag> diags;
         if (!step.compile(in.krs_code, dim, (int)a.size(), diags)) {
@@ -273,11 +279,26 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             result.error = std::string("parse error: ") + e.what();
             return result;
         }
+        // A map ignores the scheme field - see compute_krs_for_scheme.
+        const IntScheme isch = in.sys.is_map ? IntScheme::Map
+                                             : int_scheme_from_string(in.scheme);
+        // Те же отказы, что у GPU-пути на кодгене (cd_check_complex_safe, jac_over), —
+        // сюда кодген не доходит. Без них комплексная схема молча считала бы atan2/fmod
+        // нулём, а неявная без якобиана выдавала бы "diverged (nan/inf)" вместо причины.
+        // Именно отказ, а не исключение: у future этого расчёта нет catch.
+        if (int_scheme_complex_state(isch) && !evaluator->complex_unsafe_function().empty()) {
+            result.error = in.scheme + ": function " + evaluator->complex_unsafe_function()
+                         + " is not defined in complex arithmetic - pick another scheme";
+            return result;
+        }
+        if ((isch == IntScheme::ImplicitEuler || isch == IntScheme::ImplicitMidpoint
+             || isch == IntScheme::ComplexIEuler) && !evaluator->has_jacobian()) {
+            result.error = in.scheme + ": the right-hand side is not differentiable (floor/ceil/fmod), "
+                           "no Jacobian can be built - pick an explicit scheme";
+            return result;
+        }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
-            // A map ignores the scheme field - see compute_krs_for_scheme.
-            const IntScheme isch = in.sys.is_map ? IntScheme::Map
-                                                 : int_scheme_from_string(in.scheme);
             bool ok = computePhasePortraitCPU(*evaluator, isch,
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
@@ -488,6 +509,7 @@ PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.use_gpu      = s.use_gpu;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
+    in.krs_error    = s.krs_error;
     in.krs_is_custom = false;
     // For a map krs_code is always codegen output; custom KRS do not apply.
     if (!s.sys.is_map) {
@@ -725,7 +747,7 @@ void PhaseAnalysisSession::regenerate_krs() {
     // пришлось бы в оба места: панель KRS рисует именно krs_code, а Run идёт
     // через compute_krs_for_scheme. Разъехавшись, они показывали бы одно, а
     // считали другое — поэтому теперь резолвер ровно один.
-    krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme);
+    krs_code = compute_krs_for_scheme(custom_schemes, sys, scheme, &krs_error);
     prewarm_gpu();
 }
 

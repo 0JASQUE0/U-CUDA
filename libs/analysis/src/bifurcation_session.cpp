@@ -202,7 +202,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             return false;
         }
         Bifurcation2DResult r = engine.run_bifurcation_2d(req);
@@ -212,7 +212,7 @@ bool BifurcationAnalysisSession::run(ParametricEngine& engine, int diagram_idx) 
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             return false;
         }
         Bifurcation1DResult r = engine.run_bifurcation_1d(req);
@@ -239,7 +239,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     if (bd.mode_2d) {
         Bifurcation2DRequest req = build_bif2d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -256,7 +256,7 @@ bool BifurcationAnalysisSession::run_async(ParametricEngine& engine, int diagram
     } else {
         Bifurcation1DRequest req = build_bif1d_request(*this, bd);
         if (req.krs_body.empty()) {
-            bd.last_error = "krs_code is empty (no valid system or scheme)";
+            bd.last_error = krs_empty_error(custom_schemes, sys, bd.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;

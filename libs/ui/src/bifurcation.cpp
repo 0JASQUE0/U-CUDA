@@ -369,6 +369,10 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                 draw_view_range_menu(vrt, hb.x_axis, hb.y_axis, hb.swap_axes, &model);
             };
 
+            // Значение ячейки — сырой выход DBSCAN: число кластеров пиков, -1 / 0 — коды режима.
+            hb.cell_regime = regime_cell_label(bdact.result_2d.flags, bdact.result_2d.n_pts);
+            hb.value_name = "period";
+            hb.value_is_regime_code = true;
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hb.render(renderer, origin, avail,
@@ -540,6 +544,7 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
             double x0 = rev ? hi : lo;
             double x1 = rev ? lo : hi;
 
+            hc.cell_regime = regime_cell_label(bdact.result.flags, 0);   // флаг на колонку
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hc.render(renderer, origin, avail,

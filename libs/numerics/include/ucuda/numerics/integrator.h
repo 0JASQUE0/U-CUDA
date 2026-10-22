@@ -19,6 +19,11 @@ enum class IntScheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, C
 
 IntScheme int_scheme_from_string(const std::string& s);
 
+// Схема держит состояние в ucmplx и гоняет правые части через eval_complex
+// (Complex CD-семейство, Complex Implicit Euler). Такой схеме нельзя давать
+// систему с SystemEvaluator::complex_unsafe_function() — см. compute_phase_portrait.
+bool int_scheme_complex_state(IntScheme s);
+
 // Шаг, скомпилированный из пользовательской КРС (см. krs_cpu.h). Сигнатура
 // совпадает с calculateDiscreteModel на GPU — включая тип numb: тело мутирует
 // X[] в той же точности, в какой считал бы kernel.

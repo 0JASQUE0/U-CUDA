@@ -401,9 +401,20 @@ Scheme scheme_from_string(const std::string& s) {
 // КРС их объявил автор, у встроенной берём из паспорта. Неизвестная база — отказ, а не
 // тихий откат на Эйлер. Одна функция на все обёртки — иначе они разъехались бы по тому,
 // что считают допустимой базой.
+// Кодген отказывает исключением с читаемой причиной (cd_check_complex_safe,
+// jac_check_differentiable, ...). Наверх уходит пустая КРС, а причина — в *err:
+// без неё пользователь видел только "КРС пуста" и гадал, что не так с системой.
+template <class F>
+static std::string krs_try(std::string* err, F&& f) {
+    try { return f(); }
+    catch (const std::exception& e) { if (err) *err = e.what(); }
+    catch (...) { if (err) *err = "code generation failed"; }
+    return {};
+}
+
 bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const System& sys,
                                  const std::string& base_name, std::string (*gen)(const System&, Scheme),
-                                 std::string& body, int& p, bool& sym) {
+                                 std::string& body, int& p, bool& sym, std::string* err) {
     p = 1; sym = false;
     for (const auto& cs : custom_schemes) {
         if (cs.name == base_name) {
@@ -412,8 +423,7 @@ bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const
         }
     }
     if (!builtin_scheme_traits(base_name, &p, &sym)) return false;
-    try { body = gen(sys, scheme_from_string(base_name)); }
-    catch (...) { return false; }
+    body = krs_try(err, [&] { return gen(sys, scheme_from_string(base_name)); });
     return !body.empty();
 }
 
@@ -423,15 +433,22 @@ bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const
 std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
                                        const System& sys,
                                        const std::string& scheme,
-                                       std::string (*gen)(const System&, Scheme)) {
+                                       std::string (*gen)(const System&, Scheme),
+                                       std::string* err) {
+    if (err) err->clear();
+    auto refuse = [err](std::string why) -> std::string {
+        if (err) *err = std::move(why);
+        return {};
+    };
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
         if (sys.rhs.empty()) return {};
-        try { return gen(sys, Scheme::Map); } catch (...) { return {}; }
+        return krs_try(err, [&] { return gen(sys, Scheme::Map); });
     }
     for (const auto& cs : custom_schemes) {
-        if (cs.name == scheme) return cs.body;
+        if (cs.name == scheme)
+            return cs.body.empty() ? refuse("custom KRS '" + scheme + "' has an empty body") : cs.body;
     }
     if (sys.rhs.empty()) return {};
 
@@ -439,10 +456,14 @@ std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
     // встроенной берём из паспорта. Неизвестная база — отказ, а не тихий
     // откат на Эйлер: пустая КРС наверху превращается в честную ошибку.
     // Общее для ОБЕИХ обёрток — иначе Extr и Comp разъехались бы по тому,
-    // что считают допустимой базой.
-    auto resolve_base = [&](const std::string& base_name, std::string& body,
+    // что считают допустимой базой. Отказ кодгена на базе (Extr(Complex CD|...)
+    // при atan2) несёт свою причину; иначе база просто не найдена.
+    auto resolve_base = [&](const char* kind, const std::string& base_name, std::string& body,
                             int& p, bool& sym) -> bool {
-        return resolve_wrapper_base(custom_schemes, sys, base_name, gen, body, p, sym);
+        if (resolve_wrapper_base(custom_schemes, sys, base_name, gen, body, p, sym, err)) return true;
+        if (err && err->empty())
+            *err = std::string(kind) + " base '" + base_name + "' is unknown or has no step body";
+        return false;
     };
 
     ExtrapolationSpec spec;
@@ -451,42 +472,35 @@ std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
         // комплексных CD-схем. Кастомная КРС с тем же именем перекрыла бы
         // встроенную (см. выше) — её ядро не выделить, поэтому отказ.
         for (const auto& cs : custom_schemes)
-            if (cs.name == spec.base) return {};
+            if (cs.name == spec.base)
+                return refuse("ExtrZ needs a built-in complex base, '" + spec.base + "' is a custom KRS");
         int p = 1; bool sym = false;
         if (!scheme_has_complex_core(spec.base) || !builtin_scheme_traits(spec.base, &p, &sym))
-            return {};
-        try {
+            return refuse("ExtrZ base '" + spec.base + "' has no complex core");
+        return krs_try(err, [&] {
             const std::string core = codegen_scheme_complex_core(sys, scheme_from_string(spec.base));
             return wrap_extrapolation_complex(core, (int)sys.vars.size(), spec.n, p, spec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
     if (parse_extrapolation_name(scheme, &spec)) {
         int  p = 1; bool sym = false; std::string base_body;
-        if (!resolve_base(spec.base, base_body, p, sym)) return {};
-        try {
+        if (!resolve_base("extrapolation", spec.base, base_body, p, sym)) return {};
+        return krs_try(err, [&] {
             return wrap_extrapolation(base_body, (int)sys.vars.size(),
                                       spec.n, p, sym, spec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
 
     CompositionSpec cspec;
     if (parse_composition_name(scheme, &cspec)) {
         int  p = 1; bool sym = false; std::string base_body;
-        if (!resolve_base(cspec.base, base_body, p, sym)) return {};
-        try {
+        if (!resolve_base("composition", cspec.base, base_body, p, sym)) return {};
+        return krs_try(err, [&] {
             return wrap_composition(base_body, sys, cspec.gammas, p, sym, cspec.base);
-        }
-        catch (...) { return {}; }
+        });
     }
 
-    try {
-        return gen(sys, scheme_from_string(scheme));
-    }
-    catch (...) {
-        return {};
-    }
+    return krs_try(err, [&] { return gen(sys, scheme_from_string(scheme)); });
 }
 
 
@@ -804,10 +818,18 @@ bool make_rqa_job(const Projection& pr, RqaJob& out)
 
 std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                           const System& sys,
-                                          const std::string& scheme) {
-    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme);
+                                          const std::string& scheme,
+                                          std::string* err) {
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme, err);
 }
 
+
+std::string krs_empty_error(const std::vector<CustomScheme>& custom_schemes,
+                            const System& sys, const std::string& scheme) {
+    std::string err;
+    compute_krs_for_scheme(custom_schemes, sys, scheme, &err);
+    return err.empty() ? "krs_code is empty (no valid system or scheme)" : err;
+}
 
 // CPU-форма того же шага — только для отладочной панели, нигде не
 // компилируется (CPU-интегратор гоняет байткод AST, а не этот текст).
@@ -816,7 +838,7 @@ std::string compute_krs_for_scheme(const std::vector<CustomScheme>& custom_schem
 std::string compute_krs_cpu_for_scheme(const std::vector<CustomScheme>& custom_schemes,
                                        const System& sys,
                                        const std::string& scheme) {
-    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme_cpu_equivalent);
+    return krs_for_scheme_impl(custom_schemes, sys, scheme, &codegen_scheme_cpu_equivalent, nullptr);
 }
 
 
@@ -850,9 +872,10 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
                 sys, codegen_scheme_complex_core(sys, scheme_from_string(spec.base)), spec.n, p, spec.base,
                 scheme_rhs_per_step(sys, spec.base));
         }
-        std::string body; int p = 1; bool sym = false;
-        if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym))
-            throw std::runtime_error("extrapolation base '" + spec.base + "' is unknown or has no step body");
+        std::string body, why; int p = 1; bool sym = false;
+        if (!resolve_wrapper_base(custom_schemes, sys, spec.base, &codegen_scheme, body, p, sym, &why))
+            throw std::runtime_error(!why.empty() ? why
+                : "extrapolation base '" + spec.base + "' is unknown or has no step body");
         // f базы: кастомная КРС непрозрачна — 0 (счётчик видит только F1); встроенная — по
         // scheme_rhs_per_step, CD-семейство в том числе.
         bool base_custom = false;

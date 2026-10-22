@@ -42,12 +42,25 @@ void draw_adaptive_stats(const std::vector<double>& st) {
 }
 
 
+std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                              int row_stride,
+                                                              bool with_oscillation) {
+    return [&flags, row_stride, with_oscillation](int ix, int iy) -> const char* {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        if (k >= flags.size()) return nullptr;
+        if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
+        return regime_label(flags[k]);
+    };
+}
+
 void draw_regime_summary(const std::vector<int>& flags) {
     int fp = 0, unb = 0, osc = 0;
     count_regimes(flags, fp, unb, osc);
     if (fp == 0 && unb == 0) return;
-    ImGui::TextDisabled("regimes: %d fixed point / %d unbound / %d oscillation",
-                        fp, unb, osc);
+    ImGui::TextDisabled("regimes: %d %s / %d %s / %d %s",
+                        fp,  regime_label(REGIME_FIXED_POINT),
+                        unb, regime_label(REGIME_UNBOUND),
+                        osc, regime_label(REGIME_OSCILLATION));
 }
 
 

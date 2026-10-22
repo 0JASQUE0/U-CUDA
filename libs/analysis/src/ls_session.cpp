@@ -62,7 +62,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LS2DResult r = engine.run_ls_2d(req);
@@ -72,7 +72,7 @@ bool LyapunovSpectrumAnalysisSession::run(ParametricEngine& engine, int curve_id
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LS1DResult r = engine.run_ls_1d(req);
@@ -98,7 +98,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     if (c.mode_2d) {
         LS2DRequest req = build_ls2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -115,7 +115,7 @@ bool LyapunovSpectrumAnalysisSession::run_async(ParametricEngine& engine, int cu
     } else {
         LS1DRequest req = build_ls1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;

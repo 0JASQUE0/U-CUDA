@@ -121,6 +121,14 @@ static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string
     return scheme_rhs_per_step(s.sys, scheme);
 }
 
+// Причина пустой КРС для сообщения пользователю — по той же системе (допуск Ньютона
+// под точность), что и у build_order_request; Performance и Stability берут КРС оттуда же.
+static std::string order_krs_empty_error(const OrderAnalysisSession& s, const OrderConfig& c) {
+    return krs_empty_error(s.custom_schemes,
+                           order_newton_system(s.sys, c.use_gpu ? kOrderPrecDouble : c.cpu_precision),
+                           c.scheme);
+}
+
 PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig& c) {
     // Всё общее с Order берётся из того же построителя: расхождение настроек
     // между двумя расчётами одной вкладки было бы худшим из возможных багов —
@@ -1230,7 +1238,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     if (c.calc_kind == kOrderCalcStab) {
         StabilityRequest sreq = build_stability_request(*this, c);
         if (sreq.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = order_krs_empty_error(*this, c);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1252,7 +1260,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
     if (c.calc_kind == kOrderCalcPerf) {
         PerfRequest preq = build_perf_request(*this, c);
         if (preq.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = order_krs_empty_error(*this, c);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -1273,7 +1281,7 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
 
     OrderRequest req = build_order_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = order_krs_empty_error(*this, c);
         cancel_token.reset();
         progress_token.reset();
         return false;

@@ -170,7 +170,7 @@ bool FastSyncAnalysisSession::run(ParametricEngine& engine, int config_idx) {
     FastSyncConfig& c = configs[config_idx];
     c.last_error.clear();
     FastSyncRequest req = build_fastsync_request(*this, c);
-    if (req.krs_body.empty()) { c.last_error = "krs_code is empty"; return false; }
+    if (req.krs_body.empty()) { c.last_error = krs_empty_error(custom_schemes, sys, c.scheme); return false; }
     FastSyncResult r = engine.run_fastsync(req);
     bool ok = r.ok;
     apply_fastsync_result(c, std::move(r));
@@ -189,7 +189,7 @@ bool FastSyncAnalysisSession::run_async(ParametricEngine& engine, int config_idx
 
     FastSyncRequest req = build_fastsync_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset(); progress_token.reset();
         return false;
     }

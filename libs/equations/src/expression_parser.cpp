@@ -70,7 +70,15 @@ namespace ucuda::equations_detail {
         switch (n->kind) {
         case Node::Num:o << fmtnum(n->num); break;
         case Node::Sym:o << nm.resolve(n->name); break;
-        case Node::Neg:o << "-"; emit_child(n->a, nm, o, prec(Node::Neg)); break;
+        case Node::Neg:
+            o << "-";
+            // "- -x" и "-(-x)^2" дают Neg(Neg(..)); без скобок вышло бы "--X[0]" —
+            // в C это декремент состояния. То же для отрицательного литерала.
+            if (n->a->kind == Node::Neg || (n->a->kind == Node::Num && std::signbit(n->a->num))) {
+                o << "("; emit(n->a, nm, o); o << ")";
+            }
+            else emit_child(n->a, nm, o, prec(Node::Neg));
+            break;
         case Node::Add:emit_child(n->a, nm, o, 1); o << " + "; emit_child(n->b, nm, o, 1); break;
         case Node::Sub:emit_child(n->a, nm, o, 1); o << " - "; emit_child(n->b, nm, o, 2); break;
         case Node::Mul:emit_child(n->a, nm, o, 2); o << " * "; emit_child(n->b, nm, o, 2); break;
@@ -247,14 +255,20 @@ namespace ucuda::equations_detail {
     // deliberately provides no ucmplx overload for them. Catch them here, at
     // codegen time, so the user gets the reason instead of an NVRTC template
     // error from the middle of a generated kernel.
+    const std::string* cd_find_complex_unsafe(const PN& n) {
+        if (!n) return nullptr;
+        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2")) return &n->name;
+        if (const std::string* f = cd_find_complex_unsafe(n->a)) return f;
+        if (const std::string* f = cd_find_complex_unsafe(n->b)) return f;
+        for (const auto& c : n->args)
+            if (const std::string* f = cd_find_complex_unsafe(c)) return f;
+        return nullptr;
+    }
+
     void cd_check_complex_safe(const PN& n) {
-        if (!n) return;
-        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2"))
-            throw std::runtime_error("Complex CD: function " + n->name +
+        if (const std::string* f = cd_find_complex_unsafe(n))
+            throw std::runtime_error("Complex CD: function " + *f +
                 " is not defined in complex arithmetic - pick another scheme");
-        cd_check_complex_safe(n->a);
-        cd_check_complex_safe(n->b);
-        for (const auto& c : n->args) cd_check_complex_safe(c);
     }
 
 
@@ -680,6 +694,7 @@ namespace ucuda::equations_detail {
         if (nm == "exp")return F_EXP; if (nm == "log")return F_LOG; if (nm == "log2")return F_LOG2;
         if (nm == "log10")return F_LOG10; if (nm == "sqrt")return F_SQRT; if (nm == "cbrt")return F_CBRT;
         if (nm == "fabs" || nm == "abs")return F_FABS;
+        if (nm == "floor")return F_FLOOR; if (nm == "ceil")return F_CEIL;
         if (nm == "pow")return F_POW; if (nm == "atan2")return F_ATAN2; if (nm == "fmod")return F_FMOD;
         if (nm == "copysign")return F_COPYSIGN;
         throw std::runtime_error("eval: unknown function " + nm);
@@ -694,9 +709,9 @@ namespace ucuda::equations_detail {
         case F_EXP:return std::exp(x); case F_LOG:return std::log(x); case F_LOG2:return std::log2(x);
         case F_LOG10:return std::log10(x); case F_SQRT:return std::sqrt(x); case F_CBRT:return std::cbrt(x);
         case F_FABS:return std::fabs(x);
+        case F_FLOOR:return std::floor(x); case F_CEIL:return std::ceil(x);
         } return 0;
     }
-
     double apply_func2(int fid, double a, double b) {
         switch (fid) {
         case F_POW:return std::pow(a, b); case F_ATAN2:return std::atan2(a, b); case F_FMOD:return std::fmod(a, b);
@@ -704,12 +719,14 @@ namespace ucuda::equations_detail {
         } return 0;
     }
 
-
     // Комплексные версии — те же id, те же формулы, что и в device-коде: обе
     // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
     // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
-    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: система с
-    // ними отсекается в cd_check_complex_safe ещё на кодгене.
+    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: на GPU систему
+    // с ними отсекает cd_check_complex_safe на кодгене, а CPU-путь кодген не
+    // зовёт и спрашивает complex_unsafe_function() перед комплексной схемой.
+    // floor/ceil кусочно-постоянны, и их продолжение — константа floor(Re z)
+    // (см. configCUDA.h).
     ucmplx apply_func1(int fid, ucmplx x) {
         switch (fid) {
         case F_SIN:return sin(x); case F_COS:return cos(x); case F_TAN:return tan(x);
@@ -718,12 +735,16 @@ namespace ucuda::equations_detail {
         case F_EXP:return exp(x); case F_LOG:return log(x); case F_LOG2:return log2(x);
         case F_LOG10:return log10(x); case F_SQRT:return sqrt(x); case F_CBRT:return cbrt(x);
         case F_FABS:return fabs(x);
+        case F_FLOOR:return floor(x); case F_CEIL:return ceil(x);
         } return ucmplx(0, 0);
     }
-
+    // F_COPYSIGN приходит только из якобиана (производная fabs) и всегда с
+    // литералом 1 первым аргументом — поэтому a.re. atan2/fmod сюда не доходят:
+    // CPU-путь отказывает им заранее (SystemEvaluator::complex_unsafe_function).
     ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {
         switch (fid) {
         case F_POW:return pow(a, b);
+        case F_COPYSIGN:return copysign(a.re, b);
         } return ucmplx(0, 0);
     }
 

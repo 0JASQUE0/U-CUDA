@@ -161,7 +161,7 @@ bool SignalMetricsAnalysisSession::run_async(ParametricEngine& engine, int confi
 
     SignalMetricsRequest req = build_metrics_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     cancel_token   = std::make_shared<std::atomic<bool>>(false);

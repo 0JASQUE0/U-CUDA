@@ -102,33 +102,45 @@ namespace ucuda::equations_detail {
             return false;
         }
         PN term() {
-            PN n = powr();
+            PN n = unary();
             for (;;) {
                 if (latex) {
                     ws();
-                    if (i + 5 <= s.size() && s.compare(i, 5, "\\cdot") == 0) { i += 5; auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; continue; }
+                    if (i + 5 <= s.size() && s.compare(i, 5, "\\cdot") == 0) { i += 5; auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; continue; }
                 }
                 char c = peek();
-                if (c == '*') { eat('*'); auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; }
-                else if (c == '/') { eat('/'); auto t = mk(Node::Div); t->a = n; t->b = powr(); n = t; }
-                else if (latex && at_primary_start()) { auto t = mk(Node::Mul); t->a = n; t->b = powr(); n = t; }
+                if (c == '*') { eat('*'); auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; }
+                else if (c == '/') { eat('/'); auto t = mk(Node::Div); t->a = n; t->b = unary(); n = t; }
+                else if (latex && at_primary_start()) { auto t = mk(Node::Mul); t->a = n; t->b = unary(); n = t; }
                 else break;
             }
             return n;
         }
-        PN powr() {
-            PN base = unary();
-            if (peek() == '^') {
-                eat('^'); auto t = mk(Node::Pow); t->a = base;
-                t->b = latex ? braced_arg() : powr(); return t;
-            }
-            return base;
-        }
+        // Унарный минус слабее степени, как в математике: -x^2 = -(x^2),
+        // 2*-x^2 = 2*(-(x^2)). Раньше основание степени бралось через unary(),
+        // и -x^2 молча превращался в (-x)^2.
         PN unary() {
             char c = peek();
             if (c == '-') { eat('-'); auto t = mk(Node::Neg); t->a = unary(); return t; }
             if (c == '+') { eat('+'); return unary(); }
-            return primary();
+            return powr();
+        }
+        PN powr() {
+            PN base = primary();
+            if (peek() == '^') {
+                eat('^'); auto t = mk(Node::Pow); t->a = base;
+                t->b = exponent(); return t;
+            }
+            return base;
+        }
+        // Показатель: в LaTeX один токен или группа {..}, в обычном синтаксисе —
+        // снова powr(), поэтому ^ правоассоциативна. Знак перед показателем
+        // разрешён в обоих режимах: x^-1, x^-y^2 = x^(-(y^2)).
+        PN exponent() {
+            char c = peek();
+            if (c == '-') { eat('-'); auto t = mk(Node::Neg); t->a = exponent(); return t; }
+            if (c == '+') { eat('+'); return exponent(); }
+            return latex ? braced_arg() : powr();
         }
         PN primary_single() {
             ws();
@@ -358,6 +370,8 @@ namespace ucuda::equations_detail {
     // deliberately provides no ucmplx overload for them. Catch them here, at
     // codegen time, so the user gets the reason instead of an NVRTC template
     // error from the middle of a generated kernel.
+    const std::string* cd_find_complex_unsafe(const PN& n);
+
     void cd_check_complex_safe(const PN& n) ;
 
 
@@ -806,7 +820,7 @@ namespace ucuda::equations_detail {
     enum FuncId : int {
         F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
         F_SINH, F_COSH, F_TANH, F_EXP, F_LOG, F_LOG2, F_LOG10,
-        F_SQRT, F_CBRT, F_FABS,
+        F_SQRT, F_CBRT, F_FABS, F_FLOOR, F_CEIL,
         // F_COPYSIGN is emitted only by pn_diff (derivative of fabs); the user-facing
         // parser does not accept it, so it is absent from known_funcs().
         F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN

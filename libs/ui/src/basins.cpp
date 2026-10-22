@@ -623,6 +623,10 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         // не инвалидируется при toggle галки и пиксели остаются от прошлой версии.
         // Сам swap_axes уже отлавливается через HeatmapView::swap_axes_cached_.
         int hm_basins_gen = c.data_generation * 2 + (c.renumber_spiral ? 1 : 0);
+        // id бассейна: <= -1 — кластер равновесий, 0 — unbound, >= 1 — колебательный.
+        hm_basins_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_basins_v.value_name = "basin";
+        hm_basins_v.value_is_regime_code = true;
         hm_basins_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 0u, hm_basins_gen,
                           n, n, buf.data(),
@@ -634,6 +638,9 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     else if (c.active_plot_tab == 1) {
         hm_avgpk_v.x_axis.name = ax_x;
         hm_avgpk_v.y_axis.name = ax_y;
+        // У равновесия здесь последняя точка траектории — настоящее значение, не код.
+        hm_avgpk_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_avgpk_v.value_name = "feature 1";
         hm_avgpk_v.render(*renderer, origin, avail,
                          /*owner_id*/ base_oid + 1u, c.data_generation,
                          n, n, c.result.avg_peaks.data(),
@@ -645,6 +652,10 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     else if (c.active_plot_tab == 2) {
         hm_avgint_v.x_axis.name = ax_x;
         hm_avgint_v.y_axis.name = ax_y;
+        // У равновесия avgPeakFinderCUDA пишет сюда -1 — код, а не величину фичи.
+        hm_avgint_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
+        hm_avgint_v.value_name = "feature 2";
+        hm_avgint_v.value_is_regime_code = true;
         hm_avgint_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 2u, c.data_generation,
                           n, n, c.result.avg_intervals.data(),
@@ -664,6 +675,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             buf[k] = (double)regime_code(c.result.helpful_array[k]);
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
+        hm_states_v.cell_regime = regime_cell_label(c.result.helpful_array, n, /*with_oscillation*/ true);
+        hm_states_v.value_is_regime_code = true;
         hm_states_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 3u, c.data_generation,
                           n, n, buf.data(),
@@ -672,7 +685,10 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         handle_view_range_keys(vrt, hm_states_v.x_axis, hm_states_v.y_axis, plot_window_active(),
                                hm_states_v.swap_axes, &model);
         // Подсказка под плотом — числовые уровни, цвет зависит от выбранной colormap.
-        ImGui::TextDisabled("Levels: -1 = FixedPoint, 0 = Unbound, 1 = Oscillation");
+        ImGui::TextDisabled("Levels: %d = %s, %d = %s, %d = %s",
+                            REGIME_FIXED_POINT, regime_label(REGIME_FIXED_POINT),
+                            REGIME_UNBOUND,     regime_label(REGIME_UNBOUND),
+                            REGIME_OSCILLATION, regime_label(REGIME_OSCILLATION));
     }
     else if (c.active_plot_tab == 4) {
         // Scatter (avgPeak, avgInterval), точки сгруппированы по basin_idx.

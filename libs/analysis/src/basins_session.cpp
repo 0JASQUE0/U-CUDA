@@ -220,7 +220,7 @@ bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
     BasinsResult r = engine.run_basins(req);
@@ -245,7 +245,7 @@ bool BasinsAnalysisSession::run_async(ParametricEngine& engine, int config_idx) 
 
     BasinsRequest req = build_basins_request(*this, c);
     if (req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         cancel_token.reset();
         progress_token.reset();
         progress_phase_token.reset();
@@ -282,7 +282,7 @@ bool BasinsAnalysisSession::run_recluster_async(ParametricEngine& engine, int co
     // если система не менялась — compile_basins_if_needed обойдётся no-op'ом.
     BasinsRequest sim_req = build_basins_request(*this, c);
     if (sim_req.krs_body.empty()) {
-        c.last_error = "krs_code is empty (no valid system or scheme)";
+        c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
         return false;
     }
 

@@ -164,9 +164,10 @@ namespace ucuda::equations_detail {
         auto Jn = jac_over(s, stn);    // Jacobian, same point as the residual
 
         if (cx) {
-            // Те же запреты, что у Complex CD: у fabs/floor/fmod нет
-            // аналитического продолжения в комплексную плоскость, и шаг с
-            // мнимой частью по ним считать нечем.
+            // Те же запреты, что у Complex CD: у atan2/fmod нет комплексного
+            // смысла, и шаг с мнимой частью по ним считать нечем (floor/ceil/fmod
+            // уже отсёк jac_over). fabs разрешён: |z| и copysign(1, Re u) в
+            // якобиане — см. configCUDA.h.
             for (int i = 0; i < N; ++i) {
                 Parser p(s.rhs[i], s.latex);
                 cd_check_complex_safe(p.parse());

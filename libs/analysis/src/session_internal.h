@@ -97,6 +97,7 @@ struct PhaseRunInputs {
     bool        use_gpu = true;
     System      sys;
     std::string krs_code;
+    std::string krs_error;   // причина пустой krs_code (отказ кодгена), пусто — не известна
     // krs_code для custom схемы содержит тело дословно (см. regenerate_krs).
     // Флаг нужен, чтобы CPU-ветка знала: это сырой C, а не codegen-вывод.
     bool        krs_is_custom = false;
@@ -175,7 +176,7 @@ Scheme scheme_from_string(const std::string& s) ;
 // что считают допустимой базой.
 bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const System& sys,
                                  const std::string& base_name, std::string (*gen)(const System&, Scheme),
-                                 std::string& body, int& p, bool& sym) ;
+                                 std::string& body, int& p, bool& sym, std::string* err = nullptr) ;
 
 
 // gen отличает GPU-форму от CPU-эквивалента: обе проходят ОДИН И ТОТ ЖЕ разбор
@@ -183,7 +184,8 @@ bool resolve_wrapper_base(const std::vector<CustomScheme>& custom_schemes, const
 std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_schemes,
                                        const System& sys,
                                        const std::string& scheme,
-                                       std::string (*gen)(const System&, Scheme)) ;
+                                       std::string (*gen)(const System&, Scheme),
+                                       std::string* err) ;
 
 
 // Парсит double, понимая дробь "a/b" — поведение симметрично с parse_val

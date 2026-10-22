@@ -187,7 +187,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LLE2DResult r = engine.run_lle_2d(req);
@@ -197,7 +197,7 @@ bool LLEAnalysisSession::run(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             return false;
         }
         LLE1DResult r = engine.run_lle_1d(req);
@@ -223,7 +223,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     if (c.mode_2d) {
         LLE2DRequest req = build_lle2d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;
@@ -240,7 +240,7 @@ bool LLEAnalysisSession::run_async(ParametricEngine& engine, int curve_idx) {
     } else {
         LLE1DRequest req = build_lle1d_request(*this, c);
         if (req.krs_body.empty()) {
-            c.last_error = "krs_code is empty (no valid system or scheme)";
+            c.last_error = krs_empty_error(custom_schemes, sys, c.scheme);
             cancel_token.reset();
             progress_token.reset();
             return false;

@@ -600,10 +600,13 @@ inline const BuiltinScheme kBuiltinSchemes[] = {
     { "DOPRI78",                  8, &AppModel::scheme_dopri78,
       "Dormand-Prince RK8(7)13M, 13 stages, order 8 (the 7th-order\n"
       "embedded solution is computed but not used).\n"
-      "Coefficients refined from the published fractions by solving\n"
-      "all 200 order conditions to 1.8e-39 and stored to ~62 digits:\n"
-      "double uses the nearest double, dd/qd in the Order tab get\n"
-      "the full precision. Error floor ~1e-38 in dd (was ~1e-17).\n"
+      "Coefficients refined from the published fractions: the values\n"
+      "the authors chose (c2..c8, c10, c12 = c13 = 1, rows 2-6,\n"
+      "a75, a76, b13 = 1/4, b^12 = 2/45) are kept exact, the rest\n"
+      "solve all 200 + 85 order conditions to ~1e-65 (corrections\n"
+      "<= 1.4e-17) and are stored to ~62 digits: double uses the\n"
+      "nearest double, dd/qd in the Order tab get the full precision.\n"
+      "No coefficient error floor in dd/qd (was ~1e-17).\n"
       "Note: the leading error term is minimized (the M in 13M), so\n"
       "the observed order at practical steps is ~9-10, reaching 8\n"
       "only at small h." },
@@ -1670,6 +1673,10 @@ void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) ;
 // вынужденные шаги, средний h), пусто при постоянном шаге.
 void draw_adaptive_stats(const std::vector<double>& st) ;
 
+
+std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                      int row_stride,
+                                                      bool with_oscillation = false);
 
 void draw_regime_summary(const std::vector<int>& flags) ;
 

@@ -243,6 +243,7 @@ void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb
         double x0 = rev ? hi : lo;
         double x1 = rev ? lo : hi;
 
+        hc.cell_regime = regime_cell_label(c.result.flags, 0);   // флаг на точку свипа (колонку)
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hc.render(renderer, origin, avail,
