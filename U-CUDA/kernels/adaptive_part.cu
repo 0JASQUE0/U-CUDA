@@ -128,7 +128,10 @@ __device__ __forceinline__ void ucudaSetupSweepPointAd(
 	for (int i = 0; i < amountOfValues; ++i) localValues[i] = values[i];
 	for (int i = 0; i < dimension; ++i) {
 		const bool isLog = (logAxisMask >> i) & 1;
-		const numb v = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+		// ±log (бит UCUDA_SYMLOG_SHIFT + i) ставят только бассейны, как у ucudaSetupSweepPoint.
+		const bool isSym = (logAxisMask >> (UCUDA_SYMLOG_SHIFT + i)) & 1;
+		const numb v = isSym ? getValueByIdx_symlog(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+		             : isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
 		                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		const int kind = axisKind[i];
 		if (kind == UCUDA_AXIS_SYSTEM) {
@@ -592,7 +595,8 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	int*			progressCounter,
 	const int		progressStride,
 	const size_t	progressUnits,
-	numb*			adStats)
+	numb*			adStats,
+	const int		logAxisMask)		// только ±log-биты осей НУ (UCUDA_SYMLOG_SHIFT + i)
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -605,7 +609,7 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 
 	UCUDA_AD_P_LOCAL
 	ucudaSetupSweepPointAd(nPts, amountOfCalculatedPoints, idx, dimension, ranges, indicesOfMutVars,
-		initialConditions, values, amountOfValues, 0, axisKind, tolRatio, localX, localValues, P);
+		initialConditions, values, amountOfValues, logAxisMask, axisKind, tolRatio, localX, localValues, P);
 
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;

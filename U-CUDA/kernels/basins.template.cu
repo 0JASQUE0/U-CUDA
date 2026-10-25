@@ -7,8 +7,8 @@
 //      helpfulArray flag (-1=FP / 0=Unbound / 1=Osc) в `maxValueCheckerArray`.
 //   2. avgPeakFinderCUDA — d_data перезаписывается пиками, d_intervals —
 //      межпиковыми; d_avgPeaks / d_avgIntervals — агрегаты.
-//   3. CUDA_dbscan_* (три kernel'а: search_fixed_points / search_clear_points
-//      / kernel-cluster-expand) — host-цикл из hostLibrary.cu::CUDA_dbscan.
+//   3. CUDA_dbscan_bfs_seed_kernel / CUDA_dbscan_bfs_expand_kernel — DBSCAN
+//      обходом в ширину по уровням (parametric_engine.cpp::basins_dbscan_bfs).
 //
 // Плейсхолдеры:
 //   AMOUNT_OF_X — размерность системы (число переменных, int)

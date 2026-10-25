@@ -147,9 +147,12 @@ extern "C" __global__ void perfIntegrateKernel(
     numb X[AMOUNTOFX];
     for (int i = 0; i < AMOUNTOFX; ++i) X[i] = X0[i];
 
+    // Предрасчёт (CD fast) — внутри замера: он часть цены траектории.
     const unsigned long long t0 = perfGlobalTimer();
+    UcudaKrsPre krsPre;
+    ucudaKrsPrep(krsPre, a, h);
     for (long long n = 0; n < nSteps; ++n)
-        calculateDiscreteModel(X, a, h);
+        calculateDiscreteModelP(X, a, h, krsPre);
     // Конец цикла фиксируется после того, как результат последнего шага готов: без
     // зависимости от X компилятор вправе прочитать таймер раньше, чем досчитана цепочка.
     numb acc = 0;

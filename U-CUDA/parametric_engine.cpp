@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
+#include "krs_prep.h"  // стадия предрасчёта КРС (CD fast)
 #include "module_lru.h"
 #include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
@@ -1841,7 +1842,7 @@ struct ParametricEngine::Impl {
     bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
                            const std::shared_ptr<std::atomic<bool>>& cancel,
                            const std::shared_ptr<std::atomic<float>>& progress,
-                           double ticksBefore, double ticksTotal, std::string& err) const
+                           double ticksBefore, double ticksTotal, std::string& err)
     {
         bool cancelSent = false;
         // Публикуем долю и ДО первого опроса, и ПЕРЕД выходом. Раньше обновление стояло
@@ -1872,7 +1873,50 @@ struct ParametricEngine::Impl {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
+        if (cancelSent) reset_cancel_mirrors();
         return true;
+    }
+
+    // Зеркало флага отмены (g_ucudaCancelMirror, cudaLibrary.cu: ядра читают его вместо
+    // mapped-страницы) после отменённого запуска остаётся 1 в том модуле, где его подняли, и
+    // следующий запуск этого модуля сразу «отменился» бы. Какой модуль работал, здесь не известно,
+    // поэтому сброс во всех: это раз на отмену, а модули без переменной (не из cudaLibrary.cu)
+    // пропускаются. Ядро к этому моменту закончилось, так что memset не встаёт в очередь за ним.
+    template <class T>
+    static void reset_cancel_mirror_pool(const ModuleLru<T>& pool) {
+        pool.for_each([](const T& e) {
+            if (!e.module) return;
+            CUdeviceptr p = 0;
+            size_t      sz = 0;
+            if (cuModuleGetGlobal(&p, &sz, e.module, "g_ucudaCancelMirror") == CUDA_SUCCESS && sz == sizeof(int))
+                cuMemsetD32(p, 0, 1);
+        });
+    }
+
+    void reset_cancel_mirrors() {
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        reset_cancel_mirror_pool(pool_bif1d);
+        reset_cancel_mirror_pool(pool_lle);
+        reset_cancel_mirror_pool(pool_lle_2d);
+        reset_cancel_mirror_pool(pool_ls);
+        reset_cancel_mirror_pool(pool_ls_2d);
+        reset_cancel_mirror_pool(pool_cont);
+        reset_cancel_mirror_pool(pool_lle_cont);
+        reset_cancel_mirror_pool(pool_ls_cont);
+        reset_cancel_mirror_pool(pool_dft_cont);
+        reset_cancel_mirror_pool(pool_dft_hsweep);
+        reset_cancel_mirror_pool(pool_bif2d);
+        reset_cancel_mirror_pool(pool_basins);
+        reset_cancel_mirror_pool(pool_ad);
+        reset_cancel_mirror_pool(pool_ad_cont);
+        reset_cancel_mirror_pool(pool_lyap_ad);
+        reset_cancel_mirror_pool(pool_lyap_ad_cont);
+        reset_cancel_mirror_pool(pool_metrics_ad);
+        reset_cancel_mirror_pool(pool_fs_attr);
+        reset_cancel_mirror_pool(pool_fs_grid);
+        reset_cancel_mirror_pool(pool_order);
+        reset_cancel_mirror_pool(pool_network);
+        reset_cancel_mirror_pool(pool_metrics);
     }
 
     // Закэшированные тексты NonLinAnal headers (читаются один раз)
@@ -1976,17 +2020,19 @@ struct ParametricEngine::Impl {
         CUmodule     module        = nullptr;
         CUfunction   kernel_fused  = nullptr;   // calculateDiscreteModelPeaksCUDA
         CUfunction   kernel_dbscan = nullptr;   // dbscanCUDA
+        CUfunction   kernel_dbscan_warp = nullptr;   // dbscanWarpCUDA (одномерная ветка)
+        CUfunction   kernel_dbscan_warp2d = nullptr; // dbscanWarp2DCUDA (двумерная ветка)
+        CUfunction   kernel_max_peaks   = nullptr;   // ucudaMaxPeaksCUDA
     };
     CachedBif2dModule cached_bif2d;
 
-    // Basins — отдельный шаблон, пять kernel'ов (трое для DBSCAN host-цикла).
+    // Basins — отдельный шаблон: признаки + два ядра DBSCAN-обхода (basins_dbscan_bfs).
     struct CachedBasinsModule {
         std::string  key;
         CUmodule     module                  = nullptr;
         CUfunction   kernel_fused            = nullptr;  // calculateDiscreteModelAvgPeaksCUDA
-        CUfunction   kernel_dbscan           = nullptr;  // CUDA_dbscan_kernel
-        CUfunction   kernel_search_fixed     = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
-        CUfunction   kernel_search_clear     = nullptr;  // CUDA_dbscan_search_clear_points_kernel
+        CUfunction   kernel_bfs_seed         = nullptr;  // CUDA_dbscan_bfs_seed_kernel
+        CUfunction   kernel_bfs_expand       = nullptr;  // CUDA_dbscan_bfs_expand_kernel
     };
     CachedBasinsModule cached_basins;
 
@@ -1999,9 +2045,11 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_peaks        = nullptr;  // calculateDiscreteModelPeaksAdCUDA
         CUfunction   kernel_avg          = nullptr;  // calculateDiscreteModelAvgPeaksAdCUDA
         CUfunction   kernel_dbscan       = nullptr;  // dbscanCUDA (БД 2D)
-        CUfunction   kernel_cdbscan      = nullptr;  // CUDA_dbscan_kernel (бассейны)
-        CUfunction   kernel_search_fixed = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
-        CUfunction   kernel_search_clear = nullptr;  // CUDA_dbscan_search_clear_points_kernel
+        CUfunction   kernel_bfs_seed     = nullptr;  // CUDA_dbscan_bfs_seed_kernel (бассейны)
+        CUfunction   kernel_bfs_expand   = nullptr;  // CUDA_dbscan_bfs_expand_kernel (бассейны)
+        CUfunction   kernel_dbscan_warp  = nullptr;  // dbscanWarpCUDA (БД 2D, одномерная ветка)
+        CUfunction   kernel_dbscan_warp2d = nullptr; // dbscanWarp2DCUDA (БД 2D, двумерная ветка)
+        CUfunction   kernel_max_peaks    = nullptr;  // ucudaMaxPeaksCUDA
     };
     CachedAdModule cached_ad;
     // Continuation БД 1D с адаптивным шагом — свой модуль (UCUDA_AD_CONT_KERNEL): ядро с
@@ -2529,13 +2577,24 @@ struct ParametricEngine::Impl {
     // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
     // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
     // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
-    bool build_module(const SrcSnapshot& snap,
+    bool build_module(const SrcSnapshot& snap_in,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
+        // циклы cudaLibrary.cu зовут ucudaKrsPrep / calculateDiscreteModelP. Их определения
+        // встают в шаблон: одной единицей трансляции — перед #include "cudaLibrary.cu"
+        // (сам calculateDiscreteModel остаётся самодостаточным для прочих вызовов), при
+        // раздельной сборке — обёртками над krs_prep / krs_step_p модуля КРС сразу после
+        // #include "cudaLibrary.cuh". Шаблон меняется, значит меняется и ключ библиотеки.
+        KrsPrepSplit prep_sp;
+        bool has_prep = false;
+        for (const auto& sub : subs)
+            if (sub.first == "{{KRS_BODY}}") has_prep = krs_split_prep(sub.second, prep_sp);
+        SrcSnapshot snap = snap_in;
         // Раздельная сборка: библиотека без КРС компилируется один раз на (шаблон, размерность,
         // настройки) и переиспользуется, шаг живёт в своём модуле, склейка — cuLink. Замерено на
         // bifurcation2d + implicit midpoint: смена КРС 0.25 с против ~15 с одной единицей
@@ -2545,6 +2604,20 @@ struct ParametricEngine::Impl {
             std::vector<std::pair<const KrsFn*, std::string>> krs_fns;
             std::string krs_all, amount_of_x = "3";
             std::string lib_key = src_name;
+            static const KrsFn kPrepFn  = { "", "krs_prep",   krs_prep_fn_params(),   "" };
+            static const KrsFn kStepPFn = { "", "krs_step_p", krs_step_p_fn_params(), "" };
+            if (has_prep) {
+                krs_fns.emplace_back(&kPrepFn,  krs_prep_fn_body(prep_sp));
+                krs_fns.emplace_back(&kStepPFn, krs_step_p_fn_body(prep_sp));
+                // Тела обеих выводятся из KRS_BODY, который ниже и так входит в ключ.
+                if (!krs_insert_after_line(snap.tmpl, "#include \"cudaLibrary.cuh\"",
+                                           krs_prep_lib_defs(prep_sp))) {
+                    // Шаблон без этой строки: шаг остаётся самодостаточным, циклы
+                    // берут пустой предрасчёт из cudaLibrary.cu.
+                    krs_fns.clear();
+                    snap.tmpl = snap_in.tmpl;
+                }
+            }
             for (const auto& sub : subs) {
                 if (const KrsFn* f = krs_fn(sub.first)) {
                     krs_fns.emplace_back(f, sub.second);
@@ -2590,8 +2663,12 @@ struct ParametricEngine::Impl {
                          lib_err.c_str());
         }
 
-        std::string src = snap.tmpl;
+        // snap_in, а не snap: после неудачной раздельной сборки в snap.tmpl остались бы
+        // её обёртки над krs_prep / krs_step_p.
+        std::string src = snap_in.tmpl;
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
+        if (has_prep)
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", krs_prep_inline_defs(prep_sp));
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
@@ -2770,16 +2847,17 @@ struct ParametricEngine::Impl {
                                 { "{{KRS_DEVAL_BODY}}",  ad.deval },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "calculateDiscreteModelPeaksAdCUDA", "calculateDiscreteModelAvgPeaksAdCUDA",
-                                "dbscanCUDA", "CUDA_dbscan_kernel",
-                                "CUDA_dbscan_search_fixed_points_kernel",
-                                "CUDA_dbscan_search_clear_points_kernel" },
+                                "dbscanCUDA", "CUDA_dbscan_bfs_seed_kernel",
+                                "CUDA_dbscan_bfs_expand_kernel",
+                                "dbscanWarpCUDA", "ucudaMaxPeaksCUDA", "dbscanWarp2DCUDA" },
                               mod, mg, err))
                 return false;
             fresh.key    = key;
             fresh.module = mod;
             CUfunction* slots[] = { &fresh.kernel_peaks, &fresh.kernel_avg, &fresh.kernel_dbscan,
-                                    &fresh.kernel_cdbscan, &fresh.kernel_search_fixed, &fresh.kernel_search_clear };
-            for (int i = 0; i < 6; ++i)
+                                    &fresh.kernel_bfs_seed, &fresh.kernel_bfs_expand,
+                                    &fresh.kernel_dbscan_warp, &fresh.kernel_max_peaks, &fresh.kernel_dbscan_warp2d };
+            for (int i = 0; i < 8; ++i)
                 if (!module_fn(mod, mg[(size_t)i], *slots[i], err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
@@ -7238,7 +7316,8 @@ struct ParametricEngine::Impl {
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                              { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA" },
+                              { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA",
+                                "dbscanWarpCUDA", "ucudaMaxPeaksCUDA", "dbscanWarp2DCUDA" },
                               mod, mg, err))
                 return false;
 
@@ -7246,6 +7325,9 @@ struct ParametricEngine::Impl {
             fresh.module = mod;
             if (!module_fn(mod, mg[0], fresh.kernel_fused,  err)) { cuModuleUnload(mod); return false; }
             if (!module_fn(mod, mg[1], fresh.kernel_dbscan, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[2], fresh.kernel_dbscan_warp, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[3], fresh.kernel_max_peaks,   err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[4], fresh.kernel_dbscan_warp2d, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -7505,6 +7587,7 @@ struct ParametricEngine::Impl {
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
+        int*    d_maxPeaks          = nullptr;   // max числа пиков в куске (для dbscanWarpCUDA)
         RunSignals sig;   // прогресс и отмена в mapped-памяти
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
@@ -7525,6 +7608,7 @@ struct ParametricEngine::Impl {
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_maxPeaks)          cudaFree(d_maxPeaks);
             sig.release();
             if (stream)              cuStreamDestroy(stream);
         };
@@ -7560,6 +7644,7 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
         BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        BIF2D_CHECK(cudaMalloc((void**)&d_maxPeaks,          sizeof(int)),                                                  "cudaMalloc d_maxPeaks");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         if (ad) {
             // swap_xy бывает только при двух системных осях, поэтому коды осей идут как есть.
@@ -7727,26 +7812,70 @@ struct ParametricEngine::Impl {
             numb mult_pk_arg  = mult_peak_arg;
             numb mult_int_arg = mult_interval_arg;
             size_t helpfulStride_arg = helpfulStride;
-            // sizeOfBlock у dbscanCUDA остаётся ради legacy-вызовов; здесь раскладку
-            // задают peakStride/helpfulStride, и этот аргумент не читается.
-            size_t sizeOfBlock_s = peakStride;
-            void* args_dbscan[] = {
-                &d_outPeaks,          // кластеризуем пики, а не сырую траекторию
-                &sizeOfBlock_s,
-                &nPtsLimiter_int,
-                &d_amountOfPeaks,
-                &d_intervals,
-                &d_helpfulArray,
-                &eps_arg,
-                &d_dbscanResult,
-                &mult_pk_arg,
-                &mult_int_arg,
-                &peakStride_arg,
-                &helpfulStride_arg
+
+            // DBSCAN — по варпу на ячейку, данные ячейки в shared (dbscanWarpCUDA для одномерной
+            // ветки, dbscanWarp2DCUDA для двумерной; см. cudaLibrary.cu). Прежний dbscanCUDA вёл
+            // ячейку одним потоком по глобальной памяти и стоял на ней (БД 2D 512x512 float:
+            // 1.3 с против 17 мс). Ёмкость строки shared берём по реальному максимуму пиков в
+            // куске: «под потолок» max_amount_of_peaks одномерное ядро в 3-4 раза медленнее.
+            // Максимум считает ucudaMaxPeaksCUDA, и чтобы прочитать его, ждём конца
+            // интегрирования тем же wait_with_signals — прогресс и отмена живы.
+            const bool dbscan1d = (mult_pk_arg == 0 || mult_int_arg == 0);
+            const CUfunction k_max  = ad ? cached_ad.kernel_max_peaks : cached_bif2d.kernel_max_peaks;
+            const CUfunction k_warp = dbscan1d ? (ad ? cached_ad.kernel_dbscan_warp   : cached_bif2d.kernel_dbscan_warp)
+                                               : (ad ? cached_ad.kernel_dbscan_warp2d : cached_bif2d.kernel_dbscan_warp2d);
+            BIF2D_CHECK_CU(cuMemsetD32Async((CUdeviceptr)d_maxPeaks, 0, 1, stream), "memset d_maxPeaks");
+            void* args_max[] = { &d_amountOfPeaks, &nPtsLimiter_int, &d_maxPeaks };
+            BIF2D_CHECK_CU(cuLaunchKernel(k_max, 120, 1, 1, 256, 1, 1, 0, stream, args_max, nullptr),
+                           "cuLaunchKernel(bif2d max peaks)");
+            if (!wait_with_signals(stream, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerCell,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
+            BIF2D_CANCEL_CHECK();
+            int maxPeaks = 0;
+            BIF2D_CHECK(cudaMemcpy(&maxPeaks, d_maxPeaks, sizeof(int), cudaMemcpyDeviceToHost), "memcpy d_maxPeaks");
+
+            int    cap = 0, wpb = 1;
+            size_t shBytes = 0;
+            if (dbscan1d) {
+                // Строка — степень двойки (битоническая сеть с добивкой +inf).
+                cap = 32;
+                while (cap < maxPeaks && cap < 4096) cap <<= 1;
+                // Варпов на блок — чтобы блок держал не больше 32 КБ shared; 4 варпа на малых
+                // строках оказались быстрее 8 (замер на синтетике).
+                wpb = (int)(32768 / ((size_t)cap * sizeof(numb)));
+                if (wpb > 4) wpb = 4;
+                if (wpb < 1) wpb = 1;
+                shBytes = (size_t)wpb * cap * sizeof(numb);
+            } else {
+                // Строка — x, y (numb) и par (int) на пик, без добивки. Double при ~2500 пиках
+                // это ~50 КБ: выше 48 КБ нужен opt-in; если и его не хватает — cap = 0, ядро
+                // идёт по глобальной памяти (те же шаги, медленнее, но без потолка).
+                cap = (maxPeaks + 31) & ~31;
+                if (cap < 32) cap = 32;
+                const size_t perWarp = (size_t)cap * (2 * sizeof(numb) + sizeof(int));
+                wpb = (int)(32768 / perWarp);
+                if (wpb > 4) wpb = 4;
+                if (wpb < 1) wpb = 1;
+                shBytes = (size_t)wpb * perWarp;
+                int optin = 0;
+                cuDeviceGetAttribute(&optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device);
+                if (shBytes > (size_t)48 * 1024) {
+                    if (shBytes <= (size_t)optin)
+                        BIF2D_CHECK_CU(cuFuncSetAttribute(k_warp, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shBytes),
+                                       "cuFuncSetAttribute(dbscan warp2d shared)");
+                    else { cap = 0; shBytes = 0; }
+                }
+            }
+            int capArg = cap;
+            void* args_warp[] = {
+                &d_outPeaks, &nPtsLimiter_int, &d_amountOfPeaks, &d_intervals, &d_helpfulArray,
+                &eps_arg, &d_dbscanResult, &mult_pk_arg, &mult_int_arg,
+                &peakStride_arg, &helpfulStride_arg, &capArg
             };
-            BIF2D_CHECK_CU(cuLaunchKernel(ad ? cached_ad.kernel_dbscan : cached_bif2d.kernel_dbscan,
-                                          gridSize, 1, 1, blockSize, 1, 1,
-                                          0, stream, args_dbscan, nullptr),
+            const unsigned gridWarp = (unsigned)((cur_limiter + (size_t)wpb - 1) / (size_t)wpb);
+            BIF2D_CHECK_CU(cuLaunchKernel(k_warp, gridWarp, 1, 1, 32 * wpb, 1, 1,
+                                          (unsigned)shBytes, stream, args_warp, nullptr),
                            "cuLaunchKernel(bif2d dbscan)");
 
             // D2H: только d_dbscanResult (число кластеров = период).
@@ -8733,10 +8862,10 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
-    // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
-    // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
-    // захардкожен в шаблоне, поэтому ключа не требует — только хэш krs_body/amountOfX.
+    // compile_basins_if_needed — отдельный шаблон basins.template.cu: ядро траекторий и
+    // признаков плюс два ядра DBSCAN-обхода (seed и уровень, см. basins_dbscan_bfs).
+    // Cache-ключ помечен `:basins`; par_or_var=0 захардкожен в шаблоне, поэтому ключа не
+    // требует — только хэш krs_body/amountOfX.
     bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
                                   std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
@@ -8748,26 +8877,117 @@ struct ParametricEngine::Impl {
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               { "calculateDiscreteModelAvgPeaksCUDA",
-                                "CUDA_dbscan_kernel",
-                                "CUDA_dbscan_search_fixed_points_kernel",
-                                "CUDA_dbscan_search_clear_points_kernel" },
+                                "CUDA_dbscan_bfs_seed_kernel",
+                                "CUDA_dbscan_bfs_expand_kernel" },
                               mod, mg, err))
                 return false;
 
             fresh.key    = key;
             fresh.module = mod;
-            if (!module_fn(mod, mg[0], fresh.kernel_fused,        err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[1], fresh.kernel_dbscan,       err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[2], fresh.kernel_search_fixed, err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[3], fresh.kernel_search_clear, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[0], fresh.kernel_fused,      err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[1], fresh.kernel_bfs_seed,   err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[2], fresh.kernel_bfs_expand, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
 
+    // DBSCAN бассейнов (фаза 2 run_basins и run_basins_recluster): обход в ширину по уровням,
+    // целиком на GPU — разбиение и порядок меток см. над CUDA_dbscan_bfs_seed_kernel. На кластер:
+    // одно ядро seed'а и чтение двух индексов; на уровень: одно ядро и чтение одного int (размер
+    // следующего фронта, в pinned-память). labels должны быть обнулены. Прогресс — доля
+    // размеченных ячеек от всей сетки (Unbound не размечаются, так что до 1 он доходит, только
+    // если их нет); отмена проверяется на каждом уровне. false + err пустой = отмена.
+    bool basins_dbscan_bfs(CUfunction k_seed, CUfunction k_expand,
+                           const numb* d_X, const numb* d_Y, const int* d_helpful, int* d_labels,
+                           size_t total_cells, double eps,
+                           const std::shared_ptr<std::atomic<bool>>& cancel,
+                           const std::shared_ptr<std::atomic<float>>& progress,
+                           int& n_pos, int& n_neg, std::string& err) {
+        n_pos = 0; n_neg = 0; err.clear();
+        int*          d_front   = nullptr;
+        int*          d_next    = nullptr;
+        int*          d_count   = nullptr;
+        unsigned int* d_seed    = nullptr;
+        int*          h_pin     = nullptr;   // [0..1] seed'ы FP/Osc, [2] размер фронта, [3] метка
+        auto cleanup = [&]() {
+            if (d_front) cudaFree(d_front);
+            if (d_next)  cudaFree(d_next);
+            if (d_count) cudaFree(d_count);
+            if (d_seed)  cudaFree(d_seed);
+            if (h_pin)   cudaFreeHost(h_pin);
+        };
+        #define BFS_CHECK(call, where) do { \
+            cudaError_t _e = (call); \
+            if (_e != cudaSuccess) { \
+                err = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
+                cleanup(); return false; \
+            } \
+        } while(0)
+        #define BFS_CHECK_CU(call, where) do { \
+            CUresult _r = (call); \
+            if (_r != CUDA_SUCCESS) { \
+                err = std::string(where) + ": " + cu_err(_r); \
+                cleanup(); return false; \
+            } \
+        } while(0)
+
+        BFS_CHECK(cudaMalloc((void**)&d_front, total_cells * sizeof(int)), "cudaMalloc dbscan front");
+        BFS_CHECK(cudaMalloc((void**)&d_next,  total_cells * sizeof(int)), "cudaMalloc dbscan next");
+        BFS_CHECK(cudaMalloc((void**)&d_count, sizeof(int)),               "cudaMalloc dbscan count");
+        BFS_CHECK(cudaMalloc((void**)&d_seed,  2 * sizeof(unsigned int)),  "cudaMalloc dbscan seed");
+        BFS_CHECK(cudaMallocHost((void**)&h_pin, 4 * sizeof(int)),         "cudaMallocHost dbscan");
+
+        const int blockSize = launch_block_size(2 * sizeof(numb));   // тайл фронта в shared
+        const int gridSize  = (int)((total_cells + blockSize - 1) / blockSize);
+        const unsigned shared = (unsigned)(2 * blockSize * sizeof(numb));
+        int n = (int)total_cells;
+        numb eps2 = (numb)eps;
+        eps2 = eps2 * eps2;   // в numb, как eps * eps в CUDA_dbscan_kernel
+        size_t classified = 0;
+
+        for (;;) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) { cleanup(); return false; }
+            BFS_CHECK(cudaMemset(d_seed, 0xFF, 2 * sizeof(unsigned int)), "memset dbscan seed");
+            void* args_seed[] = { &d_helpful, &d_labels, &n, &d_seed };
+            BFS_CHECK_CU(cuLaunchKernel(k_seed, gridSize, 1, 1, blockSize, 1, 1, 0, nullptr, args_seed, nullptr),
+                         "cuLaunchKernel(dbscan seed)");
+            BFS_CHECK(cudaMemcpy(h_pin, d_seed, 2 * sizeof(unsigned int), cudaMemcpyDeviceToHost), "memcpy dbscan seed D2H");
+            const unsigned fp = (unsigned)h_pin[0], osc = (unsigned)h_pin[1];
+            if (fp == 0xFFFFFFFFu && osc == 0xFFFFFFFFu) break;   // размечать больше нечего
+            // NB: счётчик растёт ПОСЛЕ проверки seed'а. Референс NonLinAnal инкрементирует до неё
+            // и сообщает на один кластер больше; мы отдаём n_clusters в UI, где off-by-one был
+            // виден как «4 кластера» при трёх реальных.
+            int seed  = (int)(fp != 0xFFFFFFFFu ? fp : osc);
+            int label = fp != 0xFFFFFFFFu ? --n_neg : ++n_pos;
+            h_pin[2] = seed; h_pin[3] = label;
+            BFS_CHECK(cudaMemcpy(d_labels + seed, &h_pin[3], sizeof(int), cudaMemcpyHostToDevice), "memcpy dbscan seed label");
+            BFS_CHECK(cudaMemcpy(d_front,         &h_pin[2], sizeof(int), cudaMemcpyHostToDevice), "memcpy dbscan seed front");
+            ++classified;
+
+            int nf = 1;
+            while (nf > 0) {
+                if (cancel && cancel->load(std::memory_order_relaxed)) { cleanup(); return false; }
+                BFS_CHECK(cudaMemset(d_count, 0, sizeof(int)), "memset dbscan count");
+                void* args_exp[] = { (void*)&d_X, (void*)&d_Y, (void*)&d_helpful, &d_labels, &n,
+                                     &d_front, &nf, &d_next, &d_count, &eps2, &label };
+                BFS_CHECK_CU(cuLaunchKernel(k_expand, gridSize, 1, 1, blockSize, 1, 1, shared, nullptr, args_exp, nullptr),
+                             "cuLaunchKernel(dbscan expand)");
+                BFS_CHECK(cudaMemcpy(&h_pin[2], d_count, sizeof(int), cudaMemcpyDeviceToHost), "memcpy dbscan count D2H");
+                nf = h_pin[2];
+                std::swap(d_front, d_next);
+                classified += (size_t)nf;
+                if (progress) progress->store(float(classified) / float(total_cells), std::memory_order_relaxed);
+            }
+        }
+        cleanup();
+        #undef BFS_CHECK
+        #undef BFS_CHECK_CU
+        return true;
+    }
+
     // run_basins — порт NonLinAnal::basinsOfAttraction + CUDA_dbscan host-loop (hostLibrary.cu).
-    // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) host-DBSCAN — цикл по точкам, на
-    // каждой итерации search_fixed/search_clear + cluster_kernel с расширением через
-    // neighbors-список. Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
+    // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) DBSCAN обходом в ширину на GPU
+    // (basins_dbscan_bfs). Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
     BasinsResult run_basins(const BasinsRequest& req) {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
@@ -8787,6 +9007,26 @@ struct ParametricEngine::Impl {
         if (req.transient_time < 0) return fail("transient_time must be >= 0");
         if (req.pre_scaller <= 0)   return fail("pre_scaller must be > 0");
         if (req.eps_dbscan <= 0.0)  return fail("eps_dbscan must be > 0");
+        if (req.axis_x_symlog || req.axis_y_symlog) {
+            // m = n_pts/2 узлов на полуось, и формула делит на m - 1. При нечётном n_pts легаси
+            // клал лишний узел за пределы [lo, hi], поэтому нечётное не принимаем.
+            if (req.n_pts < 4 || (req.n_pts % 2) != 0)
+                return fail("±log grid needs an even Resolution >= 4");
+            if (req.axis_x_symlog && !(req.axis_x_lo > 0.0 && req.axis_x_hi > 0.0))
+                return fail("±log X: lo and hi are |x| bounds and must be > 0");
+            if (req.axis_y_symlog && !(req.axis_y_lo > 0.0 && req.axis_y_hi > 0.0))
+                return fail("±log Y: lo and hi are |y| bounds and must be > 0");
+        }
+        const int logAxisMask = (req.axis_x_symlog ? (1 << (UCUDA_SYMLOG_SHIFT + 0)) : 0)
+                              | (req.axis_y_symlog ? (1 << (UCUDA_SYMLOG_SHIFT + 1)) : 0);
+
+        // Время фаз печатается в консоль в конце расчёта: компиляция модуля, счёт
+        // (траектории + признаки), DBSCAN и весь run_basins.
+        using bas_clock = std::chrono::steady_clock;
+        const auto bas_t0 = bas_clock::now();
+        auto bas_secs = [](bas_clock::time_point a, bas_clock::time_point b) {
+            return std::chrono::duration<double>(b - a).count();
+        };
 
         std::string err;
         if (!ensure_init(err)) return fail(err);
@@ -8796,9 +9036,7 @@ struct ParametricEngine::Impl {
             if (!compile_ad_if_needed(req.adaptive, req.krs_body, req.amountOfX, 0, err)) return fail(err);
         }
         else if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
-        const CUfunction k_cdbscan      = ad ? cached_ad.kernel_cdbscan      : cached_basins.kernel_dbscan;
-        const CUfunction k_search_fixed = ad ? cached_ad.kernel_search_fixed : cached_basins.kernel_search_fixed;
-        const CUfunction k_search_clear = ad ? cached_ad.kernel_search_clear : cached_basins.kernel_search_clear;
+        const auto bas_t_compiled = bas_clock::now();
 
         const int    nPts                       = req.n_pts;
         const double h                          = req.h;
@@ -8846,9 +9084,6 @@ struct ParametricEngine::Impl {
         RunSignals sig;   // прогресс и отмена в mapped-памяти
         numb* d_avgPeaks          = nullptr;
         numb* d_avgIntervals      = nullptr;
-        int*    d_amountOfNeighbors = nullptr;
-        int*    d_neighbors         = nullptr;
-        int*    d_clearIdx          = nullptr;
         AdDeviceArgs adArgs;                  // адаптивный шаг: параметры, оси, статистика
 
         auto cleanup = [&]() {
@@ -8863,9 +9098,6 @@ struct ParametricEngine::Impl {
             sig.release();
             if (d_avgPeaks)          cudaFree(d_avgPeaks);
             if (d_avgIntervals)      cudaFree(d_avgIntervals);
-            if (d_amountOfNeighbors) cudaFree(d_amountOfNeighbors);
-            if (d_neighbors)         cudaFree(d_neighbors);
-            if (d_clearIdx)          cudaFree(d_clearIdx);
         };
 
         #define BAS_CHECK(call, where) do { \
@@ -8909,9 +9141,6 @@ struct ParametricEngine::Impl {
         const double ticksTotal     = (double)total_cells * ticksPerCell;
         BAS_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)),                                 "cudaMalloc d_avgPeaks");
         BAS_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)),                                 "cudaMalloc d_avgIntervals");
-        BAS_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                                                  "cudaMalloc d_amountOfNeighbors");
-        BAS_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),                                    "cudaMalloc d_neighbors");
-        BAS_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                                                  "cudaMalloc d_clearIdx");
 
         BAS_CHECK(cudaMemcpy(d_ranges,            ranges,            4 * sizeof(numb),                                  cudaMemcpyHostToDevice), "memcpy d_ranges");
         BAS_CHECK(cudaMemcpy(d_indicesOfMutVars,  indicesOfMutVars,  2 * sizeof(int),                                     cudaMemcpyHostToDevice), "memcpy d_indices");
@@ -8940,6 +9169,8 @@ struct ParametricEngine::Impl {
         res.snapshot.axis_x_hi     = req.axis_x_hi;
         res.snapshot.axis_y_lo     = req.axis_y_lo;
         res.snapshot.axis_y_hi     = req.axis_y_hi;
+        res.snapshot.axis_x_symlog = req.axis_x_symlog;
+        res.snapshot.axis_y_symlog = req.axis_y_symlog;
         res.snapshot.n_pts         = nPts;
         res.snapshot.feature1      = req.feature1;
         res.snapshot.feature2      = req.feature2;
@@ -9019,6 +9250,7 @@ struct ParametricEngine::Impl {
             numb* d_avg_peak_chunk   = d_avgPeaks      + iter * originalNPtsLimiter;
             numb* d_avg_interv_chunk = d_avgIntervals  + iter * originalNPtsLimiter;
 
+            int logAxisMask_arg = logAxisMask;
             void* args_basins[] = {
                 &nPts_arg, &nPtsLimiter_int, &amountOfCalculatedPoints,
                 &amountOfPointsForSkip_s, &dimension_arg, &d_ranges, &h_arg,
@@ -9028,6 +9260,7 @@ struct ParametricEngine::Impl {
                 &d_avg_peak_chunk, &d_avg_interv_chunk, &d_helpful_chunk,
                 &par_or_var_arg, &transientTime_arg, &tMax_arg,
                 &feature1_int, &feature2_int, &mult1_v, &mult2_v,
+                &logAxisMask_arg,
                 &d_cancel_arg, &d_progress_arg, &progressStride_arg
             };
             unsigned int shared_traj = (unsigned int)(ucuda_shared_stride(amountOfInitialConditions, amountOfValues) * sizeof(numb) * blockSize);
@@ -9049,7 +9282,7 @@ struct ParametricEngine::Impl {
                     ad_param_arg(req.adaptive, &d_adp_arg), &d_axis_arg, &tolRatio_arg, &transientTime_arg, &tMax_arg, &dtOut_arg,
                     &preScaller_int, &amountOfIterations_arg, &raw_arg, &interp_arg,
                     &d_cancel_arg, &d_progress_arg, &progressStride_arg,
-                    &progressUnits_arg, &d_adStats_arg
+                    &progressUnits_arg, &d_adStats_arg, &logAxisMask_arg
                 };
                 BAS_CHECK_CU(cuLaunchKernel(cached_ad.kernel_avg,
                                             gridSize, 1, 1, blockSize, 1, 1,
@@ -9075,127 +9308,23 @@ struct ParametricEngine::Impl {
             res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
         }
 
-        // 2. Host-DBSCAN: порт hostLibrary.cu:3066 (CUDA_dbscan).
-        // Динамической shared у dbscan-ядер нет — настройка идёт как есть.
-        int blockSize_db = launch_block_size(0);
-        int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
-        int amountOfData_int = (int)total_cells;
+        const auto bas_t_sim = bas_clock::now();
 
-        int amountOfClusters         = 0;
-        int amountOfNegativeClusters = 0;
-        std::vector<int> h_neighbors(total_cells, 0);
-        int h_amountOfNeighbors      = 0;
-
-        // Прогресс DBSCAN-фазы: внешний цикл идёт ОДИН РАЗ НА КЛАСТЕР (с ранним выходом, когда все
-        // ячейки классифицированы), поэтому main_iter — плохая метрика: он доходит до ~10 против
-        // миллионов ячеек. Вместо него после расширения каждого кластера считаем классифицированные
-        // ячейки в d_dbscanResult и репортим долю. Троттлинг >200 мс между сканами держит накладные
-        // расходы ограниченными на больших сетках (скан ~4 МБ D2H + линейный проход на 1М ячеек,
-        // ~3-5 мс; с троттлингом это максимум ~5 сканов в секунду).
-        std::vector<int> h_dbscan_check(total_cells, 0);
-        auto last_progress_scan = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-
-        // Phase 2: DBSCAN expansion. Reset bar to 0..1, bump phase to 2.
+        // 2. DBSCAN — обход в ширину на GPU (basins_dbscan_bfs). Прогресс фазы — доля
+        // размеченных ячеек, обновляется на каждом уровне обхода.
         if (req.progress_phase) req.progress_phase->store(2, std::memory_order_relaxed);
         if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
-        for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
-            BAS_CANCEL_CHECK();
-            int clearIdx_init = -1;
-            BAS_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
-
-            // search_fixed_points: проверяет, остались ли -1-точки без cluster'а.
-            void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
-                                    &amountOfData_int, &d_clearIdx };
-            BAS_CHECK_CU(cuLaunchKernel(k_search_fixed,
-                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                        0, nullptr, args_search, nullptr),
-                         "cuLaunchKernel(search_fixed)");
-            BAS_CHECK(cudaDeviceSynchronize(), "sync search_fixed");
-
-            int clearIdx = -1;
-            BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H");
-
-            int resultClusters = 0;
-            if (clearIdx == -1) {
-                // FP-точек не осталось — search_clear_points (Osc).
-                BAS_CHECK_CU(cuLaunchKernel(k_search_clear,
-                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                            0, nullptr, args_search, nullptr),
-                             "cuLaunchKernel(search_clear)");
-                BAS_CHECK(cudaDeviceSynchronize(), "sync search_clear");
-                BAS_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
-                // Все ячейки классифицированы — нового seed'а нет, останавливаемся.
-                // NB: инкремент идёт ПОСЛЕ проверки clearIdx. Референс NonLinAnal инкрементирует до
-                // неё и сообщает на один кластер больше, но он возвращает void и счётчик никто не
-                // читает; мы отдаём n_clusters в UI, где off-by-one был виден как «4 кластера» при
-                // трёх реальных.
-                if (clearIdx == -1) break;
-                ++amountOfClusters;
-                resultClusters = amountOfClusters;
-            } else {
-                --amountOfNegativeClusters;
-                resultClusters = amountOfNegativeClusters;
-            }
-
-            // Reset amountOfNeighbors на каждой итерации.
-            h_amountOfNeighbors = 0;
-            BAS_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
-
-            // CUDA_dbscan_kernel — расширение cluster'а от clearIdx.
-            numb eps_arg = eps_dbscan;
-            void* args_db[] = {
-                &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
-                &amountOfData_int, &eps_arg, &resultClusters,
-                &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
-            };
-            BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
-                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                        0, nullptr, args_db, nullptr),
-                         "cuLaunchKernel(dbscan expand init)");
-            BAS_CHECK(cudaDeviceSynchronize(), "sync dbscan init");
-
-            BAS_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors D2H");
-            if (h_amountOfNeighbors > 0)
-                BAS_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
-                          "memcpy neighbors D2H");
-
-            // Цикл расширения cluster'а по всем найденным соседям.
-            for (size_t ni = 0; ni < (size_t)h_amountOfNeighbors; ++ni) {
-                int neighbor_idx = h_neighbors[ni];
-                void* args_db2[] = {
-                    &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
-                    &amountOfData_int, &eps_arg, &resultClusters,
-                    &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
-                };
-                BAS_CHECK_CU(cuLaunchKernel(k_cdbscan,
-                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                            0, nullptr, args_db2, nullptr),
-                             "cuLaunchKernel(dbscan expand neighbor)");
-                BAS_CHECK(cudaDeviceSynchronize(), "sync dbscan neighbor");
-
-                BAS_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors loop");
-                if (h_amountOfNeighbors > 0)
-                    BAS_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
-                              "memcpy neighbors loop");
-            }
-
-            // Report progress by counting classified cells. Throttled so the
-            // D2H+scan happens at most ~5x/sec regardless of cluster count.
-            if (req.progress) {
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_progress_scan >= std::chrono::milliseconds(200)) {
-                    last_progress_scan = now;
-                    BAS_CHECK(cudaMemcpy(h_dbscan_check.data(), d_dbscanResult,
-                                         total_cells * sizeof(int), cudaMemcpyDeviceToHost),
-                              "memcpy dbscanResult D2H (progress)");
-                    size_t classified = 0;
-                    for (size_t k = 0; k < total_cells; ++k)
-                        if (h_dbscan_check[k] != 0) ++classified;
-                    req.progress->store(float(classified) / float(total_cells),
-                                        std::memory_order_relaxed);
-                }
-            }
+        int amountOfClusters         = 0;
+        int amountOfNegativeClusters = 0;
+        if (!basins_dbscan_bfs(ad ? cached_ad.kernel_bfs_seed   : cached_basins.kernel_bfs_seed,
+                               ad ? cached_ad.kernel_bfs_expand : cached_basins.kernel_bfs_expand,
+                               d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
+                               total_cells, eps_dbscan, req.cancel, req.progress,
+                               amountOfClusters, amountOfNegativeClusters, res.error)) {
+            if (res.error.empty()) { res.cancelled = true; res.error = "Cancelled by user"; }
+            cleanup(); return res;
         }
+        const auto bas_t_dbscan = bas_clock::now();
 
         // 3. D2H результаты
         res.n_pts       = nPts;
@@ -9205,6 +9334,8 @@ struct ParametricEngine::Impl {
         res.axis_y_hi   = req.axis_y_hi;
         res.axis_x_var  = req.axis_x_var;
         res.axis_y_var  = req.axis_y_var;
+        res.axis_x_symlog = req.axis_x_symlog;
+        res.axis_y_symlog = req.axis_y_symlog;
         res.basin_idx.assign(total_cells, 0);
         res.avg_peaks.assign(total_cells, 0.0);
         res.avg_intervals.assign(total_cells, 0.0);
@@ -9264,12 +9395,17 @@ struct ParametricEngine::Impl {
         cleanup();
         #undef BAS_CHECK
         #undef BAS_CHECK_CU
+        std::fprintf(stderr, "[basins] %dx%d %s: compile %.3f s, sim %.3f s, DBSCAN %.3f s, total %.3f s (clusters +%d/%d)\n",
+                     nPts, nPts, ad ? "adaptive" : "fixed",
+                     bas_secs(bas_t0, bas_t_compiled), bas_secs(bas_t_compiled, bas_t_sim),
+                     bas_secs(bas_t_sim, bas_t_dbscan), bas_secs(bas_t0, bas_clock::now()),
+                     amountOfClusters, amountOfNegativeClusters);
         res.ok = true;
         return res;
     }
 
     // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич. Зеркалит фазу 2
-    // (host-DBSCAN) из run_basins, но пропускает sim-фазу: d_avgPeaks/d_avgIntervals/d_helpfulArray
+    // (DBSCAN, basins_dbscan_bfs) из run_basins, но пропускает sim-фазу: d_avgPeaks/d_avgIntervals/d_helpfulArray
     // заливаются из request'а вместо повторного прогона avgPeakFinderCUDA. Мульты уже применены к
     // загруженным фичам (run_basins, фаза 1), поэтому здесь не нужны.
     BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req) {
@@ -9287,30 +9423,24 @@ struct ParametricEngine::Impl {
         if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: size does not match n_pts²");
         if (req.helpful_array.size() != total_cells)             return fail("helpful_array: size does not match n_pts²");
 
+        const auto brc_t0 = std::chrono::steady_clock::now();
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
         if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
 
-        // Ширина запуска dbscan-ядер — из настройки (launch_block_size ниже).
         const double eps_dbscan = req.eps_dbscan;
 
         int*    d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
         numb* d_avgPeaks          = nullptr;
         numb* d_avgIntervals      = nullptr;
-        int*    d_amountOfNeighbors = nullptr;
-        int*    d_neighbors         = nullptr;
-        int*    d_clearIdx          = nullptr;
 
         auto cleanup = [&]() {
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
             if (d_avgPeaks)          cudaFree(d_avgPeaks);
             if (d_avgIntervals)      cudaFree(d_avgIntervals);
-            if (d_amountOfNeighbors) cudaFree(d_amountOfNeighbors);
-            if (d_neighbors)         cudaFree(d_neighbors);
-            if (d_clearIdx)          cudaFree(d_clearIdx);
         };
 
         #define BRC_CHECK(call, where) do { \
@@ -9320,28 +9450,11 @@ struct ParametricEngine::Impl {
                 cleanup(); return res; \
             } \
         } while(0)
-        #define BRC_CHECK_CU(call, where) do { \
-            CUresult _r = (call); \
-            if (_r != CUDA_SUCCESS) { \
-                res.error = std::string(where) + ": " + cu_err(_r); \
-                cleanup(); return res; \
-            } \
-        } while(0)
-        #define BRC_CANCEL_CHECK() do { \
-            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { \
-                res.cancelled = true; \
-                res.error = "Cancelled by user"; \
-                cleanup(); return res; \
-            } \
-        } while(0)
 
         BRC_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),    "cudaMalloc d_helpfulArray");
         BRC_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),    "cudaMalloc d_dbscanResult");
         BRC_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)), "cudaMalloc d_avgPeaks");
         BRC_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)), "cudaMalloc d_avgIntervals");
-        BRC_CHECK(cudaMalloc((void**)&d_amountOfNeighbors, sizeof(int)),                  "cudaMalloc d_amountOfNeighbors");
-        BRC_CHECK(cudaMalloc((void**)&d_neighbors,         total_cells * sizeof(int)),    "cudaMalloc d_neighbors");
-        BRC_CHECK(cudaMalloc((void**)&d_clearIdx,          sizeof(int)),                  "cudaMalloc d_clearIdx");
 
         BRC_CHECK(cudaMemcpy(d_avgPeaks,     to_numb(req.avg_peaks).data(),     total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_peaks H2D");
         BRC_CHECK(cudaMemcpy(d_avgIntervals, to_numb(req.avg_intervals).data(), total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_intervals H2D");
@@ -9349,106 +9462,19 @@ struct ParametricEngine::Impl {
         BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
         BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
 
-        const int blockSize_db = launch_block_size(0);   // dbscan-ядра без динамической shared
-        const int gridSize_db  = (int)((total_cells + blockSize_db - 1) / blockSize_db);
-        const int amountOfData_int = (int)total_cells;
-
+        if (req.progress) req.progress->store(0.0f, std::memory_order_relaxed);
         int amountOfClusters         = 0;
         int amountOfNegativeClusters = 0;
-        std::vector<int> h_neighbors(total_cells, 0);
-        int h_amountOfNeighbors      = 0;
-        std::vector<int> h_dbscan_check(total_cells, 0);
-        auto last_progress_scan = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-
-        if (req.progress) req.progress->store(0.0f, std::memory_order_relaxed);
-
-        for (size_t main_iter = 0; main_iter < total_cells; ++main_iter) {
-            BRC_CANCEL_CHECK();
-            int clearIdx_init = -1;
-            BRC_CHECK(cudaMemcpy(d_clearIdx, &clearIdx_init, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_clearIdx init");
-
-            void* args_search[] = { &d_avgPeaks, &d_avgIntervals, &d_helpfulArray, &d_dbscanResult,
-                                    (void*)&amountOfData_int, &d_clearIdx };
-            BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_fixed,
-                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                        0, nullptr, args_search, nullptr),
-                         "cuLaunchKernel(search_fixed)");
-            BRC_CHECK(cudaDeviceSynchronize(), "sync search_fixed");
-
-            int clearIdx = -1;
-            BRC_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H");
-
-            int resultClusters = 0;
-            if (clearIdx == -1) {
-                BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_search_clear,
-                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                            0, nullptr, args_search, nullptr),
-                             "cuLaunchKernel(search_clear)");
-                BRC_CHECK(cudaDeviceSynchronize(), "sync search_clear");
-                BRC_CHECK(cudaMemcpy(&clearIdx, d_clearIdx, sizeof(int), cudaMemcpyDeviceToHost), "memcpy clearIdx D2H 2");
-                if (clearIdx == -1) break;
-                ++amountOfClusters;
-                resultClusters = amountOfClusters;
-            } else {
-                --amountOfNegativeClusters;
-                resultClusters = amountOfNegativeClusters;
-            }
-
-            h_amountOfNeighbors = 0;
-            BRC_CHECK(cudaMemcpy(d_amountOfNeighbors, &h_amountOfNeighbors, sizeof(int), cudaMemcpyHostToDevice), "memcpy d_amountOfNeighbors=0");
-
-            numb eps_arg = eps_dbscan;
-            void* args_db[] = {
-                &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
-                (void*)&amountOfData_int, &eps_arg, &resultClusters,
-                &d_amountOfNeighbors, &d_neighbors, &clearIdx, &d_helpfulArray
-            };
-            BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
-                                        gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                        0, nullptr, args_db, nullptr),
-                         "cuLaunchKernel(dbscan expand init)");
-            BRC_CHECK(cudaDeviceSynchronize(), "sync dbscan init");
-
-            BRC_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors D2H");
-            if (h_amountOfNeighbors > 0)
-                BRC_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
-                          "memcpy neighbors D2H");
-
-            for (size_t ni = 0; ni < (size_t)h_amountOfNeighbors; ++ni) {
-                int neighbor_idx = h_neighbors[ni];
-                void* args_db2[] = {
-                    &d_avgPeaks, &d_avgIntervals, &d_dbscanResult,
-                    (void*)&amountOfData_int, &eps_arg, &resultClusters,
-                    &d_amountOfNeighbors, &d_neighbors, &neighbor_idx, &d_helpfulArray
-                };
-                BRC_CHECK_CU(cuLaunchKernel(cached_basins.kernel_dbscan,
-                                            gridSize_db, 1, 1, blockSize_db, 1, 1,
-                                            0, nullptr, args_db2, nullptr),
-                             "cuLaunchKernel(dbscan expand neighbor)");
-                BRC_CHECK(cudaDeviceSynchronize(), "sync dbscan neighbor");
-
-                BRC_CHECK(cudaMemcpy(&h_amountOfNeighbors, d_amountOfNeighbors, sizeof(int), cudaMemcpyDeviceToHost), "memcpy amountOfNeighbors loop");
-                if (h_amountOfNeighbors > 0)
-                    BRC_CHECK(cudaMemcpy(h_neighbors.data(), d_neighbors, (size_t)h_amountOfNeighbors * sizeof(int), cudaMemcpyDeviceToHost),
-                              "memcpy neighbors loop");
-            }
-
-            if (req.progress) {
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_progress_scan >= std::chrono::milliseconds(200)) {
-                    last_progress_scan = now;
-                    BRC_CHECK(cudaMemcpy(h_dbscan_check.data(), d_dbscanResult,
-                                         total_cells * sizeof(int), cudaMemcpyDeviceToHost),
-                              "memcpy dbscanResult D2H (progress)");
-                    size_t classified = 0;
-                    for (size_t k = 0; k < total_cells; ++k)
-                        if (h_dbscan_check[k] != 0) ++classified;
-                    req.progress->store(float(classified) / float(total_cells),
-                                        std::memory_order_relaxed);
-                }
-            }
+        const auto brc_t_db0 = std::chrono::steady_clock::now();
+        if (!basins_dbscan_bfs(cached_basins.kernel_bfs_seed, cached_basins.kernel_bfs_expand,
+                               d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
+                               total_cells, eps_dbscan, req.cancel, req.progress,
+                               amountOfClusters, amountOfNegativeClusters, res.error)) {
+            if (res.error.empty()) { res.cancelled = true; res.error = "Cancelled by user"; }
+            cleanup(); return res;
         }
 
+        const auto brc_t_db1 = std::chrono::steady_clock::now();
         res.n_pts = req.n_pts;
         res.basin_idx.assign(total_cells, 0);
         BRC_CHECK(cudaMemcpy(res.basin_idx.data(), d_dbscanResult, total_cells * sizeof(int), cudaMemcpyDeviceToHost), "memcpy basin_idx D2H");
@@ -9457,8 +9483,11 @@ struct ParametricEngine::Impl {
 
         cleanup();
         #undef BRC_CHECK
-        #undef BRC_CHECK_CU
-        #undef BRC_CANCEL_CHECK
+        std::fprintf(stderr, "[basins recluster] %dx%d: DBSCAN %.3f s, total %.3f s (clusters +%d/%d)\n",
+                     req.n_pts, req.n_pts,
+                     std::chrono::duration<double>(brc_t_db1 - brc_t_db0).count(),
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - brc_t0).count(),
+                     amountOfClusters, amountOfNegativeClusters);
         res.ok = true;
         return res;
     }

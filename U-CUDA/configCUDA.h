@@ -165,6 +165,9 @@ constexpr numb mult_avg_interval = 1.0; // multiplier for average interval value
 //   LOG_AVG   — sign(mean) * log10(|mean|), 0 при mean==0
 //   LOG_RMS   — log10(RMS), -999 при RMS==0
 //   LOG_STDEV — log10(StDev), -999 при StDev==0
+//   SLOG_AVG  — sign(mean) * log10(max(|mean|, 1e-12) / 1e-12): тот же шаг по логарифму, что
+//               у LOG_AVG (eps DBSCAN работает так же на аттракторах любого масштаба), но
+//               монотонная и однозначная: у LOG_AVG +0.05 и -20 давали одно и то же -1.3
 constexpr int BF_AVG_PEAKS            = 0;
 constexpr int BF_AVG_INTERVALS        = 1;
 constexpr int BF_RMS_PEAKS            = 2;
@@ -177,7 +180,11 @@ constexpr int BF_LOG_RMS_PEAKS        = 8;
 constexpr int BF_LOG_RMS_INTERVALS    = 9;
 constexpr int BF_LOG_STDEV_PEAKS      = 10;
 constexpr int BF_LOG_STDEV_INTERVALS  = 11;
-constexpr int BF_FEATURE_COUNT        = 12;
+constexpr int BF_SLOG_AVG_PEAKS       = 12;
+constexpr int BF_FEATURE_COUNT        = 13;
+
+// Пол модуля для BF_SLOG_AVG_PEAKS: |mean| ниже него даёт 0.
+constexpr double BF_SLOG_FLOOR        = 1e-12;
 
 // Дефолты — семантически равны pre-feature-selection поведению (mean пиков,
 // mean интервалов). Подставляются как default args kernel'а, в UI и в
@@ -441,6 +448,29 @@ UCUDA_HD inline numb ucuda_node_value_log(int k, int nPts, numb lo, numb hi) {
     if (nPts <= 1) return lo;
     return (numb)pow(10.0, ucuda_node_log10_d(k, nPts, (double)lo, (double)hi));
 }
+
+// Симметричная лог-сетка бассейнов (±log), по мотивам getValueByIdx_forLogBains из легаси
+// basinsOfAttraction_logAxes: |x| лог-равномерно на [lo, hi] по обе стороны от нуля, m = nPts/2
+// узлов на полуось. Узлы те же, что в легаси, но порядок монотонный: первая половина
+// -hi ... -lo, вторая +lo ... +hi (в легаси шло -lo..-hi, +hi..+lo, и на карте большие |x|
+// оказывались в центре). Требует lo, hi > 0 и чётного nPts >= 4 — проверяется на host-стороне
+// до запуска (run_basins). Дробный kf нужен осям heatmap: мировое значение между узлами.
+UCUDA_HD inline double ucuda_node_symlog_d(double kf, int nPts, double lo, double hi) {
+    const int m = nPts / 2;
+    const double l0 = log10(lo), l1 = log10(hi);
+    if (m <= 1) return kf < (double)m ? -hi : hi;
+    if (kf < (double)m)
+        return -pow(10.0, l1 + kf * (l0 - l1) / (double)(m - 1));
+    return pow(10.0, l0 + (kf - (double)m) * (l1 - l0) / (double)(m - 1));
+}
+
+UCUDA_HD inline numb ucuda_node_value_symlog(int k, int nPts, numb lo, numb hi) {
+    return (numb)ucuda_node_symlog_d((double)k, nPts, (double)lo, (double)hi);
+}
+
+// logAxisMask свипов: бит i — log-ось i, бит UCUDA_SYMLOG_SHIFT + i — ±log-ось i. ±log бывает
+// только у осей НУ бассейнов; параметрические свипы старшие биты не ставят, и их узлы не меняются.
+#define UCUDA_SYMLOG_SHIFT 2
 
 // Continuation-свип: у него СВОЯ конвенция узлов, не совпадающая с классической (там lerp, здесь
 // lo + (hi-lo)*t). Менять её нельзя — по ней посчитаны все continuation-диаграммы. Точка k цепочки:

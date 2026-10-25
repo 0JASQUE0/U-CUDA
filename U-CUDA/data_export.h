@@ -210,6 +210,8 @@ struct BasinsSnapshot {
     int    axis_x_var = 0, axis_y_var = 0;
     double axis_x_lo = 0.0, axis_x_hi = 0.0;
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
+    // ±log-сетка оси (ucuda_node_value_symlog): lo/hi — границы |x|, узлы -hi..-lo, +lo..+hi.
+    bool   axis_x_symlog = false, axis_y_symlog = false;
     int    n_pts = 0;
     int    feature1 = 0;
     int    feature2 = 0;

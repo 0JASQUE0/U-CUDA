@@ -118,12 +118,16 @@ struct System {
 // честное, порядок 2K (замерено 4.1 и 6.1). См. scheme_gbs в codegen.cpp.
 // Map is not an integration scheme but the right-hand side of a discrete map
 // x_{n+1} = f(x_n) itself. The only emitter that never uses h.
+// CDFast — "CD fast": тот же CD, но всё, что не зависит от переменных
+// состояния (h1, h2 и обратные знаменатели 1/(1 - h2*coef) неявного полушага),
+// вынесено в стадию предрасчёта — см. krs_split_prep ниже. Шаг вместо деления
+// умножает на готовую обратную величину, поэтому с CD совпадает лишь до ulp.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
                     ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
                     GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy,
-                    RK45, DOP853, Map };
+                    RK45, DOP853, Map, CDFast };
 
 // Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
 int gbs_stage_count(Scheme sch);
@@ -283,6 +287,10 @@ int adaptive_scheme_q_guess(const std::string& name);
 // the debug panel asks for the CPU form, and as the place to express a future
 // divergence between the two paths.
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
+
+// Стадия предрасчёта КРС ("CD fast"): маркеры блока констант в начале тела и
+// его разбор для ядер — в krs_prep.h (header-only, его читают и движки).
+#include "krs_prep.h"
 
 // Правые части системы в том виде, из которого codegen_scheme собирает шаг
 // ЛЮБОЙ схемы: выражения над X[0..N-1] и a[1..M], по строке на переменную
@@ -643,7 +651,9 @@ public:
     // включая порядок умножений и вынос знака.
     // Возвращает false, если f_i нелинейна по своей переменной: тогда шаг
     // обязан откатиться на простые итерации, ровно как это делает GPU.
-    bool solve_diag_implicit(int i, double* X, const double* a, double hs) const;
+    // recip -- "CD fast": где coef не зависит от состояния, умножить на 1/d.
+    bool solve_diag_implicit(int i, double* X, const double* a, double hs,
+                             bool recip = false) const;
     bool solve_diag_implicit_complex(int i, ucmplx* Z, const double* a, ucmplx hs) const;
 
     // То же самое и по тому же байткоду, но в комплексной арифметике —

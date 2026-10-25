@@ -528,6 +528,10 @@ void write_basins_config(std::ofstream& out, const BasinsSnapshot& s)
     out << "indexVar for estimation = " << s.axis_x_var << ", " << s.axis_y_var << "\n";
     out << "start value_1 = " << s.axis_x_lo << ", stop value_1 = " << s.axis_x_hi << "\n";
     out << "start value_2 = " << s.axis_y_lo << ", stop value_2 = " << s.axis_y_hi << "\n";
+    // ±log-ось: start/stop выше — границы |x|, узлы -hi..-lo, +lo..+hi (сетка легаси
+    // basinsOfAttraction_logAxes). Строка только для такой оси — линейные конфиги прежние.
+    if (s.axis_x_symlog) out << "scale_1 = symlog (|x| log-spaced on both sides of 0: -hi..-lo, +lo..+hi)\n";
+    if (s.axis_y_symlog) out << "scale_2 = symlog (|x| log-spaced on both sides of 0: -hi..-lo, +lo..+hi)\n";
     write_fmad_line(out, s.gpu_fmad);
 }
 

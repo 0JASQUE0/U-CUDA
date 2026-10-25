@@ -1282,6 +1282,8 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text);   o << ",";
     o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
     o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
+    o << "\"axis_x_symlog\":"     << (c.axis_x_symlog ? "true" : "false") << ",";
+    o << "\"axis_y_symlog\":"     << (c.axis_y_symlog ? "true" : "false") << ",";
     o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
     o << "\"writable_var\":"      << c.writable_var          << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
@@ -1336,6 +1338,8 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "axis_x_hi_text")     c.axis_x_hi_text    = p.str();
     else if (key == "axis_y_lo_text")     c.axis_y_lo_text    = p.str();
     else if (key == "axis_y_hi_text")     c.axis_y_hi_text    = p.str();
+    else if (key == "axis_x_symlog")      c.axis_x_symlog     = p.boolean();
+    else if (key == "axis_y_symlog")      c.axis_y_symlog     = p.boolean();
     else if (key == "n_pts_text")         c.n_pts_text        = p.str();
     else if (key == "writable_var")       c.writable_var      = std::stoi(p.str_or_num());
     else if (key == "h_text")             c.h_text            = p.str();

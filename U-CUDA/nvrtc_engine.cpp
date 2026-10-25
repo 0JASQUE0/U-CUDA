@@ -1,6 +1,7 @@
 ﻿#include "nvrtc_engine.h"
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include "perf_warmup.h"       // прогрев GPU перед замером Performance
+#include "krs_prep.h"          // стадия предрасчёта КРС (CD fast)
 #include <cuda.h>
 #include <nvrtc.h>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <fstream>
 #include <thread>
+#include <type_traits>
 
 // exe_dir(): единственное внешнее определение живёт в app_main.cpp (Release) /
 // main_NonLinAnal.cu (Debug) — копия в parametric_engine.cpp лежит в
@@ -30,6 +32,21 @@ static bool cu_ok(CUresult r, std::string& err, const char* where) {
 }
 #define NVOK(x,w) do { if(!nvrtc_ok((x),error_,w)) return false; } while(0)
 #define CUOK(x,w) do { if(!cu_ok((x),error_,w)) return false; } while(0)
+
+// Ядра этого движка собираются без -I, и numb объявляется прямо в исходнике — тем же
+// типом, что в exe (configCUDA.h): UcudaAdaptParams уходит в ядро по значению с хостовой
+// раскладкой, а CPU-ветка Analysis считает в numb. Повторный typedef того же типа в
+// configCUDA.h (комплексные схемы) легален. Хостовый интерфейс движка остаётся в double,
+// буферы устройства — в numb (to_numb / from_numb).
+static const char* const kNumbTypedef =
+    std::is_same<numb, float>::value ? "typedef float numb;\n" : "typedef double numb;\n";
+
+static std::vector<numb> to_numb(const std::vector<double>& v) {
+    return std::vector<numb>(v.begin(), v.end());
+}
+static std::vector<double> from_numb(const std::vector<numb>& v) {
+    return std::vector<double>(v.begin(), v.end());
+}
 
 NvrtcEngine::NvrtcEngine() {}
 NvrtcEngine::~NvrtcEngine() {
@@ -168,16 +185,28 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     }
 
     // Собираем полный CUDA-исходник: тип, КРС как __device__, ядро траектории.
-    // krs_body использует X[], a[], h (как выдаёт codegen). Тип numb=double тут.
+    // krs_body использует X[], a[], h (как выдаёт codegen). Тип numb — kNumbTypedef.
     std::ostringstream src;
-    src << "typedef double numb;\n"
+    src << kNumbTypedef
         << "#define AMOUNTOFX " << amountOfX << "\n";
     // configCUDA.h сам объявляет numb и AMOUNTOFX (второе — под #ifndef, первое
     // повторным typedef того же типа, что легально), поэтому порядок безопасен.
     if (needs_complex) src << "#include \"configCUDA.h\"\n";
+    // Стадия предрасчёта (krs_prep.h, "CD fast"): константы шага — один раз до
+    // траектории. У прочих схем — пустая структура и прямой вызов шага.
+    KrsPrepSplit prep_sp;
+    std::string prep_defs;
+    if (krs_split_prep(krs_body, prep_sp))
+        prep_defs = krs_prep_inline_defs(prep_sp, true);
+    else
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n"
+                    "__device__ __forceinline__ void calculateDiscreteModelP(numb* X, const numb* a, const numb h,"
+                    " const UcudaKrsPre&) { calculateDiscreteModel(X, a, h); }\n";
     src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
         << krs_body << "\n"
         << "}\n"
+        << prep_defs
         // Ядро на N траекторий: поток tid считает траекторию для НУ номер tid.
         // Все траектории параллельны. Параметры values общие для всех потоков.
         // Layout НУ:    ic[tid*AMOUNTOFX + k]
@@ -188,11 +217,13 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
         << "    if (tid >= N) return;\n"
         << "    numb X[AMOUNTOFX];\n"
         << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
-        << "    for (int s=0;s<skip;++s) calculateDiscreteModel(X, values, h);\n"
+        << "    UcudaKrsPre krsPre;\n"
+        << "    ucudaKrsPrep(krsPre, values, h);\n"
+        << "    for (int s=0;s<skip;++s) calculateDiscreteModelP(X, values, h, krsPre);\n"
         << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
         << "    for (int t=0;t<total;++t) {\n"
         << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
-        << "        calculateDiscreteModel(X, values, h);\n"
+        << "        calculateDiscreteModelP(X, values, h, krsPre);\n"
         << "    }\n"
         << "}\n";
     std::string code = src.str();
@@ -259,13 +290,14 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     int nx = amountOfX_, nv = (int)values.size();
     size_t data_count = (size_t)N * total * nx;
     CUdeviceptr d_ic = 0, d_val = 0, d_data = 0;
-    CUOK(cuMemAlloc(&d_ic, (size_t)N * nx * sizeof(double)), "allocIc");
-    CUOK(cuMemAlloc(&d_val, (nv > 0 ? nv : 1) * sizeof(double)), "allocVal");
-    CUOK(cuMemAlloc(&d_data, data_count * sizeof(double)), "allocData");
-    CUOK(cuMemcpyHtoD(d_ic, ic_flat.data(), (size_t)N * nx * sizeof(double)), "cpyIc");
-    if (nv > 0) CUOK(cuMemcpyHtoD(d_val, values.data(), nv * sizeof(double)), "cpyVal");
+    const std::vector<numb> ic_n = to_numb(ic_flat), val_n = to_numb(values);
+    CUOK(cuMemAlloc(&d_ic, (size_t)N * nx * sizeof(numb)), "allocIc");
+    CUOK(cuMemAlloc(&d_val, (nv > 0 ? nv : 1) * sizeof(numb)), "allocVal");
+    CUOK(cuMemAlloc(&d_data, data_count * sizeof(numb)), "allocData");
+    CUOK(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)N * nx * sizeof(numb)), "cpyIc");
+    if (nv > 0) CUOK(cuMemcpyHtoD(d_val, val_n.data(), nv * sizeof(numb)), "cpyVal");
 
-    double hh = h;
+    numb hh = (numb)h;
     int tot = total, sk = skip, n = N;
     void* args[] = { &d_ic, &d_val, &hh, &tot, &sk, &n, &d_data };
     // N потоков: поток tid -> траектория tid. Раскладка под N.
@@ -273,8 +305,8 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     CUOK(cuLaunchKernel((CUfunction)kernel_, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), "launch");
     CUOK(cuCtxSynchronize(), "sync");
 
-    std::vector<double> flat(data_count);
-    CUOK(cuMemcpyDtoH(flat.data(), d_data, data_count * sizeof(double)), "cpyOut");
+    std::vector<numb> flat(data_count);
+    CUOK(cuMemcpyDtoH(flat.data(), d_data, data_count * sizeof(numb)), "cpyOut");
     cuMemFree(d_ic); cuMemFree(d_val); cuMemFree(d_data);
 
     // раскладка: out[tid][step][coord]
@@ -282,7 +314,7 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     for (int tid = 0; tid < N; ++tid) {
         auto& traj = out[tid];
         traj.resize(total);
-        const double* base = flat.data() + (size_t)tid * total * nx;
+        const numb* base = flat.data() + (size_t)tid * total * nx;
         for (int t = 0; t < total; ++t) { traj[t].resize(nx); for (int k = 0; k < nx; ++k) traj[t][k] = base[(size_t)t * nx + k]; }
     }
     return true;
@@ -318,7 +350,7 @@ bool nvrtc_check_ctrl_body(const std::string& body, std::string& log) {
     // #line 1 "prepare" / "controller" — в самом конце, поэтому номера ошибок — строки раздела
     // подготовки и тела (body — оба, adaptive_ctrl_pack).
     std::ostringstream src;
-    src << "typedef double numb;\n"
+    src << kNumbTypedef
         << "#define AMOUNTOFX 3\n"
         << "#define UCUDA_ADAPT_LAYOUT_ONLY\n#include \"ucuda_adaptive.cuh\"\n#undef UCUDA_ADAPT_LAYOUT_ONLY\n"
         << "extern \"C\" __global__ void ucuda_ctrl_check(const UcudaCtlIn* in, UcudaCtlMem* m, UcudaCtlOut* o);\n"
@@ -410,7 +442,7 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
     // Функции схемы — __host__ __device__, как calculateDiscreteModel в шаблонах:
     // их зовут __host__ __device__ методы провайдера UcudaKrsFns.
     std::ostringstream src;
-    src << "typedef double numb;\n"
+    src << kNumbTypedef
         << "#define AMOUNTOFX " << rq.amountOfX << "\n"
         << (needs_complex ? "#include \"configCUDA.h\"\n" : "")
         << "#define UCUDA_AD_KRS_FUNCS\n"
@@ -569,14 +601,15 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
     auto free_all = [&]() {
         for (CUdeviceptr p : { d_ic, d_val, d_y, d_st, d_ts }) if (p) cuMemFree(p);
     };
-    bool ok = cu_ok(cuMemAlloc(&d_ic, (size_t)nx * sizeof(double)), error_, "allocIc(end)")
-           && cu_ok(cuMemAlloc(&d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(double)), error_, "allocVal(end)")
-           && cu_ok(cuMemAlloc(&d_y, (size_t)N * nx * sizeof(double)), error_, "allocY(end)")
-           && cu_ok(cuMemAlloc(&d_st, 8 * sizeof(double)), error_, "allocStats(end)")
+    const std::vector<numb> ic_n = to_numb(rq.ic), val_n = to_numb(rq.values);
+    bool ok = cu_ok(cuMemAlloc(&d_ic, (size_t)nx * sizeof(numb)), error_, "allocIc(end)")
+           && cu_ok(cuMemAlloc(&d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb)), error_, "allocVal(end)")
+           && cu_ok(cuMemAlloc(&d_y, (size_t)N * nx * sizeof(numb)), error_, "allocY(end)")
+           && cu_ok(cuMemAlloc(&d_st, 8 * sizeof(numb)), error_, "allocStats(end)")
            && cu_ok(cuMemAlloc(&d_ts, 2 * sizeof(unsigned long long)), error_, "allocTimer(end)")
-           && cu_ok(cuMemcpyHtoD(d_ic, rq.ic.data(), (size_t)nx * sizeof(double)), error_, "cpyIc(end)")
-           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, rq.values.data(), (size_t)nv * sizeof(double)), error_, "cpyVal(end)"));
-    double T = rq.T;
+           && cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)nx * sizeof(numb)), error_, "cpyIc(end)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(end)"));
+    numb T = (numb)rq.T;
     int n = N;
     UcudaAdaptParams par = rq.params;
     ok = ok && cancel_flag_reset();
@@ -615,14 +648,14 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
         tsum += us;
     }
     if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
-    std::vector<double> y((size_t)nx), st(8);
+    std::vector<numb> y((size_t)nx), st(8);
     if (ok)
-        ok = cu_ok(cuMemcpyDtoH(y.data(), d_y, (size_t)nx * sizeof(double)), error_, "cpyY(end)")
-          && cu_ok(cuMemcpyDtoH(st.data(), d_st, 8 * sizeof(double)), error_, "cpyStats(end)");
+        ok = cu_ok(cuMemcpyDtoH(y.data(), d_y, (size_t)nx * sizeof(numb)), error_, "cpyY(end)")
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, 8 * sizeof(numb)), error_, "cpyStats(end)");
     free_all();
     if (!ok) return false;
     out.t_avg = tsum / (double)rq.repeats;
-    out.y_end = y;
+    out.y_end = from_numb(y);
     out.stats.nacc = st[0]; out.stats.nrej = st[1]; out.stats.nforced = st[2]; out.stats.nrhs = st[3];
     out.stats.hmin = st[4]; out.stats.hmax = st[5]; out.stats.hmean = st[6];
     out.stats.diverged = st[7] != 0;
@@ -659,24 +692,25 @@ bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, P
         if (r != CUDA_SUCCESS) { cu_ok(r, error_, what); return false; }
         return true;
     };
-    if (!alloc(d_ic, (size_t)N * nx * sizeof(double), "allocIc(ad)")
-        || !alloc(d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(double), "allocVal(ad)")
-        || !alloc(d_data, data_count * sizeof(double), "allocData(ad)")
-        || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(double) : 0, "allocTimes(ad)")
+    if (!alloc(d_ic, (size_t)N * nx * sizeof(numb), "allocIc(ad)")
+        || !alloc(d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb), "allocVal(ad)")
+        || !alloc(d_data, data_count * sizeof(numb), "allocData(ad)")
+        || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(numb) : 0, "allocTimes(ad)")
         || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(ad)")
-        || !alloc(d_log, log_count * sizeof(double), "allocLog(ad)")
+        || !alloc(d_log, log_count * sizeof(numb), "allocLog(ad)")
         || !alloc(d_logc, (size_t)N * sizeof(int), "allocLogc(ad)")
-        || !alloc(d_st, (size_t)N * 9 * sizeof(double), "allocStats(ad)")
-        || !alloc(d_fh, (size_t)N * sizeof(double), "allocFh(ad)")) {
+        || !alloc(d_st, (size_t)N * 9 * sizeof(numb), "allocStats(ad)")
+        || !alloc(d_fh, (size_t)N * sizeof(numb), "allocFh(ad)")) {
         free_all();
         return false;
     }
-    bool ok = cu_ok(cuMemcpyHtoD(d_ic, rq.ic_flat.data(), (size_t)N * nx * sizeof(double)), error_, "cpyIc(ad)")
-           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, rq.values.data(), (size_t)nv * sizeof(double)), error_, "cpyVal(ad)"));
+    const std::vector<numb> ic_n = to_numb(rq.ic_flat), val_n = to_numb(rq.values);
+    bool ok = cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)N * nx * sizeof(numb)), error_, "cpyIc(ad)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(ad)"));
     bool cancelled = false;
     if (ok) ok = cancel_flag_reset();
     if (ok) {
-        double t_skip = rq.t_skip, t_rec = rq.t_rec, dt = rq.dt;
+        numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
         int total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, log_cap = rq.log_cap, n = N;
         UcudaAdaptParams par = rq.params;
         CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
@@ -687,44 +721,46 @@ bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, P
           && wait_default_stream(rq.cancel, cancelled);
     }
     if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
-    std::vector<double> st((size_t)N * 9), fh(N);
+    std::vector<numb> st((size_t)N * 9), fh(N);
     std::vector<int> cnt(N), logc(N);
     if (ok) {
         ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(ad)")
           && cu_ok(cuMemcpyDtoH(logc.data(), d_logc, (size_t)N * sizeof(int)), error_, "cpyLogc(ad)")
-          && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(double)), error_, "cpyStats(ad)")
-          && cu_ok(cuMemcpyDtoH(fh.data(), d_fh, (size_t)N * sizeof(double)), error_, "cpyFh(ad)");
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(numb)), error_, "cpyStats(ad)")
+          && cu_ok(cuMemcpyDtoH(fh.data(), d_fh, (size_t)N * sizeof(numb)), error_, "cpyFh(ad)");
     }
 
     out.traj.resize(N);
     if (rq.raw) out.times.resize(N);
     out.log.resize(N);
     out.stats.resize(N);
-    out.final_h = fh;
+    out.final_h = from_numb(fh);
     // Только записанное нитью (counts / log_counts): буфер — под потолок max points, заполнен обычно малой частью.
-    std::vector<double> buf;
+    std::vector<numb> buf;
     for (int tid = 0; ok && tid < N; ++tid) {
         const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
         buf.resize((size_t)c * nx);
         if (c > 0)
-            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(double),
-                                    buf.size() * sizeof(double)), error_, "cpyData(ad)");
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(numb),
+                                    buf.size() * sizeof(numb)), error_, "cpyData(ad)");
         if (!ok) break;
         auto& tr = out.traj[tid];
         tr.resize(c);
         for (int i = 0; i < c; ++i) tr[i].assign(buf.data() + (size_t)i * nx, buf.data() + (size_t)(i + 1) * nx);
         if (rq.raw) {
-            out.times[tid].resize((size_t)c);
+            buf.resize((size_t)c);
             if (c > 0)
-                ok = cu_ok(cuMemcpyDtoH(out.times[tid].data(), d_times + (size_t)tid * cap * sizeof(double),
-                                        (size_t)c * sizeof(double)), error_, "cpyTimes(ad)");
+                ok = cu_ok(cuMemcpyDtoH(buf.data(), d_times + (size_t)tid * cap * sizeof(numb),
+                                        (size_t)c * sizeof(numb)), error_, "cpyTimes(ad)");
+            out.times[tid].assign(buf.begin(), buf.end());
         }
         const int lc = rq.log_cap > 0 ? (logc[tid] < 0 ? 0 : (logc[tid] < rq.log_cap ? logc[tid] : rq.log_cap)) : 0;
-        out.log[tid].resize((size_t)lc * 4);
+        buf.resize((size_t)lc * 4);
         if (ok && lc > 0)
-            ok = cu_ok(cuMemcpyDtoH(out.log[tid].data(), d_log + (size_t)tid * rq.log_cap * 4 * sizeof(double),
-                                    (size_t)lc * 4 * sizeof(double)), error_, "cpyLog(ad)");
-        const double* s = st.data() + (size_t)tid * 9;
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_log + (size_t)tid * rq.log_cap * 4 * sizeof(numb),
+                                    (size_t)lc * 4 * sizeof(numb)), error_, "cpyLog(ad)");
+        out.log[tid].assign(buf.begin(), buf.end());
+        const numb* s = st.data() + (size_t)tid * 9;
         AdaptiveStats& a = out.stats[tid];
         a.nacc = s[0]; a.nrej = s[1]; a.nforced = s[2]; a.nrhs = s[3];
         a.hmin = s[4]; a.hmax = s[5]; a.hmean = s[6];

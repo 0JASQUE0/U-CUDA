@@ -149,6 +149,7 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_rk45", r.scheme_rk45);
     kvbool(o, "scheme_dop853", r.scheme_dop853);
     kvbool(o, "scheme_cd", r.scheme_cd);
+    kvbool(o, "scheme_cdfast", r.scheme_cdfast);
     kvbool(o, "scheme_ccd", r.scheme_ccd);
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
     kvbool(o, "scheme_ccd4s3", r.scheme_ccd4s3);
@@ -234,6 +235,7 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_rk45") r.scheme_rk45 = p.parse_bool();
         else if (key == "scheme_dop853") r.scheme_dop853 = p.parse_bool();
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
+        else if (key == "scheme_cdfast") r.scheme_cdfast = p.parse_bool();
         else if (key == "scheme_ccd") r.scheme_ccd = p.parse_bool();
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
         else if (key == "scheme_ccd4s3") r.scheme_ccd4s3 = p.parse_bool();
