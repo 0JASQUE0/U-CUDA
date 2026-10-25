@@ -916,8 +916,8 @@ struct BasinsResult {
 // Basins recluster — DBSCAN-only прогон поверх кэшированных фич (avg_peaks / avg_intervals /
 // helpful_array из предыдущего run_basins). Используется кнопкой "Clustering" в GUI: меняешь
 // eps_dbscan, не пересчитывая траекторно-feature часть (≈99% времени основного run_basins).
-// krs_body + amountOfX нужны, чтобы compile_basins_if_needed подхватил кэш-ключ модуля; сами
-// DBSCAN-kernel'ы от системы уравнений не зависят.
+// DBSCAN считается на CPU, GPU и модуль бассейнов не нужны; krs_body + amountOfX только
+// проверяются на непустоту (контракт прежней GPU-версии, которой нужен был кэш-ключ модуля).
 struct BasinsReclusterRequest {
     std::string krs_body;
     int amountOfX = 0;

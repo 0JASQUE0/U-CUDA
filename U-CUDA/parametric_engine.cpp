@@ -2026,13 +2026,11 @@ struct ParametricEngine::Impl {
     };
     CachedBif2dModule cached_bif2d;
 
-    // Basins — отдельный шаблон: признаки + два ядра DBSCAN-обхода (basins_dbscan_bfs).
+    // Basins — отдельный шаблон: траектории и признаки. DBSCAN — на CPU (basins_dbscan_host).
     struct CachedBasinsModule {
         std::string  key;
         CUmodule     module                  = nullptr;
         CUfunction   kernel_fused            = nullptr;  // calculateDiscreteModelAvgPeaksCUDA
-        CUfunction   kernel_bfs_seed         = nullptr;  // CUDA_dbscan_bfs_seed_kernel
-        CUfunction   kernel_bfs_expand       = nullptr;  // CUDA_dbscan_bfs_expand_kernel
     };
     CachedBasinsModule cached_basins;
 
@@ -2045,8 +2043,6 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_peaks        = nullptr;  // calculateDiscreteModelPeaksAdCUDA
         CUfunction   kernel_avg          = nullptr;  // calculateDiscreteModelAvgPeaksAdCUDA
         CUfunction   kernel_dbscan       = nullptr;  // dbscanCUDA (БД 2D)
-        CUfunction   kernel_bfs_seed     = nullptr;  // CUDA_dbscan_bfs_seed_kernel (бассейны)
-        CUfunction   kernel_bfs_expand   = nullptr;  // CUDA_dbscan_bfs_expand_kernel (бассейны)
         CUfunction   kernel_dbscan_warp  = nullptr;  // dbscanWarpCUDA (БД 2D, одномерная ветка)
         CUfunction   kernel_dbscan_warp2d = nullptr; // dbscanWarp2DCUDA (БД 2D, двумерная ветка)
         CUfunction   kernel_max_peaks    = nullptr;  // ucudaMaxPeaksCUDA
@@ -2847,17 +2843,15 @@ struct ParametricEngine::Impl {
                                 { "{{KRS_DEVAL_BODY}}",  ad.deval },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "calculateDiscreteModelPeaksAdCUDA", "calculateDiscreteModelAvgPeaksAdCUDA",
-                                "dbscanCUDA", "CUDA_dbscan_bfs_seed_kernel",
-                                "CUDA_dbscan_bfs_expand_kernel",
+                                "dbscanCUDA",
                                 "dbscanWarpCUDA", "ucudaMaxPeaksCUDA", "dbscanWarp2DCUDA" },
                               mod, mg, err))
                 return false;
             fresh.key    = key;
             fresh.module = mod;
             CUfunction* slots[] = { &fresh.kernel_peaks, &fresh.kernel_avg, &fresh.kernel_dbscan,
-                                    &fresh.kernel_bfs_seed, &fresh.kernel_bfs_expand,
                                     &fresh.kernel_dbscan_warp, &fresh.kernel_max_peaks, &fresh.kernel_dbscan_warp2d };
-            for (int i = 0; i < 8; ++i)
+            for (int i = 0; i < 6; ++i)
                 if (!module_fn(mod, mg[(size_t)i], *slots[i], err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
@@ -8868,7 +8862,7 @@ struct ParametricEngine::Impl {
     }
 
     // compile_basins_if_needed — отдельный шаблон basins.template.cu: ядро траекторий и
-    // признаков плюс два ядра DBSCAN-обхода (seed и уровень, см. basins_dbscan_bfs).
+    // признаков (DBSCAN — на CPU, см. basins_dbscan_host).
     // Cache-ключ помечен `:basins`; par_or_var=0 захардкожен в шаблоне, поэтому ключа не
     // требует — только хэш krs_body/amountOfX.
     bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
@@ -8881,118 +8875,190 @@ struct ParametricEngine::Impl {
             if (!build_module(snapshot_sources(src_template_basins), "basins.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
-                              { "calculateDiscreteModelAvgPeaksCUDA",
-                                "CUDA_dbscan_bfs_seed_kernel",
-                                "CUDA_dbscan_bfs_expand_kernel" },
+                              { "calculateDiscreteModelAvgPeaksCUDA" },
                               mod, mg, err))
                 return false;
 
             fresh.key    = key;
             fresh.module = mod;
-            if (!module_fn(mod, mg[0], fresh.kernel_fused,      err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[1], fresh.kernel_bfs_seed,   err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[2], fresh.kernel_bfs_expand, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[0], fresh.kernel_fused, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
 
-    // DBSCAN бассейнов (фаза 2 run_basins и run_basins_recluster): обход в ширину по уровням,
-    // целиком на GPU — разбиение и порядок меток см. над CUDA_dbscan_bfs_seed_kernel. На кластер:
-    // одно ядро seed'а и чтение двух индексов; на уровень: одно ядро и чтение одного int (размер
-    // следующего фронта, в pinned-память). labels должны быть обнулены. Прогресс — доля
-    // размеченных ячеек от всей сетки (Unbound не размечаются, так что до 1 он доходит, только
-    // если их нет); отмена проверяется на каждом уровне. false + err пустой = отмена.
-    bool basins_dbscan_bfs(CUfunction k_seed, CUfunction k_expand,
-                           const numb* d_X, const numb* d_Y, const int* d_helpful, int* d_labels,
-                           size_t total_cells, double eps,
-                           const std::shared_ptr<std::atomic<bool>>& cancel,
-                           const std::shared_ptr<std::atomic<float>>& progress,
-                           int& n_pos, int& n_neg, std::string& err) {
-        n_pos = 0; n_neg = 0; err.clear();
-        int*          d_front   = nullptr;
-        int*          d_next    = nullptr;
-        int*          d_count   = nullptr;
-        unsigned int* d_seed    = nullptr;
-        int*          h_pin     = nullptr;   // [0..1] seed'ы FP/Osc, [2] размер фронта, [3] метка
-        auto cleanup = [&]() {
-            if (d_front) cudaFree(d_front);
-            if (d_next)  cudaFree(d_next);
-            if (d_count) cudaFree(d_count);
-            if (d_seed)  cudaFree(d_seed);
-            if (h_pin)   cudaFreeHost(h_pin);
-        };
-        #define BFS_CHECK(call, where) do { \
-            cudaError_t _e = (call); \
-            if (_e != cudaSuccess) { \
-                err = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
-                cleanup(); return false; \
-            } \
-        } while(0)
-        #define BFS_CHECK_CU(call, where) do { \
-            CUresult _r = (call); \
-            if (_r != CUDA_SUCCESS) { \
-                err = std::string(where) + ": " + cu_err(_r); \
-                cleanup(); return false; \
-            } \
-        } while(0)
-
-        BFS_CHECK(cudaMalloc((void**)&d_front, total_cells * sizeof(int)), "cudaMalloc dbscan front");
-        BFS_CHECK(cudaMalloc((void**)&d_next,  total_cells * sizeof(int)), "cudaMalloc dbscan next");
-        BFS_CHECK(cudaMalloc((void**)&d_count, sizeof(int)),               "cudaMalloc dbscan count");
-        BFS_CHECK(cudaMalloc((void**)&d_seed,  2 * sizeof(unsigned int)),  "cudaMalloc dbscan seed");
-        BFS_CHECK(cudaMallocHost((void**)&h_pin, 4 * sizeof(int)),         "cudaMallocHost dbscan");
-
-        const int blockSize = launch_block_size(2 * sizeof(numb));   // тайл фронта в shared
-        const int gridSize  = (int)((total_cells + blockSize - 1) / blockSize);
-        const unsigned shared = (unsigned)(2 * blockSize * sizeof(numb));
-        int n = (int)total_cells;
+    // DBSCAN бассейнов (фаза 2 run_basins и run_basins_recluster) на CPU, сеткой в пространстве
+    // признаков. Разбиение и метки — те же, что давал прежний обход в ширину на GPU:
+    //   - кластер — компонента связности по отношению distance2 <= eps² среди точек с
+    //     helpful != REGIME_UNBOUND (Unbound остаются 0);
+    //   - компоненты, где есть REGIME_FIXED_POINT, получают -1, -2, ... по возрастанию своего
+    //     наименьшего индекса FP; остальные — 1, 2, ... по наименьшему индексу REGIME_OSCILLATION;
+    //     компонента без FP и Osc (иные коды helpful) остаётся 0.
+    // Зачем: обход в ширину был O(N²). У бассейнов признаки ячеек одного аттрактора почти равны,
+    // первый уровень от seed'а захватывает почти весь кластер, и каждая точка ДРУГОГО аттрактора
+    // затем просматривает весь этот фронт без попадания. 600x600: 5.3 с из 24.7 с расчёта.
+    // Здесь точки раскладываются по ячейкам со стороной чуть меньше eps/√2: любые две точки одной
+    // ячейки заведомо соседи, так что ячейка — один узел union-find, а соседей ищем только в окне
+    // 5x5 ячеек (пара в пределах eps отстоит не больше чем на 2 ячейки по каждой оси).
+    // Предикат соседства — ровно GPU-шный: distance2 на numb, при --fmad NVRTC сворачивает его в
+    // fma(dx, dx, dy*dy) (проверено по PTX), без него — отдельные округления; MSVC без
+    // /fp:contract выражений не сворачивает. Поэтому и граничные пары решаются так же, как на GPU.
+    // Сетка — только отсев кандидатов с запасом: на результат она не влияет. Считает fmad
+    // текущей настройки (get_nvrtc_fmad), как считало бы ядро, собранное с ней.
+    // labels — n ячеек, Unbound получают 0. false = отмена.
+    static bool basins_dbscan_host(const numb* X, const numb* Y, const int* H, size_t n, double eps,
+                                   const std::shared_ptr<std::atomic<bool>>& cancel,
+                                   const std::shared_ptr<std::atomic<float>>& progress,
+                                   int* labels, int& n_pos, int& n_neg) {
+        n_pos = 0; n_neg = 0;
         numb eps2 = (numb)eps;
         eps2 = eps2 * eps2;   // в numb, как eps * eps в CUDA_dbscan_kernel
-        size_t classified = 0;
+        const bool fmad = get_nvrtc_fmad();
+        auto near_pt = [&](size_t a, size_t b) {
+            const numb dx = X[b] - X[a];
+            const numb dy = Y[b] - Y[a];
+            const numb d2 = fmad ? (numb)std::fma(dx, dx, dy * dy) : dx * dx + dy * dy;
+            return d2 <= eps2;
+        };
+        auto cancelled = [&]() { return cancel && cancel->load(std::memory_order_relaxed); };
 
-        for (;;) {
-            if (cancel && cancel->load(std::memory_order_relaxed)) { cleanup(); return false; }
-            BFS_CHECK(cudaMemset(d_seed, 0xFF, 2 * sizeof(unsigned int)), "memset dbscan seed");
-            void* args_seed[] = { &d_helpful, &d_labels, &n, &d_seed };
-            BFS_CHECK_CU(cuLaunchKernel(k_seed, gridSize, 1, 1, blockSize, 1, 1, 0, nullptr, args_seed, nullptr),
-                         "cuLaunchKernel(dbscan seed)");
-            BFS_CHECK(cudaMemcpy(h_pin, d_seed, 2 * sizeof(unsigned int), cudaMemcpyDeviceToHost), "memcpy dbscan seed D2H");
-            const unsigned fp = (unsigned)h_pin[0], osc = (unsigned)h_pin[1];
-            if (fp == 0xFFFFFFFFu && osc == 0xFFFFFFFFu) break;   // размечать больше нечего
-            // NB: счётчик растёт ПОСЛЕ проверки seed'а. Референс NonLinAnal инкрементирует до неё
-            // и сообщает на один кластер больше; мы отдаём n_clusters в UI, где off-by-one был
-            // виден как «4 кластера» при трёх реальных.
-            int seed  = (int)(fp != 0xFFFFFFFFu ? fp : osc);
-            int label = fp != 0xFFFFFFFFu ? --n_neg : ++n_pos;
-            h_pin[2] = seed; h_pin[3] = label;
-            BFS_CHECK(cudaMemcpy(d_labels + seed, &h_pin[3], sizeof(int), cudaMemcpyHostToDevice), "memcpy dbscan seed label");
-            BFS_CHECK(cudaMemcpy(d_front,         &h_pin[2], sizeof(int), cudaMemcpyHostToDevice), "memcpy dbscan seed front");
-            ++classified;
-
-            int nf = 1;
-            while (nf > 0) {
-                if (cancel && cancel->load(std::memory_order_relaxed)) { cleanup(); return false; }
-                BFS_CHECK(cudaMemset(d_count, 0, sizeof(int)), "memset dbscan count");
-                void* args_exp[] = { (void*)&d_X, (void*)&d_Y, (void*)&d_helpful, &d_labels, &n,
-                                     &d_front, &nf, &d_next, &d_count, &eps2, &label };
-                BFS_CHECK_CU(cuLaunchKernel(k_expand, gridSize, 1, 1, blockSize, 1, 1, shared, nullptr, args_exp, nullptr),
-                             "cuLaunchKernel(dbscan expand)");
-                BFS_CHECK(cudaMemcpy(&h_pin[2], d_count, sizeof(int), cudaMemcpyDeviceToHost), "memcpy dbscan count D2H");
-                nf = h_pin[2];
-                std::swap(d_front, d_next);
-                classified += (size_t)nf;
-                if (progress) progress->store(float(classified) / float(total_cells), std::memory_order_relaxed);
-            }
+        // Ячейка: сторона s чуть меньше eps/√2 (запас 1e-4 перекрывает округления и numb = float).
+        // Ключ считается в double; при |x/s| > 2^32 погрешность ключа съела бы запас, такие точки
+        // (и вообще нечисловые признаки) идут мимо сетки.
+        const double s   = eps / std::sqrt(2.0) * (1.0 - 1e-4);
+        const double lim = 4294967296.0;
+        struct Key { long long cx, cy; uint32_t i; };
+        std::vector<Key> keys;     keys.reserve(n);
+        std::vector<uint32_t> offgrid;   // конечные, но вне сетки: перебор против всех
+        std::vector<int> node(n, -1);   // узел union-find точки; -1 — Unbound (не участвует)
+        for (size_t i = 0; i < n; ++i) {
+            if (H[i] == REGIME_UNBOUND) continue;
+            if (!std::isfinite((double)X[i]) || !std::isfinite((double)Y[i])) continue;   // узел получит ниже; соседей у NaN/inf нет
+            const double qx = (double)X[i] / s, qy = (double)Y[i] / s;
+            if (!(std::fabs(qx) <= lim && std::fabs(qy) <= lim)) { offgrid.push_back((uint32_t)i); continue; }
+            keys.push_back({ (long long)std::floor(qx), (long long)std::floor(qy), (uint32_t)i });
         }
-        cleanup();
-        #undef BFS_CHECK
-        #undef BFS_CHECK_CU
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+            return a.cx != b.cx ? a.cx < b.cx : (a.cy != b.cy ? a.cy < b.cy : a.i < b.i);
+        });
+        struct Cell { long long cx, cy; size_t b, e; double x0, x1, y0, y1; };
+        std::vector<Cell> cells;
+        for (size_t k = 0; k < keys.size();) {
+            size_t e = k;
+            Cell c{ keys[k].cx, keys[k].cy, k, k, INFINITY, -INFINITY, INFINITY, -INFINITY };
+            for (; e < keys.size() && keys[e].cx == c.cx && keys[e].cy == c.cy; ++e) {
+                const size_t i = keys[e].i;
+                c.x0 = (std::min)(c.x0, (double)X[i]); c.x1 = (std::max)(c.x1, (double)X[i]);
+                c.y0 = (std::min)(c.y0, (double)Y[i]); c.y1 = (std::max)(c.y1, (double)Y[i]);
+                node[i] = (int)cells.size();
+            }
+            c.e = e;
+            cells.push_back(c);
+            k = e;
+        }
+        int nodes = (int)cells.size();
+        for (uint32_t i : offgrid) node[i] = nodes++;
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] != REGIME_UNBOUND && node[i] < 0) node[i] = nodes++;   // NaN/inf: свой узел навсегда
+
+        std::vector<int> parent((size_t)nodes);
+        for (int v = 0; v < nodes; ++v) parent[(size_t)v] = v;
+        auto find = [&](int v) {
+            while (parent[(size_t)v] != v) { parent[(size_t)v] = parent[(size_t)parent[(size_t)v]]; v = parent[(size_t)v]; }
+            return v;
+        };
+        auto unite = [&](int a, int b) {
+            a = find(a); b = find(b);
+            if (a != b) { if (a < b) std::swap(a, b); parent[(size_t)a] = b; }
+        };
+
+        // Пары соседних ячеек. Окно 5x5 без центра, каждая неупорядоченная пара — один раз (сосед
+        // с большим ключом). Пара, уже связанная через другие ячейки, не проверяется: плотные
+        // кластеры сливаются за первые же проверки. Перед перебором точек — отсев по
+        // прямоугольникам ячеек с тем же запасом.
+        const double gapMax2 = eps * eps * (1.0 + 1e-4);
+        auto box_gap2 = [](double ax0, double ax1, double ay0, double ay1,
+                           double bx0, double bx1, double by0, double by1) {
+            const double gx = (std::max)(0.0, (std::max)(ax0 - bx1, bx0 - ax1));
+            const double gy = (std::max)(0.0, (std::max)(ay0 - by1, by0 - ay1));
+            return gx * gx + gy * gy;
+        };
+        auto find_cell = [&](long long cx, long long cy) -> int {
+            auto it = std::lower_bound(cells.begin(), cells.end(), std::make_pair(cx, cy),
+                [](const Cell& c, const std::pair<long long, long long>& k) {
+                    return c.cx != k.first ? c.cx < k.first : c.cy < k.second;
+                });
+            return (it != cells.end() && it->cx == cx && it->cy == cy) ? (int)(it - cells.begin()) : -1;
+        };
+        for (size_t a = 0; a < cells.size(); ++a) {
+            if ((a & 1023) == 0) {
+                if (cancelled()) return false;
+                if (progress) progress->store(0.9f * float(a) / float(cells.size()), std::memory_order_relaxed);
+            }
+            const Cell& A = cells[a];
+            for (int ox = 0; ox <= 2; ++ox)
+                for (int oy = -2; oy <= 2; ++oy) {
+                    if (ox == 0 && oy <= 0) continue;
+                    const int b = find_cell(A.cx + ox, A.cy + oy);
+                    if (b < 0 || find((int)a) == find(b)) continue;
+                    const Cell& B = cells[(size_t)b];
+                    if (box_gap2(A.x0, A.x1, A.y0, A.y1, B.x0, B.x1, B.y0, B.y1) > gapMax2) continue;
+                    bool hit = false;
+                    for (size_t p = A.b; p < A.e && !hit; ++p) {
+                        const size_t i = keys[p].i;
+                        const double xi = (double)X[i], yi = (double)Y[i];
+                        if (box_gap2(xi, xi, yi, yi, B.x0, B.x1, B.y0, B.y1) > gapMax2) continue;
+                        for (size_t q = B.b; q < B.e; ++q)
+                            if (near_pt(i, keys[q].i)) { hit = true; break; }
+                    }
+                    if (hit) unite((int)a, b);
+                }
+        }
+        // Точки вне сетки: перебор против всех конечных точек (на практике их нет).
+        for (uint32_t u : offgrid) {
+            if (cancelled()) return false;
+            for (size_t j = 0; j < n; ++j)
+                if (j != u && H[j] != REGIME_UNBOUND && near_pt(u, j)) unite(node[u], node[j]);
+        }
+
+        // Метки: компоненты с FP — по возрастанию наименьшего индекса FP, затем остальные — по
+        // наименьшему индексу Osc. Первая встреча корня при обходе по возрастанию индекса и есть
+        // этот наименьший индекс.
+        std::vector<int> labelOf((size_t)nodes, 0);
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] == REGIME_FIXED_POINT) { int& l = labelOf[(size_t)find(node[i])]; if (l == 0) l = --n_neg; }
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] == REGIME_OSCILLATION) { int& l = labelOf[(size_t)find(node[i])]; if (l == 0) l = ++n_pos; }
+        for (size_t i = 0; i < n; ++i)
+            labels[i] = node[i] >= 0 ? labelOf[(size_t)find(node[i])] : 0;
+        if (progress) progress->store(1.0f, std::memory_order_relaxed);
+        return true;
+    }
+
+    // То же для признаков, лежащих на устройстве (run_basins): D2H, basins_dbscan_host, метки
+    // обратно в d_labels. false + err пустой = отмена.
+    bool basins_dbscan_grid(const numb* d_X, const numb* d_Y, const int* d_helpful, int* d_labels,
+                            size_t total_cells, double eps,
+                            const std::shared_ptr<std::atomic<bool>>& cancel,
+                            const std::shared_ptr<std::atomic<float>>& progress,
+                            int& n_pos, int& n_neg, std::string& err) {
+        err.clear();
+        const size_t n = total_cells;
+        std::vector<numb> X(n), Y(n);
+        std::vector<int>  H(n), labels(n);
+        cudaError_t ce = cudaMemcpy(X.data(), d_X, n * sizeof(numb), cudaMemcpyDeviceToHost);
+        if (ce == cudaSuccess) ce = cudaMemcpy(Y.data(), d_Y, n * sizeof(numb), cudaMemcpyDeviceToHost);
+        if (ce == cudaSuccess) ce = cudaMemcpy(H.data(), d_helpful, n * sizeof(int), cudaMemcpyDeviceToHost);
+        if (ce != cudaSuccess) { err = std::string("CUDA memcpy dbscan D2H: ") + cudaGetErrorString(ce); return false; }
+        if (!basins_dbscan_host(X.data(), Y.data(), H.data(), n, eps, cancel, progress, labels.data(), n_pos, n_neg))
+            return false;
+        ce = cudaMemcpy(d_labels, labels.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+        if (ce != cudaSuccess) { err = std::string("CUDA memcpy dbscan labels H2D: ") + cudaGetErrorString(ce); return false; }
         return true;
     }
 
     // run_basins — порт NonLinAnal::basinsOfAttraction + CUDA_dbscan host-loop (hostLibrary.cu).
     // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) DBSCAN обходом в ширину на GPU
-    // (basins_dbscan_bfs). Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
+    // (basins_dbscan_grid, на CPU). Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
     BasinsResult run_basins(const BasinsRequest& req) {
         BasinsResult res;
         auto fail = [&](const std::string& msg) -> BasinsResult& { res.error = msg; return res; };
@@ -9315,17 +9381,15 @@ struct ParametricEngine::Impl {
 
         const auto bas_t_sim = bas_clock::now();
 
-        // 2. DBSCAN — обход в ширину на GPU (basins_dbscan_bfs). Прогресс фазы — доля
-        // размеченных ячеек, обновляется на каждом уровне обхода.
+        // 2. DBSCAN — на CPU сеткой в пространстве признаков (basins_dbscan_grid). Прогресс фазы —
+        // доля обработанных ячеек сетки.
         if (req.progress_phase) req.progress_phase->store(2, std::memory_order_relaxed);
         if (req.progress)       req.progress->store(0.0f, std::memory_order_relaxed);
         int amountOfClusters         = 0;
         int amountOfNegativeClusters = 0;
-        if (!basins_dbscan_bfs(ad ? cached_ad.kernel_bfs_seed   : cached_basins.kernel_bfs_seed,
-                               ad ? cached_ad.kernel_bfs_expand : cached_basins.kernel_bfs_expand,
-                               d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
-                               total_cells, eps_dbscan, req.cancel, req.progress,
-                               amountOfClusters, amountOfNegativeClusters, res.error)) {
+        if (!basins_dbscan_grid(d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
+                                total_cells, eps_dbscan, req.cancel, req.progress,
+                                amountOfClusters, amountOfNegativeClusters, res.error)) {
             if (res.error.empty()) { res.cancelled = true; res.error = "Cancelled by user"; }
             cleanup(); return res;
         }
@@ -9409,9 +9473,8 @@ struct ParametricEngine::Impl {
         return res;
     }
 
-    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич. Зеркалит фазу 2
-    // (DBSCAN, basins_dbscan_bfs) из run_basins, но пропускает sim-фазу: d_avgPeaks/d_avgIntervals/d_helpfulArray
-    // заливаются из request'а вместо повторного прогона avgPeakFinderCUDA. Мульты уже применены к
+    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич: та же фаза 2, что в
+    // run_basins (basins_dbscan_host), без sim-фазы и без GPU. Мульты уже применены к
     // загруженным фичам (run_basins, фаза 1), поэтому здесь не нужны.
     BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req) {
         BasinsReclusterResult res;
@@ -9428,66 +9491,28 @@ struct ParametricEngine::Impl {
         if (req.avg_intervals.size() != total_cells)             return fail("avg_intervals: size does not match n_pts²");
         if (req.helpful_array.size() != total_cells)             return fail("helpful_array: size does not match n_pts²");
 
+        // DBSCAN считается на CPU (basins_dbscan_host): ни GPU, ни модуль бассейнов здесь не нужны.
+        // Признаки — в numb, как их видел бы расчёт на устройстве.
         const auto brc_t0 = std::chrono::steady_clock::now();
-        std::string err;
-        if (!ensure_init(err)) return fail(err);
-        cuCtxSetCurrent(context);
-        if (!compile_basins_if_needed(req.krs_body, req.amountOfX, err)) return fail(err);
-
-        const double eps_dbscan = req.eps_dbscan;
-
-        int*    d_helpfulArray      = nullptr;
-        int*    d_dbscanResult      = nullptr;
-        numb* d_avgPeaks          = nullptr;
-        numb* d_avgIntervals      = nullptr;
-
-        auto cleanup = [&]() {
-            if (d_helpfulArray)      cudaFree(d_helpfulArray);
-            if (d_dbscanResult)      cudaFree(d_dbscanResult);
-            if (d_avgPeaks)          cudaFree(d_avgPeaks);
-            if (d_avgIntervals)      cudaFree(d_avgIntervals);
-        };
-
-        #define BRC_CHECK(call, where) do { \
-            cudaError_t _e = (call); \
-            if (_e != cudaSuccess) { \
-                res.error = std::string("CUDA ") + (where) + ": " + cudaGetErrorString(_e); \
-                cleanup(); return res; \
-            } \
-        } while(0)
-
-        BRC_CHECK(cudaMalloc((void**)&d_helpfulArray,      total_cells * sizeof(int)),    "cudaMalloc d_helpfulArray");
-        BRC_CHECK(cudaMalloc((void**)&d_dbscanResult,      total_cells * sizeof(int)),    "cudaMalloc d_dbscanResult");
-        BRC_CHECK(cudaMalloc((void**)&d_avgPeaks,          total_cells * sizeof(numb)), "cudaMalloc d_avgPeaks");
-        BRC_CHECK(cudaMalloc((void**)&d_avgIntervals,      total_cells * sizeof(numb)), "cudaMalloc d_avgIntervals");
-
-        BRC_CHECK(cudaMemcpy(d_avgPeaks,     to_numb(req.avg_peaks).data(),     total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_peaks H2D");
-        BRC_CHECK(cudaMemcpy(d_avgIntervals, to_numb(req.avg_intervals).data(), total_cells * sizeof(numb), cudaMemcpyHostToDevice), "memcpy avg_intervals H2D");
-        BRC_CHECK(cudaMemcpy(d_helpfulArray, req.helpful_array.data(), total_cells * sizeof(int),    cudaMemcpyHostToDevice), "memcpy helpful_array H2D");
-        BRC_CHECK(cudaMemset(d_dbscanResult, 0, total_cells * sizeof(int)), "memset d_dbscanResult");
-        BRC_CHECK(cudaDeviceSynchronize(), "sync after H2D");
-
+        const std::vector<numb> X = to_numb(req.avg_peaks);
+        const std::vector<numb> Y = to_numb(req.avg_intervals);
         if (req.progress) req.progress->store(0.0f, std::memory_order_relaxed);
         int amountOfClusters         = 0;
         int amountOfNegativeClusters = 0;
+        res.basin_idx.assign(total_cells, 0);
         const auto brc_t_db0 = std::chrono::steady_clock::now();
-        if (!basins_dbscan_bfs(cached_basins.kernel_bfs_seed, cached_basins.kernel_bfs_expand,
-                               d_avgPeaks, d_avgIntervals, d_helpfulArray, d_dbscanResult,
-                               total_cells, eps_dbscan, req.cancel, req.progress,
-                               amountOfClusters, amountOfNegativeClusters, res.error)) {
-            if (res.error.empty()) { res.cancelled = true; res.error = "Cancelled by user"; }
-            cleanup(); return res;
+        if (!basins_dbscan_host(X.data(), Y.data(), req.helpful_array.data(), total_cells, req.eps_dbscan,
+                                req.cancel, req.progress, res.basin_idx.data(),
+                                amountOfClusters, amountOfNegativeClusters)) {
+            res.basin_idx.clear();
+            res.cancelled = true; res.error = "Cancelled by user";
+            return res;
         }
-
         const auto brc_t_db1 = std::chrono::steady_clock::now();
         res.n_pts = req.n_pts;
-        res.basin_idx.assign(total_cells, 0);
-        BRC_CHECK(cudaMemcpy(res.basin_idx.data(), d_dbscanResult, total_cells * sizeof(int), cudaMemcpyDeviceToHost), "memcpy basin_idx D2H");
         res.n_clusters      = amountOfClusters;
         res.min_cluster_idx = amountOfNegativeClusters;
 
-        cleanup();
-        #undef BRC_CHECK
         std::fprintf(stderr, "[basins recluster] %dx%d: DBSCAN %.3f s, total %.3f s (clusters +%d/%d)\n",
                      req.n_pts, req.n_pts,
                      std::chrono::duration<double>(brc_t_db1 - brc_t_db0).count(),
