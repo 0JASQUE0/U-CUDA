@@ -32,7 +32,28 @@ struct System {
     bool   newton_full      = false;
     double newton_tol       = 1e-10;
     int    newton_max_iters = 8;
+    // "CD FP" / "CD fast FP": число простых итераций. Сам расчёт берёт его в
+    // рантайме из a[] (см. cd_fp_slot ниже); здесь — только оценка цены шага
+    // для scheme_rhs_per_step (Order -> Performance кладёт сюда n своего конфига).
+    int    cd_fp_iters      = 4;
 };
+
+// "CD FP" / "CD fast FP": число простых итераций n — рантайм-значение, как
+// коэффициент симметрии s. Раскладка a[] во всех вкладках: [s, p_1..p_M, n],
+// то есть n лежит в a[M+1]; тело КРС читает его в cdfp_n. Слот есть у всех
+// схем (остальные его не читают), поэтому размер a[] от схемы не зависит.
+inline int cd_fp_slot(const System& s) { return (int)s.params.size() + 1; }
+// Текст поля "FP iterations" -> n (не меньше 1; мусор -> 4).
+inline int cd_fp_iters_from_text(const std::string& t) {
+    int v = 4;
+    try { v = std::stoi(t); } catch (...) { v = 4; }
+    return v < 1 ? 1 : v;
+}
+// Дописать слот n в конец собранного a[] = [s, p_1..p_M].
+template <class Vec>
+inline void cd_fp_append_slot(Vec& values, const std::string& n_text) {
+    values.push_back((typename Vec::value_type)cd_fp_iters_from_text(n_text));
+}
 
 // Конечно-разностные схемы интегрирования.
 // DOPRI78 — Dormand-Prince 8(7), 13-стадийный embedded метод (см. scheme_dopri78
@@ -122,12 +143,19 @@ struct System {
 // состояния (h1, h2 и обратные знаменатели 1/(1 - h2*coef) неявного полушага),
 // вынесено в стадию предрасчёта — см. krs_split_prep ниже. Шаг вместо деления
 // умножает на готовую обратную величину, поэтому с CD совпадает лишь до ulp.
+// CDFP — "CD FP": неявная половина CD целиком простыми итерациями
+// (System::cd_fp_iters проходов), слагаемые f_i без своей переменной считаются
+// один раз до итераций; у линейной f_i = coef*x_i + rem итерация
+// x = x_fp + (h2*coef)*x.
+// CDFastFP — "CD fast FP": линейные уравнения как в CD fast (предрасчёт 1/d),
+// итерации с тем же выносом только у нелинейных. См. emit_fp_implicit_eq в
+// codegen.cpp.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
                     ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
                     GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy,
-                    RK45, DOP853, Map, CDFast };
+                    RK45, DOP853, Map, CDFast, CDFP, CDFastFP };
 
 // Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
 int gbs_stage_count(Scheme sch);
@@ -655,6 +683,10 @@ public:
     bool solve_diag_implicit(int i, double* X, const double* a, double hs,
                              bool recip = false) const;
     bool solve_diag_implicit_complex(int i, ucmplx* Z, const double* a, ucmplx hs) const;
+    // "CD FP" / "CD fast FP" (fast): i-е уравнение неявного полушага так же,
+    // как его печатает emit_fp_implicit_eq, — a[cd_fp_slot] простых итераций
+    // с вынесенными слагаемыми без x_i, линейные при fast — solve_diag_implicit.
+    void solve_diag_fp(int i, double* X, const double* a, double hs, bool fast) const;
 
     // То же самое и по тому же байткоду, но в комплексной арифметике —
     // для схем с комплексными коэффициентами (Complex CD). Параметры a[]

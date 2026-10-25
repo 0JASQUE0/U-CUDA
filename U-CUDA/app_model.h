@@ -279,6 +279,7 @@ enum class BroadcastField {
     InitCondition,  // начальное условие по имени переменной
     StepH,
     SymmetryS,
+    CdFpIters,      // число простых итераций CD FP (a[M+1])
     TMax,           // computing time
     Transient,      // transient time
     PreScaller,     // decimator
@@ -367,6 +368,9 @@ public:
     bool scheme_dop853 = false;
     bool scheme_cd = false;
     bool scheme_cdfast = false;   // CD fast: CD с предрасчётом констант шага
+    // CD FP, CD fast FP: неявная половина простыми итерациями (cd_fp_iters)
+    bool scheme_cdfp = false;
+    bool scheme_cdfastfp = false;
     // Complex CD: та же композиция и тот же слот a[0], но полушаги комплексные:
     // h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6.
     bool scheme_ccd = false;
@@ -419,6 +423,9 @@ public:
     bool        newton_full      = false;
     std::string newton_tol       = "1e-10";
     std::string newton_max_iters = "8";
+    // Число простых итераций CD FP / CD fast FP по умолчанию для вкладок
+    // (как symmetry_s: копируется в конфиги при загрузке системы).
+    std::string cd_fp_iters      = "4";
 
     // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
     std::string symmetry_s = "0.5";
@@ -1095,6 +1102,8 @@ public:
                 { scheme_cd,       "CD",                Scheme::CD },
                 { scheme_cd10, "CD_{1-0}", Scheme::CD10 },
                 { scheme_cdfast,   "CD fast",           Scheme::CDFast },
+                { scheme_cdfp,     "CD FP",             Scheme::CDFP },
+                { scheme_cdfastfp, "CD fast FP",        Scheme::CDFastFP },
                 { scheme_ccd,      "Complex CD",        Scheme::ComplexCD },
                 { scheme_ccd10, "Complex CD_{1-0}", Scheme::ComplexCD10 },
                 { scheme_cieuler,  "Complex Implicit Euler", Scheme::ComplexIEuler },

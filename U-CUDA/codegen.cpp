@@ -377,6 +377,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // Number of simple iterations used in the fallback path. Must stay in sync
     // with integrator.cpp::step_cd so that CPU and GPU trajectories match.
     constexpr int CD_ITERS = 4;
+    // "CD FP": число итераций из System (UI), не меньше одной. Сверху
+    // ограничено, чтобы опечатка не развернула тело на мегабайты.
+    // Само число итераций приходит в рантайме слотом a[M+1] (cd_fp_slot); это
+    // значение — только оценка цены шага для scheme_rhs_per_step.
+    int cd_fp_iters_of(const System& s) {
+        return s.cd_fp_iters < 1 ? 1 : s.cd_fp_iters;
+    }
 
     // Complex CD: imaginary part of the half-step coefficients, sqrt(3)/6.
     // h1 = h*(0.5 + i*CCD_IMAG), h2 = conj(h1). Mirrored in
@@ -1415,6 +1422,82 @@ namespace { // внутренняя линковка: всё ниже не ви�
         }
     }
 
+    // --- "CD FP" / "CD fast FP": неявная половина простыми итерациями ---------
+    // Слагаемые верхней суммы f_i, не содержащие своей переменной v, за время
+    // итераций не меняются (остальные X[] и a[] итерации не трогают), поэтому
+    // идут в начальное значение один раз:
+    //   x_fp = X[i] + hs * (r);          r -- слагаемые без v
+    //   for (k < cdfp_n) X[i] = x_fp + hs * (g);   g -- слагаемые с v
+    // Если f_i линейна по v (coef*v + rem), итерация -- X[i] = x_fp + c*X[i]
+    // с c = hs * coef, посчитанным тоже один раз. Первое приближение то же,
+    // что у CD: X[i] до полушага. Число итераций n -- рантайм-значение, как s:
+    // a[] = [s, p_1..p_M, n], тело читает его в cdfp_n (kCdFpIterDecl).
+    void fp_collect_terms(const PN& n, bool neg, std::vector<std::pair<bool, PN>>& out) {
+        if (n && n->kind == Node::Add) { fp_collect_terms(n->a, neg, out); fp_collect_terms(n->b, neg, out); return; }
+        if (n && n->kind == Node::Sub) { fp_collect_terms(n->a, neg, out); fp_collect_terms(n->b, !neg, out); return; }
+        if (n && n->kind == Node::Neg) { fp_collect_terms(n->a, !neg, out); return; }
+        out.emplace_back(neg, n);
+    }
+    PN fp_sum_terms(const std::vector<std::pair<bool, PN>>& t) {
+        PN acc;
+        for (const auto& e : t) {
+            if (!acc) acc = e.first ? pn_neg(e.second) : e.second;
+            else      acc = e.first ? pn_sub(acc, e.second) : pn_add(acc, e.second);
+        }
+        return acc;   // nullptr -- слагаемых нет
+    }
+    // f = r + g по слагаемым верхней суммы; r == nullptr, если все слагаемые с v.
+    void fp_split_terms(const PN& f, const std::string& v, PN& r, PN& g) {
+        std::vector<std::pair<bool, PN>> terms, tr, tg;
+        fp_collect_terms(f, false, terms);
+        for (const auto& e : terms) (pn_contains_var(e.second, v) ? tg : tr).push_back(e);
+        r = fp_sum_terms(tr);
+        g = fp_sum_terms(tg);
+    }
+    // Множитель после "hs * ": скобки всегда, кроме атомов. CPU-зеркало
+    // (SystemEvaluator::solve_diag_fp) считает hs * eval(e) -- та же группировка.
+    std::string fp_factor(const PN& e, const NameMap& nm) {
+        const bool atom = e && (e->kind == Node::Sym || e->kind == Node::Call
+                                || (e->kind == Node::Num && e->num >= 0.0));
+        return wrap_paren(emit_to_str(e, nm), !atom);
+    }
+
+    // Одно уравнение неявной половины "CD FP" / "CD fast FP". fast -- линейные
+    // уравнения решаются как в CD fast (предрасчитанный 1/d или деление),
+    // итерации только у нелинейных; иначе итерации у всех, кроме coef == 0
+    // (там одна явная формула и есть точное решение).
+    void emit_fp_implicit_eq(std::ostringstream& o, const PN& rhs_ast,
+                             const std::string& v, const std::string& x,
+                             const NameMap& nm, const char* hs,
+                             const std::string& sfx, bool fast, PrepList* prep,
+                             const std::vector<std::string>* state_vars,
+                             const std::string& prep_name) {
+        PN coef, rem;
+        const bool linear = cd_try_extract_linear(rhs_ast, v, coef, rem);
+        if (linear && (fast || pn_is_zero(coef))) {
+            emit_diag_implicit_eq(o, rhs_ast, v, x, nm, hs, "numb", "x" + sfx + "_cd",
+                                  fast ? prep : nullptr, state_vars, prep_name);
+            return;
+        }
+        PN r, g;
+        if (linear) { r = pn_is_zero(rem) ? nullptr : rem; g = coef; }
+        else        fp_split_terms(rhs_ast, v, r, g);
+        const std::string xs = "x" + sfx + "_fp";
+        o << "    numb " << xs << " = " << x;
+        if (r) o << " + " << hs << " * " << fp_factor(r, nm);
+        o << ";\n";
+        if (linear) {
+            const std::string cs = "c" + sfx + "_fp";
+            o << "    numb " << cs << " = " << hs << " * " << fp_factor(g, nm) << ";\n";
+            o << "    for (int cdfp_k = 0; cdfp_k < cdfp_n; ++cdfp_k)\n";
+            o << "        " << x << " = " << xs << " + " << cs << " * " << x << ";\n";
+        }
+        else {
+            o << "    for (int cdfp_k = 0; cdfp_k < cdfp_n; ++cdfp_k)\n";
+            o << "        " << x << " = " << xs << " + " << hs << " * " << fp_factor(g, nm) << ";\n";
+        }
+    }
+
     // CD: Composition D-method (diagonally-implicit symplectic composition).
     // Theory (PDF chapter 1.1): Psi_{h,s} = Phi_{h1} o Phi*_{h2} with
     // h1 = h*s and h2 = h*(1 - s), s = a[0] symmetry coefficient. Phi is an
@@ -1542,12 +1625,17 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
     // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
     std::string scheme_cd_common(const System& s, CdKind kind, bool core_only = false,
-                                 bool flip_halves = false, bool fast = false) {
+                                 bool flip_halves = false, bool fast = false,
+                                 bool fp = false) {
         // fast -- "CD fast": только вещественный CD. h1, h2 и обратные
         // знаменатели, не зависящие от состояния, идут в блок предрасчёта
         // (см. krs_split_prep в codegen.hpp).
+        // fp -- "CD FP" / "CD fast FP": неявная половина простыми итерациями
+        // (emit_fp_implicit_eq), их число -- a[M+1] (cd_fp_slot).
         if (fast && kind != CdKind::Real)
             throw std::runtime_error("CD fast: only the real CD is supported");
+        if (fp && (kind != CdKind::Real || flip_halves))
+            throw std::runtime_error("CD FP: only the real CD {0-1} is supported");
         PrepList prep;
         if (s.vars.size() != s.rhs.size())
             throw std::runtime_error("vars/rhs size mismatch");
@@ -1640,6 +1728,19 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "    ucmplx h1 = " << pass_h1[0] << ";\n";
             o << "    ucmplx h2 = " << pass_h2[0] << ";\n";
         }
+        // "CD FP": число итераций из a[M+1]; объявляется, только если хоть одно
+        // уравнение действительно уходит на итерации (у CD fast FP на системе,
+        // линейной по своим переменным, тело совпадает с CD fast).
+        if (fp) {
+            bool need = false;
+            for (int i = 0; i < N && !need; ++i) {
+                PN coef, rem;
+                const bool lin = cd_try_extract_linear(rhs_ast[i], s.vars[i], coef, rem);
+                need = !(lin && (fast || pn_is_zero(coef)));
+            }
+            if (need)
+                o << "    const int cdfp_n = (int)a[" << cd_fp_slot(s) << "];\n";
+        }
 
         // Phi*_{h2}: diagonally-implicit half-step, reverse order. Сам разбор
         // уравнения — в emit_diag_implicit_eq выше: стадия SIMP гоняет тот же
@@ -1663,11 +1764,18 @@ namespace { // внутренняя линковка: всё ниже не ви�
         };
         auto emit_implicit = [&](const char* step) {
             for (int i = N - 1; i >= 0; --i)
-                emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
-                                      stv + ("[" + std::to_string(i) + "]"), nm,
-                                      step, sty, "x" + std::to_string(i) + "_cd" + sfx,
-                                      fast ? &prep : nullptr, &s.vars,
-                                      "cdf_r" + std::to_string(i) + sfx);
+                if (fp)
+                    emit_fp_implicit_eq(o, rhs_ast[i], s.vars[i],
+                                        stv + ("[" + std::to_string(i) + "]"), nm,
+                                        step, std::to_string(i) + sfx,
+                                        fast, &prep, &s.vars,
+                                        "cdf_r" + std::to_string(i) + sfx);
+                else
+                    emit_diag_implicit_eq(o, rhs_ast[i], s.vars[i],
+                                          stv + ("[" + std::to_string(i) + "]"), nm,
+                                          step, sty, "x" + std::to_string(i) + "_cd" + sfx,
+                                          fast ? &prep : nullptr, &s.vars,
+                                          "cdf_r" + std::to_string(i) + sfx);
         };
         if (implicit_first) { emit_implicit("h1"); emit_explicit("h2"); }
         else                { emit_explicit("h1"); emit_implicit("h2"); }
@@ -2012,6 +2120,12 @@ struct SystemEvaluator::Impl {
     // на 1/(1 -+ hs*|coef|) вместо деления, как его GPU-предрасчёт.
     std::vector<char> diag_coef_free;
     std::vector<std::vector<Instr>> diag_coef, diag_rem;
+    // "CD FP": программы итераций emit_fp_implicit_eq. Линейная f_i: fp_r = rem,
+    // fp_g = coef; нелинейная: слагаемые без x_i и с x_i. fp_has_r == 0 —
+    // вынесенной части нет. diag_coef_zero — coef == 0 (явная формула).
+    std::vector<char> fp_has_r, diag_coef_zero;
+    std::vector<std::vector<Instr>> fp_r, fp_g;
+    int fp_slot = 1;   // a[fp_slot] -- число итераций CD FP (cd_fp_slot)
     // Первая функция правых частей без комплексного смысла (cd_find_complex_unsafe),
     // пусто — таких нет.
     std::string complex_unsafe;
@@ -2043,6 +2157,10 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
     impl_->diag_coef_free.assign((size_t)impl_->dim, 0);
     impl_->diag_coef.resize(impl_->dim);
     impl_->diag_rem.resize(impl_->dim);
+    impl_->fp_has_r.assign((size_t)impl_->dim, 0);
+    impl_->diag_coef_zero.assign((size_t)impl_->dim, 0);
+    impl_->fp_r.resize(impl_->dim);
+    impl_->fp_g.resize(impl_->dim);
     int maxdepth = 8;
     for (int i = 0; i < impl_->dim; ++i) {
         Parser p(sys.rhs[i], sys.latex);
@@ -2057,7 +2175,22 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
 
         // Разложение по своей переменной — для диагонально-неявных схем.
         PN coef, rem;
-        if (cd_try_extract_linear(ast, sys.vars[i], coef, rem)) {
+        const bool lin = cd_try_extract_linear(ast, sys.vars[i], coef, rem);
+        {
+            // До peel_sign ниже: он меняет coef/rem на месте.
+            PN r, g;
+            if (lin) { r = pn_is_zero(rem) ? nullptr : rem; g = coef; }
+            else     fp_split_terms(ast, sys.vars[i], r, g);
+            impl_->diag_coef_zero[(size_t)i] = lin && pn_is_zero(coef);
+            impl_->fp_has_r[(size_t)i] = r ? 1 : 0;
+            if (r) { ByteCompiler b{ impl_->fp_r[i], var_index, param_index }; b.compile(r); }
+            if (g) { ByteCompiler b{ impl_->fp_g[i], var_index, param_index }; b.compile(g); }
+            for (const auto* prog : { &impl_->fp_r[i], &impl_->fp_g[i] }) {
+                int d = (int)prog->size() + 4;
+                if (d > maxdepth) maxdepth = d;
+            }
+        }
+        if (lin) {
             // Зеркалим emit_diag_implicit_eq вплоть до формы выражения: сперва
             // тот же вынос знака, затем тот же порядок умножений.
             // "CD fast" берёт обратный знаменатель из предрасчёта только там,
@@ -2102,6 +2235,7 @@ SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
     impl_->newton_full      = sys.newton_full;
     impl_->newton_tol       = sys.newton_tol;
     impl_->newton_max_iters = sys.newton_max_iters;
+    impl_->fp_slot          = cd_fp_slot(sys);
 
     impl_->max_stack = maxdepth;
     impl_->stack.resize(maxdepth);
@@ -2167,6 +2301,30 @@ bool SystemEvaluator::solve_diag_implicit(int i, double* X, const double* a, dou
     // "CD fast": X * (1/d), как предрасчитанный cdf_r<i> на GPU.
     X[i] = (recip && impl_->diag_coef_free[(size_t)i]) ? xn * (1.0 / d) : xn / d;
     return true;
+}
+
+// Зеркало emit_fp_implicit_eq оператор в оператор:
+//   x_fp = X[i] (+ hs * r);  X[i] = x_fp + c * X[i] (c = hs * coef) | x_fp + hs * g.
+void SystemEvaluator::solve_diag_fp(int i, double* X, const double* a, double hs,
+                                    bool fast) const {
+    if (i < 0 || i >= impl_->dim) return;
+    const int iters = (int)a[impl_->fp_slot];
+    const size_t k = (size_t)i;
+    const bool lin = impl_->diag_linear[k] != 0;
+    if (lin && (fast || impl_->diag_coef_zero[k])) {
+        solve_diag_implicit(i, X, a, hs, fast);
+        return;
+    }
+    double* st = impl_->stack.data();
+    const double xs = impl_->fp_has_r[k] ? X[i] + hs * run_program(impl_->fp_r[k], X, a, st)
+                                         : X[i];
+    if (lin) {
+        const double c = hs * run_program(impl_->fp_g[k], X, a, st);
+        for (int it = 0; it < iters; ++it) X[i] = xs + c * X[i];
+    }
+    else {
+        for (int it = 0; it < iters; ++it) X[i] = xs + hs * run_program(impl_->fp_g[k], X, a, st);
+    }
 }
 
 bool SystemEvaluator::solve_diag_implicit_complex(int i, ucmplx* Z, const double* a,
@@ -3150,6 +3308,8 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::DOP853:           return scheme_erk(s, &kDop853A[0][0], 11, kDop853B, 12);
     case Scheme::CD:               return scheme_cd(s);
     case Scheme::CDFast:           return scheme_cd_common(s, CdKind::Real, false, false, true);
+    case Scheme::CDFP:             return scheme_cd_common(s, CdKind::Real, false, false, false, true);
+    case Scheme::CDFastFP:         return scheme_cd_common(s, CdKind::Real, false, false, true,  true);
     case Scheme::ComplexCD:        return scheme_complex_cd(s);
     case Scheme::ComplexCD4:       return scheme_complex_cd4(s);
     case Scheme::ComplexCD4S3:     return scheme_complex_cd4_s3(s);
@@ -3285,6 +3445,8 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "DOP853")            return Scheme::DOP853;
     if (name == "CD")                return Scheme::CD;
     if (name == "CD fast")           return Scheme::CDFast;
+    if (name == "CD FP")             return Scheme::CDFP;
+    if (name == "CD fast FP")        return Scheme::CDFastFP;
     if (name == "Complex CD")        return Scheme::ComplexCD;
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
     if (name == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
@@ -3335,6 +3497,11 @@ const SchemeRow kSchemeRows[] = {
     // {1-0}: неявная половина первой; порядок и симметрия как у исходных.
     { "CD_{1-0}",               2, true  },
     { "CD fast",                2, true  },  // CD с предрасчётом констант шага
+    // Неявная половина простыми итерациями: самосопряжённость лишь до
+    // невязки итераций (O(h^(n+1)) при n итерациях), поэтому false.
+    // Порядок 2 -- при n >= 2.
+    { "CD FP",                  2, false },
+    { "CD fast FP",             2, false },
     { "Complex CD",             2, false },
     { "Complex CD_{1-0}",       2, false },
     { "Complex Implicit Euler", 2, false },
@@ -4159,14 +4326,16 @@ int builtin_scheme_rhs_per_step(const std::string& name) {
 
 // Неявный полушаг CD (и стадия SIMP, и шаг D): по компоненте — одно вычисление f_i, если она
 // линейна по своей переменной (аналитика), иначе CD_ITERS простых итераций; в единицах полной f.
-static double cd_implicit_sweep_rhs(const System& s) {
+// iters -- число итераций нелинейной компоненты (у "CD FP" -- cd_fp_iters; линейная
+// у FP тоже одно вычисление: rem и coef считаются один раз).
+static double cd_implicit_sweep_rhs(const System& s, int iters = CD_ITERS) {
     const int N = (int)s.vars.size();
     if (N < 1 || (int)s.rhs.size() != N) return 0.0;
     double sum = 0.0;
     for (int i = 0; i < N; ++i) {
         Parser p(s.rhs[(size_t)i], s.latex);
         PN coef, rem;
-        sum += cd_try_extract_linear(p.parse(), s.vars[(size_t)i], coef, rem) ? 1.0 : (double)CD_ITERS;
+        sum += cd_try_extract_linear(p.parse(), s.vars[(size_t)i], coef, rem) ? 1.0 : (double)iters;
     }
     return sum / (double)N;
 }
@@ -4197,6 +4366,8 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
         case Scheme::CD: case Scheme::CD10: case Scheme::CDFast:
         case Scheme::ComplexCD: case Scheme::ComplexCD10:
             return 1.0 + cd_implicit_sweep_rhs(s);
+        case Scheme::CDFP: case Scheme::CDFastFP:
+            return 1.0 + cd_implicit_sweep_rhs(s, cd_fp_iters_of(s));
         case Scheme::ComplexCD4: case Scheme::ComplexCD4_10:
         case Scheme::ComplexCD4SS01: case Scheme::ComplexCD4SS10:
             return 2.0 * (1.0 + cd_implicit_sweep_rhs(s));

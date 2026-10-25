@@ -33,6 +33,8 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "DOP853")            return IntScheme::DOP853;
     if (s == "CD")                return IntScheme::CD;
     if (s == "CD fast")           return IntScheme::CDFast;
+    if (s == "CD FP")             return IntScheme::CDFP;
+    if (s == "CD fast FP")        return IntScheme::CDFastFP;
     if (s == "Complex CD")        return IntScheme::ComplexCD;
     if (s == "Complex CD4")       return IntScheme::ComplexCD4;
     if (s == "CCD4 (o4s3)")       return IntScheme::ComplexCD4S3;
@@ -251,8 +253,10 @@ void solve_diag_implicit_cx(const SystemEvaluator& ev, ucmplx* Z, const double* 
 // затем явный h2 (прямой).
 // recip -- "CD fast": там, где коэффициент при своей переменной не зависит от
 // состояния, умножение на 1/d вместо деления (на GPU 1/d предрасчитан).
+// fp -- "CD FP" / "CD fast FP" (с recip): неявный полушаг через
+// SystemEvaluator::solve_diag_fp, a[cd_fp_slot] простых итераций.
 void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
-             int n, double* k1, bool flip = false, bool recip = false) {
+             int n, double* k1, bool flip = false, bool recip = false, bool fp = false) {
     const double s = a[0];
     const double h1 = h * s;
     const double h2 = h * (1.0 - s);
@@ -273,7 +277,8 @@ void step_cd(const SystemEvaluator& ev, double* X, const double* a, double h,
     }
     // Φ*_h2: неявный полушаг, обратный порядок.
     for (int i = n - 1; i >= 0; --i)
-        solve_diag_implicit(ev, X, a, h2, i, k1, recip);
+        if (fp) ev.solve_diag_fp(i, X, a, h2, recip);
+        else    solve_diag_implicit(ev, X, a, h2, i, k1, recip);
 }
 
 // Complex CD: та же композиция, что step_cd, но полушаги комплексные —
@@ -775,6 +780,8 @@ bool computePhasePortraitCPU(
         case IntScheme::DOP853:           step_erk(ev, X.data(), a, h, n, erk_table(scheme), kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::CDFast:           step_cd(ev, X.data(), a, h, n, k1.data(), false, true); break;
+        case IntScheme::CDFP:             step_cd(ev, X.data(), a, h, n, k1.data(), false, false, true); break;
+        case IntScheme::CDFastFP:         step_cd(ev, X.data(), a, h, n, k1.data(), false, true,  true); break;
         case IntScheme::ComplexCD:        step_complex_cd(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4:       step_complex_cd4(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;
         case IntScheme::ComplexCD4S3:     step_complex_cd4_s3(ev, a, h, n, X.data(), Zc.data(), Kc.data()); break;

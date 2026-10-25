@@ -150,6 +150,8 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_dop853", r.scheme_dop853);
     kvbool(o, "scheme_cd", r.scheme_cd);
     kvbool(o, "scheme_cdfast", r.scheme_cdfast);
+    kvbool(o, "scheme_cdfp", r.scheme_cdfp);
+    kvbool(o, "scheme_cdfastfp", r.scheme_cdfastfp);
     kvbool(o, "scheme_ccd", r.scheme_ccd);
     kvbool(o, "scheme_ccd4", r.scheme_ccd4);
     kvbool(o, "scheme_ccd4s3", r.scheme_ccd4s3);
@@ -176,6 +178,7 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "newton_full", r.newton_full);
     kv(o, "newton_tol", r.newton_tol);
     kv(o, "newton_max_iters", r.newton_max_iters);
+    kv(o, "cd_fp_iters", r.cd_fp_iters);
     kv(o, "symmetry_s", r.symmetry_s);
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
@@ -236,6 +239,8 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_dop853") r.scheme_dop853 = p.parse_bool();
         else if (key == "scheme_cd") r.scheme_cd = p.parse_bool();
         else if (key == "scheme_cdfast") r.scheme_cdfast = p.parse_bool();
+        else if (key == "scheme_cdfp") r.scheme_cdfp = p.parse_bool();
+        else if (key == "scheme_cdfastfp") r.scheme_cdfastfp = p.parse_bool();
         else if (key == "scheme_ccd") r.scheme_ccd = p.parse_bool();
         else if (key == "scheme_ccd4") r.scheme_ccd4 = p.parse_bool();
         else if (key == "scheme_ccd4s3") r.scheme_ccd4s3 = p.parse_bool();
@@ -355,6 +360,7 @@ SystemRecord record_from_json(const std::string& json) {
             else if (key == "symmetry_s") r.symmetry_s = val;
             else if (key == "newton_tol") r.newton_tol = val;
             else if (key == "newton_max_iters") r.newton_max_iters = val;
+            else if (key == "cd_fp_iters") r.cd_fp_iters = val;
         }
         p.ws();
         if (p.peek() == ',') { ++p.i; continue; }

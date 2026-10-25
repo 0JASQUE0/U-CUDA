@@ -1038,13 +1038,14 @@ static void write_order_config(std::ofstream& out, const OrderSnapshot& s, bool 
     }
     out << "\n";
 
-    // values[0] — коэффициент симметрии s, values[1..M] — параметры системы
-    // (та же раскладка a[], что во всех вкладках).
+    // values[0] — коэффициент симметрии s, values[1..M] — параметры системы,
+    // values[M+1] — число итераций CD FP (та же раскладка a[], что во всех вкладках).
     out << "params: ";
     for (size_t i = 0; i < s.values.size(); ++i) {
         if (i) out << ", ";
         if (i == 0) out << "s = ";
         else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        else if (i - 1 == s.param_names.size()) out << "n_fp = ";
         out << s.values[i];
     }
     out << "\n";
@@ -1143,6 +1144,7 @@ static void write_stability_config(std::ofstream& out, const StabilityResult& r,
         if (i) out << ", ";
         if (i == 0) out << "s = ";
         else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        else if (i - 1 == s.param_names.size()) out << "n_fp = ";
         out << s.values[i];
     }
     out << "\n";

@@ -195,6 +195,8 @@ SystemRecord AppModel::to_record() const {
     r.scheme_dop853 = scheme_dop853;
     r.scheme_cd = scheme_cd;
     r.scheme_cdfast = scheme_cdfast;
+    r.scheme_cdfp = scheme_cdfp;
+    r.scheme_cdfastfp = scheme_cdfastfp;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
     r.scheme_ccd4s3 = scheme_ccd4s3;
@@ -221,6 +223,7 @@ SystemRecord AppModel::to_record() const {
     r.newton_full = newton_full;
     r.newton_tol = newton_tol;
     r.newton_max_iters = newton_max_iters;
+    r.cd_fp_iters = cd_fp_iters;
     r.symmetry_s = symmetry_s;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
@@ -259,6 +262,8 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_dop853 = r.scheme_dop853;
     scheme_cd = r.scheme_cd;
     scheme_cdfast = r.scheme_cdfast;
+    scheme_cdfp = r.scheme_cdfp;
+    scheme_cdfastfp = r.scheme_cdfastfp;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
     scheme_ccd4s3 = r.scheme_ccd4s3;
@@ -285,6 +290,7 @@ void AppModel::from_record(const SystemRecord& r) {
     newton_full = r.newton_full;
     newton_tol = r.newton_tol;
     newton_max_iters = r.newton_max_iters;
+    cd_fp_iters = r.cd_fp_iters;
     symmetry_s = r.symmetry_s;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
@@ -303,7 +309,8 @@ void AppModel::from_record(const SystemRecord& r) {
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_dopri78_legacy
         || scheme_rk45 || scheme_dop853
-        || scheme_cd || scheme_cdfast || scheme_ccd || scheme_ccd4|| scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
+        || scheme_cd || scheme_cdfast
+        || scheme_cdfp || scheme_cdfastfp || scheme_ccd || scheme_ccd4|| scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
         || scheme_ccd4ss10
         || scheme_cd10 || scheme_ccd10 || scheme_ccd4_10 || scheme_ccd4s3_10 || scheme_ccd4s4_10
         || scheme_ieuler || scheme_imidpoint
@@ -330,7 +337,8 @@ void AppModel::clear() {
     is_map = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
-        = scheme_cd = scheme_cdfast = scheme_ccd = scheme_ccd4= scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
+        = scheme_cd = scheme_cdfast
+        = scheme_cdfp = scheme_cdfastfp = scheme_ccd = scheme_ccd4= scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
         = scheme_ccd4ss10
         = scheme_cd10 = scheme_ccd10 = scheme_ccd4_10 = scheme_ccd4s3_10 = scheme_ccd4s4_10
         = scheme_ieuler = scheme_imidpoint
@@ -340,6 +348,7 @@ void AppModel::clear() {
     newton_full = false;
     newton_tol = "1e-10";
     newton_max_iters = "8";
+    cd_fp_iters = "4";
     step_h.clear();
     init_conditions.clear();
     param_values.clear();
@@ -517,6 +526,7 @@ struct SweepTargetSlot {
 struct BroadcastSlots {
     std::string* h           = nullptr;
     std::string* symmetry    = nullptr;
+    std::string* cd_fp_iters = nullptr;
     std::string* t_max       = nullptr;
     std::string* transient   = nullptr;
     std::string* pre_scaller = nullptr;
@@ -598,6 +608,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = 0;
         out.h         = &m.phase_session.step_h;
         out.symmetry  = &m.phase_session.symmetry_s;
+        out.cd_fp_iters = &m.phase_session.cd_fp_iters;
         out.t_max     = &m.phase_session.sim_time;
         out.transient = &m.phase_session.skip_time;
         out.params    = &m.phase_session.param_values;
@@ -611,7 +622,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.bifurcation_session.active_diagram_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -631,7 +642,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.lle_session.active_curve_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -651,7 +662,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.ls_session.active_curve_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -671,7 +682,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.dft1d_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -688,7 +699,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.basins_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -707,7 +718,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.fastsync_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values;
@@ -721,7 +732,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         // пересобираются из него срезами apply_shared_to_* на каждом Run.
         resolved_idx = 0;
         auto& c = m.custom_session.shared;
-        out.h = &c.h_text; out.symmetry = &c.symmetry_s;
+        out.h = &c.h_text; out.symmetry = &c.symmetry_s; out.cd_fp_iters = &c.cd_fp_iters;
         out.t_max = &c.t_max_text; out.transient = &c.transient_text;
         out.pre_scaller = &c.pre_scaller_text; out.max_value = &c.max_value_text;
         out.params = &c.param_values; out.ics = &c.initial_conditions;
@@ -742,7 +753,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.metrics_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -762,7 +773,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.order_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
         out.scheme = &c->scheme;
@@ -782,6 +793,7 @@ std::string* string_slot(const BroadcastSlots& s, BroadcastField f) {
     switch (f) {
         case BroadcastField::StepH:      return s.h;
         case BroadcastField::SymmetryS:  return s.symmetry;
+        case BroadcastField::CdFpIters:  return s.cd_fp_iters;
         case BroadcastField::TMax:       return s.t_max;
         case BroadcastField::Transient:  return s.transient;
         case BroadcastField::PreScaller: return s.pre_scaller;

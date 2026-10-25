@@ -319,6 +319,7 @@ struct PhaseAnalysisSession {
     std::string skip_time = "100";      // transient (с)
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
     std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
     std::string decimation = "1";      // выводить каждую N-ю точку
     // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
     // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
@@ -487,6 +488,7 @@ struct BifurcationDiagramConfig {
     // session.custom_schemes на момент Run).
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     // Свип: какой параметр, его диапазон, число точек.
     int         param_index    = 0;
@@ -726,6 +728,7 @@ struct LLECurveConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -876,6 +879,7 @@ struct Dft1DConfig {
 
     std::string scheme     = "Euler";
     std::string symmetry_s = "0.5";       // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     // Свип — см. BifurcationDiagramConfig (то же самое: параметр или НУ,
     // с опциональным continuation). Continuation требует sweep_over_var=false
@@ -1077,6 +1081,7 @@ struct BasinsConfig {
     std::string label = "Basins";
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     int axis_x_var = 0;
     int axis_y_var = 1;
@@ -1308,6 +1313,7 @@ struct FastSyncConfig {
     std::string label  = "FastSync 1";
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5"; // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     // Режим:
     int mode = 0;   // 0 = On Attractor, 1 = On Grid
@@ -1457,6 +1463,7 @@ struct LSCurveConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -1609,6 +1616,7 @@ struct SignalMetricsConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     // Свип по X — см. BifurcationDiagramConfig.
     int         param_index     = 0;
