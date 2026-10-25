@@ -393,6 +393,7 @@ bool AppModel::start_parametric_analysis() {
     lle_session.loaded_system_name         = name;
     ls_session.loaded_system_name          = name;
     metrics_session.loaded_system_name     = name;
+    ++session_epoch[(int)AppMode::Parametric];
     return true;
 }
 
@@ -406,6 +407,7 @@ bool AppModel::start_dft1d_analysis() {
     }
     catch (...) {}
     dft1d_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Dft1D];
     return true;
 }
 
@@ -419,6 +421,7 @@ bool AppModel::start_basins_analysis() {
     }
     catch (...) {}
     basins_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Basins];
     return true;
 }
 
@@ -432,6 +435,7 @@ bool AppModel::start_order_analysis() {
     }
     catch (...) {}
     order_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Order];
     return true;
 }
 
@@ -445,6 +449,7 @@ bool AppModel::start_network_analysis() {
     }
     catch (...) {}
     network_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Network];
     return true;
 }
 
@@ -458,6 +463,7 @@ bool AppModel::start_fastsync_analysis() {
     }
     catch (...) {}
     fastsync_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::FastSync];
     return true;
 }
 

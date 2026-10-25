@@ -59,6 +59,8 @@ public:
     AxisInfo y_axis;
     bool view_valid = false;
     int  data_gen_cached = -1;
+    // Забыть поколения данных и оверлея и вид: следующий render() перезальёт текстуры и сделает автофит.
+    void invalidate() { view_valid = false; data_gen_cached = -1; overlay_gen_cached_ = -1; }
 
     // Видимый диапазон цвета. autoscale → vmin/vmax из render() пересчитываются
     // каждый кадр из values; иначе используются ручные значения.
