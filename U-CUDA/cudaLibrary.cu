@@ -2376,6 +2376,72 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	return;
 }
 
+// DFT_custom с потоком на пару (точка, частота) вместо потока на точку. Аргументы те же, сетка —
+// amountOfBlocks * nFreq потоков. Зачем: в DFT_custom поток последовательно проходит nFreq частот
+// по sizeOfBlock отсчётов, а точек свипа в 1D мало (500..2000 — 16..63 блока на 30 SM), так что
+// GPU простаивал: FP64 занят на 18 %, ~3.4 с на свип почти независимо от числа точек.
+// Арифметика на пару (k, точка) — та же, операция в операцию (f_k, поворот, сброс через
+// cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
+// как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
+// варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+__global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
+	const int logFreqAxis)
+{
+	const size_t tid = (size_t)threadIdx.x + (size_t)blockIdx.x * blockDim.x;
+	if (tid >= (size_t)amountOfBlocks * (size_t)nFreq)
+		return;
+	const size_t idx = tid / (size_t)nFreq;
+	const size_t k   = tid - idx * (size_t)nFreq;
+
+	const size_t startDataIndex = idx * sizeOfBlock;
+	const size_t outIndex       = idx * nFreq + k;
+
+	const int checker = __ldg(&checkerArray[idx]);
+	if (checker == -1) { AkCOS[outIndex] = -1.0; BkSIN[outIndex] = -1.0; return; }
+	if (checker == 0)  { AkCOS[outIndex] = 0.0;  BkSIN[outIndex] = 0.0;  return; }
+
+	const int RESET_INTERVAL = 1000;
+
+	const numb freq_lo = __ldg(&rangesFreq[0]);
+	const numb freq_hi = __ldg(&rangesFreq[1]);
+	const numb f_step = (freq_hi - freq_lo) / (numb)(nFreq - 1);
+	const numb f_start = freq_lo;
+	const numb psi = 2 * pi * h;
+
+	const numb f_k = logFreqAxis ? getValueByIdx_log((int)k, nFreq, freq_lo, freq_hi, 0)
+	                             : (f_start + (numb)k * f_step);
+	const numb cos_theta = cos(2.0 * pi * h * f_k);
+	const numb sin_theta = sin(2.0 * pi * h * f_k);
+	numb cos_n = 1.0;
+	numb sin_n = 0.0;
+	numb ak = 0;
+	numb bk = 0;
+	int reset_counter = RESET_INTERVAL;
+
+	for (size_t n = 0; n < sizeOfBlock; n++) {
+		const numb wd = __ldg(&window[n]) * __ldg(&data[startDataIndex + n]);
+		ak += wd * cos_n;
+		bk += wd * sin_n;
+
+		numb new_cos = cos_n * cos_theta - sin_n * sin_theta;
+		numb new_sin = sin_n * cos_theta + cos_n * sin_theta;
+		cos_n = new_cos;
+		sin_n = new_sin;
+
+		if (--reset_counter == 0) {
+			reset_counter = RESET_INTERVAL;
+			if (n + 1 < sizeOfBlock) {
+				numb exact_angle = psi * f_k * (numb)(n + 1.0);
+				cos_n = cosf(exact_angle);
+				sin_n = sinf(exact_angle);
+			}
+		}
+	}
+	AkCOS[outIndex] = ak / (numb)sizeOfBlock;
+	BkSIN[outIndex] = bk / (numb)sizeOfBlock;
+}
+
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {
@@ -4492,76 +4558,6 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 	{
 		atomicMin((unsigned int*)res, (unsigned int)idx);	// детерминированный выбор seed'а, см. комментарий над CUDA_dbscan_kernel
 		return;
-	}
-}
-
-// DBSCAN бассейнов в U-CUDA (run_basins / run_basins_recluster): обход в ширину по уровням,
-// весь на GPU. Ядра выше (CUDA_dbscan_kernel + поиск seed'а) остались для NonLinAnal; там хост
-// запускает ядро на всю сетку на КАЖДУЮ точку кластера, с двумя синхронизациями и копией
-// списка соседей — ~130 мкс на итерацию при 5 мкс самого ядра. Здесь один запуск на уровень,
-// а хост читает только размер следующего фронта.
-//
-// Разбиение то же: кластер — компонента связности по отношению dist2 <= eps² среди точек
-// с helpfulArray != REGIME_UNBOUND, seed — наименьший неразмеченный индекс, сначала среди
-// REGIME_FIXED_POINT (метки -1, -2, ...), потом REGIME_OSCILLATION (1, 2, ...).
-// Отличие одно: Unbound-точки здесь не размечаются никогда (остаются 0). В CUDA_dbscan_kernel
-// такая точка получала метку как сосед, а когда до неё доходил обход, все потоки запуска
-// писали labels[cur] = cluster, и часть из них затем сбрасывала её в 0 — итог решала гонка
-// между этими записями. Расширять кластер она не могла и там, так что на остальные точки
-// это не влияет.
-
-// Seed: res[0] — наименьший неразмеченный FP, res[1] — наименьший неразмеченный Osc.
-// Хост заранее заливает оба слота 0xFF (UINT_MAX = «нет»).
-__global__ void CUDA_dbscan_bfs_seed_kernel(const int* __restrict__ helpfulArray, const int* __restrict__ labels,
-	const int amountOfData, unsigned int* res)
-{
-	int idx = threadIdx.x + blockIdx.x * blockDim.x;
-	if (idx >= amountOfData || labels[idx] != 0)
-		return;
-	if (helpfulArray[idx] == REGIME_FIXED_POINT)
-		atomicMin(res, (unsigned int)idx);
-	else if (helpfulArray[idx] == REGIME_OSCILLATION)
-		atomicMin(res + 1, (unsigned int)idx);
-}
-
-// Один уровень обхода: поток на точку, фронт (front[0..frontSize)) идёт через shared тайлами
-// по blockDim.x точек. Динамическая shared — 2 * blockDim.x * sizeof(numb). Блок выходит из
-// цикла, как только у всех его потоков нашёлся сосед или им нечего искать (__syncthreads_or).
-// Попавшие в eps от фронта получают label и образуют следующий фронт (порядок в next[] не
-// детерминирован, метки — да: они от порядка не зависят).
-__global__ void CUDA_dbscan_bfs_expand_kernel(const numb* __restrict__ data, const numb* __restrict__ intervals,
-	const int* __restrict__ helpfulArray, int* labels, const int amountOfData,
-	const int* __restrict__ front, const int frontSize, int* next, int* nextSize,
-	const numb eps2, const int label)
-{
-	extern __shared__ unsigned char bfsShared[];
-	numb* sx = (numb*)bfsShared;
-	numb* sy = sx + blockDim.x;
-
-	const int idx = threadIdx.x + blockIdx.x * blockDim.x;
-	const bool want = idx < amountOfData && labels[idx] == 0 && helpfulArray[idx] != REGIME_UNBOUND;
-	const numb x = want ? data[idx] : (numb)0;
-	const numb y = want ? intervals[idx] : (numb)0;
-	bool hit = false;
-	for (int t = 0; t < frontSize; t += blockDim.x)
-	{
-		if (!__syncthreads_or(want && !hit))
-			break;
-		const int k = t + threadIdx.x;
-		if (k < frontSize) { const int j = front[k]; sx[threadIdx.x] = data[j]; sy[threadIdx.x] = intervals[j]; }
-		__syncthreads();
-		if (want && !hit)
-		{
-			const int m = min((int)blockDim.x, frontSize - t);
-			for (int q = 0; q < m; ++q)
-				if (distance2(sx[q], sy[q], x, y) <= eps2) { hit = true; break; }	// тот же нестрогий порог, что у CUDA_dbscan_kernel
-		}
-		__syncthreads();
-	}
-	if (hit)
-	{
-		labels[idx] = label;
-		next[atomicAdd(nextSize, 1)] = idx;
 	}
 }
 
