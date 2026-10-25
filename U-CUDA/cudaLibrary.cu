@@ -2376,6 +2376,72 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	return;
 }
 
+// DFT_custom с потоком на пару (точка, частота) вместо потока на точку. Аргументы те же, сетка —
+// amountOfBlocks * nFreq потоков. Зачем: в DFT_custom поток последовательно проходит nFreq частот
+// по sizeOfBlock отсчётов, а точек свипа в 1D мало (500..2000 — 16..63 блока на 30 SM), так что
+// GPU простаивал: FP64 занят на 18 %, ~3.4 с на свип почти независимо от числа точек.
+// Арифметика на пару (k, точка) — та же, операция в операцию (f_k, поворот, сброс через
+// cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
+// как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
+// варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+__global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
+	const int logFreqAxis)
+{
+	const size_t tid = (size_t)threadIdx.x + (size_t)blockIdx.x * blockDim.x;
+	if (tid >= (size_t)amountOfBlocks * (size_t)nFreq)
+		return;
+	const size_t idx = tid / (size_t)nFreq;
+	const size_t k   = tid - idx * (size_t)nFreq;
+
+	const size_t startDataIndex = idx * sizeOfBlock;
+	const size_t outIndex       = idx * nFreq + k;
+
+	const int checker = __ldg(&checkerArray[idx]);
+	if (checker == -1) { AkCOS[outIndex] = -1.0; BkSIN[outIndex] = -1.0; return; }
+	if (checker == 0)  { AkCOS[outIndex] = 0.0;  BkSIN[outIndex] = 0.0;  return; }
+
+	const int RESET_INTERVAL = 1000;
+
+	const numb freq_lo = __ldg(&rangesFreq[0]);
+	const numb freq_hi = __ldg(&rangesFreq[1]);
+	const numb f_step = (freq_hi - freq_lo) / (numb)(nFreq - 1);
+	const numb f_start = freq_lo;
+	const numb psi = 2 * pi * h;
+
+	const numb f_k = logFreqAxis ? getValueByIdx_log((int)k, nFreq, freq_lo, freq_hi, 0)
+	                             : (f_start + (numb)k * f_step);
+	const numb cos_theta = cos(2.0 * pi * h * f_k);
+	const numb sin_theta = sin(2.0 * pi * h * f_k);
+	numb cos_n = 1.0;
+	numb sin_n = 0.0;
+	numb ak = 0;
+	numb bk = 0;
+	int reset_counter = RESET_INTERVAL;
+
+	for (size_t n = 0; n < sizeOfBlock; n++) {
+		const numb wd = __ldg(&window[n]) * __ldg(&data[startDataIndex + n]);
+		ak += wd * cos_n;
+		bk += wd * sin_n;
+
+		numb new_cos = cos_n * cos_theta - sin_n * sin_theta;
+		numb new_sin = sin_n * cos_theta + cos_n * sin_theta;
+		cos_n = new_cos;
+		sin_n = new_sin;
+
+		if (--reset_counter == 0) {
+			reset_counter = RESET_INTERVAL;
+			if (n + 1 < sizeOfBlock) {
+				numb exact_angle = psi * f_k * (numb)(n + 1.0);
+				cos_n = cosf(exact_angle);
+				sin_n = sinf(exact_angle);
+			}
+		}
+	}
+	AkCOS[outIndex] = ak / (numb)sizeOfBlock;
+	BkSIN[outIndex] = bk / (numb)sizeOfBlock;
+}
+
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {

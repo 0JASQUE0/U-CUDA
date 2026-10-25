@@ -390,6 +390,11 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq = 0, numb h = 0,
 	const int logFreqAxis = 0);
 
+// То же, что DFT_custom, но поток на пару (точка, частота): сетка amountOfBlocks * nFreq потоков.
+__global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
+	const int logFreqAxis);
+
 // Параллельный поиск пиков, блок на траекторию: число пиков -> amountOfPeaks,
 // значения -> outPeaks, моменты времени -> timeOfPeaks (те, что != nullptr).
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,

@@ -1960,7 +1960,7 @@ struct ParametricEngine::Impl {
         CUfunction  kernel_traj = nullptr;  // calculateDiscreteModelCUDA
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
         CUfunction  kernel_fused = nullptr; // calculateDiscreteModelPeaksCUDA
-        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d classical branch)
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom_pf (used by run_dft_1d classical branch)
     };
     CachedModule cached;          // bif1d kernels (traj + peak + dft)
 
@@ -1993,7 +1993,7 @@ struct ParametricEngine::Impl {
         CUmodule    module     = nullptr;
         CUfunction  kernel_cont = nullptr;  // bifurcation1dContinuationKernel
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
-        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d continuation branch)
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom_pf (used by run_dft_1d continuation branch)
     };
     CachedContModule cached_cont;
 
@@ -2804,7 +2804,7 @@ struct ParametricEngine::Impl {
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                              { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom",
+                              { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom_pf",
                                 "calculateDiscreteModelPeaksCUDA" },
                               mod, mg, err))
                 return false;
@@ -5628,7 +5628,7 @@ struct ParametricEngine::Impl {
             if (!build_module(snapshot_sources(src_template_cont), "bifurcation1d_cont.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
-                              { "peakFinderCUDA", "DFT_custom" },
+                              { "peakFinderCUDA", "DFT_custom_pf" },
                               mod, mg, err))
                 return false;
 
@@ -7005,7 +7005,7 @@ struct ParametricEngine::Impl {
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
             DFT_CANCEL_CHECK();
 
-            // DFT_custom(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
+            // DFT_custom_pf(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
             // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
             // МЕЖДУ decimated сэмплами (h*preScaller), как и у peakFinderCUDA
             // (см. run_bif1d).
@@ -7025,8 +7025,12 @@ struct ParametricEngine::Impl {
                 &timeStep_arg,
                 &logFreqAxis_arg
             };
+            // DFT_custom_pf — поток на пару (точка, частота), сетка nPtsLimiter * nFreq потоков.
+            // Блок свой: shared ядру не нужна, а ширина на результат не влияет.
+            const int    dftBlock = 128;
+            const size_t dftGrid  = (nPtsLimiter * (size_t)nFreq + dftBlock - 1) / dftBlock;
             DFT_CHECK_CU(cuLaunchKernel(cached.kernel_dft,
-                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        (unsigned)dftGrid, 1, 1, dftBlock, 1, 1,
                                         0, nullptr, args_dft, nullptr),
                          "cuLaunchKernel(dft)");
             DFT_CHECK(cudaDeviceSynchronize(), "sync after dft");
@@ -7232,10 +7236,11 @@ struct ParametricEngine::Impl {
             &d_amountOfPeaks, &d_AkCOS, &d_BkSIN, &d_rangesFreq, &d_window,
             &nFreq_int, &timeStep, &logFreqAxis_arg
         };
-        int    dftBlock = 32;
-        int    dftGrid  = (nPts + dftBlock - 1) / dftBlock;
+        // DFT_custom_pf — поток на пару (точка, частота), см. run_dft1d_classical.
+        const int    dftBlock = 128;
+        const size_t dftGrid  = ((size_t)nPts * (size_t)nFreq + dftBlock - 1) / dftBlock;
         DFTC_CHECK_CU(cuLaunchKernel(cached_cont.kernel_dft,
-                                  dftGrid, 1, 1, dftBlock, 1, 1,
+                                  (unsigned)dftGrid, 1, 1, dftBlock, 1, 1,
                                   0, nullptr, dft_args, nullptr),
                    "cuLaunchKernel(dft)");
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after dft");
