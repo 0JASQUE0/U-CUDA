@@ -107,26 +107,48 @@ static void axis_range_inputs(AxisInfo& ax, const char* tag, bool positive_only)
     if (ImGui::InputText(id, hi_buf, sizeof(hi_buf), ImGuiInputTextFlags_EnterReturnsTrue)) accept(hi_buf, false);
 }
 
+// Границы оси по данным: lo/hi — в координатах VBO (на лог-оси там log10). Возвращает мировые
+// значения с 5% запаса; на лог-оси запас — в ЛОГ-домене: линейные 5% от диапазона 0.1..14 дали
+// бы view_min = -0.595, ось ушла бы в минус и лог-режим молча выключился бы сам. Вырожденный
+// лог-диапазон (одно значение) раздвигается на полдекады — как линейный на единицу.
+static void axis_range_from_data(double lo, double hi, bool log_axis, bool pad,
+                                 double& wlo, double& whi) {
+    if (log_axis) {
+        double lpad = pad ? (hi - lo) * 0.05 : 0.0;
+        if (pad && lpad < 1e-9 && hi - lo < 1e-9) lpad = 0.5;
+        wlo = std::pow(10.0, lo - lpad);
+        whi = std::pow(10.0, hi + lpad);
+    } else {
+        double p = pad ? (hi - lo) * 0.05 : 0.0;
+        if (pad && p < 1e-9) p = 1.0;
+        wlo = lo - p;
+        whi = hi + p;
+    }
+}
+
+bool Plot2DView::data_bbox(double& xmin, double& xmax, double& ymin, double& ymax) const {
+    if (!own_bbox_)
+        return render_visible_mask_.empty()
+               ? series_cache_.bbox(xmin, xmax, ymin, ymax)
+               : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    const double inf = std::numeric_limits<double>::infinity();
+    xmin = inf; xmax = -inf; ymin = inf; ymax = -inf;
+    for (size_t k = 0; k < series_bbox_.size(); ++k) {
+        if (k < render_visible_mask_.size() && !render_visible_mask_[k]) continue;
+        const auto& b = series_bbox_[k];
+        if (std::isfinite(b[0])) { xmin = std::min(xmin, b[0]); xmax = std::max(xmax, b[1]); }
+        if (std::isfinite(b[2])) { ymin = std::min(ymin, b[2]); ymax = std::max(ymax, b[3]); }
+    }
+    return xmin <= xmax && ymin <= ymax;
+}
+
 void Plot2DView::do_autofit() {
     double xmin, xmax, ymin, ymax;
-    bool ok = render_visible_mask_.empty()
-              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
-              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
+    bool ok = data_bbox(xmin, xmax, ymin, ymax);
     if (ok) {
-        // bbox снят с VBO, а там при лог-оси лежит log10(x) (см. заливку в
-        // render). Возвращаем X в мировые единицы, и запас берём в ЛОГ-домене:
-        // линейные 5% от диапазона 0.1..14 дали бы view_min = -0.595, ось
-        // ушла бы в минус и лог-режим молча выключился бы сам.
-        double wxmin = (double)xmin, wxmax = (double)xmax;
-        if (series_xlog_cached) {
-            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
-            wxmin = std::pow(10.0, wxmin - lpad);
-            wxmax = std::pow(10.0, wxmax + lpad);
-        } else {
-            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
-            wxmin -= padx; wxmax += padx;
-        }
-        double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
+        double wxmin, wxmax, wymin, wymax;
+        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, wxmin, wxmax);
+        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, wymin, wymax);
         // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
         // locked axes, but fit_request used to stomp them on every data change
         // (esp. visible in phase continuation, where each tick refit the view).
@@ -141,7 +163,7 @@ void Plot2DView::do_autofit() {
             }
         }
         if (!y_axis.lock && !y_axis.user_range) {
-            y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
+            y_axis.view_min = wymin; y_axis.view_max = wymax;
         }
         view_valid = true;
     }
@@ -161,34 +183,15 @@ void Plot2DView::fit_x() {
         return;
     }
     double xmin, xmax, ymin, ymax;
-    bool ok = render_visible_mask_.empty()
-              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
-              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
-    if (ok) {
-        // Тот же обратный перевод и лог-домен запаса, что в do_autofit.
-        double wxmin = (double)xmin, wxmax = (double)xmax;
-        if (series_xlog_cached) {
-            const double lpad = pad_x ? (wxmax - wxmin) * 0.05 : 0.0;
-            wxmin = std::pow(10.0, wxmin - lpad);
-            wxmax = std::pow(10.0, wxmax + lpad);
-        } else {
-            double padx = pad_x ? (wxmax - wxmin) * 0.05 : 0.0; if (pad_x && padx < 1e-9) padx = 1.0;
-            wxmin -= padx; wxmax += padx;
-        }
-        x_axis.view_min = wxmin; x_axis.view_max = wxmax;
-    }
+    if (data_bbox(xmin, xmax, ymin, ymax))   // тот же перевод и лог-домен запаса, что в do_autofit
+        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, x_axis.view_min, x_axis.view_max);
 }
 
 void Plot2DView::fit_y() {
     y_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     double xmin, xmax, ymin, ymax;
-    bool ok = render_visible_mask_.empty()
-              ? series_cache_.bbox(xmin, xmax, ymin, ymax)
-              : series_cache_.bbox_filtered(xmin, xmax, ymin, ymax, render_visible_mask_);
-    if (ok) {
-        double pady = pad_y ? (ymax - ymin) * 0.05 : 0.0; if (pad_y && pady < 1e-9) pady = 1.0;
-        y_axis.view_min = ymin - pady; y_axis.view_max = ymax + pady;
-    }
+    if (data_bbox(xmin, xmax, ymin, ymax))
+        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, y_axis.view_min, y_axis.view_max);
 }
 
 void Plot2DView::render(PlotRenderer& renderer,
@@ -200,45 +203,67 @@ void Plot2DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
-    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим оси X. Лог-ось переносит саму
-    // координату: в VBO уходит log10(x), потому что GL рисует вершины аффинной make_ortho_mvp, а
-    // логарифм не аффинен (см. XS/XW ниже). Флаг обязан входить в условие перезаливки — иначе
-    // переключение Log scale не тронуло бы уже залитый буфер и график остался бы в прежних
-    // координатах.
-    const bool upload_xlog = x_axis.log_scale;
-    if (data_generation != series_generation || series_xlog_cached != upload_xlog) {
+    // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим осей. Лог-ось переносит саму
+    // координату: в VBO уходит log10, потому что GL рисует вершины аффинной make_ortho_mvp, а
+    // логарифм не аффинен (см. XS/XW и YS/YW ниже). Флаги обязаны входить в условие перезаливки —
+    // иначе переключение lin/log не тронуло бы уже залитый буфер и график остался бы в прежних
+    // координатах. X логарифмический по сетке свипа (log_scale) или по выбору пользователя
+    // (display_log), Y — только по выбору пользователя.
+    const bool upload_xlog = x_axis.log_scale || x_axis.display_log;
+    const bool upload_ylog = y_axis.display_log;
+    if (data_generation != series_generation || series_xlog_cached != upload_xlog
+        || series_ylog_cached != upload_ylog) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
-        std::vector<double> xlog_buf;
+        // Неположительная координата на лог-оси невыразима: уводим точку далеко за край (-300 в
+        // лог-домене) вместо NaN, который испортил бы весь VBO. В начало координат и в границы
+        // данных такие заглушки не идут.
+        const double kLogOff = -300.0;
+        auto tf = [kLogOff](double v, bool lg) { return lg ? ((v > 0.0) ? std::log10(v) : kLogOff) : v; };
+        auto real = [kLogOff](double v, bool lg) { return !lg || v != kLogOff; };
+        // Свой bbox — при лог-Y и пользовательском лог-X; лог-сетка свипа без display_log
+        // остаётся на прежнем (см. own_bbox_ в plot_view_2d.h).
+        own_bbox_ = upload_ylog || (upload_xlog && !x_axis.log_scale);
+        std::vector<double> log_buf;
         // Начало координат для VBO: центр данных ПОСЛЕ лог-переноса, общий на весь
         // набор (матрица проекции одна на все серии). Проход по данным здесь дешевле
         // самой заливки и делается только при перезаливке.
         {
-            double xlo = std::numeric_limits<double>::infinity(), xhi = -xlo;
-            double ylo = std::numeric_limits<double>::infinity(), yhi = -ylo;
-            for (const auto& s : series_in) {
+            const double inf = std::numeric_limits<double>::infinity();
+            double xlo = inf, xhi = -inf, ylo = inf, yhi = -inf;
+            series_bbox_.assign(series_in.size(), { inf, -inf, inf, -inf });
+            for (size_t k = 0; k < series_in.size(); ++k) {
+                const auto& s = series_in[k];
                 if (!s.points || s.n_points <= 0) continue;
+                auto& b = series_bbox_[k];
                 for (int i = 0; i < s.n_points; ++i) {
-                    double x = s.points[(size_t)i * 2 + 0];
-                    if (upload_xlog) x = (x > 0.0) ? std::log10(x) : -300.0;
-                    const double y = s.points[(size_t)i * 2 + 1];
-                    if (x < xlo) xlo = x;  if (x > xhi) xhi = x;
-                    if (y < ylo) ylo = y;  if (y > yhi) yhi = y;
+                    const double x = tf(s.points[(size_t)i * 2 + 0], upload_xlog);
+                    const double y = tf(s.points[(size_t)i * 2 + 1], upload_ylog);
+                    if (real(x, upload_xlog)) {
+                        if (x < xlo) xlo = x;  if (x > xhi) xhi = x;
+                        if (x < b[0]) b[0] = x; if (x > b[1]) b[1] = x;
+                    }
+                    if (real(y, upload_ylog)) {
+                        if (y < ylo) ylo = y;  if (y > yhi) yhi = y;
+                        if (y < b[2]) b[2] = y; if (y > b[3]) b[3] = y;
+                    }
                 }
             }
-            const bool got = (xlo <= xhi && ylo <= yhi);
-            series_origin_x_ = got ? (xlo + xhi) * 0.5 : 0.0;
-            series_origin_y_ = got ? (ylo + yhi) * 0.5 : 0.0;
+            for (auto& b : series_bbox_) {   // нет ни одной точки по оси — NaN (см. data_bbox)
+                if (!(b[0] <= b[1])) b[0] = b[1] = std::numeric_limits<double>::quiet_NaN();
+                if (!(b[2] <= b[3])) b[2] = b[3] = std::numeric_limits<double>::quiet_NaN();
+            }
+            series_origin_x_ = (xlo <= xhi) ? (xlo + xhi) * 0.5 : 0.0;
+            series_origin_y_ = (ylo <= yhi) ? (ylo + yhi) * 0.5 : 0.0;
         }
         for (const auto& s : series_in) {
-            if (upload_xlog && s.points && s.n_points > 0) {
-                xlog_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
-                // Неположительный X на лог-оси невыразим: движок такой Run
-                // отклоняет, но чекбокс живой — уводим точку далеко влево
-                // вместо NaN, который испортил бы весь VBO.
-                for (size_t t = 0; t < xlog_buf.size(); t += 2)
-                    xlog_buf[t] = (xlog_buf[t] > 0.0) ? std::log10(xlog_buf[t]) : -300.0;
-                series_cache_.upload(xlog_buf.data(), s.n_points,
+            if ((upload_xlog || upload_ylog) && s.points && s.n_points > 0) {
+                log_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
+                for (size_t t = 0; t < log_buf.size(); t += 2) {
+                    log_buf[t]     = tf(log_buf[t], upload_xlog);
+                    log_buf[t + 1] = tf(log_buf[t + 1], upload_ylog);
+                }
+                series_cache_.upload(log_buf.data(), s.n_points,
                                      series_origin_x_, series_origin_y_);
             } else {
                 series_cache_.upload(s.points, s.n_points,
@@ -246,6 +271,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             }
         }
         series_xlog_cached = upload_xlog;
+        series_ylog_cached = upload_ylog;
         series_generation = data_generation;
         // Не сбрасываем view_valid здесь: смена набора серий (вкл/выкл переменной через show_var)
         // не должна двигать вид. Автофит — только по fit_request или когда вида ещё не было.
@@ -282,6 +308,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     for (int k = 0; k < series_cache_.size(); ++k)
         render_visible_mask_[k] = eff_visible(k);
 
+    // Переключили lin/log в меню оси: VBO уже перезалит в новом домене (шаг 1), маска готова —
+    // теперь подгонка считает по правильным координатам.
+    if (pending_fit_x_) { pending_fit_x_ = false; fit_x(); }
+    if (pending_fit_y_) { pending_fit_y_ = false; fit_y(); }
+
     // Detect legend-toggle across frames (legend clicks flip visible[k] later in this render, so the
     // change lands in NEXT frame's mask). Any bit that flipped → autofit, so newly-visible series
     // come into view. Was asymmetric before: turning OFF shrunk the view via clamp, turning ON left
@@ -308,9 +339,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     bool has_bounds_x = false, has_bounds_y = false;
     {
         double xmn, xmx, ymn, ymx;
-        bool ok = render_visible_mask_.empty()
-                    ? series_cache_.bbox(xmn, xmx, ymn, ymx)
-                    : series_cache_.bbox_filtered(xmn, xmx, ymn, ymx, render_visible_mask_);
+        bool ok = data_bbox(xmn, xmx, ymn, ymx);
         if (x_fit_use_explicit) {
             clamp_lo_x = std::min(x_fit_min, x_fit_max);
             clamp_hi_x = std::max(x_fit_min, x_fit_max);
@@ -325,26 +354,12 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Пересчёт повторяет do_autofit операция в операцию, чтобы
             // только что подогнанный вид ровно совпал с границами и не был
             // сдвинут на первом же кадре.
-            double lo = (double)xmn, hi = (double)xmx;
-            if (series_xlog_cached) {
-                const double lpad = pad_x ? (hi - lo) * 0.05 : 0.0;
-                lo = std::pow(10.0, lo - lpad);
-                hi = std::pow(10.0, hi + lpad);
-            } else {
-                double padx = pad_x ? (hi - lo) * 0.05 : 0.0;
-                if (pad_x && padx < 1e-9) padx = 1.0;
-                lo -= padx;
-                hi += padx;
-            }
-            clamp_lo_x = lo;
-            clamp_hi_x = hi;
+            axis_range_from_data(xmn, xmx, series_xlog_cached, pad_x, clamp_lo_x, clamp_hi_x);
             has_bounds_x = true;
         }
         if (ok) {
-            double pady = pad_y ? (ymx - ymn) * 0.05 : 0.0;
-            if (pad_y && pady < 1e-9) pady = 1.0;
-            clamp_lo_y = ymn - pady;
-            clamp_hi_y = ymx + pady;
+            // На лог-Y — так же, как по X: границы мировые, запас в лог-домене.
+            axis_range_from_data(ymn, ymx, series_ylog_cached, pad_y, clamp_lo_y, clamp_hi_y);
             has_bounds_y = true;
         }
     }
@@ -411,10 +426,16 @@ void Plot2DView::render(PlotRenderer& renderer,
     // Активна только при положительных границах: чекбокс можно включить до
     // Run, и log10(<=0) отравил бы NaN'ом весь кадр. Концы диапазона в обоих
     // режимах совпадают, поэтому подписи границ на оси остаются на месте.
-    const bool xlog = x_axis.log_scale && std::min(ex0, ex1) > 0.0;
+    const bool xlog = (x_axis.log_scale || x_axis.display_log) && std::min(ex0, ex1) > 0.0;
     auto XS = [xlog](double w) { return xlog ? std::log10(w > 0.0 ? w : 1e-300) : w; };
     auto XW = [xlog](double s) { return xlog ? std::pow(10.0, s) : s; };
     const double sx0 = XS(ex0), sx1 = XS(ex1);
+    // То же для Y (AxisInfo::display_log): YS/YW — единственная пара переходов для всех
+    // Y-формул экрана ниже (MVP, Y(), курсор, зум, пан, рамка, крест, подсказки).
+    const bool ylog = y_axis.display_log && std::min(ey0, ey1) > 0.0;
+    auto YS = [ylog](double w) { return ylog ? std::log10(w > 0.0 ? w : 1e-300) : w; };
+    auto YW = [ylog](double s) { return ylog ? std::pow(10.0, s) : s; };
+    const double sy0 = YS(ey0), sy1 = YS(ey1);
 
     // Зум вокруг точки и сдвиг — в экранной координате: на лог-оси
     // арифметика по мировым значениям увела бы вид от курсора.
@@ -428,6 +449,19 @@ void Plot2DView::render(PlotRenderer& renderer,
         x_axis.view_min = XW(XS(x_axis.view_min) + d);
         x_axis.view_max = XW(XS(x_axis.view_max) + d);
     };
+    auto zoom_y_about = [&](double center_w, double scale) {
+        const double c = YS(center_w);
+        y_axis.view_min = YW(c + (YS(y_axis.view_min) - c) * scale);
+        y_axis.view_max = YW(c + (YS(y_axis.view_max) - c) * scale);
+    };
+    // Сдвиг вниз по экрану (dpx > 0) поднимает вид — как прежний линейный пан по Y.
+    auto pan_y_by_px = [&](double dpx) {
+        const double d = dpx / (double)plot_h * (sy1 - sy0);
+        y_axis.view_min = YW(YS(y_axis.view_min) + d);
+        y_axis.view_max = YW(YS(y_axis.view_max) + d);
+    };
+    // Мировой Y под экранной долей высоты my (0 — низ, 1 — верх).
+    auto y_at = [&](double my) { return YW(sy0 + my * (sy1 - sy0)); };
 
     // 4. FBO render
     {
@@ -441,7 +475,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     // вычитание делается в double, поэтому границы окна становятся малыми по модулю,
     // и float-матрицы хватает с запасом даже на окне шириной 5e-7 около 0.15.
     make_ortho_mvp(sx0 - series_origin_x_, sx1 - series_origin_x_,
-                   ey0 - series_origin_y_, ey1 - series_origin_y_, mvp);
+                   sy0 - series_origin_y_, sy1 - series_origin_y_, mvp);
     for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
         if (!eff_visible(k)) continue;
         const GpuLineSeries& g = series_cache_.get(k);
@@ -550,13 +584,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
 
     double vrx = sx1 - sx0;
-    double vry = ey1 - ey0;
+    double vry = sy1 - sy0;
     auto X = [&](double x) { return img_pos.x + (float)((XS(x) - sx0) / vrx) * plot_w; };
-    auto Y = [&](double y) { return img_pos.y + (float)((ey1 - y) / vry) * plot_h; };
+    auto Y = [&](double y) { return img_pos.y + (float)((sy1 - YS(y)) / vry) * plot_h; };
 
     if (show_zero_x && std::min(ex0, ex1) <= 0 && std::max(ex0, ex1) >= 0)
         dl->AddLine(ImVec2(X(0), img_pos.y), ImVec2(X(0), img_pos.y + plot_h), col_axis, 1.5f);
-    if (show_zero_y && std::min(ey0, ey1) <= 0 && std::max(ey0, ey1) >= 0)
+    if (show_zero_y && !ylog && std::min(ey0, ey1) <= 0 && std::max(ey0, ey1) >= 0)
         dl->AddLine(ImVec2(img_pos.x, Y(0)), ImVec2(img_pos.x + plot_w, Y(0)), col_axis, 1.5f);
 
     // Линии данных поверх осей через ImDrawList (только если imdraw_lines).
@@ -639,7 +673,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         // Центр — курсор в мировых координатах (та же пара формул, что у
         // читалки координат ниже).
         const double cx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
-        const double cy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        const double cy = YW(sy1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (sy1 - sy0));
         const int kSeg = 72;
         ImVec2 pts[kSeg];
         // finite — гард на патологический радиус: eps приходит из текстового
@@ -779,7 +813,12 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (ts.x > 0.0f && ts.y > 0.0f) {
             float max_tick_w = 0.0f;
             double vry = ey1 - ey0;
-            if (std::abs(vry) >= 1e-30) {
+            if (ylog && std::abs(vry) >= 1e-30) {
+                // Лог-ось подписана главными тиками log_axis_ticks (draw_axis_y_grid).
+                for (const LogAxisTick& t : log_axis_ticks(std::min(ey0, ey1), std::max(ey0, ey1),
+                                                           (float)plot_h, false))
+                    if (t.major) max_tick_w = std::max(max_tick_w, plot_text_size(fmt_tick(t.value).c_str()).x);
+            } else if (std::abs(vry) >= 1e-30) {
                 double lo = std::min(ey0, ey1);
                 double hi = std::max(ey0, ey1);
                 double sy = nice_step(std::abs(vry), 6);
@@ -816,7 +855,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (plot_h_ov) {
         ImGuiIO& io = ImGui::GetIO();
         double dx = XW(sx0 + (double)(io.MousePos.x - img_pos.x) / (double)plot_w * (sx1 - sx0));
-        double dy = ey1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (ey1 - ey0);
+        double dy = YW(sy1 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h * (sy1 - sy0));
         // Snap X к узлу, если caller выставил snap-конфиг (для 1D Bif/LLE/LS).
         // Если курсор вне param-диапазона — snap не срабатывает и dx остаётся
         // непрерывной (мы за пределами сетки движка).
@@ -875,7 +914,8 @@ void Plot2DView::render(PlotRenderer& renderer,
                     for (int i = 0; i < s.n_points; ++i) {
                         if (s.points[(size_t)i * 2 + 0] != dx) continue;
                         const double yv = s.points[(size_t)i * 2 + 1];
-                        const double d = std::abs(yv - dy);
+                        // В экранной метрике: на лог-Y «ближе» — ближе глазу.
+                        const double d = std::abs(YS(yv) - YS(dy));
                         if (!col_has_point || d < best_dy) {
                             best_dy = d; best_yv = yv; col_has_point = true;
                         }
@@ -886,8 +926,8 @@ void Plot2DView::render(PlotRenderer& renderer,
                 // у LLE/LS в столбце ОДНА точка, и её значение показывалось на
                 // всю высоту плота, а у БД — значение ближайшего края полосы,
                 // когда курсор в пустоте между ветвями.
-                const double py_per_w = (ey1 != ey0)
-                    ? (double)plot_h / std::abs(ey1 - ey0) : 0.0;
+                const double py_per_w = (sy1 != sy0)
+                    ? (double)plot_h / std::abs(sy1 - sy0) : 0.0;
                 if (col_has_point && best_dy * py_per_w <= kTooltipSnapPx) dy = best_yv;
             }
         }
@@ -955,25 +995,19 @@ void Plot2DView::render(PlotRenderer& renderer,
         float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
         float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
         double cx = XW(sx0 + mx * (sx1 - sx0));
-        double cy = ey0 + my * (ey1 - ey0);
+        double cy = y_at(my);
 
         if (plot_h_ov && io.MouseWheel != 0.0f) {
             double scale = std::pow(0.85, io.MouseWheel);
             if (!x_axis.lock) zoom_x_about(cx, scale);
-            if (!y_axis.lock) {
-                y_axis.view_min = cy + (y_axis.view_min - cy) * scale;
-                y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
-            }
+            if (!y_axis.lock) zoom_y_about(cy, scale);
         }
         // LMB pan — skip when Shift is held (that's a crosshair gesture).
         if (plot_a && !io.KeyShift
             && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
             ImVec2 d = io.MouseDelta;
             if (!x_axis.lock) pan_x_by_px((double)d.x);
-            if (!y_axis.lock) {
-                double dy_data = (double)d.y / plot_h * (ey1 - ey0);
-                y_axis.view_min += dy_data; y_axis.view_max += dy_data;
-            }
+            if (!y_axis.lock) pan_y_by_px((double)d.y);
         }
     }
 
@@ -988,18 +1022,15 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
         if (yax_h && io.MouseWheel != 0.0f && !y_axis.lock) {
             float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
-            double cy = ey0 + my * (ey1 - ey0);
+            double cy = y_at(my);
             double scale = std::pow(0.85, io.MouseWheel);
-            y_axis.view_min = cy + (y_axis.view_min - cy) * scale;
-            y_axis.view_max = cy + (y_axis.view_max - cy) * scale;
+            zoom_y_about(cy, scale);
         }
         if (xax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !x_axis.lock) {
             pan_x_by_px((double)io.MouseDelta.x);
         }
         if (yax_a && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !y_axis.lock) {
-            ImVec2 d = io.MouseDelta;
-            double dy_data = (double)d.y / plot_h * (ey1 - ey0);
-            y_axis.view_min += dy_data; y_axis.view_max += dy_data;
+            pan_y_by_px((double)io.MouseDelta.y);
         }
     }
 
@@ -1009,7 +1040,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         float mx = (io.MousePos.x - img_pos.x) / (float)plot_w;
         float my = 1.0f - (io.MousePos.y - img_pos.y) / (float)plot_h;
         double cx = XW(sx0 + mx * (sx1 - sx0));
-        double cy = ey0 + my * (ey1 - ey0);
+        double cy = y_at(my);
 
         const float drag_threshold = 5.0f;
 
@@ -1045,7 +1076,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (rect_zoom_active_) {
             auto d2s = [&](double x, double y) -> ImVec2 {
                 float sx = img_pos.x + (float)((XS(x) - sx0) / (sx1 - sx0)) * plot_w;
-                float sy = img_pos.y + (float)((ey1 - y) / (ey1 - ey0)) * plot_h;
+                float sy = img_pos.y + (float)((sy1 - YS(y)) / (sy1 - sy0)) * plot_h;
                 return ImVec2(sx, sy);
                 };
             ImVec2 p0, p1;
@@ -1127,12 +1158,38 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
         ImGui::EndPopup();
     }
+    // Строка "Scale: lin / log" меню оси. Переключение снимает ручной диапазон и подгоняет ось
+    // заново на следующем шаге render (pending_fit_*): VBO перезаливается в новом домене, а
+    // прежний линейный вид мог уходить в <= 0, где лог-ось не включилась бы. forced — лог задан
+    // сеткой свипа (AxisInfo::log_scale), его здесь не выключить.
+    auto scale_row = [](AxisInfo& ax, const char* tag, bool forced, bool& pending) {
+        const bool lg = forced || ax.display_log;
+        ImGui::TextUnformatted("Scale:");
+        ImGui::SameLine();
+        if (forced) ImGui::BeginDisabled();
+        char id[32];
+        std::snprintf(id, sizeof(id), "lin##scale_%s", tag);
+        if (ImGui::RadioButton(id, !lg) && lg) { ax.display_log = false; ax.user_range = false; pending = true; }
+        ImGui::SameLine();
+        std::snprintf(id, sizeof(id), "log##scale_%s", tag);
+        if (ImGui::RadioButton(id, lg) && !lg) { ax.display_log = true; ax.user_range = false; pending = true; }
+        if (forced) {
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("The sweep grid is log-spaced (Log scale in the diagram settings).");
+        } else if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Log display: points with a value <= 0 on this axis are not shown\n"
+                              "and do not take part in Auto fit.");
+        }
+    };
+
     std::snprintf(pop_id, sizeof(pop_id), "##xaxis_menu_%d", owner_id);
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit X")) fit_x();
         ImGui::Separator();
+        scale_row(x_axis, "x", x_axis.log_scale, pending_fit_x_);
         ImGui::Text("X range:");
-        axis_range_inputs(x_axis, "x", x_axis.log_scale);
+        axis_range_inputs(x_axis, "x", x_axis.log_scale || x_axis.display_log);
         ImGui::Separator();
         ImGui::MenuItem("Custom X range", nullptr, &x_axis.user_range);
         if (ImGui::IsItemHovered())
@@ -1146,8 +1203,9 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit Y")) fit_y();
         ImGui::Separator();
+        scale_row(y_axis, "y", false, pending_fit_y_);
         ImGui::Text("Y range:");
-        axis_range_inputs(y_axis, "y", false);
+        axis_range_inputs(y_axis, "y", y_axis.display_log);
         ImGui::Separator();
         ImGui::MenuItem("Custom Y range", nullptr, &y_axis.user_range);
         if (ImGui::IsItemHovered())

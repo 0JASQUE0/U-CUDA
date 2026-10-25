@@ -777,7 +777,13 @@ float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
     if (std::abs(vry) >= 1e-30) {
         const double lo = std::min(emin, emax);
         const double hi = std::max(emin, emax);
-        if (y.log_scale) {
+        if (y.display_log && lo > 0.0) {
+            // Лог-отображение: подписи — главные тики log_axis_ticks, как в draw_axis_y_grid.
+            // Высоты плота здесь нет (марджин нужен до layout'а) — берём с запасом: на высоком
+            // плоте подписей больше, а ширину задаёт самая длинная из них.
+            for (const LogAxisTick& t : log_axis_ticks(lo, hi, 2000.0f, false))
+                if (t.major) max_w = std::max(max_w, plot_text_size(fmt_tick(t.value).c_str()).x);
+        } else if (y.log_scale) {
             // Лог-ось подписывает только границы диапазона — см. draw_axis_y_grid.
             max_w = std::max(plot_text_size(fmt_tick(lo).c_str()).x,
                              plot_text_size(fmt_tick(hi).c_str()).x);
@@ -1021,7 +1027,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     // поэтому и позиция тика считается через log10 — линейная формула ниже
     // верна только на концах диапазона. Guard lo > 0 повторяет guard самого
     // Plot2DView: чекбокс можно включить до Run, и тогда ось остаётся линейной.
-    if (x.log_scale && lo > 0.0) {
+    if ((x.log_scale || x.display_log) && lo > 0.0) {
         const double le0 = std::log10(emin), le1 = std::log10(emax);
         const double lvr = le1 - le0;
         const ImU32 col_minor = dim_grid_col(col_grid);
@@ -1111,9 +1117,26 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
 
-    // Декадной сетки тут нет намеренно: отображение по Y у Plot2DView линейное
-    // (лог-оси по Y не бывает, см. AxisInfo::log_scale) — тики 10^k встали бы
-    // не там, где данные. Остаются границы диапазона.
+    // Лог-отображение Y (AxisInfo::display_log, YS/YW в Plot2DView): декадная сетка, позиция
+    // тика через log10 — зеркало ветки лог-оси в draw_axis_x_grid.
+    if (y.display_log && lo > 0.0) {
+        const double le0 = std::log10(emin), le1 = std::log10(emax);
+        const double lvr = le1 - le0;
+        const ImU32 col_minor = dim_grid_col(col_grid);
+        for (const LogAxisTick& t : log_axis_ticks(lo, hi, plot_h, false)) {
+            float py = axis_px(pos.y + (float)((le1 - std::log10(t.value)) / lvr) * plot_h,
+                               pos.y, plot_h);
+            fill_row_px(dl, py, pos.x, pos.x + plot_w, t.major ? col_grid : col_minor);
+            if (!t.major) continue;
+            std::string lbl = fmt_tick(t.value);
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            plot_text(dl, ImVec2(pos.x - ts.x - 4, px_center(py) - ts.y * 0.5f), col_text, lbl.c_str());
+        }
+        return;
+    }
+
+    // Без display_log декадной сетки тут нет намеренно: log_scale по Y — свойство данных, а
+    // отображение тогда линейное — тики 10^k встали бы не там, где данные. Остаются границы.
     if (y.log_scale) {
         auto draw_edge = [&](double yv) {
             float py = axis_px(pos.y + (float)((emax - yv) / vry) * plot_h, pos.y, plot_h);

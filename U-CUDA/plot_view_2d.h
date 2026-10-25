@@ -3,6 +3,7 @@
 #include "plot_legend.h"
 #include "gpu_line_series.h"
 #include "plot_renderer.h"
+#include <array>
 #include <vector>
 #include <string>
 #include <map>
@@ -186,6 +187,8 @@ public:
     // data_generation — иначе переключение чекбокса Log scale не меняло бы
     // уже залитый буфер, и график молча остался бы в старых координатах.
     bool series_xlog_cached = false;
+    // То же для Y: лог-отображение оси Y (AxisInfo::display_log), в VBO лежит log10(y).
+    bool series_ylog_cached = false;
 
     // Локальная видимость серий в этом плоте (переключается кликом по легенде).
     std::vector<bool> visible;
@@ -282,6 +285,18 @@ private:
     // меняется зумом и панорамированием, а VBO переливается только по data_generation.
     double series_origin_x_ = 0.0;
     double series_origin_y_ = 0.0;
+    // При лог-отображении точка с координатой <= 0 заливается в VBO заглушкой (-300 в лог-домене,
+    // далеко за краем). bbox GpuLineSeriesSet её учитывает, и автоподгонка ушла бы к 1e-300, поэтому
+    // на лог-осях границы данных берутся отсюда: по сериям, в координатах VBO, без заглушек.
+    // own_bbox_ — ими пользоваться (лог по Y или пользовательский лог по X); у лог-сетки свипа без
+    // display_log остаётся прежний bbox, чтобы её автоподгонка не изменилась ни на бит.
+    std::vector<std::array<double, 4>> series_bbox_;   // xmin, xmax, ymin, ymax; NaN — нет точек
+    bool own_bbox_ = false;
+    // Переключение lin/log в меню оси: подогнать ось заново, но только ПОСЛЕ перезаливки VBO в
+    // новом домене (это следующий render), иначе fit считал бы по старым координатам.
+    bool pending_fit_x_ = false;
+    bool pending_fit_y_ = false;
+    bool data_bbox(double& xmin, double& xmax, double& ymin, double& ymax) const;
     // Подпись серии, чей цвет правит меню легенды (legend_color_popup). ImGui immediate mode —
     // жить между кадрами обязано здесь, а не в локальных переменных render().
     std::string legend_color_target_;
