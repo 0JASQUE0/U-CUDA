@@ -3135,6 +3135,24 @@ static HeatmapView& get_or_create_heatmap(
     return *slot;
 }
 
+// Static-вью вкладок переживают пересоздание сессии (смена системы), а data_generation новых
+// конфигов снова считается с 0: совпавший номер оставлял на экране картинку прошлой системы.
+// Сбрасываем только то, что решает перезаливку и автофит (как в Custom); палитра и шкала остаются.
+static void invalidate_view(HeatmapView& hv) { hv.invalidate(); }
+static void invalidate_view(Plot2DView& v)   { v.view_valid = false;  v.series_generation = -1; }
+static void invalidate_view(Plot3DView& v)   { v.view_valid = false;  v.series_generation = -1; }
+template <class K, class V>
+static void invalidate_views(std::map<K, std::unique_ptr<V>>& m) {
+    for (auto& kv : m) if (kv.second) invalidate_view(*kv.second);
+}
+// true один раз после каждого start_*_analysis вкладки `mode`; `seen` — static вызывающего.
+static bool session_reloaded(const AppModel& model, AppModel::AppMode mode, int& seen) {
+    const int epoch = model.session_epoch[(int)mode];
+    if (seen == epoch) return false;
+    seen = epoch;
+    return true;
+}
+
 // Скретч-буферы точек одного plot-окна (по одному на серию). Между кадрами живут намеренно:
 // buf.clear() у вызывающего сохраняет capacity, поэтому со второго кадра push_back уже не
 // аллоцирует — на диаграммах в миллионы точек это заметно.
@@ -8891,6 +8909,11 @@ static void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, co
     // window's kind changes (Type combo), re-run configure_plot_view so
     // e.g. LLE doesn't inherit Bifurcation's points_mode=true.
     static std::map<int, ParametricPlotWindow::Kind> view_configured_for;
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Parametric, seen_epoch)) {
+        invalidate_views(views);
+        for (auto& kv : heatmaps) invalidate_views(kv.second);
+    }
 
     int to_remove = -1;
     for (int i = 0; i < (int)model.parametric_plot_windows.size(); ++i) {
@@ -9341,6 +9364,9 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
 static void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
     static std::map<int, std::map<int, std::unique_ptr<HeatmapView>>> heatmaps;
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Dft1D, seen_epoch))
+        for (auto& kv : heatmaps) invalidate_views(kv.second);
 
     int to_remove = -1;
     for (int i = 0; i < (int)model.dft1d_plot_windows.size(); ++i) {
@@ -9847,6 +9873,14 @@ static void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallb
     static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_avgpk, hm_avgint, hm_states;
     static std::map<unsigned, std::unique_ptr<Plot2DView>>  scatter_views;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Basins, seen_epoch)) {
+        invalidate_views(g_hm_basins);
+        invalidate_views(hm_avgpk);
+        invalidate_views(hm_avgint);
+        invalidate_views(hm_states);
+        invalidate_views(scatter_views);
+    }
     auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
                      bool discrete_default) -> HeatmapView& {
         auto& slot = m[oid];
@@ -10643,6 +10677,11 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     static std::map<unsigned, std::unique_ptr<HeatmapView>> hm_map;
     static std::map<unsigned, std::unique_ptr<Plot2DView>>  traj_map;
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::FastSync, seen_epoch)) {
+        invalidate_views(hm_map);
+        invalidate_views(traj_map);
+    }
 
     // Visualization toolbar — общая реализация (draw_heatmap_toolbar). Цветовая шкала
     // FastSync держится в HeatmapView даже в mode 0 (colored trajectory, где хитмапы нет),
@@ -10750,7 +10789,10 @@ static void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             // 3D: та же окраска по ошибке синхронизации, но в GL (draw_line_3d_cmap): цвет
             // интерполируется вдоль сегмента, глубина — depth test, а не сортировка сегментов.
             static std::map<unsigned, std::unique_ptr<Plot3DView>> traj3d_map;
-            int vz = (c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
+            static int seen_epoch_3d = 0;
+            if (session_reloaded(model, AppModel::AppMode::FastSync, seen_epoch_3d))
+                invalidate_views(traj3d_map);
+            int vz =(c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
             auto& slot3 = traj3d_map[base_oid];
             if (!slot3) {
                 slot3 = std::make_unique<Plot3DView>();
@@ -12968,6 +13010,11 @@ static void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
     static std::map<int, std::unique_ptr<PlotRenderer>> renderers;
     static std::map<int, std::unique_ptr<HeatmapView>>  heatmaps;
     static std::map<int, std::unique_ptr<Plot2DView>>   curves;
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Order, seen_epoch)) {
+        invalidate_views(heatmaps);
+        invalidate_views(curves);
+    }
 
     int to_remove = -1;
     for (int i = 0; i < (int)model.order_plot_windows.size(); ++i) {
@@ -17318,6 +17365,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         static std::map<int, std::unique_ptr<PlotRenderer>> net_renderers;
         static Plot2DView   net_series_view;
         static HeatmapView  net_raster_view;
+        static int seen_epoch = 0;
+        if (session_reloaded(model, AppModel::AppMode::Network, seen_epoch)) {
+            invalidate_view(net_series_view);
+            invalidate_view(net_raster_view);
+        }
         auto& rnd_series = net_renderers[0];
         if (!rnd_series) rnd_series = std::make_unique<PlotRenderer>();
         auto& rnd_raster = net_renderers[1];

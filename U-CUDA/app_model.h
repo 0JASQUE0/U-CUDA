@@ -575,6 +575,10 @@ public:
     // из-за чего Order не восстанавливался на старте).
     static constexpr int kAppModeCount = 10;
 
+    // Номер пересоздания сессий вкладки (++ в start_*_analysis). Сессия грузится с
+    // data_generation = 0, а static-вью вкладки помнят поколение прошлой: по смене номера gui сбрасывает их.
+    int session_epoch[kAppModeCount] = {};
+
     // Настройки видимости из Settings. Зеркалят AppConfig::hidden_tabs /
     // hidden_schemes: СКРЫТЫЕ идентификаторы вкладок (kModeTabs в gui.cpp) и
     // имена встроенных схем (kBuiltinSchemes там же). Храним скрытые, а не
