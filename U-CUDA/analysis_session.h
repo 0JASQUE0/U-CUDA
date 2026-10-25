@@ -1162,6 +1162,13 @@ struct BasinsConfig {
     bool        pp_use_gpu     = true;
     bool        pp_autorun     = false;
     float       pp_marker_size = 6.0f;   // px, маркер бассейнов-равновесий
+
+    // Стиль точек Scatter (облако признаков, вкладка 4). Выключенный стиль —
+    // прежний вид: сплошной квадратный GL-пойнт 3 px без смешивания.
+    bool        scatter_custom_style = false;
+    int         scatter_marker       = 0;      // PointMarker
+    float       scatter_point_size   = 4.0f;   // px
+    float       scatter_alpha        = 0.6f;
 };
 
 // Фазовые портреты по бассейнам — один слот на BasinsConfig, позиционно синхронный с

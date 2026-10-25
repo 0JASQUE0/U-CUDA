@@ -124,6 +124,12 @@ public:
     // 2D-портрет: всё true. Time domain: по X ни запаса, ни нуля (pad_x/show_zero_x=false).
     bool pad_x = true;
     bool pad_y = true;
+    // Доля размаха, добавляемая с каждой стороны при pad_* (0.05 = 5%, как было).
+    double pad_frac = 0.05;
+    // Вырожденный линейный размах (все точки на одном значении): false — ±1, как было;
+    // true — ±pad_frac·|значение| (±1 только у нуля). Для облаков признаков, где
+    // значения бывают и ~1e-3, и ~1e3, и единица то схлопывает, то раздувает ось.
+    bool pad_degenerate_rel = false;
     bool show_zero_x = true;
     bool show_zero_y = true;
 

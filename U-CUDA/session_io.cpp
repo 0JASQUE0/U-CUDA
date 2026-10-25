@@ -1329,6 +1329,10 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"pp_use_gpu\":"     << (c.pp_use_gpu ? "true" : "false") << ",";
     o << "\"pp_autorun\":"     << (c.pp_autorun ? "true" : "false") << ",";
     o << "\"pp_marker_size\":" << c.pp_marker_size << ",";
+    o << "\"scatter_custom_style\":" << (c.scatter_custom_style ? "true" : "false") << ",";
+    o << "\"scatter_marker\":"       << c.scatter_marker       << ",";
+    o << "\"scatter_point_size\":"   << c.scatter_point_size   << ",";
+    o << "\"scatter_alpha\":"        << c.scatter_alpha        << ",";
     o << "\"phase_projections\":";
     if (phase_slot) write_basins_phase_projections(o, phase_slot->phase.projections);
     else            o << "[]";
@@ -1382,6 +1386,10 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "pp_use_gpu")             c.pp_use_gpu             = p.boolean();
     else if (key == "pp_autorun")             c.pp_autorun             = p.boolean();
     else if (key == "pp_marker_size")         c.pp_marker_size         = (float)std::stod(p.str_or_num());
+    else if (key == "scatter_custom_style")   c.scatter_custom_style   = p.boolean();
+    else if (key == "scatter_marker")         c.scatter_marker         = std::stoi(p.str_or_num());
+    else if (key == "scatter_point_size")     c.scatter_point_size     = (float)std::stod(p.str_or_num());
+    else if (key == "scatter_alpha")          c.scatter_alpha          = (float)std::stod(p.str_or_num());
     else return false;
     return true;
 }
