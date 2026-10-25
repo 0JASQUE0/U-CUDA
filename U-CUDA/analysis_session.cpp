@@ -261,6 +261,8 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_cd)       out.emplace_back("CD");
     if (r.scheme_cd10) out.emplace_back("CD_{1-0}");
     if (r.scheme_cdfast) out.emplace_back("CD fast");
+    if (r.scheme_cdfp) out.emplace_back("CD FP");
+    if (r.scheme_cdfastfp) out.emplace_back("CD fast FP");
     if (r.scheme_ccd)      out.emplace_back("Complex CD");
     if (r.scheme_ccd10) out.emplace_back("Complex CD_{1-0}");
     if (r.scheme_cieuler)  out.emplace_back("Complex Implicit Euler");
@@ -298,6 +300,7 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     step_h = default_h_from_record(r);
     scheme = default_scheme_from_record(r, scheme);
     symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
+    cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
     sim_time = "50";
     skip_time = "10";
 
@@ -335,6 +338,7 @@ struct PhaseRunInputs {
     std::string step_h, sim_time, skip_time;
     std::string scheme, decimation;
     std::string symmetry_s = "0.5"; // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
     AdaptiveSettings adaptive;
     std::shared_ptr<std::atomic<bool>> cancel;   // отмена (адаптивный шаг), nullptr — нет
     bool        use_gpu = true;
@@ -714,8 +718,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
     // параметры: a[0] зарезервирован под CD-коэф. симметрии, a[1..] = params
     int nparams = (int)in.params.size();
-    std::vector<double> a(nparams + 1, 0.0);
+    std::vector<double> a(nparams + 2, 0.0);   // [s, p_1..p_M, n]
     a[0] = parse_val(in.symmetry_s, 0.5);
+    a[(size_t)nparams + 1] = cd_fp_iters_from_text(in.cd_fp_iters); // CD FP: a[M+1]
     for (int j = 0; j < nparams; ++j) {
         auto it = in.param_values.find(in.params[j]);
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
@@ -1034,6 +1039,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.skip_time    = s.skip_time;
     in.scheme       = s.scheme;
     in.symmetry_s   = s.symmetry_s;
+    in.cd_fp_iters  = s.cd_fp_iters;
     in.decimation   = s.decimation;
     in.adaptive     = s.adaptive;
     in.use_gpu      = s.use_gpu;
@@ -1211,6 +1217,8 @@ static Scheme scheme_from_string(const std::string& s) {
     if (s == "DOP853")            return Scheme::DOP853;
     if (s == "CD")                return Scheme::CD;
     if (s == "CD fast")           return Scheme::CDFast;
+    if (s == "CD FP")             return Scheme::CDFP;
+    if (s == "CD fast FP")        return Scheme::CDFastFP;
     if (s == "Complex CD")        return Scheme::ComplexCD;
     if (s == "Complex CD4")       return Scheme::ComplexCD4;
     if (s == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
@@ -1473,6 +1481,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     bd.scheme = default_scheme_from_record(r, bd.scheme);
     bd.plot_all_iterates = default_all_iterates_from_record(r);
     bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    bd.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -1588,8 +1597,9 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
 
     // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(bd.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1644,8 +1654,9 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(bd.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1853,6 +1864,7 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -1916,8 +1928,9 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1970,8 +1983,9 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2168,6 +2182,7 @@ void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -2234,8 +2249,9 @@ static Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2378,6 +2394,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -2456,8 +2473,9 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2787,6 +2805,7 @@ std::string build_basins_phase_run_signature(const BasinsConfig& c) {
     add(c.pp_use_gpu ? "1" : "0");
     add(c.scheme);
     add(c.symmetry_s);
+    add(c.cd_fp_iters);
     add(c.h_text);
     for (const auto& kv : c.param_values)       { o += kv.first; o += '='; o += kv.second; o += ';'; }
     o += '|';
@@ -2998,6 +3017,7 @@ static void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
     // обязана прийти в тот же аттрактор, что и ячейка сетки.
     ph.scheme       = c.scheme;
     ph.symmetry_s   = c.symmetry_s;
+    ph.cd_fp_iters  = c.cd_fp_iters;
     ph.step_h       = c.h_text;
     ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
     ph.param_values = c.param_values;
@@ -3095,6 +3115,7 @@ void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     // Параметры — из record, остальные секции инициализируем нулями.
     for (const auto& p : params) {
@@ -3157,8 +3178,9 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     // values[0] = a[0] (symmetry для CD), затем по параметрам.
     int nparams = (int)s.params.size();
-    req.values.assign((size_t)nparams + 1, 0.0);
+    req.values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.values[0] = parse_d(c.symmetry_s, 0.5);
+    req.values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3322,6 +3344,7 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -3385,8 +3408,9 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3437,8 +3461,9 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3642,6 +3667,7 @@ void SignalMetricsAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -3704,8 +3730,9 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;

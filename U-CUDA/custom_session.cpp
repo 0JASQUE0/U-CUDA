@@ -23,6 +23,7 @@ template <typename Cfg>
 void copy_integrator_and_state(const CustomTabSharedConfig& s, Cfg& c) {
     c.scheme           = s.scheme;
     c.symmetry_s       = s.symmetry_s;
+    c.cd_fp_iters      = s.cd_fp_iters;
     c.h_text           = s.h_text;
     c.t_max_text       = s.t_max_text;
     c.transient_text   = s.transient_text;
@@ -289,6 +290,7 @@ void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession&
     // recompute_async has something to run.
     ph.scheme     = s.scheme;
     ph.symmetry_s = s.symmetry_s;
+    ph.cd_fp_iters = s.cd_fp_iters;
     ph.step_h     = s.h_text;
     ph.sim_time   = s.t_max_text;
     ph.skip_time  = s.transient_text;
@@ -334,6 +336,7 @@ void CustomSession::load_from_record(const SystemRecord& r,
     // Seed shared config from the record's defaults.
     shared.scheme         = default_scheme_from_record(r, "Euler");
     shared.symmetry_s     = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    shared.cd_fp_iters    = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
     shared.h_text         = default_h_from_record(r);
     // Seed L1D integrator overrides from the same shared defaults; user
     // can drift them apart later in the L1D detail panel.
@@ -508,6 +511,7 @@ namespace {
     void sig_append_shared_state(std::string& o, const CustomTabSharedConfig& s) {
         sig_append_str(o, "sc", s.scheme);
         sig_append_str(o, "sym", s.symmetry_s);
+        sig_append_str(o, "fpn", s.cd_fp_iters);
         sig_append_str(o, "h",   s.h_text);
         sig_append_str(o, "tt",  s.transient_text);
         sig_append_str(o, "ct",  s.t_max_text);

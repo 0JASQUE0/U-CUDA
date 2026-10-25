@@ -329,6 +329,7 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     if (parse_composition_name(scheme_name, &cspec))
         return scheme_uses_symmetry(cspec.base, custom_schemes);
     return scheme_name == "CD" || scheme_name == "CD fast"
+        || scheme_name == "CD FP" || scheme_name == "CD fast FP"
         || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
         || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
         || scheme_name == "CD_{1-0}" || scheme_name == "Complex CD_{1-0}"
@@ -338,6 +339,26 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
         || scheme_name == "SEMP" || scheme_name == "SIMP"
         || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
 }
+
+// Читает ли схема число простых итераций CD FP из a[M+1] — показывать ли поле
+// "FP iterations n". Обёртки Extr/Comp — по базе, как у scheme_uses_symmetry.
+[[nodiscard]] static bool scheme_uses_cd_fp_iters(const std::string& scheme_name) {
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_cd_fp_iters(spec.base);
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_cd_fp_iters(cspec.base);
+    return scheme_name == "CD FP" || scheme_name == "CD fast FP";
+}
+
+// Поле "FP iterations n" (CD FP / CD fast FP). Рядом с "symmetry s" и с тем же
+// смыслом: значение уходит в ядро рантайм-слотом a[M+1], модуль не пересобирается.
+static const char* const kCdFpItersTip =
+    "Simple iterations n of the CD FP implicit half-step (integer >= 1).\n"
+    "Passed to the kernel at run time as a[M+1], like s in a[0]:\n"
+    "changing it does not recompile. Iteration residual O(h^(n+1)):\n"
+    "order 2 needs n >= 2.";
 
 // Auto-labels for BD/LLE/LS configs and Parametric plot windows
 // Каждый label регенерируется каждый кадр из текущего свипа, пока
@@ -833,6 +854,20 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "first step; the implicit half-step then multiplies instead\n"
       "of dividing. Same method and order as CD; the result\n"
       "differs from CD only at round-off level." },
+    { "CD FP",                    2, &AppModel::scheme_cdfp,
+      "CD whose implicit half-step is solved by n simple\n"
+      "iterations for EVERY equation (no analytic division);\n"
+      "n is the \"FP iterations n\" field of each tab, next to s\n"
+      "(a run-time value in a[M+1], like s in a[0]).\n"
+      "Terms of f_i free of x_i are added once before the\n"
+      "iterations; a linear f_i = c*x_i + r iterates\n"
+      "x = x0 + (h2*c)*x. Iteration residual O(h^(n+1)):\n"
+      "order 2 needs n >= 2." },
+    { "CD fast FP",               2, &AppModel::scheme_cdfastfp,
+      "CD fast (precomputed reciprocal denominators for\n"
+      "linear equations) + n simple iterations, with the\n"
+      "x_i-free terms hoisted, for equations nonlinear in\n"
+      "their own variable. Order 2 needs n >= 2." },
     { "Complex CD",               2, &AppModel::scheme_ccd,
       "CD with complex half-steps:\n"
       "h1 = s*h + i*h*sqrt(3)/6, h2 = (1-s)*h - i*h*sqrt(3)/6,\n"
@@ -1836,6 +1871,7 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
 struct IntegrationFields {
     std::string* h           = nullptr;
     std::string* symmetry_s  = nullptr;
+    std::string* cd_fp_iters = nullptr;   // CD FP: число простых итераций (a[M+1])
     std::string* t_max       = nullptr;
     std::string* transient   = nullptr;
     std::string* pre_scaller = nullptr;
@@ -1874,7 +1910,12 @@ static bool draw_integration_block(const char* header,
     if (f.symmetry_s && scheme_uses_symmetry(scheme, custom_schemes))
         changed |= InputNumStr("symmetry s", *f.symmetry_s, kFieldW,
                                menu(BroadcastField::SymmetryS, "symmetry s", *f.symmetry_s));
-    if (f.t_max)       changed |= InputNumStr(t_max_label, *f.t_max,       kFieldW,
+    if (f.cd_fp_iters && scheme_uses_cd_fp_iters(scheme)) {
+        changed |= InputNumStr("FP iterations n", *f.cd_fp_iters, kFieldW,
+                               menu(BroadcastField::CdFpIters, "FP iterations n", *f.cd_fp_iters));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+    }
+    if (f.t_max)      changed |= InputNumStr(t_max_label, *f.t_max,       kFieldW,
                                menu(BroadcastField::TMax, t_max_label, *f.t_max));
     if (f.transient)   changed |= InputNumStr(transient_label, *f.transient,   kFieldW,
                                menu(BroadcastField::Transient, transient_label, *f.transient));
@@ -3632,7 +3673,8 @@ static std::string wrapper_name_field(const char* id, std::string& text,
 // только при a[0] = 0.5; проверить это в кодогене нельзя (значение приходит в
 // рантайме), поэтому предупреждаем здесь.
 static bool extr_base_needs_half_s(const std::string& nm) {
-    return nm == "CD" || nm == "CD fast" || nm == "Complex CD" || nm == "Complex CD4"
+    return nm == "CD" || nm == "CD fast" || nm == "CD FP" || nm == "CD fast FP"
+        || nm == "Complex CD" || nm == "Complex CD4"
         || nm == "CCD4 (o4s3)" || nm == "CCD4 (o4s4)"
         || nm == "CD_{1-0}" || nm == "Complex CD_{1-0}" || nm == "Complex CD4_{1-0}"
         || nm == "CCD4 (o4s3)_{1-0}" || nm == "CCD4 (o4s4)_{1-0}"
@@ -5169,6 +5211,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     if (scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
         ImGui::Text("Symmetry s:"); ImGui::SameLine();
         changed |= InputNumStr("##sym", s.symmetry_s, 70);
+    }
+    if (scheme_uses_cd_fp_iters(s.scheme)) {
+        ImGui::Text("FP iterations n:"); ImGui::SameLine();
+        changed |= InputNumStr("##cdfpn", s.cd_fp_iters, 70);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
     }
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
@@ -7018,6 +7065,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
         IntegrationFields f;
         f.h           = &bd.h_text;
         f.symmetry_s  = &bd.symmetry_s;
+        f.cd_fp_iters = &bd.cd_fp_iters;
         f.t_max       = &bd.t_max_text;
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
@@ -7680,6 +7728,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
         IntegrationFields f;
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
@@ -8029,6 +8078,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
         IntegrationFields f;
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
@@ -8477,6 +8527,7 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         IntegrationFields f;
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -9057,6 +9108,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
         IntegrationFields f;
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -9743,6 +9795,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         IntegrationFields f;
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -10345,6 +10398,10 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                       &model, model.is_map, &s.wrapper_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+    if (scheme_uses_cd_fp_iters(c.scheme)) {
+        InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+    }
     ImGui::Separator();
 
     // Mode-specific axes
@@ -11589,6 +11646,10 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                           &model, model.is_map, &s.wrapper_schemes);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+        if (scheme_uses_cd_fp_iters(c.scheme)) {
+            InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+        }
         // Область устойчивости берёт из этого блока только схему и s: она
         // делает ОДИН шаг, поэтому ни времени счёта, ни порога расхождения,
         // ни подгонки числа шагов у неё нет, а собственный шаг живёт в своём
@@ -12047,6 +12108,7 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
         auto it = c.param_values.find(p);
         sn.values.push_back(it != c.param_values.end() ? parse_num(it->second, 0.0) : 0.0);
     }
+    cd_fp_append_slot(sn.values, c.cd_fp_iters);   // a[M+1], как в build_order_request
     sn.h             = parse_num(c.h_text, 0.01);
     sn.t_max         = parse_num(c.t_max_text, 10.0);
     sn.max_value     = parse_num(c.max_value_text, 1.0e6);
@@ -13472,6 +13534,7 @@ static void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
     IntegrationFields f;
     f.h           = &c.h_text;
     f.symmetry_s  = &c.symmetry_s;
+    f.cd_fp_iters = &c.cd_fp_iters;
     f.t_max       = &c.t_max_text;
     f.transient   = &c.transient_text;
     f.pre_scaller = &c.pre_scaller_text;
@@ -14317,6 +14380,11 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
         if (scheme_uses_symmetry(c.scheme, custom_schemes))
             if (InputNumStr("symmetry s", c.symmetry_s, kFieldW))
                 phase.symmetry_s = c.symmetry_s;
+        if (scheme_uses_cd_fp_iters(c.scheme)) {
+            if (InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW))
+                phase.cd_fp_iters = c.cd_fp_iters;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+        }
         // TT before CT: transient runs first, computing-time is what's
         // actually sampled after — order matches conceptual flow.
         if (InputNumStr(model.is_map ? "transient iterations" : "transient time",

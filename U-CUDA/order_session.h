@@ -68,6 +68,7 @@ struct OrderConfig {
     std::string label  = "Order";
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";        // a[0], когда s не свипуется
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
 
     // ---- Оси ----
     bool        two_d = false;             // false = 1D-кривая, true = 2D-карта

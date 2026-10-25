@@ -365,6 +365,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"skip_time\":"; jstr(o, s.skip_time); o << ",\n";
     o << "  \"scheme\":"; jstr(o, s.scheme); o << ",\n";
     o << "  \"symmetry_s\":"; jstr(o, s.symmetry_s); o << ",\n";
+    o << "  \"cd_fp_iters\":"; jstr(o, s.cd_fp_iters); o << ",\n";
     o << "  \"decimation\":"; jstr(o, s.decimation); o << ",\n";
     write_adaptive(o, s.adaptive, "  ", ",\n");
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
@@ -421,6 +422,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "skip_time")  s.skip_time = p.str();
             else if (key == "scheme")     s.scheme = p.str();
             else if (key == "symmetry_s") s.symmetry_s = p.str();
+            else if (key == "cd_fp_iters") s.cd_fp_iters = p.str();
             else if (key == "decimation") s.decimation = p.str();
             else if (key == "adaptive")   read_adaptive(p, s.adaptive);
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();
@@ -517,6 +519,7 @@ static void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig&
     o << ",\"label_is_manual\":"  << (bd.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, bd.scheme);
     o << ",\"symmetry_s\":";      jstr(o, bd.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, bd.cd_fp_iters);
     o << ",\"param_index\":"      << bd.param_index;
     o << ",\"sweep_over_var\":"   << (bd.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (bd.sweep_over_h ? "true" : "false");
@@ -577,6 +580,7 @@ static bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::s
     else if (key == "label_is_manual")    bd.label_is_manual   = p.boolean();
     else if (key == "scheme")             bd.scheme            = p.str();
     else if (key == "symmetry_s")         bd.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         bd.cd_fp_iters        = p.str();
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     bd.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       bd.sweep_over_h      = p.boolean();
@@ -738,6 +742,7 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -783,6 +788,7 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
@@ -904,6 +910,7 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -948,6 +955,7 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
@@ -1066,6 +1074,7 @@ static void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "\"label_is_manual\":"     << (c.label_is_manual ? "true" : "false") << ",";
     o << "\"scheme\":";             jstr(o, c.scheme);             o << ",";
     o << "\"symmetry_s\":";         jstr(o, c.symmetry_s);         o << ",";
+    o << "\"cd_fp_iters\":";         jstr(o, c.cd_fp_iters);         o << ",";
     o << "\"param_index\":"         << c.param_index              << ",";
     o << "\"sweep_over_var\":"      << (c.sweep_over_var ? "true" : "false") << ",";
     o << "\"var_sweep_index\":"     << c.var_sweep_index          << ",";
@@ -1105,6 +1114,7 @@ static bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "label_is_manual")     c.label_is_manual     = p.boolean();
     else if (key == "scheme")              c.scheme              = p.str();
     else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "cd_fp_iters")          c.cd_fp_iters          = p.str();
     else if (key == "param_index")         c.param_index         = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")      c.sweep_over_var      = p.boolean();
     else if (key == "var_sweep_index")     c.var_sweep_index     = std::stoi(p.str_or_num());
@@ -1276,6 +1286,7 @@ static void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
     o << "\"axis_x_var\":"        << c.axis_x_var            << ",";
     o << "\"axis_y_var\":"        << c.axis_y_var            << ",";
     o << "\"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text);   o << ",";
@@ -1332,6 +1343,7 @@ static bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
     else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
     else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
     else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();
@@ -1398,6 +1410,7 @@ static void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
     o << "\"mode\":"              << c.mode                  << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
     o << "\"iter_of_synchr_text\":"; jstr(o, c.iter_of_synchr_text); o << ",";
@@ -1446,6 +1459,7 @@ static bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key
     if      (key == "label")               c.label               = p.str();
     else if (key == "scheme")              c.scheme              = p.str();
     else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "cd_fp_iters")          c.cd_fp_iters          = p.str();
     else if (key == "mode")                c.mode                = std::stoi(p.str_or_num());
     else if (key == "h_text")              c.h_text              = p.str();
     else if (key == "iter_of_synchr_text") c.iter_of_synchr_text = p.str();
@@ -1596,6 +1610,7 @@ static void write_network_config(std::ostringstream& o, const NetworkConfig& c) 
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
     o << "\"t_max_text\":";       jstr(o, c.t_max_text);       o << ",";
     o << "\"transient_text\":";   jstr(o, c.transient_text);   o << ",";
@@ -1661,6 +1676,7 @@ static bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) 
     if      (key == "label")              c.label              = p.str();
     else if (key == "scheme")             c.scheme             = p.str();
     else if (key == "symmetry_s")         c.symmetry_s         = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters         = p.str();
     else if (key == "h_text")             c.h_text             = p.str();
     else if (key == "t_max_text")         c.t_max_text         = p.str();
     else if (key == "transient_text")     c.transient_text     = p.str();
@@ -1942,6 +1958,7 @@ void write_metrics_config(std::ostringstream& o, const SignalMetricsConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -1986,6 +2003,7 @@ bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string&
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
@@ -2190,6 +2208,7 @@ static void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"label\":";           jstr(o, c.label);           o << ",";
     o << "\"scheme\":";          jstr(o, c.scheme);          o << ",";
     o << "\"symmetry_s\":";      jstr(o, c.symmetry_s);      o << ",";
+    o << "\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);      o << ",";
     o << "\"calc_kind\":"        << c.calc_kind             << ",";
     o << "\"two_d\":"            << (c.two_d ? "true" : "false") << ",";
     o << "\"axis_x_target\":"    << c.axis_x_target         << ",";
@@ -2240,6 +2259,7 @@ static bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     if      (key == "label")            c.label            = p.str();
     else if (key == "scheme")           c.scheme           = p.str();
     else if (key == "symmetry_s")       c.symmetry_s       = p.str();
+    else if (key == "cd_fp_iters")       c.cd_fp_iters       = p.str();
     else if (key == "calc_kind") {
         const int k = std::stoi(p.str_or_num());
         c.calc_kind = (k == kOrderCalcPerf || k == kOrderCalcStab) ? k : kOrderCalcOrder;
@@ -2577,6 +2597,7 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     B("level_phase_enabled", c.level_phase_enabled);
     S("scheme",              c.scheme);
     S("symmetry_s",          c.symmetry_s);
+    S("cd_fp_iters",         c.cd_fp_iters);
     S("h_text",              c.h_text);
     S("t_max_text",          c.t_max_text);
     S("transient_text",      c.transient_text);
@@ -2702,6 +2723,7 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "level_phase_enabled")     c.level_phase_enabled = q.boolean();
                         else if (k == "scheme")                  c.scheme = q.str();
                         else if (k == "symmetry_s")              c.symmetry_s = q.str();
+                        else if (k == "cd_fp_iters")              c.cd_fp_iters = q.str();
                         else if (k == "h_text")                  c.h_text = q.str();
                         else if (k == "t_max_text")              c.t_max_text = q.str();
                         else if (k == "transient_text")          c.transient_text = q.str();
