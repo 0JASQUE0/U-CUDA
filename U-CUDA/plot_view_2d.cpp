@@ -108,19 +108,25 @@ static void axis_range_inputs(AxisInfo& ax, const char* tag, bool positive_only)
 }
 
 // Границы оси по данным: lo/hi — в координатах VBO (на лог-оси там log10). Возвращает мировые
-// значения с 5% запаса; на лог-оси запас — в ЛОГ-домене: линейные 5% от диапазона 0.1..14 дали
+// значения с запасом frac (по умолчанию 5%); на лог-оси запас — в ЛОГ-домене: линейные 5% от диапазона 0.1..14 дали
 // бы view_min = -0.595, ось ушла бы в минус и лог-режим молча выключился бы сам. Вырожденный
 // лог-диапазон (одно значение) раздвигается на полдекады — как линейный на единицу.
+// frac — доля размаха с каждой стороны (Plot2DView::pad_frac); degenerate_rel — см.
+// Plot2DView::pad_degenerate_rel.
 static void axis_range_from_data(double lo, double hi, bool log_axis, bool pad,
+                                 double frac, bool degenerate_rel,
                                  double& wlo, double& whi) {
     if (log_axis) {
-        double lpad = pad ? (hi - lo) * 0.05 : 0.0;
+        double lpad = pad ? (hi - lo) * frac : 0.0;
         if (pad && lpad < 1e-9 && hi - lo < 1e-9) lpad = 0.5;
         wlo = std::pow(10.0, lo - lpad);
         whi = std::pow(10.0, hi + lpad);
     } else {
-        double p = pad ? (hi - lo) * 0.05 : 0.0;
-        if (pad && p < 1e-9) p = 1.0;
+        double p = pad ? (hi - lo) * frac : 0.0;
+        if (pad && p < 1e-9) {
+            const double rel = std::max(std::fabs(lo), std::fabs(hi)) * frac;
+            p = (degenerate_rel && rel >= 1e-9) ? rel : 1.0;
+        }
         wlo = lo - p;
         whi = hi + p;
     }
@@ -147,8 +153,8 @@ void Plot2DView::do_autofit() {
     bool ok = data_bbox(xmin, xmax, ymin, ymax);
     if (ok) {
         double wxmin, wxmax, wymin, wymax;
-        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, wxmin, wxmax);
-        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, wymin, wymax);
+        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, pad_frac, pad_degenerate_rel, wxmin, wxmax);
+        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, pad_frac, pad_degenerate_rel, wymin, wymax);
         // A locked axis must survive autofit — pan/zoom/rect-zoom already skip
         // locked axes, but fit_request used to stomp them on every data change
         // (esp. visible in phase continuation, where each tick refit the view).
@@ -184,14 +190,14 @@ void Plot2DView::fit_x() {
     }
     double xmin, xmax, ymin, ymax;
     if (data_bbox(xmin, xmax, ymin, ymax))   // тот же перевод и лог-домен запаса, что в do_autofit
-        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, x_axis.view_min, x_axis.view_max);
+        axis_range_from_data(xmin, xmax, series_xlog_cached, pad_x, pad_frac, pad_degenerate_rel, x_axis.view_min, x_axis.view_max);
 }
 
 void Plot2DView::fit_y() {
     y_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
     double xmin, xmax, ymin, ymax;
     if (data_bbox(xmin, xmax, ymin, ymax))
-        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, y_axis.view_min, y_axis.view_max);
+        axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, pad_frac, pad_degenerate_rel, y_axis.view_min, y_axis.view_max);
 }
 
 void Plot2DView::render(PlotRenderer& renderer,
@@ -354,12 +360,12 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Пересчёт повторяет do_autofit операция в операцию, чтобы
             // только что подогнанный вид ровно совпал с границами и не был
             // сдвинут на первом же кадре.
-            axis_range_from_data(xmn, xmx, series_xlog_cached, pad_x, clamp_lo_x, clamp_hi_x);
+            axis_range_from_data(xmn, xmx, series_xlog_cached, pad_x, pad_frac, pad_degenerate_rel, clamp_lo_x, clamp_hi_x);
             has_bounds_x = true;
         }
         if (ok) {
             // На лог-Y — так же, как по X: границы мировые, запас в лог-домене.
-            axis_range_from_data(ymn, ymx, series_ylog_cached, pad_y, clamp_lo_y, clamp_hi_y);
+            axis_range_from_data(ymn, ymx, series_ylog_cached, pad_y, pad_frac, pad_degenerate_rel, clamp_lo_y, clamp_hi_y);
             has_bounds_y = true;
         }
     }
