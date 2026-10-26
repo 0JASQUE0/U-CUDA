@@ -35,6 +35,14 @@ static void log_run_completed(const char* label, bool ok, double secs) {
     std::fflush(stdout);
 }
 
+// Хвост подписи прогона на плашке справа ("Cancelled <label> in ..."): чем кончился Stop. ok + cancelled —
+// частичный результат (см. ParametricEngine, cancel); без единой посчитанной точки его не применяем.
+static std::string stop_note_for(bool cancelled, bool ok, const std::vector<int>& flags) {
+    if (!cancelled || !ok) return std::string();
+    return partial_result_worth_showing(ok, flags) ? " (partial result shown)"
+                                                   : " (no point finished before Stop)";
+}
+
 // Host-порт peakFinder из cudaLibrary.cu.
 //
 // Зачем копия, а не вызов оригинала: peakFinder объявлен как __device__ __host__ в
@@ -1814,6 +1822,7 @@ void BifurcationAnalysisSession::request_cancel() {
 bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_diagram_index;
     if (idx >= 0 && idx < (int)diagrams.size()) label = diagrams[idx].label;
@@ -1822,7 +1831,8 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif2d_result(diagrams[idx], std::move(r));
         }
     } else {
@@ -1830,13 +1840,15 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif1d_result(diagrams[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("bifurcation") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -2132,6 +2144,7 @@ void LLEAnalysisSession::request_cancel() {
 bool LLEAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -2140,7 +2153,8 @@ bool LLEAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -2148,13 +2162,15 @@ bool LLEAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LLE") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -2359,15 +2375,17 @@ bool Dft1DAnalysisSession::poll() {
 
     Dft1DResult r = run_future.get();
     bool cancelled = r.cancelled;
+    const std::string stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
     int idx = running_config_index;
     std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[idx].label.empty())
                             ? configs[idx].label : std::string("dft1d");
-    if (!cancelled && idx >= 0 && idx < (int)configs.size()) {
+    if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)configs.size()) {
         apply_dft1d_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -3617,6 +3635,7 @@ void LyapunovSpectrumAnalysisSession::request_cancel() {
 bool LyapunovSpectrumAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -3625,7 +3644,8 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -3633,13 +3653,15 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LS") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -3847,14 +3869,16 @@ bool SignalMetricsAnalysisSession::poll() {
 
     SignalMetricsResult r = run_future.get();
     const bool cancelled = r.cancelled;
+    const std::string stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
     std::string label;
     if (idx >= 0 && idx < (int)configs.size()) {
         label = configs[idx].label;
-        if (!cancelled) apply_metrics_result(configs[idx], std::move(r));
+        if (!cancelled || partial_result_worth_showing(r.ok, r.flags)) apply_metrics_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("Metrics") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;

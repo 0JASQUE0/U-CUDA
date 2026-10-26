@@ -462,6 +462,13 @@ __device__ __host__ __forceinline__ bool ucudaCancelRequested(const volatile int
 #endif
 }
 
+// Число вместо результата точки, у которой его нет: 999 — разошлась, UCUDA_CANCELLED_VALUE —
+// прервана Stop (flag — код режима из loopCalculateDiscreteModel_int).
+__device__ __host__ __forceinline__ numb ucudaNoDataValue(int flag)
+{
+	return flag == REGIME_CANCELLED ? (numb)UCUDA_CANCELLED_VALUE : (numb)999;
+}
+
 // Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
 // с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
 // свою долю, и бар застрял бы не дойдя до ста.
@@ -1200,9 +1207,9 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 					sinceReport = 0;
 				}
 			}
-			// Cancel отдаёт REGIME_UNBOUND: результат отменённого прогона
-			// хост всё равно выбрасывает, нового кода режима заводить не стали.
-			if (ucudaCancelRequested(cancelFlag)) return REGIME_UNBOUND;
+			// Cancel отдаёт REGIME_CANCELLED: по Stop хост показывает посчитанные точки,
+			// а прерванные — пустыми, не путая их с расходимостью.
+			if (ucudaCancelRequested(cancelFlag)) return REGIME_CANCELLED;
 			checker = 0;
 			//#pragma unroll
 			for (int j = 0; j < AMOUNTOFX; ++j) {
@@ -1321,7 +1328,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 					sinceReport = 0;
 				}
 			}
-			if (ucudaCancelRequested(cancelFlag)) return REGIME_UNBOUND;
+			if (ucudaCancelRequested(cancelFlag)) return REGIME_CANCELLED;
 			checker = 0;
 			for (int j = 0; j < AMOUNTOFX; ++j)
 				checker = checker + abs(x[j]);
@@ -2230,11 +2237,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		return;
 	}
 
-	if (amountOfPeaks[idx] == REGIME_UNBOUND)
-	{
-		amountOfPeaks[idx] = REGIME_UNBOUND;
+	// Cancelled — тоже без данных, код проносим как есть.
+	if (amountOfPeaks[idx] == REGIME_UNBOUND || amountOfPeaks[idx] == REGIME_CANCELLED)
 		return;
-	}
 
 	// dt-sweep: only the first actualIterations[idx] samples of this thread's
 	// (worst-case-sized) block are real data -- the rest is stale/uninitialised
@@ -2302,7 +2307,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 		return;
 	}
 
-	if (checker == 0)
+	if (checker == 0 || checker == REGIME_CANCELLED)
 	{
 		for (size_t i = 0; i < nFreq; i++) {
 			AkCOS[startIndexFreq + i] = 0.0;
@@ -2399,7 +2404,7 @@ __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amoun
 
 	const int checker = __ldg(&checkerArray[idx]);
 	if (checker == -1) { AkCOS[outIndex] = -1.0; BkSIN[outIndex] = -1.0; return; }
-	if (checker == 0)  { AkCOS[outIndex] = 0.0;  BkSIN[outIndex] = 0.0;  return; }
+	if (checker == 0 || checker == REGIME_CANCELLED) { AkCOS[outIndex] = 0.0;  BkSIN[outIndex] = 0.0;  return; }
 
 	const int RESET_INTERVAL = 1000;
 
@@ -2936,9 +2941,9 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 		return;
 	}
 
-	if (amountOfPeaks[idx] == REGIME_UNBOUND)
+	if (amountOfPeaks[idx] == REGIME_UNBOUND || amountOfPeaks[idx] == REGIME_CANCELLED)
 	{
-		outData[idx] = REGIME_UNBOUND;
+		outData[idx] = amountOfPeaks[idx];
 		return;
 	}
 
@@ -2995,7 +3000,7 @@ __global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
 
 	const int P = amountOfPeaks[cell];
 	// Коды режима и вырожденные случаи — как в dbscanCUDA / dbscan().
-	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND) { if (lane == 0) outData[cell] = P; return; }
+	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND || P == REGIME_CANCELLED) { if (lane == 0) outData[cell] = P; return; }
 	if (P == 1) { if (lane == 0) outData[cell] = 1; return; }
 
 	const bool byPeak = (multInterval == 0);
@@ -3101,7 +3106,7 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 	if (cell >= amountOfBlocks) return;
 
 	const int P = amountOfPeaks[cell];
-	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND) { if (lane == 0) outData[cell] = P; return; }
+	if (P == REGIME_FIXED_POINT || P == REGIME_UNBOUND || P == REGIME_CANCELLED) { if (lane == 0) outData[cell] = P; return; }
 	if (P == 1) { if (lane == 0) outData[cell] = 1; return; }
 
 	numb* gx = data      + (size_t)cell * peakStride;
@@ -3311,8 +3316,8 @@ __global__ void LLEKernelCUDA(
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 		1, cancelFlag, progressCounter, progressStride, &ticks);
 
-	if (flag == 0) {
-		resultArray[idx] = 999;
+	if (flag == 0 || flag == REGIME_CANCELLED) {
+		resultArray[idx] = ucudaNoDataValue(flag);
 		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
@@ -3368,8 +3373,8 @@ __global__ void LLEKernelCUDA(
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, progressCounter, progressStride, &ticks);
 
-		if (flag == 0) {
-			resultArray[idx] = 999;
+		if (flag == 0 || flag == REGIME_CANCELLED) {
+			resultArray[idx] = ucudaNoDataValue(flag);
 			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
@@ -3377,8 +3382,8 @@ __global__ void LLEKernelCUDA(
 		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, nullptr, 0, nullptr);
 
-		if (flag == 0) {
-			resultArray[idx] = 999;
+		if (flag == 0 || flag == REGIME_CANCELLED) {
+			resultArray[idx] = ucudaNoDataValue(flag);
 			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
@@ -3872,8 +3877,8 @@ __global__ void LSKernelCUDA(
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 		1, cancelFlag, progressCounter, progressStride, &ticks);
 
-	if (flag == 0) {
-		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+	if (flag == 0 || flag == REGIME_CANCELLED) {
+		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
 		ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 		return;
 	}
@@ -3895,8 +3900,8 @@ __global__ void LSKernelCUDA(
 	{
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 			1, cancelFlag, progressCounter, progressStride, &ticks);
-		if (flag == 0) {
-			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+		if (flag == 0 || flag == REGIME_CANCELLED) {
+			for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
 			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
@@ -3904,8 +3909,8 @@ __global__ void LSKernelCUDA(
 		{
 			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 				1, cancelFlag, nullptr, 0, nullptr);
-			if (flag == 0) {
-				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = 999;
+			if (flag == 0 || flag == REGIME_CANCELLED) {
+				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
 				ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 				return;
 			}

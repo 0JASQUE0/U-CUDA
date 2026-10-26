@@ -5764,10 +5764,12 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
 // "diverged" по flags[k] < 0, и подпись значила разное: у Bif1D/Bif2D отрицательный флаг —
 // это fixed point, а у LLE/LS — расходимость. Теперь коды канонические (REGIME_* в
 // configCUDA.h) и категории раскладываются одинаково везде.
-static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) {
+static void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc, int* stopped = nullptr) {
     fp = unb = osc = 0;
+    if (stopped) *stopped = 0;
     for (int f : flags) {
-        if      (regime_is_fixed_point(f)) ++fp;
+        if      (regime_is_cancelled(f))   { if (stopped) ++*stopped; }
+        else if (regime_is_fixed_point(f)) ++fp;
         else if (regime_is_unbound(f))     ++unb;
         else                               ++osc;
     }
@@ -5787,6 +5789,15 @@ static std::function<const char*(int, int)> regime_cell_label(const std::vector<
         if (k >= flags.size()) return nullptr;
         if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
         return regime_label(flags[k]);
+    };
+}
+
+// Ячейки, которые не досчитал Stop (HeatmapView::cell_not_computed) — та же адресация, что у
+// regime_cell_label.
+static std::function<bool(int, int)> cancelled_cell_mask(const std::vector<int>& flags, int row_stride) {
+    return [&flags, row_stride](int ix, int iy) -> bool {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        return k < flags.size() && regime_is_cancelled(flags[k]);
     };
 }
 
@@ -5815,8 +5826,12 @@ static void draw_adaptive_stats(const std::vector<double>& st) {
 }
 
 static void draw_regime_summary(const std::vector<int>& flags) {
-    int fp = 0, unb = 0, osc = 0;
-    count_regimes(flags, fp, unb, osc);
+    int fp = 0, unb = 0, osc = 0, stopped = 0;
+    count_regimes(flags, fp, unb, osc, &stopped);
+    if (stopped > 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "Stopped: %d of %d points computed, the rest are grey / blank",
+                           (int)flags.size() - stopped, (int)flags.size());
     if (fp == 0 && unb == 0) return;
     ImGui::TextDisabled("regimes: %d %s / %d %s / %d %s",
                         fp,  regime_label(REGIME_FIXED_POINT),
@@ -7310,6 +7325,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
 
             // Значение ячейки — сырой выход DBSCAN: число кластеров пиков, -1 / 0 — коды режима.
             hb.cell_regime = regime_cell_label(bdact.result_2d.flags, bdact.result_2d.n_pts);
+            hb.cell_not_computed = cancelled_cell_mask(bdact.result_2d.flags, bdact.result_2d.n_pts);
             hb.value_name = "period";
             hb.value_is_regime_code = true;
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -7484,6 +7500,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
             double x1 = rev ? lo : hi;
 
             hc.cell_regime = regime_cell_label(bdact.result.flags, 0);   // флаг на колонку
+            hc.cell_not_computed = cancelled_cell_mask(bdact.result.flags, 0);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hc.render(renderer, origin, avail,
@@ -7900,6 +7917,7 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
             };
 
             heatmap.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
+            heatmap.cell_not_computed = cancelled_cell_mask(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail,
@@ -8269,6 +8287,7 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
             };
 
             heatmap_ls.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
+            heatmap_ls.cell_not_computed = cancelled_cell_mask(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap_ls.render(renderer, origin, avail,
@@ -8707,6 +8726,7 @@ static void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCall
             // значения в той же ячейке, и текстура обязана перестроиться.
             const int gen = cact.data_generation_2d * SIGM_COUNT + m;
             heatmap.cell_regime = regime_cell_label(r.flags, r.n_pts);
+            heatmap.cell_not_computed = cancelled_cell_mask(r.flags, r.n_pts);
             ImVec2 avail_sz = ImGui::GetContentRegionAvail();
             ImVec2 origin   = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail_sz,
@@ -9397,6 +9417,7 @@ static void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallba
         double x1 = rev ? lo : hi;
 
         hc.cell_regime = regime_cell_label(c.result.flags, 0);   // флаг на точку свипа (колонку)
+        hc.cell_not_computed = cancelled_cell_mask(c.result.flags, 0);
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hc.render(renderer, origin, avail,
@@ -15999,8 +16020,10 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
                 double        vmin_use   = (i == 2 && ls_plane) ? ls_vmin  : slots[i].vmin;
                 double        vmax_use   = (i == 2 && ls_plane) ? ls_vmax  : slots[i].vmax;
                 int           gen_use    = (i == 2 && ls_plane) ? ls_gen   : slots[i].data_gen;
-                if (slots[i].flags)
+                if (slots[i].flags) {
                     hv.cell_regime = regime_cell_label(*slots[i].flags, slots[i].n_pts);
+                    hv.cell_not_computed = cancelled_cell_mask(*slots[i].flags, slots[i].n_pts);
+                }
                 if (i == 0) {   // Bif 2D: значение — период, -1 / 0 — коды режима (как в Parametric)
                     hv.value_name = "period";
                     hv.value_is_regime_code = true;

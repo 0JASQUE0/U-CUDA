@@ -1279,7 +1279,7 @@ struct UcudaLyapClones {
 // предыдущей точки цепочки continuation (carried = true, клоны в cl уже прикреплены, S после
 // ucuda_ad_restart): транзиента по одной x нет — он идёт блоками с клонами без учёта
 // (max(tTr/NT, nWarm) блоков, как settleBlocks у постоянного шага), чтобы щуп не терял
-// ориентацию. res[NC] — показатели. Возвращает 1, 0 — разлёт или отмена.
+// ориентацию. res[NC] — показатели. Возвращает 1; 0 — разлёт; -1 — отмена (Stop).
 template <int NC, class K>
 UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb* a, const UcudaAdaptParams& P,
                                      UcudaLyapClones<NC>& cl, const bool carried, const numb tTr, const numb NT,
@@ -1335,7 +1335,7 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             if (k > 0)
                 for (int c = 0; c < NC; ++c)
                     if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
-            if (cancelFlag != nullptr && *cancelFlag != 0) return 0;
+            if (cancelFlag != nullptr && *cancelFlag != 0) return -1;
         }
     }
     if (ucuda_lyap_out(S.X, maxValue)) return 0;   // хвост короче CHECK_INTERVAL
@@ -1373,7 +1373,11 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
     int  seq = 0;
     const numb qnan = sqrt((numb)-1);
     for (int j = 0; j < nPts; ++j) {
-        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (size_t r = (size_t)j * NC; r < (size_t)nPts * NC; ++r) result[r] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
         if (progressCounter != nullptr) {
 #ifdef __CUDA_ARCH__
             atomicAdd(progressCounter, 1);
@@ -1395,13 +1399,14 @@ UCUDA_HD inline void ucuda_lyap_chain(const K& Kf, const int continuation, const
         const int ok = ucuda_lyap_out(S.X, maxValue) ? 0
                      : ucuda_lyap_point<NC>(S, Kf, a, P, cl, attached, tTr, NT, nBlocks, nWarm, eps, renorm,
                                             maxValue, seq, res, cancelFlag);
-        for (int m = 0; m < NC; ++m) result[(size_t)j * NC + m] = ok ? res[m] : qnan;
+        for (int m = 0; m < NC; ++m)
+            result[(size_t)j * NC + m] = ok > 0 ? res[m] : (ok < 0 ? (numb)UCUDA_CANCELLED_VALUE : qnan);
         if (adStats != nullptr) {
             numb* st = adStats + (size_t)j * 4;
             st[0] = (numb)S.st.nacc; st[1] = (numb)S.st.nrej; st[2] = (numb)S.st.nforced;
             st[3] = S.st.nacc > 0 ? S.st.hsum / (numb)S.st.nacc : (numb)0;
         }
-        if (ok) attached = continuation != 0;
+        if (ok > 0) attached = continuation != 0;
         else    { attached = false; seq = j + 1; }
     }
 }
@@ -1429,7 +1434,11 @@ UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const i
     cl.active = false;
     const numb qnan = sqrt((numb)-1);
     for (int j = j0; j < j1; ++j) {
-        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        // Stop: недосчитанные точки куска помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (size_t r = (size_t)(j - j0) * NC; r < (size_t)(j1 - j0) * NC; ++r) result[r] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
         if (progressCounter != nullptr) {
 #ifdef __CUDA_ARCH__
             atomicAdd(progressCounter, 1);
@@ -1446,7 +1455,8 @@ UCUDA_HD inline void ucuda_lyap_classic_range(const K& Kf, const int j0, const i
                      : ucuda_lyap_point<NC>(S, Kf, a, P, cl, false, tTr, NT, nBlocks, nWarm, eps, renorm,
                                             maxValue, j, res, cancelFlag);
         const size_t r = (size_t)(j - j0);
-        for (int m = 0; m < NC; ++m) result[r * NC + m] = ok ? res[m] : qnan;
+        for (int m = 0; m < NC; ++m)
+            result[r * NC + m] = ok > 0 ? res[m] : (ok < 0 ? (numb)UCUDA_CANCELLED_VALUE : qnan);
         if (adStats != nullptr) {
             numb* st = adStats + r * 4;
             st[0] = (numb)S.st.nacc; st[1] = (numb)S.st.nrej; st[2] = (numb)S.st.nforced;

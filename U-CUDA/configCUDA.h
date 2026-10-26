@@ -36,6 +36,8 @@ constexpr int CHECK_INTERVAL = 100;
 //   -1 — fixed point (схлопнулась в неподвижную точку, |Δx| < eps_fixed_point)
 //    0 — unbound     (nan/inf или |x| > maxValue)
 //    1 — oscillation (нормальный колебательный режим)
+//   -2 — cancelled   (точку прервал Stop: данных нет; по Stop диаграмма показывает
+//                     посчитанное, а такие точки — пустыми)
 // Источник — loopCalculateDiscreteModel_int; коды живут в maxValueCheckerArray /
 // helpfulArray / *Result::flags. Там, где flags[] хранит СЫРОЙ выход
 // peakFinder / DBSCAN, N > 0 — это число пиков (период), т.е. OSCILLATION;
@@ -43,6 +45,10 @@ constexpr int CHECK_INTERVAL = 100;
 constexpr int REGIME_FIXED_POINT = -1;
 constexpr int REGIME_UNBOUND     =  0;
 constexpr int REGIME_OSCILLATION =  1;
+constexpr int REGIME_CANCELLED   = -2;
+// Значение-заглушка прерванной точки там, где ядро пишет число, а не код режима
+// (LLE/LS, DFT, метрики): рядом с 999 = «разошлось». Хост превращает её в NaN.
+constexpr int UCUDA_CANCELLED_VALUE = 998;
 
 // Calculate peaks
 // 1 -- Yes;

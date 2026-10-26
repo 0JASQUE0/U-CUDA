@@ -165,6 +165,11 @@ public:
     // Одноразовый, как overlay_mask: render() его забирает и сбрасывает, поэтому caller
     // назначает его перед каждым render(), и захваченные данные обязаны жить до конца вызова.
     std::function<const char*(int nx_idx, int ny_idx)> cell_regime;
+    // Ячейка не досчитана — расчёт прервал Stop (частичный результат, REGIME_CANCELLED): рисуется
+    // средне-серым, а не тёмным цветом «нет данных», чтобы не путать с расходимостью. Координаты ДАННЫХ,
+    // как у cell_regime. Одноразовый так же: render() его забирает; читается только при заливке
+    // текстуры (смена data_generation или swap_axes), поэтому caller задаёт его перед каждым render().
+    std::function<bool(int nx_idx, int ny_idx)> cell_not_computed;
     // Имя значения в подсказке ("<имя> = 1.23"); nullptr — "lambda". Строка обязана жить до
     // конца render() (обычно литерал).
     const char* value_name = nullptr;
@@ -272,7 +277,9 @@ private:
     std::vector<unsigned> overlay_buf_;
 
     void ensure_tex(int w, int h);
-    void upload_data(int nx, int ny, const double* values);
+    // not_computed — в координатах ЗАЛИВАЕМОЙ (пост-swap) сетки; пустой — таких ячеек нет.
+    void upload_data(int nx, int ny, const double* values,
+                     const std::function<bool(int, int)>& not_computed = nullptr);
     // nx, ny — уже в визуальной (после swap) раскладке.
     void upload_overlay(int nx, int ny, const unsigned char* mask);
     void do_autofit(double lo_x, double hi_x, double lo_y, double hi_y);

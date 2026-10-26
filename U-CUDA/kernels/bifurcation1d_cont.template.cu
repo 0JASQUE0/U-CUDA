@@ -102,7 +102,11 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
     numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     for (int j = 0; j < nPts; ++j) {
-        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (int r = j; r < nPts; ++r) d_amountOfPeaks[r] = REGIME_CANCELLED;
+            return;
+        }
         if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Значение узла continuation-цепочки — общая с host'ом функция
         // (ucuda_node_value_cont в configCUDA.h). Прежняя арифметика сохранена

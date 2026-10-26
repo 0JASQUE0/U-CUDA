@@ -203,6 +203,35 @@ static inline int lyap_warm_blocks(double vt, double NT)
     return vt > 0 ? (int)ucuda_steps_per_block((numb)vt, (numb)NT) : 0;
 }
 
+// Stop. Отмена по-прежнему рвёт расчёт, но то, что уже посчитано, не выбрасывается: свип
+// возвращает ok = true вместе с cancelled = true (частичный результат), а точки, до которых
+// не дошли или которые прервал Stop, помечены REGIME_CANCELLED / NaN. Отмена до первого
+// запуска (ничего не посчитано) — прежний отказ, ok = false.
+static inline bool cancel_requested(const std::shared_ptr<std::atomic<bool>>& c)
+{
+    return c && c->load(std::memory_order_relaxed);
+}
+
+// CPU-свипы по точкам: Stop перед точкой j > 0 помечает точки [j, n) как недосчитанные.
+static inline void mark_cancelled_tail(std::vector<int>& flags, size_t j)
+{
+    for (size_t k = j; k < flags.size(); ++k) flags[k] = REGIME_CANCELLED;
+}
+static inline void fill_nan_tail(std::vector<double>& v, size_t from)
+{
+    for (size_t k = from; k < v.size(); ++k) v[k] = std::numeric_limits<double>::quiet_NaN();
+}
+
+// Значение точки из ядра -> NaN, если в нём заглушка «разошлась» (999 / -999) или «прервана»
+// (UCUDA_CANCELLED_VALUE); flag — что именно. Остальное — как есть, flag = OSCILLATION.
+static inline double lyap_value_from_kernel(double v, int& flag)
+{
+    if (v == (double)UCUDA_CANCELLED_VALUE) { flag = REGIME_CANCELLED; return std::numeric_limits<double>::quiet_NaN(); }
+    if (v == 999.0 || v == -999.0)         { flag = REGIME_UNBOUND;   return std::numeric_limits<double>::quiet_NaN(); }
+    flag = REGIME_OSCILLATION;
+    return v;
+}
+
 static inline size_t steps_from_time_size_t(double t, double h)
 {
     if (!(h > 0.0) || !(t > 0.0)) return 0;
@@ -490,10 +519,12 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     numb h_local = (numb)req.h;
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           req.continuation_reverse, req.log_scale);
@@ -655,10 +686,12 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     std::vector<numb> times((size_t)maxPointsInBlock);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           /*reverse*/ false, req.log_scale);
@@ -973,10 +1006,13 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     };
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            fill_nan_tail(res.lyapunov, (size_t)j);
+            break;
         }
         // Свипуемая величина. Классика: направление и log берутся из запроса,
         // reverse не применяется (точки независимы).
@@ -1303,10 +1339,13 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     std::vector<numb> logs((size_t)N, (numb)0);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            for (size_t k = (size_t)j; k < res.spectrum.size(); ++k) fill_nan_tail(res.spectrum[k], 0);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           continuation && req.continuation_reverse,
@@ -1456,10 +1495,14 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     numb h_local = (numb)req.h;
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            fill_nan_tail(res.ak_cos, (size_t)j * (size_t)nFreq);
+            fill_nan_tail(res.bk_sin, (size_t)j * (size_t)nFreq);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           continuation && req.continuation_reverse,
@@ -1549,6 +1592,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::fprintf(stderr, "[metrics] CSV: %s\n", e.c_str());
     }
     res.ok = true;
+    res.cancelled = cancel_requested(req.cancel);   // ok + cancelled = частичный результат (Stop)
 }
 
 // Host-двойник MetricsAccum из signal_metrics.template.cu: те же суммы в том же
@@ -1670,10 +1714,13 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
     std::vector<numb> boxMin((size_t)req.amountOfX), boxMax((size_t)req.amountOfX);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            for (int m = 0; m < SIGM_COUNT; ++m) fill_nan_tail(res.values[m], (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi, rev, req.log_scale);
         if (!continuation) {
@@ -2976,8 +3023,9 @@ struct ParametricEngine::Impl {
 
     // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
     // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
-    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
-    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
+    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт,
+    // UCUDA_CANCELLED_VALUE — точка, до которой не дошёл Stop), stats[nPts * 4]. Возвращает false с
+    // текстом в err. Stop — true и cancelled = true: посчитанное в out остаётся.
     template <class Req>
     bool run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
                          std::string& err, bool& cancelled) {
@@ -2995,7 +3043,8 @@ struct ParametricEngine::Impl {
         const int    nBlocks = (int)(req.t_max / req.NT);
         const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
         if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
-        out.assign((size_t)nPts * NC, std::numeric_limits<double>::quiet_NaN());
+        // Точки, которых Stop не дал начать, так и останутся с меткой отмены.
+        out.assign((size_t)nPts * NC, (double)UCUDA_CANCELLED_VALUE);
         stats.assign((size_t)nPts * 4, 0.0);
         const int continuation = req.continuation ? 1 : 0;
 
@@ -3009,6 +3058,8 @@ struct ParametricEngine::Impl {
                     err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
                 return false;
             }
+            // Stop до запуска — прежний отказ, а не пустой частичный результат.
+            if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
             // Второй поток переносит отмену во флаг DLL и число готовых точек в прогресс.
             volatile int cancelFlag = 0;
             int progressCount = 0;                  // цепочка: счётчик DLL (точки)
@@ -3062,10 +3113,11 @@ struct ParametricEngine::Impl {
             }
             done.store(true, std::memory_order_relaxed);
             watcher.join();
-            if (cancelFlag) { cancelled = true; err = "Cancelled by user"; return false; }
+            cancelled = cancelFlag != 0;
             return true;
         }
 
+        if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
         // GPU: однопоточное ядро цепочки.
         if (!ensure_init(err)) return false;
         cuCtxSetCurrent(context);
@@ -3130,6 +3182,7 @@ struct ParametricEngine::Impl {
         cleanup();
         out.assign(h_res.begin(), h_res.end());
         stats.assign(h_st.begin(), h_st.end());
+        cancelled = cancel_requested(req.cancel);
         return true;
     }
 
@@ -3192,7 +3245,7 @@ struct ParametricEngine::Impl {
 
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;
-        res.flags.assign((size_t)nPts, 0);
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);   // точки, до которых не дошёл Stop
         res.bifurcation_points.assign((size_t)nPts, {});
         res.peak_times.assign((size_t)nPts, {});
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
@@ -3218,6 +3271,8 @@ struct ParametricEngine::Impl {
             }
         };
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -3244,7 +3299,7 @@ struct ParametricEngine::Impl {
         if (cont) {
             // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
             std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);   // хвост, до которого не дошёл Stop
             int prog = 0;
             std::thread pump([&]() {
                 while (!finished.load(std::memory_order_relaxed)) {
@@ -3256,7 +3311,7 @@ struct ParametricEngine::Impl {
             finished.store(true, std::memory_order_relaxed);
             pump.join();
             watcher.join();
-            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = !ok || cancelFlag;   // Stop: посчитанное начало цепочки остаётся
             collect(0, nPts, pk, tm, fl, st);
         } else {
             // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
@@ -3276,8 +3331,11 @@ struct ParametricEngine::Impl {
                     if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
                     int prog = 0;
-                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются с меткой отмены.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    const bool whole = call(i0, i1, pk, tm, fl, st, &prog) != 0;
                     collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    if (!whole) { aborted.store(true); return; }
                     donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
                 }
             };
@@ -3286,7 +3344,7 @@ struct ParametricEngine::Impl {
             for (std::thread& t : pool) t.join();
             finished.store(true, std::memory_order_relaxed);
             watcher.join();
-            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = aborted.load() || cancelFlag;   // Stop: посчитанные куски остаются
         }
         fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
@@ -3306,13 +3364,21 @@ struct ParametricEngine::Impl {
         res.continuation_reverse = req.continuation && req.continuation_reverse;
         res.lyapunov = out;
         res.flags.assign((size_t)req.n_pts, 0);
-        for (int j = 0; j < req.n_pts; ++j)
-            res.flags[(size_t)j] = std::isfinite(out[(size_t)j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        for (int j = 0; j < req.n_pts; ++j) {
+            double& v = res.lyapunov[(size_t)j];
+            if (v == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                v = std::numeric_limits<double>::quiet_NaN();
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+            } else {
+                res.flags[(size_t)j] = std::isfinite(v) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+            }
+        }
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
@@ -3330,6 +3396,11 @@ struct ParametricEngine::Impl {
         res.spectrum.assign((size_t)req.n_pts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign((size_t)req.n_pts, 0);
         for (int j = 0; j < req.n_pts; ++j) {
+            if (N > 0 && out[(size_t)j * N] == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                fill_nan_tail(res.spectrum[(size_t)j], 0);
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+                continue;
+            }
             bool fin = true;
             for (int k = 0; k < N; ++k) {
                 res.spectrum[(size_t)j][(size_t)k] = out[(size_t)j * N + k];
@@ -3342,6 +3413,7 @@ struct ParametricEngine::Impl {
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
@@ -3754,12 +3826,13 @@ struct ParametricEngine::Impl {
         // результат-аккумулятор (для GUI)
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;   // ёмкость строки пиков, а не длина траектории
-        res.flags.assign(nPts, 0);
+        res.flags.assign(nPts, REGIME_CANCELLED);   // чанки, до которых не дошёл Stop
         res.bifurcation_points.assign(nPts, {});
         res.peak_times.assign(nPts, {});
 
         // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -3849,7 +3922,7 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after traj+peaks");
-            BIF_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки ядро пометило REGIME_CANCELLED, остальные целы.
 
             // D2H (порт строк 538-540 NL)
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
@@ -3919,6 +3992,7 @@ struct ParametricEngine::Impl {
         #undef BIF_CHECK
         #undef BIF_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -4159,12 +4233,14 @@ struct ParametricEngine::Impl {
         res.n_pts    = nPts;
         res.param_lo = ranges[0];
         res.param_hi = ranges[1];
-        res.lyapunov.assign(nPts, 0.0);
-        res.flags.assign(nPts, 0);
+        // Чанки, до которых не дошёл Stop, остаются пустыми.
+        res.lyapunov.assign(nPts, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -4277,22 +4353,19 @@ struct ParametricEngine::Impl {
                 size_t global_idx = originalNPtsLimiter * iter + k;
                 double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
-                double v          = h_lleResult[k];
-
-                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось). Наружу отдаём
-                // NaN, а не сырой sentinel: 999 — легитимное по типу значение λ, поэтому любой
-                // потребитель, забывший сверить flags[], молча рисовал выброс на 999. NaN
-                // отсекается через !isfinite (и в GUI, и в min/max), т.е. безопасен по умолчанию;
-                // flags[] остаётся источником истины о ПРИЧИНЕ отсутствия точки.
-                const bool diverged = (v == 999.0 || v == -999.0);
-                if (diverged) v = std::numeric_limits<double>::quiet_NaN();
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось), 998 — точку
+                // прервал Stop. Наружу отдаём NaN, а не сырой sentinel: 999 — легитимное по типу
+                // значение λ, поэтому любой потребитель, забывший сверить flags[], молча рисовал
+                // выброс на 999. NaN отсекается через !isfinite (и в GUI, и в min/max), т.е.
+                // безопасен по умолчанию; flags[] остаётся источником истины о ПРИЧИНЕ отсутствия
+                // точки. LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена).
+                int flag = REGIME_OSCILLATION;
+                const double v = lyap_value_from_kernel((double)h_lleResult[k], flag);
 
                 res.lyapunov[global_idx] = v;
-                // LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена),
-                // поэтому единственный «плохой» код — REGIME_UNBOUND.
-                res.flags[global_idx] = diverged ? REGIME_UNBOUND : REGIME_OSCILLATION;
+                res.flags[global_idx] = flag;
 
-                if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
+                if (out.is_open() && flag != REGIME_CANCELLED) data_export::write_lle1d_row(out, param_val, v);
             }
             if (out.is_open()) out.close();
         }
@@ -4301,6 +4374,7 @@ struct ParametricEngine::Impl {
         #undef LLE_CHECK
         #undef LLE_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -4605,8 +4679,9 @@ struct ParametricEngine::Impl {
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         // Snapshot of CSV-relevant fields in USER ordering — engine + GUI
@@ -4638,6 +4713,7 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -4754,8 +4830,10 @@ struct ParametricEngine::Impl {
                 } else {
                     out_idx = kernel_idx;
                 }
+                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает. Прерванную
+                // Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (v == (double)UCUDA_CANCELLED_VALUE) continue;
                 res.values[out_idx] = v;
-                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает.
                 res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? REGIME_UNBOUND
                                                                   : REGIME_OSCILLATION;
             }
@@ -4794,6 +4872,7 @@ struct ParametricEngine::Impl {
         #undef LLE2_CHECK
         #undef LLE2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5027,11 +5106,13 @@ struct ParametricEngine::Impl {
         res.n_exponents = amountOfInitialConditions;
         res.param_lo    = ranges[0];
         res.param_hi    = ranges[1];
-        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, 0.0));
-        res.flags.assign(nPts, 0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, std::numeric_limits<double>::quiet_NaN()));
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -5133,6 +5214,8 @@ struct ParametricEngine::Impl {
 
                 // первая экспонента используется как ground-truth для флага
                 double first = h_lsResult[k * (size_t)amountOfInitialConditions + 0];
+                // Прерванную Stop точку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 // 999/-999 — kernel-sentinel расходимости; FP LS не различает.
                 res.flags[global_idx] = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                             : REGIME_OSCILLATION;
@@ -5153,6 +5236,7 @@ struct ParametricEngine::Impl {
         #undef LS_CHECK
         #undef LS_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5441,8 +5525,9 @@ struct ParametricEngine::Impl {
         res.param_hi    = req.param_hi;
         res.param_lo_2  = req.param_lo_2;
         res.param_hi_2  = req.param_hi_2;
-        res.values.assign((size_t)N * total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign((size_t)N * total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         res.snapshot.values.assign(values, values + amountOfValues);
@@ -5472,6 +5557,7 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -5572,6 +5658,8 @@ struct ParametricEngine::Impl {
                 }
                 // Первая экспонента — ground-truth для флага (как в run_ls_1d).
                 double first = h_lsResult[k * (size_t)N + 0];
+                // Прерванную Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 int flag = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                : REGIME_OSCILLATION;
                 res.flags[out_idx] = flag;
@@ -5618,6 +5706,7 @@ struct ParametricEngine::Impl {
         #undef LS2_CHECK
         #undef LS2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5753,9 +5842,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         LC_CHECK(cudaDeviceSynchronize(), "sync after lle cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts);
         LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -5769,13 +5856,21 @@ struct ParametricEngine::Impl {
         res.continuation_reverse = req.continuation_reverse;
         res.lyapunov.assign(host.begin(), host.end());   // numb -> double
         res.flags.assign(nPts, 0);
-        // NaN у continuation-ядра означает расходимость (FP оно не различает).
-        for (int j = 0; j < nPts; ++j)
+        // NaN у continuation-ядра означает расходимость (FP оно не различает),
+        // UCUDA_CANCELLED_VALUE — хвост, до которого не дошёл Stop.
+        for (int j = 0; j < nPts; ++j) {
+            if (res.lyapunov[j] == (double)UCUDA_CANCELLED_VALUE) {
+                res.lyapunov[j] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             res.flags[j] = std::isfinite(res.lyapunov[j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5847,9 +5942,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SC_CHECK(cudaDeviceSynchronize(), "sync after ls cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts * N);
         SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -5865,6 +5958,12 @@ struct ParametricEngine::Impl {
         res.spectrum.assign(nPts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign(nPts, 0);
         for (int j = 0; j < nPts; ++j) {
+            // Хвост, до которого не дошёл Stop (UCUDA_CANCELLED_VALUE), — пустой.
+            if (N > 0 && host[(size_t)j * N] == (numb)UCUDA_CANCELLED_VALUE) {
+                for (int k = 0; k < N; ++k) res.spectrum[j][k] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             bool ok = true;
             for (int k = 0; k < N; ++k) {
                 const double v = host[(size_t)j * N + k];
@@ -5878,6 +5977,7 @@ struct ParametricEngine::Impl {
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5976,9 +6076,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DC_CHECK(cudaDeviceSynchronize(), "sync after dft cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> ak_host(freqCells), bk_host(freqCells);
         res.flags.assign(nPts, 0);
@@ -5998,8 +6096,16 @@ struct ParametricEngine::Impl {
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
         res.continuation_reverse = req.continuation_reverse;
+        // Строки, до которых не дошёл Stop, ядро не писало: в них мусор cudaMalloc.
+        for (int j = 0; j < nPts; ++j)
+            if (res.flags[j] == REGIME_CANCELLED)
+                for (int f = 0; f < nFreq; ++f) {
+                    res.ak_cos[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                    res.bk_sin[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6181,13 +6287,15 @@ struct ParametricEngine::Impl {
         res.param_hi = req.param_hi;
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         const size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DH_CANCEL_CHECK();
             if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
@@ -6271,6 +6379,7 @@ struct ParametricEngine::Impl {
         #undef DH_CANCEL_CHECK
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6407,9 +6516,8 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, peakFinderCUDA
+        // проносит код как есть.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // Launch peakFinderCUDA на полученные данные
@@ -6492,6 +6600,7 @@ struct ParametricEngine::Impl {
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6618,9 +6727,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         CA_CHECK(cudaDeviceSynchronize(), "sync after adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> h_outPeaks((size_t)nPts * peakStride), h_timeOfPeaks((size_t)nPts * peakStride);
         std::vector<int>  h_flags((size_t)nPts);
@@ -6657,6 +6764,7 @@ struct ParametricEngine::Impl {
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6924,11 +7032,13 @@ struct ParametricEngine::Impl {
         res.param_hi = ranges[1];
         res.freq_lo  = rangesFreq[0];
         res.freq_hi  = rangesFreq[1];
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DFT_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -7012,7 +7122,7 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
-            DFT_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, DFT их пропускает.
 
             // DFT_custom_pf(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
             // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
@@ -7081,6 +7191,7 @@ struct ParametricEngine::Impl {
         #undef DFT_CHECK_CU
         #undef DFT_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -7228,9 +7339,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, DFT его пропускает.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks
@@ -7313,6 +7422,7 @@ struct ParametricEngine::Impl {
         #undef DFTC_CHECK_CU
         #undef DFTC_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -7682,8 +7792,9 @@ struct ParametricEngine::Impl {
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells,  0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells,  REGIME_CANCELLED);
 
         res.snapshot.values.assign(values, values + amountOfValues);
         res.snapshot.initial_conditions.assign(initialConditions,
@@ -7714,6 +7825,7 @@ struct ParametricEngine::Impl {
 
         // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF2D_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
@@ -7845,7 +7957,8 @@ struct ParametricEngine::Impl {
             if (!wait_with_signals(stream, sig, req.cancel, req.progress,
                                    (double)(originalNPtsLimiter * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
-            BIF2D_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные ячейки помечены REGIME_CANCELLED, DBSCAN их
+            // пропускает, остальные досчитываются.
             int maxPeaks = 0;
             BIF2D_CHECK(cudaMemcpy(&maxPeaks, d_maxPeaks, sizeof(int), cudaMemcpyDeviceToHost), "memcpy d_maxPeaks");
 
@@ -7899,7 +8012,6 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
-            BIF2D_CANCEL_CHECK();
 
             // Копируем ПОСЛЕ опроса, а не до него: device -> pageable копирование
             // асинхронным не бывает (h_dbscanResult — std::vector), драйвер возвращает
@@ -7928,7 +8040,8 @@ struct ParametricEngine::Impl {
                 // point, 0 = unbound, N > 0 = число кластеров пиков. Раньше
                 // unbound (0) получал flag 1, т.е. считался валидной ячейкой и
                 // попадал в автошкалу colormap'а как «период 0».
-                res.values[out_idx] = (double)period;
+                res.values[out_idx] = period == REGIME_CANCELLED ? std::numeric_limits<double>::quiet_NaN()
+                                                                 : (double)period;
                 res.flags[out_idx]  = period;
                 if (ad)
                     for (int q = 0; q < 4; ++q)
@@ -7975,6 +8088,7 @@ struct ParametricEngine::Impl {
         #undef BIF2D_CHECK
         #undef BIF2D_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -8346,7 +8460,8 @@ struct ParametricEngine::Impl {
         res.param_lo_2  = req.param_lo_2; res.param_hi_2 = req.param_hi_2;
         res.log_scale   = req.log_scale;  res.log_scale_2 = req.log_scale_2;
         res.metric_mask = mask;
-        res.flags.assign(total_cells, REGIME_UNBOUND);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign(total_cells, std::numeric_limits<double>::quiet_NaN());
 
@@ -8354,6 +8469,7 @@ struct ParametricEngine::Impl {
         std::vector<int>  h_flags(chunk);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             SIGM_CANCEL_CHECK();
             if (req.progress) req.progress->store((float)((double)(chunk * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             const size_t cur = (iter == amountOfIteration - 1) ? total_cells - chunk * iter : chunk;
@@ -8433,7 +8549,7 @@ struct ParametricEngine::Impl {
                                    (double)(chunk * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             SIGM_CHECK(cudaStreamSynchronize(stream), "sync stream");
-            SIGM_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, метрики у них NaN.
 
             // Индекс ядра -> индекс результата: в 2D при swap_xy ядро шло по осям
             // в обратном порядке, результат всегда в раскладке GUI [iy*n + ix].
@@ -8570,9 +8686,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMC_CHECK(cudaDeviceSynchronize(), "sync after metrics cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
@@ -8652,11 +8766,14 @@ struct ParametricEngine::Impl {
         res.metric_mask = mask;
         res.continuation         = cont;
         res.continuation_reverse = cont && req.continuation_reverse;
-        res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+        // Точки, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, std::numeric_limits<double>::quiet_NaN());
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -8680,15 +8797,15 @@ struct ParametricEngine::Impl {
         bool aborted = false;
         if (cont) {
             std::vector<double> iv(needIntervals ? peakStride : 0), om((size_t)SIGM_COUNT * nPts), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            // Stop рвёт цепочку: хвост, до которого она не дошла, остаётся пустым.
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);
+            std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
             aborted = !call(0, nPts, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &chainProg);
-            if (!aborted) {
-                for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
-                for (int m = 0; m < SIGM_COUNT; ++m)
-                    if ((mask >> m) & 1)
-                        for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
-                res.ad_stats = st;
-            }
+            for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((mask >> m) & 1)
+                    for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
+            res.ad_stats = st;
         } else {
             // Куски точек — потокам по мере освобождения; строки кусков не пересекаются.
             constexpr int kChunk = 4;
@@ -8707,9 +8824,11 @@ struct ParametricEngine::Impl {
                     if (c >= nChunks || stop.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk), rows = i1 - i0;
                     int prog = 0;
-                    if (!call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog)) {
-                        stop.store(true); return;
-                    }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются пустыми.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
+                    const bool whole = call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog) != 0;
+                    if (!whole) stop.store(true);
                     for (int r = 0; r < rows; ++r) {
                         res.flags[(size_t)(i0 + r)] = fl[(size_t)r];
                         for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)(i0 + r) * 4 + q] = st[(size_t)r * 4 + q];
@@ -8717,6 +8836,7 @@ struct ParametricEngine::Impl {
                     for (int m = 0; m < SIGM_COUNT; ++m)
                         if ((mask >> m) & 1)
                             for (int r = 0; r < rows; ++r) res.values[m][(size_t)(i0 + r)] = om[(size_t)m * rows + r];
+                    if (!whole) return;
                     donePts.fetch_add(rows, std::memory_order_relaxed);
                 }
             };
@@ -8727,7 +8847,7 @@ struct ParametricEngine::Impl {
         }
         finished.store(true, std::memory_order_relaxed);
         watcher.join();
-        if (aborted || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        (void)aborted;   // Stop: частичный результат, cancelled ставит metrics_finish
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         metrics_finish(res, req);
         return res;
@@ -8841,9 +8961,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMA_CHECK(cudaDeviceSynchronize(), "sync after metrics adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
