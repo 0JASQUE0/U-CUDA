@@ -16561,6 +16561,44 @@ template <class Session>
     return b;
 }
 
+// Объём работы идущего расчёта (time_estimate.h) — по running-индексу его сессии. Порядок
+// проверок тот же, что у цепочки busy в draw_gui: показывается оценка того расчёта, чья подпись
+// стоит в индикаторе. Phase, FastSync, Order — без оценки.
+[[nodiscard]] static TrajWork running_traj_work(const AppModel& m) {
+    const CustomSession& cus = m.custom_session;
+    if (m.bifurcation_session.in_flight)
+        return m.bifurcation_session.traj_work(m.bifurcation_session.running_diagram_index);
+    if (m.lle_session.in_flight)     return m.lle_session.traj_work(m.lle_session.running_curve_index);
+    if (m.ls_session.in_flight)      return m.ls_session.traj_work(m.ls_session.running_curve_index);
+    if (m.metrics_session.in_flight) return m.metrics_session.traj_work(m.metrics_session.running_config_index);
+    if (m.dft1d_session.in_flight)   return m.dft1d_session.traj_work(m.dft1d_session.running_config_index);
+    if (m.phase_session.in_flight)   return {};
+    if (m.basins_session.in_flight)  return m.basins_session.traj_work(m.basins_session.running_config_index);
+    if (m.fastsync_session.in_flight || m.order_session.in_flight) return {};
+    if (cus.bif_session.in_flight)    return cus.bif_session.traj_work(cus.bif_session.running_diagram_index);
+    if (cus.lle_session.in_flight)    return cus.lle_session.traj_work(cus.lle_session.running_curve_index);
+    if (cus.ls_session.in_flight)     return cus.ls_session.traj_work(cus.ls_session.running_curve_index);
+    if (cus.basins_session.in_flight) return cus.basins_session.traj_work(cus.basins_session.running_config_index);
+    return {};
+}
+
+// Объём работы по настройкам открытой вкладки: активный конфиг активного анализа.
+[[nodiscard]] static TrajWork current_tab_traj_work(const AppModel& m) {
+    switch (m.app_mode) {
+    case AppModel::AppMode::Parametric:
+        switch (m.parametric_active_analysis) {
+        case 0:  return m.bifurcation_session.traj_work(m.bifurcation_session.active_diagram_index);
+        case 1:  return m.lle_session.traj_work(m.lle_session.active_curve_index);
+        case 2:  return m.ls_session.traj_work(m.ls_session.active_curve_index);
+        case 3:  return m.metrics_session.traj_work(m.metrics_session.active_config_index);
+        default: return {};
+        }
+    case AppModel::AppMode::Dft1D:  return m.dft1d_session.traj_work(m.dft1d_session.active_config_index);
+    case AppModel::AppMode::Basins: return m.basins_session.traj_work(m.basins_session.active_config_index);
+    default: return {};
+    }
+}
+
 // Главное окно: переключатель режимов Library / Analysis / Parametric
 void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
     if (!model.pending_netlist_export) return;
@@ -17101,6 +17139,79 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     }   // область видимости ссылок на сессии
 
+    // Оценка времени счёта траекторий (time_estimate.h). Пока идёт расчёт — его собственная,
+    // снятая один раз на старте: правка настроек под следующий прогон её не трогает. В простое —
+    // по настройкам открытой вкладки.
+    TrajTimeEstimator::Result est;
+    bool show_est = false;
+    {
+        // Время завершённого расчёта уточняет поправку оценщика на настоящие ядра. Смотрим саму
+        // сессию, а не плашку Done: очередь запускает следующий элемент в том же кадре, и кадра
+        // простоя между ними может не быть.
+        if (model.traj_learn_pending) {
+            auto learn_from = [&](const auto& s) {
+                if (s.last_run_completed_at <= model.traj_running_start) return;   // ещё идёт
+                if (s.last_run_succeeded)
+                    model.traj_estimator.learn(model.traj_running_work, s.last_run_seconds);
+                model.traj_learn_pending = false;
+            };
+            switch ((BusyKind)model.traj_running_kind) {
+            case BusyKind::LLE:    learn_from(model.lle_session);    break;
+            case BusyKind::LS:     learn_from(model.ls_session);     break;
+            case BusyKind::Basins: learn_from(model.basins_session); break;
+            default:               model.traj_learn_pending = false; break;
+            }
+        }
+        const bool running = busy.kind != BusyKind::None && !show_done;
+        if (running) {
+            if (model.traj_running_start != busy.start) {
+                model.traj_running_start = busy.start;
+                model.traj_running_work  = running_traj_work(model);
+                model.traj_running_kind  = (int)busy.kind;
+                model.traj_learn_pending = model.traj_running_work.valid;
+            }
+            est = model.traj_estimator.estimate(model.traj_running_work, false);
+            show_est = model.traj_running_work.valid || !model.traj_running_work.why.empty();
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - model.traj_idle_at > std::chrono::milliseconds(300)) {
+                model.traj_idle_at   = now;
+                model.traj_idle_work = current_tab_traj_work(model);
+            }
+            est = model.traj_estimator.estimate(model.traj_idle_work, true);
+            show_est = model.traj_idle_work.valid || !model.traj_idle_work.why.empty();
+        }
+    }
+    char   est_text[64] = "";
+    ImVec4 est_col(0.55f, 0.55f, 0.55f, 1.0f);
+    if (show_est) {
+        if (est.state == TrajTimeEstimator::State::Ready) {
+            std::snprintf(est_text, sizeof(est_text), "est. %s%s", est.rough ? "~" : "",
+                          traj_format_seconds(est.seconds).c_str());
+            est_col = ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+        } else if (est.state == TrajTimeEstimator::State::Pending) {
+            std::snprintf(est_text, sizeof(est_text), "est. ...");
+        } else {
+            std::snprintf(est_text, sizeof(est_text), "est. n/a");
+        }
+    }
+    auto draw_est = [&]() {
+        ImGui::TextColored(est_col, "%s", est_text);
+        if (ImGui::IsItemHovered() && !est.detail.empty())
+            ImGui::SetTooltip("Estimated trajectory integration time\n%s\nRight-click: recalibrate the GPU.",
+                              est.detail.c_str());
+        if (ImGui::BeginPopupContextItem("##traj_est_ctx")) {
+            if (ImGui::MenuItem("Recalibrate GPU")) model.traj_estimator.recalibrate();
+            ImGui::EndPopup();
+        }
+    };
+
+    if (busy.kind == BusyKind::None && show_est) {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetWindowSize().x - ImGui::CalcTextSize(est_text).x - 12.0f);
+        draw_est();
+    }
+
     if (busy.kind != BusyKind::None) {
         char text[200];
         // Phase suffix appears only for basins while running (not on "Cancelling"
@@ -17153,6 +17264,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         float total_w = text_w + 12.0f;
         if (show_bar)  total_w += bar_w + pad;
         if (show_stop) total_w += stop_w + pad;
+        if (show_est)  total_w += ImGui::CalcTextSize(est_text).x + pad;
 
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - total_w);
@@ -17170,6 +17282,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::SameLine();
             const float f = std::clamp(busy.progress, 0.0f, 1.0f);
             ImGui::ProgressBar(f, ImVec2(bar_w, bar_h), "");
+        }
+        if (show_est) {
+            ImGui::SameLine();
+            draw_est();
         }
         if (show_stop) {
             ImGui::SameLine();

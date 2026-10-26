@@ -3863,3 +3863,118 @@ bool SignalMetricsAnalysisSession::poll() {
     progress_token.reset();
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Объём работы для оценки времени счёта траекторий (time_estimate.h). Числа берутся из того же
+// запроса, что уходит в движок; пост-обработка (пики, DBSCAN, Грам-Шмидт, ДПФ) в оценку не входит.
+
+namespace {
+
+// 1/h; при свипе по h на одной из осей — среднее по её сетке (шагов у каждой точки ~ T/h).
+double work_inv_h(double h, bool sweep_x, double lo, double hi, int n, bool log_x,
+                  bool sweep_y = false, double lo2 = 0.0, double hi2 = 0.0, bool log_y = false) {
+    if (sweep_x) return traj_mean_inv_h(lo, hi, n, log_x);
+    if (sweep_y) return traj_mean_inv_h(lo2, hi2, n, log_y);
+    return h > 0.0 ? 1.0 / h : 0.0;
+}
+
+// points — точек свипа, per_point — вызовов шага на точку. continuation на GPU — одна нить,
+// проходящая все точки подряд.
+TrajWork make_traj_work(const std::string& body, int n, bool adaptive, bool cpu, bool continuation,
+                        double points, double per_point) {
+    TrajWork w;
+    if (body.empty()) { w.why = "no step body for this scheme"; return w; }
+    if (adaptive)     { w.why = "adaptive step: the number of steps is not known in advance"; return w; }
+    if (cpu)          { w.why = "computed on the CPU"; return w; }
+    w.valid     = true;
+    w.krs_body  = body;
+    w.amountOfX = n;
+    if (continuation) { w.threads = 1.0;    w.steps = points * per_point; }
+    else              { w.threads = points; w.steps = per_point; }
+    return w;
+}
+
+// LLE / LS: транзиент идёт одной траекторией, блоки NT (с транзиентом векторов) — основной и
+// клонами: у LLE траекторий 2, у LS N + 1.
+double lyap_steps(double inv_h, double transient, double t_max, double vtr, double trajectories) {
+    return traj_steps(transient, inv_h) + trajectories * traj_steps(t_max + std::max(0.0, vtr), inv_h);
+}
+
+}  // namespace
+
+TrajWork BifurcationAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)diagrams.size()) return {};
+    const BifurcationDiagramConfig& bd = diagrams[idx];
+    if (bd.mode_2d) {
+        const Bifurcation2DRequest r = build_bif2d_request(*this, bd);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+    }
+    const Bifurcation1DRequest r = build_bif1d_request(*this, bd);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork LLEAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)curves.size()) return {};
+    const LLECurveConfig& c = curves[idx];
+    if (c.mode_2d) {
+        const LLE2DRequest r = build_lle2d_request(*this, c);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts,
+                              lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, 2.0));
+    }
+    const LLE1DRequest r = build_lle1d_request(*this, c);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts, lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, 2.0));
+}
+
+TrajWork LyapunovSpectrumAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)curves.size()) return {};
+    const LSCurveConfig& c = curves[idx];
+    if (c.mode_2d) {
+        const LS2DRequest r = build_ls2d_request(*this, c);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts,
+                              lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, r.amountOfX + 1.0));
+    }
+    const LS1DRequest r = build_ls1d_request(*this, c);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts,
+                          lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, r.amountOfX + 1.0));
+}
+
+TrajWork SignalMetricsAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const SignalMetricsRequest r = build_metrics_request(*this, configs[idx]);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                 r.dimension == 2 && r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+    const double points = r.dimension == 2 ? (double)r.n_pts * r.n_pts : (double)r.n_pts;
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          points, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork Dft1DAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const Dft1DRequest r = build_dft1d_request(*this, configs[idx]);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, false, r.use_cpu, r.continuation,
+                          (double)r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork BasinsAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const BasinsRequest r = build_basins_request(*this, configs[idx]);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                          (double)r.n_pts * r.n_pts,
+                          traj_steps(r.transient_time + r.t_max, r.h > 0.0 ? 1.0 / r.h : 0.0));
+}

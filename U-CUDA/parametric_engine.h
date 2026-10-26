@@ -1605,6 +1605,42 @@ struct SignalMetricsResult {
 // (csv_output_path), и ПКМ-экспорт с графика.
 bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
 
+// --- Оценка времени счёта траекторий (см. time_estimate.h) ---------------------------------
+// Цена шага — взвешенное число арифметических инструкций типа numb в PTX тела КРС (IEEE-деление
+// и корень ~8, остальное по 1). Медленные ветви libm (редукция больших аргументов sin/cos) живут
+// в отдельных .func и в счёт не входят.
+struct KrsStepCost {
+    double ops   = 0.0;    // на один вызов шага
+    bool   loops = false;  // есть цикл (Ньютон неявных схем, итерации CD FP): посчитан один проход
+};
+// Без контекста: только NVRTC. Тяжёлый (~0.2-1 с) — звать из фонового потока.
+bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err);
+
+// Калибровка карты: два калибровочных шага (Эйлер и RK4 Лоренца) в цикле, повторяющем
+// loopCalculateDiscreteModel_int, блоки по варпу, на двух загрузках SM. Модель времени:
+//   steps * max(w * ns_thr * (ops + c0_thr), ns_lat * (ops + c0_lat)), w — варпов на SM;
+// c0 — постоянная добавка шага (цикл, shared, запись траектории) в тех же операциях.
+struct GpuCalibration {
+    std::string device;
+    int    sm_count   = 0;
+    int    numb_bytes = 0;     // калибровка float и double — разные числа
+    double calib_ops  = 0.0;   // цена калибровочного RK4 (для справки)
+    double ns_thr = 0.0;       // нс на операцию на варп при насыщенном SM (32 варпа)
+    double c0_thr = 0.0;
+    double ns_lat = 0.0;       // нс на операцию, когда в SM один варп (латентность цепочки)
+    double c0_lat = 0.0;
+    // Во сколько раз настоящие ядра свипов медленнее калибровочного на ту же операцию (регистры,
+    // занятость, запись траектории в большой массив). Стартовое значение замерено на RTX 2060
+    // (Basins / LLE, Лоренц, Euler..DOPRI78: 1.2-1.6), дальше уточняется по завершённым
+    // расчётам (TrajTimeEstimator::learn).
+    double kernel_factor = 1.3;
+};
+bool gpu_device_info(std::string& name, int& sm_count, std::string& err);
+// <каталог exe>\gpu_calibration.txt — хранилище калибровок (time_estimate.h).
+std::string gpu_calibration_path();
+// Занимает GPU на ~0.5-1 с. Звать, когда расчётов нет: иначе замер завышен.
+bool gpu_calibrate(GpuCalibration& out, std::string& err);
+
 class ParametricEngine {
 public:
     ParametricEngine();

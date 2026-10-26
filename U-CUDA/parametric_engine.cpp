@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
@@ -1791,6 +1792,76 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
     return res;
 }
 
+// Компиляция одной единицы трансляции в PTX с едиными опциями движка. rdc=true — для половинок
+// раздельной сборки. Свободная функция, а не член Impl: ею же собирает тело шага оценка времени
+// (krs_step_cost), и копия опций там разошлась бы с движком (см. build_module про --fmad).
+static bool nvrtc_compile_ptx(int cc_major, int cc_minor,
+                              const std::string& src, const char* src_name,
+                              const std::vector<const char*>& headers_src,
+                              const std::vector<const char*>& headers_name,
+                              const std::vector<const char*>& name_exprs,
+                              bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
+                              std::string& err) {
+    nvrtcProgram prog = nullptr;
+    nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
+                                        (int)headers_src.size(),
+                                        headers_src.empty() ? nullptr : headers_src.data(),
+                                        headers_name.empty() ? nullptr : headers_name.data());
+    if (nr != NVRTC_SUCCESS) {
+        err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
+        return false;
+    }
+    for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
+
+    char arch[64];
+    std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+    std::string cuda_include_opt;
+    {
+        char buf[MAX_PATH];
+        DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+        if (nlen > 0 && nlen < MAX_PATH)
+            cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+    }
+    if (cuda_include_opt.empty()) {
+        err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+              "(install the CUDA Toolkit or set CUDA_PATH=...)";
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+
+    std::string std_opt = "--std=c++17";
+    std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
+                                      cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+    if (rdc) opts.push_back("--relocatable-device-code=true");
+    std::string dev_opt_storage;
+    add_profiling_nvrtc_opts(opts, dev_opt_storage);
+
+    nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
+    if (nr != NVRTC_SUCCESS) {
+        size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+        std::string log;
+        if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+        err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+
+    size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+    out_ptx.assign(ptxsz, '\0');
+    nvrtcGetPTX(prog, &out_ptx[0]);
+
+    // Mangled-имена копируем ДО destroy — после него указатели невалидны.
+    lowered.clear();
+    lowered.reserve(name_exprs.size());
+    for (const char* sym : name_exprs) {
+        const char* lo = nullptr;
+        nvrtcGetLoweredName(prog, sym, &lo);
+        lowered.push_back(lo ? lo : sym);
+    }
+    nvrtcDestroyProgram(&prog);
+    return true;
+}
+
 struct ParametricEngine::Impl {
     bool       inited   = false;
     CUcontext  context  = nullptr;
@@ -2375,71 +2446,15 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedLibPtx>     pool_lib_ptx{ 4 };   // ~1.2 МБ на запись
     ModuleLru<CachedKrsPtx>     pool_krs_ptx{ 8 };   // ~50 КБ на запись
 
-    // Компиляция одной единицы трансляции в PTX. rdc=true — для половинок раздельной сборки.
+    // Компиляция одной единицы трансляции в PTX (см. nvrtc_compile_ptx).
     bool compile_ptx(const std::string& src, const char* src_name,
                      const std::vector<const char*>& headers_src,
                      const std::vector<const char*>& headers_name,
                      const std::vector<const char*>& name_exprs,
                      bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
                      std::string& err) {
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
-                                            (int)headers_src.size(),
-                                            headers_src.empty() ? nullptr : headers_src.data(),
-                                            headers_name.empty() ? nullptr : headers_name.data());
-        if (nr != NVRTC_SUCCESS) {
-            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
-            return false;
-        }
-        for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
-
-        char arch[64];
-        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
-                  "(install the CUDA Toolkit or set CUDA_PATH=...)";
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        std::string std_opt = "--std=c++17";
-        std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
-                                          cuda_include_opt.c_str(), nvrtc_fmad_opt() };
-        if (rdc) opts.push_back("--relocatable-device-code=true");
-        std::string dev_opt_storage;
-        add_profiling_nvrtc_opts(opts, dev_opt_storage);
-
-        nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        out_ptx.assign(ptxsz, '\0');
-        nvrtcGetPTX(prog, &out_ptx[0]);
-
-        // Mangled-имена копируем ДО destroy — после него указатели невалидны.
-        lowered.clear();
-        lowered.reserve(name_exprs.size());
-        for (const char* sym : name_exprs) {
-            const char* lo = nullptr;
-            nvrtcGetLoweredName(prog, sym, &lo);
-            lowered.push_back(lo ? lo : sym);
-        }
-        nvrtcDestroyProgram(&prog);
-        return true;
+        return nvrtc_compile_ptx(cc_major, cc_minor, src, src_name, headers_src, headers_name,
+                                 name_exprs, rdc, out_ptx, lowered, err);
     }
 
     // Библиотечная половина: тот же шаблон, но вместо тела шага — вызов внешнего krs_step.
@@ -11463,4 +11478,349 @@ bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& p
     }
     if (!out.good()) { err = "write failed: " + path; return false; }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Оценка времени счёта траекторий (time_estimate.h): цена шага по PTX и калибровка карты.
+
+namespace {
+
+// Тип numb в PTX: только его арифметика идёт в счёт.
+const char* ptx_numb_type() { return sizeof(numb) == 8 ? "f64" : "f32"; }
+
+// Вес PTX-инструкции в операциях numb. IEEE-деление, корень и обратная величина в SASS
+// разворачиваются в итерацию Ньютона (~8 FMA с проверкой), approx-варианты — одна MUFU.
+// Пересылки, загрузки, select и целочисленная арифметика не считаются: в FP64 узкое место —
+// FP64-конвейер, а во float их долю поглощает калибровка тем же счётом.
+double ptx_op_weight(const std::string& op) {
+    std::vector<std::string> parts;
+    size_t s = 0;
+    for (size_t i = 0; i <= op.size(); ++i)
+        if (i == op.size() || op[i] == '.') { parts.push_back(op.substr(s, i - s)); s = i + 1; }
+    const std::string ty = ptx_numb_type();
+    bool typed = false, approx = false;
+    for (size_t i = 1; i < parts.size(); ++i) {
+        if (parts[i] == ty)       typed  = true;
+        if (parts[i] == "approx") approx = true;
+    }
+    if (!typed) return 0.0;
+    const std::string& b = parts[0];
+    if (b == "div" || b == "sqrt" || b == "rcp") return approx ? 1.0 : 8.0;
+    if (b == "add" || b == "sub" || b == "mul" || b == "fma" || b == "mad" || b == "neg" ||
+        b == "abs" || b == "min" || b == "max" || b == "setp" || b == "cvt" || b == "copysign" ||
+        b == "testp" || b == "rsqrt" || b == "sin" || b == "cos" || b == "ex2" || b == "lg2" ||
+        b == "tanh")
+        return 1.0;
+    return 0.0;
+}
+
+// Взвешенная сумма инструкций тела функции fn. Медленные ветви libm (редукция больших аргументов
+// sin/cos) вынесены в отдельные .func и сюда не попадают — на обычных аргументах они и не
+// исполняются. Обе ветви if идут в счёт целиком, цикл — одним проходом; loops = true, если
+// есть переход назад, на уже встреченную метку (Ньютон неявных схем, итерации CD FP).
+double ptx_function_cost(const std::string& ptx, const std::string& fn, bool& loops) {
+    loops = false;
+    size_t pos = 0;
+    for (;;) {
+        pos = ptx.find(fn + "(", pos);
+        if (pos == std::string::npos) return 0.0;
+        // Определение, а не объявление: за списком параметров идёт '{', а не ';'.
+        const size_t rp = ptx.find(')', pos);
+        if (rp == std::string::npos) return 0.0;
+        size_t q = rp + 1;
+        while (q < ptx.size() && std::isspace((unsigned char)ptx[q])) ++q;
+        if (q < ptx.size() && ptx[q] == '{') { pos = q; break; }
+        pos = rp;
+    }
+
+    double cost = 0.0;
+    int depth = 0;
+    std::set<std::string> labels;
+    std::istringstream in(ptx.substr(pos));
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) continue;
+        std::string t = line.substr(a);
+        const size_t cm = t.find("//");
+        if (cm != std::string::npos) t.erase(cm);
+        for (char c : t) {
+            if (c == '{') ++depth;
+            else if (c == '}') --depth;
+        }
+        if (depth == 0) break;
+        if (t.empty() || t[0] == '{' || t[0] == '}' || t[0] == '.') continue;
+        if (t[0] == '$') {
+            const size_t c = t.find(':');
+            if (c != std::string::npos) labels.insert(t.substr(0, c));
+            continue;
+        }
+        if (t[0] == '@') {   // предикат: "@%p1 bra ..."
+            const size_t sp = t.find_first_of(" \t");
+            if (sp == std::string::npos) continue;
+            const size_t nx = t.find_first_not_of(" \t", sp);
+            if (nx == std::string::npos) continue;
+            t.erase(0, nx);
+        }
+        const std::string op = t.substr(0, t.find_first_of(" \t;"));
+        if (op.compare(0, 3, "bra") == 0) {
+            const size_t l = t.find('$');
+            if (l != std::string::npos) {
+                const std::string tgt = t.substr(l, t.find_first_of(" \t;", l) - l);
+                if (labels.count(tgt)) loops = true;
+            }
+            continue;
+        }
+        cost += ptx_op_weight(op);
+    }
+    return cost;
+}
+
+bool estimate_device(CUdevice& dev, int& cc_major, int& cc_minor, std::string& err) {
+    CUresult r = cuInit(0);
+    if (r != CUDA_SUCCESS) { err = "cuInit: " + cu_err(r); return false; }
+    r = cuDeviceGet(&dev, 0);
+    if (r != CUDA_SUCCESS) { err = "cuDeviceGet: " + cu_err(r); return false; }
+    cuDeviceGetAttribute(&cc_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+    cuDeviceGetAttribute(&cc_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
+    return true;
+}
+
+// Калибровочные шаги на системе Лоренца: дешёвый (Эйлер) и дорогой (RK4). Их цену считает тот же
+// krs_step_cost, что и цену пользовательской КРС, поэтому систематика счёта (свёртка констант,
+// вынос инвариантов из цикла) сокращается в отношении время / операции. Два шага разной цены
+// разделяют время на операции и постоянную добавку шага (цикл, shared, запись траектории): у
+// Эйлера Лоренца она больше половины времени.
+const char* const kCalibBodyCheap =
+    "    numb k[3];\n"
+    "    k[0] = a[1] * (X[1] - X[0]); k[1] = X[0] * (a[2] - X[2]) - X[1]; k[2] = X[0] * X[1] - a[3] * X[2];\n"
+    "    for (int i = 0; i < 3; ++i) X[i] = X[i] + h * k[i];\n";
+const char* const kCalibBody =
+    "    numb k1[3], k2[3], k3[3], k4[3], Y[3];\n"
+    "    k1[0] = a[1] * (X[1] - X[0]); k1[1] = X[0] * (a[2] - X[2]) - X[1]; k1[2] = X[0] * X[1] - a[3] * X[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + (numb)0.5 * h * k1[i];\n"
+    "    k2[0] = a[1] * (Y[1] - Y[0]); k2[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k2[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + (numb)0.5 * h * k2[i];\n"
+    "    k3[0] = a[1] * (Y[1] - Y[0]); k3[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k3[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + h * k3[i];\n"
+    "    k4[0] = a[1] * (Y[1] - Y[0]); k4[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k4[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i)\n"
+    "        X[i] = X[i] + h * (k1[i] + (numb)2 * (k2[i] + k3[i]) + k4[i]) * ((numb)1 / (numb)6);\n";
+
+// Длина кольца записи на нить в ядре калибровки.
+constexpr int kCalibRing = 64;
+
+// Ядра калибровки повторяют цикл loopCalculateDiscreteModel_int: состояние и параметры в shared
+// (как у ядер свипов), значение пишется в глобальный массив на каждом шаге (у них — траектория,
+// здесь — кольцо), раз в CHECK_INTERVAL шагов — проверка на расходимость.
+std::string calib_source() {
+    std::string src = "#define AMOUNTOFX 3\n#include \"configCUDA.h\"\n";
+    const char* names[2]  = { "Cheap", "Rk4" };
+    const char* bodies[2] = { kCalibBodyCheap, kCalibBody };
+    for (int k = 0; k < 2; ++k) {
+        src += std::string("__device__ __forceinline__ void ucuda_calib_step") + names[k]
+             + "(numb* X, const numb* a, const numb h) {\n" + bodies[k] + "}\n"
+             + "extern \"C\" __global__ void ucudaCalib" + names[k]
+             + "(numb* out, const numb* ag, numb h, int steps, int n, numb maxValue) {\n"
+               "    extern __shared__ numb sh[];\n"
+               "    const int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+               "    if (i >= n) return;\n"
+               "    numb* X = sh + threadIdx.x * 3;\n"
+               "    numb* a = sh + blockDim.x * 3 + threadIdx.x * 4;\n"
+               "    for (int j = 0; j < 4; ++j) a[j] = ag[j];\n"
+               "    X[0] = (numb)1 + (numb)1e-3 * (numb)(i & 1023); X[1] = (numb)1; X[2] = (numb)1;\n"
+               "    numb* data = out + (size_t)i * " + std::to_string(kCalibRing) + ";\n"
+               "    int untilCheck = 0;\n"
+               "    for (int s = 0; s < steps; ++s) {\n"
+               "        data[s & " + std::to_string(kCalibRing - 1) + "] = X[0];\n"
+               "        ucuda_calib_step" + names[k] + "(X, a, h);\n"
+               "        if (--untilCheck < 0) {\n"
+               "            untilCheck = 99;\n"
+               "            const numb c = abs(X[0]) + abs(X[1]) + abs(X[2]);\n"
+               "            if (isnan(c) || isinf(c) || c > maxValue) return;\n"
+               "        }\n"
+               "    }\n"
+               "}\n";
+    }
+    return src;
+}
+
+}  // namespace
+
+bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err) {
+    out = KrsStepCost();
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    std::string rerr;
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    if (!rerr.empty()) { err = rerr; return false; }
+
+    // Шаг со стадией предрасчёта (CD fast) считается без неё: в горячих циклах она идёт раз на
+    // траекторию (krs_prep.h).
+    KrsPrepSplit sp;
+    const bool prep = krs_split_prep(krs_body, sp);
+    const std::string fn = prep ? "krs_step_p" : "krs_step";
+    const std::string src = "#define AMOUNTOFX " + std::to_string(amountOfX) + "\n"
+                            "#include \"configCUDA.h\"\n"
+                            "extern \"C\" __device__ void " + fn + "("
+                          + (prep ? krs_step_p_fn_params() : "numb* X, const numb* a, const numb h")
+                          + ") {\n" + (prep ? krs_step_p_fn_body(sp) : krs_body) + "\n}\n";
+    std::string ptx;
+    std::vector<std::string> ignored;
+    if (!nvrtc_compile_ptx(cc_major, cc_minor, src, "krs_cost.cu", { cfg.c_str() }, { "configCUDA.h" },
+                           {}, true, ptx, ignored, err))
+        return false;
+    out.ops = ptx_function_cost(ptx, fn, out.loops);
+    if (out.ops <= 0.0) {
+        err = std::string("no ") + ptx_numb_type() + " arithmetic found in the step";
+        return false;
+    }
+    return true;
+}
+
+std::string gpu_calibration_path() { return exe_dir() + "\\gpu_calibration.txt"; }
+
+bool gpu_device_info(std::string& name, int& sm_count, std::string& err) {
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    char buf[256] = {};
+    cuDeviceGetName(buf, (int)sizeof buf, dev);
+    name = buf;
+    sm_count = 0;
+    cuDeviceGetAttribute(&sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
+    return sm_count > 0;
+}
+
+bool gpu_calibrate(GpuCalibration& out, std::string& err) {
+    out = GpuCalibration();
+    KrsStepCost cost[2];
+    if (!krs_step_cost(kCalibBodyCheap, 3, cost[0], err)) return false;
+    if (!krs_step_cost(kCalibBody,      3, cost[1], err)) return false;
+    if (cost[1].ops <= cost[0].ops) { err = "calibration steps have equal cost"; return false; }
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    if (!gpu_device_info(out.device, out.sm_count, err)) return false;
+    out.numb_bytes = (int)sizeof(numb);
+    out.calib_ops  = cost[1].ops;
+
+    std::string rerr;
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    if (!rerr.empty()) { err = rerr; return false; }
+    std::string ptx;
+    std::vector<std::string> ignored;
+    if (!nvrtc_compile_ptx(cc_major, cc_minor, calib_source(), "calib.cu", { cfg.c_str() }, { "configCUDA.h" },
+                           {}, false, ptx, ignored, err))
+        return false;
+
+    // Первичный контекст: тот же, что у cudart в GUI, — отдельный стоил бы сотни МБ видеопамяти.
+    CUcontext ctx = nullptr;
+    CUresult r = cuDevicePrimaryCtxRetain(&ctx, dev);
+    if (r != CUDA_SUCCESS) { err = "cuDevicePrimaryCtxRetain: " + cu_err(r); return false; }
+    cuCtxPushCurrent(ctx);
+
+    const int sm        = out.sm_count;
+    const int kWarpsSat = 32;   // варпов на SM в насыщенном прогоне
+    CUmodule    mod   = nullptr;
+    CUfunction  fn[2] = { nullptr, nullptr };
+    CUdeviceptr d_out = 0, d_a = 0;
+    CUstream    st    = nullptr;
+    CUevent     e0    = nullptr, e1 = nullptr;
+    bool ok = false;
+    do {
+        if ((r = cuModuleLoadData(&mod, ptx.c_str())) != CUDA_SUCCESS) { err = "cuModuleLoadData(calib): " + cu_err(r); break; }
+        if ((r = cuModuleGetFunction(&fn[0], mod, "ucudaCalibCheap")) != CUDA_SUCCESS ||
+            (r = cuModuleGetFunction(&fn[1], mod, "ucudaCalibRk4")) != CUDA_SUCCESS) { err = "cuModuleGetFunction(calib): " + cu_err(r); break; }
+        if ((r = cuMemAlloc(&d_out, (size_t)32 * sm * kWarpsSat * kCalibRing * sizeof(numb))) != CUDA_SUCCESS) { err = "cuMemAlloc(calib): " + cu_err(r); break; }
+        if ((r = cuMemAlloc(&d_a, 4 * sizeof(numb))) != CUDA_SUCCESS) { err = "cuMemAlloc(calib): " + cu_err(r); break; }
+        const numb av[4] = { (numb)0.5, (numb)10, (numb)28, (numb)8 / (numb)3 };
+        if ((r = cuMemcpyHtoD(d_a, av, sizeof av)) != CUDA_SUCCESS) { err = "cuMemcpyHtoD(calib): " + cu_err(r); break; }
+        if ((r = cuStreamCreate(&st, CU_STREAM_NON_BLOCKING)) != CUDA_SUCCESS) { err = "cuStreamCreate(calib): " + cu_err(r); break; }
+        cuEventCreate(&e0, CU_EVENT_DEFAULT);
+        cuEventCreate(&e1, CU_EVENT_DEFAULT);
+
+        numb h = (numb)0.001;
+        numb max_value = (numb)1e6;
+        // Один прогон ядра k: warps варпов на SM (блоки по варпу), steps шагов; время в мс.
+        auto run = [&](int k, int warps, int steps, double& ms) -> bool {
+            int n = 32 * sm * warps;
+            void* args[] = { &d_out, &d_a, &h, &steps, &n, &max_value };
+            cuEventRecord(e0, st);
+            CUresult rr = cuLaunchKernel(fn[k], (unsigned)(sm * warps), 1, 1, 32, 1, 1,
+                                         (unsigned)(32 * 7 * sizeof(numb)), st, args, nullptr);
+            if (rr == CUDA_SUCCESS) rr = cuEventRecord(e1, st);
+            if (rr == CUDA_SUCCESS) rr = cuEventSynchronize(e1);
+            if (rr != CUDA_SUCCESS) { err = "calibration launch: " + cu_err(rr); return false; }
+            float f = 0.0f;
+            cuEventElapsedTime(&f, e0, e1);
+            ms = f;
+            return true;
+        };
+        // Шагов на ~40 мс: короче — шум запуска, длиннее — риск сброса драйвером (TDR) на
+        // медленной карте. Подбор заодно начинает поднимать частоты.
+        auto fit_steps = [&](int k, int warps, int& steps) -> bool {
+            steps = 256;
+            double ms = 0.0;
+            for (int it = 0; it < 16; ++it) {
+                if (!run(k, warps, steps, ms)) return false;
+                if (ms >= 10.0 || steps > (1 << 26)) break;
+                steps *= 4;
+            }
+            steps = (std::max)(1, (int)(std::min)(1e9, steps * 40.0 / (std::max)(ms, 1e-3)));
+            return true;
+        };
+        // [ядро][0 — насыщение, 1 — один варп на SM]
+        int    steps[2][2] = {};
+        double best[2][2]  = { { 1e300, 1e300 }, { 1e300, 1e300 } };
+        const int warps[2] = { kWarpsSat, 1 };
+        bool run_ok = true;
+        for (int k = 0; k < 2 && run_ok; ++k)
+            for (int m = 0; m < 2 && run_ok; ++m) run_ok = fit_steps(k, warps[m], steps[k][m]);
+        if (!run_ok) break;
+
+        // Прогрев: ~300 мс насыщенных запусков подряд, иначе карта не выходит из низкого
+        // P-state и первый замер завышен в 2-3 раза.
+        double ms = 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (run_ok && std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(300))
+            run_ok = run(1, kWarpsSat, steps[1][0], ms);
+        for (int rep = 0; rep < 5 && run_ok; ++rep)
+            for (int k = 0; k < 2 && run_ok; ++k)
+                for (int m = 0; m < 2 && run_ok; ++m) {
+                    run_ok = run(k, warps[m], steps[k][m], ms);
+                    best[k][m] = (std::min)(best[k][m], ms / steps[k][m]);   // мс на шаг
+                }
+        if (!run_ok) break;
+
+        // Шаг стоит (ops + c0) * ns: наклон по двум шагам — цена операции, остаток — добавка c0.
+        double ns[2], c0[2];
+        for (int m = 0; m < 2; ++m) {
+            const double slope = (best[1][m] - best[0][m]) / (cost[1].ops - cost[0].ops);
+            if (slope > 0.0) {
+                ns[m] = slope * 1e6;
+                c0[m] = (std::max)(0.0, best[0][m] / slope - cost[0].ops);
+            } else {   // шум перекрыл разницу: без добавки, по дорогому шагу
+                ns[m] = best[1][m] * 1e6 / cost[1].ops;
+                c0[m] = 0.0;
+            }
+        }
+        out.ns_thr = ns[0] / kWarpsSat;
+        out.c0_thr = c0[0];
+        out.ns_lat = ns[1];
+        out.c0_lat = c0[1];
+        ok = out.ns_thr > 0.0 && out.ns_lat > 0.0;
+        if (!ok) err = "calibration produced a zero time";
+    } while (false);
+
+    if (e0)    cuEventDestroy(e0);
+    if (e1)    cuEventDestroy(e1);
+    if (st)    cuStreamDestroy(st);
+    if (d_out) cuMemFree(d_out);
+    if (d_a)   cuMemFree(d_a);
+    if (mod)   cuModuleUnload(mod);
+    cuCtxPopCurrent(nullptr);
+    cuDevicePrimaryCtxRelease(dev);
+    return ok;
 }
