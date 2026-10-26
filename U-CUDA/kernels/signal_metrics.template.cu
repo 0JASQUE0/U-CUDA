@@ -278,7 +278,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 					sinceReport = 0;
 				}
 			}
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
 			checker = 0;
 			for (int j = 0; j < AMOUNTOFX; ++j)
 				checker = checker + abs(x[j]);
@@ -315,7 +315,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 //
 // Что пишется, когда величину измерить нельзя (NaN, а не заглушка вроде 999:
 // NaN отсекается штатным !isfinite и на графике, и в автошкале):
-//   UNBOUND (разошлось / отмена / h <= 0) — NaN во всех метриках;
+//   UNBOUND (разошлось / h <= 0) и CANCELLED (Stop) — NaN во всех метриках;
 //   нет ни одного межпикового интервала: FIXED_POINT — частота 0 (колебаний
 //     нет, это измеренный факт), OSCILLATION — NaN (период длиннее окна);
 //   нулевая дисперсия — mobility/complexity NaN (0/0).
@@ -328,7 +328,7 @@ __device__ int smFinalize(int flag, const MetricsAccum& acc, const PeakStream& p
 	for (int m = 0; m < SIGM_COUNT; ++m) res[m] = NaN;
 
 	if (!((flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) && acc.n > 0))
-		return REGIME_UNBOUND;
+		return flag == REGIME_CANCELLED ? REGIME_CANCELLED : REGIME_UNBOUND;
 
 	res[SIGM_MAX]   = acc.mx;
 	res[SIGM_MIN]   = acc.mn;
@@ -519,7 +519,16 @@ __global__ void signalMetricsContinuationKernel(
 
 	numb res[SIGM_COUNT];
 	for (int j = 0; j < nPts; ++j) {
-		if (cancelFlag != nullptr && *cancelFlag != 0) return;
+		// Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+		if (cancelFlag != nullptr && *cancelFlag != 0) {
+			for (int r = j; r < nPts; ++r) {
+				if (flags != nullptr) flags[r] = REGIME_CANCELLED;
+				for (int m = 0; m < SIGM_COUNT; ++m)
+					if ((metricMask >> m) & 1)
+						outMetrics[(size_t)m * (size_t)nPts + r] = (numb)nan("");
+			}
+			return;
+		}
 		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 
 		const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse != 0);
@@ -538,7 +547,7 @@ __global__ void signalMetricsContinuationKernel(
 		if (hLocal > 0 && blockLen > 0) {
 			flag = loopCalculateDiscreteModel_int(x, a, hLocal, (size_t)transient_steps,
 				amountOfX, 1, 0, maxValue, nullptr, 0, 1, cancelFlag);
-			if (flag != REGIME_UNBOUND) {
+			if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 				const numb dt = hLocal * (numb)preScaller;
 				PeakStream peaks;
 				peaks.init(nullptr, intervals, 0, dt, (size_t)blockLen, peakCapacity, false);

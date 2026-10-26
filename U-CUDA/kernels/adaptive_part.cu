@@ -325,7 +325,7 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 			if (++cnt == CHECK_INTERVAL) {
 				cnt = 0;
 				if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-				if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+				if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
 			}
 		}
 		if (S.diverged) return REGIME_UNBOUND;
@@ -377,7 +377,7 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 		if (++nst == CHECK_INTERVAL) {
 			nst = 0;
 			if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
 		}
 	}
 	if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;   // хвост короче CHECK_INTERVAL
@@ -544,7 +544,7 @@ __device__ __forceinline__ void ucudaAdBasinFeatures(const int flag, const int a
 	const int feature1, const int feature2, const numb mult1, const numb mult2,
 	numb& out1, numb& out2)
 {
-	if (flag == REGIME_UNBOUND) { out1 = 999; out2 = 999; return; }
+	if (flag == REGIME_UNBOUND || flag == REGIME_CANCELLED) { out1 = 999; out2 = 999; return; }
 	if (flag == REGIME_FIXED_POINT) { out1 = last; out2 = -1.0; return; }
 	if (amountOfPeaks <= 0) { out1 = -999; out2 = -1.0; return; }
 	const numb inv_n  = (numb)1.0 / (numb)amountOfPeaks;
@@ -690,7 +690,12 @@ __global__ void calculateDiscreteModelPeaksAdContCUDA(
 	UcudaAdaptState S;
 
 	for (int j = 0; j < nPts; ++j) {
-		if (cancelFlag != nullptr && *cancelFlag != 0) return;
+		// Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+		if (cancelFlag != nullptr && *cancelFlag != 0) {
+			if (maxValueCheckerArray != nullptr)
+				for (int r = j; r < nPts; ++r) maxValueCheckerArray[r] = REGIME_CANCELLED;
+			return;
+		}
 		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 		const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse != 0);
 		if (kind == UCUDA_AXIS_SYSTEM) a[mutParamIdx] = v;

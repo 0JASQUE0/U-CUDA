@@ -113,7 +113,12 @@ extern "C" __global__ void ls1dContinuationKernel(
     const int nWarm   = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;
 
     for (int j = 0; j < nPts; ++j) {
-        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (int r = j; r < nPts; ++r)
+                for (int k = 0; k < amountOfX; ++k) result[r * amountOfX + k] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
         if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
         const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);

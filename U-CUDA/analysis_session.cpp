@@ -35,6 +35,14 @@ static void log_run_completed(const char* label, bool ok, double secs) {
     std::fflush(stdout);
 }
 
+// Хвост подписи прогона на плашке справа ("Cancelled <label> in ..."): чем кончился Stop. ok + cancelled —
+// частичный результат (см. ParametricEngine, cancel); без единой посчитанной точки его не применяем.
+static std::string stop_note_for(bool cancelled, bool ok, const std::vector<int>& flags) {
+    if (!cancelled || !ok) return std::string();
+    return partial_result_worth_showing(ok, flags) ? " (partial result shown)"
+                                                   : " (no point finished before Stop)";
+}
+
 // Host-порт peakFinder из cudaLibrary.cu.
 //
 // Зачем копия, а не вызов оригинала: peakFinder объявлен как __device__ __host__ в
@@ -1814,6 +1822,7 @@ void BifurcationAnalysisSession::request_cancel() {
 bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_diagram_index;
     if (idx >= 0 && idx < (int)diagrams.size()) label = diagrams[idx].label;
@@ -1822,7 +1831,8 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif2d_result(diagrams[idx], std::move(r));
         }
     } else {
@@ -1830,13 +1840,15 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif1d_result(diagrams[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("bifurcation") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -2132,6 +2144,7 @@ void LLEAnalysisSession::request_cancel() {
 bool LLEAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -2140,7 +2153,8 @@ bool LLEAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -2148,13 +2162,15 @@ bool LLEAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LLE") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -2359,15 +2375,17 @@ bool Dft1DAnalysisSession::poll() {
 
     Dft1DResult r = run_future.get();
     bool cancelled = r.cancelled;
+    const std::string stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
     int idx = running_config_index;
     std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[idx].label.empty())
                             ? configs[idx].label : std::string("dft1d");
-    if (!cancelled && idx >= 0 && idx < (int)configs.size()) {
+    if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)configs.size()) {
         apply_dft1d_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -3617,6 +3635,7 @@ void LyapunovSpectrumAnalysisSession::request_cancel() {
 bool LyapunovSpectrumAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -3625,7 +3644,8 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -3633,13 +3653,15 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LS") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -3847,14 +3869,16 @@ bool SignalMetricsAnalysisSession::poll() {
 
     SignalMetricsResult r = run_future.get();
     const bool cancelled = r.cancelled;
+    const std::string stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
     std::string label;
     if (idx >= 0 && idx < (int)configs.size()) {
         label = configs[idx].label;
-        if (!cancelled) apply_metrics_result(configs[idx], std::move(r));
+        if (!cancelled || partial_result_worth_showing(r.ok, r.flags)) apply_metrics_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("Metrics") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;
@@ -3862,4 +3886,119 @@ bool SignalMetricsAnalysisSession::poll() {
     cancel_token.reset();
     progress_token.reset();
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Объём работы для оценки времени счёта траекторий (time_estimate.h). Числа берутся из того же
+// запроса, что уходит в движок; пост-обработка (пики, DBSCAN, Грам-Шмидт, ДПФ) в оценку не входит.
+
+namespace {
+
+// 1/h; при свипе по h на одной из осей — среднее по её сетке (шагов у каждой точки ~ T/h).
+double work_inv_h(double h, bool sweep_x, double lo, double hi, int n, bool log_x,
+                  bool sweep_y = false, double lo2 = 0.0, double hi2 = 0.0, bool log_y = false) {
+    if (sweep_x) return traj_mean_inv_h(lo, hi, n, log_x);
+    if (sweep_y) return traj_mean_inv_h(lo2, hi2, n, log_y);
+    return h > 0.0 ? 1.0 / h : 0.0;
+}
+
+// points — точек свипа, per_point — вызовов шага на точку. continuation на GPU — одна нить,
+// проходящая все точки подряд.
+TrajWork make_traj_work(const std::string& body, int n, bool adaptive, bool cpu, bool continuation,
+                        double points, double per_point) {
+    TrajWork w;
+    if (body.empty()) { w.why = "no step body for this scheme"; return w; }
+    if (adaptive)     { w.why = "adaptive step: the number of steps is not known in advance"; return w; }
+    if (cpu)          { w.why = "computed on the CPU"; return w; }
+    w.valid     = true;
+    w.krs_body  = body;
+    w.amountOfX = n;
+    if (continuation) { w.threads = 1.0;    w.steps = points * per_point; }
+    else              { w.threads = points; w.steps = per_point; }
+    return w;
+}
+
+// LLE / LS: транзиент идёт одной траекторией, блоки NT (с транзиентом векторов) — основной и
+// клонами: у LLE траекторий 2, у LS N + 1.
+double lyap_steps(double inv_h, double transient, double t_max, double vtr, double trajectories) {
+    return traj_steps(transient, inv_h) + trajectories * traj_steps(t_max + std::max(0.0, vtr), inv_h);
+}
+
+}  // namespace
+
+TrajWork BifurcationAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)diagrams.size()) return {};
+    const BifurcationDiagramConfig& bd = diagrams[idx];
+    if (bd.mode_2d) {
+        const Bifurcation2DRequest r = build_bif2d_request(*this, bd);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+    }
+    const Bifurcation1DRequest r = build_bif1d_request(*this, bd);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork LLEAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)curves.size()) return {};
+    const LLECurveConfig& c = curves[idx];
+    if (c.mode_2d) {
+        const LLE2DRequest r = build_lle2d_request(*this, c);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts,
+                              lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, 2.0));
+    }
+    const LLE1DRequest r = build_lle1d_request(*this, c);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts, lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, 2.0));
+}
+
+TrajWork LyapunovSpectrumAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)curves.size()) return {};
+    const LSCurveConfig& c = curves[idx];
+    if (c.mode_2d) {
+        const LS2DRequest r = build_ls2d_request(*this, c);
+        const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                     r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+        return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                              (double)r.n_pts * r.n_pts,
+                              lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, r.amountOfX + 1.0));
+    }
+    const LS1DRequest r = build_ls1d_request(*this, c);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          (double)r.n_pts,
+                          lyap_steps(ih, r.transient_time, r.t_max, r.vector_transient, r.amountOfX + 1.0));
+}
+
+TrajWork SignalMetricsAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const SignalMetricsRequest r = build_metrics_request(*this, configs[idx]);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale,
+                                 r.dimension == 2 && r.sweep_over_h_2, r.param_lo_2, r.param_hi_2, r.log_scale_2);
+    const double points = r.dimension == 2 ? (double)r.n_pts * r.n_pts : (double)r.n_pts;
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, r.use_cpu, r.continuation,
+                          points, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork Dft1DAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const Dft1DRequest r = build_dft1d_request(*this, configs[idx]);
+    const double ih = work_inv_h(r.h, r.sweep_over_h, r.param_lo, r.param_hi, r.n_pts, r.log_scale);
+    return make_traj_work(r.krs_body, r.amountOfX, false, r.use_cpu, r.continuation,
+                          (double)r.n_pts, traj_steps(r.transient_time + r.t_max, ih));
+}
+
+TrajWork BasinsAnalysisSession::traj_work(int idx) const {
+    if (idx < 0 || idx >= (int)configs.size()) return {};
+    const BasinsRequest r = build_basins_request(*this, configs[idx]);
+    return make_traj_work(r.krs_body, r.amountOfX, r.adaptive.enabled, false, false,
+                          (double)r.n_pts * r.n_pts,
+                          traj_steps(r.transient_time + r.t_max, r.h > 0.0 ? 1.0 / r.h : 0.0));
 }

@@ -95,12 +95,13 @@ void HeatmapView::ensure_tex(int w, int h) {
     tex_w_ = w; tex_h_ = h;
 }
 
-void HeatmapView::upload_data(int nx, int ny, const double* values) {
+void HeatmapView::upload_data(int nx, int ny, const double* values,
+                              const std::function<bool(int, int)>& not_computed) {
     if (!data_tex_) return;
     upload_buf_.resize((size_t)nx * (size_t)ny);
     // diverged/spec-значения engine помечает как ±999; заменяем на FLT_MAX,
     // шейдер увидит >=1e30 и нарисует тёмно-серым (а не верхним концом
-    // colormap'а).
+    // colormap'а). Недосчитанные по Stop — -FLT_MAX: шейдер рисует их средне-серым.
     const double DIV_MARK = 999.0;
     for (size_t k = 0; k < upload_buf_.size(); ++k) {
         double v = values[k];
@@ -110,6 +111,11 @@ void HeatmapView::upload_data(int nx, int ny, const double* values) {
             upload_buf_[k] = (float)v;
         }
     }
+    if (not_computed)
+        for (int iy = 0; iy < ny; ++iy)
+            for (int ix = 0; ix < nx; ++ix)
+                if (not_computed(ix, iy))
+                    upload_buf_[(size_t)iy * (size_t)nx + (size_t)ix] = -std::numeric_limits<float>::max();
     glBindTexture(GL_TEXTURE_2D, data_tex_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RED, GL_FLOAT,
@@ -246,9 +252,11 @@ void HeatmapView::render(PlotRenderer& renderer,
 {
     // Одноразовый (см. heatmap_view.h): забираем сразу, чтобы он не пережил вызов ни на одном пути.
     const std::function<const char*(int, int)> regime_of = std::move(cell_regime);
+    const std::function<bool(int, int)> not_computed_data = std::move(cell_not_computed);
     const char* const value_nm   = value_name ? value_name : "lambda";
     const bool        value_code = value_is_regime_code;
     cell_regime          = nullptr;
+    cell_not_computed    = nullptr;
     value_name           = nullptr;
     value_is_regime_code = false;
     if (nx <= 0 || ny <= 0 || !values) {
@@ -298,7 +306,12 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
         ensure_tex(nx, ny);
-        upload_data(nx, ny, eff_values);
+        // Маска — в координатах данных, а сетка здесь уже пост-swap: (ix, iy) после swap — это (iy, ix).
+        std::function<bool(int, int)> not_computed;
+        if (not_computed_data)
+            not_computed = swap_axes ? std::function<bool(int, int)>([&](int ix, int iy) { return not_computed_data(iy, ix); })
+                                     : not_computed_data;
+        upload_data(nx, ny, eff_values, not_computed);
         data_gen_cached = data_generation;
     }
 

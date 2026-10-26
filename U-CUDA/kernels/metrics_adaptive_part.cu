@@ -151,7 +151,7 @@ __device__ int smFinalizeNU(int flag, const MetricsAccumNU& acc, const PeakStrea
 	for (int m = 0; m < SIGM_COUNT; ++m) res[m] = NaN;
 
 	if (!((flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) && acc.n > 0))
-		return REGIME_UNBOUND;
+		return flag == REGIME_CANCELLED ? REGIME_CANCELLED : REGIME_UNBOUND;
 
 	res[SIGM_MAX]   = acc.mx;
 	res[SIGM_MIN]   = acc.mn;
@@ -368,7 +368,16 @@ __global__ void signalMetricsContinuationAdKernel(
 
 	numb res[SIGM_COUNT];
 	for (int j = 0; j < nPts; ++j) {
-		if (cancelFlag != nullptr && *cancelFlag != 0) return;
+		// Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+		if (cancelFlag != nullptr && *cancelFlag != 0) {
+			for (int r = j; r < nPts; ++r) {
+				if (flags != nullptr) flags[r] = REGIME_CANCELLED;
+				for (int m = 0; m < SIGM_COUNT; ++m)
+					if ((metricMask >> m) & 1)
+						outMetrics[(size_t)m * (size_t)nPts + r] = (numb)nan("");
+			}
+			return;
+		}
 		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 		const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse != 0);
 		if (kind == UCUDA_AXIS_SYSTEM) a[mutParamIdx] = v;

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
@@ -200,6 +201,35 @@ constexpr double kEuler = 2.7182818284590452353602874713527;
 static inline int lyap_warm_blocks(double vt, double NT)
 {
     return vt > 0 ? (int)ucuda_steps_per_block((numb)vt, (numb)NT) : 0;
+}
+
+// Stop. Отмена по-прежнему рвёт расчёт, но то, что уже посчитано, не выбрасывается: свип
+// возвращает ok = true вместе с cancelled = true (частичный результат), а точки, до которых
+// не дошли или которые прервал Stop, помечены REGIME_CANCELLED / NaN. Отмена до первого
+// запуска (ничего не посчитано) — прежний отказ, ok = false.
+static inline bool cancel_requested(const std::shared_ptr<std::atomic<bool>>& c)
+{
+    return c && c->load(std::memory_order_relaxed);
+}
+
+// CPU-свипы по точкам: Stop перед точкой j > 0 помечает точки [j, n) как недосчитанные.
+static inline void mark_cancelled_tail(std::vector<int>& flags, size_t j)
+{
+    for (size_t k = j; k < flags.size(); ++k) flags[k] = REGIME_CANCELLED;
+}
+static inline void fill_nan_tail(std::vector<double>& v, size_t from)
+{
+    for (size_t k = from; k < v.size(); ++k) v[k] = std::numeric_limits<double>::quiet_NaN();
+}
+
+// Значение точки из ядра -> NaN, если в нём заглушка «разошлась» (999 / -999) или «прервана»
+// (UCUDA_CANCELLED_VALUE); flag — что именно. Остальное — как есть, flag = OSCILLATION.
+static inline double lyap_value_from_kernel(double v, int& flag)
+{
+    if (v == (double)UCUDA_CANCELLED_VALUE) { flag = REGIME_CANCELLED; return std::numeric_limits<double>::quiet_NaN(); }
+    if (v == 999.0 || v == -999.0)         { flag = REGIME_UNBOUND;   return std::numeric_limits<double>::quiet_NaN(); }
+    flag = REGIME_OSCILLATION;
+    return v;
 }
 
 static inline size_t steps_from_time_size_t(double t, double h)
@@ -489,10 +519,12 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     numb h_local = (numb)req.h;
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           req.continuation_reverse, req.log_scale);
@@ -654,10 +686,12 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
     std::vector<numb> times((size_t)maxPointsInBlock);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           /*reverse*/ false, req.log_scale);
@@ -972,10 +1006,13 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     };
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            fill_nan_tail(res.lyapunov, (size_t)j);
+            break;
         }
         // Свипуемая величина. Классика: направление и log берутся из запроса,
         // reverse не применяется (точки независимы).
@@ -1302,10 +1339,13 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     std::vector<numb> logs((size_t)N, (numb)0);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            for (size_t k = (size_t)j; k < res.spectrum.size(); ++k) fill_nan_tail(res.spectrum[k], 0);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           continuation && req.continuation_reverse,
@@ -1455,10 +1495,14 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     numb h_local = (numb)req.h;
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            fill_nan_tail(res.ak_cos, (size_t)j * (size_t)nFreq);
+            fill_nan_tail(res.bk_sin, (size_t)j * (size_t)nFreq);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi,
                                           continuation && req.continuation_reverse,
@@ -1548,6 +1592,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::fprintf(stderr, "[metrics] CSV: %s\n", e.c_str());
     }
     res.ok = true;
+    res.cancelled = cancel_requested(req.cancel);   // ok + cancelled = частичный результат (Stop)
 }
 
 // Host-двойник MetricsAccum из signal_metrics.template.cu: те же суммы в том же
@@ -1669,10 +1714,13 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
     std::vector<numb> boxMin((size_t)req.amountOfX), boxMax((size_t)req.amountOfX);
 
     for (int j = 0; j < nPts; ++j) {
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
+        if (cancel_requested(req.cancel)) {
+            // Stop: до первой точки — прежний отказ, дальше отдаём посчитанное, хвост пустой.
             res.cancelled = true;
-            res.error = "Cancelled by user";
-            return res;
+            if (j == 0) { res.error = "Cancelled by user"; return res; }
+            mark_cancelled_tail(res.flags, (size_t)j);
+            for (int m = 0; m < SIGM_COUNT; ++m) fill_nan_tail(res.values[m], (size_t)j);
+            break;
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi, rev, req.log_scale);
         if (!continuation) {
@@ -1789,6 +1837,76 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
 
     metrics_finish(res, req);
     return res;
+}
+
+// Компиляция одной единицы трансляции в PTX с едиными опциями движка. rdc=true — для половинок
+// раздельной сборки. Свободная функция, а не член Impl: ею же собирает тело шага оценка времени
+// (krs_step_cost), и копия опций там разошлась бы с движком (см. build_module про --fmad).
+static bool nvrtc_compile_ptx(int cc_major, int cc_minor,
+                              const std::string& src, const char* src_name,
+                              const std::vector<const char*>& headers_src,
+                              const std::vector<const char*>& headers_name,
+                              const std::vector<const char*>& name_exprs,
+                              bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
+                              std::string& err) {
+    nvrtcProgram prog = nullptr;
+    nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
+                                        (int)headers_src.size(),
+                                        headers_src.empty() ? nullptr : headers_src.data(),
+                                        headers_name.empty() ? nullptr : headers_name.data());
+    if (nr != NVRTC_SUCCESS) {
+        err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
+        return false;
+    }
+    for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
+
+    char arch[64];
+    std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+    std::string cuda_include_opt;
+    {
+        char buf[MAX_PATH];
+        DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
+        if (nlen > 0 && nlen < MAX_PATH)
+            cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+    }
+    if (cuda_include_opt.empty()) {
+        err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
+              "(install the CUDA Toolkit or set CUDA_PATH=...)";
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+
+    std::string std_opt = "--std=c++17";
+    std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
+                                      cuda_include_opt.c_str(), nvrtc_fmad_opt() };
+    if (rdc) opts.push_back("--relocatable-device-code=true");
+    std::string dev_opt_storage;
+    add_profiling_nvrtc_opts(opts, dev_opt_storage);
+
+    nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
+    if (nr != NVRTC_SUCCESS) {
+        size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+        std::string log;
+        if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+        err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+
+    size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
+    out_ptx.assign(ptxsz, '\0');
+    nvrtcGetPTX(prog, &out_ptx[0]);
+
+    // Mangled-имена копируем ДО destroy — после него указатели невалидны.
+    lowered.clear();
+    lowered.reserve(name_exprs.size());
+    for (const char* sym : name_exprs) {
+        const char* lo = nullptr;
+        nvrtcGetLoweredName(prog, sym, &lo);
+        lowered.push_back(lo ? lo : sym);
+    }
+    nvrtcDestroyProgram(&prog);
+    return true;
 }
 
 struct ParametricEngine::Impl {
@@ -2375,71 +2493,15 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedLibPtx>     pool_lib_ptx{ 4 };   // ~1.2 МБ на запись
     ModuleLru<CachedKrsPtx>     pool_krs_ptx{ 8 };   // ~50 КБ на запись
 
-    // Компиляция одной единицы трансляции в PTX. rdc=true — для половинок раздельной сборки.
+    // Компиляция одной единицы трансляции в PTX (см. nvrtc_compile_ptx).
     bool compile_ptx(const std::string& src, const char* src_name,
                      const std::vector<const char*>& headers_src,
                      const std::vector<const char*>& headers_name,
                      const std::vector<const char*>& name_exprs,
                      bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
                      std::string& err) {
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
-                                            (int)headers_src.size(),
-                                            headers_src.empty() ? nullptr : headers_src.data(),
-                                            headers_name.empty() ? nullptr : headers_name.data());
-        if (nr != NVRTC_SUCCESS) {
-            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
-            return false;
-        }
-        for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
-
-        char arch[64];
-        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        std::string cuda_include_opt;
-        {
-            char buf[MAX_PATH];
-            DWORD nlen = GetEnvironmentVariableA("CUDA_PATH", buf, MAX_PATH);
-            if (nlen > 0 && nlen < MAX_PATH)
-                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
-        }
-        if (cuda_include_opt.empty()) {
-            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
-                  "(install the CUDA Toolkit or set CUDA_PATH=...)";
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        std::string std_opt = "--std=c++17";
-        std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
-                                          cuda_include_opt.c_str(), nvrtc_fmad_opt() };
-        if (rdc) opts.push_back("--relocatable-device-code=true");
-        std::string dev_opt_storage;
-        add_profiling_nvrtc_opts(opts, dev_opt_storage);
-
-        nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        out_ptx.assign(ptxsz, '\0');
-        nvrtcGetPTX(prog, &out_ptx[0]);
-
-        // Mangled-имена копируем ДО destroy — после него указатели невалидны.
-        lowered.clear();
-        lowered.reserve(name_exprs.size());
-        for (const char* sym : name_exprs) {
-            const char* lo = nullptr;
-            nvrtcGetLoweredName(prog, sym, &lo);
-            lowered.push_back(lo ? lo : sym);
-        }
-        nvrtcDestroyProgram(&prog);
-        return true;
+        return nvrtc_compile_ptx(cc_major, cc_minor, src, src_name, headers_src, headers_name,
+                                 name_exprs, rdc, out_ptx, lowered, err);
     }
 
     // Библиотечная половина: тот же шаблон, но вместо тела шага — вызов внешнего krs_step.
@@ -2961,8 +3023,9 @@ struct ParametricEngine::Impl {
 
     // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
     // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
-    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
-    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
+    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт,
+    // UCUDA_CANCELLED_VALUE — точка, до которой не дошёл Stop), stats[nPts * 4]. Возвращает false с
+    // текстом в err. Stop — true и cancelled = true: посчитанное в out остаётся.
     template <class Req>
     bool run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
                          std::string& err, bool& cancelled) {
@@ -2980,7 +3043,8 @@ struct ParametricEngine::Impl {
         const int    nBlocks = (int)(req.t_max / req.NT);
         const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
         if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
-        out.assign((size_t)nPts * NC, std::numeric_limits<double>::quiet_NaN());
+        // Точки, которых Stop не дал начать, так и останутся с меткой отмены.
+        out.assign((size_t)nPts * NC, (double)UCUDA_CANCELLED_VALUE);
         stats.assign((size_t)nPts * 4, 0.0);
         const int continuation = req.continuation ? 1 : 0;
 
@@ -2994,6 +3058,8 @@ struct ParametricEngine::Impl {
                     err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
                 return false;
             }
+            // Stop до запуска — прежний отказ, а не пустой частичный результат.
+            if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
             // Второй поток переносит отмену во флаг DLL и число готовых точек в прогресс.
             volatile int cancelFlag = 0;
             int progressCount = 0;                  // цепочка: счётчик DLL (точки)
@@ -3047,10 +3113,11 @@ struct ParametricEngine::Impl {
             }
             done.store(true, std::memory_order_relaxed);
             watcher.join();
-            if (cancelFlag) { cancelled = true; err = "Cancelled by user"; return false; }
+            cancelled = cancelFlag != 0;
             return true;
         }
 
+        if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
         // GPU: однопоточное ядро цепочки.
         if (!ensure_init(err)) return false;
         cuCtxSetCurrent(context);
@@ -3115,6 +3182,7 @@ struct ParametricEngine::Impl {
         cleanup();
         out.assign(h_res.begin(), h_res.end());
         stats.assign(h_st.begin(), h_st.end());
+        cancelled = cancel_requested(req.cancel);
         return true;
     }
 
@@ -3177,7 +3245,7 @@ struct ParametricEngine::Impl {
 
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;
-        res.flags.assign((size_t)nPts, 0);
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);   // точки, до которых не дошёл Stop
         res.bifurcation_points.assign((size_t)nPts, {});
         res.peak_times.assign((size_t)nPts, {});
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
@@ -3203,6 +3271,8 @@ struct ParametricEngine::Impl {
             }
         };
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -3229,7 +3299,7 @@ struct ParametricEngine::Impl {
         if (cont) {
             // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
             std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);   // хвост, до которого не дошёл Stop
             int prog = 0;
             std::thread pump([&]() {
                 while (!finished.load(std::memory_order_relaxed)) {
@@ -3241,7 +3311,7 @@ struct ParametricEngine::Impl {
             finished.store(true, std::memory_order_relaxed);
             pump.join();
             watcher.join();
-            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = !ok || cancelFlag;   // Stop: посчитанное начало цепочки остаётся
             collect(0, nPts, pk, tm, fl, st);
         } else {
             // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
@@ -3261,8 +3331,11 @@ struct ParametricEngine::Impl {
                     if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
                     int prog = 0;
-                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются с меткой отмены.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    const bool whole = call(i0, i1, pk, tm, fl, st, &prog) != 0;
                     collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    if (!whole) { aborted.store(true); return; }
                     donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
                 }
             };
@@ -3271,7 +3344,7 @@ struct ParametricEngine::Impl {
             for (std::thread& t : pool) t.join();
             finished.store(true, std::memory_order_relaxed);
             watcher.join();
-            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = aborted.load() || cancelFlag;   // Stop: посчитанные куски остаются
         }
         fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
@@ -3291,13 +3364,21 @@ struct ParametricEngine::Impl {
         res.continuation_reverse = req.continuation && req.continuation_reverse;
         res.lyapunov = out;
         res.flags.assign((size_t)req.n_pts, 0);
-        for (int j = 0; j < req.n_pts; ++j)
-            res.flags[(size_t)j] = std::isfinite(out[(size_t)j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        for (int j = 0; j < req.n_pts; ++j) {
+            double& v = res.lyapunov[(size_t)j];
+            if (v == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                v = std::numeric_limits<double>::quiet_NaN();
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+            } else {
+                res.flags[(size_t)j] = std::isfinite(v) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+            }
+        }
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
@@ -3315,6 +3396,11 @@ struct ParametricEngine::Impl {
         res.spectrum.assign((size_t)req.n_pts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign((size_t)req.n_pts, 0);
         for (int j = 0; j < req.n_pts; ++j) {
+            if (N > 0 && out[(size_t)j * N] == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                fill_nan_tail(res.spectrum[(size_t)j], 0);
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+                continue;
+            }
             bool fin = true;
             for (int k = 0; k < N; ++k) {
                 res.spectrum[(size_t)j][(size_t)k] = out[(size_t)j * N + k];
@@ -3327,6 +3413,7 @@ struct ParametricEngine::Impl {
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
@@ -3739,12 +3826,13 @@ struct ParametricEngine::Impl {
         // результат-аккумулятор (для GUI)
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;   // ёмкость строки пиков, а не длина траектории
-        res.flags.assign(nPts, 0);
+        res.flags.assign(nPts, REGIME_CANCELLED);   // чанки, до которых не дошёл Stop
         res.bifurcation_points.assign(nPts, {});
         res.peak_times.assign(nPts, {});
 
         // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -3834,7 +3922,7 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after traj+peaks");
-            BIF_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки ядро пометило REGIME_CANCELLED, остальные целы.
 
             // D2H (порт строк 538-540 NL)
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
@@ -3904,6 +3992,7 @@ struct ParametricEngine::Impl {
         #undef BIF_CHECK
         #undef BIF_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -4144,12 +4233,14 @@ struct ParametricEngine::Impl {
         res.n_pts    = nPts;
         res.param_lo = ranges[0];
         res.param_hi = ranges[1];
-        res.lyapunov.assign(nPts, 0.0);
-        res.flags.assign(nPts, 0);
+        // Чанки, до которых не дошёл Stop, остаются пустыми.
+        res.lyapunov.assign(nPts, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -4262,22 +4353,19 @@ struct ParametricEngine::Impl {
                 size_t global_idx = originalNPtsLimiter * iter + k;
                 double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
-                double v          = h_lleResult[k];
-
-                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось). Наружу отдаём
-                // NaN, а не сырой sentinel: 999 — легитимное по типу значение λ, поэтому любой
-                // потребитель, забывший сверить flags[], молча рисовал выброс на 999. NaN
-                // отсекается через !isfinite (и в GUI, и в min/max), т.е. безопасен по умолчанию;
-                // flags[] остаётся источником истины о ПРИЧИНЕ отсутствия точки.
-                const bool diverged = (v == 999.0 || v == -999.0);
-                if (diverged) v = std::numeric_limits<double>::quiet_NaN();
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось), 998 — точку
+                // прервал Stop. Наружу отдаём NaN, а не сырой sentinel: 999 — легитимное по типу
+                // значение λ, поэтому любой потребитель, забывший сверить flags[], молча рисовал
+                // выброс на 999. NaN отсекается через !isfinite (и в GUI, и в min/max), т.е.
+                // безопасен по умолчанию; flags[] остаётся источником истины о ПРИЧИНЕ отсутствия
+                // точки. LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена).
+                int flag = REGIME_OSCILLATION;
+                const double v = lyap_value_from_kernel((double)h_lleResult[k], flag);
 
                 res.lyapunov[global_idx] = v;
-                // LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена),
-                // поэтому единственный «плохой» код — REGIME_UNBOUND.
-                res.flags[global_idx] = diverged ? REGIME_UNBOUND : REGIME_OSCILLATION;
+                res.flags[global_idx] = flag;
 
-                if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
+                if (out.is_open() && flag != REGIME_CANCELLED) data_export::write_lle1d_row(out, param_val, v);
             }
             if (out.is_open()) out.close();
         }
@@ -4286,6 +4374,7 @@ struct ParametricEngine::Impl {
         #undef LLE_CHECK
         #undef LLE_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -4590,8 +4679,9 @@ struct ParametricEngine::Impl {
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         // Snapshot of CSV-relevant fields in USER ordering — engine + GUI
@@ -4623,6 +4713,7 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -4739,8 +4830,10 @@ struct ParametricEngine::Impl {
                 } else {
                     out_idx = kernel_idx;
                 }
+                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает. Прерванную
+                // Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (v == (double)UCUDA_CANCELLED_VALUE) continue;
                 res.values[out_idx] = v;
-                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает.
                 res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? REGIME_UNBOUND
                                                                   : REGIME_OSCILLATION;
             }
@@ -4779,6 +4872,7 @@ struct ParametricEngine::Impl {
         #undef LLE2_CHECK
         #undef LLE2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5012,11 +5106,13 @@ struct ParametricEngine::Impl {
         res.n_exponents = amountOfInitialConditions;
         res.param_lo    = ranges[0];
         res.param_hi    = ranges[1];
-        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, 0.0));
-        res.flags.assign(nPts, 0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, std::numeric_limits<double>::quiet_NaN()));
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -5118,6 +5214,8 @@ struct ParametricEngine::Impl {
 
                 // первая экспонента используется как ground-truth для флага
                 double first = h_lsResult[k * (size_t)amountOfInitialConditions + 0];
+                // Прерванную Stop точку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 // 999/-999 — kernel-sentinel расходимости; FP LS не различает.
                 res.flags[global_idx] = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                             : REGIME_OSCILLATION;
@@ -5138,6 +5236,7 @@ struct ParametricEngine::Impl {
         #undef LS_CHECK
         #undef LS_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5426,8 +5525,9 @@ struct ParametricEngine::Impl {
         res.param_hi    = req.param_hi;
         res.param_lo_2  = req.param_lo_2;
         res.param_hi_2  = req.param_hi_2;
-        res.values.assign((size_t)N * total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign((size_t)N * total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         res.snapshot.values.assign(values, values + amountOfValues);
@@ -5457,6 +5557,7 @@ struct ParametricEngine::Impl {
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -5557,6 +5658,8 @@ struct ParametricEngine::Impl {
                 }
                 // Первая экспонента — ground-truth для флага (как в run_ls_1d).
                 double first = h_lsResult[k * (size_t)N + 0];
+                // Прерванную Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 int flag = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                : REGIME_OSCILLATION;
                 res.flags[out_idx] = flag;
@@ -5603,6 +5706,7 @@ struct ParametricEngine::Impl {
         #undef LS2_CHECK
         #undef LS2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5738,9 +5842,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         LC_CHECK(cudaDeviceSynchronize(), "sync after lle cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts);
         LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -5754,13 +5856,21 @@ struct ParametricEngine::Impl {
         res.continuation_reverse = req.continuation_reverse;
         res.lyapunov.assign(host.begin(), host.end());   // numb -> double
         res.flags.assign(nPts, 0);
-        // NaN у continuation-ядра означает расходимость (FP оно не различает).
-        for (int j = 0; j < nPts; ++j)
+        // NaN у continuation-ядра означает расходимость (FP оно не различает),
+        // UCUDA_CANCELLED_VALUE — хвост, до которого не дошёл Stop.
+        for (int j = 0; j < nPts; ++j) {
+            if (res.lyapunov[j] == (double)UCUDA_CANCELLED_VALUE) {
+                res.lyapunov[j] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             res.flags[j] = std::isfinite(res.lyapunov[j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5832,9 +5942,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SC_CHECK(cudaDeviceSynchronize(), "sync after ls cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts * N);
         SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -5850,6 +5958,12 @@ struct ParametricEngine::Impl {
         res.spectrum.assign(nPts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign(nPts, 0);
         for (int j = 0; j < nPts; ++j) {
+            // Хвост, до которого не дошёл Stop (UCUDA_CANCELLED_VALUE), — пустой.
+            if (N > 0 && host[(size_t)j * N] == (numb)UCUDA_CANCELLED_VALUE) {
+                for (int k = 0; k < N; ++k) res.spectrum[j][k] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             bool ok = true;
             for (int k = 0; k < N; ++k) {
                 const double v = host[(size_t)j * N + k];
@@ -5863,6 +5977,7 @@ struct ParametricEngine::Impl {
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -5961,9 +6076,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DC_CHECK(cudaDeviceSynchronize(), "sync after dft cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> ak_host(freqCells), bk_host(freqCells);
         res.flags.assign(nPts, 0);
@@ -5983,8 +6096,16 @@ struct ParametricEngine::Impl {
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
         res.continuation_reverse = req.continuation_reverse;
+        // Строки, до которых не дошёл Stop, ядро не писало: в них мусор cudaMalloc.
+        for (int j = 0; j < nPts; ++j)
+            if (res.flags[j] == REGIME_CANCELLED)
+                for (int f = 0; f < nFreq; ++f) {
+                    res.ak_cos[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                    res.bk_sin[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6166,13 +6287,15 @@ struct ParametricEngine::Impl {
         res.param_hi = req.param_hi;
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         const size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DH_CANCEL_CHECK();
             if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
@@ -6256,6 +6379,7 @@ struct ParametricEngine::Impl {
         #undef DH_CANCEL_CHECK
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6392,9 +6516,8 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, peakFinderCUDA
+        // проносит код как есть.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // Launch peakFinderCUDA на полученные данные
@@ -6477,6 +6600,7 @@ struct ParametricEngine::Impl {
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6603,9 +6727,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         CA_CHECK(cudaDeviceSynchronize(), "sync after adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> h_outPeaks((size_t)nPts * peakStride), h_timeOfPeaks((size_t)nPts * peakStride);
         std::vector<int>  h_flags((size_t)nPts);
@@ -6642,6 +6764,7 @@ struct ParametricEngine::Impl {
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -6909,11 +7032,13 @@ struct ParametricEngine::Impl {
         res.param_hi = ranges[1];
         res.freq_lo  = rangesFreq[0];
         res.freq_hi  = rangesFreq[1];
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DFT_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -6997,7 +7122,7 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
-            DFT_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, DFT их пропускает.
 
             // DFT_custom_pf(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
             // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
@@ -7066,6 +7191,7 @@ struct ParametricEngine::Impl {
         #undef DFT_CHECK_CU
         #undef DFT_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -7213,9 +7339,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, DFT его пропускает.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks
@@ -7298,6 +7422,7 @@ struct ParametricEngine::Impl {
         #undef DFTC_CHECK_CU
         #undef DFTC_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -7667,8 +7792,9 @@ struct ParametricEngine::Impl {
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells,  0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells,  REGIME_CANCELLED);
 
         res.snapshot.values.assign(values, values + amountOfValues);
         res.snapshot.initial_conditions.assign(initialConditions,
@@ -7699,6 +7825,7 @@ struct ParametricEngine::Impl {
 
         // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF2D_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
@@ -7830,7 +7957,8 @@ struct ParametricEngine::Impl {
             if (!wait_with_signals(stream, sig, req.cancel, req.progress,
                                    (double)(originalNPtsLimiter * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
-            BIF2D_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные ячейки помечены REGIME_CANCELLED, DBSCAN их
+            // пропускает, остальные досчитываются.
             int maxPeaks = 0;
             BIF2D_CHECK(cudaMemcpy(&maxPeaks, d_maxPeaks, sizeof(int), cudaMemcpyDeviceToHost), "memcpy d_maxPeaks");
 
@@ -7884,7 +8012,6 @@ struct ParametricEngine::Impl {
                                    (double)(originalNPtsLimiter * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
-            BIF2D_CANCEL_CHECK();
 
             // Копируем ПОСЛЕ опроса, а не до него: device -> pageable копирование
             // асинхронным не бывает (h_dbscanResult — std::vector), драйвер возвращает
@@ -7913,7 +8040,8 @@ struct ParametricEngine::Impl {
                 // point, 0 = unbound, N > 0 = число кластеров пиков. Раньше
                 // unbound (0) получал flag 1, т.е. считался валидной ячейкой и
                 // попадал в автошкалу colormap'а как «период 0».
-                res.values[out_idx] = (double)period;
+                res.values[out_idx] = period == REGIME_CANCELLED ? std::numeric_limits<double>::quiet_NaN()
+                                                                 : (double)period;
                 res.flags[out_idx]  = period;
                 if (ad)
                     for (int q = 0; q < 4; ++q)
@@ -7960,6 +8088,7 @@ struct ParametricEngine::Impl {
         #undef BIF2D_CHECK
         #undef BIF2D_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
@@ -8331,7 +8460,8 @@ struct ParametricEngine::Impl {
         res.param_lo_2  = req.param_lo_2; res.param_hi_2 = req.param_hi_2;
         res.log_scale   = req.log_scale;  res.log_scale_2 = req.log_scale_2;
         res.metric_mask = mask;
-        res.flags.assign(total_cells, REGIME_UNBOUND);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign(total_cells, std::numeric_limits<double>::quiet_NaN());
 
@@ -8339,6 +8469,7 @@ struct ParametricEngine::Impl {
         std::vector<int>  h_flags(chunk);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             SIGM_CANCEL_CHECK();
             if (req.progress) req.progress->store((float)((double)(chunk * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             const size_t cur = (iter == amountOfIteration - 1) ? total_cells - chunk * iter : chunk;
@@ -8418,7 +8549,7 @@ struct ParametricEngine::Impl {
                                    (double)(chunk * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             SIGM_CHECK(cudaStreamSynchronize(stream), "sync stream");
-            SIGM_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, метрики у них NaN.
 
             // Индекс ядра -> индекс результата: в 2D при swap_xy ядро шло по осям
             // в обратном порядке, результат всегда в раскладке GUI [iy*n + ix].
@@ -8555,9 +8686,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMC_CHECK(cudaDeviceSynchronize(), "sync after metrics cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
@@ -8637,11 +8766,14 @@ struct ParametricEngine::Impl {
         res.metric_mask = mask;
         res.continuation         = cont;
         res.continuation_reverse = cont && req.continuation_reverse;
-        res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+        // Точки, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, std::numeric_limits<double>::quiet_NaN());
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -8665,15 +8797,15 @@ struct ParametricEngine::Impl {
         bool aborted = false;
         if (cont) {
             std::vector<double> iv(needIntervals ? peakStride : 0), om((size_t)SIGM_COUNT * nPts), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            // Stop рвёт цепочку: хвост, до которого она не дошла, остаётся пустым.
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);
+            std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
             aborted = !call(0, nPts, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &chainProg);
-            if (!aborted) {
-                for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
-                for (int m = 0; m < SIGM_COUNT; ++m)
-                    if ((mask >> m) & 1)
-                        for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
-                res.ad_stats = st;
-            }
+            for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((mask >> m) & 1)
+                    for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
+            res.ad_stats = st;
         } else {
             // Куски точек — потокам по мере освобождения; строки кусков не пересекаются.
             constexpr int kChunk = 4;
@@ -8692,9 +8824,11 @@ struct ParametricEngine::Impl {
                     if (c >= nChunks || stop.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk), rows = i1 - i0;
                     int prog = 0;
-                    if (!call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog)) {
-                        stop.store(true); return;
-                    }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются пустыми.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
+                    const bool whole = call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog) != 0;
+                    if (!whole) stop.store(true);
                     for (int r = 0; r < rows; ++r) {
                         res.flags[(size_t)(i0 + r)] = fl[(size_t)r];
                         for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)(i0 + r) * 4 + q] = st[(size_t)r * 4 + q];
@@ -8702,6 +8836,7 @@ struct ParametricEngine::Impl {
                     for (int m = 0; m < SIGM_COUNT; ++m)
                         if ((mask >> m) & 1)
                             for (int r = 0; r < rows; ++r) res.values[m][(size_t)(i0 + r)] = om[(size_t)m * rows + r];
+                    if (!whole) return;
                     donePts.fetch_add(rows, std::memory_order_relaxed);
                 }
             };
@@ -8712,7 +8847,7 @@ struct ParametricEngine::Impl {
         }
         finished.store(true, std::memory_order_relaxed);
         watcher.join();
-        if (aborted || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        (void)aborted;   // Stop: частичный результат, cancelled ставит metrics_finish
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         metrics_finish(res, req);
         return res;
@@ -8826,9 +8961,7 @@ struct ParametricEngine::Impl {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMA_CHECK(cudaDeviceSynchronize(), "sync after metrics adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
@@ -11463,4 +11596,349 @@ bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& p
     }
     if (!out.good()) { err = "write failed: " + path; return false; }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Оценка времени счёта траекторий (time_estimate.h): цена шага по PTX и калибровка карты.
+
+namespace {
+
+// Тип numb в PTX: только его арифметика идёт в счёт.
+const char* ptx_numb_type() { return sizeof(numb) == 8 ? "f64" : "f32"; }
+
+// Вес PTX-инструкции в операциях numb. IEEE-деление, корень и обратная величина в SASS
+// разворачиваются в итерацию Ньютона (~8 FMA с проверкой), approx-варианты — одна MUFU.
+// Пересылки, загрузки, select и целочисленная арифметика не считаются: в FP64 узкое место —
+// FP64-конвейер, а во float их долю поглощает калибровка тем же счётом.
+double ptx_op_weight(const std::string& op) {
+    std::vector<std::string> parts;
+    size_t s = 0;
+    for (size_t i = 0; i <= op.size(); ++i)
+        if (i == op.size() || op[i] == '.') { parts.push_back(op.substr(s, i - s)); s = i + 1; }
+    const std::string ty = ptx_numb_type();
+    bool typed = false, approx = false;
+    for (size_t i = 1; i < parts.size(); ++i) {
+        if (parts[i] == ty)       typed  = true;
+        if (parts[i] == "approx") approx = true;
+    }
+    if (!typed) return 0.0;
+    const std::string& b = parts[0];
+    if (b == "div" || b == "sqrt" || b == "rcp") return approx ? 1.0 : 8.0;
+    if (b == "add" || b == "sub" || b == "mul" || b == "fma" || b == "mad" || b == "neg" ||
+        b == "abs" || b == "min" || b == "max" || b == "setp" || b == "cvt" || b == "copysign" ||
+        b == "testp" || b == "rsqrt" || b == "sin" || b == "cos" || b == "ex2" || b == "lg2" ||
+        b == "tanh")
+        return 1.0;
+    return 0.0;
+}
+
+// Взвешенная сумма инструкций тела функции fn. Медленные ветви libm (редукция больших аргументов
+// sin/cos) вынесены в отдельные .func и сюда не попадают — на обычных аргументах они и не
+// исполняются. Обе ветви if идут в счёт целиком, цикл — одним проходом; loops = true, если
+// есть переход назад, на уже встреченную метку (Ньютон неявных схем, итерации CD FP).
+double ptx_function_cost(const std::string& ptx, const std::string& fn, bool& loops) {
+    loops = false;
+    size_t pos = 0;
+    for (;;) {
+        pos = ptx.find(fn + "(", pos);
+        if (pos == std::string::npos) return 0.0;
+        // Определение, а не объявление: за списком параметров идёт '{', а не ';'.
+        const size_t rp = ptx.find(')', pos);
+        if (rp == std::string::npos) return 0.0;
+        size_t q = rp + 1;
+        while (q < ptx.size() && std::isspace((unsigned char)ptx[q])) ++q;
+        if (q < ptx.size() && ptx[q] == '{') { pos = q; break; }
+        pos = rp;
+    }
+
+    double cost = 0.0;
+    int depth = 0;
+    std::set<std::string> labels;
+    std::istringstream in(ptx.substr(pos));
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) continue;
+        std::string t = line.substr(a);
+        const size_t cm = t.find("//");
+        if (cm != std::string::npos) t.erase(cm);
+        for (char c : t) {
+            if (c == '{') ++depth;
+            else if (c == '}') --depth;
+        }
+        if (depth == 0) break;
+        if (t.empty() || t[0] == '{' || t[0] == '}' || t[0] == '.') continue;
+        if (t[0] == '$') {
+            const size_t c = t.find(':');
+            if (c != std::string::npos) labels.insert(t.substr(0, c));
+            continue;
+        }
+        if (t[0] == '@') {   // предикат: "@%p1 bra ..."
+            const size_t sp = t.find_first_of(" \t");
+            if (sp == std::string::npos) continue;
+            const size_t nx = t.find_first_not_of(" \t", sp);
+            if (nx == std::string::npos) continue;
+            t.erase(0, nx);
+        }
+        const std::string op = t.substr(0, t.find_first_of(" \t;"));
+        if (op.compare(0, 3, "bra") == 0) {
+            const size_t l = t.find('$');
+            if (l != std::string::npos) {
+                const std::string tgt = t.substr(l, t.find_first_of(" \t;", l) - l);
+                if (labels.count(tgt)) loops = true;
+            }
+            continue;
+        }
+        cost += ptx_op_weight(op);
+    }
+    return cost;
+}
+
+bool estimate_device(CUdevice& dev, int& cc_major, int& cc_minor, std::string& err) {
+    CUresult r = cuInit(0);
+    if (r != CUDA_SUCCESS) { err = "cuInit: " + cu_err(r); return false; }
+    r = cuDeviceGet(&dev, 0);
+    if (r != CUDA_SUCCESS) { err = "cuDeviceGet: " + cu_err(r); return false; }
+    cuDeviceGetAttribute(&cc_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+    cuDeviceGetAttribute(&cc_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
+    return true;
+}
+
+// Калибровочные шаги на системе Лоренца: дешёвый (Эйлер) и дорогой (RK4). Их цену считает тот же
+// krs_step_cost, что и цену пользовательской КРС, поэтому систематика счёта (свёртка констант,
+// вынос инвариантов из цикла) сокращается в отношении время / операции. Два шага разной цены
+// разделяют время на операции и постоянную добавку шага (цикл, shared, запись траектории): у
+// Эйлера Лоренца она больше половины времени.
+const char* const kCalibBodyCheap =
+    "    numb k[3];\n"
+    "    k[0] = a[1] * (X[1] - X[0]); k[1] = X[0] * (a[2] - X[2]) - X[1]; k[2] = X[0] * X[1] - a[3] * X[2];\n"
+    "    for (int i = 0; i < 3; ++i) X[i] = X[i] + h * k[i];\n";
+const char* const kCalibBody =
+    "    numb k1[3], k2[3], k3[3], k4[3], Y[3];\n"
+    "    k1[0] = a[1] * (X[1] - X[0]); k1[1] = X[0] * (a[2] - X[2]) - X[1]; k1[2] = X[0] * X[1] - a[3] * X[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + (numb)0.5 * h * k1[i];\n"
+    "    k2[0] = a[1] * (Y[1] - Y[0]); k2[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k2[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + (numb)0.5 * h * k2[i];\n"
+    "    k3[0] = a[1] * (Y[1] - Y[0]); k3[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k3[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i) Y[i] = X[i] + h * k3[i];\n"
+    "    k4[0] = a[1] * (Y[1] - Y[0]); k4[1] = Y[0] * (a[2] - Y[2]) - Y[1]; k4[2] = Y[0] * Y[1] - a[3] * Y[2];\n"
+    "    for (int i = 0; i < 3; ++i)\n"
+    "        X[i] = X[i] + h * (k1[i] + (numb)2 * (k2[i] + k3[i]) + k4[i]) * ((numb)1 / (numb)6);\n";
+
+// Длина кольца записи на нить в ядре калибровки.
+constexpr int kCalibRing = 64;
+
+// Ядра калибровки повторяют цикл loopCalculateDiscreteModel_int: состояние и параметры в shared
+// (как у ядер свипов), значение пишется в глобальный массив на каждом шаге (у них — траектория,
+// здесь — кольцо), раз в CHECK_INTERVAL шагов — проверка на расходимость.
+std::string calib_source() {
+    std::string src = "#define AMOUNTOFX 3\n#include \"configCUDA.h\"\n";
+    const char* names[2]  = { "Cheap", "Rk4" };
+    const char* bodies[2] = { kCalibBodyCheap, kCalibBody };
+    for (int k = 0; k < 2; ++k) {
+        src += std::string("__device__ __forceinline__ void ucuda_calib_step") + names[k]
+             + "(numb* X, const numb* a, const numb h) {\n" + bodies[k] + "}\n"
+             + "extern \"C\" __global__ void ucudaCalib" + names[k]
+             + "(numb* out, const numb* ag, numb h, int steps, int n, numb maxValue) {\n"
+               "    extern __shared__ numb sh[];\n"
+               "    const int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+               "    if (i >= n) return;\n"
+               "    numb* X = sh + threadIdx.x * 3;\n"
+               "    numb* a = sh + blockDim.x * 3 + threadIdx.x * 4;\n"
+               "    for (int j = 0; j < 4; ++j) a[j] = ag[j];\n"
+               "    X[0] = (numb)1 + (numb)1e-3 * (numb)(i & 1023); X[1] = (numb)1; X[2] = (numb)1;\n"
+               "    numb* data = out + (size_t)i * " + std::to_string(kCalibRing) + ";\n"
+               "    int untilCheck = 0;\n"
+               "    for (int s = 0; s < steps; ++s) {\n"
+               "        data[s & " + std::to_string(kCalibRing - 1) + "] = X[0];\n"
+               "        ucuda_calib_step" + names[k] + "(X, a, h);\n"
+               "        if (--untilCheck < 0) {\n"
+               "            untilCheck = 99;\n"
+               "            const numb c = abs(X[0]) + abs(X[1]) + abs(X[2]);\n"
+               "            if (isnan(c) || isinf(c) || c > maxValue) return;\n"
+               "        }\n"
+               "    }\n"
+               "}\n";
+    }
+    return src;
+}
+
+}  // namespace
+
+bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err) {
+    out = KrsStepCost();
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    std::string rerr;
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    if (!rerr.empty()) { err = rerr; return false; }
+
+    // Шаг со стадией предрасчёта (CD fast) считается без неё: в горячих циклах она идёт раз на
+    // траекторию (krs_prep.h).
+    KrsPrepSplit sp;
+    const bool prep = krs_split_prep(krs_body, sp);
+    const std::string fn = prep ? "krs_step_p" : "krs_step";
+    const std::string src = "#define AMOUNTOFX " + std::to_string(amountOfX) + "\n"
+                            "#include \"configCUDA.h\"\n"
+                            "extern \"C\" __device__ void " + fn + "("
+                          + (prep ? krs_step_p_fn_params() : "numb* X, const numb* a, const numb h")
+                          + ") {\n" + (prep ? krs_step_p_fn_body(sp) : krs_body) + "\n}\n";
+    std::string ptx;
+    std::vector<std::string> ignored;
+    if (!nvrtc_compile_ptx(cc_major, cc_minor, src, "krs_cost.cu", { cfg.c_str() }, { "configCUDA.h" },
+                           {}, true, ptx, ignored, err))
+        return false;
+    out.ops = ptx_function_cost(ptx, fn, out.loops);
+    if (out.ops <= 0.0) {
+        err = std::string("no ") + ptx_numb_type() + " arithmetic found in the step";
+        return false;
+    }
+    return true;
+}
+
+std::string gpu_calibration_path() { return exe_dir() + "\\gpu_calibration.txt"; }
+
+bool gpu_device_info(std::string& name, int& sm_count, std::string& err) {
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    char buf[256] = {};
+    cuDeviceGetName(buf, (int)sizeof buf, dev);
+    name = buf;
+    sm_count = 0;
+    cuDeviceGetAttribute(&sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
+    return sm_count > 0;
+}
+
+bool gpu_calibrate(GpuCalibration& out, std::string& err) {
+    out = GpuCalibration();
+    KrsStepCost cost[2];
+    if (!krs_step_cost(kCalibBodyCheap, 3, cost[0], err)) return false;
+    if (!krs_step_cost(kCalibBody,      3, cost[1], err)) return false;
+    if (cost[1].ops <= cost[0].ops) { err = "calibration steps have equal cost"; return false; }
+    CUdevice dev = 0;
+    int cc_major = 0, cc_minor = 0;
+    if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
+    if (!gpu_device_info(out.device, out.sm_count, err)) return false;
+    out.numb_bytes = (int)sizeof(numb);
+    out.calib_ops  = cost[1].ops;
+
+    std::string rerr;
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    if (!rerr.empty()) { err = rerr; return false; }
+    std::string ptx;
+    std::vector<std::string> ignored;
+    if (!nvrtc_compile_ptx(cc_major, cc_minor, calib_source(), "calib.cu", { cfg.c_str() }, { "configCUDA.h" },
+                           {}, false, ptx, ignored, err))
+        return false;
+
+    // Первичный контекст: тот же, что у cudart в GUI, — отдельный стоил бы сотни МБ видеопамяти.
+    CUcontext ctx = nullptr;
+    CUresult r = cuDevicePrimaryCtxRetain(&ctx, dev);
+    if (r != CUDA_SUCCESS) { err = "cuDevicePrimaryCtxRetain: " + cu_err(r); return false; }
+    cuCtxPushCurrent(ctx);
+
+    const int sm        = out.sm_count;
+    const int kWarpsSat = 32;   // варпов на SM в насыщенном прогоне
+    CUmodule    mod   = nullptr;
+    CUfunction  fn[2] = { nullptr, nullptr };
+    CUdeviceptr d_out = 0, d_a = 0;
+    CUstream    st    = nullptr;
+    CUevent     e0    = nullptr, e1 = nullptr;
+    bool ok = false;
+    do {
+        if ((r = cuModuleLoadData(&mod, ptx.c_str())) != CUDA_SUCCESS) { err = "cuModuleLoadData(calib): " + cu_err(r); break; }
+        if ((r = cuModuleGetFunction(&fn[0], mod, "ucudaCalibCheap")) != CUDA_SUCCESS ||
+            (r = cuModuleGetFunction(&fn[1], mod, "ucudaCalibRk4")) != CUDA_SUCCESS) { err = "cuModuleGetFunction(calib): " + cu_err(r); break; }
+        if ((r = cuMemAlloc(&d_out, (size_t)32 * sm * kWarpsSat * kCalibRing * sizeof(numb))) != CUDA_SUCCESS) { err = "cuMemAlloc(calib): " + cu_err(r); break; }
+        if ((r = cuMemAlloc(&d_a, 4 * sizeof(numb))) != CUDA_SUCCESS) { err = "cuMemAlloc(calib): " + cu_err(r); break; }
+        const numb av[4] = { (numb)0.5, (numb)10, (numb)28, (numb)8 / (numb)3 };
+        if ((r = cuMemcpyHtoD(d_a, av, sizeof av)) != CUDA_SUCCESS) { err = "cuMemcpyHtoD(calib): " + cu_err(r); break; }
+        if ((r = cuStreamCreate(&st, CU_STREAM_NON_BLOCKING)) != CUDA_SUCCESS) { err = "cuStreamCreate(calib): " + cu_err(r); break; }
+        cuEventCreate(&e0, CU_EVENT_DEFAULT);
+        cuEventCreate(&e1, CU_EVENT_DEFAULT);
+
+        numb h = (numb)0.001;
+        numb max_value = (numb)1e6;
+        // Один прогон ядра k: warps варпов на SM (блоки по варпу), steps шагов; время в мс.
+        auto run = [&](int k, int warps, int steps, double& ms) -> bool {
+            int n = 32 * sm * warps;
+            void* args[] = { &d_out, &d_a, &h, &steps, &n, &max_value };
+            cuEventRecord(e0, st);
+            CUresult rr = cuLaunchKernel(fn[k], (unsigned)(sm * warps), 1, 1, 32, 1, 1,
+                                         (unsigned)(32 * 7 * sizeof(numb)), st, args, nullptr);
+            if (rr == CUDA_SUCCESS) rr = cuEventRecord(e1, st);
+            if (rr == CUDA_SUCCESS) rr = cuEventSynchronize(e1);
+            if (rr != CUDA_SUCCESS) { err = "calibration launch: " + cu_err(rr); return false; }
+            float f = 0.0f;
+            cuEventElapsedTime(&f, e0, e1);
+            ms = f;
+            return true;
+        };
+        // Шагов на ~40 мс: короче — шум запуска, длиннее — риск сброса драйвером (TDR) на
+        // медленной карте. Подбор заодно начинает поднимать частоты.
+        auto fit_steps = [&](int k, int warps, int& steps) -> bool {
+            steps = 256;
+            double ms = 0.0;
+            for (int it = 0; it < 16; ++it) {
+                if (!run(k, warps, steps, ms)) return false;
+                if (ms >= 10.0 || steps > (1 << 26)) break;
+                steps *= 4;
+            }
+            steps = (std::max)(1, (int)(std::min)(1e9, steps * 40.0 / (std::max)(ms, 1e-3)));
+            return true;
+        };
+        // [ядро][0 — насыщение, 1 — один варп на SM]
+        int    steps[2][2] = {};
+        double best[2][2]  = { { 1e300, 1e300 }, { 1e300, 1e300 } };
+        const int warps[2] = { kWarpsSat, 1 };
+        bool run_ok = true;
+        for (int k = 0; k < 2 && run_ok; ++k)
+            for (int m = 0; m < 2 && run_ok; ++m) run_ok = fit_steps(k, warps[m], steps[k][m]);
+        if (!run_ok) break;
+
+        // Прогрев: ~300 мс насыщенных запусков подряд, иначе карта не выходит из низкого
+        // P-state и первый замер завышен в 2-3 раза.
+        double ms = 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (run_ok && std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(300))
+            run_ok = run(1, kWarpsSat, steps[1][0], ms);
+        for (int rep = 0; rep < 5 && run_ok; ++rep)
+            for (int k = 0; k < 2 && run_ok; ++k)
+                for (int m = 0; m < 2 && run_ok; ++m) {
+                    run_ok = run(k, warps[m], steps[k][m], ms);
+                    best[k][m] = (std::min)(best[k][m], ms / steps[k][m]);   // мс на шаг
+                }
+        if (!run_ok) break;
+
+        // Шаг стоит (ops + c0) * ns: наклон по двум шагам — цена операции, остаток — добавка c0.
+        double ns[2], c0[2];
+        for (int m = 0; m < 2; ++m) {
+            const double slope = (best[1][m] - best[0][m]) / (cost[1].ops - cost[0].ops);
+            if (slope > 0.0) {
+                ns[m] = slope * 1e6;
+                c0[m] = (std::max)(0.0, best[0][m] / slope - cost[0].ops);
+            } else {   // шум перекрыл разницу: без добавки, по дорогому шагу
+                ns[m] = best[1][m] * 1e6 / cost[1].ops;
+                c0[m] = 0.0;
+            }
+        }
+        out.ns_thr = ns[0] / kWarpsSat;
+        out.c0_thr = c0[0];
+        out.ns_lat = ns[1];
+        out.c0_lat = c0[1];
+        ok = out.ns_thr > 0.0 && out.ns_lat > 0.0;
+        if (!ok) err = "calibration produced a zero time";
+    } while (false);
+
+    if (e0)    cuEventDestroy(e0);
+    if (e1)    cuEventDestroy(e1);
+    if (st)    cuStreamDestroy(st);
+    if (d_out) cuMemFree(d_out);
+    if (d_a)   cuMemFree(d_a);
+    if (mod)   cuModuleUnload(mod);
+    cuCtxPopCurrent(nullptr);
+    cuDevicePrimaryCtxRelease(dev);
+    return ok;
 }

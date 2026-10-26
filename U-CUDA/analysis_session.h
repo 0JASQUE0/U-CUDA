@@ -2,6 +2,7 @@
 #include "system_record.h"
 #include "codegen.hpp"
 #include "parametric_engine.h"
+#include "time_estimate.h"
 #include "circuit_solver.h"
 #include "adaptive_settings.h"
 
@@ -702,6 +703,8 @@ struct BifurcationAnalysisSession {
 
     // Async-Run для конкретной БД. Возвращает false если очередь занята.
     bool run_async(ParametricEngine& engine, int diagram_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int diagram_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -859,6 +862,8 @@ struct LLEAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int curve_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -1012,6 +1017,8 @@ struct Dft1DAnalysisSession {
 
     bool run(ParametricEngine& engine, int config_idx);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
     void request_cancel();
     bool poll();
 };
@@ -1273,6 +1280,8 @@ struct BasinsAnalysisSession {
 
     bool run(ParametricEngine& engine, int config_idx);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
 
     // Reclustering: запуск DBSCAN-only прогона поверх уже сохранённых фич
     // configs[config_idx].result.{avg_peaks,avg_intervals,helpful_array}. Использует ту же
@@ -1602,6 +1611,8 @@ struct LyapunovSpectrumAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int curve_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -1729,6 +1740,8 @@ struct SignalMetricsAnalysisSession {
     void add_config();
     void remove_config(int i);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
     std::function<void(ParametricEngine&)> prewarm_task(int config_idx) const;
     void request_cancel();
     bool poll();
