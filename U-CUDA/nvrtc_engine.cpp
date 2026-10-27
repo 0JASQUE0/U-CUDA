@@ -474,20 +474,25 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
 
     // Функции схемы — __host__ __device__, как calculateDiscreteModel в шаблонах:
     // их зовут __host__ __device__ методы провайдера UcudaKrsFns.
+    // Неавтономная система (явное t): функции получают ucuda_t перед a, драйвер
+    // передаёт им S.t (UCUDA_NONAUTONOMOUS). Тела — ключ кэша, признак берётся из них.
+    const bool nonauto = step_body_uses_time(rq.rhs);
+    const char* tp = nonauto ? "const numb ucuda_t, " : "";
     std::ostringstream src;
     src << kNumbTypedef
         << "#define AMOUNTOFX " << rq.amountOfX << "\n"
         << (needs_complex ? "#include \"configCUDA.h\"\n" : "")
+        << (nonauto ? "#define UCUDA_NONAUTONOMOUS\n" : "")
         << "#define UCUDA_AD_KRS_FUNCS\n"
         << "#define UCUDA_AD_STATIC_N\n"   // поток на траекторию, потоков мало: состояние — в регистры
         << (variant == 1 ? "#define UCUDA_AD_NO_DENSE 1\n" : "")
-        << "__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, const numb* a, numb* F) {\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, " << tp << "const numb* a, numb* F) {\n"
         << rq.rhs << "\n}\n"
-        << "__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, const numb* a,\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, " << tp << "const numb* a,\n"
            "    const numb h, numb* Y, numb* E, numb* F1, numb* W) {\n"
         << rq.emb << "\n}\n"
         << "__device__ __host__ __forceinline__ void ucuda_krs_dprep(const numb* X, const numb* Y, const numb* F0,\n"
-           "    const numb* F1, const numb* a, const numb h, numb* W, numb* D) {\n"
+           "    const numb* F1, " << tp << "const numb* a, const numb h, numb* W, numb* D) {\n"
         << rq.dprep << "\n}\n"
         << "__device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const numb th, numb* Yo) {\n"
         << rq.deval << "\n}\n"

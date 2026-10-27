@@ -11,6 +11,7 @@
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 #include "krs_prep.h"  // стадия предрасчёта КРС (CD fast)
+#include "codegen.hpp" // step_body_uses_time: явное время t в свипах пока не поддержано
 #include "module_lru.h"
 #include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
@@ -2713,6 +2714,15 @@ struct ParametricEngine::Impl {
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Явное время t (этап 2) в свипах ещё не проведено: шаблоны объявляют шаг без
+        // ucuda_t, и NVRTC ответил бы непонятным "identifier ucuda_t is undefined".
+        for (const auto& sub : subs)
+            if ((sub.first == "{{KRS_BODY}}" || sub.first == "{{KRS_RHS_BODY}}")
+                && step_body_uses_time(sub.second)) {
+                err = "explicit time t: parameter sweeps (bifurcation, LLE/LS, metrics, basins, "
+                      "FastSync, Order, Network) do not support it yet; use Analysis";
+                return false;
+            }
         // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
         // циклы cudaLibrary.cu зовут ucudaKrsPrep / calculateDiscreteModelP. Их определения
         // встают в шаблон: одной единицей трансляции — перед #include "cudaLibrary.cu"

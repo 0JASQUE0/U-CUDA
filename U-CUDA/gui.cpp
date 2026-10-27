@@ -363,7 +363,8 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     if (parse_composition_name(scheme_name, &cspec))
         return scheme_uses_newton(cspec.base);
     return scheme_name == "Implicit Euler" || scheme_name == "Implicit Midpoint"
-        || scheme_name == "Complex Implicit Euler";
+        || scheme_name == "Complex Implicit Euler"
+        || dae_scheme_from_name(scheme_name, nullptr);   // DAE BDF1 / Trapezoidal
 }
 
 // Поле "FP iterations n" (CD FP / CD fast FP). Рядом с "symmetry s" и с тем же
@@ -1141,6 +1142,19 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         if (on_pick) on_pick(nm);
         picked = true;
     };
+    // ДАУ: сессия получила только схемы ДАУ (enabled_builtins_from_record) — их и показываем,
+    // схемы ОДУ на такой системе не строятся.
+    if (enabled_builtins && !enabled_builtins->empty()
+        && dae_scheme_from_name((*enabled_builtins)[0], nullptr)) {
+        ImGui::SetNextItemWidth(kComboW);
+        if (ImGui::BeginCombo(label, scheme.c_str())) {
+            ImGui::SeparatorText("DAE");
+            for (const auto& nm : *enabled_builtins)
+                if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
+            ImGui::EndCombo();
+        }
+        return picked;
+    }
     // enabled_builtins null = no filter. Empty = no built-in is ticked: that is still
     // "no filter" only while the combo would otherwise be empty; a system that offers
     // custom KRS or wrappers (e.g. Izhikevich, whose reset lives in custom schemes)
@@ -1901,12 +1915,15 @@ static bool draw_newton_fields(NewtonSettings& n, float w, const char* id = "") 
     changed |= InputNumStr("Newton tolerance", n.tol, w);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Newton stops once ||dX|| falls below this (a[M+2], run time).\n"
+                          "DAE methods also stop at ||dX|| < tol * |X| (relative).\n"
                           "With numb = float it also stops at the precision floor\n"
                           "||dX|| < 16 eps |X|: below that float cannot go.");
     changed |= InputNumStr("Newton max iterations", n.max_iters, w);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Hard cap on Newton passes per step (a[M+3], run time).\n"
-                          "2-3 is typical from the explicit-Euler predictor.");
+                          "2-3 is typical from the explicit-Euler predictor.\n"
+                          "A step that hits the cap is accepted unconverged: on a DAE\n"
+                          "the constraint then drifts. DAE: full Newton, ~25 iterations.");
     ImGui::PopID();
     return changed;
 }
@@ -4991,6 +5008,14 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
         model.library_edit_buffer->clear();
         model.library_edit_buffer->is_dae = tab == LibTab::Dae;
         model.library_edit_buffer->is_map = tab == LibTab::Map;
+        if (tab == LibTab::Dae) {
+            // ДАУ: полный Ньютон и запас итераций. Предиктор z — прежнее значение, и при
+            // быстро меняющемся множителе (маятник) квадратичная фаза начинается лишь на
+            // ~9-й итерации; 8 итераций модифицированного Ньютона молча принимали
+            // несошедшийся шаг, и связь уплывала.
+            model.library_edit_buffer->newton_full      = true;
+            model.library_edit_buffer->newton_max_iters = "25";
+        }
         model.edit_original_name.clear();
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::AddNew;
@@ -5287,15 +5312,42 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 for (size_t i = 0; i < d.n_vars(); ++i)
                     m += " " + st.vars[i] + "=" + (d.index[i] ? std::to_string(d.index[i]) : "?");
                 st.message = m;
+                // Уровень A: можно ли решать как ОДУ (z выражены из связей явно).
+                System ode;
+                std::vector<std::string> zex;
+                std::string why;
+                st.reducible = dae_reduce_to_ode(d.as_codegen_system(), ode, &zex, &why);
+                if (st.reducible) {
+                    st.reduce_msg = "explicit z(x):";
+                    for (size_t j = 0; j < d.alg.size(); ++j) st.reduce_msg += "\n  " + d.alg[j] + " = " + zex[j];
+                } else st.reduce_msg = why;
             } catch (const std::exception& e) {
                 st.ok = false;
                 st.message = e.what();
                 st.vars.clear();
                 st.params.clear();
+                st.reducible = false;
+                st.reduce_msg.clear();
             }
         }
         if (st.ok) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", st.message.c_str());
         else       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", st.message.c_str());
+
+        // Этап 3, уровень A: ДАУ -> ОДУ подстановкой z. Снять галочку можно всегда;
+        // поставить — только если сведение удаётся.
+        if (st.ok) {
+            ImGui::BeginDisabled(!st.reducible && !buf.dae_as_ode);
+            ImGui::Checkbox("Solve as ODE (substitute z)", &buf.dae_as_ode);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("z is expressed from the constraints and substituted into f:\n"
+                                  "the system becomes an ODE in x and runs in every tab with every\n"
+                                  "ODE scheme (CD, Yoshida, RK, implicit; bifurcations, LLE/LS, basins).\n"
+                                  "z is then not part of the state. Index 1 with z linear in its constraint.");
+            ImGui::TextDisabled("%s", st.reduce_msg.c_str());
+            if (buf.dae_as_ode && !st.reducible)
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "cannot solve as ODE: untick");
+        }
 
         // Начальные условия всех переменных (z тоже: согласовать их — дело
         // решателя, но стартовое приближение Ньютону даёт пользователь) и
@@ -5310,9 +5362,19 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
             for (const auto& p : st.params)
                 InputNumStr((p + "##daepv").c_str(), buf.param_values[p], 140.0f, {}, true);
             InputNumStr("h##daeh", buf.step_h, 140.0f, {}, true);
+            // Ньютон схем ДАУ — значения по умолчанию для вкладок (как у неявных схем ОДУ).
+            ImGui::TextDisabled("Newton (defaults for the tabs)");
+            InputNumStr("tol##daent", buf.newton_tol, 140.0f);
+            InputNumStr("max iters##daeni", buf.newton_max_iters, 140.0f);
+            ImGui::Checkbox("full Newton##daenf", &buf.newton_full);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Rebuild the Jacobian every iteration. A step that runs out of\n"
+                                  "iterations is accepted unconverged and the constraint drifts.");
             ImGui::EndTable();
         }
-        ImGui::TextDisabled("DAE systems cannot be analysed yet: solvers come next.");
+        ImGui::TextDisabled("DAE methods (Analysis): BDF1 / Trapezoidal / TR-BDF2 / Rosenbrock ROS2 for any index;\n"
+                            "CD, CD + Yoshida-4 and explicit Euler / Midpoint / RK4 with the constraint solved\n"
+                            "whenever x changes - index 1 only. 'Solve as ODE' opens every tab and ODE scheme.");
     }
     else if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
@@ -5338,6 +5400,27 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
+}
+
+// Ось фазовой проекции: переменная (0..nv-1) или наблюдаемая вне состояния (nv + j, ДАУ,
+// сведённая к ОДУ — значения дописаны к точкам после координат состояния).
+static std::string phase_axis_name(const PhaseAnalysisSession& s, int ax) {
+    const int nv = (int)s.vars.size();
+    if (ax >= 0 && ax < nv) return s.vars[(size_t)ax];
+    if (ax >= nv && ax - nv < (int)s.observables.size()) return s.observables[(size_t)(ax - nv)];
+    return s.vars.empty() ? std::string("-") : s.vars[0];
+}
+static void phase_axis_combo(const char* id, PhaseAnalysisSession& s, int& axis) {
+    if (!ImGui::BeginCombo(id, phase_axis_name(s, axis).c_str())) return;
+    for (int k = 0; k < (int)s.vars.size(); ++k)
+        if (ImGui::Selectable(s.vars[(size_t)k].c_str(), axis == k)) { axis = k; s.fit_request = true; }
+    if (!s.observables.empty()) {
+        ImGui::SeparatorText("z (observables)");
+        const int nv = (int)s.vars.size();
+        for (int j = 0; j < (int)s.observables.size(); ++j)
+            if (ImGui::Selectable(s.observables[(size_t)j].c_str(), axis == nv + j)) { axis = nv + j; s.fit_request = true; }
+    }
+    ImGui::EndCombo();
 }
 
 // РЕЖИМ АНАЛИЗА: пространство фазовых портретов
@@ -5409,6 +5492,9 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
     }
     if (scheme_uses_newton(s.scheme))
         changed |= draw_newton_fields(s.newton, 70, "phase_newton");
+    // ДАУ: начальные z согласуются по связи перед счётом (dae_consistent_z) — что вышло.
+    if (!s.result.dae_status.empty())
+        ImGui::TextDisabled("%s", s.result.dae_status.c_str());
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
     if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -5608,18 +5694,10 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (pr.type == ProjType::Phase2D) {
             ImGui::Text("X:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(55);
-            if (ImGui::BeginCombo("##px", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##px", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(55);
-            if (ImGui::BeginCombo("##py", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##py", s, pr.axis_y);
         }
         else if (pr.type == ProjType::FeatureDiagram) {
             // Одна переменная: по ней ищутся пики. Оси фиксированы (значение пика /
@@ -5688,25 +5766,13 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3x", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3x", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3y", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3y", s, pr.axis_y);
             ImGui::SameLine(); ImGui::Text("Z:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3z", s.vars.empty() ? "-" : s.vars[pr.axis_z < (int)s.vars.size() ? pr.axis_z : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_z == k)) { pr.axis_z = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3z", s, pr.axis_z);
         }
         else if (pr.type == ProjType::ContinuationDiagram) {
             const int nv = (int)s.vars.size();
@@ -6166,8 +6232,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
 
                     // обновить имена осей
-                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
+                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
                     // No zero-axis on phase 2D — x=0 / y=0 have no meaning
                     // for a state-space trajectory.
                     pr.view2d->show_zero_x = false;
@@ -6811,9 +6877,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     pr.view3d->point_size_px     = pr.point_size;
 
-                    pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
-                    pr.view3d->z_name = s.vars.empty() ? "z" : s.vars[az < (int)s.vars.size() ? az : 0];
+                    pr.view3d->x_name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
+                    pr.view3d->y_name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
+                    pr.view3d->z_name = s.vars.empty() ? "z" : phase_axis_name(s, az);
 
                     // Локальный буфер — см. ветку Phase2D выше.
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
@@ -16950,9 +17016,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // в их комбо до перезагрузки системы. Пустой список = фильтра нет, как и
     // у enabled_builtins_from_record.
     {
+        // ДАУ: флагов scheme_* у неё нет, а схемы ОДУ на ней не строятся — список
+        // свой (иначе этот синк каждый кадр затирал бы его схемами ОДУ).
         std::vector<std::string> enabled_now;
-        for (const auto& b : kBuiltinSchemes)
-            if (model.*b.flag) enabled_now.push_back(b.name);
+        if (model.dae_native()) enabled_now = dae_scheme_names();
+        else
+            for (const auto& b : kBuiltinSchemes)
+                if (model.*b.flag) enabled_now.push_back(b.name);
         for (std::vector<std::string>* dst : {
                  &model.phase_session.enabled_builtin_schemes,
                  &model.bifurcation_session.enabled_builtin_schemes,
@@ -17570,9 +17640,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
         if (ImGui::BeginCombo("##topsyssel", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
-            // Группы по вкладкам Library: ODE, DAE, MAP. ДАУ пока только видны —
-            // в анализ их не пустить, пока нет решателей (вкладки упали бы на
-            // разборе "0 = g").
+            // Группы по вкладкам Library: ODE, DAE, MAP. ДАУ считает пока только
+            // Analysis (схемы DAE BDF1 / Trapezoidal); другие вкладки откажут при Run.
             const LibraryListCache& cache = library_list_cached(lib);
             int listed = 0;
             for (int group = 0; group < kLibTabCount; ++group) {
@@ -17586,12 +17655,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     if (model.system_hidden(nm) && model.name != nm) continue;
                     if (!header) { ImGui::SeparatorText(kLibTabName[group]); header = true; }
                     ++listed;
-                    ImGui::BeginDisabled(dae);
                     if (ImGui::Selectable(nm.c_str(), model.name == nm))
                         apply_system_switch(model, lib, nm);
-                    ImGui::EndDisabled();
-                    if (dae && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip("DAE solvers are not implemented yet");
+                    if (dae && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("DAE: DAE methods in Analysis on the GPU;\n"
+                                          "with 'Solve as ODE' (Library -> DAE) — every tab and ODE scheme");
                 }
             }
             if (listed == 0) ImGui::TextDisabled("(all systems hidden in Library)");

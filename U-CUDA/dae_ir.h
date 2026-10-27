@@ -44,15 +44,14 @@ struct DaeSystem {
     std::vector<std::string> unmatched_alg;   // z без связи в паросочетании
 
     size_t n_vars() const { return diff.size() + alg.size(); }
-    // System для кодогена: vars = x, затем z; rhs = f, затем g. t, если есть,
-    // — последний параметр (до этапа явного времени это единственный способ
-    // провести выражение с t через codegen).
+    // System для кодогена: vars = x, затем z; rhs = f, затем g. Явное время t
+    // кодоген узнаёт сам (system_uses_time) — в параметры оно не идёт.
     System as_codegen_system() const {
         System s;
         s.vars = diff;
         s.vars.insert(s.vars.end(), alg.begin(), alg.end());
         s.params = params;
-        if (uses_t) s.params.push_back("t");
+        s.dae_nx = (int)diff.size();
         s.rhs = f;
         s.rhs.insert(s.rhs.end(), g.begin(), g.end());
         s.latex = true;

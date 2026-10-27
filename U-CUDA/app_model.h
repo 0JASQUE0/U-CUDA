@@ -354,6 +354,9 @@ public:
     bool is_dae = false;
     std::string alg_text;
     std::string dae_index_text;    // "x=1, lambda=3", см. SystemRecord
+    bool dae_as_ode = false;       // ДАУ -> ОДУ подстановкой z (см. SystemRecord)
+    // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
+    bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
@@ -581,6 +584,8 @@ public:
         std::string message;                // ошибка или сводка (индексы, t)
         std::vector<std::string> vars;      // x, затем z — для полей НУ
         std::vector<std::string> params;
+        bool        reducible = false;      // сводится к ОДУ подстановкой z (dae_reduce_to_ode)
+        std::string reduce_msg;             // z(x) или почему не сводится
     };
     DaeEditorState dae_editor;
 

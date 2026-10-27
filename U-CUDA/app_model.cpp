@@ -6,10 +6,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include "sysparse.hpp"
+#include "dae_ir.h"       // build_system для ДАУ
 #include <stdexcept>
 
 // Строит System из текущего режима ввода и алфавита.
 System AppModel::build_system() const {
+    // ДАУ: X = [x; z], rhs = [f; g], dae_nx = число x (dae_ir.h). Схемы — только ДАУ.
+    // dae_as_ode: z подставлены в f — ОДУ по x для всех схем и вкладок (dae_reduce_to_ode).
+    if (is_dae) {
+        System s = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text).as_codegen_system();
+        if (!dae_as_ode) return s;
+        System ode;
+        std::string why;
+        if (!dae_reduce_to_ode(s, ode, nullptr, &why))
+            throw std::runtime_error("solve as ODE: " + why);
+        return ode;
+    }
     std::vector<std::string> alpha = parse_alphabet();
 
     // вспомогательные функции (опция)
@@ -117,6 +129,21 @@ bool AppModel::refresh_symbols() {
         return out;
     };
 
+    // ДАУ: переменные — x, затем z (как в X шага), параметры — как в params_text.
+    if (is_dae) {
+        try {
+            const System sys = build_system();
+            known_vars = sys.vars;
+            known_params = sys.params;
+            apply_sync();
+            return true;
+        }
+        catch (const std::exception& e) {
+            error_message = e.what();
+            return false;
+        }
+    }
+
     // Если заданы явные vars_text И params_text — используем их напрямую.
     // Это новый удобный формат: переменные и параметры разделены явно.
     if (!vars_text.empty() && !params_text.empty()) {
@@ -163,6 +190,7 @@ SystemRecord AppModel::to_record() const {
     r.is_dae = is_dae;
     r.alg_text = alg_text;
     r.dae_index_text = dae_index_text;
+    r.dae_as_ode = dae_as_ode;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -232,6 +260,7 @@ void AppModel::from_record(const SystemRecord& r) {
     is_dae = r.is_dae;
     alg_text = r.alg_text;
     dae_index_text = r.dae_index_text;
+    dae_as_ode = r.dae_as_ode;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -332,6 +361,7 @@ void AppModel::clear() {
     is_dae = false;
     alg_text.clear();
     dae_index_text.clear();
+    dae_as_ode = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast
@@ -366,6 +396,19 @@ bool AppModel::start_phase_analysis() {
     // передать уравнения в сессию и сгенерировать КРС для NVRTC
     try {
         phase_session.sys = build_system();
+        // ДАУ, сведённая к ОДУ: z(x) — наблюдаемые вне состояния (проекции Phase 2D / 3D).
+        phase_session.observables.clear();
+        phase_session.obs_exprs.clear();
+        if (is_dae && dae_as_ode) {
+            const DaeSystem d = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text);
+            System ode;
+            std::vector<std::string> zex;
+            std::string why;
+            if (dae_reduce_to_ode(d.as_codegen_system(), ode, &zex, &why)) {
+                phase_session.observables = d.alg;
+                phase_session.obs_exprs = zex;
+            }
+        }
         // метод по умолчанию — из текущего выбора схемы в модели, если задан
         phase_session.regenerate_krs();
     }

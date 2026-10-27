@@ -49,7 +49,10 @@ struct SystemRecord {
     // Индексы переменных ДАУ, "x=1, lambda=3" (как nind1/2/3 в RADAU5); не
     // названные — по умолчанию (см. parse_dae в dae_ir.h).
     std::string dae_index_text;
-    std::string mode;          // "Image" | "LaTeX" | "Plain"
+    // Решать как ОДУ (этап 3, уровень A): z выражается из связей и подставляется в f —
+    // система идёт во все вкладки со схемами ОДУ. Только если сведение удаётся.
+    bool        dae_as_ode = false;
+    std::string mode;         // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
     std::string alphabet_text;       // legacy: один список (vars + params вперемешку)

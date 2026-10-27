@@ -23,6 +23,11 @@ struct System {
     // cannot substitute a different step for the map.
     bool is_map = false;
 
+    // ДАУ (вкладка DAE): >= 0 — первые dae_nx переменных дифференциальные (x), остальные
+    // алгебраические (z), rhs = [f; g] со связями 0 = g. -1 — обычная ОДУ. Схемы ОДУ на
+    // такой System не строятся (codegen_scheme откажет), только codegen_dae_scheme.
+    int dae_nx = -1;
+
     // Ньютон неявных схем здесь не живёт: допуск, предел итераций и режим якобиана —
     // рантайм-слоты a[] каждой вкладки (NewtonSettings ниже).
     // "CD FP" / "CD fast FP": число простых итераций. Сам расчёт берёт его в
@@ -368,12 +373,46 @@ std::vector<std::string> codegen_rhs(const System& s);
 // автономной системы тело прежнее до байта.
 inline constexpr const char* kStepTimeArg = "ucuda_t";
 inline constexpr const char* kTimeUnsupportedMsg =
-    "explicit time t is supported only by Euler, Euler-Cromer, Explicit Midpoint, RK4, "
-    "DOPRI78, RK45 and DOP853 with a fixed step so far";
+    "explicit time t is not supported by this scheme: complex CD, CD fast, SEMP/SIMP/D, "
+    "Complex Implicit Euler and adaptive GBS/Extr do not shift stage times yet "
+    "(supported: explicit RK, implicit Euler/Midpoint, CD, CD {1-0}, CD FP, GBS, Extr/Comp over them; "
+    "adaptive RK45/DOP853/DOPRI78)";
 bool system_uses_time(const System& s);
 // Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
 bool scheme_supports_time(Scheme sch);
-// Тело шага неавтономное: ссылается на аргумент времени.
+// ДАУ: схемы этапа 4 плана DAE. Тело шага — как у схем ОДУ (calculateDiscreteModel над
+// X = [x; z], та же раскладка a[] с хвостом Ньютона), поэтому идёт в те же ядра.
+//   BDF1        — неявный Эйлер на ДАУ: x+ = x + h f(x+, z+), 0 = g(x+, z+).
+//   Trapezoidal — трапеции: x+ = x + h/2 (f(x, z) + f(x+, z+)), 0 = g(x+, z+).
+//   TRBDF2      — трапеции до t + gamma*h, затем BDF2 (gamma = 2 - sqrt 2): L-устойчив, порядок 2.
+// Ньютон по всему [x+; z+] с символьным якобианом (тот же, что у Implicit Euler).
+//   ExplicitEuler / ExplicitMidpoint / RK4 — явные схемы с решением связи на каждой стадии
+//   (Ньютон только по z, индекс 1); Midpoint — полуявный РК2 отчёта CD-ДАУ.
+//   ROS2 — Rosenbrock ROS2 (линейно-неявный, L-устойчив, порядок 2).
+//   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
+//   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
+enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4 };
+// Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
+// (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
+// шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
+// dg/dz вырожден (индекс >= 2: z из g не определяется, нужны скрытые связи) или Ньютон не сошёлся.
+// На CPU (вычислитель правых частей), вызывается один раз до траектории.
+bool dae_consistent_z(const System& s, const double* a, int na, double t0, double* X, std::string* why);
+// Этап 3, уровень A: ДАУ индекса 1, где каждую z можно выразить из связи явно (связь
+// линейна по ней; связи решаются по очереди, решённые z подставляются в следующие),
+// сводится к ОДУ по x: z = -rem/coef подставлено в f на уровне AST, так что якобиан,
+// разбор CD и все вкладки видят честную ОДУ. ode.vars = x, ode.rhs — f(x, z(x)), dae_nx = -1.
+// z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
+// входит нелинейно: тогда только методы ДАУ).
+bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Имена в комбо схем DAE-вкладки и сессиях; false — не схема ДАУ.
+bool dae_scheme_from_name(const std::string& name, DaeScheme* out);
+const std::vector<std::string>& dae_scheme_names();
+
+// Тело шага неавтономное: ссылается на аргумент времени. То же для тел
+// адаптивного шага (rhs / emb / dprep): модуль тогда собирается с
+// #define UCUDA_NONAUTONOMOUS, и функции ucuda_krs_* получают ucuda_t.
 inline bool step_body_uses_time(const std::string& body) {
     for (size_t p = body.find(kStepTimeArg); p != std::string::npos; p = body.find(kStepTimeArg, p + 1)) {
         const size_t e = p + 7;   // strlen("ucuda_t")

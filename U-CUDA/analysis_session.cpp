@@ -248,6 +248,11 @@ std::string default_h_from_record(const SystemRecord& r) {
 }
 
 std::string default_scheme_from_record(const SystemRecord& r, std::string current) {
+    // ДАУ: схема ОДУ из прошлой системы не подходит — по умолчанию BDF1.
+    if (r.is_dae && !r.dae_as_ode)
+        return dae_scheme_from_name(current, nullptr) ? current : std::string("DAE BDF1");
+    // Сведено к ОДУ: схема ДАУ от прошлого запуска не подходит.
+    if (r.is_dae && dae_scheme_from_name(current, nullptr)) return std::string("RK4");
     return r.is_map ? std::string("Map") : std::move(current);
 }
 
@@ -259,6 +264,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     std::vector<std::string> out;
     // A map has no scheme: its only step is the right-hand side itself.
     if (r.is_map) { out.emplace_back("Map"); return out; }
+    if (r.is_dae && !r.dae_as_ode) return dae_scheme_names();   // у ДАУ — только свои схемы
     // Порядок — как в комбо схем: по порядку точности.
     if (r.scheme_euler)    out.emplace_back("Euler");
     if (r.scheme_cromer)   out.emplace_back("Euler-Cromer");
@@ -353,6 +359,7 @@ struct PhaseRunInputs {
     std::shared_ptr<std::atomic<bool>> cancel;   // отмена (адаптивный шаг), nullptr — нет
     bool        use_gpu = true;
     System      sys;
+    std::vector<std::string> obs_exprs;   // наблюдаемые z(x) (PhaseAnalysisSession::obs_exprs)
     std::string krs_code;
     std::string krs_error;   // причина пустой krs_code (отказ кодгена), пусто — не известна
     // krs_code для custom схемы содержит тело дословно (см. regenerate_krs).
@@ -760,6 +767,22 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
     }
 
+    // ДАУ: согласованные НУ — z из g(x0, z, 0) = 0 при заданных x0 (индекс 1). Поля НУ не
+    // меняются: заданное z — лишь старт Ньютона. Продолжение (ic_override) несёт состояние,
+    // уже согласованное шагом, — его не трогаем.
+    if (in.sys.dae_nx >= 0 && in.sys.dae_nx < dim && !use_override) {
+        int solved = 0;
+        std::string why;
+        for (int k = 0; k < N; ++k) {
+            std::string w;
+            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) ++solved;
+            else if (why.empty()) why = w;
+        }
+        result.dae_status = solved == N
+            ? std::string("initial z made consistent: g(x0, z) = 0")
+            : "initial z: " + why;
+    }
+
     std::vector<std::vector<std::vector<double>>> raw;
     bool calc_ok = true;
     std::string calc_err;
@@ -767,10 +790,10 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Адаптивный шаг — своя ветка расчёта; признаки, RQA и прореживание ниже общие.
     // У отображения шага нет, и переключатель для него игнорируется.
     std::vector<std::vector<double>> ad_times;
-    // Явное время t: пока только GPU с постоянным шагом (CPU-пути — в конце этапа 2).
-    if (system_uses_time(in.sys) && (!in.use_gpu || in.adaptive.enabled)) {
-        result.error = "explicit time t: only the GPU fixed-step path supports it so far "
-                       "(turn on GPU and turn off the adaptive step)";
+    // Явное время t: пока только GPU (CPU-пути — в конце этапа 2). Адаптивный шаг —
+    // пары RK45 / DOP853 / DOPRI78, прочие отклонит кодоген.
+    if (system_uses_time(in.sys) && !in.use_gpu) {
+        result.error = "explicit time t: only the GPU path supports it so far (turn on GPU)";
         return result;
     }
     if (in.adaptive.enabled && !in.sys.is_map) {
@@ -791,7 +814,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             return result;
         }
     }
-    else if (in.krs_is_custom) {
+    // ДАУ на CPU: тело DAE-метода — обычный шаг над [x; z], его собирает в нативную функцию
+    // krs_cpu, как пользовательскую КРС (вычислитель правых частей ДАУ не считает).
+    else if (in.krs_is_custom || in.sys.dae_nx >= 0) {
         // Custom КРС: тело — сырой C с объявлениями, циклами и локальными
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага
@@ -855,6 +880,37 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
             if (!ok) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[k].label + "' diverged (nan/inf)"; }
+        }
+    }
+
+    // Наблюдаемые вне состояния (ДАУ, сведённая к ОДУ): z(x) в каждой точке, дописанные
+    // после координат состояния. Тем же вычислителем правых частей: выражения — как rhs над
+    // x и a[] (списки выровнены нулями/фиктивными переменными до одной длины).
+    if (!in.obs_exprs.empty()) {
+        System os;
+        os.vars = in.sys.vars;
+        os.params = in.sys.params;
+        os.latex = in.sys.latex;
+        os.rhs = in.obs_exprs;
+        const size_t nz = in.obs_exprs.size(), L = std::max(os.vars.size(), nz);
+        for (size_t j = os.vars.size(); j < L; ++j) os.vars.push_back("ucuda_obs_pad" + std::to_string(j));
+        while (os.rhs.size() < L) os.rhs.push_back("0");
+        if (system_uses_time(os)) {
+            result.dae_status = "z observables use explicit time t: not computed yet";
+        } else {
+            try {
+                SystemEvaluator ev(os);
+                std::vector<double> xin(L, 0.0), zout(L, 0.0);
+                for (auto& traj : raw)
+                    for (auto& pt : traj) {
+                        for (int i = 0; i < dim && i < (int)pt.size(); ++i) xin[(size_t)i] = pt[(size_t)i];
+                        ev.eval(xin.data(), a.data(), zout.data());
+                        pt.resize((size_t)dim);
+                        for (size_t j = 0; j < nz; ++j) pt.push_back(zout[j]);
+                    }
+            } catch (const std::exception& e) {
+                result.dae_status = std::string("z observables: ") + e.what();
+            }
         }
     }
 
@@ -1060,6 +1116,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.decimation   = s.decimation;
     in.adaptive     = s.adaptive;
     in.use_gpu      = s.use_gpu;
+    in.obs_exprs    = s.obs_exprs;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
     in.krs_error    = s.krs_error;
@@ -1359,6 +1416,15 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     if (sys.is_map) {
         if (sys.rhs.empty()) return {};
         return krs_try(err, [&] { return gen(sys, Scheme::Map); });
+    }
+    // ДАУ: только схемы ДАУ. Схема ОДУ из старой сессии — честный отказ, а не подмена.
+    if (sys.dae_nx >= 0) {
+        if (sys.rhs.empty()) return {};
+        DaeScheme ds;
+        if (!dae_scheme_from_name(scheme, &ds))
+            return refuse("'" + scheme + "' is not a DAE method: pick one of the DAE methods "
+                          "(or tick 'Solve as ODE' in Library -> DAE)");
+        return krs_try(err, [&] { return codegen_dae_scheme(sys, ds); });
     }
     for (const auto& cs : custom_schemes) {
         if (cs.name == scheme)

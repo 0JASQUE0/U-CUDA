@@ -1,5 +1,6 @@
 ﻿#include "krs_cpu.h"
 #include "adaptive_settings.h"   // adaptive_ctrl_source
+#include "codegen.hpp"           // step_body_uses_time: явное время t на CPU пока нет
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -916,6 +917,11 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
                                 const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
     endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr; phase_ = nullptr;
+    // Явное время t на CPU ещё не проведено (этап 2): cl.exe ответил бы "ucuda_t: undeclared".
+    if (step_body_uses_time(rhs)) {
+        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
+        return false;
+    }
     std::string why;
     if (vcvars_path(why).empty()) {
         diags.push_back({ 0, "CPU compiler unavailable: " + why });
@@ -1064,6 +1070,10 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
                          KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags) {
     release();
+    if (step_body_uses_time(body)) {
+        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
+        return false;
+    }
 
     // Индексы проверяем ДО компиляции: в нативном коде выход за границу X[]
     // — это порча стека вызывающего, а не понятная ошибка.
