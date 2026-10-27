@@ -135,8 +135,7 @@ public:
 
     // Принудительный X-диапазон для autofit. Если x_fit_use_explicit=true,
     // do_autofit/fit_x возьмут (x_fit_min, x_fit_max) вместо bbox данных.
-    // Нужно для BD/LLE/LS: X-ось должна охватывать ВЕСЬ sweep-диапазон,
-    // даже если часть параметров диверговала и точки отсутствуют.
+    // Ставит его Order; 1D-свипы — нет: их X подгоняется по данным.
     bool   x_fit_use_explicit = false;
     double x_fit_min = 0.0;
     double x_fit_max = 1.0;

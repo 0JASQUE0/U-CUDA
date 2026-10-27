@@ -11412,7 +11412,11 @@ ParametricEngine::ParametricEngine()  : impl_(std::make_unique<Impl>()) {}
 ParametricEngine::~ParametricEngine() = default;
 
 Bifurcation1DResult ParametricEngine::run_bifurcation_1d(const Bifurcation1DRequest& req) {
-    return impl_->run_bif1d(req);
+    Bifurcation1DResult res = impl_->run_bif1d(req);
+    // Диапазон прогона для X точек в GUI — у всех путей, не только у continuation.
+    res.param_lo = req.param_lo;
+    res.param_hi = req.param_hi;
+    return res;
 }
 
 Dft1DResult ParametricEngine::run_dft_1d(const Dft1DRequest& req) {
