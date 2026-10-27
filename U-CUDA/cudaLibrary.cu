@@ -3410,6 +3410,15 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 // удаления max_amount_of_peaks больше НЕ бьёт по local memory и occupancy —
 // он ограничивает только число пиков в peakFinder и размеры device-буферов.
 
+// ДАУ (X = [x; z]): касательные векторы LLE/LS — только по первым UCUDA_LYAP_NX компонентам.
+// Норма и Грам-Шмидт — по x, а сдвиг клона умножается целиком, так что z клона остаётся
+// согласованной со связью в первом порядке. Без макроса (ОДУ) — все переменные, текст прежний.
+#ifdef UCUDA_LYAP_NX
+#define UCUDA_LYAP_K(n) (UCUDA_LYAP_NX)
+#else
+#define UCUDA_LYAP_K(n) (n)
+#endif
+
 // Ядро для LLE
 // LLEKernelCUDA (Wolf/Benettin) под NVRTC ВКЛЮЧЁН — curand_kernel.h теперь
 // доступен из cudaLibrary.cuh. Всё что после этого kernel'а (LLE_IC, LS,
@@ -3566,7 +3575,7 @@ __global__ void LLEKernelCUDA(
 	}
 
 	numb zPower = 0;
-	for (int i = 0; i < amountOfInitialConditions; ++i)
+	for (int i = 0; i < UCUDA_LYAP_K(amountOfInitialConditions); ++i)
 	{
 		z[i] = curand_uniform(&state) - (numb)0.5;
 		zPower += z[i] * z[i];
@@ -3619,7 +3628,7 @@ __global__ void LLEKernelCUDA(
 		numb tempData = 0;
 		numb tempData2 = 0;
 
-		for (int l = 0; l < amountOfInitialConditions; ++l) {
+		for (int l = 0; l < UCUDA_LYAP_K(amountOfInitialConditions); ++l) {
 			tempData2 = invEps * (x[l] - y[l]);
 			tempData += tempData2 * tempData2;
 
@@ -3832,6 +3841,47 @@ __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVector
 			denominators[i] = denominator;
 	}
 }
+
+#ifdef UCUDA_LYAP_NX
+// gramSchmidtProcess для ДАУ: K = UCUDA_LYAP_NX векторов длины n (шаг n), скалярные
+// произведения и нормы — по первым K компонентам (x), вычитание и деление — по всем n,
+// чтобы z-часть каждого вектора шла той же линейной комбинацией, что и x-часть.
+__device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* denominators = nullptr)
+{
+	constexpr int K = UCUDA_LYAP_NX;
+	for (int i = 0; i < K; ++i)
+	{
+		for (int j = 0; j < n; ++j)
+			b[i * n + j] = a[i * n + j];
+
+		for (int j = 0; j < i; ++j)
+		{
+			numb numerator = 0, denominator = 0;
+			for (int k = 0; k < K; ++k)
+			{
+				numerator += a[i * n + k] * b[j * n + k];
+				denominator += b[j * n + k] * b[j * n + k];
+			}
+			numb fraction = denominator == 0 ? 0 : numerator / denominator;
+			for (int k = 0; k < n; ++k)
+				b[i * n + k] -= fraction * b[j * n + k];
+		}
+	}
+
+	for (int i = 0; i < K; ++i)
+	{
+		numb denominator = 0;
+		for (int j = 0; j < K; ++j)
+			denominator += b[i * n + j] * b[i * n + j];
+		denominator = sqrt(denominator);
+		for (int j = 0; j < n; ++j)
+			b[i * n + j] = denominator == 0 ? 0 : b[i * n + j] / denominator;
+
+		if (denominators != nullptr)
+			denominators[i] = denominator;
+	}
+}
+#endif
 
 // error_estim 7 — показатель сжатия ошибки за один цикл вперёд-назад,
 // посчитанный схемой Беннеттина поверх ТОГО ЖЕ forward-backward оператора,
@@ -4116,14 +4166,18 @@ __global__ void LSKernelCUDA(
 
 	curand_init(ppSeed, (unsigned long long)idx, 0, &state);
 
-	for (int j = 0; j < amountOfInitialConditions; ++j)
+	for (int j = 0; j < UCUDA_LYAP_K(amountOfInitialConditions); ++j)
 	{
 		numb zPower = 0;
-		for (int i = 0; i < amountOfInitialConditions; ++i)
+		for (int i = 0; i < UCUDA_LYAP_K(amountOfInitialConditions); ++i)
 		{
 			z[j * amountOfInitialConditions + i] = curand_uniform(&state) - (numb)0.5;
 			zPower += z[j * amountOfInitialConditions + i] * z[j * amountOfInitialConditions + i];
 		}
+#ifdef UCUDA_LYAP_NX
+		for (int i = UCUDA_LYAP_NX; i < amountOfInitialConditions; ++i)
+			z[j * amountOfInitialConditions + i] = 0;
+#endif
 
 		zPower = sqrt(zPower);
 
@@ -4150,9 +4204,13 @@ __global__ void LSKernelCUDA(
 
 	//Calculating
 
+#ifdef UCUDA_LYAP_NX
+	ucudaGramSchmidtDae(z, y, amountOfInitialConditions);
+#else
 	gramSchmidtProcess(z, y, amountOfInitialConditions);
+#endif
 
-	for (int j = 0; j < amountOfInitialConditions; ++j)
+	for (int j = 0; j < UCUDA_LYAP_K(amountOfInitialConditions); ++j)
 	{
 		for (int i = 0; i < amountOfInitialConditions; ++i) {
 			y[j * amountOfInitialConditions + i] = y[j * amountOfInitialConditions + i] * eps + x[i];
@@ -4173,7 +4231,7 @@ __global__ void LSKernelCUDA(
 			ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 			return;
 		}
-		for (int j = 0; j < amountOfInitialConditions; ++j)
+		for (int j = 0; j < UCUDA_LYAP_K(amountOfInitialConditions); ++j)
 		{
 			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
 				1, nullptr, nullptr, 0, nullptr);
@@ -4189,17 +4247,21 @@ __global__ void LSKernelCUDA(
 		//__syncthreads();
 
 		//NORMALIZTION??????????
-		for (int k = 0; k < amountOfInitialConditions; ++k)
+		for (int k = 0; k < UCUDA_LYAP_K(amountOfInitialConditions); ++k)
 			for (int l = 0; l < amountOfInitialConditions; ++l)
 				y[k * amountOfInitialConditions + l] = y[k * amountOfInitialConditions + l] - x[l];
 
+#ifdef UCUDA_LYAP_NX
+		ucudaGramSchmidtDae(y, z, amountOfInitialConditions, denominators);
+#else
 		// Развёрнутый вариант — до 8 переменных: дальше базис N² не помещается в регистры.
 		if (AMOUNTOFX <= 8 && amountOfInitialConditions == AMOUNTOFX) ucudaGramSchmidtN(y, z, denominators);
 		else gramSchmidtProcess(y, z, amountOfInitialConditions, denominators);
+#endif
 
 		//denominator[amountOfInitialConditions];
 
-		for (int k = 0; k < amountOfInitialConditions; ++k)
+		for (int k = 0; k < UCUDA_LYAP_K(amountOfInitialConditions); ++k)
 		{
 			if (i >= warmBlocks) result[k] += log(denominators[k] / eps);
 
@@ -4210,8 +4272,12 @@ __global__ void LSKernelCUDA(
 	}
 
 	const numb tIntegrated = (numb)sizeOfBlock * (numb)amountOfNTPoints * h_local;
-	for (int i = 0; i < amountOfInitialConditions; ++i)
+	for (int i = 0; i < UCUDA_LYAP_K(amountOfInitialConditions); ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tIntegrated;
+#ifdef UCUDA_LYAP_NX
+	for (int i = UCUDA_LYAP_NX; i < amountOfInitialConditions; ++i)   // хост обрезает спектр до x
+		resultArray[idx * amountOfInitialConditions + i] = nan("");
+#endif
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
 

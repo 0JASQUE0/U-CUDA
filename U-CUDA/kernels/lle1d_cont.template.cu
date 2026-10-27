@@ -105,7 +105,10 @@ extern "C" __global__ void lle1dContinuationKernel(
 
     // Fresh random unit direction for the probe.
     numb zPower = 0;
-    for (int i = 0; i < amountOfX; ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zPower += y[i] * y[i]; }
+    for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zPower += y[i] * y[i]; }
+#ifdef UCUDA_LYAP_NX
+    for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[i] = 0;   // ДАУ: щуп только по x
+#endif
     zPower = sqrt(zPower);
     for (int i = 0; i < amountOfX; ++i) y[i] = (zPower == 0) ? (numb)0 : y[i] / zPower;
 
@@ -167,7 +170,7 @@ extern "C" __global__ void lle1dContinuationKernel(
                                                1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
 
             numb d = 0;
-            for (int l = 0; l < amountOfX; ++l) {
+            for (int l = 0; l < UCUDA_LYAP_K(amountOfX); ++l) {
                 numb q = (x[l] - y[l]) / eps;
                 d += q * q;
             }
@@ -194,7 +197,10 @@ extern "C" __global__ void lle1dContinuationKernel(
             rngSeq = (unsigned long long)j + 1ULL;
             curand_init(1234567891ULL, rngSeq, 0ULL, &rng);
             numb zp = 0;
-            for (int i = 0; i < amountOfX; ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zp += y[i] * y[i]; }
+            for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zp += y[i] * y[i]; }
+#ifdef UCUDA_LYAP_NX
+            for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[i] = 0;
+#endif
             zp = sqrt(zp);
             for (int i = 0; i < amountOfX; ++i) y[i] = (zp == 0) ? (numb)0 : y[i] / zp;
         }
