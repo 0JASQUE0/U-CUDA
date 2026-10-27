@@ -3783,9 +3783,7 @@ std::vector<int> gbs_substeps(int K) {
 static const char* kDaeNeedsDaeScheme =
     "this is a DAE system: pick a DAE method (or tick 'Solve as ODE' in Library -> DAE)";
 
-std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
-    if (s.dae_nx < 0 || s.dae_nx > (int)s.vars.size())
-        throw std::runtime_error("DAE method on a system without a DAE split");
+static std::string dae_scheme_body(const System& s, DaeScheme sch) {
     switch (sch) {
     case DaeScheme::BDF1:        return scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, false);
     case DaeScheme::Trapezoidal: return scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, true);
@@ -3808,6 +3806,12 @@ std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
     }
     }
     throw std::runtime_error("unknown DAE scheme");
+}
+
+std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
+    if (s.dae_nx < 0 || s.dae_nx > (int)s.vars.size())
+        throw std::runtime_error("DAE method on a system without a DAE split");
+    return dae_scheme_body(s, sch) + dae_nx_tag(s.dae_nx);
 }
 
 namespace {

@@ -405,7 +405,19 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
 // z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
 // входит нелинейно: тогда только методы ДАУ).
 bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+// Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
 std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x
+// (UCUDA_LYAP_NX), z клона решает сам метод. Тело входит в ключ кэша модулей.
+constexpr const char* kDaeNxTag = "// @ucuda-dae-nx ";
+inline std::string dae_nx_tag(int nx) { return std::string("\n") + kDaeNxTag + std::to_string(nx) + "\n"; }
+// Число дифференциальных переменных из метки; -1 — тело не метода ДАУ.
+inline int dae_nx_from_body(const std::string& body) {
+    const size_t p = body.rfind(kDaeNxTag);
+    if (p == std::string::npos) return -1;
+    try { return std::stoi(body.substr(p + std::char_traits<char>::length(kDaeNxTag))); }
+    catch (...) { return -1; }
+}
 // Имена в комбо схем DAE-вкладки и сессиях; false — не схема ДАУ.
 bool dae_scheme_from_name(const std::string& name, DaeScheme* out);
 const std::vector<std::string>& dae_scheme_names();

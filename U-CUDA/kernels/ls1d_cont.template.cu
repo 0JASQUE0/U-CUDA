@@ -95,13 +95,16 @@ extern "C" __global__ void ls1dContinuationKernel(
     curandState_t rng;
     curand_init(1234567891ULL, 0ULL, 0ULL, &rng);
 
-    // Fresh random basis of N unit vectors.
-    for (int k = 0; k < amountOfX; ++k) {
+    // Fresh random basis of N unit vectors (DAE: K = UCUDA_LYAP_NX vectors in x).
+    for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
         numb zp = 0;
-        for (int i = 0; i < amountOfX; ++i) {
+        for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
             y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
             zp += y[k * amountOfX + i] * y[k * amountOfX + i];
         }
+#ifdef UCUDA_LYAP_NX
+        for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
         zp = sqrt(zp);
         for (int i = 0; i < amountOfX; ++i)
             y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;
@@ -149,8 +152,12 @@ extern "C" __global__ void ls1dContinuationKernel(
             } else {
                 // Orthonormalise the random basis, then place the probes at
                 // distance eps around the current trajectory point.
+#ifdef UCUDA_LYAP_NX
+                ucudaGramSchmidtDae(y, z, amountOfX);
+#else
                 gramSchmidtProcess(y, z, amountOfX);
-                for (int k = 0; k < amountOfX; ++k)
+#endif
+                for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
                     for (int i = 0; i < amountOfX; ++i)
                         y[k * amountOfX + i] = z[k * amountOfX + i] * eps + x[i];
                 probesAttached = 1;
@@ -166,18 +173,22 @@ extern "C" __global__ void ls1dContinuationKernel(
         for (int b = 0; alive && b < totalBlocks; ++b) {
             if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
                                                1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
-            for (int k = 0; k < amountOfX; ++k)
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
                 if (loopCalculateDiscreteModel_int(y + k * amountOfX, a, hLocal, blockIters, amountOfX,
                                                    1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
             if (!alive) break;
 
-            for (int k = 0; k < amountOfX; ++k)
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
                 for (int l = 0; l < amountOfX; ++l)
                     y[k * amountOfX + l] -= x[l];
 
+#ifdef UCUDA_LYAP_NX
+            ucudaGramSchmidtDae(y, z, amountOfX, denominators);
+#else
             gramSchmidtProcess(y, z, amountOfX, denominators);
+#endif
 
-            for (int k = 0; k < amountOfX; ++k) {
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
                 if (b >= settleBlocks) sum[k] += log(denominators[k] / eps);
                 for (int i = 0; i < amountOfX; ++i)
                     y[k * amountOfX + i] = x[i] + z[k * amountOfX + i] * eps;
@@ -186,18 +197,24 @@ extern "C" __global__ void ls1dContinuationKernel(
 
         if (alive) {
             const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * hLocal;
-            for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = sum[k] / tIntegrated;
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) result[j * amountOfX + k] = sum[k] / tIntegrated;
+#ifdef UCUDA_LYAP_NX
+            for (int k = UCUDA_LYAP_NX; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");   // хост обрезает
+#endif
         } else {
             for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
             probesAttached = 0;
             for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
             curand_init(1234567891ULL, (unsigned long long)j + 1ULL, 0ULL, &rng);
-            for (int k = 0; k < amountOfX; ++k) {
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
                 numb zp = 0;
-                for (int i = 0; i < amountOfX; ++i) {
+                for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
                     y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
                     zp += y[k * amountOfX + i] * y[k * amountOfX + i];
                 }
+#ifdef UCUDA_LYAP_NX
+                for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
                 zp = sqrt(zp);
                 for (int i = 0; i < amountOfX; ++i)
                     y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;

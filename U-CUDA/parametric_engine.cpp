@@ -819,6 +819,19 @@ std::string hash_key(const std::string& krs_body, int amountOfX) {
            ":rdc" + (get_nvrtc_rdc() ? "1" : "0");
 }
 
+// Метод ДАУ (метка dae_nx_from_body): клоны LLE/LS — только по x, см. UCUDA_LYAP_K в
+// cudaLibrary.cu. У ОДУ пусто — исходник модуля прежний; тело уже в ключе кэша.
+static std::string lyap_nx_prefix(const std::string& krs_body) {
+    const int nx = dae_nx_from_body(krs_body);
+    return nx > 0 ? "#define UCUDA_LYAP_NX " + std::to_string(nx) + "\n" : std::string();
+}
+
+// Число касательных векторов LLE/LS: x у метода ДАУ, иначе все N.
+static int lyap_dim(const std::string& krs_body, int N) {
+    const int nx = dae_nx_from_body(krs_body);
+    return (nx > 0 && nx < N) ? nx : N;
+}
+
 // Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот оборачивает свои
 // дефолты в #ifndef). Один инжект покрывает все 14 шаблонов — они тянут configCUDA.h транзитивно
 // через cudaLibrary.cuh. Приведение к (numb) внутри макроса безопасно: разворачивается он только
@@ -968,6 +981,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> y((size_t)N, (numb)0);
+    const int K = lyap_dim(req.krs_body, N);   // ДАУ: щуп и норма только по x, как в ядре
 
     // Случайное единичное направление щупа. subsequence = индекс точки: в
     // kernel'е это idx потока, поэтому классический CPU-свип получает те же
@@ -977,7 +991,8 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     auto seed_probe_direction = [&](unsigned long long subsequence) {
         cpu_curand_init(1234567891ULL, subsequence, 0ULL, &rng);
         double zPower = 0.0;
-        for (int i = 0; i < N; ++i) { y[i] = cpu_curand_uniform(&rng) - 0.5; zPower += y[i] * y[i]; }
+        for (int i = 0; i < K; ++i) { y[i] = cpu_curand_uniform(&rng) - 0.5; zPower += y[i] * y[i]; }
+        for (int i = K; i < N; ++i) y[i] = 0;
         zPower = std::sqrt(zPower);
         for (int i = 0; i < N; ++i) y[i] = (zPower == 0.0) ? 0.0 : y[i] / zPower;
     };
@@ -997,7 +1012,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
                            1, 0, req.max_value, nullptr) == 0) return false;
 
         double d = 0.0;
-        for (int l = 0; l < N; ++l) {
+        for (int l = 0; l < K; ++l) {
             const double t = (x[l] - y[l]) / req.eps;
             d += t * t;
         }
@@ -1232,6 +1247,31 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullpt
     }
 }
 
+// Двойник ucudaGramSchmidtDae (cudaLibrary.cu): k векторов длины n, произведения и нормы по
+// первым k компонентам (x), вычитание и деление — по всем n.
+void cpu_gram_schmidt_dae(const numb* a, numb* b, int k, int n, numb* denominators = nullptr) {
+    for (int i = 0; i < k; ++i) {
+        for (int j = 0; j < n; ++j) b[i * n + j] = a[i * n + j];
+        for (int j = 0; j < i; ++j) {
+            numb numerator = (numb)0, denominator = (numb)0;
+            for (int m = 0; m < k; ++m) {
+                numerator += a[i * n + m] * b[j * n + m];
+                denominator += b[j * n + m] * b[j * n + m];
+            }
+            const numb fraction = (denominator == (numb)0) ? (numb)0 : numerator / denominator;
+            for (int m = 0; m < n; ++m) b[i * n + m] -= fraction * b[j * n + m];
+        }
+    }
+    for (int i = 0; i < k; ++i) {
+        numb denominator = (numb)0;
+        for (int j = 0; j < k; ++j) denominator += b[i * n + j] * b[i * n + j];
+        denominator = std::sqrt(denominator);
+        for (int j = 0; j < n; ++j)
+            b[i * n + j] = (denominator == (numb)0) ? (numb)0 : b[i * n + j] / denominator;
+        if (denominators != nullptr) denominators[i] = denominator;
+    }
+}
+
 // run_ls1d_cpu — спектр Ляпунова LS(param) на CPU, оба режима (см. run_lle1d_cpu).
 // Внутри точки — построчный порт LSKernelCUDA: Бенеттин с N векторами возмущения и
 // ортогонализацией Грама-Шмидта каждые NT единиц времени,
@@ -1294,18 +1334,25 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     std::vector<numb> z((size_t)N * N, (numb)0);   // рабочий буфер Грама-Шмидта
     std::vector<numb> denominators((size_t)N, (numb)0);
     std::vector<numb> sum((size_t)N, (numb)0);
+    // ДАУ: K = число x щупов, произведения по x (как UCUDA_LYAP_NX в ядре); хвост спектра — NaN.
+    const int K = lyap_dim(req.krs_body, N);
+    auto gram_schmidt = [&](numb* den) {
+        if (K < N) cpu_gram_schmidt_dae(y.data(), z.data(), K, N, den);
+        else       cpu_gram_schmidt(y.data(), z.data(), N, den);
+    };
 
     CpuRandState rng;
     // Случайный базис из N векторов — та же процедура и тот же RNG, что в
     // kernel'е (subsequence = idx потока).
     auto seed_probe_basis = [&](unsigned long long subsequence) {
         cpu_curand_init(1234567891ULL, subsequence, 0ULL, &rng);
-        for (int j = 0; j < N; ++j) {
+        for (int j = 0; j < K; ++j) {
             double zPower = 0.0;
-            for (int i = 0; i < N; ++i) {
+            for (int i = 0; i < K; ++i) {
                 y[(size_t)j * N + i] = cpu_curand_uniform(&rng) - 0.5;
                 zPower += y[(size_t)j * N + i] * y[(size_t)j * N + i];
             }
+            for (int i = K; i < N; ++i) y[(size_t)j * N + i] = 0;
             zPower = std::sqrt(zPower);
             for (int i = 0; i < N; ++i)
                 y[(size_t)j * N + i] = (zPower == 0.0) ? 0.0 : y[(size_t)j * N + i] / zPower;
@@ -1324,17 +1371,17 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     auto advance_block = [&](numb* out_logs) -> bool {
         if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        for (int j = 0; j < N; ++j)
+        for (int j = 0; j < K; ++j)
             if (cpu_loop_model(step.fn(), y.data() + (size_t)j * N, a.data(), h_local,
                                (size_t)(ntSteps - 1), N, 1, 0, req.max_value, nullptr) == 0) return false;
 
-        for (int k = 0; k < N; ++k)
+        for (int k = 0; k < K; ++k)
             for (int l = 0; l < N; ++l)
                 y[(size_t)k * N + l] -= x[l];
 
-        cpu_gram_schmidt(y.data(), z.data(), N, denominators.data());
+        gram_schmidt(denominators.data());
 
-        for (int k = 0; k < N; ++k) {
+        for (int k = 0; k < K; ++k) {
             if (out_logs) out_logs[k] = std::log(denominators[k] / req.eps);
             for (int j = 0; j < N; ++j)
                 y[(size_t)k * N + j] = x[j] + z[(size_t)k * N + j] * req.eps;
@@ -1387,8 +1434,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             } else {
                 // z = ортонормированный базис из y, затем щупы ставятся на eps
                 // вокруг текущей точки траектории (порядок как в kernel'е).
-                cpu_gram_schmidt(y.data(), z.data(), N);
-                for (int k = 0; k < N; ++k)
+                gram_schmidt(nullptr);
+                for (int k = 0; k < K; ++k)
                     for (int i = 0; i < N; ++i)
                         y[(size_t)k * N + i] = z[(size_t)k * N + i] * req.eps + x[i];
                 probes_attached = true;
@@ -1402,12 +1449,12 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         std::fill(sum.begin(), sum.end(), 0.0);
         for (int b = 0; alive && b < nBlocks; ++b) {
             if (!advance_block(logs.data())) { alive = false; break; }
-            for (int k = 0; k < N; ++k) sum[k] += logs[k];
+            for (int k = 0; k < K; ++k) sum[k] += logs[k];
         }
 
         if (alive) {
             const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * (numb)h_local;
-            for (int k = 0; k < N; ++k) res.spectrum[j][k] = (double)(sum[k] / tIntegrated);
+            for (int k = 0; k < K; ++k) res.spectrum[j][k] = (double)(sum[k] / tIntegrated);
             res.flags[j] = REGIME_OSCILLATION;
         } else {
             // Как и LLE, LS не различает fixed point — только расходимость.
@@ -4089,7 +4136,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_lle, key, cached_lle, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_lle), "lle1d.cu",
+            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_lle), "lle1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -4470,7 +4517,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_lle_2d, key, cached_lle_2d, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_lle_2d), "lle2d.cu",
+            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_lle_2d), "lle2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -4965,7 +5012,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_ls, key, cached_ls, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_ls), "ls1d.cu",
+            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_ls), "ls1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -5330,7 +5377,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_ls_2d, key, cached_ls_2d, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_ls_2d), "ls2d.cu",
+            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_ls_2d), "ls2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -5838,7 +5885,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool, key, slot, true, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
-            if (!build_module(snapshot_sources(tmpl), src_name,
+            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + tmpl), src_name,
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               {},
@@ -11431,8 +11478,25 @@ LLE1DResult ParametricEngine::run_lle_1d(const LLE1DRequest& req) {
     return impl_->run_lle_1d(req);
 }
 
+// ДАУ: ядра и CPU считают K = lyap_dim показателей (по x), хвост до N — NaN; наружу только K.
+static void trim_ls_spectrum(LS1DResult& r, int K) {
+    if (K >= r.n_exponents) return;
+    r.n_exponents = K;
+    for (auto& v : r.spectrum) if ((int)v.size() > K) v.resize((size_t)K);
+}
+static void trim_ls_spectrum(LS2DResult& r, int K) {
+    if (K >= r.n_exponents) return;
+    const size_t plane = (size_t)r.n_pts * (size_t)r.n_pts;
+    if (r.values.size() > (size_t)K * plane) r.values.resize((size_t)K * plane);
+    if (r.min_val.size() > (size_t)K) r.min_val.resize((size_t)K);
+    if (r.max_val.size() > (size_t)K) r.max_val.resize((size_t)K);
+    r.n_exponents = K;
+}
+
 LS1DResult ParametricEngine::run_ls_1d(const LS1DRequest& req) {
-    return impl_->run_ls_1d(req);
+    LS1DResult res = impl_->run_ls_1d(req);
+    trim_ls_spectrum(res, lyap_dim(req.krs_body, req.amountOfX));
+    return res;
 }
 
 LLE2DResult ParametricEngine::run_lle_2d(const LLE2DRequest& req) {
@@ -11440,7 +11504,9 @@ LLE2DResult ParametricEngine::run_lle_2d(const LLE2DRequest& req) {
 }
 
 LS2DResult ParametricEngine::run_ls_2d(const LS2DRequest& req) {
-    return impl_->run_ls_2d(req);
+    LS2DResult res = impl_->run_ls_2d(req);
+    trim_ls_spectrum(res, lyap_dim(req.krs_body, req.amountOfX));
+    return res;
 }
 
 BasinsResult ParametricEngine::run_basins(const BasinsRequest& req) {
