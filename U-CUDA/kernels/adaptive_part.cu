@@ -325,7 +325,7 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 			if (++cnt == CHECK_INTERVAL) {
 				cnt = 0;
 				if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-				if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
+				if (UCUDA_AD_CANCELLED(cancelFlag)) return REGIME_CANCELLED;
 			}
 		}
 		if (S.diverged) return REGIME_UNBOUND;
@@ -377,7 +377,7 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 		if (++nst == CHECK_INTERVAL) {
 			nst = 0;
 			if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
+			if (UCUDA_AD_CANCELLED(cancelFlag)) return REGIME_CANCELLED;
 		}
 	}
 	if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;   // хвост короче CHECK_INTERVAL

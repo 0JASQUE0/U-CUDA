@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -22,16 +23,13 @@ struct System {
     // cannot substitute a different step for the map.
     bool is_map = false;
 
-    // Newton knobs for the implicit schemes. They live here (and not in every
-    // per-analysis config) because AppModel::build_system() is the single System
-    // factory and its result is copied into every session, so codegen sees them
-    // without touching analysis_session.h / session_io.cpp.
-    // newton_full: false = modified Newton (Jacobian and LU reused across
-    // iterations, refreshed when the correction stops shrinking), true = full
-    // Newton (rebuilt every iteration).
-    bool   newton_full      = false;
-    double newton_tol       = 1e-10;
-    int    newton_max_iters = 8;
+    // ДАУ (вкладка DAE): >= 0 — первые dae_nx переменных дифференциальные (x), остальные
+    // алгебраические (z), rhs = [f; g] со связями 0 = g. -1 — обычная ОДУ. Схемы ОДУ на
+    // такой System не строятся (codegen_scheme откажет), только codegen_dae_scheme.
+    int dae_nx = -1;
+
+    // Ньютон неявных схем здесь не живёт: допуск, предел итераций и режим якобиана —
+    // рантайм-слоты a[] каждой вкладки (NewtonSettings ниже).
     // "CD FP" / "CD fast FP": число простых итераций. Сам расчёт берёт его в
     // рантайме из a[] (см. cd_fp_slot ниже); здесь — только оценка цены шага
     // для scheme_rhs_per_step (Order -> Performance кладёт сюда n своего конфига).
@@ -53,6 +51,46 @@ inline int cd_fp_iters_from_text(const std::string& t) {
 template <class Vec>
 inline void cd_fp_append_slot(Vec& values, const std::string& n_text) {
     values.push_back((typename Vec::value_type)cd_fp_iters_from_text(n_text));
+}
+
+// Ньютон неявных схем (Implicit Euler, Implicit Midpoint, Complex Implicit Euler): допуск,
+// предел итераций и режим якобиана — рантайм-значения, как s и n, со своими полями в блоке
+// Integration каждой вкладки (System::newton_* — только значения по умолчанию из записи
+// системы). Раскладка хвоста a[] после параметров: [n, tol, max_iters, full], то есть
+// a[M+1] = n, a[M+2] = tol, a[M+3] = max_iters, a[M+4] = full (0 — модифицированный Ньютон,
+// 1 — полный). Слоты есть у всех схем, размер a[] от схемы не зависит. Тело КРС читает их
+// из a[], поэтому смена допуска не пересобирает модуль.
+struct NewtonSettings {
+    bool        full      = false;
+    std::string tol       = "1e-10";
+    std::string max_iters = "8";
+};
+constexpr int kSchemeTailSlots = 4;   // [n, tol, max_iters, full] после p_M
+inline int newton_slot(const System& s) { return (int)s.params.size() + 2; }   // a[] допуска
+inline double newton_tol_from_text(const std::string& t) {
+    double v = 1e-10;
+    try { v = std::stod(t); } catch (...) { v = 1e-10; }
+    return v > 0.0 ? v : 1e-10;
+}
+inline int newton_iters_from_text(const std::string& t) {
+    int v = 8;
+    try { v = std::stoi(t); } catch (...) { v = 8; }
+    return v < 1 ? 1 : v;
+}
+// Записать хвост [n, tol, max_iters, full] начиная с tail = &a[M+1].
+template <class T>
+inline void scheme_fill_tail(T* tail, const std::string& n_text, const NewtonSettings& nw) {
+    tail[0] = (T)cd_fp_iters_from_text(n_text);
+    tail[1] = (T)newton_tol_from_text(nw.tol);
+    tail[2] = (T)newton_iters_from_text(nw.max_iters);
+    tail[3] = (T)(nw.full ? 1 : 0);
+}
+// Дописать хвост в конец собранного a[] = [s, p_1..p_M].
+template <class Vec>
+inline void scheme_append_tail(Vec& values, const std::string& n_text, const NewtonSettings& nw) {
+    const size_t b = values.size();
+    values.resize(b + kSchemeTailSlots);
+    scheme_fill_tail(values.data() + b, n_text, nw);
 }
 
 // Конечно-разностные схемы интегрирования.
@@ -326,6 +364,63 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 // отдельный путь, — превью в Library показывает ровно то, что уйдёт в ядро.
 // std::runtime_error при ошибке разбора.
 std::vector<std::string> codegen_rhs(const System& s);
+
+// Явное время t (этап 2 плана DAE). Правая часть с символом t, который не
+// переменная и не параметр, делает систему неавтономной: тело шага читает
+// время шага из аргумента kStepTimeArg и печатает время каждой стадии.
+// Сигнатура шага тогда calculateDiscreteModel(X, ucuda_t, a, h) — её ставит
+// шаблон/движок по kStepTimeArg в тексте тела (step_body_uses_time). У
+// автономной системы тело прежнее до байта.
+inline constexpr const char* kStepTimeArg = "ucuda_t";
+inline constexpr const char* kTimeUnsupportedMsg =
+    "explicit time t is not supported by this scheme: complex CD, CD fast, SEMP/SIMP/D, "
+    "Complex Implicit Euler and adaptive GBS/Extr do not shift stage times yet "
+    "(supported: explicit RK, implicit Euler/Midpoint, CD, CD {1-0}, CD FP, GBS, Extr/Comp over them; "
+    "adaptive RK45/DOP853/DOPRI78)";
+bool system_uses_time(const System& s);
+// Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
+bool scheme_supports_time(Scheme sch);
+// ДАУ: схемы этапа 4 плана DAE. Тело шага — как у схем ОДУ (calculateDiscreteModel над
+// X = [x; z], та же раскладка a[] с хвостом Ньютона), поэтому идёт в те же ядра.
+//   BDF1        — неявный Эйлер на ДАУ: x+ = x + h f(x+, z+), 0 = g(x+, z+).
+//   Trapezoidal — трапеции: x+ = x + h/2 (f(x, z) + f(x+, z+)), 0 = g(x+, z+).
+//   TRBDF2      — трапеции до t + gamma*h, затем BDF2 (gamma = 2 - sqrt 2): L-устойчив, порядок 2.
+// Ньютон по всему [x+; z+] с символьным якобианом (тот же, что у Implicit Euler).
+//   ExplicitEuler / ExplicitMidpoint / RK4 — явные схемы с решением связи на каждой стадии
+//   (Ньютон только по z, индекс 1); Midpoint — полуявный РК2 отчёта CD-ДАУ.
+//   ROS2 — Rosenbrock ROS2 (линейно-неявный, L-устойчив, порядок 2).
+//   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
+//   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
+enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4 };
+// Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
+// (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
+// шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
+// dg/dz вырожден (индекс >= 2: z из g не определяется, нужны скрытые связи) или Ньютон не сошёлся.
+// На CPU (вычислитель правых частей), вызывается один раз до траектории.
+bool dae_consistent_z(const System& s, const double* a, int na, double t0, double* X, std::string* why);
+// Этап 3, уровень A: ДАУ индекса 1, где каждую z можно выразить из связи явно (связь
+// линейна по ней; связи решаются по очереди, решённые z подставляются в следующие),
+// сводится к ОДУ по x: z = -rem/coef подставлено в f на уровне AST, так что якобиан,
+// разбор CD и все вкладки видят честную ОДУ. ode.vars = x, ode.rhs — f(x, z(x)), dae_nx = -1.
+// z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
+// входит нелинейно: тогда только методы ДАУ).
+bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Имена в комбо схем DAE-вкладки и сессиях; false — не схема ДАУ.
+bool dae_scheme_from_name(const std::string& name, DaeScheme* out);
+const std::vector<std::string>& dae_scheme_names();
+
+// Тело шага неавтономное: ссылается на аргумент времени. То же для тел
+// адаптивного шага (rhs / emb / dprep): модуль тогда собирается с
+// #define UCUDA_NONAUTONOMOUS, и функции ucuda_krs_* получают ucuda_t.
+inline bool step_body_uses_time(const std::string& body) {
+    for (size_t p = body.find(kStepTimeArg); p != std::string::npos; p = body.find(kStepTimeArg, p + 1)) {
+        const size_t e = p + 7;   // strlen("ucuda_t")
+        const char c = e < body.size() ? body[e] : ' ';
+        if (!(std::isalnum((unsigned char)c) || c == '_')) return true;
+    }
+    return false;
+}
 
 // Вклад ОДНОГО ребра сети в правую часть узла-приёмника (вкладка Network).
 // exprs — по выражению на переменную системы; пустая строка = в это уравнение
@@ -665,11 +760,12 @@ public:
     // Параметры a[] остаются вещественными.
     void eval_jacobian_complex(const ucmplx* Z, const double* a, ucmplx* J) const;
 
-    // Newton settings carried over from the System this evaluator was built from —
-    // exposed here so computePhasePortraitCPU needs no extra parameters.
-    bool   newton_full() const;
-    double newton_tol() const;
-    int    newton_max_iters() const;
+    // Newton settings of the implicit schemes, read from the tail of a[] exactly as the
+    // generated GPU step reads them (a[M+2..M+4], see NewtonSettings), so the CPU paths
+    // need no extra parameters.
+    bool   newton_full(const double* a) const;
+    double newton_tol(const double* a) const;
+    int    newton_max_iters(const double* a) const;
 
     // Решает i-е уравнение диагонально-неявного полушага относительно своей
     // переменной: X[i] = X[i] + hs * f_i(X), где f_i = coef*x_i + rem и ни coef,

@@ -2,6 +2,7 @@
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include "perf_warmup.h"       // прогрев GPU перед замером Performance
 #include "krs_prep.h"          // стадия предрасчёта КРС (CD fast)
+#include "codegen.hpp"         // step_body_uses_time: явное время t
 #include <cuda.h>
 #include <nvrtc.h>
 #include <chrono>
@@ -196,13 +197,45 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     // траектории. У прочих схем — пустая структура и прямой вызов шага.
     KrsPrepSplit prep_sp;
     std::string prep_defs;
-    if (krs_split_prep(krs_body, prep_sp))
+    // Неавтономная система (явное t): шаг получает время t_n = n*h вторым
+    // аргументом. Признак — в самом теле (оно же ключ кэша), автономный
+    // исходник ниже не меняется ни на байт.
+    const bool nonauto = step_body_uses_time(krs_body);
+    if (nonauto && krs_split_prep(krs_body, prep_sp))
+        NV_FAIL("explicit time t is not supported by schemes with a precompute stage (CD fast)");
+    if (nonauto)
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n";
+    else if (krs_split_prep(krs_body, prep_sp))
         prep_defs = krs_prep_inline_defs(prep_sp, true);
     else
         prep_defs = "struct UcudaKrsPre {};\n"
                     "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n"
                     "__device__ __forceinline__ void calculateDiscreteModelP(numb* X, const numb* a, const numb h,"
                     " const UcudaKrsPre&) { calculateDiscreteModel(X, a, h); }\n";
+    if (nonauto)
+        src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb ucuda_t,"
+               " const numb* a, numb h) {\n"
+            << krs_body << "\n"
+            << "}\n"
+            << prep_defs
+            // t_n = n*h от целого счётчика: накопление t += h за 1e7 шагов
+            // уводит фазу воздействия.
+            << "extern \"C\" __global__ void phase_kernel("
+            "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+            << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
+            << "    if (tid >= N) return;\n"
+            << "    numb X[AMOUNTOFX];\n"
+            << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
+            << "    long long n = 0;\n"
+            << "    for (int s=0;s<skip;++s, ++n) calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
+            << "    for (int t=0;t<total;++t, ++n) {\n"
+            << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
+            << "        calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    }\n"
+            << "}\n";
+    else
     src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
         << krs_body << "\n"
         << "}\n"
@@ -441,20 +474,25 @@ bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, in
 
     // Функции схемы — __host__ __device__, как calculateDiscreteModel в шаблонах:
     // их зовут __host__ __device__ методы провайдера UcudaKrsFns.
+    // Неавтономная система (явное t): функции получают ucuda_t перед a, драйвер
+    // передаёт им S.t (UCUDA_NONAUTONOMOUS). Тела — ключ кэша, признак берётся из них.
+    const bool nonauto = step_body_uses_time(rq.rhs);
+    const char* tp = nonauto ? "const numb ucuda_t, " : "";
     std::ostringstream src;
     src << kNumbTypedef
         << "#define AMOUNTOFX " << rq.amountOfX << "\n"
         << (needs_complex ? "#include \"configCUDA.h\"\n" : "")
+        << (nonauto ? "#define UCUDA_NONAUTONOMOUS\n" : "")
         << "#define UCUDA_AD_KRS_FUNCS\n"
         << "#define UCUDA_AD_STATIC_N\n"   // поток на траекторию, потоков мало: состояние — в регистры
         << (variant == 1 ? "#define UCUDA_AD_NO_DENSE 1\n" : "")
-        << "__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, const numb* a, numb* F) {\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, " << tp << "const numb* a, numb* F) {\n"
         << rq.rhs << "\n}\n"
-        << "__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, const numb* a,\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, " << tp << "const numb* a,\n"
            "    const numb h, numb* Y, numb* E, numb* F1, numb* W) {\n"
         << rq.emb << "\n}\n"
         << "__device__ __host__ __forceinline__ void ucuda_krs_dprep(const numb* X, const numb* Y, const numb* F0,\n"
-           "    const numb* F1, const numb* a, const numb h, numb* W, numb* D) {\n"
+           "    const numb* F1, " << tp << "const numb* a, const numb h, numb* W, numb* D) {\n"
         << rq.dprep << "\n}\n"
         << "__device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const numb th, numb* Yo) {\n"
         << rq.deval << "\n}\n"

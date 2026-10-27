@@ -1,5 +1,6 @@
 ﻿#include "gui.h"
 #include "circuit_netlist.h"
+#include "dae_ir.h"
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
@@ -350,6 +351,20 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
     if (parse_composition_name(scheme_name, &cspec))
         return scheme_uses_cd_fp_iters(cspec.base);
     return scheme_name == "CD FP" || scheme_name == "CD fast FP";
+}
+
+// Решает ли схема шаг Ньютоном — показывать ли поля Newton (NewtonSettings, a[M+2..M+4]).
+// Обёртки Extr/Comp — по базе.
+[[nodiscard]] static bool scheme_uses_newton(const std::string& scheme_name) {
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_newton(spec.base);
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_newton(cspec.base);
+    return scheme_name == "Implicit Euler" || scheme_name == "Implicit Midpoint"
+        || scheme_name == "Complex Implicit Euler"
+        || dae_scheme_from_name(scheme_name, nullptr);   // DAE BDF1 / Trapezoidal
 }
 
 // Поле "FP iterations n" (CD FP / CD fast FP). Рядом с "symmetry s" и с тем же
@@ -1127,6 +1142,19 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
         if (on_pick) on_pick(nm);
         picked = true;
     };
+    // ДАУ: сессия получила только схемы ДАУ (enabled_builtins_from_record) — их и показываем,
+    // схемы ОДУ на такой системе не строятся.
+    if (enabled_builtins && !enabled_builtins->empty()
+        && dae_scheme_from_name((*enabled_builtins)[0], nullptr)) {
+        ImGui::SetNextItemWidth(kComboW);
+        if (ImGui::BeginCombo(label, scheme.c_str())) {
+            ImGui::SeparatorText("DAE");
+            for (const auto& nm : *enabled_builtins)
+                if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
+            ImGui::EndCombo();
+        }
+        return picked;
+    }
     // enabled_builtins null = no filter. Empty = no built-in is ticked: that is still
     // "no filter" only while the combo would otherwise be empty; a system that offers
     // custom KRS or wrappers (e.g. Izhikevich, whose reset lives in custom schemes)
@@ -1865,6 +1893,41 @@ static bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::
     return changed;
 }
 
+// Поля Ньютона неявных схем: режим якобиана, допуск, предел итераций. Как "symmetry s":
+// значения уходят в ядро рантайм-слотами a[M+2..M+4], модуль не пересобирается. id —
+// суффикс ImGui-идентификаторов (несколько блоков в одном окне). Возвращает true при правке.
+static bool draw_newton_fields(NewtonSettings& n, float w, const char* id = "") {
+    bool changed = false;
+    ImGui::PushID(id);
+    int jac_mode = n.full ? 1 : 0;
+    ImGui::SetNextItemWidth(w * 2.0f);
+    if (ImGui::Combo("Newton jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0")) {
+        n.full = (jac_mode == 1);
+        changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("modified: Jacobian and LU reused across iterations and\n"
+                          "refreshed when the correction stops shrinking.\n"
+                          "Cheaper on GPU and the right default.\n"
+                          "full: rebuilt every iteration. Quadratic convergence,\n"
+                          "most robust at large h, ~k times the cost.\n"
+                          "Passed at run time as a[M+4]: no recompilation.");
+    changed |= InputNumStr("Newton tolerance", n.tol, w);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Newton stops once ||dX|| falls below this (a[M+2], run time).\n"
+                          "DAE methods also stop at ||dX|| < tol * |X| (relative).\n"
+                          "With numb = float it also stops at the precision floor\n"
+                          "||dX|| < 16 eps |X|: below that float cannot go.");
+    changed |= InputNumStr("Newton max iterations", n.max_iters, w);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hard cap on Newton passes per step (a[M+3], run time).\n"
+                          "2-3 is typical from the explicit-Euler predictor.\n"
+                          "A step that hits the cap is accepted unconverged: on a DAE\n"
+                          "the constraint then drifts. DAE: full Newton, ~25 iterations.");
+    ImGui::PopID();
+    return changed;
+}
+
 // Поля секции "Integration". nullptr = поле у этого анализа отсутствует
 // (например, у LLE/LS нет decimator'а). Условие показа "symmetry s" —
 // схема CD либо пользовательская, чьё тело обращается к a[0].
@@ -1872,6 +1935,7 @@ struct IntegrationFields {
     std::string* h           = nullptr;
     std::string* symmetry_s  = nullptr;
     std::string* cd_fp_iters = nullptr;   // CD FP: число простых итераций (a[M+1])
+    NewtonSettings* newton   = nullptr;   // неявные схемы: Ньютон (a[M+2..M+4])
     std::string* t_max       = nullptr;
     std::string* transient   = nullptr;
     std::string* pre_scaller = nullptr;
@@ -1915,6 +1979,8 @@ static bool draw_integration_block(const char* header,
                                menu(BroadcastField::CdFpIters, "FP iterations n", *f.cd_fp_iters));
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
     }
+    if (f.newton && scheme_uses_newton(scheme))
+        changed |= draw_newton_fields(*f.newton, kFieldW);
     if (f.t_max)      changed |= InputNumStr(t_max_label, *f.t_max,       kFieldW,
                                menu(BroadcastField::TMax, t_max_label, *f.t_max));
     if (f.transient)   changed |= InputNumStr(transient_label, *f.transient,   kFieldW,
@@ -4289,11 +4355,15 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     ImGui::RadioButton("LaTeX", &mode, (int)InputMode::Latex); ImGui::SameLine();
     ImGui::RadioButton("Plain", &mode, (int)InputMode::Plain);
     model.mode = (InputMode)mode;
-    ImGui::SameLine();
-    ImGui::Checkbox("Discrete map", &model.is_map);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("System is given as x_{n+1} = f(x_n): no integration\n"
-                          "scheme, no step h, and time is the iteration number n.");
+    // Отображение или ОДУ — решает вкладка Library (MAP / ODE), а не галочка:
+    // снятая галочка увела бы черновик в другую вкладку посреди правки.
+    if (model.is_map) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(discrete map)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("System is given as x_{n+1} = f(x_n): no integration\n"
+                              "scheme, no step h, and time is the iteration number n.");
+    }
     ImGui::Separator();
 
     // источник картинки
@@ -4483,11 +4553,12 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
                                 hidden_on.c_str());
     }
 
-    // Настройки Ньютона — общие для обеих неявных схем, поэтому живут здесь,
-    // на уровне системы, а не в конфиге каждого анализа.
+    // Настройки Ньютона на уровне системы — значения по умолчанию для новых вкладок, как
+    // symmetry s: каждая вкладка держит свои (NewtonSettings, поля в блоке Integration)
+    // и передаёт их в ядро рантайм-слотами a[M+2..M+4].
     if (model.scheme_ieuler || model.scheme_imidpoint) {
         ImGui::Spacing();
-        ImGui::Text("Newton solver:");
+        ImGui::Text("Newton solver (defaults for new tabs):");
         int jac_mode = model.newton_full ? 1 : 0;
         ImGui::SetNextItemWidth(kFieldW * 2.0f);
         if (ImGui::Combo("jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0"))
@@ -4744,10 +4815,19 @@ static void draw_parameters_tab(AppModel& model) {
 // немедленно — иначе удалённая система висела бы в таблице до десяти секунд.
 // Сюда же переехал кэш превью заметки: он жил отдельными static'ами и не сбрасывался
 // после сохранения, поэтому отредактированная заметка показывалась старой.
+// Вкладки Library и группы верхнего списка систем, в этом порядке.
+enum class LibTab : char { Ode = 0, Dae = 1, Map = 2 };
+static constexpr int kLibTabCount = 3;
+static const char* const kLibTabName[kLibTabCount] = { "ODE", "DAE", "MAP" };
+static LibTab lib_tab_of(bool is_dae, bool is_map) {
+    return is_dae ? LibTab::Dae : is_map ? LibTab::Map : LibTab::Ode;
+}
+
 struct LibraryListCache {
     std::vector<std::string> names;
     std::vector<int>         custom_counts;   // параллелен names
-    std::string              sel_name;        // для какой системы прочитано превью ниже
+    std::vector<char>        tab;             // параллелен names: LibTab записи
+    std::string              sel_name;      // для какой системы прочитано превью ниже
     bool                     sel_ok = false;  // запись прочиталась
     SystemRecord             sel_rec;
     std::string              sel_desc;        // describe_record(sel_rec), готов для буфера обмена
@@ -4770,10 +4850,12 @@ static const LibraryListCache& library_list_cached(SystemLibrary& lib) {
 
     g_library_cache.names = lib.list();
     g_library_cache.custom_counts.assign(g_library_cache.names.size(), 0);
+    g_library_cache.tab.assign(g_library_cache.names.size(), (char)LibTab::Ode);
     for (size_t i = 0; i < g_library_cache.names.size(); ++i) {
         try {
-            g_library_cache.custom_counts[i] =
-                (int)lib.load(g_library_cache.names[i]).custom_schemes.size();
+            const SystemRecord r = lib.load(g_library_cache.names[i]);
+            g_library_cache.custom_counts[i] = (int)r.custom_schemes.size();
+            g_library_cache.tab[i]           = (char)lib_tab_of(r.is_dae, r.is_map);
         } catch (...) {}
     }
     g_library_cache.filled_at = now;
@@ -4814,11 +4896,12 @@ static std::string describe_record(const SystemRecord& r) {
     };
 
     line("Name", r.name);
-    o += std::string("Type: ") + (r.is_map ? "discrete map" : "ODE system") + "\n";
+    o += std::string("Type: ") + (r.is_dae ? "DAE system" : r.is_map ? "discrete map" : "ODE system") + "\n";
     block("Note", r.note);
     block("LaTeX", r.latex_text);
     block("Plain", r.plain_text);
-    line("Variables", r.vars_text);
+    line(r.is_dae ? "Differential variables" : "Variables", r.vars_text);
+    if (r.is_dae) line("Algebraic variables", r.alg_text);
     line("Parameters", r.params_text);
     // Legacy records keep vars and params mixed in one list.
     if (r.vars_text.empty() && r.params_text.empty()) line("Alphabet", r.alphabet_text);
@@ -4906,9 +4989,33 @@ static void library_editor_save(AppModel& model, SystemLibrary& lib) {
 // Interacting with this view (row select, Edit, Add new) only ever touches
 // model.library_edit_buffer — never the live model — so it never changes
 // the system currently active in Parametric/Phase/Basins/FastSync.
-static void draw_library_list(AppModel& model, SystemLibrary& lib) {
-    if (ImGui::Button("Add new system")) {
+// tab — какая вкладка рисуется: в ней только записи своего вида (kind в system.json).
+static void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
+    // Черновик один на все вкладки: пока он открыт в соседней, Add/Edit отсюда
+    // молча затёрли бы несохранённую правку.
+    const bool other_tab_editing = model.library_edit_mode != AppModel::LibraryEditMode::None;
+    if (other_tab_editing) {
+        const AppModel& eb = *model.library_edit_buffer;
+        ImGui::TextDisabled("Finish editing in the %s tab first.",
+                            kLibTabName[(int)lib_tab_of(eb.is_dae, eb.is_map)]);
+    }
+    ImGui::BeginDisabled(other_tab_editing);
+    const char* add_label = tab == LibTab::Dae ? "Add new DAE system"
+                          : tab == LibTab::Map ? "Add new map" : "Add new system";
+    const bool add_clicked = ImGui::Button(add_label);
+    ImGui::EndDisabled();
+    if (add_clicked) {
         model.library_edit_buffer->clear();
+        model.library_edit_buffer->is_dae = tab == LibTab::Dae;
+        model.library_edit_buffer->is_map = tab == LibTab::Map;
+        if (tab == LibTab::Dae) {
+            // ДАУ: полный Ньютон и запас итераций. Предиктор z — прежнее значение, и при
+            // быстро меняющемся множителе (маятник) квадратичная фаза начинается лишь на
+            // ~9-й итерации; 8 итераций модифицированного Ньютона молча принимали
+            // несошедшийся шаг, и связь уплывала.
+            model.library_edit_buffer->newton_full      = true;
+            model.library_edit_buffer->newton_max_iters = "25";
+        }
         model.edit_original_name.clear();
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::AddNew;
@@ -4917,26 +5024,35 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
 
     // Список и счётчики custom-схем — из кэша (см. library_list_cached):
     // раньше здесь был обход каталога и чтение всех system.json на каждом кадре.
-    const LibraryListCache&         cache     = library_list_cached(lib);
-    const std::vector<std::string>& names     = cache.names;
-    const std::vector<int>&         cs_counts = cache.custom_counts;
+    const LibraryListCache& cache = library_list_cached(lib);
+    std::vector<std::string> names;
+    std::vector<int>         cs_counts;
+    for (size_t i = 0; i < cache.names.size(); ++i) {
+        if ((LibTab)cache.tab[i] != tab) continue;
+        names.push_back(cache.names[i]);
+        cs_counts.push_back(cache.custom_counts[i]);
+    }
     if (names.empty()) {
-        ImGui::TextDisabled("(library is empty)");
+        ImGui::TextDisabled("(no %s systems yet)", kLibTabName[(int)tab]);
         return;
     }
 
     // Delete confirmation flow: row buttons only set pending_delete + a
     // one-shot open flag; OpenPopup/BeginPopupModal are called at a stable
     // ID-stack level below the table so the popup id stays consistent.
-    static std::string pending_delete;
-    static bool        want_open_confirm = false;
+    // По копии на вкладку: все рисуются в одном кадре, общий флаг открыл бы
+    // окно подтверждения не в той вкладке.
+    static std::string pending_delete_k[kLibTabCount];
+    static bool        want_open_confirm_k[kLibTabCount] = {};
+    std::string& pending_delete    = pending_delete_k[(int)tab];
+    bool&        want_open_confirm = want_open_confirm_k[(int)tab];
 
     // Visibility mask for the top-bar system picker. Stored as HIDDEN names
     // (AppModel::hidden_systems), so a newly added system shows up ticked.
     ImGui::TextDisabled("Tick a system to keep it in the top-bar picker.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Show all")) {
-        model.hidden_systems.clear();
+        for (const auto& n : names) AppModel::set_name_hidden(model.hidden_systems, n, false);
         persist_hidden_systems(model);
     }
     ImGui::SameLine();
@@ -4994,7 +5110,10 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
             }
 
             ImGui::TableSetColumnIndex(2);
-            if (ImGui::SmallButton("Edit")) {
+            ImGui::BeginDisabled(other_tab_editing);
+            const bool edit_clicked = ImGui::SmallButton("Edit");
+            ImGui::EndDisabled();
+            if (edit_clicked) {
                 try {
                     model.library_edit_buffer->from_record(lib.load(n));
                     model.edit_original_name = n;
@@ -5056,7 +5175,8 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib) {
     // system can be read and copied without the editor. Cached by name to
     // avoid a disk read every frame.
     ImGui::Separator();
-    if (model.library_selected_name.empty()) {
+    if (model.library_selected_name.empty()
+        || std::find(names.begin(), names.end(), model.library_selected_name) == names.end()) {
         ImGui::TextDisabled("Click a row to preview and copy its description.");
         return;
     }
@@ -5142,7 +5262,121 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
     // Редактор рисует System tab по буферу-черновику, а маска схем глобальная
     // и живёт в основной модели — иначе в редакторе показались бы скрытые схемы.
     buf.hidden_schemes = model.hidden_schemes;
-    if (ImGui::BeginTabBar("editor_tabs")) {
+    if (buf.is_dae) {
+        // Пока только текст записи: разбор "0 = g" и решатели появятся на этапах
+        // DAE-ядра, до тех пор система не уходит в анализ.
+        ImGui::TextWrapped("x' = f(x, z, t),  0 = g(x, z, t). One equation per line: "
+                           "x' = ... for each differential variable, 0 = ... for each "
+                           "algebraic one.");
+        ImGui::Text("Equations:");
+        InputTextMultilineStr("##dae_eqs", buf.plain_text, ImVec2(-1, 160));
+        ImGui::Text("Differential variables (x):"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        InputTextStr("##dae_vars", buf.vars_text);
+        ImGui::Text("Algebraic variables (z):"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        InputTextStr("##dae_alg", buf.alg_text);
+        ImGui::Text("Parameters:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        InputTextStr("##dae_params", buf.params_text);
+        ImGui::Text("Variable indices:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        InputTextStr("##dae_index", buf.dae_index_text);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Optional, e.g. \"x=1, u=2, lambda=3\" (as nind1/2/3 in RADAU5).\n"
+                              "Unnamed: differential 1, algebraic 1 if structurally index 1.");
+
+        // Разбор — только при смене ввода.
+        AppModel::DaeEditorState& st = model.dae_editor;
+        const std::string key = buf.plain_text + '\x1e' + buf.vars_text + '\x1e' + buf.alg_text
+                              + '\x1e' + buf.params_text + '\x1e' + buf.dae_index_text;
+        if (st.key != key) {
+            st.key = key;
+            try {
+                const DaeSystem d = parse_dae(buf.plain_text, buf.vars_text, buf.alg_text,
+                                              buf.params_text, buf.dae_index_text);
+                st.ok = true;
+                st.vars = d.diff;
+                st.vars.insert(st.vars.end(), d.alg.begin(), d.alg.end());
+                st.params = d.params;
+                std::string m = std::to_string(d.diff.size()) + " differential, "
+                              + std::to_string(d.alg.size()) + " algebraic";
+                if (d.structural_index_hint == 1) m += "; structurally index 1";
+                else if (d.structural_index_hint == 2) {
+                    m += "; index >= 2 (no constraint contains";
+                    for (const auto& z : d.unmatched_alg) m += " " + z;
+                    m += ")";
+                }
+                if (d.uses_t) m += "; uses t";
+                m += "\nindices:";
+                for (size_t i = 0; i < d.n_vars(); ++i)
+                    m += " " + st.vars[i] + "=" + (d.index[i] ? std::to_string(d.index[i]) : "?");
+                st.message = m;
+                // Уровень A: можно ли решать как ОДУ (z выражены из связей явно).
+                System ode;
+                std::vector<std::string> zex;
+                std::string why;
+                st.reducible = dae_reduce_to_ode(d.as_codegen_system(), ode, &zex, &why);
+                if (st.reducible) {
+                    st.reduce_msg = "explicit z(x):";
+                    for (size_t j = 0; j < d.alg.size(); ++j) st.reduce_msg += "\n  " + d.alg[j] + " = " + zex[j];
+                } else st.reduce_msg = why;
+            } catch (const std::exception& e) {
+                st.ok = false;
+                st.message = e.what();
+                st.vars.clear();
+                st.params.clear();
+                st.reducible = false;
+                st.reduce_msg.clear();
+            }
+        }
+        if (st.ok) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", st.message.c_str());
+        else       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", st.message.c_str());
+
+        // Этап 3, уровень A: ДАУ -> ОДУ подстановкой z. Снять галочку можно всегда;
+        // поставить — только если сведение удаётся.
+        if (st.ok) {
+            ImGui::BeginDisabled(!st.reducible && !buf.dae_as_ode);
+            ImGui::Checkbox("Solve as ODE (substitute z)", &buf.dae_as_ode);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("z is expressed from the constraints and substituted into f:\n"
+                                  "the system becomes an ODE in x and runs in every tab with every\n"
+                                  "ODE scheme (CD, Yoshida, RK, implicit; bifurcations, LLE/LS, basins).\n"
+                                  "z is then not part of the state. Index 1 with z linear in its constraint.");
+            ImGui::TextDisabled("%s", st.reduce_msg.c_str());
+            if (buf.dae_as_ode && !st.reducible)
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "cannot solve as ODE: untick");
+        }
+
+        // Начальные условия всех переменных (z тоже: согласовать их — дело
+        // решателя, но стартовое приближение Ньютону даёт пользователь) и
+        // значения параметров.
+        if (st.ok && ImGui::BeginTable("##dae_vals", 2, ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("Initial conditions");
+            for (const auto& v : st.vars)
+                InputNumStr((v + "##daeic").c_str(), buf.init_conditions[v], 140.0f, {}, true);
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("Parameter values");
+            for (const auto& p : st.params)
+                InputNumStr((p + "##daepv").c_str(), buf.param_values[p], 140.0f, {}, true);
+            InputNumStr("h##daeh", buf.step_h, 140.0f, {}, true);
+            // Ньютон схем ДАУ — значения по умолчанию для вкладок (как у неявных схем ОДУ).
+            ImGui::TextDisabled("Newton (defaults for the tabs)");
+            InputNumStr("tol##daent", buf.newton_tol, 140.0f);
+            InputNumStr("max iters##daeni", buf.newton_max_iters, 140.0f);
+            ImGui::Checkbox("full Newton##daenf", &buf.newton_full);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Rebuild the Jacobian every iteration. A step that runs out of\n"
+                                  "iterations is accepted unconverged and the constraint drifts.");
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("DAE methods (Analysis): BDF1 / Trapezoidal / TR-BDF2 / Rosenbrock ROS2 for any index;\n"
+                            "CD, CD + Yoshida-4 and explicit Euler / Midpoint / RK4 with the constraint solved\n"
+                            "whenever x changes - index 1 only. 'Solve as ODE' opens every tab and ODE scheme.");
+    }
+    else if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
             draw_system_tab(buf, cb);
             ImGui::EndTabItem();
@@ -5166,6 +5400,27 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
         model.edit_error.clear();
         model.library_edit_mode = AppModel::LibraryEditMode::None;
     }
+}
+
+// Ось фазовой проекции: переменная (0..nv-1) или наблюдаемая вне состояния (nv + j, ДАУ,
+// сведённая к ОДУ — значения дописаны к точкам после координат состояния).
+static std::string phase_axis_name(const PhaseAnalysisSession& s, int ax) {
+    const int nv = (int)s.vars.size();
+    if (ax >= 0 && ax < nv) return s.vars[(size_t)ax];
+    if (ax >= nv && ax - nv < (int)s.observables.size()) return s.observables[(size_t)(ax - nv)];
+    return s.vars.empty() ? std::string("-") : s.vars[0];
+}
+static void phase_axis_combo(const char* id, PhaseAnalysisSession& s, int& axis) {
+    if (!ImGui::BeginCombo(id, phase_axis_name(s, axis).c_str())) return;
+    for (int k = 0; k < (int)s.vars.size(); ++k)
+        if (ImGui::Selectable(s.vars[(size_t)k].c_str(), axis == k)) { axis = k; s.fit_request = true; }
+    if (!s.observables.empty()) {
+        ImGui::SeparatorText("z (observables)");
+        const int nv = (int)s.vars.size();
+        for (int j = 0; j < (int)s.observables.size(); ++j)
+            if (ImGui::Selectable(s.observables[(size_t)j].c_str(), axis == nv + j)) { axis = nv + j; s.fit_request = true; }
+    }
+    ImGui::EndCombo();
 }
 
 // РЕЖИМ АНАЛИЗА: пространство фазовых портретов
@@ -5235,6 +5490,11 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         changed |= InputNumStr("##cdfpn", s.cd_fp_iters, 70);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
     }
+    if (scheme_uses_newton(s.scheme))
+        changed |= draw_newton_fields(s.newton, 70, "phase_newton");
+    // ДАУ: начальные z согласуются по связи перед счётом (dae_consistent_z) — что вышло.
+    if (!s.result.dae_status.empty())
+        ImGui::TextDisabled("%s", s.result.dae_status.c_str());
     ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
     changed |= InputNumStr("##dec", s.decimation, 70);
     if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -5434,18 +5694,10 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         if (pr.type == ProjType::Phase2D) {
             ImGui::Text("X:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(55);
-            if (ImGui::BeginCombo("##px", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##px", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(55);
-            if (ImGui::BeginCombo("##py", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##py", s, pr.axis_y);
         }
         else if (pr.type == ProjType::FeatureDiagram) {
             // Одна переменная: по ней ищутся пики. Оси фиксированы (значение пика /
@@ -5514,25 +5766,13 @@ static void draw_phase_controls(PhaseAnalysisSession& s,
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3x", s.vars.empty() ? "-" : s.vars[pr.axis_x < (int)s.vars.size() ? pr.axis_x : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3x", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3y", s.vars.empty() ? "-" : s.vars[pr.axis_y < (int)s.vars.size() ? pr.axis_y : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3y", s, pr.axis_y);
             ImGui::SameLine(); ImGui::Text("Z:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(50);
-            if (ImGui::BeginCombo("##p3z", s.vars.empty() ? "-" : s.vars[pr.axis_z < (int)s.vars.size() ? pr.axis_z : 0].c_str())) {
-                for (int k = 0; k < (int)s.vars.size(); ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_z == k)) { pr.axis_z = k; s.fit_request = true; }
-                ImGui::EndCombo();
-            }
+            phase_axis_combo("##p3z", s, pr.axis_z);
         }
         else if (pr.type == ProjType::ContinuationDiagram) {
             const int nv = (int)s.vars.size();
@@ -5825,9 +6065,19 @@ static void draw_adaptive_stats(const std::vector<double>& st) {
                         att > 0 ? 100.0 * rej / att : 0.0, frc);
 }
 
-static void draw_regime_summary(const std::vector<int>& flags) {
+// cache — для 2D-карт: обход flags раз на данные (gen + буфер), а не на каждый кадр (см.
+// RegimeCounts). Без cache — прямой подсчёт: у 1D-свипов flags короткие.
+static void draw_regime_summary(const std::vector<int>& flags, RegimeCounts* cache = nullptr, int gen = 0) {
     int fp = 0, unb = 0, osc = 0, stopped = 0;
-    count_regimes(flags, fp, unb, osc, &stopped);
+    if (!cache) {
+        count_regimes(flags, fp, unb, osc, &stopped);
+    } else {
+        if (cache->gen != gen || cache->data != (const void*)flags.data() || cache->size != flags.size()) {
+            count_regimes(flags, cache->fp, cache->unb, cache->osc, &cache->stopped);
+            cache->gen = gen; cache->data = flags.data(); cache->size = flags.size();
+        }
+        fp = cache->fp; unb = cache->unb; osc = cache->osc; stopped = cache->stopped;
+    }
     if (stopped > 0)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
                            "Stopped: %d of %d points computed, the rest are grey / blank",
@@ -5982,8 +6232,8 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
 
                     // обновить имена осей
-                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
+                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
                     // No zero-axis on phase 2D — x=0 / y=0 have no meaning
                     // for a state-space trajectory.
                     pr.view2d->show_zero_x = false;
@@ -6627,9 +6877,9 @@ static void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks&
                     pr.view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     pr.view3d->point_size_px     = pr.point_size;
 
-                    pr.view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    pr.view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
-                    pr.view3d->z_name = s.vars.empty() ? "z" : s.vars[az < (int)s.vars.size() ? az : 0];
+                    pr.view3d->x_name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
+                    pr.view3d->y_name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
+                    pr.view3d->z_name = s.vars.empty() ? "z" : phase_axis_name(s, az);
 
                     // Локальный буфер — см. ветку Phase2D выше.
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
@@ -7099,6 +7349,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
         f.h           = &bd.h_text;
         f.symmetry_s  = &bd.symmetry_s;
         f.cd_fp_iters = &bd.cd_fp_iters;
+        f.newton      = &bd.newton;
         f.t_max       = &bd.t_max_text;
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
@@ -7125,7 +7376,7 @@ static void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s
                 "OK: %dx%d heatmap, period(min..max) = %.0f..%.0f",
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
-            draw_regime_summary(bd.result_2d.flags);
+            draw_regime_summary(bd.result_2d.flags, &bd.regime_counts_2d, bd.data_generation_2d);
             draw_adaptive_stats(bd.result_2d.ad_stats);
         }
         else if (!bd.last_error.empty()) {
@@ -7764,6 +8015,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
         f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
@@ -7810,7 +8062,7 @@ static void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int 
                 "OK: %dx%d heatmap, lambda(min..max) = %.4g..%.4g",
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
-            draw_regime_summary(c.result_2d.flags);
+            draw_regime_summary(c.result_2d.flags, &c.regime_counts_2d, c.data_generation_2d);
             draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
@@ -8115,6 +8367,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
         f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
@@ -8160,7 +8413,7 @@ static void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSess
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: %dx%d heatmap, %d exponents",
                 c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
-            draw_regime_summary(c.result_2d.flags);
+            draw_regime_summary(c.result_2d.flags, &c.regime_counts_2d, c.data_generation_2d);
             draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
@@ -8565,6 +8818,7 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
         f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -8590,7 +8844,7 @@ static void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisS
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d grid", r.n_pts, r.n_pts);
         else
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: n_pts=%d", r.n_pts);
-        draw_regime_summary(r.flags);
+        draw_regime_summary(r.flags, &c.regime_counts, c.mode_2d ? c.data_generation_2d : c.data_generation);
         draw_adaptive_stats(r.ad_stats);
     }
     else if (!c.last_error.empty()) {
@@ -9152,6 +9406,7 @@ static void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
         f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -9850,6 +10105,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
         f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -9920,7 +10176,7 @@ static void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             "OK: %dx%d, %d clusters (+ %d FP clusters)",
             c.result.n_pts, c.result.n_pts,
             c.result.n_clusters, -c.result.min_cluster_idx);
-        draw_regime_summary(c.result.helpful_array);
+        draw_regime_summary(c.result.helpful_array, &c.regime_counts, c.data_generation);
         draw_adaptive_stats(c.result.ad_stats);
     } else if (!c.last_error.empty()) {
         draw_error_box("##basins_err", c.last_error);
@@ -10541,6 +10797,8 @@ static void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
     }
+    if (scheme_uses_newton(c.scheme))
+        draw_newton_fields(c.newton, kFieldW, "fs_newton");
     ImGui::Separator();
 
     // Mode-specific axes
@@ -11764,8 +12022,9 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         // вкладке считается иначе, чем на остальных.
         const double ntol = order_newton_tol_for_precision(c.cpu_precision);
         if (ntol > 0.0) {
-            ImGui::TextDisabled("Implicit schemes: Newton tolerance %.0e instead of the "
-                                "system setting (%s)", ntol, model.newton_tol.c_str());
+            ImGui::TextDisabled("Implicit schemes: Newton tolerance at most %.0e, at least 12 "
+                                "iterations (Integration: %s, %s)", ntol, c.newton.tol.c_str(),
+                                c.newton.max_iters.c_str());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
                     "Newton stops at ||dX|| < tol, so the system-wide setting would\n"
@@ -11797,6 +12056,8 @@ static void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
         }
+        if (scheme_uses_newton(c.scheme))
+            draw_newton_fields(c.newton, kFieldW, "order_newton");
         // Область устойчивости берёт из этого блока только схему и s: она
         // делает ОДИН шаг, поэтому ни времени счёта, ни порога расхождения,
         // ни подгонки числа шагов у неё нет, а собственный шаг живёт в своём
@@ -12255,7 +12516,7 @@ static data_export::OrderSnapshot order_snapshot(const OrderAnalysisSession& s,
         auto it = c.param_values.find(p);
         sn.values.push_back(it != c.param_values.end() ? parse_num(it->second, 0.0) : 0.0);
     }
-    cd_fp_append_slot(sn.values, c.cd_fp_iters);   // a[M+1], как в build_order_request
+    scheme_append_tail(sn.values, c.cd_fp_iters, c.newton);   // a[M+1..M+4], как в build_order_request
     sn.h             = parse_num(c.h_text, 0.01);
     sn.t_max         = parse_num(c.t_max_text, 10.0);
     sn.max_value     = parse_num(c.max_value_text, 1.0e6);
@@ -13687,6 +13948,7 @@ static void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
     f.h           = &c.h_text;
     f.symmetry_s  = &c.symmetry_s;
     f.cd_fp_iters = &c.cd_fp_iters;
+    f.newton      = &c.newton;
     f.t_max       = &c.t_max_text;
     f.transient   = &c.transient_text;
     f.pre_scaller = &c.pre_scaller_text;
@@ -14537,6 +14799,9 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
                 phase.cd_fp_iters = c.cd_fp_iters;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
         }
+        if (scheme_uses_newton(c.scheme))
+            if (draw_newton_fields(c.newton, kFieldW, "custom_newton"))
+                phase.newton = c.newton;
         // TT before CT: transient runs first, computing-time is what's
         // actually sampled after — order matches conceptual flow.
         if (InputNumStr(model.is_map ? "transient iterations" : "transient time",
@@ -16751,9 +17016,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // в их комбо до перезагрузки системы. Пустой список = фильтра нет, как и
     // у enabled_builtins_from_record.
     {
+        // ДАУ: флагов scheme_* у неё нет, а схемы ОДУ на ней не строятся — список
+        // свой (иначе этот синк каждый кадр затирал бы его схемами ОДУ).
         std::vector<std::string> enabled_now;
-        for (const auto& b : kBuiltinSchemes)
-            if (model.*b.flag) enabled_now.push_back(b.name);
+        if (model.dae_native()) enabled_now = dae_scheme_names();
+        else
+            for (const auto& b : kBuiltinSchemes)
+                if (model.*b.flag) enabled_now.push_back(b.name);
         for (std::vector<std::string>* dst : {
                  &model.phase_session.enabled_builtin_schemes,
                  &model.bifurcation_session.enabled_builtin_schemes,
@@ -17370,15 +17639,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(cx);
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
-        if (ImGui::BeginCombo("##topsyssel", preview.c_str())) {
+        if (ImGui::BeginCombo("##topsyssel", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
+            // Группы по вкладкам Library: ODE, DAE, MAP. ДАУ считает пока только
+            // Analysis (схемы DAE BDF1 / Trapezoidal); другие вкладки откажут при Run.
+            const LibraryListCache& cache = library_list_cached(lib);
             int listed = 0;
-            for (const auto& nm : lib.list()) {
-                // Ticked off in the Library tab. The active system stays listed
-                // regardless, so the combo never previews a name it can't show.
-                if (model.system_hidden(nm) && model.name != nm) continue;
-                ++listed;
-                if (ImGui::Selectable(nm.c_str(), model.name == nm))
-                    apply_system_switch(model, lib, nm);
+            for (int group = 0; group < kLibTabCount; ++group) {
+                const bool dae = (LibTab)group == LibTab::Dae;
+                bool header = false;
+                for (size_t i = 0; i < cache.names.size(); ++i) {
+                    const std::string& nm = cache.names[i];
+                    if (cache.tab[i] != group) continue;
+                    // Ticked off in the Library tab. The active system stays listed
+                    // regardless, so the combo never previews a name it can't show.
+                    if (model.system_hidden(nm) && model.name != nm) continue;
+                    if (!header) { ImGui::SeparatorText(kLibTabName[group]); header = true; }
+                    ++listed;
+                    if (ImGui::Selectable(nm.c_str(), model.name == nm))
+                        apply_system_switch(model, lib, nm);
+                    if (dae && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("DAE: DAE methods in Analysis on the GPU;\n"
+                                          "with 'Solve as ODE' (Library -> DAE) — every tab and ODE scheme");
+                }
             }
             if (listed == 0) ImGui::TextDisabled("(all systems hidden in Library)");
             ImGui::EndCombo();
@@ -17575,13 +17857,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the
         // editor works on model.library_edit_buffer, a scratch AppModel, so it never touches the
         // system active in Parametric/Phase/Basins/FastSync.
-        if (ImGui::Begin("Editor")) {
-            if (model.library_edit_mode == AppModel::LibraryEditMode::None)
-                draw_library_list(model, lib);
-            else
-                draw_library_editor(model, lib, cb);
+        //
+        // Две вкладки: ODE (бывшая Editor — "###Editor" сохраняет её место в
+        // imgui.ini) и DAE. Редактор открывается в той вкладке, к которой
+        // относится черновик; вторая в это время показывает свой список.
+        // Три вкладки: ODE (бывшая Editor), DAE, MAP.
+        const bool editing = model.library_edit_mode != AppModel::LibraryEditMode::None;
+        const LibTab edit_tab = lib_tab_of(model.library_edit_buffer->is_dae,
+                                           model.library_edit_buffer->is_map);
+        static const char* const kLibWindow[kLibTabCount] =
+            { "ODE###Editor", "DAE###LibraryDAE", "MAP###LibraryMAP" };
+        ImGuiID ode_dock = 0;
+        for (int t = 0; t < kLibTabCount; ++t) {
+            // Впервые — в тот же узел дока, что и ODE, чтобы встать рядом вкладкой.
+            if (t > 0 && ode_dock != 0) ImGui::SetNextWindowDockID(ode_dock, ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(kLibWindow[t])) {
+                if (editing && edit_tab == (LibTab)t) draw_library_editor(model, lib, cb);
+                else                                  draw_library_list(model, lib, (LibTab)t);
+            }
+            if (t == 0) ode_dock = ImGui::GetWindowDockID();
+            ImGui::End();
         }
-        ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Analysis) {
         // режим анализа: панель настроек + окна проекций (докаются пользователем)

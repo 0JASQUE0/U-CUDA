@@ -1,5 +1,6 @@
 ﻿#include "krs_cpu.h"
 #include "adaptive_settings.h"   // adaptive_ctrl_source
+#include "codegen.hpp"           // step_body_uses_time: явное время t на CPU пока нет
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -575,7 +576,7 @@ std::string extract_through_function(const std::string& src, const std::string& 
 }
 
 // Из signal_metrics.template.cu — то, чем GPU-ядра метрик сводят точку: номера метрик
-// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats и smFinalize; из
+// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats, smEquilibrium и smFinalize; из
 // cudaLibrary.cu — ucuda_heapsort (медиана). Сами циклы и ядра шаблона не нужны.
 // Пусто — что-то не нашлось.
 std::string extract_metrics_pieces(const std::string& tmpl, const std::string& lib) {
@@ -583,7 +584,8 @@ std::string extract_metrics_pieces(const std::string& tmpl, const std::string& l
                                                       "__device__ __host__ void ucuda_heapsort(");
     const size_t b = tmpl.find("#define SIGM_MAX");
     const size_t e = tmpl.find("// loopCalculateDiscreteModelPeaks_int + MetricsAccum", b == std::string::npos ? 0 : b);
-    const std::string fin = extract_through_function(tmpl, "__device__ int smFinalize(", "__device__ int smFinalize(");
+    // smEquilibrium (итог точки в равновесии) стоит прямо перед smFinalize — берём обе.
+    const std::string fin = extract_through_function(tmpl, "__device__ __host__ __forceinline__ int smEquilibrium(", "__device__ int smFinalize(");
     if (heap.empty() || b == std::string::npos || e == std::string::npos || fin.empty()) return {};
     return heap + "#define SIGM_MINMAX_INTERP 1\n" + tmpl.substr(b, e - b) + fin;
 }
@@ -915,6 +917,11 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
                                 const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
     endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr; phase_ = nullptr;
+    // Явное время t на CPU ещё не проведено (этап 2): cl.exe ответил бы "ucuda_t: undeclared".
+    if (step_body_uses_time(rhs)) {
+        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
+        return false;
+    }
     std::string why;
     if (vcvars_path(why).empty()) {
         diags.push_back({ 0, "CPU compiler unavailable: " + why });
@@ -1063,6 +1070,10 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
                          KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags) {
     release();
+    if (step_body_uses_time(body)) {
+        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
+        return false;
+    }
 
     // Индексы проверяем ДО компиляции: в нативном коде выход за границу X[]
     // — это порча стека вызывающего, а не понятная ошибка.

@@ -349,6 +349,14 @@ public:
     // редактируемые UI-поля (UI читает/пишет напрямую)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
     bool is_map = false;
+    // ДАУ: живёт на вкладке Library → DAE, в анализ пока не идёт (решателей нет).
+    // alg_text — алгебраические переменные (z), vars_text у ДАУ — дифференциальные (x).
+    bool is_dae = false;
+    std::string alg_text;
+    std::string dae_index_text;    // "x=1, lambda=3", см. SystemRecord
+    bool dae_as_ode = false;       // ДАУ -> ОДУ подстановкой z (см. SystemRecord)
+    // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
+    bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;
     std::string latex_text;        // распознанный/введённый LaTeX (правится в UI)
     std::string plain_text;        // обычный синтаксис (режим Plain)
@@ -567,6 +575,19 @@ public:
     std::string     edit_original_name;      // on-disk name at the moment Edit was pressed
     std::string     edit_error;              // inline validation / rename error in the editor
     std::unique_ptr<AppModel> library_edit_buffer; // scratch model the editor actually edits
+
+    // Редактор ДАУ: результат parse_dae для текущего текста черновика. Разбор
+    // идёт только при смене ввода (key), не каждый кадр — в нём regex.
+    struct DaeEditorState {
+        std::string key;                    // ввод, по которому получен результат
+        bool        ok = false;
+        std::string message;                // ошибка или сводка (индексы, t)
+        std::vector<std::string> vars;      // x, затем z — для полей НУ
+        std::vector<std::string> params;
+        bool        reducible = false;      // сводится к ОДУ подстановкой z (dae_reduce_to_ode)
+        std::string reduce_msg;             // z(x) или почему не сводится
+    };
+    DaeEditorState dae_editor;
 
     // режим приложения и сессия анализа (слой 2)
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,

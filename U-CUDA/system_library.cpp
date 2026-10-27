@@ -130,7 +130,12 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "note", r.note);
     // String, not bool: record_from_json feeds unknown keys to parse_string(),
     // which throws on a bool — so an older build must still be able to skip it.
-    kv(o, "kind", r.is_map ? "map" : "ode");
+    kv(o, "kind", r.is_dae ? "dae" : r.is_map ? "map" : "ode");
+    if (r.is_dae) {
+        kv(o, "alg_text", r.alg_text);
+        kv(o, "dae_index_text", r.dae_index_text);
+        kv(o, "dae_as_ode", r.dae_as_ode ? "1" : "0");   // строкой — см. "kind"
+    }
     kv(o, "mode", r.mode);
     kv(o, "latex_text", r.latex_text);
     kv(o, "plain_text", r.plain_text);
@@ -347,7 +352,10 @@ SystemRecord record_from_json(const std::string& json) {
             std::string val = p.parse_string();
             if (key == "name") r.name = val;
             else if (key == "note") r.note = val;
-            else if (key == "kind") r.is_map = (val == "map");
+            else if (key == "kind") { r.is_map = (val == "map"); r.is_dae = (val == "dae"); }
+            else if (key == "alg_text") r.alg_text = val;
+            else if (key == "dae_index_text") r.dae_index_text = val;
+            else if (key == "dae_as_ode") r.dae_as_ode = (val == "1" || val == "true");
             else if (key == "mode") r.mode = val;
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;

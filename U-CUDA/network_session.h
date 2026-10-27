@@ -79,6 +79,7 @@ struct NetworkConfig {
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // ---- Интегрирование ----
     std::string h_text           = "0.01";

@@ -275,15 +275,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         view_valid = false;
         swap_axes_cached_ = swap_axes;
     }
-    std::vector<double> swap_buf;
-    const double* eff_values = values;
+    // Транспонированная копия values строится только при заливке текстуры (ниже), не на каждом
+    // кадре: на 10000² это ~1 с на кадр. Подсказка читает одну ячейку прямо из values.
+    const int data_nx = nx, data_ny = ny;
     if (swap_axes) {
-        swap_buf.resize((size_t)nx * (size_t)ny);
-        for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i)
-                swap_buf[(size_t)i * (size_t)ny + (size_t)j]
-                    = values[(size_t)j * (size_t)nx + (size_t)i];
-        eff_values = swap_buf.data();
         std::swap(nx, ny);
         std::swap(param_lo_x, param_lo_y);
         std::swap(param_hi_x, param_hi_y);
@@ -306,6 +301,16 @@ void HeatmapView::render(PlotRenderer& renderer,
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
         ensure_tex(nx, ny);
+        std::vector<double> swap_buf;
+        const double* eff_values = values;
+        if (swap_axes) {
+            swap_buf.resize((size_t)data_nx * (size_t)data_ny);
+            for (int j = 0; j < data_ny; ++j)
+                for (int i = 0; i < data_nx; ++i)
+                    swap_buf[(size_t)i * (size_t)data_ny + (size_t)j]
+                        = values[(size_t)j * (size_t)data_nx + (size_t)i];
+            eff_values = swap_buf.data();
+        }
         // Маска — в координатах данных, а сетка здесь уже пост-swap: (ix, iy) после swap — это (iy, ix).
         std::function<bool(int, int)> not_computed;
         if (not_computed_data)
@@ -1291,7 +1296,9 @@ void HeatmapView::render(PlotRenderer& renderer,
             // определение) — иначе подсказка и записанное значение расходятся.
             double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
             double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
-            double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
+            // values — в раскладке данных: после swap визуальный (ix, iy) — это ячейка (iy, ix).
+            double v = swap_axes ? values[(size_t)ix * (size_t)data_nx + (size_t)iy]
+                                 : values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
             // Режим — по индексам ДАННЫХ: после swap визуальный (ix, iy) — это (iy, ix).

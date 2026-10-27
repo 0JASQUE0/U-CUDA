@@ -514,9 +514,9 @@ void newton_stage(const SystemEvaluator& ev, const double* X, const double* a,
     ev.eval(X, a, kbuf);
     for (int i = 0; i < n; ++i) Xn[i] = X[i] + hc * kbuf[i];   // explicit-Euler predictor
 
-    const bool   full  = ev.newton_full();
-    const double tol   = ev.newton_tol() > 0.0 ? ev.newton_tol() : 1e-10;
-    const int    maxit = ev.newton_max_iters() > 0 ? ev.newton_max_iters() : 1;
+    const bool   full  = ev.newton_full(a);
+    const double tol   = ev.newton_tol(a) > 0.0 ? ev.newton_tol(a) : 1e-10;
+    const int    maxit = ev.newton_max_iters(a) > 0 ? ev.newton_max_iters(a) : 1;
 
     auto build = [&]() {
         ev.eval_jacobian(Xn, a, Am);
@@ -593,9 +593,9 @@ void newton_stage_cx(const SystemEvaluator& ev, const double* a, ucmplx hc, int 
     ev.eval_complex(Z, a, kbuf);
     for (int i = 0; i < n; ++i) Zn[i] = Z[i] + hc * kbuf[i];   // explicit-Euler predictor
 
-    const bool   full  = ev.newton_full();
-    const double tol   = ev.newton_tol() > 0.0 ? ev.newton_tol() : 1e-10;
-    const int    maxit = ev.newton_max_iters() > 0 ? ev.newton_max_iters() : 1;
+    const bool   full  = ev.newton_full(a);
+    const double tol   = ev.newton_tol(a) > 0.0 ? ev.newton_tol(a) : 1e-10;
+    const int    maxit = ev.newton_max_iters(a) > 0 ? ev.newton_max_iters(a) : 1;
 
     auto build = [&]() {
         ev.eval_jacobian_complex(Zn, a, Am);

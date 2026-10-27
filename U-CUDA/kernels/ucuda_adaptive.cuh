@@ -646,6 +646,16 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
 #if !defined(UCUDA_ADAPT_LAYOUT_ONLY) && !defined(UCUDA_ADAPTIVE_DRIVER_DONE)
 #define UCUDA_ADAPTIVE_DRIVER_DONE
 
+// Stop в циклах шагов (раз в CHECK_INTERVAL принятых шагов). Флаг лежит в памяти хоста, и
+// прямое чтение в каждой нити свипа шло через PCIe по одному; в модулях свипов (шаблон с
+// cudaLibrary.cu) его читают через зеркало ucudaCancelRequested — как циклы постоянного шага.
+// На CPU (DLL) и в модулях без cudaLibrary.cu — прямое чтение, как раньше.
+#if defined(__CUDA_ARCH__) && defined(UCUDA_HAVE_CANCEL_MIRROR)
+#define UCUDA_AD_CANCELLED(f) ucudaCancelRequested(f)
+#else
+#define UCUDA_AD_CANCELLED(f) ((f) != nullptr && *(f) != 0)
+#endif
+
 // Размер массивов состояния: на GPU — AMOUNTOFX шаблона, на CPU — потолок
 // UCUDA_AD_MAXN (размерность там известна только во время выполнения).
 #ifndef UCUDA_AD_NMAX
@@ -720,7 +730,36 @@ UCUDA_HD inline void ucuda_step_ctrl(int ctrl, const UcudaCtlIn& in, UcudaCtlMem
 // На GPU это UcudaKrsFns (ниже) — вызовы ucuda_krs_*, которые определяет шаблон;
 // на CPU — вычислитель правых частей с таблицами Бутчера (integrator.cpp).
 
+// Явное время t (UCUDA_NONAUTONOMOUS): функции схемы получают время аргументом
+// перед a — rhs(X, t, a, F) в момент t, emb(X, F0, t, a, h, ...) и dprep(..., t, a, h, ...)
+// для шага из t (время стадий печатает кодоген). Время — S.t / S.tp драйвера, в X
+// оно не входит. Без макроса UCUDA_TA/UCUDA_TP пусты, и препроцессор отдаёт прежний
+// текст вызовов — автономные модули не меняются.
+#ifndef UCUDA_TA
+#ifdef UCUDA_NONAUTONOMOUS
+#define UCUDA_TA(t) (t),
+#define UCUDA_TP(decl) decl,
+#else
+#define UCUDA_TA(t)
+#define UCUDA_TP(decl)
+#endif
+#endif
+
 #ifdef UCUDA_AD_KRS_FUNCS
+#ifdef UCUDA_NONAUTONOMOUS
+struct UcudaKrsFns {
+    UCUDA_HD void rhs(const numb* X, const numb t, const numb* a, numb* F) const { ucuda_krs_rhs(X, t, a, F); }
+    UCUDA_HD void emb(const numb* X, const numb* F0, const numb t, const numb* a, const numb h,
+                      numb* Y, numb* E, numb* F1, numb* W) const {
+        ucuda_krs_emb(X, F0, t, a, h, Y, E, F1, W);
+    }
+    UCUDA_HD void dprep(const numb* X, const numb* Y, const numb* F0, const numb* F1,
+                        const numb t, const numb* a, const numb h, numb* W, numb* D) const {
+        ucuda_krs_dprep(X, Y, F0, F1, t, a, h, W, D);
+    }
+    UCUDA_HD void deval(const numb* D, const numb th, numb* Yo) const { ucuda_krs_deval(D, th, Yo); }
+};
+#else
 struct UcudaKrsFns {
     UCUDA_HD void rhs(const numb* X, const numb* a, numb* F) const { ucuda_krs_rhs(X, a, F); }
     UCUDA_HD void emb(const numb* X, const numb* F0, const numb* a, const numb h,
@@ -733,6 +772,7 @@ struct UcudaKrsFns {
     }
     UCUDA_HD void deval(const numb* D, const numb th, numb* Yo) const { ucuda_krs_deval(D, th, Yo); }
 };
+#endif
 #endif
 
 struct UcudaAdaptState {
@@ -793,8 +833,8 @@ UCUDA_HD inline numb ucuda_ad_hmin_auto(numb t, numb span) {
 
 // Начальный шаг: select_initial_step scipy (Hairer-Nørsett-Wanner I, II.4).
 template <class K>
-UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, const numb* X, const numb* F0, const numb* a,
-                                 const UcudaAdaptParams& P, UcudaAdaptStats& st) {
+UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, UCUDA_TP(const numb t0) const numb* X, const numb* F0,
+                                 const numb* a, const UcudaAdaptParams& P, UcudaAdaptStats& st) {
     if (!(P.span > 0)) return 0;
     numb s0 = 0, s1 = 0;
     for (int i = 0; i < n; ++i) {
@@ -807,7 +847,7 @@ UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, const numb* X, const numb* F
     h0 = fmin(h0, P.span);
     numb X1[UCUDA_AD_NMAX], F1[UCUDA_AD_NMAX];
     for (int i = 0; i < n; ++i) X1[i] = X[i] + h0 * F0[i];
-    k.rhs(X1, a, F1);
+    k.rhs(X1, UCUDA_TA(t0 + h0) a, F1);
     st.nrhs += 1;
     numb s2 = 0;
     for (int i = 0; i < n; ++i) {
@@ -828,7 +868,8 @@ UCUDA_HD inline numb ucuda_ad_h0(const K& k, int n, const numb* X, const numb* F
 // суммы квадратов без деления на n, порог 1e-10 по сумме, hmax по умолчанию —
 // весь интервал.
 template <class K>
-UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, const numb* X, const numb* F0, const numb* a,
+UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, UCUDA_TP(const numb t0) const numb* X,
+                                        const numb* F0, const numb* a,
                                         const UcudaAdaptParams& P, UcudaAdaptStats& st) {
     const numb hmax = (P.hmax > 0 && P.hmax < UCUDA_AD_BIG) ? P.hmax : P.span;   // +inf (и 0) — без ограничения
     if (!(hmax > 0)) return 0;
@@ -842,7 +883,7 @@ UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, const numb* X, const 
     h = fmin(h, hmax);
     numb X1[UCUDA_AD_NMAX], F1[UCUDA_AD_NMAX];
     for (int i = 0; i < n; ++i) X1[i] = X[i] + h * F0[i];
-    k.rhs(X1, a, F1);
+    k.rhs(X1, UCUDA_TA(t0 + h) a, F1);
     st.nrhs += 1;
     numb der2 = 0;
     for (int i = 0; i < n; ++i) {
@@ -867,7 +908,7 @@ UCUDA_HD inline void ucuda_ad_init(UcudaAdaptState& S, const K& k, int n, const 
     S.st.nacc = 0; S.st.nrej = 0; S.st.nforced = 0; S.st.nrhs = 1;
     for (int i = 0; i < n; ++i) S.X[i] = X0[i];
     S.t = t0;
-    k.rhs(S.X, a, S.F0);
+    k.rhs(S.X, UCUDA_TA(t0) a, S.F0);
 #ifndef UCUDA_AD_NO_DENSE
     for (int i = 0; i < n; ++i) { S.Xp[i] = S.X[i]; S.Fp[i] = S.F0[i]; }
     S.dense_ready = 0;
@@ -880,8 +921,8 @@ UCUDA_HD inline void ucuda_ad_init(UcudaAdaptState& S, const K& k, int n, const 
     S.log = log; S.log_cap = log_cap; S.log_n = 0;
     ucuda_ad_prepare_ctl(P, S.cc);
     S.h = P.h0 > 0 ? P.h0
-        : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, S.X, S.F0, a, P, S.st)
-                         : ucuda_ad_h0(k, n, S.X, S.F0, a, P, S.st));
+        : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, UCUDA_TA(t0) S.X, S.F0, a, P, S.st)
+                         : ucuda_ad_h0(k, n, UCUDA_TA(t0) S.X, S.F0, a, P, S.st));
     S.hfree = S.h;
 }
 
@@ -898,7 +939,7 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
     S.st.hmin = 0; S.st.hmax = 0; S.st.hsum = 0;
     S.st.nacc = 0; S.st.nrej = 0; S.st.nforced = 0; S.st.nrhs = 1;
     S.t = t0;
-    k.rhs(S.X, a, S.F0);
+    k.rhs(S.X, UCUDA_TA(t0) a, S.F0);
 #ifndef UCUDA_AD_NO_DENSE
     for (int i = 0; i < n; ++i) { S.Xp[i] = S.X[i]; S.Fp[i] = S.F0[i]; }
     S.dense_ready = 0;
@@ -909,8 +950,8 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
     ucuda_ad_prepare_ctl(P, S.cc);
     if (hc > 0 && hc <= UCUDA_AD_BIG) S.h = hc;   // !(<=) отсекает и inf, и NaN
     else S.h = P.h0 > 0 ? P.h0
-             : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, S.X, S.F0, a, P, S.st)
-                              : ucuda_ad_h0(k, n, S.X, S.F0, a, P, S.st));
+             : (P.h0mode == 1 ? ucuda_ad_h0_hairer(k, n, UCUDA_TA(t0) S.X, S.F0, a, P, S.st)
+                              : ucuda_ad_h0(k, n, UCUDA_TA(t0) S.X, S.F0, a, P, S.st));
     S.hfree = S.h;
 }
 
@@ -920,7 +961,7 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
 // принята. Так LLE/LS ведут клоны тем же шагом и заодно контролируют их ошибку.
 struct UcudaAdNoExtra {
     template <class K>
-    UCUDA_HD numb attempt(const K&, const numb*, const numb*, const numb*, const numb*, numb) { return 0; }
+    UCUDA_HD numb attempt(const K&, UCUDA_TP(numb) const numb*, const numb*, const numb*, const numb*, numb) { return 0; }
     UCUDA_HD void commit() {}
 };
 
@@ -963,11 +1004,11 @@ UCUDA_HD inline int ucuda_ad_try_x(UcudaAdaptState& S, const K& k, const numb* a
             tn = tEnd; h = tEnd - S.t; last = 1;
         }
 
-        k.emb(S.X, S.F0, a, h, Y, E, F1, W);
+        k.emb(S.X, S.F0, UCUDA_TA(S.t) a, h, Y, E, F1, W);
 #ifndef UCUDA_AD_NODES_KERNEL   // ядро узлов (свипы) выводит только nacc, nrej, nforced, hsum
         S.st.nrhs += P.emb_rhs;
 #endif
-        const numb err_extra = ext.attempt(k, a, S.X, Y, E, h);
+        const numb err_extra = ext.attempt(k, UCUDA_TA(S.t) a, S.X, Y, E, h);
 
         UcudaCtlIn in;
         in.y0 = S.X; in.y1 = Y; in.yerr = E; in.atol = P.atol; in.c = P.c;
@@ -1064,7 +1105,7 @@ UCUDA_HD inline void ucuda_ad_eval(UcudaAdaptState& S, const K& k, const numb* a
         return;
     }
     if (!S.dense_ready) {
-        k.dprep(S.Xp, S.X, S.Fp, S.F0, a, S.hp, S.W, S.D);
+        k.dprep(S.Xp, S.X, S.Fp, S.F0, UCUDA_TA(S.tp) a, S.hp, S.W, S.D);
         S.st.nrhs += P.dprep_rhs;
         S.dense_ready = 1;
     }
@@ -1223,13 +1264,14 @@ struct UcudaLyapClones {
     bool active;                                   // false — транзиент, клонов ещё нет
 
     template <class K>
-    UCUDA_HD numb attempt(const K& k, const numb* a, const numb* X, const numb* Y, const numb* E, numb h) {
+    UCUDA_HD numb attempt(const K& k, UCUDA_TP(const numb t) const numb* a, const numb* X, const numb* Y,
+                          const numb* E, numb h) {
         if (!active) return 0;
         constexpr int n = AMOUNTOFX;
         numb W[UCUDA_AD_MAXSTAGES * AMOUNTOFX];
         numb worst = 0;
         for (int c = 0; c < NC; ++c) {
-            k.emb(y + c * n, F + c * n, a, h, Yc + c * n, Ec, Fc + c * n, W);
+            k.emb(y + c * n, F + c * n, UCUDA_TA(t) a, h, Yc + c * n, Ec, Fc + c * n, W);
             numb d0 = 0, d1 = 0;
             for (int i = 0; i < n; ++i) {
                 const numb p0 = y[c * n + i] - X[i], p1 = Yc[c * n + i] - Y[i];
@@ -1306,7 +1348,7 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             const bool clipped = (k == 0) || (renorm == 0);   // шаг к границе обрезался
             if (k == 0) { if (!carried) ucuda_lyap_init_clones<NC>(S.X, eps, seq, cl.y, z); }
             else        ucuda_lyap_renorm<NC>(S.X, eps, cl.y, z, k > nW ? acc : accWarm);
-            for (int c = 0; c < NC; ++c) Kf.rhs(cl.y + c * n, a, cl.F + c * n);   // клоны сдвинуты (или новые a) — f заново
+            for (int c = 0; c < NC; ++c) Kf.rhs(cl.y + c * n, UCUDA_TA(S.t) a, cl.F + c * n);   // клоны сдвинуты (или новые a) — f заново
             cl.active = true;
             if (clipped) S.h = S.hfree;
             const int kDone = k;   // блок, который сейчас закрыт
@@ -1335,7 +1377,7 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             if (k > 0)
                 for (int c = 0; c < NC; ++c)
                     if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
-            if (cancelFlag != nullptr && *cancelFlag != 0) return -1;
+            if (UCUDA_AD_CANCELLED(cancelFlag)) return -1;
         }
     }
     if (ucuda_lyap_out(S.X, maxValue)) return 0;   // хвост короче CHECK_INTERVAL

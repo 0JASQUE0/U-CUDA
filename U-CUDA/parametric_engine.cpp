@@ -11,6 +11,7 @@
 
 #include "krs_cpu.h"   // CPU-ветка continuation: КРС -> нативная функция шага
 #include "krs_prep.h"  // стадия предрасчёта КРС (CD fast)
+#include "codegen.hpp" // step_body_uses_time: явное время t в свипах пока не поддержано
 #include "module_lru.h"
 #include "perf_warmup.h"   // прогрев GPU перед замером Performance
 
@@ -177,7 +178,8 @@ constexpr double kNetworkWorkBudget = 1.0e7;
 // дублируются: они настраиваются из GUI, и CPU-ветки читают их через get_peak_config(). Заодно
 // ушло расхождение — kEpsFixedPoint был 1e-8 против 1e-6 в configCUDA.h, из-за чего CPU-ветка
 // ловила fixed point не там, где GPU.
-constexpr int    kCheckInterval      = 100;      // CHECK_INTERVAL
+constexpr int    kCheckInterval      = 100;      // CHECK_INTERVAL: циклы с записью траектории, метрики
+constexpr int    kLoopCheckBlock     = 1000;     // UCUDA_LOOP_CHECK_BLOCK: транзиент, LLE/LS, цикл пиков
 constexpr double kPi    = 3.1415926535897932384626433832795;
 constexpr double kEuler = 2.7182818284590452353602874713527;
 
@@ -252,14 +254,17 @@ static inline int steps_from_time_int(double t, double h)
 // compile-time AMOUNTOFX, здесь она приходит параметром (в NVRTC-сборке AMOUNTOFX как раз
 // раскрывается в amountOfX, т.е. численно это одно и то же).
 // Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point, 0 = unbound). Проверка
-// расходимости — раз в kCheckInterval итераций, как на GPU.
+// расходимости — с тем же шагом, что у GPU-двойника: без записи траектории kLoopCheckBlock,
+// с записью kCheckInterval; БД 1D с записью передаёт kLoopCheckBlock явно (на GPU это цикл пиков).
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
                    int writableVar, numb maxValue,
                    numb* data,
-                   numb* boxMin = nullptr, numb* boxMax = nullptr)
+                   numb* boxMin = nullptr, numb* boxMax = nullptr,
+                   int checkEvery = 0)
 {
+    if (checkEvery <= 0) checkEvery = data != nullptr ? kCheckInterval : kLoopCheckBlock;
     for (size_t i = 0; i < iterations; ++i) {
         if (data != nullptr) {
             // writableVar < 0 -> комбинация первых (до трёх) переменных.
@@ -284,7 +289,7 @@ int cpu_loop_model(KrsCpuStep::StepFn step,
             step(x, a, h);
         }
 
-        if (i % (size_t)kCheckInterval == 0) {
+        if (i % (size_t)checkEvery == 0) {
             numb checker = (numb)0;
             for (int j = 0; j < amountOfX; ++j) checker += std::fabs(x[j]);
             if (std::isnan(checker) || std::isinf(checker)) return REGIME_UNBOUND;
@@ -734,7 +739,8 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
             flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsInBlock, req.amountOfX,
                                   req.pre_scaller, req.writable_var,
-                                  req.max_value, block.data());
+                                  req.max_value, block.data(),
+                                  nullptr, nullptr, kLoopCheckBlock);   // на GPU — цикл пиков
         // Same reasoning as above: a map's period-1 orbit is a branch, not a blank.
         if (flag != REGIME_OSCILLATION &&
             !(req.emit_all_samples && flag == REGIME_FIXED_POINT)) { finish_point(flag); continue; }
@@ -1780,6 +1786,19 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
         const numb dt = h_local * (numb)req.pre_scaller;
         double r[SIGM_COUNT];
         for (int m = 0; m < SIGM_COUNT; ++m) r[m] = NaN;
+        // Равновесие — метрики самой точки (smEquilibrium в signal_metrics.template.cu).
+        if (flag == REGIME_FIXED_POINT && pointsInBlock > 0) {
+            const double y = (double)block[(size_t)pointsInBlock - 1];
+            r[SIGM_MAX] = r[SIGM_MIN] = r[SIGM_MEAN] = y;
+            r[SIGM_RANGE] = r[SIGM_VARIANCE] = 0.0;
+            if (wantBox) r[SIGM_VOLUME] = 0.0;
+            r[SIGM_MEAN_FREQ] = r[SIGM_MEDIAN_FREQ] = 0.0;
+            res.flags[(size_t)j] = flag;
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((mask >> m) & 1) res.values[m][(size_t)j] = r[m];
+            done();
+            continue;
+        }
         numb mxv = acc.mx, mnv = acc.mn;   // как smFinalize: интерполяция только расширяет
         if (ex.haveMax && ex.mx > mxv) mxv = ex.mx;
         if (ex.haveMin && ex.mn < mnv) mnv = ex.mn;
@@ -1823,9 +1842,6 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
                 const numb med = (nI & 1) ? times[(size_t)(nI / 2)]
                                           : (numb)0.5 * (times[(size_t)(nI / 2 - 1)] + times[(size_t)(nI / 2)]);
                 if (med > (numb)0) r[SIGM_MEDIAN_FREQ] = (double)((numb)1 / med);
-            } else if (flag == REGIME_FIXED_POINT) {
-                r[SIGM_MEAN_FREQ]   = 0.0;
-                r[SIGM_MEDIAN_FREQ] = 0.0;
             }
         }
 
@@ -1916,47 +1932,100 @@ struct ParametricEngine::Impl {
     int        cc_major = 0;
     int        cc_minor = 0;
 
-    // Сигнальная страница расчёта: [0] — запрос отмены, [1] — тики прогресса.
+    // Сигналы расчёта: запрос отмены и тики прогресса.
     //
-    // Mapped host memory, а НЕ память устройства. На WDDM любой cudaMemcpy,
-    // выданный пока работает ядро, встаёт за ним в очередь и блокирует хост:
-    // цикл опроса делал ровно одну итерацию, и ни прогресс, ни Cancel не
-    // работали. Через mapped-страницу хост читает и пишет обычными load/store,
-    // без единого вызова CUDA.
+    // Отмена — в mapped host memory: на WDDM синхронный cudaMemcpy, выданный пока работает
+    // ядро, встаёт за ним в очередь и блокирует хост, а через mapped-страницу хост пишет
+    // флаг обычным store, без вызовов CUDA.
+    //
+    // Тики — в памяти устройства. Раньше они тоже лежали в mapped-странице, но атомарные
+    // операции туда идут через PCIe строго по одной (~1.1 мкс): во float-сборке это стоило
+    // больше самого счёта (БД 2D, Лоренц, 600x600, Эйлер: 0.98 с против 0.18 с без прогресса),
+    // и все схемы шли одинаково. Хост читает счётчик асинхронной копией в pinned-память из
+    // своего неблокирующего потока: она идёт параллельно с ядром (проверено на WDDM — значения
+    // приходят каждые ~60 мс, пока ядро работает), в отличие от синхронного cudaMemcpy.
     struct RunSignals {
-        int* host = nullptr;   // страница на хосте
-        int* dev  = nullptr;   // её же device-проекция для ядра
+        int* host = nullptr;          // mapped-страница: [0] — отмена
+        int* dev  = nullptr;          // её device-проекция для ядра
+        int* devTicks  = nullptr;     // счётчик тиков в памяти устройства (его прибавляют ядра)
+        int* hostTicks = nullptr;     // pinned-копия для опроса
+        cudaStream_t pollStream = nullptr;
+        bool copyPending = false;
+        int  lastTicks   = 0;
 
         bool alloc(std::string& err) {
-            CUresult r = cuMemHostAlloc((void**)&host, 2 * sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP);
+            CUresult r = cuMemHostAlloc((void**)&host, sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP);
             if (r != CUDA_SUCCESS) { err = "cuMemHostAlloc(signals): " + cu_err(r); return false; }
             r = cuMemHostGetDevicePointer((CUdeviceptr*)&dev, host, 0);
             if (r != CUDA_SUCCESS) { err = "cuMemHostGetDevicePointer: " + cu_err(r); release(); return false; }
-            host[0] = 0; host[1] = 0;
+            host[0] = 0;
+            // Неблокирующий: ядра идут в legacy-поток 0, и обычный поток ждал бы их.
+            cudaError_t e = cudaStreamCreateWithFlags(&pollStream, cudaStreamNonBlocking);
+            if (e == cudaSuccess) e = cudaMalloc((void**)&devTicks, sizeof(int));
+            if (e == cudaSuccess) e = cudaMallocHost((void**)&hostTicks, sizeof(int));
+            if (e != cudaSuccess) { err = std::string("progress counter: ") + cudaGetErrorString(e); release(); return false; }
+            resetTicks();
             return true;
         }
-        void release()          { if (host) { cuMemFreeHost(host); host = nullptr; dev = nullptr; } }
+        void release() {
+            if (pollStream) { cudaStreamSynchronize(pollStream); cudaStreamDestroy(pollStream); pollStream = nullptr; }
+            if (devTicks)   { cudaFree(devTicks); devTicks = nullptr; }
+            if (hostTicks)  { cudaFreeHost(hostTicks); hostTicks = nullptr; }
+            if (host) { cuMemFreeHost(host); host = nullptr; dev = nullptr; }
+            copyPending = false; lastTicks = 0;
+        }
         int* cancelArg()  const { return dev; }
-        int* progressArg()const { return dev ? dev + 1 : nullptr; }
-        void resetTicks()       { if (host) ((volatile int*)host)[1] = 0; }
-        int  ticks()      const { return host ? ((volatile int*)host)[1] : 0; }
+        int* progressArg()const { return devTicks; }
+        // Перед запуском, когда ядер нет: обнуление идёт в потоке опроса и дожидается конца,
+        // поэтому ни недочитанная копия, ни старое значение до нового ядра не доживут.
+        void resetTicks() {
+            lastTicks = 0;
+            if (!devTicks) return;
+            cudaStreamSynchronize(pollStream);
+            cudaMemsetAsync(devTicks, 0, sizeof(int), pollStream);
+            cudaStreamSynchronize(pollStream);
+            copyPending = false;
+        }
+        // Забрать пришедшую копию и выдать следующую; final — дождаться точного значения
+        // (ядро уже закончилось).
+        void pollTicks(bool final) {
+            if (!devTicks) return;
+            if (final) {
+                cudaStreamSynchronize(pollStream);
+                cudaMemcpyAsync(hostTicks, devTicks, sizeof(int), cudaMemcpyDeviceToHost, pollStream);
+                cudaStreamSynchronize(pollStream);
+                lastTicks = *hostTicks;
+                copyPending = false;
+                return;
+            }
+            if (copyPending && cudaStreamQuery(pollStream) == cudaSuccess) {
+                lastTicks = *hostTicks;
+                copyPending = false;
+            }
+            if (!copyPending) {
+                cudaMemcpyAsync(hostTicks, devTicks, sizeof(int), cudaMemcpyDeviceToHost, pollStream);
+                cudaStreamQuery(pollStream);   // WDDM: вытолкнуть копию драйверу сразу
+                copyPending = true;
+            }
+        }
+        int  ticks()      const { return lastTicks; }
         void raiseCancel()      { if (host) ((volatile int*)host)[0] = 1; }
     };
 
-    // Шаг тика прогресса. Кратен CHECK_INTERVAL, потому что тики ставятся в уже
-    // существующей проверке расходимости, и подобран так, чтобы точка отчиталась
-    // около 64 раз за свою работу: этого хватает на гладкий бар и не создаёт
-    // давки на одном адресе.
+    // Шаг тика прогресса. Кратен шагу проверки, потому что тики ставятся в уже
+    // существующей проверке расходимости: kLoopCheckBlock (1000) кратен и ему, и
+    // CHECK_INTERVAL циклов с записью траектории. Подобран так, чтобы точка отчиталась
+    // около 64 раз за свою работу: этого хватает на гладкий бар.
     static int progress_stride_for(size_t stepsPerPoint) {
         int s = (int)(stepsPerPoint / 64);
-        s -= s % kCheckInterval;
-        if (s < kCheckInterval) s = kCheckInterval;
+        s -= s % kLoopCheckBlock;
+        if (s < kLoopCheckBlock) s = kLoopCheckBlock;
         return s;
     }
 
     // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
-    // и передавая Cancel в ядро. В теле цикла не должно быть вызовов CUDA, кроме
-    // cudaStreamQuery — см. комментарий к RunSignals.
+    // и передавая Cancel в ядро. В теле цикла не должно быть синхронных вызовов CUDA:
+    // только cudaStreamQuery и асинхронная копия тиков в своём потоке (RunSignals).
     bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
                            const std::shared_ptr<std::atomic<bool>>& cancel,
                            const std::shared_ptr<std::atomic<float>>& progress,
@@ -1971,16 +2040,17 @@ struct ParametricEngine::Impl {
         //     оставалось предыдущее значение.
         // Пока чанк считался секундами, оба окна были незаметны; после ускорения dbscan
         // (в 20-100 раз) чанки стали короткими, и стыки полезли наружу.
-        auto publish = [&]() {
+        auto publish = [&](bool final) {
             if (!progress || ticksTotal <= 0.0) return;
+            sig.pollTicks(final);
             double f = (ticksBefore + (double)sig.ticks()) / ticksTotal;
             if (f > 1.0) f = 1.0;
             progress->store((float)f, std::memory_order_relaxed);
         };
         for (;;) {
-            publish();
+            publish(false);
             cudaError_t q = cudaStreamQuery(stream);
-            if (q == cudaSuccess) { publish(); break; }
+            if (q == cudaSuccess) { publish(true); break; }
             if (q != cudaErrorNotReady) {
                 err = std::string("CUDA stream query: ") + cudaGetErrorString(q);
                 return false;
@@ -1989,7 +2059,9 @@ struct ParametricEngine::Impl {
                 sig.raiseCancel();
                 cancelSent = true;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            // 2 мс, а не 16: GPU простаивает, пока хост не заметит конец работы и не выдаст
+            // следующую, а у БД 2D таких ожиданий два на чанк (интегрирование, DBSCAN).
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         if (cancelSent) reset_cancel_mirrors();
         return true;
@@ -2642,6 +2714,15 @@ struct ParametricEngine::Impl {
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Явное время t (этап 2) в свипах ещё не проведено: шаблоны объявляют шаг без
+        // ucuda_t, и NVRTC ответил бы непонятным "identifier ucuda_t is undefined".
+        for (const auto& sub : subs)
+            if ((sub.first == "{{KRS_BODY}}" || sub.first == "{{KRS_RHS_BODY}}")
+                && step_body_uses_time(sub.second)) {
+                err = "explicit time t: parameter sweeps (bifurcation, LLE/LS, metrics, basins, "
+                      "FastSync, Order, Network) do not support it yet; use Analysis";
+                return false;
+            }
         // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
         // циклы cudaLibrary.cu зовут ucudaKrsPrep / calculateDiscreteModelP. Их определения
         // встают в шаблон: одной единицей трансляции — перед #include "cudaLibrary.cu"
@@ -7666,11 +7747,27 @@ struct ParametricEngine::Impl {
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
+        // helpfulArray нужен DBSCAN только запасным путём — когда строка ячейки не влезает в
+        // shared (P > cap). Худший случай известен заранее: одномерной ветке хватает всегда
+        // (строка растёт до 4096 >= peakStride), двумерной — если строка из peakStride пиков
+        // помещается в shared блока с opt-in. Тогда буфер в бюджет не входит, и чанки вдвое
+        // крупнее: на каждый чанк приходятся хвост последней волны и ожидания хоста.
+        const bool dbscan1d_req = (req.mult_peak == 0 || req.mult_interval == 0);
+        bool needHelpful = false;
+        if (!dbscan1d_req) {
+            const size_t capWorst  = (peakStride + 31) & ~(size_t)31;
+            const size_t perWarp   = capWorst * (2 * sizeof(numb) + sizeof(int));
+            int optin = 0;
+            cuDeviceGetAttribute(&optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device);
+            const size_t shLimit = (size_t)optin > (size_t)48 * 1024 ? (size_t)optin : (size_t)48 * 1024;
+            needHelpful = perWarp > shLimit;
+        }
+
         // Бюджет больше не зависит от длины траектории вообще: сэмплы
         // потребляются на лету (PeakStream), в памяти остаются только пики.
         // tMax/h теперь влияет на время счёта, но не на число ячеек в чанке.
         size_t baseMemPerSystem = peakStride * 2 * sizeof(numb)                  // d_outPeaks + d_intervals
-                                + helpfulStride * sizeof(numb)                   // d_helpfulArray
+                                + (needHelpful ? helpfulStride * sizeof(numb) : 0) // d_helpfulArray
                                 + 2 * sizeof(int);                               // d_amountOfPeaks + d_dbscanResult
         size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
         if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
@@ -7766,7 +7863,8 @@ struct ParametricEngine::Impl {
         BIF2D_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
         BIF2D_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_outPeaks");
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
-        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
+        // Без запасного пути DBSCAN буфер не читается — заглушка на один элемент.
+        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      (needHelpful ? nPtsLimiter * helpfulStride : 1) * sizeof(numb)), "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
         BIF2D_CHECK(cudaMalloc((void**)&d_maxPeaks,          sizeof(int)),                                                  "cudaMalloc d_maxPeaks");
         if (!sig.alloc(res.error)) { cleanup(); return res; }

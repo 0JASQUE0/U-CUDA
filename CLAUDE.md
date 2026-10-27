@@ -220,6 +220,74 @@ Symbolic differentiation does exist, but it serves **only the implicit schemes**
 
 ---
 
+## Explicit time t (non-autonomous systems) — in progress
+A right-hand side may use `t` (not a variable or parameter). Autonomous systems must stay
+**byte-identical** in every generated body — check with a dump of `codegen_scheme` /
+`codegen_adaptive` / CPU / complex-core output for all `library/` systems before and after.
+- `system_uses_time(System)` (AST scan); the body then reads `kStepTimeArg` = `ucuda_t`, and its
+  signature becomes `calculateDiscreteModel(X, ucuda_t, a, h)`. Engines detect it from the body
+  text (`step_body_uses_time`), like `needs_complex` — the body is already the cache key.
+- Stage times are printed by the scheme (`rhs_over(s, st, tname)`, `time_name`): RK4
+  `ucuda_ts = ucuda_t + {0, h/2, h/2, h}`, explicit RK tables `ucuda_t + Cs[i]*h` (`Cs` = row sums
+  of A, `stage_time_table`). One t for all stages silently drops the order to 1.
+- Supported so far: Euler, Euler-Cromer, Explicit Midpoint, RK4, DOPRI78(+legacy), RK45, DOP853,
+  Implicit Euler / Midpoint, CD / CD {1-0} / CD FP (explicit half at the start of its sub-interval,
+  implicit half at its end), GBS (leapfrog z_m at t + m*hs), Extr/Comp over any of them (each substep
+  shadows `ucuda_t`; lambda form gets it as a second argument) (`scheme_supports_time`), all DAE
+  methods; Analysis on GPU —
+  fixed step (`phase_kernel`, t_n = n*h from an integer counter, never `t += h`) and adaptive
+  RK45 / DOP853 / DOPRI78 (`compile_adaptive`).
+- Sweeps are the open part: the loops in cudaLibrary.cu (`loopCalculateDiscreteModel*_int_core`,
+  ~15 calls of `calculateDiscreteModelP`) and the templates do not know the absolute step index —
+  transient and record are separate calls — so time needs a step-index argument threaded through
+  every loop, wrapper and kernel (keeping autonomous text byte-identical). Not done.
+  Not yet (clear errors): other schemes, GBS/Extr adaptive, Extr/Comp wrappers
+  (`step_body_uses_time(base_body)`), sweeps (`build_module` refuses), CPU paths (`krs_cpu`
+  compile refuses, CPU Analysis refuses).
+- Adaptive: with `#define UCUDA_NONAUTONOMOUS` the module's `ucuda_krs_rhs/emb/dprep` take
+  `ucuda_t` before `a`, and the driver passes `S.t` / `t0 + h0` / `S.tp` through `UCUDA_TA(t)` /
+  `UCUDA_TP(decl)` (empty otherwise, so autonomous modules preprocess to the old text). The emb body
+  prints stage times `ucuda_t + Cs[i]*h`, f(Y) at `ucuda_t + h`; DOP853 dense stages use `CE[i]`.
+  DOPRI78's cubic Hermite dense output is coarse on long steps (h ~ 0.8 → 5e-3 between nodes) —
+  that is the interpolant, not time handling.
+- t is never part of X: not in overflow/divergence thresholds, fixed-point check, error norms,
+  DBSCAN, clones.
+- `sysparse` strips `(t)` after a variable (`x(t)` → `x`) but keeps it after a math function
+  (`sin(t)`).
+
+## DAE (Library → DAE tab) — in progress
+- `dae_ir.h` (header-only): `parse_dae` → `DaeSystem`; `as_codegen_system()` gives a `System` with
+  `vars = [x; z]`, `rhs = [f; g]`, `dae_nx` = number of x (`-1` = ODE). `AppModel::build_system` returns
+  it for `is_dae` records.
+- A DAE method is an ordinary step body over X = [x; z] (`codegen_dae_scheme`), so it runs in the
+  existing kernels with the usual a[] layout and Newton tail. Methods (`dae_scheme_names`):
+  BDF1, Trapezoidal, TR-BDF2 (two passes of `scheme_implicit_common` in their own blocks, h shadowed),
+  Rosenbrock ROS2 (`dae_ros2`; with t it adds +-gamma h^2 F_t, F_t from `pn_diff` by t), CD and
+  CD + Yoshida-4 (`dae_cd`, level B: D explicit forward with z re-solved after every x update, D*
+  implicit reverse with one Newton on (x_i, z)), and explicit Euler / Midpoint / RK4 with the
+  constraint solved per stage (`dae_explicit_rk`). CD and the explicit ones are index 1 only —
+  `dae_require_index1` refuses a constraint with no z in it. Verified against the CD-DAE report:
+  tables 4, 5, 7 reproduce (IE, trapezoid, CD, RK4+constraint, explicit RK2); CD + Yoshida-4 is order 4.
+- Level A ("Solve as ODE", record field `dae_as_ode`): `dae_reduce_to_ode` solves each constraint that
+  is linear in exactly one remaining z (z = -rem/coef, AST substitution, `pn_print` back to text) and
+  returns an ODE in x; then `AppModel::build_system` hands that ODE to every tab and ODE scheme (CD,
+  Comp/Yoshida, implicit, sweeps). z is not part of the state there; in Analysis z(x) are observables
+  (`PhaseAnalysisSession::observables/obs_exprs`): evaluated on the CPU after the run and appended to every
+  point after the state coordinates, so Phase 2D / 3D axes nv + j pick them (`phase_axis_combo`).
+- Consistent initial z: `dae_consistent_z` (CPU, `SystemEvaluator` on a copy with dae_nx = -1) solves
+  g(x0, z) = 0 before Analysis runs; index >= 2 is reported in `AnalysisResult::dae_status`.
+- Guards: `codegen_scheme` / `codegen_adaptive` refuse `dae_nx >= 0`; `SystemEvaluator` refuses it (it
+  would integrate g as a derivative). Analysis on the CPU builds the DAE body with `krs_cpu` instead.
+  Other tabs with a native DAE get a valid step body but are untested; with "Solve as ODE" they are ODE.
+- Not yet: CD for index 2 (the report's secant-on-z variant), index-3 Newton scaling / GGL (stage 5).
+- Newton for DAE: the z predictor is the old value, so a fast multiplier (pendulum) needs ~9 iterations;
+  a step that runs out of iterations is accepted unconverged and the constraint drifts until the run
+  diverges. DAE presets and new DAE systems use full Newton, 25 iterations. The DAE body also stops on a
+  relative test (||dX||^2 < tol^2 |X|^2): on index 2-3 the absolute tol is below the round-off of the
+  correction and every step ran to max_iters.
+- Index 3: BDF1 holds the single pendulum, but the double pendulum diverges at any h (earlier for
+  smaller h — unscaled index-3 Newton, cond ~1/h^2). Stage 5 (scaling / GGL).
+
 ## Adaptive step (RK45 / DOPRI78 / DOP853)
 Fixed step stays the default and must stay **bit-for-bit** unchanged: the adaptive path is
 a separate module/branch everywhere, never an `if` inside the fixed-step kernels.
@@ -322,6 +390,16 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   baseline — any mismatch outside the intended change is a bug.
 
 ### Pitfalls found the hard way
+- **Layout of a[]** in every tab: `[s, p_1..p_M, n, newton_tol, newton_max_iters, newton_full]` —
+  a[0] = symmetry s, a[M+1] = CD FP iterations, a[M+2..M+4] = Newton settings of the implicit schemes
+  (`NewtonSettings` in `codegen.hpp`, filled by `scheme_fill_tail` / `scheme_append_tail`; size
+  `M + 1 + kSchemeTailSlots`). Every slot exists for every scheme, so a[] size never depends on the
+  scheme. Newton settings are per tab (fields in the Integration block); the system editor only holds
+  the defaults for new tabs. The generated step reads them at run time (no recompilation), and so does
+  the CPU `SystemEvaluator`. A builder that sizes a[] by hand reads past its end on an implicit scheme.
+- Implicit schemes: LU/solve are printed unrolled for N <= 8 (Am in registers; loop form above). With
+  numb = float Newton also stops at ||dX||^2 < (16 eps)^2 |Xn|^2 — float cannot reach the usual 1e-10,
+  and without the floor every step ran all max_iters passes with a Jacobian rebuild on most of them.
 - `loopCalculateDiscreteModel_int` (and CPU `cpu_loop_model`) take **one more step after
   the loop** (fixed-point check). A block of k steps is k-1 iterations; a transient of N
   steps is N-1 (and no call for N = 0). Step counts from time go through

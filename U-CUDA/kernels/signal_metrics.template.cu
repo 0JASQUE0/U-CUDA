@@ -132,13 +132,22 @@ struct MetricsAccum
 	numb   sd, sd2;
 	numb   sdd, sdd2;
 	bool   box;
+	// Какие суммы нужны выбранным метрикам: min/max, суммы для mean/variance, разности для
+	// Хьорта. В double на сэмпл они стоят столько же, сколько шаг Эйлера, и при части метрик
+	// их пропуск ускоряет счёт (Metrics 2D 256², Лоренц, только mean freq: Эйлер -21 %,
+	// RK4 -7 %). Во float они дешевле проверок, поэтому там считаются всегда.
+	bool   wMM, wS, wHj;
 	numb   bMin[AMOUNTOFX], bMax[AMOUNTOFX];
 #ifdef SIGM_MINMAX_INTERP
 	ExtremaInterp ex;
 #endif
 
-	__device__ __host__ void init(bool trackBox)
+	__device__ __host__ void init(bool trackBox, int mask = -1)
 	{
+		wMM = (mask & ((1 << SIGM_MAX) | (1 << SIGM_MIN) | (1 << SIGM_RANGE))) != 0;
+		wHj = (mask & ((1 << SIGM_HJORTH_MOBILITY) | (1 << SIGM_HJORTH_COMPLEXITY))) != 0;
+		wS  = wHj || (mask & ((1 << SIGM_MEAN) | (1 << SIGM_VARIANCE))) != 0;
+		if constexpr (sizeof(numb) == 4) wMM = wS = wHj = true;   // см. комментарий у полей
 #ifdef SIGM_MINMAX_INTERP
 		ex.init();
 #endif
@@ -167,14 +176,18 @@ struct MetricsAccum
 	__device__ __host__ void push(numb y)
 	{
 #ifdef SIGM_MINMAX_INTERP
-		ex.push(y);
+		if (wMM) ex.push(y);
 #endif
 		if (n == 0) { shift = y; mn = y; mx = y; }
-		const numb c = y - shift;
-		s1 += c; s2 += c * c;
-		if (y < mn) mn = y;
-		if (y > mx) mx = y;
-		if (n >= 1) {
+		if (wS) {
+			const numb c = y - shift;
+			s1 += c; s2 += c * c;
+		}
+		if (wMM) {
+			if (y < mn) mn = y;
+			if (y > mx) mx = y;
+		}
+		if (wHj && n >= 1) {
 			const numb d = y - yPrev;
 			sd += d; sd2 += d * d;
 			if (n >= 2) {
@@ -225,20 +238,27 @@ struct IntervalStats
 // (count()). Интервал восстанавливается из сдвига опорного пика ровно той же
 // формулой, что в PeakStream::emitInterval, поэтому совпадает побитово, и ни
 // средней частоте, ни min/max/mean интервалов буфер не нужен.
-__device__ int loopCalculateDiscreteModelMetrics_int(
-	numb* x, const numb* values,
-	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
+// Тело цикла записи (обёртка ниже). x — копия в регистрах, сэмпл — выбором по маске
+// (ucudaPickVar), без x[writableVar] с индексом во время выполнения. Проверки — на тех же
+// сэмплах, что раньше (i = 0, 100, 200, ...), а сэмплы между ними идут внутренним циклом с
+// постоянным числом итераций, без i % CHECK_INTERVAL на каждом сэмпле. Stop — через
+// ucudaCancelRequested: прямое чтение флага из памяти хоста раз в 100 сэмплов в каждой нити
+// шло через PCIe по одному и во float стоило больше самого счёта. Metrics 2D 256², Лоренц,
+// float: 290 -> 24..38 мс; double: -3..6 %. Результат бит-в-бит.
+__device__ __forceinline__ int loopCalculateDiscreteModelMetrics_core(
+	numb* __restrict__ x, const numb* __restrict__ values,
+	const numb h, const size_t amountOfIterations, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks, MetricsAccum& acc, IntervalStats& ist,
 	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
 {
 	numb xPrev[AMOUNTOFX];
-	numb checker;
 	size_t sinceReport = 0;
 	UcudaKrsPre krsPre;
 	ucudaKrsPrep(krsPre, values, h);
+	bool pick[AMOUNTOFX];
+	ucudaPickMask(pick, writableVar);
 
-	for (size_t i = 0; i < amountOfIterations; ++i)
-	{
+	auto sampleStep = [&]() {
 		numb sample;
 		if (writableVar < 0) {
 			if constexpr (AMOUNTOFX >= 3)
@@ -248,7 +268,7 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 			else
 				sample = x[0];
 		} else {
-			sample = x[writableVar];
+			sample = ucudaPickVar(x, pick);
 		}
 
 		if (acc.box) acc.pushBox(x);
@@ -268,27 +288,36 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 
 		for (int j = 0; j < preScaller; ++j)
 			calculateDiscreteModelP(x, values, h, krsPre);
+	};
 
-		if (i % CHECK_INTERVAL == 0) {
-			if (progressCounter != nullptr && progressStride > 0) {
-				sinceReport += CHECK_INTERVAL;
-				if (sinceReport >= (size_t)progressStride) {
-					atomicAdd(progressCounter, 1);
-					if (ticksReported != nullptr) ++(*ticksReported);
-					sinceReport = 0;
-				}
+	size_t i = 0;
+	while (i < amountOfIterations) {
+		sampleStep();   // сэмпл i, i кратно CHECK_INTERVAL — после него проверка
+		++i;
+		if (progressCounter != nullptr && progressStride > 0) {
+			sinceReport += CHECK_INTERVAL;
+			if (sinceReport >= (size_t)progressStride) {
+				atomicAdd(progressCounter, 1);
+				if (ticksReported != nullptr) ++(*ticksReported);
+				sinceReport = 0;
 			}
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_CANCELLED;
-			checker = 0;
-			for (int j = 0; j < AMOUNTOFX; ++j)
-				checker = checker + abs(x[j]);
-
-			if (isnan(checker) || isinf(checker))
+		}
+		if (ucudaCancelRequested(cancelFlag)) return REGIME_CANCELLED;
+		numb checker = 0;
+		for (int j = 0; j < AMOUNTOFX; ++j)
+			checker = checker + abs(x[j]);
+		if (isnan(checker) || isinf(checker))
+			return REGIME_UNBOUND;
+		if (maxValue != 0)
+			if (abs(checker) > maxValue)
 				return REGIME_UNBOUND;
-
-			if (maxValue != 0)
-				if (abs(checker) > maxValue)
-					return REGIME_UNBOUND;
+		if (amountOfIterations - i >= (size_t)(CHECK_INTERVAL - 1)) {
+			for (int k = 0; k < CHECK_INTERVAL - 1; ++k)
+				sampleStep();
+			i += CHECK_INTERVAL - 1;
+		} else {
+			for (; i < amountOfIterations; ++i)
+				sampleStep();
 		}
 	}
 
@@ -308,6 +337,36 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 	return REGIME_OSCILLATION;
 }
 
+// Обёртка: x — в регистры на время цикла (как loopCalculateDiscreteModel_int).
+__device__ int loopCalculateDiscreteModelMetrics_int(
+	numb* x, const numb* values,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
+	int writableVar, const numb maxValue, PeakStream& peaks, MetricsAccum& acc, IntervalStats& ist,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+{
+	(void)amountOfX;
+	numb xr[AMOUNTOFX];
+	for (int j = 0; j < AMOUNTOFX; ++j) xr[j] = x[j];
+	const int r = loopCalculateDiscreteModelMetrics_core(xr, values, h, amountOfIterations, preScaller,
+		writableVar, maxValue, peaks, acc, ist, cancelFlag, progressCounter, progressStride, ticksReported);
+	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xr[j];
+	return r;
+}
+
+// Точка ушла в равновесие (FIXED_POINT): метрики самого равновесия, а не затухающего
+// перехода, который ещё попал в окно записи. Раньше частоты и интервалы считались по
+// пикам затухания, а max/min/variance — по всему окну, и карта показывала переход вместо
+// аттрактора. y — последний сэмпл (значение в равновесии). Частоты 0, интервалы NaN
+// (колебаний нет), max = min = mean = y, range / variance / volume 0, Хьорт NaN (0/0).
+__device__ __host__ __forceinline__ int smEquilibrium(numb y, bool box, numb* res)
+{
+	res[SIGM_MAX] = res[SIGM_MIN] = res[SIGM_MEAN] = y;
+	res[SIGM_RANGE] = res[SIGM_VARIANCE] = (numb)0;
+	if (box) res[SIGM_VOLUME] = (numb)0;
+	res[SIGM_MEAN_FREQ] = res[SIGM_MEDIAN_FREQ] = (numb)0;
+	return REGIME_FIXED_POINT;
+}
+
 // Итог одной точки свипа: из сумм и пиков — значения метрик в res[] (NaN, где
 // величину не измерить). Общая для обоих ядер, чтобы классический свип и
 // continuation считали метрики одной и той же арифметикой. T — строка
@@ -316,8 +375,8 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 // Что пишется, когда величину измерить нельзя (NaN, а не заглушка вроде 999:
 // NaN отсекается штатным !isfinite и на графике, и в автошкале):
 //   UNBOUND (разошлось / h <= 0) и CANCELLED (Stop) — NaN во всех метриках;
-//   нет ни одного межпикового интервала: FIXED_POINT — частота 0 (колебаний
-//     нет, это измеренный факт), OSCILLATION — NaN (период длиннее окна);
+//   FIXED_POINT — метрики равновесия (smEquilibrium);
+//   нет ни одного межпикового интервала у OSCILLATION — NaN (период длиннее окна);
 //   нулевая дисперсия — mobility/complexity NaN (0/0).
 // Частоты — в единицах 1/время (для отображения: 1/итерация), mobility — в
 // рад/время, как в определении Хьорта. Возвращает итоговый флаг режима.
@@ -329,6 +388,7 @@ __device__ int smFinalize(int flag, const MetricsAccum& acc, const PeakStream& p
 
 	if (!((flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) && acc.n > 0))
 		return flag == REGIME_CANCELLED ? REGIME_CANCELLED : REGIME_UNBOUND;
+	if (flag == REGIME_FIXED_POINT) return smEquilibrium(acc.yPrev, acc.box, res);
 
 	res[SIGM_MAX]   = acc.mx;
 	res[SIGM_MIN]   = acc.mn;
@@ -370,9 +430,6 @@ __device__ int smFinalize(int flag, const MetricsAccum& acc, const PeakStream& p
 				                          : (numb)0.5 * (T[nI / 2 - 1] + T[nI / 2]);
 				if (med > (numb)0) res[SIGM_MEDIAN_FREQ] = (numb)1 / med;
 			}
-		} else if (flag == REGIME_FIXED_POINT) {
-			res[SIGM_MEAN_FREQ]   = (numb)0;
-			res[SIGM_MEDIAN_FREQ] = (numb)0;
 		}
 	}
 	return flag;
@@ -447,7 +504,7 @@ __global__ void calculateDiscreteModelMetricsCUDA(
 			peaks.init(nullptr, intervals, (size_t)idx * peakStride,
 				dt, iters_local, peakCapacity, false);
 			MetricsAccum acc;
-			acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
+			acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0, metricMask);
 			IntervalStats ist;
 			ist.init();
 
@@ -552,7 +609,7 @@ __global__ void signalMetricsContinuationKernel(
 				PeakStream peaks;
 				peaks.init(nullptr, intervals, 0, dt, (size_t)blockLen, peakCapacity, false);
 				MetricsAccum acc;
-				acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0);
+				acc.init(((metricMask >> SIGM_VOLUME) & 1) != 0, metricMask);
 				IntervalStats ist;
 				ist.init();
 				flag = loopCalculateDiscreteModelMetrics_int(x, a, hLocal, (size_t)blockLen,
