@@ -36,6 +36,7 @@ struct CustomTabSharedConfig {
     std::string scheme           = "Euler";
     std::string symmetry_s       = "0.5";
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
     std::string h_text           = "0.01";
     std::string t_max_text       = "100";
     std::string transient_text   = "100";

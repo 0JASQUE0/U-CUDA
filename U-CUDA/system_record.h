@@ -42,7 +42,14 @@ struct SystemRecord {
     // ввод (для редактирования)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
     bool        is_map = false;
-    std::string mode;            // "Image" | "LaTeX" | "Plain"
+    // DAE: x' = f(x,z,t), 0 = g(x,z,t). vars_text — x, alg_text — z.
+    // В system.json это "kind": "dae"; нет поля или "ode"/"map" — не ДАУ.
+    bool        is_dae = false;
+    std::string alg_text;
+    // Индексы переменных ДАУ, "x=1, lambda=3" (как nind1/2/3 в RADAU5); не
+    // названные — по умолчанию (см. parse_dae в dae_ir.h).
+    std::string dae_index_text;
+    std::string mode;          // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
     std::string alphabet_text;       // legacy: один список (vars + params вперемешку)

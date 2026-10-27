@@ -8,16 +8,6 @@
 #include "sysparse.hpp"
 #include <stdexcept>
 
-// Newton knobs are UI strings; parse them here, once, on the way into System.
-// Out-of-range or unparseable input falls back to the defaults rather than
-// producing a scheme body that cannot converge.
-static void apply_newton_settings(System& s, bool full, const std::string& tol,
-                                  const std::string& iters) {
-    s.newton_full = full;
-    try { double v = std::stod(tol);      if (v > 0.0) s.newton_tol = v; }       catch (...) {}
-    try { int    v = std::stoi(iters);    if (v > 0)   s.newton_max_iters = v; } catch (...) {}
-}
-
 // Строит System из текущего режима ввода и алфавита.
 System AppModel::build_system() const {
     std::vector<std::string> alpha = parse_alphabet();
@@ -32,7 +22,6 @@ System AppModel::build_system() const {
         if (latex_text.empty()) throw std::runtime_error("LaTeX is empty");
         if (alpha.empty()) throw std::runtime_error("alphabet is empty");
         System s = parse_system_from_latex(latex_text, alpha, param_order, funcs, is_map);
-        apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
         return s;
     }
 
@@ -42,7 +31,6 @@ System AppModel::build_system() const {
     if (plain_text.empty()) throw std::runtime_error("equations are empty");
     if (alpha.empty()) throw std::runtime_error("alphabet is empty");
     System s = parse_system_from_latex(plain_text, alpha, param_order, funcs, is_map);
-    apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
     return s;
 }
 
@@ -172,6 +160,9 @@ SystemRecord AppModel::to_record() const {
     r.name = name;
     r.note = note;
     r.is_map = is_map;
+    r.is_dae = is_dae;
+    r.alg_text = alg_text;
+    r.dae_index_text = dae_index_text;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -238,6 +229,9 @@ void AppModel::from_record(const SystemRecord& r) {
     name = r.name;
     note = r.note;
     is_map = r.is_map;
+    is_dae = r.is_dae;
+    alg_text = r.alg_text;
+    dae_index_text = r.dae_index_text;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -335,6 +329,9 @@ void AppModel::clear() {
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     is_map = false;
+    is_dae = false;
+    alg_text.clear();
+    dae_index_text.clear();
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast

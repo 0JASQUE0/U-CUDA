@@ -55,12 +55,17 @@ OrderAxis to_engine_axis(int target, const std::string& lo, const std::string& h
 //
 // Итераций Ньютон требует немногим больше: сходимость квадратичная, каждый шаг
 // удваивает разряды, и с типовых 1e-3 до 1e-58 хватает шести.
-System order_newton_system(const System& sys, int prec) {
+// Допуск и предел итераций — рантайм-слоты a[] (NewtonSettings), поэтому поправка
+// идёт по настройкам вкладки, а КРС от неё не зависит.
+static NewtonSettings order_newton_settings(const NewtonSettings& n, int prec) {
     const double tol = order_newton_tol_for_precision(prec);
-    if (!(tol > 0.0)) return sys;
-    System out = sys;
-    if (!(out.newton_tol > 0.0) || out.newton_tol > tol) out.newton_tol = tol;
-    if (out.newton_max_iters < 12) out.newton_max_iters = 12;
+    if (!(tol > 0.0)) return n;
+    NewtonSettings out = n;
+    if (newton_tol_from_text(out.tol) > tol) {
+        char b[32]; std::snprintf(b, sizeof(b), "%.17g", tol);
+        out.tol = b;
+    }
+    if (newton_iters_from_text(out.max_iters) < 12) out.max_iters = "12";
     return out;
 }
 
@@ -71,7 +76,7 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     // другой. Поэтому UI гасит селектор при GPU, а здесь режим снимается.
     req.cpu_prec  = c.use_gpu ? kOrderPrecDouble : c.cpu_precision;
     req.krs_body  = compute_krs_for_scheme(s.custom_schemes,
-                                           order_newton_system(s.sys, req.cpu_prec),
+                                           s.sys,
                                            c.scheme);
     req.amountOfX = (int)s.vars.size();
 
@@ -84,9 +89,10 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     // a[0] — коэффициент симметрии s, a[1..M] — параметры системы. Ровно та же
     // раскладка, что во всех остальных вкладках (см. build_basins_request).
     const int nparams = (int)s.params.size();
-    req.values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.values[0] = parse_d(c.symmetry_s, 0.5);
-    req.values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.values.data() + nparams + 1, c.cd_fp_iters,
+                     order_newton_settings(c.newton, req.cpu_prec)); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[(size_t)i]);
         req.values[(size_t)i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -125,11 +131,11 @@ static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string
     return scheme_rhs_per_step(sys, scheme);
 }
 
-// Причина пустой КРС для сообщения пользователю — по той же системе (допуск Ньютона
-// под точность), что и у build_order_request; Performance и Stability берут КРС оттуда же.
+// Причина пустой КРС для сообщения пользователю — по той же системе, что
+// и у build_order_request; Performance и Stability берут КРС оттуда же.
 static std::string order_krs_empty_error(const OrderAnalysisSession& s, const OrderConfig& c) {
     return krs_empty_error(s.custom_schemes,
-                           order_newton_system(s.sys, c.use_gpu ? kOrderPrecDouble : c.cpu_precision),
+                           s.sys,
                            c.scheme);
 }
 
@@ -156,7 +162,7 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     // иначе неявный эталон упёрся бы в 1e-10 и E_ref мерил бы его решатель.
     if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
         req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes,
-                                                    order_newton_system(s.sys, req.cpu_prec),
+                                                    s.sys,
                                                     c.perf_ref_scheme);
     req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
@@ -284,6 +290,7 @@ void OrderAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme     = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);

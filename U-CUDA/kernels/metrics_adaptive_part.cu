@@ -152,6 +152,7 @@ __device__ int smFinalizeNU(int flag, const MetricsAccumNU& acc, const PeakStrea
 
 	if (!((flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) && acc.n > 0))
 		return flag == REGIME_CANCELLED ? REGIME_CANCELLED : REGIME_UNBOUND;
+	if (flag == REGIME_FIXED_POINT) return smEquilibrium(acc.y1, acc.box, res);
 
 	res[SIGM_MAX]   = acc.mx;
 	res[SIGM_MIN]   = acc.mn;
@@ -184,9 +185,6 @@ __device__ int smFinalizeNU(int flag, const MetricsAccumNU& acc, const PeakStrea
 			                          : (numb)0.5 * (T[nI / 2 - 1] + T[nI / 2]);
 			if (med > (numb)0) res[SIGM_MEDIAN_FREQ] = (numb)1 / med;
 		}
-	} else if (flag == REGIME_FIXED_POINT) {
-		res[SIGM_MEAN_FREQ]   = (numb)0;
-		res[SIGM_MEDIAN_FREQ] = (numb)0;
 	}
 	return flag;
 }

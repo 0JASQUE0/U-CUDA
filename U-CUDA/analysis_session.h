@@ -6,6 +6,16 @@
 #include "circuit_solver.h"
 #include "adaptive_settings.h"
 
+// Настройки Ньютона новой вкладки — из записи системы (поля Newton solver в редакторе
+// системы задают значения по умолчанию, как symmetry s).
+inline NewtonSettings newton_from_record(const SystemRecord& r) {
+    NewtonSettings n;
+    n.full      = r.newton_full;
+    n.tol       = r.newton_tol.empty()       ? std::string("1e-10") : r.newton_tol;
+    n.max_iters = r.newton_max_iters.empty() ? std::string("8")     : r.newton_max_iters;
+    return n;
+}
+
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
 std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
@@ -321,6 +331,7 @@ struct PhaseAnalysisSession {
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
     std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
     std::string decimation = "1";      // выводить каждую N-ю точку
     // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
     // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
@@ -474,6 +485,16 @@ struct PhaseAnalysisSession {
     int data_generation = 0;
 };
 
+// Сводка режимов по flags для строки статуса (draw_regime_summary в gui.cpp). Обход flags стоит
+// ~0.2 с на 10000², поэтому он делается раз на данные, а не на каждый кадр. Ключ — generation и
+// сам буфер (data/size): копия конфига или буфер другого режима (1D / 2D) не выдаст чужие числа.
+struct RegimeCounts {
+    int         gen  = -1;
+    const void* data = nullptr;
+    size_t      size = 0;
+    int         fp = 0, unb = 0, osc = 0, stopped = 0;
+};
+
 // Одна бифуркационная диаграмма (БД) на параметрическом графике:
 // независимый свип, свои IC/scheme/range/CSV/peaks-vs-inter-peaks.
 // Несколько БД оверлеятся на один график с легендой (см. BifurcationAnalysisSession).
@@ -490,6 +511,7 @@ struct BifurcationDiagramConfig {
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип: какой параметр, его диапазон, число точек.
     int         param_index    = 0;
@@ -595,6 +617,7 @@ struct BifurcationDiagramConfig {
     Bifurcation2DResult result_2d;
     bool        last_run_2d_ok    = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d    = false;
     // Persisted heatmap colormap choice for this diagram (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
@@ -732,6 +755,7 @@ struct LLECurveConfig {
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -809,6 +833,7 @@ struct LLECurveConfig {
     LLE2DResult result_2d;
     bool        last_run_2d_ok = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d = false;
     // Persisted heatmap colormap choice for this curve (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
@@ -885,6 +910,7 @@ struct Dft1DConfig {
     std::string scheme     = "Euler";
     std::string symmetry_s = "0.5";       // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип — см. BifurcationDiagramConfig (то же самое: параметр или НУ,
     // с опциональным continuation). Continuation требует sweep_over_var=false
@@ -1089,6 +1115,7 @@ struct BasinsConfig {
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";    // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int axis_x_var = 0;
     int axis_y_var = 1;
@@ -1130,6 +1157,7 @@ struct BasinsConfig {
     bool        last_run_ok = false;
     std::string last_error;
     int         data_generation = 0;
+    RegimeCounts regime_counts;
     bool        fit_request = false;
 
     // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
@@ -1330,6 +1358,7 @@ struct FastSyncConfig {
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5"; // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Режим:
     int mode = 0;   // 0 = On Attractor, 1 = On Grid
@@ -1480,6 +1509,7 @@ struct LSCurveConfig {
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -1546,6 +1576,7 @@ struct LSCurveConfig {
     LS2DResult result_2d;
     bool        last_run_2d_ok = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d = false;
 
     // Какую экспоненту показывать в heatmap (0-based, default λ₁); -1 = "sum
@@ -1635,6 +1666,7 @@ struct SignalMetricsConfig {
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип по X — см. BifurcationDiagramConfig.
     int         param_index     = 0;
@@ -1696,6 +1728,7 @@ struct SignalMetricsConfig {
     SignalMetricsResult result_2d;
     bool        last_run_2d_ok     = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts;   // 1D и 2D различаются по буферу (RegimeCounts::data)
     bool        fit_request_2d     = false;
     int         colormap_idx       = -1;   // -1 = AppModel::heatmap_colormap
 };

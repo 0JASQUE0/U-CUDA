@@ -646,6 +646,16 @@ UCUDA_HD inline void ucuda_ctrl_filter(const UcudaCtlIn& in, UcudaCtlMem& m, Ucu
 #if !defined(UCUDA_ADAPT_LAYOUT_ONLY) && !defined(UCUDA_ADAPTIVE_DRIVER_DONE)
 #define UCUDA_ADAPTIVE_DRIVER_DONE
 
+// Stop в циклах шагов (раз в CHECK_INTERVAL принятых шагов). Флаг лежит в памяти хоста, и
+// прямое чтение в каждой нити свипа шло через PCIe по одному; в модулях свипов (шаблон с
+// cudaLibrary.cu) его читают через зеркало ucudaCancelRequested — как циклы постоянного шага.
+// На CPU (DLL) и в модулях без cudaLibrary.cu — прямое чтение, как раньше.
+#if defined(__CUDA_ARCH__) && defined(UCUDA_HAVE_CANCEL_MIRROR)
+#define UCUDA_AD_CANCELLED(f) ucudaCancelRequested(f)
+#else
+#define UCUDA_AD_CANCELLED(f) ((f) != nullptr && *(f) != 0)
+#endif
+
 // Размер массивов состояния: на GPU — AMOUNTOFX шаблона, на CPU — потолок
 // UCUDA_AD_MAXN (размерность там известна только во время выполнения).
 #ifndef UCUDA_AD_NMAX
@@ -1335,7 +1345,7 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             if (k > 0)
                 for (int c = 0; c < NC; ++c)
                     if (ucuda_lyap_out(cl.y + c * n, maxValue)) return 0;
-            if (cancelFlag != nullptr && *cancelFlag != 0) return -1;
+            if (UCUDA_AD_CANCELLED(cancelFlag)) return -1;
         }
     }
     if (ucuda_lyap_out(S.X, maxValue)) return 0;   // хвост короче CHECK_INTERVAL

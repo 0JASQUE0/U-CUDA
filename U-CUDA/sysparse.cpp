@@ -36,7 +36,32 @@ namespace {
         // Переменные как функции времени: x(t), y ( t ) -> x, y.
         // Убираем "( t )" с пробелами. Делаем это до разбора, т.к. иначе x(t)
         // выглядит как вызов функции. Также чистим производную: d x(t) -> d x.
-        s = std::regex_replace(s, std::regex(R"(\s*\(\s*t\s*\)\s*)"), " ");
+        // После имени функции "(t)" — аргумент, а не пометка зависимости от
+        // времени: sin(t), \cos(t), exp ( t ) остаются как есть (явное время,
+        // этап 2). Раньше снималось всё подряд, и sin(t) превращался в "sin ".
+        {
+            static const std::set<std::string> fn = {
+                "sin","cos","tan","asin","acos","atan","arcsin","arccos","arctan",
+                "sinh","cosh","tanh","exp","log","ln","lg","log2","log10","sqrt","cbrt",
+                "fabs","abs","sign","sgn","floor","ceil" };
+            static const std::regex rt(R"(\s*\(\s*t\s*\)\s*)");
+            std::string out;
+            size_t last = 0;
+            for (auto it = std::sregex_iterator(s.begin(), s.end(), rt); it != std::sregex_iterator(); ++it) {
+                const size_t pos = (size_t)it->position(0);
+                // имя прямо перед "(t)" (пробелы между ними допускаются)
+                size_t e = pos;
+                while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+                size_t b = e;
+                while (b > 0 && std::isalpha((unsigned char)s[b - 1])) --b;
+                const bool is_fn = b < e && fn.count(s.substr(b, e - b));
+                out += s.substr(last, pos - last);
+                out += is_fn ? "(t)" : " ";
+                last = pos + (size_t)it->length(0);
+            }
+            out += s.substr(last);
+            s = out;
+        }
         s = convert_abs(s);
 
         // нижний индекс в фигурных скобках: x_{m} -> x_m, a_{ij} -> a_ij

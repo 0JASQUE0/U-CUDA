@@ -220,6 +220,25 @@ Symbolic differentiation does exist, but it serves **only the implicit schemes**
 
 ---
 
+## Explicit time t (non-autonomous systems) — in progress
+A right-hand side may use `t` (not a variable or parameter). Autonomous systems must stay
+**byte-identical** in every generated body — check with a dump of `codegen_scheme` /
+`codegen_adaptive` / CPU / complex-core output for all `library/` systems before and after.
+- `system_uses_time(System)` (AST scan); the body then reads `kStepTimeArg` = `ucuda_t`, and its
+  signature becomes `calculateDiscreteModel(X, ucuda_t, a, h)`. Engines detect it from the body
+  text (`step_body_uses_time`), like `needs_complex` — the body is already the cache key.
+- Stage times are printed by the scheme (`rhs_over(s, st, tname)`, `time_name`): RK4
+  `ucuda_ts = ucuda_t + {0, h/2, h/2, h}`, explicit RK tables `ucuda_t + Cs[i]*h` (`Cs` = row sums
+  of A, `stage_time_table`). One t for all stages silently drops the order to 1.
+- Supported so far: Euler, Euler-Cromer, Explicit Midpoint, RK4, DOPRI78(+legacy), RK45, DOP853
+  (`scheme_supports_time`), fixed step, Analysis on GPU (`phase_kernel`, t_n = n*h from an integer
+  counter, never `t += h`). Everything else throws `kTimeUnsupportedMsg`: other schemes, adaptive
+  bodies, Extr/Comp wrappers (`step_body_uses_time(base_body)`), CPU Analysis, sweep templates.
+- t is never part of X: not in overflow/divergence thresholds, fixed-point check, error norms,
+  DBSCAN, clones.
+- `sysparse` strips `(t)` after a variable (`x(t)` → `x`) but keeps it after a math function
+  (`sin(t)`).
+
 ## Adaptive step (RK45 / DOPRI78 / DOP853)
 Fixed step stays the default and must stay **bit-for-bit** unchanged: the adaptive path is
 a separate module/branch everywhere, never an `if` inside the fixed-step kernels.
@@ -322,6 +341,16 @@ a separate module/branch everywhere, never an `if` inside the fixed-step kernels
   baseline — any mismatch outside the intended change is a bug.
 
 ### Pitfalls found the hard way
+- **Layout of a[]** in every tab: `[s, p_1..p_M, n, newton_tol, newton_max_iters, newton_full]` —
+  a[0] = symmetry s, a[M+1] = CD FP iterations, a[M+2..M+4] = Newton settings of the implicit schemes
+  (`NewtonSettings` in `codegen.hpp`, filled by `scheme_fill_tail` / `scheme_append_tail`; size
+  `M + 1 + kSchemeTailSlots`). Every slot exists for every scheme, so a[] size never depends on the
+  scheme. Newton settings are per tab (fields in the Integration block); the system editor only holds
+  the defaults for new tabs. The generated step reads them at run time (no recompilation), and so does
+  the CPU `SystemEvaluator`. A builder that sizes a[] by hand reads past its end on an implicit scheme.
+- Implicit schemes: LU/solve are printed unrolled for N <= 8 (Am in registers; loop form above). With
+  numb = float Newton also stops at ||dX||^2 < (16 eps)^2 |Xn|^2 — float cannot reach the usual 1e-10,
+  and without the floor every step ran all max_iters passes with a Jacobian rebuild on most of them.
 - `loopCalculateDiscreteModel_int` (and CPU `cpu_loop_model`) take **one more step after
   the loop** (fixed-point check). A block of k steps is k-1 iterations; a transient of N
   steps is N-1 (and no call for N = 0). Step counts from time go through

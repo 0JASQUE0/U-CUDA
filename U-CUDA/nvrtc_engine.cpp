@@ -2,6 +2,7 @@
 #include "parametric_engine.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include "perf_warmup.h"       // прогрев GPU перед замером Performance
 #include "krs_prep.h"          // стадия предрасчёта КРС (CD fast)
+#include "codegen.hpp"         // step_body_uses_time: явное время t
 #include <cuda.h>
 #include <nvrtc.h>
 #include <chrono>
@@ -196,13 +197,45 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
     // траектории. У прочих схем — пустая структура и прямой вызов шага.
     KrsPrepSplit prep_sp;
     std::string prep_defs;
-    if (krs_split_prep(krs_body, prep_sp))
+    // Неавтономная система (явное t): шаг получает время t_n = n*h вторым
+    // аргументом. Признак — в самом теле (оно же ключ кэша), автономный
+    // исходник ниже не меняется ни на байт.
+    const bool nonauto = step_body_uses_time(krs_body);
+    if (nonauto && krs_split_prep(krs_body, prep_sp))
+        NV_FAIL("explicit time t is not supported by schemes with a precompute stage (CD fast)");
+    if (nonauto)
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n";
+    else if (krs_split_prep(krs_body, prep_sp))
         prep_defs = krs_prep_inline_defs(prep_sp, true);
     else
         prep_defs = "struct UcudaKrsPre {};\n"
                     "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n"
                     "__device__ __forceinline__ void calculateDiscreteModelP(numb* X, const numb* a, const numb h,"
                     " const UcudaKrsPre&) { calculateDiscreteModel(X, a, h); }\n";
+    if (nonauto)
+        src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb ucuda_t,"
+               " const numb* a, numb h) {\n"
+            << krs_body << "\n"
+            << "}\n"
+            << prep_defs
+            // t_n = n*h от целого счётчика: накопление t += h за 1e7 шагов
+            // уводит фазу воздействия.
+            << "extern \"C\" __global__ void phase_kernel("
+            "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+            << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
+            << "    if (tid >= N) return;\n"
+            << "    numb X[AMOUNTOFX];\n"
+            << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
+            << "    long long n = 0;\n"
+            << "    for (int s=0;s<skip;++s, ++n) calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
+            << "    for (int t=0;t<total;++t, ++n) {\n"
+            << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
+            << "        calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    }\n"
+            << "}\n";
+    else
     src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
         << krs_body << "\n"
         << "}\n"

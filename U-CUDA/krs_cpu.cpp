@@ -575,7 +575,7 @@ std::string extract_through_function(const std::string& src, const std::string& 
 }
 
 // Из signal_metrics.template.cu — то, чем GPU-ядра метрик сводят точку: номера метрик
-// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats и smFinalize; из
+// (SIGM_*), ExtremaInterp, MetricsAccum, smVariance, IntervalStats, smEquilibrium и smFinalize; из
 // cudaLibrary.cu — ucuda_heapsort (медиана). Сами циклы и ядра шаблона не нужны.
 // Пусто — что-то не нашлось.
 std::string extract_metrics_pieces(const std::string& tmpl, const std::string& lib) {
@@ -583,7 +583,8 @@ std::string extract_metrics_pieces(const std::string& tmpl, const std::string& l
                                                       "__device__ __host__ void ucuda_heapsort(");
     const size_t b = tmpl.find("#define SIGM_MAX");
     const size_t e = tmpl.find("// loopCalculateDiscreteModelPeaks_int + MetricsAccum", b == std::string::npos ? 0 : b);
-    const std::string fin = extract_through_function(tmpl, "__device__ int smFinalize(", "__device__ int smFinalize(");
+    // smEquilibrium (итог точки в равновесии) стоит прямо перед smFinalize — берём обе.
+    const std::string fin = extract_through_function(tmpl, "__device__ __host__ __forceinline__ int smEquilibrium(", "__device__ int smFinalize(");
     if (heap.empty() || b == std::string::npos || e == std::string::npos || fin.empty()) return {};
     return heap + "#define SIGM_MINMAX_INTERP 1\n" + tmpl.substr(b, e - b) + fin;
 }

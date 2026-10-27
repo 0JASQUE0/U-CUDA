@@ -309,6 +309,7 @@ void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
     scheme = default_scheme_from_record(r, scheme);
     symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
     cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    newton = newton_from_record(r);
     sim_time = "50";
     skip_time = "10";
 
@@ -347,6 +348,7 @@ struct PhaseRunInputs {
     std::string scheme, decimation;
     std::string symmetry_s = "0.5"; // a[0] для CD
     std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
     AdaptiveSettings adaptive;
     std::shared_ptr<std::atomic<bool>> cancel;   // отмена (адаптивный шаг), nullptr — нет
     bool        use_gpu = true;
@@ -726,9 +728,9 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
     // параметры: a[0] зарезервирован под CD-коэф. симметрии, a[1..] = params
     int nparams = (int)in.params.size();
-    std::vector<double> a(nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    std::vector<double> a(nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     a[0] = parse_val(in.symmetry_s, 0.5);
-    a[(size_t)nparams + 1] = cd_fp_iters_from_text(in.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(a.data() + nparams + 1, in.cd_fp_iters, in.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int j = 0; j < nparams; ++j) {
         auto it = in.param_values.find(in.params[j]);
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
@@ -765,6 +767,12 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Адаптивный шаг — своя ветка расчёта; признаки, RQA и прореживание ниже общие.
     // У отображения шага нет, и переключатель для него игнорируется.
     std::vector<std::vector<double>> ad_times;
+    // Явное время t: пока только GPU с постоянным шагом (CPU-пути — в конце этапа 2).
+    if (system_uses_time(in.sys) && (!in.use_gpu || in.adaptive.enabled)) {
+        result.error = "explicit time t: only the GPU fixed-step path supports it so far "
+                       "(turn on GPU and turn off the adaptive step)";
+        return result;
+    }
     if (in.adaptive.enabled && !in.sys.is_map) {
         if (!run_adaptive_phase(in, dim, N, ic_flat, a, h, tsim, tskip, total, raw, ad_times,
                                 result, calc_ok, calc_err))
@@ -1048,6 +1056,7 @@ static PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.scheme       = s.scheme;
     in.symmetry_s   = s.symmetry_s;
     in.cd_fp_iters  = s.cd_fp_iters;
+    in.newton  = s.newton;
     in.decimation   = s.decimation;
     in.adaptive     = s.adaptive;
     in.use_gpu      = s.use_gpu;
@@ -1490,6 +1499,7 @@ void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
     bd.plot_all_iterates = default_all_iterates_from_record(r);
     bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     bd.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    bd.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -1605,9 +1615,9 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
 
     // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(bd.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, bd.cd_fp_iters, bd.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1662,9 +1672,9 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(bd.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, bd.cd_fp_iters, bd.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1877,6 +1887,7 @@ void LLEAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -1940,9 +1951,9 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -1995,9 +2006,9 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2199,6 +2210,7 @@ void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -2265,9 +2277,9 @@ static Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2413,6 +2425,7 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -2491,9 +2504,9 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -2824,6 +2837,7 @@ std::string build_basins_phase_run_signature(const BasinsConfig& c) {
     add(c.scheme);
     add(c.symmetry_s);
     add(c.cd_fp_iters);
+    add(c.newton.tol); add(c.newton.max_iters); add(c.newton.full ? "1" : "0");
     add(c.h_text);
     for (const auto& kv : c.param_values)       { o += kv.first; o += '='; o += kv.second; o += ';'; }
     o += '|';
@@ -3036,6 +3050,7 @@ static void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
     ph.scheme       = c.scheme;
     ph.symmetry_s   = c.symmetry_s;
     ph.cd_fp_iters  = c.cd_fp_iters;
+    ph.newton  = c.newton;
     ph.step_h       = c.h_text;
     ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
     ph.param_values = c.param_values;
@@ -3134,6 +3149,7 @@ void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     // Параметры — из record, остальные секции инициализируем нулями.
     for (const auto& p : params) {
@@ -3196,9 +3212,9 @@ static FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     // values[0] = a[0] (symmetry для CD), затем по параметрам.
     int nparams = (int)s.params.size();
-    req.values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.values[0] = parse_d(c.symmetry_s, 0.5);
-    req.values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3363,6 +3379,7 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -3426,9 +3443,9 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3479,9 +3496,9 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -3690,6 +3707,7 @@ void SignalMetricsAnalysisSession::load_from_record(const SystemRecord& r,
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
     c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -3752,9 +3770,9 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 2, 0.0);   // [s, p_1..p_M, n]
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    req.base_values[(size_t)nparams + 1] = cd_fp_iters_from_text(c.cd_fp_iters); // CD FP: a[M+1]
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
