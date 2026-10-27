@@ -3057,14 +3057,13 @@ struct SweepAxisMember {
     int    kind      = 0;      // 0 = параметр, 1 = переменная (IC), 2 = шаг h
     int    index     = -1;     // индекс в params/vars (для kind==2 не нужен)
     bool   log_scale = false;
-    double lo = 0.0, hi = 1.0; // диапазон, с которым РЕАЛЬНО шёл Run
 };
 
 // Общая настройка X-оси 1D-графика по членам окна (раньше — три почти одинаковых
 // блока по ~35 строк в Bif/LLE/LS):
 //   - подпись = общий sweep-таргет; если члены свипают разное — "parameter";
-//   - fit-диапазон = union(lo, hi) ВСЕХ членов: ось обязана охватывать весь свип,
-//     даже если часть точек разошлась и на графике их нет;
+//   - fit и кламп X — по данным, не по полям диапазона: правка диапазона до Run
+//     не двигает вид, новый прогон подгоняет его через fit_request;
 //   - log_scale только если он одинаков у всех членов.
 static void configure_sweep_x_axis(Plot2DView& view,
                                    const std::vector<SweepAxisMember>& members,
@@ -3073,8 +3072,6 @@ static void configure_sweep_x_axis(Plot2DView& view,
     int  shared_kind = -2;   // -2 = ещё не видели, -1 = смешанные
     int  shared_idx  = -2;
     bool shared_log = false, log_seen = false, log_mismatch = false;
-    double x_fit_lo = 0.0, x_fit_hi = 0.0;
-    bool   x_fit_any = false;
 
     for (const auto& m : members) {
         const int kidx = (m.kind == 2) ? -1 : m.index;
@@ -3083,15 +3080,9 @@ static void configure_sweep_x_axis(Plot2DView& view,
 
         if (!log_seen) { shared_log = m.log_scale; log_seen = true; }
         else if (shared_log != m.log_scale) { log_mismatch = true; }
-
-        const double a = std::min(m.lo, m.hi), b = std::max(m.lo, m.hi);
-        if (!x_fit_any) { x_fit_lo = a; x_fit_hi = b; x_fit_any = true; }
-        else { x_fit_lo = std::min(x_fit_lo, a); x_fit_hi = std::max(x_fit_hi, b); }
     }
 
-    view.x_fit_use_explicit = x_fit_any;
-    view.x_fit_min = x_fit_lo;
-    view.x_fit_max = x_fit_hi;
+    view.x_fit_use_explicit = false;
     view.x_axis.log_scale = shared_log && !log_mismatch;
 
     if (shared_kind == 0 && shared_idx < 0)
@@ -3108,15 +3099,13 @@ static void configure_sweep_x_axis(Plot2DView& view,
 
 // Сбор членов окна и настройка общей X-оси одним вызовом. Раньше — три почти
 // одинаковых блока по ~20 строк в Bif/LLE/LS, из которых версии LLE и LS
-// совпадали буквально. Отличается только источник диапазона (у Bif снапшот в
-// result пишется лишь для continuation), поэтому его отдаёт range_fn.
-template <class Cfg, class RangeFn>
+// совпадали буквально.
+template <class Cfg>
 static void configure_sweep_x_axis_from(Plot2DView& view,
                                         const std::vector<int>& members,
                                         const std::vector<Cfg>& cfgs,
                                         const std::vector<std::string>& params,
-                                        const std::vector<std::string>& vars,
-                                        RangeFn range_fn) {
+                                        const std::vector<std::string>& vars) {
     std::vector<SweepAxisMember> out;
     out.reserve(members.size());
     for (int idx : members) {
@@ -3127,23 +3116,9 @@ static void configure_sweep_x_axis_from(Plot2DView& view,
         m.kind      = c.sweep_over_h ? 2 : (c.sweep_over_var ? 1 : 0);
         m.index     = c.sweep_over_var ? c.var_sweep_index : c.param_index;
         m.log_scale = c.log_scale;
-        range_fn(c, m.lo, m.hi);
         out.push_back(m);
     }
     configure_sweep_x_axis(view, out, params, vars);
-}
-
-// Диапазон свипа для LLE/LS: снапшот прогона, а если движок его ещё не
-// заполнил (lo == hi) — текстовые поля конфига.
-static void sweep_range_from_result(double res_lo, double res_hi,
-                                    const std::string& lo_text, const std::string& hi_text,
-                                    double& lo, double& hi) {
-    lo = res_lo;
-    hi = res_hi;
-    if (hi == lo) {
-        lo = parse_ratio_or(lo_text, 0.0);
-        hi = parse_ratio_or(hi_text, 1.0);
-    }
 }
 
 // Snap-диапазон по ПЕРВОМУ члену окна: берём сетку успешного прогона, иначе
@@ -7792,13 +7767,7 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
         else if (shared_var_idx != bd.writable_var) var_idx_mixed = true;
     }
-    // continuation сохраняет реальные lo/hi в result, иначе — из текстов.
-    configure_sweep_x_axis_from(view, win.members, s.diagrams, s.params, s.vars,
-        [](const BifurcationDiagramConfig& bd, double& lo, double& hi) {
-            const bool from_result = bd.continuation && bd.result.param_hi != bd.result.param_lo;
-            lo = from_result ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
-            hi = from_result ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
-        });
+    configure_sweep_x_axis_from(view, win.members, s.diagrams, s.params, s.vars);
     // Y-label: combination (-1) -> "x0+pi*x1+e*x2"; single var -> имя переменной;
     // mixed / нет данных -> generic "X".
     if (var_idx_mixed || shared_var_idx == -2) {
@@ -7848,12 +7817,9 @@ static void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const Gui
         if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) {
             const auto& source = bd.plot_inter_peaks ? bd.result.peak_times
                                                      : bd.result.bifurcation_points;
-            // Continuation result хранит param_lo/hi-снапшот. Classical путь
-            // его не заполняет — fallback на текущие текстовые поля.
-            double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
-            double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
+            // Диапазон прогона (run_bifurcation_1d), не текстовые поля: их правка до Run
+            // не должна переносить посчитанные точки на другую сетку.
+            const double lo = bd.result.param_lo, hi = bd.result.param_hi;
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
             // Сетка снапа — ровно та, по которой строятся точки ниже. Раньше
@@ -8198,12 +8164,8 @@ static void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallback
         return;
     }
 
-    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
-    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
-        [](const LLECurveConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    // Подпись X — см. configure_sweep_x_axis_from.
+    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars);
     view.y_axis.name = "lambda";
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
@@ -8569,12 +8531,8 @@ static void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks
         return;
     }
 
-    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
-    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
-        [](const LSCurveConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    // Подпись X — см. configure_sweep_x_axis_from.
+    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars);
 
     // Подсчитываем общее число серий этого окна — sum(n_exponents per member).
     size_t total_series = 0;
@@ -9008,11 +8966,7 @@ static void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCall
         return;
     }
 
-    configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars,
-        [](const SignalMetricsConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars);
     view.y_axis.name = signal_metric_axis_label(m);
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
@@ -16440,15 +16394,13 @@ static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const 
             ImGui::PopID(); ImGui::End(); continue;
         }
 
-        // X range for autofit (independent of point density).
-        view.x_fit_use_explicit = true;
-        view.x_fit_min = std::min(param_lo, param_hi);
-        view.x_fit_max = std::max(param_lo, param_hi);
+        // Autofit по данным, как в Parametric (configure_sweep_x_axis).
+        view.x_fit_use_explicit = false;
         // Лог-ось — как в Parametric; узлы движка лежат лог-равномерно, ось
         // и snap обязаны это повторить. log при lo<=0 невозможен (движок
         // такой Run отклоняет), но проверку держим здесь тоже — конфиг мог
         // прийти из старой сессии.
-        view.x_axis.log_scale = slice_log && view.x_fit_min > 0.0;
+        view.x_axis.log_scale = slice_log && std::min(param_lo, param_hi) > 0.0;
 
         // Sweep-position crosshair — vertical line at fix_x (X-slice)
         // or fix_y (Y-slice), synced with the slider / drag on 2D heatmaps.
