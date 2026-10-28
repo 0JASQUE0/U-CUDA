@@ -256,6 +256,21 @@ static inline int steps_from_time_int(double t, double h)
 // Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point, 0 = unbound). Проверка
 // расходимости — с тем же шагом, что у GPU-двойника: без записи траектории kLoopCheckBlock,
 // с записью kCheckInterval; БД 1D с записью передаёт kLoopCheckBlock явно (на GPU это цикл пиков).
+// ДАУ (этап 7): z0 точки свипа — на связь при её параметрах (шаг метода ДАУ при h = 0; у ОДУ — ничего).
+// Двойник согласования в ucudaSetupSweepPoint и ядрах продолжения (cudaLibrary.cu, kernels/*_cont).
+// Ось/свип по НУ алгебраической переменной z нативной ДАУ: z каждой точки решается из связи, так что 
+// заданное значение — лишь стартовое приближение Ньютона (выбор ветви), а не координата.
+static const char* const kDaeZAxisMsg = "DAE: an initial-condition axis must be a differential variable "
+    "(algebraic z is solved from the constraint at every point)";
+static bool dae_z_axis(const std::string& body, int var) {
+    const int nx = dae_nx_from_body(body);
+    return nx > 0 && var >= nx;
+}
+
+static void dae_point_start(const KrsCpuStep& step, const std::string& body, numb* x, const numb* a) {
+    if (dae_nx_from_body(body) > 0) step.fn()(x, a, (numb)0);
+}
+
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
@@ -553,6 +568,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         }
 
         // Transient: x[] НЕ сбрасываем — это и есть перенос с прошлой точки.
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
@@ -730,6 +746,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
         // Вырожденный шаг — траектории нет: unbound, а не fixed point.
         if (h_local <= (numb)0 || pointsInBlock <= 0) { finish_point(REGIME_UNBOUND); continue; }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
@@ -1094,6 +1111,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
             continue;
         }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         bool alive = true;
         int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probe_attached) {
@@ -1466,6 +1484,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             continue;
         }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         bool alive = true;
         int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probes_attached) {
@@ -1539,6 +1558,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     if (req.sweep_over_var &&
         (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
                                                               return fail("var_sweep_index out of range");
+    if (req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
                                                               return fail("writable_var out of range");
     if (req.n_pts <= 0)         return fail("n_pts must be > 0");
@@ -1631,6 +1651,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
 
         // Вырожденный шаг — траектории нет: unbound, а не fixed point.
         if (h_local <= 0.0 || pointsInBlock <= 2) { mark_dead(REGIME_UNBOUND); continue; }
+        dae_point_start(step, req.krs_body, x.data(), a.data());
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
@@ -1853,6 +1874,7 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
         };
         if (h_local <= (numb)0 || pointsInBlock <= 0) { done(); continue; }
+        dae_point_start(step, req.krs_body, x.data(), a.data());
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
@@ -3056,7 +3078,7 @@ struct ParametricEngine::Impl {
             // мог переиспользовать этот кэш без отдельной компиляции.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(time_prefix(krs_body) + src_template), "bifurcation1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template), "bifurcation1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -3407,6 +3429,7 @@ struct ParametricEngine::Impl {
             if (cont) return fail("continuation requires a param sweep, not an IC sweep");
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
             return fail("param_index out of range");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
@@ -3783,6 +3806,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis) {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -4241,6 +4265,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -4632,6 +4657,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;   // что передаём в indicesOfMutVars[0/1]
@@ -5115,6 +5142,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -5488,6 +5516,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;
@@ -5922,7 +5952,7 @@ struct ParametricEngine::Impl {
             // cudaLibrary.cu целиком) и нужен continuation-ветке run_dft_1d.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(time_prefix(krs_body) + src_template_cont), "bifurcation1d_cont.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_cont), "bifurcation1d_cont.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               { "peakFinderCUDA", "DFT_custom_pf" },
@@ -7030,6 +7060,7 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -7635,7 +7666,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_bif2d, key, cached_bif2d, activate, [&](CachedBif2dModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(time_prefix(krs_body) + src_template_bif2d), "bifurcation2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_bif2d), "bifurcation2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -7684,6 +7715,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int    idx_axis_x, idx_axis_y;
@@ -8323,7 +8356,7 @@ struct ParametricEngine::Impl {
             std::vector<std::string> mg;
             const std::string tmpl = minmax ? "#define SIGM_MINMAX_INTERP 1\n" + src_template_metrics
                                             : src_template_metrics;
-            if (!build_module(snapshot_sources(time_prefix(krs_body) + tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -8393,6 +8426,8 @@ struct ParametricEngine::Impl {
         auto check_param = [&](int p) { return p >= 0 && p < (int)req.base_values.size(); };
         auto check_var   = [&](int v) { return v >= 0 && v < req.amountOfX; };
 
+        if (req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) return kDaeZAxisMsg;
+        if (req.dimension == 2 && req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2)) return kDaeZAxisMsg;
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return "log scale requires param lo/hi > 0 (X axis)";
 
@@ -9221,7 +9256,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_basins, key, cached_basins, activate, [&](CachedBasinsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(time_prefix(krs_body) + src_template_basins), "basins.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_basins), "basins.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               { "calculateDiscreteModelAvgPeaksCUDA" },
@@ -9420,6 +9455,7 @@ struct ParametricEngine::Impl {
         if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
         if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
         if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (pick different variables)");
+        if (dae_z_axis(req.krs_body, req.axis_x_var) || dae_z_axis(req.krs_body, req.axis_y_var)) return fail(kDaeZAxisMsg);
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
         if (req.n_pts <= 0)         return fail("n_pts must be > 0");
         if (req.h <= 0.0)           return fail("h must be > 0");

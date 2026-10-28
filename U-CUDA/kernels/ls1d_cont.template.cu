@@ -139,6 +139,10 @@ extern "C" __global__ void ls1dContinuationKernel(
             for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
             continue;
         }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
         // The loop adds one more step after its iterations (see ucuda_steps_per_block).
         const int blockIters = ntSteps - 1;
 

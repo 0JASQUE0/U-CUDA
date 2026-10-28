@@ -606,6 +606,10 @@ __global__ void signalMetricsContinuationKernel(
 		for (int m = 0; m < SIGM_COUNT; ++m) res[m] = (numb)nan("");
 
 		if (hLocal > 0 && blockLen > 0) {
+#ifdef UCUDA_LYAP_NX
+			// ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+			calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
 			flag = loopCalculateDiscreteModel_int(x, a, hLocal, (size_t)transient_steps,
 				amountOfX, 1, 0, maxValue, nullptr, 0, 1, cancelFlag UCUDA_NA(nullptr) UCUDA_NA(0) UCUDA_NA(nullptr) UCUDA_NA(&ucudaStep));
 			if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {

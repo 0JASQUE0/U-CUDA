@@ -135,6 +135,10 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
         // Вырожденный шаг — траектории нет. Это REGIME_UNBOUND, а не fixed
         // point: -1 здесь помечал точку кодом «схлопнулась в точку».
         if (hLocal <= 0 || blockLen <= 0) { d_amountOfPeaks[j] = REGIME_UNBOUND; continue; }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
 
         // Transient: x[] не сбрасываем — карри-овер с прошлой итерации.
         int flag = loopCalculateDiscreteModel_int(

@@ -4494,8 +4494,22 @@ std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
         o << "    numb ucuda_xg[" << N + K << "];\n";
         for (int i = 0; i < N; ++i) o << "    ucuda_xg[" << i << "] = X[" << i << "];\n";
         for (int i = N; i < N + K; ++i) o << "    ucuda_xg[" << i << "] = (numb)0.0;\n";
-        o << "    {\n    numb* const X = ucuda_xg;\n"
-          << dae_scheme_body(g, sch == DaeScheme::BDF1GGL ? DaeScheme::BDF1 : DaeScheme::Radau5) << "    }\n";
+        // Тело над [x; z; mu] пишет в ucuda_xg[], а не в затенённый X: CPU-путь (krs_cpu_check_indices)
+        // сверяет индексы X[i] с размерностью состояния, и mu за её пределами он отверг бы.
+        std::string inner = dae_scheme_body(g, sch == DaeScheme::BDF1GGL ? DaeScheme::BDF1 : DaeScheme::Radau5);
+        {
+            std::string r;
+            auto idc = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+            for (size_t i = 0; i < inner.size(); ++i) {
+                if (inner[i] == 'X' && (i == 0 || !idc(inner[i - 1])) && i + 1 < inner.size() && inner[i + 1] == '[') {
+                    r += "ucuda_xg";
+                    continue;
+                }
+                r += inner[i];
+            }
+            inner.swap(r);
+        }
+        o << "    {\n" << inner << "    }\n";
         for (int i = 0; i < N; ++i) o << "    X[" << i << "] = ucuda_xg[" << i << "];\n";
         body = o.str();
     } else body = dae_scheme_body(s, sch);

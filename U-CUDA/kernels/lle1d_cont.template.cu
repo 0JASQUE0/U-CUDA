@@ -133,6 +133,10 @@ extern "C" __global__ void lle1dContinuationKernel(
         else          a[mutParamIdx] = p;
 
         if (hLocal <= 0 || nBlocks <= 0) { result[j] = nan(""); continue; }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
 
         // Round to nearest, divide by k*h*nBlocks -- see ucuda_steps_per_block (configCUDA.h).
         const int ntSteps   = (int)ucuda_steps_per_block(NT, hLocal);

@@ -439,6 +439,21 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   dense LU (comparison knob). CPU probe, same results to the last digit: Andrews BDF1 114 -> 69 ms,
   Radau IIA 915 -> 250 ms (both match the Test Set q(0.03): Radau 1.4e-9), double pendulum BDF1
   27 -> 16 ms, Radau 590 -> 465 ms. Not measured on the GPU (bodies are plain C; NVRTC not checked).
+- Stage 7, sweeps on a native DAE: `lyap_nx_prefix` (`#define UCUDA_LYAP_NX nx` from the body tag) now goes
+  to the BD 1D / continuation / BD 2D / Metrics / basins modules too, not only LLE/LS. With it every sweep
+  point makes z0 consistent with ITS parameters (the constraint depends on them): the DAE step with h = 0
+  (Newton on g with x fixed; empty for index >= 2) at the end of `ucudaSetupSweepPoint` (BD, peaks,
+  basins, classic Metrics), at the start of `LLEKernelCUDA` / `LSKernelCUDA`, and after each new
+  parameter in the continuation kernels (bif1d_cont, lle1d_cont, ls1d_cont, Metrics cont; the start is
+  the previous point's z — same branch). CPU twin `dae_point_start` in every CPU sweep (BD classic/cont,
+  LLE/LS, DFT, Metrics). The user's z0 is only Newton's start, i.e. the branch rule. Axes / IC sweeps on
+  an algebraic z are refused (`dae_z_axis`, `kDaeZAxisMsg`): 1D var sweeps, LLE/LS/BD 2D, Metrics, basins.
+  GGL bodies write the extended state into `ucuda_xg[]` (not a shadowed `X`): `krs_cpu_check_indices`
+  rejects X[i] beyond N. Headless GPU probe: a sweep from z0 = 0 equals per-point runs from a consistent
+  z0 to 4e-15 (GPU, CPU, classic, continuation); double pendulum Metrics GPU vs CPU: BDF1 (sparse LU)
+  7e-12, Radau IIA 2e-10, Radau + GGL 8e-14 — the stage 5-6 bodies compile and run under NVRTC. Not done:
+  a NaN mark for points where Newton finds no root (the step cannot report it), DFT on the GPU (no
+  projection there), adaptive DAE methods (none exist).
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

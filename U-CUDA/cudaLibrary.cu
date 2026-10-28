@@ -1710,6 +1710,12 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
+#ifdef UCUDA_LYAP_NX
+	// ДАУ (этап 7): связь g(x, z; p) = 0 зависит от параметров точки, поэтому z согласуется здесь, для
+	// каждой точки: шаг метода ДАУ при h = 0 — Ньютон по z при фиксированном x (индекс 1; на индексе >= 2
+	// пусто). Старт — z из настроек: это и есть правило выбора ветви при нескольких корнях.
+	calculateDiscreteModel(localX, UCUDA_TA((numb)0) localValues, (numb)0);
+#endif
 	return true;
 }
 
@@ -3566,6 +3572,9 @@ __global__ void LLEKernelCUDA(
 	int ticks = 0;
 	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * (size_t)amountOfNTPoints;
 
+#ifdef UCUDA_LYAP_NX
+	calculateDiscreteModel(x, UCUDA_TA((numb)0) localValues, (numb)0);   // ДАУ: z0 на связь при параметрах точки
+#endif
 	UCUDA_NVAR(ucudaStep, 0)   // номер шага основной траектории; клоны начинают блок с ним же
 	int flag = amountOfPointsForSkip_local == 0 ? 1
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
@@ -4192,6 +4201,9 @@ __global__ void LSKernelCUDA(
 			localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 			                                                              : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
+#ifdef UCUDA_LYAP_NX
+	calculateDiscreteModel(x, UCUDA_TA((numb)0) localValues, (numb)0);   // ДАУ: z0 на связь при параметрах точки
+#endif
 
 	// Общий seed для всех потоков + номер подпоследовательности = idx (см.
 	// LLEKernelCUDA выше — тот же аргумент против idx-как-seed).
