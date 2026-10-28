@@ -55,7 +55,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -149,6 +149,7 @@ extern "C" __global__ void dft1dHSweepKernel(
     numb a[64];
     for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)
 
     numb* myData = d_data + (size_t)idx * (size_t)maxPointsInBlock;
 
@@ -156,7 +157,7 @@ extern "C" __global__ void dft1dHSweepKernel(
     // (loopCalculateDiscreteModel_int only applies them when writing), so pass
     // the same 1/0 the CPU path does.
     int flag = loopCalculateDiscreteModel_int(
-        x, a, hLocal, transientSteps, amountOfX, 1, 0, maxValue, nullptr, 0, 1);
+        x, a, hLocal, transientSteps, amountOfX, 1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
     if (flag == REGIME_UNBOUND) {
         // Fill follows DFT_custom: UNBOUND -> 0.0 (FIXED_POINT -> -1.0 below).
         // flags[] used to be -1 here, i.e. unbound was reported as fixed point.
@@ -166,7 +167,7 @@ extern "C" __global__ void dft1dHSweepKernel(
     }
 
     flag = loopCalculateDiscreteModel_int(
-        x, a, hLocal, blockLen, amountOfX, preScaller, writableVar, maxValue, myData, 0, 1);
+        x, a, hLocal, blockLen, amountOfX, preScaller, writableVar, maxValue, myData, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
     if (flag == -1 || flag == 0) {
         const numb fill = (flag == -1) ? (numb)-1.0 : (numb)0.0;
         for (int k = 0; k < nFreq; ++k) { AkCOS[outBase + k] = fill; BkSIN[outBase + k] = fill; }

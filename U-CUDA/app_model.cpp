@@ -12,14 +12,19 @@
 // Строит System из текущего режима ввода и алфавита.
 System AppModel::build_system() const {
     // ДАУ: X = [x; z], rhs = [f; g], dae_nx = число x (dae_ir.h). Схемы — только ДАУ.
-    // dae_as_ode: z подставлены в f — ОДУ по x для всех схем и вкладок (dae_reduce_to_ode).
+    // dae_as_ode: z подставлены в f — ОДУ по x для всех схем и вкладок (dae_reduce_to_ode), а сами
+    // z остаются в состоянии выходами (System::out_exprs): шаг пересчитывает их по новому x, и
+    // их видят выход БД, метрики и оси графиков, как обычные переменные.
     if (is_dae) {
         System s = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text).as_codegen_system();
         if (!dae_as_ode) return s;
         System ode;
+        std::vector<std::string> zex;
         std::string why;
-        if (!dae_reduce_to_ode(s, ode, nullptr, &why))
+        if (!dae_reduce_to_ode(s, ode, &zex, &why))
             throw std::runtime_error("solve as ODE: " + why);
+        ode.vars.insert(ode.vars.end(), s.vars.begin() + s.dae_nx, s.vars.end());
+        ode.out_exprs = zex;
         return ode;
     }
     std::vector<std::string> alpha = parse_alphabet();
@@ -396,19 +401,10 @@ bool AppModel::start_phase_analysis() {
     // передать уравнения в сессию и сгенерировать КРС для NVRTC
     try {
         phase_session.sys = build_system();
-        // ДАУ, сведённая к ОДУ: z(x) — наблюдаемые вне состояния (проекции Phase 2D / 3D).
+        // ДАУ, сведённая к ОДУ: z теперь в состоянии (System::out_exprs), наблюдаемые вне
+        // состояния ей не нужны.
         phase_session.observables.clear();
         phase_session.obs_exprs.clear();
-        if (is_dae && dae_as_ode) {
-            const DaeSystem d = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text);
-            System ode;
-            std::vector<std::string> zex;
-            std::string why;
-            if (dae_reduce_to_ode(d.as_codegen_system(), ode, &zex, &why)) {
-                phase_session.observables = d.alg;
-                phase_session.obs_exprs = zex;
-            }
-        }
         // метод по умолчанию — из текущего выбора схемы в модели, если задан
         phase_session.regenerate_krs();
     }

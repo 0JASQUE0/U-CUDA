@@ -51,7 +51,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -249,7 +249,7 @@ __device__ __forceinline__ int loopCalculateDiscreteModelMetrics_core(
 	numb* __restrict__ x, const numb* __restrict__ values,
 	const numb h, const size_t amountOfIterations, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks, MetricsAccum& acc, IntervalStats& ist,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	numb xPrev[AMOUNTOFX];
 	size_t sinceReport = 0;
@@ -287,7 +287,7 @@ __device__ __forceinline__ int loopCalculateDiscreteModelMetrics_core(
 		}
 
 		for (int j = 0; j < preScaller; ++j)
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 	};
 
 	size_t i = 0;
@@ -325,7 +325,7 @@ __device__ __forceinline__ int loopCalculateDiscreteModelMetrics_core(
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModelP(x, values, h, krsPre);
+		UCUDA_STEP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)
@@ -342,14 +342,16 @@ __device__ int loopCalculateDiscreteModelMetrics_int(
 	numb* x, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks, MetricsAccum& acc, IntervalStats& ist,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
 {
 	(void)amountOfX;
 	numb xr[AMOUNTOFX];
+	UCUDA_NBEGIN
 	for (int j = 0; j < AMOUNTOFX; ++j) xr[j] = x[j];
 	const int r = loopCalculateDiscreteModelMetrics_core(xr, values, h, amountOfIterations, preScaller,
-		writableVar, maxValue, peaks, acc, ist, cancelFlag, progressCounter, progressStride, ticksReported);
+		writableVar, maxValue, peaks, acc, ist, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xr[j];
+	UCUDA_NEND
 	return r;
 }
 
@@ -494,9 +496,10 @@ __global__ void calculateDiscreteModelMetricsCUDA(
 			amountOfPointsForSkip, amountOfIterations,
 			localX, localValues, h_local, skip_local, iters_local))
 	{
+		UCUDA_NVAR(ucudaStep, 0)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 		if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 			const numb dt = h_local * (numb)preScaller;
@@ -510,7 +513,7 @@ __global__ void calculateDiscreteModelMetricsCUDA(
 
 			flag = loopCalculateDiscreteModelMetrics_int(localX, localValues, h_local, iters_local,
 				amountOfInitialConditions, preScaller, writableVar, maxValue, peaks, acc, ist,
-				cancelFlag, progressCounter, progressStride, &ticks);
+				cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 			flag = smFinalize(flag, acc, peaks, ist,
 				intervals != nullptr ? intervals + (size_t)idx * peakStride : nullptr, dt, res);
@@ -573,6 +576,7 @@ __global__ void signalMetricsContinuationKernel(
 	numb a[64];   // kMaxAmountOfValues в engine
 	for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
 	for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+	UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x
 
 	numb res[SIGM_COUNT];
 	for (int j = 0; j < nPts; ++j) {
@@ -603,7 +607,7 @@ __global__ void signalMetricsContinuationKernel(
 
 		if (hLocal > 0 && blockLen > 0) {
 			flag = loopCalculateDiscreteModel_int(x, a, hLocal, (size_t)transient_steps,
-				amountOfX, 1, 0, maxValue, nullptr, 0, 1, cancelFlag);
+				amountOfX, 1, 0, maxValue, nullptr, 0, 1, cancelFlag UCUDA_NA(nullptr) UCUDA_NA(0) UCUDA_NA(nullptr) UCUDA_NA(&ucudaStep));
 			if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 				const numb dt = hLocal * (numb)preScaller;
 				PeakStream peaks;
@@ -614,7 +618,7 @@ __global__ void signalMetricsContinuationKernel(
 				ist.init();
 				flag = loopCalculateDiscreteModelMetrics_int(x, a, hLocal, (size_t)blockLen,
 					amountOfX, preScaller, writableVar, maxValue, peaks, acc, ist,
-					cancelFlag, nullptr, 0, nullptr);
+					cancelFlag, nullptr, 0, nullptr UCUDA_NA(&ucudaStep));
 				flag = smFinalize(flag, acc, peaks, ist, intervals, dt, res);
 			}
 		}

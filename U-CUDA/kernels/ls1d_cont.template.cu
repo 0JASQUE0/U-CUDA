@@ -46,7 +46,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -91,6 +91,7 @@ extern "C" __global__ void ls1dContinuationKernel(
 
     for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x; клоны начинают блок с ним же
 
     curandState_t rng;
     curand_init(1234567891ULL, 0ULL, 0ULL, &rng);
@@ -147,7 +148,7 @@ extern "C" __global__ void ls1dContinuationKernel(
             settleBlocks = 0;
             // Exactly skipSteps steps: the loop adds one more after its iterations.
             if (skipSteps > 0 && loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps - 1, amountOfX,
-                                               1, 0, maxValue, nullptr, 0, 1) == 0) {
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) {
                 alive = 0;
             } else {
                 // Orthonormalise the random basis, then place the probes at
@@ -170,17 +171,21 @@ extern "C" __global__ void ls1dContinuationKernel(
 #ifdef UCUDA_LYAP_NX
         // z клонов — на связь при новом параметре (и после постановки щупов).
         if (alive)
-            for (int k = 0; k < UCUDA_LYAP_NX; ++k) ucudaDaeProject(y + k * amountOfX, x, a, amountOfX);
+            for (int k = 0; k < UCUDA_LYAP_NX; ++k)
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
 #endif
         for (int k = 0; k < amountOfX; ++k) sum[k] = 0;
 
         const int totalBlocks = settleBlocks + nBlocks;
         for (int b = 0; alive && b < totalBlocks; ++b) {
+            UCUDA_NVAR(ucudaBlock0, ucudaStep)
             if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
-                                               1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
-            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) { alive = 0; break; }
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+                UCUDA_NVAR(ucudaClone, ucudaBlock0)
                 if (loopCalculateDiscreteModel_int(y + k * amountOfX, a, hLocal, blockIters, amountOfX,
-                                                   1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
+                                                   1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaClone)) == 0) { alive = 0; break; }
+            }
             if (!alive) break;
 
             for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
@@ -198,7 +203,7 @@ extern "C" __global__ void ls1dContinuationKernel(
                 for (int i = 0; i < amountOfX; ++i)
                     y[k * amountOfX + i] = x[i] + z[k * amountOfX + i] * eps;
 #ifdef UCUDA_LYAP_NX
-                ucudaDaeProject(y + k * amountOfX, x, a, amountOfX);
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
 #endif
             }
         }
@@ -213,6 +218,7 @@ extern "C" __global__ void ls1dContinuationKernel(
             for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
             probesAttached = 0;
             for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
+            UCUDA_NSET(ucudaStep, 0)
             curand_init(1234567891ULL, (unsigned long long)j + 1ULL, 0ULL, &rng);
             for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
                 numb zp = 0;

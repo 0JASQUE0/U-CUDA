@@ -32,7 +32,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
         static const std::set<std::string> f = {
             "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
             "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
-            "pow","atan2","fmod","floor","ceil"
+            "pow","atan2","fmod","floor","ceil",
+            "copysign"   // производная fabs (pn_diff): её печатает pn_print, и текст читается обратно
         };
         return f;
     }
@@ -2335,7 +2336,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
 
-        NameMap nm = build_namemap(s, "X");
+        // Явное время: явная стадия (Эйлер-Кромер на h1) — в t, диагонально-неявная — в t + h1
+        // (неявный Эйлер на h1); корректор берёт f по значениям стадии — тоже в t + h1.
+        NameMap nm = build_namemap(s, "X", time_name(s, implicit_stage ? "(ucuda_t + h1)" : nullptr));
+        NameMap nm_corr = build_namemap(s, "X", time_name(s, "(ucuda_t + h1)"));
         std::vector<PN> rhs_ast(N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
@@ -2361,7 +2365,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
 
         for (int i = 0; i < N; ++i)
             o << "    X1[" << i << "] = X1[" << i << "] + h * ("
-              << emit_to_str(rhs_ast[i], nm) << ");\n";
+              << emit_to_str(rhs_ast[i], nm_corr) << ");\n";
         for (int i = 0; i < N; ++i)
             o << "    X[" << i << "] = X1[" << i << "];\n";
         return o.str();
@@ -2385,7 +2389,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             throw std::runtime_error("vars/rhs size mismatch");
         int N = (int)s.vars.size();
 
-        NameMap nm = build_namemap(s, "X");
+        NameMap nm = build_namemap(s, "X", time_name(s, "(ucuda_t + h)"));   // неявный: f в t + h
         std::ostringstream o;
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
@@ -2435,8 +2439,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
         F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
         F_SINH, F_COSH, F_TANH, F_EXP, F_LOG, F_LOG2, F_LOG10,
         F_SQRT, F_CBRT, F_FABS, F_FLOOR, F_CEIL,
-        // F_COPYSIGN is emitted only by pn_diff (derivative of fabs); the user-facing
-        // parser does not accept it, so it is absent from known_funcs().
+        // F_COPYSIGN is emitted by pn_diff (derivative of fabs); known_funcs() accepts it
+        // so that pn_print text (z outputs: dz/dt, sys_augmented) parses back.
         F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN
     };
     struct Instr { int op; int idx; double val; };
@@ -2624,6 +2628,8 @@ struct SystemEvaluator::Impl {
 };
 
 SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
+    if (!sys.out_exprs.empty())   // z-выходы считает шаг КРС (krs_cpu), не вычислитель
+        throw std::runtime_error("SystemEvaluator: z outputs need the compiled step (krs_cpu)");
     if (sys.vars.size() != sys.rhs.size())
         throw std::runtime_error("SystemEvaluator: vars/rhs size mismatch");
     // ДАУ: строки связей 0 = g тут посчитались бы как производные — тихо неверный ответ.
@@ -2841,6 +2847,8 @@ bool scheme_has_complex_core(const std::string& name) {
 }
 
 std::string codegen_scheme_complex_core(const System& s, Scheme sch) {
+    if (!s.out_exprs.empty())
+        throw std::runtime_error("z outputs (Solve as ODE): ExtrZ (complex extrapolation core) is not available - pick another scheme");
     if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     switch (sch) {
     case Scheme::ComplexCD:    return scheme_cd_common(s, CdKind::Cx,    true);
@@ -4013,8 +4021,76 @@ bool dae_scheme_from_name(const std::string& name, DaeScheme* out) {
     return false;
 }
 
+// --- Выходы z (System::out_exprs): «Solve as ODE» несёт z = phi(x) в состоянии после x ---
+namespace {
+    // ОДУ по x: z сняты (их строк в rhs и нет).
+    System sys_core(const System& s) {
+        System c = s;
+        c.vars.resize(s.rhs.size());
+        c.out_exprs.clear();
+        return c;
+    }
+    // st[nx + j] = phi_j(st[0..nx-1]) — пересчёт выходов по новому состоянию (время — tname).
+    std::string outputs_tail(const System& s, const char* st, const std::string& tname) {
+        const int nx = (int)s.rhs.size();
+        const NameMap nm = build_namemap(sys_core(s), st, tname);
+        std::ostringstream o;
+        o << "    // z outputs: phi(x) of the new state (passive: not in f)\n";
+        for (size_t j = 0; j < s.out_exprs.size(); ++j) {
+            Parser p(s.out_exprs[j], s.latex);
+            o << "    " << st << "[" << nx + (int)j << "] = " << emit_to_str(p.parse(), nm) << ";\n";
+        }
+        return o.str();
+    }
+    // Для адаптивного шага z — строки ОДУ с производной вдоль потока dz/dt = sum dphi/dx_i f_i
+    // + dphi/dt: так у них есть F для плотного выхода (Эрмит, стадии схемы). Значение z в узле
+    // всё равно перезаписывается phi(Y), а оценка ошибки по z — нулём (adaptive_outputs_tail).
+    System sys_augmented(const System& s) {
+        System a = sys_core(s);
+        const int nx = (int)s.rhs.size();
+        std::vector<PN> f(nx);
+        for (int i = 0; i < nx; ++i) { Parser p(s.rhs[i], s.latex); f[i] = p.parse(); }
+        const bool ut = system_uses_time(s);
+        for (size_t j = 0; j < s.out_exprs.size(); ++j) {
+            Parser p(s.out_exprs[j], s.latex);
+            const PN phi = p.parse();
+            jac_check_differentiable(phi);
+            PN d = pn_num(0.0);
+            for (int i = 0; i < nx; ++i) {
+                const PN di = pn_diff(phi, s.vars[i]);
+                if (!pn_is_zero(di)) d = pn_is_zero(d) ? pn_mul(di, f[i]) : pn_add(d, pn_mul(di, f[i]));
+            }
+            if (ut) {
+                const PN dt = pn_diff(phi, "t");
+                if (!pn_is_zero(dt)) d = pn_is_zero(d) ? dt : pn_add(d, dt);
+            }
+            a.vars.push_back(s.vars[(size_t)nx + j]);
+            a.rhs.push_back(pn_print(d, s.latex));
+        }
+        return a;
+    }
+    // Хвост emb: z в Y — phi(Y) (точно на связи), ошибка по z — 0 (регулятор ведёт по x).
+    void adaptive_outputs_tail(AdaptiveCode& c, const System& s) {
+        const int nx = (int)s.rhs.size();
+        c.emb += outputs_tail(s, "Y", time_name(s, "(ucuda_t + h)"));
+        for (size_t j = 0; j < s.out_exprs.size(); ++j)
+            c.emb += "    E[" + std::to_string(nx + (int)j) + "] = (numb)0;\n";
+    }
+    const char* const kOutputsNoComplex =
+        "z outputs (Solve as ODE): ExtrZ (complex extrapolation core) is not available - pick another scheme";
+}
+
 std::string codegen_scheme(const System& s, Scheme sch) {
     if (s.dae_nx >= 0) throw std::runtime_error(kDaeNeedsDaeScheme);
+    // Выходы z: шаг по x, затем z = phi(x нового состояния); метка nx — LLE/LS возмущают только x,
+    // а проекция клона (шаг с h = 0) просто пересчитывает его z.
+    if (!s.out_exprs.empty())
+        return codegen_scheme(sys_core(s), sch) + outputs_tail(s, "X", time_name(s, "(ucuda_t + h)"))
+             + dae_nx_tag((int)s.rhs.size());
+    // CD fast выносит в предрасчёт всё, что не зависит от X, — с явным t это были бы константы
+    // одного момента. Схема та же, что CD (FP), только без предрасчёта: с t она им и считается.
+    if (system_uses_time(s) && (sch == Scheme::CDFast || sch == Scheme::CDFastFP))
+        sch = (sch == Scheme::CDFast) ? Scheme::CD : Scheme::CDFP;
     if (!scheme_supports_time(sch) && system_uses_time(s))
         throw std::runtime_error(kTimeUnsupportedMsg);
     if (const int K = gbs_stage_count(sch)) return scheme_gbs(s, K);
@@ -4079,6 +4155,11 @@ bool scheme_supports_adaptive(Scheme sch) {
 }
 
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
+    if (!s.out_exprs.empty()) {   // выходы z: строки с dz/dt, затем z = phi(Y), E_z = 0
+        AdaptiveCode c = codegen_adaptive(sys_augmented(s), sch);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size())
         throw std::runtime_error("vars/rhs size mismatch");
     if (s.dae_nx >= 0) throw std::runtime_error("adaptive step for DAE systems is not implemented yet");
@@ -4877,7 +4958,7 @@ void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, cons
     const int N = (int)s.vars.size();
     o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { Y[i_ea] = " << ac << "[i_ea]; E[i_ea] = "
       << ec << "[i_ea]; }\n";
-    const auto fy = rhs_over(s, "Y");
+    const auto fy = rhs_over(s, "Y", time_name(s, "(ucuda_t + h)"));   // F1 = f(t + h, Y)
     for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
 }
 
@@ -4886,8 +4967,13 @@ void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, cons
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
                                             const std::string& base_name, double base_rhs) {
+    if (!s.out_exprs.empty()) {   // база (codegen_scheme) уже пересчитывает z после каждого подшага
+        AdaptiveCode c = codegen_adaptive_extrapolation(sys_augmented(s), base_body, n, p, symmetric,
+                                                        base_name, base_rhs);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
-    if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     const int N = (int)s.vars.size(), K = (int)n.size();
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
     if (K < 2) throw std::runtime_error("adaptive step needs an extrapolation with at least two stages "
@@ -4910,11 +4996,15 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     o << "    numb XS_ea[" << N << "];\n";
     o << "    numb* const X = XS_ea;\n";
     const bool inl = wrapper_can_inline(base_body);
+    // Явное время — как у wrap_extrapolation: подшаг s начинается в t + s*h/n (t попытки —
+    // аргумент emb от драйвера), внутренний ucuda_t затеняет его для тела базы.
+    const bool ht = step_body_uses_time(base_body);
+    if (ht) o << "    const numb ucuda_t_ea = ucuda_t;\n";
     if (inl) {
         o << "    const numb h_ea = h;\n";
     } else {
         o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
-        o << "    auto step_ea = [&](const numb h) {\n";
+        o << "    auto step_ea = [&](const numb h" << (ht ? ", const numb ucuda_t" : "") << ") {\n";
         emit_indented(o, base_body, "    ");
         o << "    };\n";
     }
@@ -4924,8 +5014,12 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
         if (inl) {
             o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
             o << "        const numb h = h_ea * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
+            if (ht) o << "        const numb ucuda_t = ucuda_t_ea + (numb)s_ea * h;\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
+        } else if (ht) {
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h * ((numb)1 / (numb)" << fmtnum((double)n[k])
+              << "), ucuda_t_ea + (numb)s_ea * h * ((numb)1 / (numb)" << fmtnum((double)n[k]) << "));\n";
         } else {
             o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h * ((numb)1 / (numb)" << fmtnum((double)n[k]) << "));\n";
         }
@@ -4949,6 +5043,7 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
 AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
                                                     const std::vector<int>& n, int p,
                                                     const std::string& base_name, double base_rhs) {
+    if (!s.out_exprs.empty()) throw std::runtime_error(kOutputsNoComplex);
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     const int N = (int)s.vars.size(), K = (int)n.size();
@@ -4996,15 +5091,21 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
 }
 
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
+    if (!s.out_exprs.empty()) {
+        AdaptiveCode c = codegen_adaptive_gbs(sys_augmented(s), K);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
-    if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     const int N = (int)s.vars.size();
     if (N < 1) throw std::runtime_error("GBS needs a non-empty system");
     if (K < 2) throw std::runtime_error("adaptive step needs GBS 2-4 or longer (the lower-order solution comes "
                                         "from the first K-1 stages)");
     const std::vector<int> n = gbs_substeps(K);
     const ExtrAdWeights w = extr_ad_weights(n, 2, true);
-    const auto f1 = rhs_over(s, "Z1_gbs");
+    // Явное время — как у scheme_gbs: leapfrog z_m в t + m*hs, сглаживание f(z_n) в t + h.
+    const auto f1  = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + (numb)m_gbs * hs_gbs)"));
+    const auto f1s = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + h)"));
     int cost = 0;
     for (int v : n) cost += v;   // n - 1 leapfrog + сглаживание; f(X) — из F0
 
@@ -5043,7 +5144,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
     o << "        // сглаживание Грэгга: (z_{n-1} + z_n + hs*f(z_n)) / 2\n";
     for (int i = 0; i < N; ++i)
         o << "        T_gbs[" << i << "] = (numb)0.5 * (Z0_gbs[" << i << "] + Z1_gbs[" << i << "] + hs_gbs * ("
-          << f1[(size_t)i] << "));\n";
+          << f1s[(size_t)i] << "));\n";
     o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { AC_gbs[i_gbs] += W_gbs[k_gbs] * T_gbs[i_gbs]; "
          "EC_gbs[i_gbs] += V_gbs[k_gbs] * T_gbs[i_gbs]; }\n";
     o << "    }\n";
@@ -5080,6 +5181,7 @@ static double cd_implicit_sweep_rhs(const System& s, int iters = CD_ITERS) {
 }
 
 double scheme_rhs_per_step(const System& s, const std::string& name) {
+    if (!s.out_exprs.empty()) return scheme_rhs_per_step(sys_core(s), name);   // z пересчёт f не стоит
     if (const int k = builtin_scheme_rhs_per_step(name); k > 0) return (double)k;
     ExtrapolationSpec es;
     if (parse_extrapolation_name(name, &es)) {
@@ -5714,7 +5816,9 @@ bool system_uses_time(const System& s) {
         for (const auto& c : n->args) if (has_t(c)) return true;
         return false;
     };
-    for (const auto& r : s.rhs) {
+    std::vector<std::string> all = s.rhs;   // и выходы z (их пересчёт берёт t конца шага)
+    all.insert(all.end(), s.out_exprs.begin(), s.out_exprs.end());
+    for (const auto& r : all) {
         Parser p(r, s.latex);
         if (has_t(p.parse())) return true;
     }
@@ -5729,6 +5833,7 @@ bool scheme_supports_time(Scheme sch) {
     case Scheme::CD: case Scheme::CD10: case Scheme::CDFP:
     case Scheme::GBS: case Scheme::GBS24: case Scheme::GBS246: case Scheme::GBS2468:
     case Scheme::GBS246810: case Scheme::GBS24681012:
+    case Scheme::SEMP: case Scheme::SIMP: case Scheme::D:
         return true;
     default:
         return false;

@@ -28,6 +28,12 @@ struct System {
     // такой System не строятся (codegen_scheme откажет), только codegen_dae_scheme.
     int dae_nx = -1;
 
+    // Выходы z («Solve as ODE», уровень A): vars = [x; z], rhs = f (только x), out_exprs[j] = phi_j(x)
+    // — z после шага пересчитываются по новому x и в f не входят. Так z видят все вкладки
+    // (выход БД, метрики, оси) как переменные состояния. codegen_scheme / codegen_adaptive и
+    // обёртки поддерживают это сами; точки входа, которые не умеют, отказывают явно.
+    std::vector<std::string> out_exprs;
+
     // Ньютон неявных схем здесь не живёт: допуск, предел итераций и режим якобиана —
     // рантайм-слоты a[] каждой вкладки (NewtonSettings ниже).
     // "CD FP" / "CD fast FP": число простых итераций. Сам расчёт берёт его в
@@ -373,10 +379,10 @@ std::vector<std::string> codegen_rhs(const System& s);
 // автономной системы тело прежнее до байта.
 inline constexpr const char* kStepTimeArg = "ucuda_t";
 inline constexpr const char* kTimeUnsupportedMsg =
-    "explicit time t is not supported by this scheme: complex CD, CD fast, SEMP/SIMP/D, "
-    "Complex Implicit Euler and adaptive GBS/Extr do not shift stage times yet "
-    "(supported: explicit RK, implicit Euler/Midpoint, CD, CD {1-0}, CD FP, GBS, Extr/Comp over them; "
-    "adaptive RK45/DOP853/DOPRI78)";
+    "explicit time t is not supported by this scheme: complex CD "
+    "and Complex Implicit Euler have complex stage times "
+    "(supported: explicit RK, implicit Euler/Midpoint, SEMP/SIMP/D, CD, CD {1-0}, CD FP, CD fast as CD, GBS, Extr/Comp over them; "
+    "adaptive RK45/DOP853/DOPRI78, GBS, Extr)";
 bool system_uses_time(const System& s);
 // Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
 bool scheme_supports_time(Scheme sch);

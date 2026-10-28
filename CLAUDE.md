@@ -210,6 +210,31 @@ D:\U-CUDA\
 6. Renderer uses the same memory via OpenGL interop—no copies
 7. **Post-Build Event** copies runtime data to `<solution>/x64/{Debug,Release}/` (= `OutDir`): `ocr_server.py`, the whole `kernels/` folder, plus `cudaLibrary.cu`, `cudaLibrary.cuh`, `cudaMacros.cuh` and `configCUDA.h` into `kernels/`—NVRTC picks them up at runtime. Note: `library/` is **not** copied (it is resolved from source at runtime), and neither is `hostLibrary.cuh`.
 
+### How a sweep module is compiled (monolith vs rdc)
+`build_module` (`parametric_engine.cpp`) has two paths; `set_nvrtc_rdc` picks one. The code default is
+**off** (`g_nvrtc_rdc{false}`, `AppConfig::nvrtc_rdc = false`); only a saved `_app_config.json` turns it on.
+- **Monolith (rdc off):** the template defines `calculateDiscreteModel` (`__forceinline__`) and then
+  `#include "cudaLibrary.cu"` — one translation unit. `name_exprs` only fetches mangled names, it prunes
+  nothing: every non-template `__global__` of `cudaLibrary.cu` (30 of them) lands in the PTX and goes through
+  the driver's ptxas, and ~12 of them inline the step. `loopCalculateDiscreteModel_int` itself is NOT inlined
+  (one shared `.func`, 4-5 step copies inside), so the cost is the other kernels, not the requested one.
+  Measured (Mikhailov DAU_n, DAE CD, 45 KB body, RTX 2060, `CUDA_CACHE_DISABLE=1`): LLE 2D module with all
+  kernels 266 s (NVRTC 62 s + ptxas 204 s, 30 entries, 15 MB PTX); with only `LLEKernelCUDA` left
+  10.7 s (1 entry, 1.4 MB) — the same as rdc.
+- **rdc:** the library half (template with `extern "C" krs_step(...)` calls instead of the body) is compiled
+  once per (template, N, par_or_var, fmad, peak settings, kernels) and cached as PTX (`lib_ptx_for`); the step
+  is its own small TU (`krs_ptx_for`); `cuLinkAddData` x2 + `cuLinkComplete` join them (PTX link, no LTO, so
+  the step is a real call). The lost FMA contraction across that call changes last bits on some schemes.
+- **Pruning kernels is not bit-identical by itself.** Cutting the unused kernels (tried on a scratch copy of
+  `cudaLibrary.cu`) gave LS 1D on Mikhailov ~1e-12 differences in 8 of 16 rows. Cause: when every remaining
+  caller passes `data = nullptr`, NVVM specialises `loopCalculateDiscreteModel_int` (the trajectory-writing
+  branch is dead, one step copy goes), the CFG changes and FMA contraction in the step copies lands
+  differently. Proof: a dummy caller kernel with `data` from a parameter restores bit equality with the full
+  library (`preScaller == 1` alone does not matter), and with `--fmad=false` both agree exactly. So a pruned
+  build needs a "keeper" kernel per loop wrapper (`loopCalculateDiscreteModel_int`, `…Peaks_int`,
+  `loopCalculateDiscreteModel`) whose arguments are all runtime values, and a CSV comparison against the full
+  build for every template.
+
 ### Where linearization actually comes from
 **LLE/LS do not use a Jacobian.** They linearize with perturbed clone trajectories plus Gram-Schmidt (`LLEKernelCUDA` / `LSKernelCUDA` in `cudaLibrary.cu`) — the Benettin/Wolf method. No variational equations, no monodromy matrix anywhere.
 
@@ -220,7 +245,7 @@ Symbolic differentiation does exist, but it serves **only the implicit schemes**
 
 ---
 
-## Explicit time t (non-autonomous systems) — in progress
+## Explicit time t (non-autonomous systems)
 A right-hand side may use `t` (not a variable or parameter). Autonomous systems must stay
 **byte-identical** in every generated body — check with a dump of `codegen_scheme` /
 `codegen_adaptive` / CPU / complex-core output for all `library/` systems before and after.
@@ -230,20 +255,40 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
 - Stage times are printed by the scheme (`rhs_over(s, st, tname)`, `time_name`): RK4
   `ucuda_ts = ucuda_t + {0, h/2, h/2, h}`, explicit RK tables `ucuda_t + Cs[i]*h` (`Cs` = row sums
   of A, `stage_time_table`). One t for all stages silently drops the order to 1.
-- Supported so far: Euler, Euler-Cromer, Explicit Midpoint, RK4, DOPRI78(+legacy), RK45, DOP853,
-  Implicit Euler / Midpoint, CD / CD {1-0} / CD FP (explicit half at the start of its sub-interval,
-  implicit half at its end), GBS (leapfrog z_m at t + m*hs), Extr/Comp over any of them (each substep
-  shadows `ucuda_t`; lambda form gets it as a second argument) (`scheme_supports_time`), all DAE
-  methods; Analysis on GPU —
-  fixed step (`phase_kernel`, t_n = n*h from an integer counter, never `t += h`) and adaptive
-  RK45 / DOP853 / DOPRI78 (`compile_adaptive`).
-- Sweeps are the open part: the loops in cudaLibrary.cu (`loopCalculateDiscreteModel*_int_core`,
-  ~15 calls of `calculateDiscreteModelP`) and the templates do not know the absolute step index —
-  transient and record are separate calls — so time needs a step-index argument threaded through
-  every loop, wrapper and kernel (keeping autonomous text byte-identical). Not done.
-  Not yet (clear errors): other schemes, GBS/Extr adaptive, Extr/Comp wrappers
-  (`step_body_uses_time(base_body)`), sweeps (`build_module` refuses), CPU paths (`krs_cpu`
-  compile refuses, CPU Analysis refuses).
+- Schemes (`scheme_supports_time`): Euler, Euler-Cromer, Explicit Midpoint, RK4, DOPRI78(+legacy),
+  RK45, DOP853, Implicit Euler / Midpoint, SEMP / SIMP / D (stage at t or t + h1, corrector at t + h1;
+  D at t + h), CD / CD {1-0} / CD FP (explicit half at the start of its sub-interval, implicit half at
+  its end), CD fast / CD fast FP — generated as CD / CD FP when t is used (the prep block would freeze
+  t), GBS (leapfrog z_m at t + m*hs), Extr/Comp over any of them (each substep shadows `ucuda_t`;
+  lambda form gets it as a second argument), all DAE methods. Adaptive: RK45 / DOP853 / DOPRI78, GBS
+  and Extr (same stage times as the fixed ones, F1 = f(t + h, Y)). Refused: complex CD family and
+  Complex Implicit Euler (complex stage times), ExtrZ, FastSync, Network.
+- GPU fixed-step loops: `cudaLibrary.cuh` macros, all empty without `UCUDA_NONAUTONOMOUS`. A kernel
+  keeps the trajectory's step index (`UCUDA_NVAR(ucudaStep, 0)`) and passes it to every loop call
+  (`UCUDA_NA(&ucudaStep)`, or `UCUDA_NA_AFTER_WS` for calls cut off at `writeStep`); the loop wrapper
+  copies it into a register (`UCUDA_NBEGIN` / `UCUDA_NEND`), the inlined core steps with
+  `UCUDA_STEP` = `calculateDiscreteModelP(X, n++ * h, a, h, P)`, so transient and record calls share
+  one time axis. LLE/LS clones start each block from the main trajectory's index (`ucudaClone` /
+  `ucudaBlock0`); continuation kernels keep it along the chain and reset it with x
+  (`UCUDA_NSET`). Converted: BD (`calculateDiscreteModelCUDA`, `...PeaksCUDA`, bif1d_cont), basins
+  (`...AvgPeaksCUDA`), LLE/LS (classic, 2D, cont), Metrics (classic, cont), DFT (cont, h-sweep),
+  Order (`perfIntegrateKernel` n*h; `orderEstimateKernel` substeps at t_n + k*h/2, t_n + k*h/4).
+  Legacy kernels with defaulted loop arguments (distributed, IC, CUDA_H) start t at 0 per call.
+- Engine: `time_prefix(body)` puts `#define UCUDA_NONAUTONOMOUS` before the template of the modules
+  above (and the adaptive ones); `build_module` refuses a time body in a module without it (FastSync,
+  Network). rdc: `kKrsFnsT` — `krs_step_t(X, ucuda_t, a, h)` and the adaptive `krs_*_t`.
+- Adaptive sweeps: the driver's `S.t`, start 0. Adaptive continuation restarts each point at t = 0
+  (the point's transient / record targets are absolute times), unlike the fixed-step chain.
+- CPU: the `krs_cpu` step DLL of a time body keeps the step index itself (`thread_local`, t = n*h of
+  the last nonzero h, so the DAE projection step with h = 0 sees its trajectory's t and does not
+  advance it); `KrsCpuStep::step_index(v)` sets / reads it — 0 at each trajectory start, the main
+  index for LLE/LS clones, explicit k / 2k / 4k for Order's three copies. CPU loops are unchanged.
+  The adaptive CPU DLL (`AdaptiveCpuModule`) gets `UCUDA_NONAUTONOMOUS` and its own `UCUDA_TA/TP`
+  (it has no cudaLibrary.cuh); CPU Analysis sends time systems to it and to `krs_cpu`.
+- Verified on x'' + 0.2x' + x = cos(wt) (amplitude R(w) exact, LLE = LS = -0.1): BD 1D/2D, Metrics,
+  LLE/LS (classic and cont), basins on GPU fixed step (rdc and one TU), adaptive DOP853 / GBS / Extr
+  (grid and nodes, GPU and CPU), CPU fixed-step sweeps (= GPU to all digits); Order orders: RK4 4,
+  Explicit Midpoint 2, SEMP / SIMP 2, D 1, CD 2, GBS 2-4 4. Lorenz sweep dumps (24 runs) bit-identical.
 - Adaptive: with `#define UCUDA_NONAUTONOMOUS` the module's `ucuda_krs_rhs/emb/dprep` take
   `ucuda_t` before `a`, and the driver passes `S.t` / `t0 + h0` / `S.tp` through `UCUDA_TA(t)` /
   `UCUDA_TP(decl)` (empty otherwise, so autonomous modules preprocess to the old text). The emb body
@@ -271,9 +316,17 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
 - Level A ("Solve as ODE", record field `dae_as_ode`): `dae_reduce_to_ode` solves each constraint that
   is linear in exactly one remaining z (z = -rem/coef, AST substitution, `pn_print` back to text) and
   returns an ODE in x; then `AppModel::build_system` hands that ODE to every tab and ODE scheme (CD,
-  Comp/Yoshida, implicit, sweeps). z is not part of the state there; in Analysis z(x) are observables
-  (`PhaseAnalysisSession::observables/obs_exprs`): evaluated on the CPU after the run and appended to every
-  point after the state coordinates, so Phase 2D / 3D axes nv + j pick them (`phase_axis_combo`).
+  Comp/Yoshida, implicit, sweeps), with z kept in the state as outputs: `System::out_exprs` = z(x),
+  vars = [x; z], rhs = f only. `codegen_scheme` steps x (`sys_core`) and then recomputes
+  X[nx + j] = phi_j(X) at t + h (`outputs_tail`), plus `dae_nx_tag(nx)` — LLE/LS perturb x only and the
+  clone projection (h = 0) just recomputes z. Adaptive (`codegen_adaptive`, GBS, Extr): the z rows get
+  dz/dt = grad phi . f + dphi/dt (`sys_augmented`, `pn_diff` + `pn_print`; `copysign` from d|u| is now
+  in `known_funcs`) for F and dense output, then Y_z = phi(Y), E_z = 0 (`adaptive_outputs_tail`). So
+  every tab sees z as a variable: BD / Metrics output, axes, basins. Refused: ExtrZ (complex core),
+  `SystemEvaluator` (CPU Analysis goes through `krs_cpu` / the adaptive DLL instead). Checked on Chua
+  with the diode current: BD on x and LS bit-identical to the plain ODE, Metrics on z equal to the
+  native DAE RK4 to 1e-10 (periodic points). The old Analysis observables
+  (`PhaseAnalysisSession::observables/obs_exprs`, appended after the run) are no longer filled.
 - Consistent initial z: `dae_consistent_z` (CPU, `SystemEvaluator` on a copy with dae_nx = -1) solves
   g(x0, z) = 0 before Analysis runs; index >= 2 is reported in `AnalysisResult::dae_status`.
 - Guards: `codegen_scheme` / `codegen_adaptive` refuse `dae_nx >= 0`; `SystemEvaluator` refuses it (it
@@ -290,7 +343,8 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   Kernels still return N exponents (tail NaN); `trim_ls_spectrum` cuts the result to nx, and every LS CSV
   writer (streamed 1D rows, 2D cells, `write_curve1d_csv(.., K)`) writes nx columns too.
   Headless probes with `set_nvrtc_rdc` off compile a DAE LLE/LS module for Mikhailov in ~200-270 s (one
-  monolithic module); with rdc on (the app default in `_app_config.json`) it is ~11 s.
+  monolithic module); with rdc on (set in `_app_config.json`; the code default is off) it is ~11 s. Why: see
+  "How a sweep module is compiled".
 - Not yet: CD for index 2 (the report's secant-on-z variant), index-3 Newton scaling / GGL (stage 5).
 - Newton for DAE: the z predictor is the old value, so a fast multiplier (pendulum) needs ~9 iterations;
   a step that runs out of iterations is accepted unconverged and the constraint drifts until the run

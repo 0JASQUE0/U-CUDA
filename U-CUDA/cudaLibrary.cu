@@ -128,8 +128,8 @@ __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const n
 struct UcudaKrsPre {};
 __device__ __host__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}
 __device__ __host__ __forceinline__
-void calculateDiscreteModelP(numb* X, const numb* a, const numb h, const UcudaKrsPre&) {
-	calculateDiscreteModel(X, a, h);
+void calculateDiscreteModelP(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h, const UcudaKrsPre&) {
+	calculateDiscreteModel(X, UCUDA_TA(ucuda_t) a, h);
 }
 #endif
 
@@ -373,7 +373,9 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		N[i] = K[i] * (S1[i] - X[i]);
 
-	calculateDiscreteModel(X, a, eff_h);
+	// FastSync с явным t не поддерживается (движок отказывает раньше); t = 0 — только чтобы
+	// модуль неавтономной системы собирался: cudaLibrary.cu входит в каждый модуль целиком.
+	calculateDiscreteModel(X, UCUDA_TA((numb)0) a, eff_h);
 
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		X[i] += h * N[i];
@@ -1145,13 +1147,14 @@ struct PeakStream
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
-	int writableVar, const numb maxValue, numb* data, 
-	const int startDataIndex, const int writeStep)
+	int writableVar, const numb maxValue, numb* data,
+	const int startDataIndex, const int writeStep UCUDA_NP)
 {
 
 	numb xPrev[AMOUNTOFX];
 	UcudaKrsPre krsPre;
 	ucudaKrsPrep(krsPre, values, h);
+	UCUDA_NBEGIN
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
 	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
@@ -1167,11 +1170,12 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 
 		// Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории )
 		for ( int j = 0; j < preScaller; ++j )
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 
 		// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 		if ( isnan( x[writableVar] ) || isinf( x[writableVar] ) )
 		{
+			UCUDA_NEND
 			return false;
 		}
 
@@ -1179,10 +1183,12 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 		if ( maxValue != 0 )
 			if ( fabs( x[writableVar] ) > maxValue )
 			{
+				UCUDA_NEND
 				return false;
 			}
 	}
 
+	UCUDA_NEND
 	return true;
 }
 
@@ -1275,7 +1281,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
@@ -1294,18 +1300,18 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	if (data == nullptr) {
 		size_t i = 0;
 		while (i < amountOfIterations) {
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 			++i;
 			const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
 			if (r != UCUDA_LOOP_GO) return r;
 			if (amountOfIterations - i >= (size_t)(UCUDA_LOOP_CHECK_BLOCK - 1)) {
 				#pragma unroll 4
 				for (int k = 0; k < UCUDA_LOOP_CHECK_BLOCK - 1; ++k)
-					calculateDiscreteModelP(x, values, h, krsPre);
+					UCUDA_STEP(x, values, h, krsPre);
 				i += UCUDA_LOOP_CHECK_BLOCK - 1;
 			} else {
 				for (; i < amountOfIterations; ++i)
-					calculateDiscreteModelP(x, values, h, krsPre);
+					UCUDA_STEP(x, values, h, krsPre);
 			}
 		}
 	}
@@ -1339,11 +1345,11 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {
 				//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-				calculateDiscreteModelP(x, values, h, krsPre);
+				UCUDA_STEP(x, values, h, krsPre);
 			}
 		}
 		else
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = CHECK_INTERVAL - 1;
@@ -1393,7 +1399,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	//#pragma unroll
 	for (int j = 0; j < preScaller; ++j) {
 		//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-		calculateDiscreteModelP(x, values, h, krsPre);
+		UCUDA_STEP(x, values, h, krsPre);
 	}
 
 	// Возврат — REGIME_* из configCUDA.h:
@@ -1460,7 +1466,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 	numb* __restrict__ x, const numb* __restrict__ values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	numb xPrev[AMOUNTOFX];
 	size_t sinceReport = 0;
@@ -1483,8 +1489,8 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 			#pragma unroll
 			for (int k = 0; k < UCUDA_PEAK_CHUNK; ++k) {
 				samples[k] = ucudaSampleOf(x, writableVar, pick);
-				if (PS1) calculateDiscreteModelP(x, values, h, krsPre);
-				else for (int j = 0; j < preScaller; ++j) calculateDiscreteModelP(x, values, h, krsPre);
+				if (PS1) UCUDA_STEP(x, values, h, krsPre);
+				else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
 				if (k == 0 && check) {
 					const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
 					if (r != UCUDA_LOOP_GO) return r;
@@ -1516,8 +1522,8 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 		if (EA) peaks.pushRaw(sample);
 		else    peaks.pushAt(sample, i);
 
-		if (PS1) calculateDiscreteModelP(x, values, h, krsPre);
-		else for (int j = 0; j < preScaller; ++j) calculateDiscreteModelP(x, values, h, krsPre);
+		if (PS1) UCUDA_STEP(x, values, h, krsPre);
+		else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = UCUDA_LOOP_CHECK_BLOCK - 1;
@@ -1530,7 +1536,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModelP(x, values, h, krsPre);
+		UCUDA_STEP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)
@@ -1549,13 +1555,15 @@ __device__ __host__ int loopCalculateDiscreteModel_int(
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
 {
 	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
 	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
 	const int r = loopCalculateDiscreteModel_int_core(x, values, h, amountOfIterations, amountOfX, preScaller,
-		writableVar, maxValue, data, startDataIndex, writeStep, cancelFlag, progressCounter, progressStride, ticksReported);
+		writableVar, maxValue, data, startDataIndex, writeStep, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
 	return r;
 }
 
@@ -1563,21 +1571,23 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	numb* xs, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
 {
 	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
 	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
 	int r;
 	if (peaks.emitAll)
 		r = loopCalculateDiscreteModelPeaks_int_core<true, false>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	else if (preScaller == 1)
 		r = loopCalculateDiscreteModelPeaks_int_core<false, true>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	else
 		r = loopCalculateDiscreteModelPeaks_int_core<false, false>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
 	return r;
 }
 
@@ -1772,15 +1782,16 @@ __global__ void calculateDiscreteModelCUDA(
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
 	int ticks = 0;
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага траектории: t = n*h (UCUDA_NONAUTONOMOUS)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
@@ -1859,9 +1870,10 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		return;
 	}
 
+	UCUDA_NVAR(ucudaStep, 0)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
@@ -1870,7 +1882,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
@@ -3418,11 +3430,11 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 // Клон ДАУ: z берётся с траектории x (предиктор) и решается из g(y_x, z) = 0 — тело метода ДАУ
 // при h = 0 делает ровно это (codegen_dae_scheme). Без проекции методы, берущие f(x_n, z_n),
 // начинали бы блок с рассогласованной z, и показатели смещались на O(h/NT).
-__device__ __host__ inline void ucudaDaeProject(numb* y, const numb* x, const numb* a, int n)
+__device__ __host__ inline void ucudaDaeProject(numb* y, const numb* x, UCUDA_TP(const numb ucuda_t) const numb* a, int n)
 {
 	for (int i = UCUDA_LYAP_NX; i < n; ++i)
 		y[i] = x[i];
-	calculateDiscreteModel(y, a, (numb)0);
+	calculateDiscreteModel(y, UCUDA_TA(ucuda_t) a, (numb)0);
 }
 #else
 #define UCUDA_LYAP_K(n) (n)
@@ -3554,9 +3566,10 @@ __global__ void LLEKernelCUDA(
 	int ticks = 0;
 	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * (size_t)amountOfNTPoints;
 
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага основной траектории; клоны начинают блок с ним же
 	int flag = amountOfPointsForSkip_local == 0 ? 1
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-		1, cancelFlag, progressCounter, progressStride, &ticks);
+		1, cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == 0 || flag == REGIME_CANCELLED) {
 		resultArray[idx] = ucudaNoDataValue(flag);
@@ -3603,7 +3616,7 @@ __global__ void LLEKernelCUDA(
 		y[i] = z[i] * eps + x[i];
 	}
 #ifdef UCUDA_LYAP_NX
-	ucudaDaeProject(y, x, localValues, amountOfInitialConditions);
+	ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
 #endif
 
 	numb result = 0;
@@ -3617,8 +3630,9 @@ __global__ void LLEKernelCUDA(
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
+		UCUDA_NVAR(ucudaClone, ucudaStep)
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaStep));
 		if (flag != 0 && ucudaBlockSignals(cancelFlag, progressCounter, progressStride, amountOfNTPoints, sinceTick, sinceCancel, ticks))
 			flag = REGIME_CANCELLED;
 
@@ -3629,7 +3643,7 @@ __global__ void LLEKernelCUDA(
 		}
 
 		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaClone));
 
 		if (flag == 0 || flag == REGIME_CANCELLED) {
 			resultArray[idx] = ucudaNoDataValue(flag);
@@ -3667,7 +3681,7 @@ __global__ void LLEKernelCUDA(
 			y[j] = (numb)(x[j] - ((x[j] - y[j]  + (numb)1e-14) * tempData));
 		}
 #ifdef UCUDA_LYAP_NX
-		ucudaDaeProject(y, x, localValues, amountOfInitialConditions);
+		ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
 #endif
 	}
 
@@ -4212,9 +4226,10 @@ __global__ void LSKernelCUDA(
 	int ticks = 0;
 	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * amountOfNTPoints;
 
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага основной траектории; клоны начинают блок с ним же
 	int flag = amountOfPointsForSkip_local == 0 ? 1
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-		1, cancelFlag, progressCounter, progressStride, &ticks);
+		1, cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == 0 || flag == REGIME_CANCELLED) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
@@ -4236,7 +4251,7 @@ __global__ void LSKernelCUDA(
 			y[j * amountOfInitialConditions + i] = y[j * amountOfInitialConditions + i] * eps + x[i];
 		}
 #ifdef UCUDA_LYAP_NX
-		ucudaDaeProject(y + j * amountOfInitialConditions, x, localValues, amountOfInitialConditions);
+		ucudaDaeProject(y + j * amountOfInitialConditions, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
 #endif
 	}
 
@@ -4245,8 +4260,9 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < warmBlocks + sizeOfBlock; ++i)
 	{
+		UCUDA_NVAR(ucudaBlock0, ucudaStep)   // клоны идут блок с того же момента, что и x
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaStep));
 		if (flag != 0 && ucudaBlockSignals(cancelFlag, progressCounter, progressStride, amountOfNTPoints, sinceTick, sinceCancel, ticks))
 			flag = REGIME_CANCELLED;
 		if (flag == 0 || flag == REGIME_CANCELLED) {
@@ -4256,8 +4272,9 @@ __global__ void LSKernelCUDA(
 		}
 		for (int j = 0; j < UCUDA_LYAP_K(amountOfInitialConditions); ++j)
 		{
+			UCUDA_NVAR(ucudaClone, ucudaBlock0)
 			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-				1, nullptr, nullptr, 0, nullptr);
+				1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaClone));
 			if (flag == 0 || flag == REGIME_CANCELLED) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
 				ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
@@ -4292,7 +4309,7 @@ __global__ void LSKernelCUDA(
 				y[k * amountOfInitialConditions + j] = (numb)(x[j] + z[k * amountOfInitialConditions + j] * eps);
 			}
 #ifdef UCUDA_LYAP_NX
-			ucudaDaeProject(y + k * amountOfInitialConditions, x, localValues, amountOfInitialConditions);
+			ucudaDaeProject(y + k * amountOfInitialConditions, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
 #endif
 		}
 	}
@@ -4649,9 +4666,10 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 		return;
 	}
 
+	UCUDA_NVAR(ucudaStep, 0)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	PeakStream peaks;
 	peaks.init(nullptr, nullptr, 0, h * (numb)preScaller, iters_local, 0);
@@ -4659,7 +4677,7 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (systemCheker != nullptr) systemCheker[idx] = flag;
 

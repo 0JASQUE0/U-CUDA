@@ -28,15 +28,15 @@
 // компилируется ещё и отдельной внешней копией.
 
 #define UCUDA_AD_KRS_FUNCS
-__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, const numb* a, numb* F) {
+__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, numb* F) {
 {{KRS_RHS_BODY}}
 }
-__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, const numb* a,
+__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, UCUDA_TP(const numb ucuda_t) const numb* a,
     const numb h, numb* Y, numb* E, numb* F1, numb* W) {
 {{KRS_EMB_BODY}}
 }
 __device__ __host__ __forceinline__ void ucuda_krs_dprep(const numb* X, const numb* Y, const numb* F0,
-    const numb* F1, const numb* a, const numb h, numb* W, numb* D) {
+    const numb* F1, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h, numb* W, numb* D) {
 {{KRS_DPREP_BODY}}
 }
 __device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const numb th, numb* Yo) {

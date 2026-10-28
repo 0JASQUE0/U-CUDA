@@ -594,15 +594,22 @@ static OrderResult run_order_cpu_t(const OrderRequest& req) {
 
             bool cancelled_here = false;
             for (long long k = 0; k < N; ++k) {
+                // Явное t: DLL берёт t = n*h своего номера шага, а три копии идут разными h —
+                // номер ставится каждой: Xc с k (t = k*h1), Xm с 2k (h2 = h1/2), Xf с 4k.
+                step_main.step_index(k);
                 Tr::call(fmain, Xc.data(), a.data(), h1);
+                step_main.step_index(2 * k);
                 Tr::call(fmain, Xm.data(), a.data(), h2);
                 Tr::call(fmain, Xm.data(), a.data(), h2);
+                step_main.step_index(4 * k);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
-                if (fref)
+                if (fref) {
+                    step_ref.step_index(k * (long long)refM);
                     for (int q = 0; q < refM; ++q) Tr::call(fref, Xr.data(), a.data(), hRef);
+                }
 
                 const bool last = (k == N - 1);
                 if (!req.endpoint_only || last) {
@@ -805,6 +812,7 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
 
         auto one_run = [&]() {
             for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+            step.step_index(0);   // явное t: прогон с t = 0
             const S hh = S(h_node);
             for (long long k = 0; k < N; ++k) Tr::call(fstep, X.data(), a.data(), hh);
             double acc = 0.0;
@@ -885,6 +893,7 @@ static bool perf_end_reference_t(const PerfRequest& req, std::vector<double>& y,
     auto run = [&](long long N, std::vector<S>& X) -> bool {
         X.assign((size_t)n, S(0));
         for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+        step.step_index(0);   // явное t: эталон с t = 0
         const S h = T / S((double)N);
         for (long long i = 0; i < N; ++i) {
             Tr::call(f, X.data(), a.data(), h);

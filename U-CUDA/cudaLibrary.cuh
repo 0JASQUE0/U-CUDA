@@ -18,6 +18,47 @@
 // -I CUDA_PATH/include, который ParametricEngine уже подаёт NVRTC).
 // Нужен для LLE/LS-кернелов в cudaLibrary.cu (Wolf/Benettin perturbation init).
 #include <curand_kernel.h>
+
+// Явное время t (UCUDA_NONAUTONOMOUS — движок ставит его, когда тело шага ссылается на ucuda_t,
+// см. step_body_uses_time). Шаг получает t аргументом: calculateDiscreteModel(X, t, a, h).
+// Циклы ведут номер шага n и считают t = n*h (без накопления t += h — дрейф фазы за 1e7 шагов);
+// ядро держит n траектории и отдаёт его циклам указателем (UCUDA_NA(&n)), а цикл возвращает его
+// продвинутым — так транзиент и запись, разбитые на отдельные вызовы, идут по одной оси времени.
+// Клоны LLE/LS получают n основной траектории. t не входит в X и ни в одну проверку по состоянию.
+// Без макроса всё ниже пусто: автономные модули после препроцессора прежние.
+#ifndef UCUDA_TA
+#ifdef UCUDA_NONAUTONOMOUS
+#define UCUDA_TA(t) (t),
+#define UCUDA_TP(decl) decl,
+#else
+#define UCUDA_TA(t)
+#define UCUDA_TP(decl)
+#endif
+#endif
+#ifdef UCUDA_NONAUTONOMOUS
+#define UCUDA_NP_DEF , long long* ucudaNp = nullptr  // параметр цикла в объявлении (nullptr: n от 0)
+#define UCUDA_NP     , long long* ucudaNp            // ... в определении
+#define UCUDA_NREF   , long long& ucudaN             // ... во встраиваемом ядре цикла
+#define UCUDA_NA(p)  , (p)
+#define UCUDA_NA_AFTER_WS(p) , nullptr, nullptr, 0, nullptr, (p)   // вызов _int, оборванный на writeStep
+#define UCUDA_NBEGIN long long ucudaN = ucudaNp ? *ucudaNp : 0;   // счётчик цикла — в регистре
+#define UCUDA_NEND   if (ucudaNp) *ucudaNp = ucudaN;             // ... и обратно вызывающему
+#define UCUDA_NVAR(name, init) long long name = (init);
+#define UCUDA_NSET(name, v) name = (v);
+#define UCUDA_STEP(X, A, H, P) calculateDiscreteModelP(X, (numb)(ucudaN++) * (H), A, H, P)
+#else
+#define UCUDA_NP_DEF
+#define UCUDA_NP
+#define UCUDA_NREF
+#define UCUDA_NA(p)
+#define UCUDA_NA_AFTER_WS(p)
+#define UCUDA_NBEGIN
+#define UCUDA_NEND
+#define UCUDA_NVAR(name, init)
+#define UCUDA_NSET(name, v)
+#define UCUDA_STEP(X, A, H, P) calculateDiscreteModelP(X, A, H, P)
+#endif
+
 // Словарь параметров, общих для ядер ниже (в их описаниях не повторяется):
 //   nPts / nPtsLimiter       - всего точек свипа / сколько считаем за один запуск (чанк)
 //   sizeOfBlock              - точек в одной траектории (tMax / h / preScaller)
@@ -188,7 +229,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	int* progressCounter = nullptr);
 
 // Один шаг дискретной модели: новое состояние пишется обратно в x.
-__device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, const numb* values, const numb h);
+__device__ __host__ __forceinline__  void calculateDiscreteModel(numb* x, UCUDA_TP(const numb ucuda_t) const numb* values, const numb h);
 
 __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a, const numb h);
 // Несколько шагов модели; траектория складывается в data (если data != nullptr).
@@ -197,8 +238,8 @@ __device__ void calculateDiscreteModel_rand(size_t seed, numb* X, const numb* a,
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller=0,
 	const int writableVar = 0, const numb maxValue = 0,
-	numb* data = nullptr, const int startDataIndex = 0, 
-	const int writeStep = 1);
+	numb* data = nullptr, const int startDataIndex = 0,
+	const int writeStep = 1 UCUDA_NP_DEF);
 
 //__device__ __host__ int loopCalculateDiscreteModel_int(
 // cancelFlag: device-side stop signal, читается раз в CHECK_INTERVAL шагов;
@@ -209,7 +250,7 @@ __device__ int loopCalculateDiscreteModel_int(
 	const int writableVar = 0, const numb maxValue = 0,
 	numb* data = nullptr, const size_t startDataIndex = 0,
 	const int writeStep = 1, const volatile int* cancelFlag = nullptr,
-	int* progressCounter = nullptr, int progressStride = 0, int* ticksReported = nullptr);
+	int* progressCounter = nullptr, int progressStride = 0, int* ticksReported = nullptr UCUDA_NP_DEF);
 
 // Ядро: ансамбль систем, разнесённых по шагу интегрирования (hSpecial).
 // amountOfThreads - размер ансамбля.
