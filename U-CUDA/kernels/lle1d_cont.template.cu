@@ -161,6 +161,10 @@ extern "C" __global__ void lle1dContinuationKernel(
         // Tangent-vector transient: a fresh probe gets nWarm unsummed blocks too, a carried
         // one the larger of its settle blocks and nWarm.
         if (settleBlocks < nWarm) settleBlocks = nWarm;
+#ifdef UCUDA_LYAP_NX
+        // z клона — на связь при новом параметре (и после постановки щупа).
+        if (alive) ucudaDaeProject(y, x, a, amountOfX);
+#endif
         numb sum = 0;
         const int totalBlocks = settleBlocks + nBlocks;
         for (int b = 0; alive && b < totalBlocks; ++b) {
@@ -184,6 +188,9 @@ extern "C" __global__ void lle1dContinuationKernel(
             const numb inv = (numb)1.0 / d;
             for (int l = 0; l < amountOfX; ++l)
                 y[l] = x[l] - ((x[l] - y[l] + (numb)1e-14) * inv);
+#ifdef UCUDA_LYAP_NX
+            ucudaDaeProject(y, x, a, amountOfX);
+#endif
         }
 
         if (alive) {

@@ -3811,7 +3811,19 @@ static std::string dae_scheme_body(const System& s, DaeScheme sch) {
 std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
     if (s.dae_nx < 0 || s.dae_nx > (int)s.vars.size())
         throw std::runtime_error("DAE method on a system without a DAE split");
-    return dae_scheme_body(s, sch) + dae_nx_tag(s.dae_nx);
+    // h == 0 — проекция на связь: x не меняется, z решает g(x, z) = 0 (BDF1 при h = 0, Ньютон
+    // стартует с z из X). Её зовут LLE/LS (ucudaDaeProject): клон x + eps*v получает
+    // согласованную z, иначе у методов, берущих f(x_n, z_n) (трапеция, TR-BDF2, ROS2, CD), первый
+    // шаг блока нёс бы дефект O(h*eps) и показатели смещались на O(h/NT). Индекс >= 2: z из связи
+    // при фиксированном x не определяется (dg/dz = 0) — проекции нет, h == 0 ничего не делает.
+    const int N = (int)s.vars.size();
+    std::string proj;
+    try {
+        dae_require_index1(jac_over(s, "X", system_uses_time(s) ? kStepTimeArg : ""), N, s.dae_nx, "projection");
+        proj = scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, false);
+    } catch (const std::runtime_error&) {}
+    return "if (h == (numb)0) {\n" + proj + "\n} else {\n" + dae_scheme_body(s, sch) + "\n}\n"
+           + dae_nx_tag(s.dae_nx);
 }
 
 namespace {

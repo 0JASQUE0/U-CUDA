@@ -279,6 +279,18 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
 - Guards: `codegen_scheme` / `codegen_adaptive` refuse `dae_nx >= 0`; `SystemEvaluator` refuses it (it
   would integrate g as a derivative). Analysis on the CPU builds the DAE body with `krs_cpu` instead.
   Other tabs with a native DAE get a valid step body but are untested; with "Solve as ODE" they are ODE.
+- LLE/LS on a DAE method (body tag `// @ucuda-dae-nx`, `UCUDA_LYAP_NX`): clones are perturbed and
+  orthonormalised in x only; `ucudaGramSchmidtDae` zeroes the z part, and every placed clone goes through
+  `ucudaDaeProject` (z from the trajectory, then the step body with h = 0, which `codegen_dae_scheme` prints as
+  BDF1 = Newton on g(x, z) = 0 with x fixed; empty for index >= 2). CPU twins: `cpu_gram_schmidt_dae`,
+  `dae_project`. Carrying the z part as a linear combination broke on Mikhailov DAU_n: with lambda4 ~ -4..-7 the x
+  part of a vector shrinks e^4 per block, the z noise does not, and the clone's diode voltage went to -4.6
+  (sinh ~ 1e42, Newton failed, LS 999 for A11 >= 0.5). Without the projection, methods that use f(x_n, z_n)
+  (trapezoid, TR-BDF2, ROS2, CD) start each block with an O(eps) inconsistent z: bias O(h/NT).
+  Kernels still return N exponents (tail NaN); `trim_ls_spectrum` cuts the result to nx, and every LS CSV
+  writer (streamed 1D rows, 2D cells, `write_curve1d_csv(.., K)`) writes nx columns too.
+  Headless probes with `set_nvrtc_rdc` off compile a DAE LLE/LS module for Mikhailov in ~200-270 s (one
+  monolithic module); with rdc on (the app default in `_app_config.json`) it is ~11 s.
 - Not yet: CD for index 2 (the report's secant-on-z variant), index-3 Newton scaling / GGL (stage 5).
 - Newton for DAE: the z predictor is the old value, so a fast multiplier (pendulum) needs ~9 iterations;
   a step that runs out of iterations is accepted unconverged and the constraint drifts until the run

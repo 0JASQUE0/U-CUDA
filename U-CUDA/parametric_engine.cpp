@@ -926,8 +926,22 @@ static void fill_curve1d_snapshot(Snap& sn, const Req& req, bool continuation, b
 static void write_curve1d_csv(const LLE1DResult& r, const std::string& path) {
     if (!path.empty()) data_export::export_lle1d(r, path);
 }
-static void write_curve1d_csv(const LS1DResult& r, const std::string& path) {
-    if (!path.empty()) data_export::export_ls1d(r, path);
+// ДАУ: K = lyap_dim показателей — хвост спектра до N у ядер и CPU NaN, в файл он не идёт.
+static void write_curve1d_csv(const LS1DResult& r, const std::string& path, int K) {
+    if (path.empty()) return;
+    if (K >= r.n_exponents) { data_export::export_ls1d(r, path); return; }
+    LS1DResult t = r;
+    t.n_exponents = K;
+    for (auto& v : t.spectrum) if ((int)v.size() > K) v.resize((size_t)K);
+    data_export::export_ls1d(t, path);
+}
+
+// Двойник ucudaDaeProject (cudaLibrary.cu): z клона v — с траектории x, затем шаг ДАУ при h = 0
+// решает связь. У ОДУ (k == n) ничего не делает.
+static void dae_project(const KrsCpuStep& step, const numb* x, numb* v, const numb* a, int k, int n) {
+    if (k >= n) return;
+    for (int i = k; i < n; ++i) v[i] = x[i];
+    step.fn()(v, a, (numb)0);
 }
 
 LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
@@ -1023,6 +1037,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         const double inv = 1.0 / d;
         for (int l = 0; l < N; ++l)
             y[l] = x[l] - ((x[l] - y[l] + 1e-14) * inv);
+        dae_project(step, x.data(), y.data(), a.data(), K, N);
         return true;
     };
 
@@ -1080,6 +1095,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         } else {
             warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        if (alive) dae_project(step, x.data(), y.data(), a.data(), K, N);   // как ядро: новый параметр
         {
             numb dummy;
             for (int b = 0; b < warm && alive; ++b)
@@ -1248,10 +1264,11 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullpt
 }
 
 // Двойник ucudaGramSchmidtDae (cudaLibrary.cu): k векторов длины n, произведения и нормы по
-// первым k компонентам (x), вычитание и деление — по всем n.
+// первым k компонентам (x); z-часть результата обнуляется (клон стартует с z траектории).
 void cpu_gram_schmidt_dae(const numb* a, numb* b, int k, int n, numb* denominators = nullptr) {
     for (int i = 0; i < k; ++i) {
-        for (int j = 0; j < n; ++j) b[i * n + j] = a[i * n + j];
+        for (int j = 0; j < k; ++j) b[i * n + j] = a[i * n + j];
+        for (int j = k; j < n; ++j) b[i * n + j] = (numb)0;
         for (int j = 0; j < i; ++j) {
             numb numerator = (numb)0, denominator = (numb)0;
             for (int m = 0; m < k; ++m) {
@@ -1259,14 +1276,14 @@ void cpu_gram_schmidt_dae(const numb* a, numb* b, int k, int n, numb* denominato
                 denominator += b[j * n + m] * b[j * n + m];
             }
             const numb fraction = (denominator == (numb)0) ? (numb)0 : numerator / denominator;
-            for (int m = 0; m < n; ++m) b[i * n + m] -= fraction * b[j * n + m];
+            for (int m = 0; m < k; ++m) b[i * n + m] -= fraction * b[j * n + m];
         }
     }
     for (int i = 0; i < k; ++i) {
         numb denominator = (numb)0;
         for (int j = 0; j < k; ++j) denominator += b[i * n + j] * b[i * n + j];
         denominator = std::sqrt(denominator);
-        for (int j = 0; j < n; ++j)
+        for (int j = 0; j < k; ++j)
             b[i * n + j] = (denominator == (numb)0) ? (numb)0 : b[i * n + j] / denominator;
         if (denominators != nullptr) denominators[i] = denominator;
     }
@@ -1385,6 +1402,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             if (out_logs) out_logs[k] = std::log(denominators[k] / req.eps);
             for (int j = 0; j < N; ++j)
                 y[(size_t)k * N + j] = x[j] + z[(size_t)k * N + j] * req.eps;
+            dae_project(step, x.data(), y.data() + (size_t)k * N, a.data(), K, N);
         }
         return true;
     };
@@ -1443,6 +1461,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         } else {
             warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        if (alive)   // как ядро: z клонов — на связь при новом параметре
+            for (int k = 0; k < K; ++k) dae_project(step, x.data(), y.data() + (size_t)k * N, a.data(), K, N);
         for (int b = 0; b < warm && alive; ++b)
             if (!advance_block(nullptr)) alive = false;
 
@@ -1469,7 +1489,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     }
 
     fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
-    write_curve1d_csv(res, req.csv_output_path);
+    write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
     res.ok = true;
     return res;
 }
@@ -3539,7 +3559,7 @@ struct ParametricEngine::Impl {
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
         res.cancelled = cancelled;
         return res;
@@ -5353,9 +5373,9 @@ struct ParametricEngine::Impl {
                     row[j] = h_lsResult[k * (size_t)amountOfInitialConditions + j];
                 }
 
-                if (out.is_open())
+                if (out.is_open())   // ДАУ: только nx показателей, как в результате (trim_ls_spectrum)
                     data_export::write_ls1d_row(out, param_val, row.data(),
-                                                amountOfInitialConditions);
+                                                lyap_dim(req.krs_body, amountOfInitialConditions));
             }
             if (out.is_open()) out.close();
         }
@@ -5804,7 +5824,8 @@ struct ParametricEngine::Impl {
             std::ofstream out(OUT_FILE_PATH);
             if (out.is_open()) {
                 out << std::setprecision(set_precision);
-                data_export::write_ls2d_cells(out, nPts, N, res.values.data());
+                // ДАУ: первые nx плоскостей (trim_ls_spectrum) — хвост ядра NaN.
+                data_export::write_ls2d_cells(out, nPts, lyap_dim(req.krs_body, N), res.values.data());
             }
         }
 
@@ -6103,7 +6124,7 @@ struct ParametricEngine::Impl {
         }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
         res.cancelled = cancel_requested(req.cancel);
         return res;

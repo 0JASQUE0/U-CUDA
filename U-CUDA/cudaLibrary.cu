@@ -3411,10 +3411,19 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 // он ограничивает только число пиков в peakFinder и размеры device-буферов.
 
 // ДАУ (X = [x; z]): касательные векторы LLE/LS — только по первым UCUDA_LYAP_NX компонентам.
-// Норма и Грам-Шмидт — по x, а сдвиг клона умножается целиком, так что z клона остаётся
-// согласованной со связью в первом порядке. Без макроса (ОДУ) — все переменные, текст прежний.
+// Норма и Грам-Шмидт — по x; после каждой постановки клона x + eps*v его z проецируется на
+// связь (ucudaDaeProject). Без макроса (ОДУ) — все переменные, текст прежний.
 #ifdef UCUDA_LYAP_NX
 #define UCUDA_LYAP_K(n) (UCUDA_LYAP_NX)
+// Клон ДАУ: z берётся с траектории x (предиктор) и решается из g(y_x, z) = 0 — тело метода ДАУ
+// при h = 0 делает ровно это (codegen_dae_scheme). Без проекции методы, берущие f(x_n, z_n),
+// начинали бы блок с рассогласованной z, и показатели смещались на O(h/NT).
+__device__ __host__ inline void ucudaDaeProject(numb* y, const numb* x, const numb* a, int n)
+{
+	for (int i = UCUDA_LYAP_NX; i < n; ++i)
+		y[i] = x[i];
+	calculateDiscreteModel(y, a, (numb)0);
+}
 #else
 #define UCUDA_LYAP_K(n) (n)
 #endif
@@ -3593,6 +3602,9 @@ __global__ void LLEKernelCUDA(
 	for (int i = 0; i < amountOfInitialConditions; ++i) {
 		y[i] = z[i] * eps + x[i];
 	}
+#ifdef UCUDA_LYAP_NX
+	ucudaDaeProject(y, x, localValues, amountOfInitialConditions);
+#endif
 
 	numb result = 0;
 	size_t sinceTick = 0, sinceCancel = 0;   // прогресс и Stop по NT-блокам — см. ucudaBlockSignals
@@ -3654,6 +3666,9 @@ __global__ void LLEKernelCUDA(
 		for (int j = 0; j < amountOfInitialConditions; ++j) {
 			y[j] = (numb)(x[j] - ((x[j] - y[j]  + (numb)1e-14) * tempData));
 		}
+#ifdef UCUDA_LYAP_NX
+		ucudaDaeProject(y, x, localValues, amountOfInitialConditions);
+#endif
 	}
 
 	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h_local);
@@ -3843,16 +3858,21 @@ __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVector
 }
 
 #ifdef UCUDA_LYAP_NX
-// gramSchmidtProcess для ДАУ: K = UCUDA_LYAP_NX векторов длины n (шаг n), скалярные
-// произведения и нормы — по первым K компонентам (x), вычитание и деление — по всем n,
-// чтобы z-часть каждого вектора шла той же линейной комбинацией, что и x-часть.
+// gramSchmidtProcess для ДАУ: K = UCUDA_LYAP_NX векторов длины n (шаг n), всё — по первым
+// K компонентам (x); z-часть результата обнуляется, и клон x + eps*b стартует с z траектории
+// (это только предиктор Ньютона: метод ДАУ решает связь заново). Нести z-часть линейной
+// комбинацией нельзя: при близких показателях (λ1 ≈ λ2) x-часть вектора после вычитания
+// мала, нелинейный остаток z-части делится на неё, и предиктор уходит (Mikhailov DAU_n:
+// vd клона -4.6 при -0.44 у траектории, sinh(vd/NVT) ~ 1e42, точка помечалась ушедшей).
 __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* denominators = nullptr)
 {
 	constexpr int K = UCUDA_LYAP_NX;
 	for (int i = 0; i < K; ++i)
 	{
-		for (int j = 0; j < n; ++j)
+		for (int j = 0; j < K; ++j)
 			b[i * n + j] = a[i * n + j];
+		for (int j = K; j < n; ++j)
+			b[i * n + j] = 0;
 
 		for (int j = 0; j < i; ++j)
 		{
@@ -3863,7 +3883,7 @@ __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* deno
 				denominator += b[j * n + k] * b[j * n + k];
 			}
 			numb fraction = denominator == 0 ? 0 : numerator / denominator;
-			for (int k = 0; k < n; ++k)
+			for (int k = 0; k < K; ++k)
 				b[i * n + k] -= fraction * b[j * n + k];
 		}
 	}
@@ -3874,7 +3894,7 @@ __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* deno
 		for (int j = 0; j < K; ++j)
 			denominator += b[i * n + j] * b[i * n + j];
 		denominator = sqrt(denominator);
-		for (int j = 0; j < n; ++j)
+		for (int j = 0; j < K; ++j)
 			b[i * n + j] = denominator == 0 ? 0 : b[i * n + j] / denominator;
 
 		if (denominators != nullptr)
@@ -4215,6 +4235,9 @@ __global__ void LSKernelCUDA(
 		for (int i = 0; i < amountOfInitialConditions; ++i) {
 			y[j * amountOfInitialConditions + i] = y[j * amountOfInitialConditions + i] * eps + x[i];
 		}
+#ifdef UCUDA_LYAP_NX
+		ucudaDaeProject(y + j * amountOfInitialConditions, x, localValues, amountOfInitialConditions);
+#endif
 	}
 
 	//numb result = 0;
@@ -4268,6 +4291,9 @@ __global__ void LSKernelCUDA(
 			for (int j = 0; j < amountOfInitialConditions; ++j) {
 				y[k * amountOfInitialConditions + j] = (numb)(x[j] + z[k * amountOfInitialConditions + j] * eps);
 			}
+#ifdef UCUDA_LYAP_NX
+			ucudaDaeProject(y + k * amountOfInitialConditions, x, localValues, amountOfInitialConditions);
+#endif
 		}
 	}
 
